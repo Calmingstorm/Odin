@@ -4,6 +4,11 @@ import { parse as parseJs } from '@babel/parser';
 import { parse as parseTemplate, NodeTypes } from '@vue/compiler-dom';
 import { guildBehaviorValue } from '../ui/js/discord-config-policy.js';
 import { findVerticalScrollOwner } from '../ui/js/config-scroll-owner.js';
+import {
+  codexAdvancedPayload, codexBasicPayload,
+  kimiAdvancedPayload, kimiBasicPayload,
+  ollamaAdvancedPayload, ollamaBasicPayload,
+} from '../ui/js/llm-config-payloads.js';
 
 const config = readFileSync('ui/js/pages/config.js', 'utf8');
 const configAst = parseJs(config, { sourceType: 'module' });
@@ -308,9 +313,67 @@ assert.equal(guildBehaviorValue({ config: {} }, 'respond_to_bots', { respond_to_
 assert.equal(guildBehaviorValue({ config: { require_mention: false } }, 'require_mention', { require_mention: true }), false, 'guild override no longer wins over the loaded global default');
 assert.equal(guildBehaviorValue({ config: { require_mention: null } }, 'require_mention', { require_mention: true }), true, 'legacy null guild override does not inherit global require_mention=true');
 assert.equal(guildBehaviorValue({ config: {} }, 'require_mention', null), undefined, 'missing globals invent a false behavior value');
-assert.match(discord, /const \[loadedGuilds, loadedMembers, loadedConfig\] = await Promise\.all\(\[[\s\S]*api\.get\('\/api\/discord\/guilds'\)[\s\S]*api\.get\('\/api\/config'\)[\s\S]*\]\);[\s\S]*globalConfig\.value = loadedGlobalConfig;[\s\S]*guilds\.value = loadedGuilds;/, 'guild rows can render before loaded global defaults are available');
+assert.match(discord, /async function fetchAll\(\)[\s\S]*api\.get\('\/api\/discord\/guilds'\)[\s\S]*api\.get\('\/api\/config'\)[\s\S]*globalConfig\.value = loadedGlobalConfig;[\s\S]*guilds\.value = loadedGuilds;/, 'initial Discord load does not establish global defaults before guild rendering');
 assert.match(discord, /guildBehaviorValue\(guild, 'require_mention', globalConfig\.value\)/, 'guild mention toggle does not use loaded global defaults');
 assert.match(discord, /guildBehaviorValue\(guild, 'respond_to_bots', globalConfig\.value\)/, 'guild bot toggle does not use loaded global defaults');
+
+
+const providerForm = {
+  enabled: true,
+  model: 'draft-model',
+  reasoning_effort: 'high',
+  agent_reasoning_effort: 'low',
+  agent_model: 'draft-agent',
+  base_url: 'http://127.0.0.1:11434',
+  api_key: 'replacement-key',
+  max_tokens: 8192,
+  request_timeout_seconds: 9876,
+  stream_stall_timeout_seconds: 876,
+  retry: { max_retries: 9, base_delay: 4, max_delay: 40 },
+  connection_pool: { max_connections: 19, keepalive_timeout: 41 },
+  context_compression: { enabled: false, max_context_chars: 123456, keep_recent_iterations: 11 },
+  timeout: 777,
+};
+const expectedPayloadKeys = new Map([
+  [codexBasicPayload, ['agent_model', 'agent_reasoning_effort', 'enabled', 'model', 'reasoning_effort']],
+  [codexAdvancedPayload, ['connection_pool', 'context_compression', 'request_timeout_seconds', 'retry', 'stream_stall_timeout_seconds']],
+  [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
+  [ollamaAdvancedPayload, ['timeout']],
+  [kimiBasicPayload, ['enabled', 'max_tokens', 'model']],
+  [kimiAdvancedPayload, ['timeout']],
+]);
+for (const [builder, keys] of expectedPayloadKeys) {
+  assert.deepEqual(Object.keys(builder(providerForm)).sort(), keys, `${builder.name} crossed its save boundary`);
+}
+assert.deepEqual(
+  Object.keys(ollamaBasicPayload(providerForm, { includeApiKey: true })).sort(),
+  ['api_key', 'base_url', 'enabled', 'max_tokens', 'model'],
+  'Ollama explicit key replacement left the basic save boundary',
+);
+assert.deepEqual(
+  Object.keys(kimiBasicPayload(providerForm, { includeApiKey: true })).sort(),
+  ['api_key', 'enabled', 'max_tokens', 'model'],
+  'Kimi explicit key replacement left the basic save boundary',
+);
+assert.match(llm, /saveCodexConfig\(\)[\s\S]*codexBasicPayload\(codexForm\.value\)/, 'Codex basic auto-save does not use its field-only payload');
+assert.match(llm, /saveOllamaConfig\(\)[\s\S]*ollamaBasicPayload\(ollamaForm\.value/, 'Ollama basic auto-save does not use its field-only payload');
+assert.match(llm, /saveKimiConfig\(\)[\s\S]*kimiBasicPayload\(kimiForm\.value/, 'Kimi basic auto-save does not use its field-only payload');
+assert.match(llm, /saveCodexAdvancedConfig\(\)[\s\S]*codexAdvancedPayload\(codexForm\.value\)/, 'Codex explicit Advanced save does not use its field-only payload');
+assert.match(llm, /saveOllamaAdvancedConfig\(\)[\s\S]*ollamaAdvancedPayload\(ollamaForm\.value\)/, 'Ollama explicit Advanced save does not use its field-only payload');
+assert.match(llm, /saveKimiAdvancedConfig\(\)[\s\S]*kimiAdvancedPayload\(kimiForm\.value\)/, 'Kimi explicit Advanced save does not use its field-only payload');
+for (const provider of ['Codex', 'Ollama', 'Kimi']) {
+  assert.match(llm, new RegExp(`fetchLLMStatus\\(\\{ preserveBasic: true, preserveAdvanced: true \\}\\)[\\s\\S]*fetch${provider}Status\\(\\)`), `${provider} save refresh can erase a live basic or Advanced draft`);
+}
+for (const mutation of ['setGuildConfig', 'setChannelConfig', 'clearOverride']) {
+  const body = namedFunction(parseJs(discord, { sourceType: 'module' }), mutation);
+  const source = discord.slice(body.start, body.end);
+  assert.match(source, /fetchGuilds\(\{ showLoading: false \}\)/, `${mutation} does not refresh guild/channel data`);
+  assert.doesNotMatch(source, /fetchAll|globalConfig|globalDraft|\/api\/config/, `${mutation} can replace a dirty global draft`);
+}
+const guildRefresh = namedFunction(parseJs(discord, { sourceType: 'module' }), 'fetchGuilds');
+const guildRefreshSource = discord.slice(guildRefresh.start, guildRefresh.end);
+assert.match(guildRefreshSource, /api\.get\('\/api\/discord\/guilds'\)/, 'override refresh does not reload guild data');
+assert.doesNotMatch(guildRefreshSource, /\/api\/config|globalConfig|globalDraft/, 'guild-only refresh can overwrite global-default drafts');
 
 console.log('config-center-ui2: de-dup, typed editing, restart flow, and provider advanced controls pinned');
 

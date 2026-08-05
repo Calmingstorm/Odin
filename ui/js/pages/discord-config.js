@@ -14,7 +14,7 @@ export default {
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4">
         <h1 class="text-xl font-semibold">Discord Channels</h1>
-        <button @click="fetchGuilds" class="btn btn-ghost text-xs" :disabled="loading">
+        <button @click="fetchAll" class="btn btn-ghost text-xs" :disabled="loading">
           {{ loading ? 'Loading...' : 'Refresh' }}
         </button>
       </div>
@@ -30,7 +30,7 @@ export default {
       </div>
       <div v-else-if="error" class="hm-card border-red-900 error-state">
         <p class="text-red-400">{{ error }}</p>
-        <button @click="fetchGuilds" class="btn btn-ghost text-xs">Retry</button>
+        <button @click="fetchAll" class="btn btn-ghost text-xs">Retry</button>
       </div>
 
       <div v-else class="space-y-4">
@@ -195,6 +195,7 @@ export default {
     const globalError = ref(null);
     const globalArrayInputs = ref({});
     const globalMembers = ref([]);
+    let guildFetchSequence = 0;
     const globalListEditors = Object.freeze([
       { key: 'allowed_users', label: 'Allowed users', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked users; prefix commands use separate authorization and allowed test webhooks bypass this gate.', placeholder: 'Search Discord users…', userAutocomplete: true, fullWidth: true },
       { key: 'channels', label: 'Allowed channels', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked channels; prefix commands use separate authorization.', placeholder: 'Discord channel ID', fullWidth: true },
@@ -226,7 +227,32 @@ export default {
       expanded.value[id] = !expanded.value[id];
     }
 
-    async function fetchGuilds() {
+    function normalizeGlobalConfig(loadedConfig) {
+      const discord = loadedConfig.discord || {};
+      return {
+        allowed_users: [...(discord.allowed_users || [])],
+        channels: [...(discord.channels || [])],
+        respond_to_bots: Boolean(discord.respond_to_bots),
+        require_mention: Boolean(discord.require_mention),
+        ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
+      };
+    }
+
+    async function fetchGuilds({ showLoading = true } = {}) {
+      const sequence = ++guildFetchSequence;
+      if (showLoading) loading.value = true;
+      error.value = null;
+      try {
+        const loadedGuilds = await api.get('/api/discord/guilds');
+        if (sequence === guildFetchSequence) guilds.value = loadedGuilds;
+      } catch (e) {
+        if (sequence === guildFetchSequence) error.value = e.message;
+      } finally {
+        if (showLoading && sequence === guildFetchSequence) loading.value = false;
+      }
+    }
+
+    async function fetchAll() {
       loading.value = true;
       error.value = null;
       try {
@@ -235,29 +261,26 @@ export default {
           api.get('/api/discord/members').catch(() => []),
           api.get('/api/config'),
         ]);
-        const discord = loadedConfig.discord || {};
-        const loadedGlobalConfig = {
-          allowed_users: [...(discord.allowed_users || [])],
-          channels: [...(discord.channels || [])],
-          respond_to_bots: Boolean(discord.respond_to_bots),
-          require_mention: Boolean(discord.require_mention),
-          ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
-        };
+        const loadedGlobalConfig = normalizeGlobalConfig(loadedConfig);
+        const preserveGlobalDraft = globalChanged.value;
         globalConfig.value = loadedGlobalConfig;
-        globalDraft.value = JSON.parse(JSON.stringify(loadedGlobalConfig));
+        if (!preserveGlobalDraft) {
+          globalDraft.value = JSON.parse(JSON.stringify(loadedGlobalConfig));
+        }
         globalMembers.value = loadedMembers;
         guilds.value = loadedGuilds;
         globalError.value = null;
       } catch (e) {
         error.value = e.message;
+      } finally {
+        loading.value = false;
       }
-      loading.value = false;
     }
 
     async function setGuildConfig(guildId, key, value) {
       try {
         await api.put('/api/discord/guild/' + guildId + '/config', { [key]: value });
-        await fetchGuilds();
+        await fetchGuilds({ showLoading: false });
       } catch (e) {
         error.value = e.message;
       }
@@ -266,7 +289,7 @@ export default {
     async function setChannelConfig(channelId, guildId, key, value) {
       try {
         await api.put('/api/discord/channel/' + channelId + '/config', { [key]: value });
-        await fetchGuilds();
+        await fetchGuilds({ showLoading: false });
       } catch (e) {
         error.value = e.message;
       }
@@ -275,7 +298,7 @@ export default {
     async function clearOverride(channelId, guildId) {
       try {
         await api.put('/api/discord/channel/' + channelId + '/config', { clear: true });
-        await fetchGuilds();
+        await fetchGuilds({ showLoading: false });
       } catch (e) {
         error.value = e.message;
       }
@@ -321,12 +344,12 @@ export default {
       }
     }
 
-    onMounted(fetchGuilds);
+    onMounted(fetchAll);
 
     return {
       guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalMembers, globalListEditors, globalChanged,
       guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
-      fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, globalItemLabel, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
+      fetchAll, fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, globalItemLabel, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
     };
   },
 };
