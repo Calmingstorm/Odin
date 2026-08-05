@@ -52,6 +52,14 @@ class TestBuildRequestPreamble:
         assert "Current message ID: msg-1" in p["content"]
         assert "=== CURRENT REQUEST" not in p["content"]
 
+    def test_no_history_bot_turn_keeps_bot_origin_note(self):
+        kw = self._base_kwargs()
+        kw["has_history"] = False
+        p = build_request_preamble(**kw, from_another_bot=True)
+        assert "from ANOTHER BOT" in p["content"]
+        assert "EXECUTE immediately" in p["content"]
+        assert "=== CURRENT REQUEST" not in p["content"]
+
     def test_with_history_includes_all_sections(self):
         p = build_request_preamble(**self._base_kwargs())
         body = p["content"]
@@ -106,10 +114,18 @@ class TestBehaviorPreservedByRefactor:
 
         msg_id_note = f"Current message ID: {message_id}"
         if not has_history:
-            return {
-                "role": "developer",
-                "content": f"{channel_description}\n{msg_id_note}",
-            }
+            content = f"{channel_description}\n{msg_id_note}"
+            if from_another_bot:
+                content += (
+                    "\n\nIMPORTANT: This message is from ANOTHER BOT. "
+                    "Bots cannot confirm, choose, or approve. "
+                    "EXECUTE immediately — never hedge, ask permission, or say "
+                    "'if you want' / 'shall I' / 'would you like'. "
+                    "If execution is explicitly requested, use run_script or run_command. "
+                    "If code is presented for review, discussion, or as context, "
+                    "do not execute it — analyze and respond to the substance."
+                )
+            return {"role": "developer", "content": content}
         sep_text = (
             f"=== CURRENT REQUEST [req-{request_id}] ===\n"
             f"Time: {request_time}\n"

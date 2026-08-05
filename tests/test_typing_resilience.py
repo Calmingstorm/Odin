@@ -461,7 +461,13 @@ def _make_pipeline(tool_loop_exc=None, sessions=None):
     sessions = sessions or _FakeSessions()
     delivery = _FakeDelivery()
 
-    async def _run(message, history, system_prompt_override=None, trace=None):
+    async def _run(
+        message,
+        history,
+        system_prompt_override=None,
+        trace=None,
+        from_another_bot=None,
+    ):
         if tool_loop_exc is not None:
             raise tool_loop_exc
         return ("ok-response", False, False, [], False)

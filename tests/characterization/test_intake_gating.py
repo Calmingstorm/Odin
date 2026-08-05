@@ -255,8 +255,6 @@ class TestBotAdmissionPreambleConsistency:
             bot.channel_config.set_channel_config(
                 str(channel.id), respond_to_bots=channel_override
             )
-        self._seed_history(bot, channel.id)
-
         expected_admitted = (
             channel_override
             if channel_override is not None
@@ -329,7 +327,6 @@ class TestBotAdmissionPreambleConsistency:
             bot.channel_config.set_channel_config(
                 str(channel.id), respond_to_bots=channel_override
             )
-        self._seed_history(bot, channel.id)
 
         await bot.on_message(
             FakeMessage(
@@ -340,6 +337,30 @@ class TestBotAdmissionPreambleConsistency:
             )
         )
         await asyncio.sleep(0.08)
+
+        assert len(fake.calls) == 1
+        assert "from ANOTHER BOT" in "\n".join(fake.developer_messages_of_call(0))
+
+    async def test_admission_snapshot_survives_live_disable_during_buffer(self):
+        """An admitted bot turn remains labeled if config changes before flush."""
+        bot, fake = self._build_real_pipeline(False)
+        bot.channel_state.bot_msg_buffer_delay = 0.05
+        guild = _FakeGuild(id=424242)
+        channel = FakeChannel(id=99, guild=guild)
+        bot.channel_config.set_channel_config(str(channel.id), respond_to_bots=True)
+
+        await bot.on_message(
+            FakeMessage(
+                "admitted before disable",
+                author=FakeAuthor(id=555, name="otherbot", bot=True),
+                channel=channel,
+                guild=guild,
+            )
+        )
+        # The message is already admitted and buffered. A live update must not
+        # erase its origin while it waits to enter the pipeline.
+        bot.channel_config.set_channel_config(str(channel.id), respond_to_bots=False)
+        await asyncio.sleep(0.12)
 
         assert len(fake.calls) == 1
         assert "from ANOTHER BOT" in "\n".join(fake.developer_messages_of_call(0))

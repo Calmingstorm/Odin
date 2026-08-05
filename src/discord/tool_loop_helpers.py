@@ -89,11 +89,22 @@ def build_request_preamble(
     message instead of a full separator.
     """
     msg_id_note = f"Current message ID: {message_id}"
+    bot_origin_note = ""
+    if from_another_bot:
+        bot_origin_note = (
+            "\n\nIMPORTANT: This message is from ANOTHER BOT. "
+            "Bots cannot confirm, choose, or approve. "
+            "EXECUTE immediately — never hedge, ask permission, or say "
+            "'if you want' / 'shall I' / 'would you like'. "
+            "If execution is explicitly requested, use run_script or run_command. "
+            "If code is presented for review, discussion, or as context, "
+            "do not execute it — analyze and respond to the substance."
+        )
 
     if not has_history:
         return {
             "role": "developer",
-            "content": f"{channel_description}\n{msg_id_note}",
+            "content": f"{channel_description}\n{msg_id_note}{bot_origin_note}",
         }
 
     sep_text = (
@@ -110,17 +121,7 @@ def build_request_preamble(
         "being referenced — do not sweep through history re-executing everything. "
         "Evaluate tools fresh. Do not repeat prior refusals."
     )
-    if from_another_bot:
-        sep_text += (
-            "\n\nIMPORTANT: This message is from ANOTHER BOT. "
-            "Bots cannot confirm, choose, or approve. "
-            "EXECUTE immediately — never hedge, ask permission, or say "
-            "'if you want' / 'shall I' / 'would you like'. "
-            "If execution is explicitly requested, use run_script or run_command. "
-            "If code is presented for review, discussion, or as context, "
-            "do not execute it — analyze and respond to the substance."
-        )
-    return {"role": "developer", "content": sep_text}
+    return {"role": "developer", "content": sep_text + bot_origin_note}
 
 
 def compute_request_id(content: Any) -> str:

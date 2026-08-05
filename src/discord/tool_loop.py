@@ -437,6 +437,7 @@ class ToolLoopRunner:
         system_prompt_override: str | None = None,
         trace=None,
         policy: LoopPolicy = CHAT_POLICY,
+        from_another_bot: bool | None = None,
     ) -> tuple[str, bool, bool, list[str], bool]:
         """Process a message with the tool loop — see module docstring.
 
@@ -450,7 +451,12 @@ class ToolLoopRunner:
         - handoff: True if the response should be handed off to another handler
         """
         st = await self._prepare_chat_turn(
-            message, history, system_prompt_override, trace, policy
+            message,
+            history,
+            system_prompt_override,
+            trace,
+            policy,
+            from_another_bot=from_another_bot,
         )
         # Admission refusal: this message identity already has durable state
         # (terminal / in-flight / suspended). A redelivered or duplicate
@@ -654,6 +660,8 @@ class ToolLoopRunner:
         system_prompt_override: str | None,
         trace,
         policy: LoopPolicy,
+        *,
+        from_another_bot: bool | None = None,
     ) -> _ChatTurn:
         """Turn setup: prompt/tools resolution, request preamble, permission
         filtering, trajectory + correlation init, cancellation wiring."""
@@ -666,25 +674,28 @@ class ToolLoopRunner:
 
         # Insert context separator between history and the current user request
         # so Codex evaluates tools fresh instead of repeating patterns from history
-        _guild = getattr(message, "guild", None)
-        _guild_id = str(_guild.id) if _guild is not None else None
-        _channel_id = str(message.channel.id)
-        _respond_to_bots = self._channel_config.should_respond_to_bots(
-            _guild_id,
-            _channel_id,
-            self._get_config().discord.respond_to_bots,
-        )
-        # Intake admits bot-authored messages through this same resolution
-        # ladder, with one deliberate exception for explicitly allowed
-        # webhooks. Preserve that exception here so every admitted bot turn is
-        # identified truthfully in the request preamble.
-        is_allowed_webhook = (
-            message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
-        )
-        is_bot_message = bool(
-            getattr(message.author, "bot", False)
-            and (_respond_to_bots or is_allowed_webhook)
-        )
+        if from_another_bot is None:
+            # Direct callers have no intake snapshot, so resolve through the
+            # exact same channel > guild > global ladder as MessageIntake.
+            _guild = getattr(message, "guild", None)
+            _guild_id = str(_guild.id) if _guild is not None else None
+            _channel_id = str(message.channel.id)
+            _respond_to_bots = self._channel_config.should_respond_to_bots(
+                _guild_id,
+                _channel_id,
+                self._get_config().discord.respond_to_bots,
+            )
+            is_allowed_webhook = (
+                message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+            )
+            is_bot_message = bool(
+                getattr(message.author, "bot", False)
+                and (_respond_to_bots or is_allowed_webhook)
+            )
+        else:
+            # Intake already made the admission decision. Do not re-resolve a
+            # live setting after buffering/queueing and mislabel admitted work.
+            is_bot_message = from_another_bot
         from .tool_loop_helpers import (
             build_request_preamble,
             compute_request_id,
