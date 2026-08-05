@@ -86,19 +86,31 @@ export default {
           <div class="grid grid-cols-1 md:grid-cols-2 gap-3">
             <div class="hm-card" style="padding:0.75rem;">
               <h3 class="text-sm font-medium mb-1">SSH Pool</h3>
-              <div v-if="sshPool && sshPool.connections" class="text-xs text-gray-400">
-                <div v-for="(conn, host) in sshPool.connections" :key="host">
-                  {{ host }}: {{ conn.active || 0 }} active, {{ conn.idle || 0 }} idle
-                </div>
+              <div v-if="sshPool && Object.keys(sshPool).length" class="text-xs text-gray-400 space-y-1">
+                <div>Active connections: {{ sshPool.active_connections || 0 }}</div>
+                <div>Active hosts: {{ sshPool.active_hosts?.length ? sshPool.active_hosts.join(', ') : 'None' }}</div>
+                <div>Opened: {{ sshPool.total_opened || 0 }}</div>
+                <div>Reused: {{ sshPool.total_reused || 0 }}</div>
               </div>
-              <p v-else class="text-xs text-gray-500">{{ sshPool.message || 'No SSH pool data' }}</p>
+              <p v-else class="text-xs text-gray-500">No SSH pool data</p>
             </div>
             <div class="hm-card" style="padding:0.75rem;">
-              <h3 class="text-sm font-medium mb-1">HTTP Pool</h3>
-              <div v-if="httpPool && httpPool.connections" class="text-xs text-gray-400">
-                Active: {{ httpPool.active || 0 }} / Limit: {{ httpPool.limit || 'n/a' }}
+              <h3 class="text-sm font-medium mb-1">HTTP Pools</h3>
+              <div v-if="httpPool && Object.keys(httpPool).length" class="text-xs text-gray-400 space-y-2">
+                <div v-for="(pool, provider) in httpPool" :key="provider">
+                  <strong class="text-gray-300">{{ provider }}</strong>
+                  <template v-if="provider === 'codex'">
+                    <div>Active: {{ pool.http_pool_active_connections || 0 }} / {{ pool.http_pool_max_connections || 0 }}</div>
+                    <div>Requests: {{ pool.http_pool_total_requests || 0 }}</div>
+                    <div>Keepalive: {{ pool.http_pool_keepalive_timeout || 0 }}s</div>
+                  </template>
+                  <template v-else>
+                    <div>Requests: {{ pool.total_requests || 0 }}</div>
+                    <div>Model: {{ pool.model || 'Unknown' }}</div>
+                  </template>
+                </div>
               </div>
-              <p v-else class="text-xs text-gray-500">{{ httpPool.message || 'No HTTP pool data' }}</p>
+              <p v-else class="text-xs text-gray-500">No HTTP pool data</p>
             </div>
           </div>
         </section>
@@ -129,10 +141,11 @@ export default {
           <section class="hm-card" style="padding:1rem;">
             <h3 class="text-sm font-medium mb-2">Risk Classifier</h3>
             <div v-if="riskStats" class="text-xs text-gray-400 space-y-1">
-              <div>Total assessed: {{ riskStats.total || 0 }}</div>
-              <div>High risk: <span class="text-red-400">{{ riskStats.high || 0 }}</span></div>
-              <div>Medium: <span class="text-yellow-400">{{ riskStats.medium || 0 }}</span></div>
-              <div>Low: <span class="text-green-400">{{ riskStats.low || 0 }}</span></div>
+              <div>Total assessed: {{ riskTotal }}</div>
+              <div>Critical: <span class="text-red-400">{{ riskStats.totals?.critical || 0 }}</span></div>
+              <div>High risk: <span class="text-red-400">{{ riskStats.totals?.high || 0 }}</span></div>
+              <div>Medium: <span class="text-yellow-400">{{ riskStats.totals?.medium || 0 }}</span></div>
+              <div>Low: <span class="text-green-400">{{ riskStats.totals?.low || 0 }}</span></div>
             </div>
             <p v-else class="text-xs text-gray-500">No risk data</p>
           </section>
@@ -141,9 +154,9 @@ export default {
           <section class="hm-card" style="padding:1rem;">
             <h3 class="text-sm font-medium mb-2">Recovery</h3>
             <div v-if="recoveryStats" class="text-xs text-gray-400 space-y-1">
-              <div>Attempts: {{ recoveryStats.total || 0 }}</div>
-              <div>Recovered: <span class="text-green-400">{{ recoveryStats.recovered || 0 }}</span></div>
-              <div>Failed: <span class="text-red-400">{{ recoveryStats.failed || 0 }}</span></div>
+              <div>Attempts: {{ recoveryStats.totals?.attempts || 0 }}</div>
+              <div>Recovered: <span class="text-green-400">{{ recoveryStats.totals?.successes || 0 }}</span></div>
+              <div>Failed: <span class="text-red-400">{{ recoveryStats.totals?.failures || 0 }}</span></div>
             </div>
             <p v-else class="text-xs text-gray-500">Recovery disabled or no data</p>
           </section>
@@ -166,8 +179,8 @@ export default {
         <section class="hm-card" style="padding:1.25rem;">
           <h2 style="font-size:1.1rem;font-weight:600;margin-bottom:0.75rem;">Branch Freshness</h2>
           <div v-if="freshnessStats" class="text-xs text-gray-400 space-y-1">
-            <div>Checks: {{ freshnessStats.total || 0 }}</div>
-            <div>Stale detected: <span class="text-yellow-400">{{ freshnessStats.stale || 0 }}</span></div>
+            <div>Checks: {{ freshnessStats.total_checks || 0 }}</div>
+            <div>Stale detected: <span class="text-yellow-400">{{ freshnessStats.stale_found || 0 }}</span></div>
             <div>Fetch failures: <span class="text-red-400">{{ freshnessStats.fetch_failures || 0 }}</span></div>
           </div>
           <p v-else class="text-xs text-gray-500">Freshness checking disabled or no data</p>
@@ -188,6 +201,8 @@ export default {
     const compressionStats = ref(null);
     const freshnessStats = ref(null);
     const governorStats = ref(null);
+    const riskTotal = computed(() => Object.values(riskStats.value?.totals || {})
+      .reduce((total, count) => total + Number(count || 0), 0));
     // Every endpoint failing used to render a fully-loaded page of empty
     // sections: no error, no retry, nothing to distinguish "the bot is down"
     // from "nothing to report".
@@ -273,7 +288,7 @@ export default {
 
     return {
       loading, error, failedCount, failedEndpoints, failedEndpointSummary, endpoints, retry, startup, subsystems, sshPool, httpPool,
-      riskStats, recoveryStats, compressionStats, freshnessStats,
+      riskStats, riskTotal, recoveryStats, compressionStats, freshnessStats,
       governorStats, statusColor, formatTime,
     };
   },

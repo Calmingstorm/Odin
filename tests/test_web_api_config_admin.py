@@ -1035,7 +1035,8 @@ class TestConfigMeta:
     #: additions and removals deliberate rather than silent UI drift.
     RECORD_KEYS = {
         "path", "owner", "label", "description", "aliases", "unit", "examples",
-        "type", "structured_container", "enum", "constraints", "default",
+        "type", "structured_container", "structured_container_child", "enum",
+        "constraints", "default",
         "sensitivity", "secret_route",
         "apply_mode", "apply_handler", "consumers", "restart_reason",
         "activation_policy", "group_description", "save_effect",
@@ -1117,6 +1118,40 @@ class TestConfigMeta:
             assert expected in paths, f"{expected} has no field record"
         assert "graceful_degradation.enabled" not in paths
         assert "grafana_alerts.enabled" not in paths
+
+    @pytest.mark.asyncio
+    async def test_populated_container_descendants_are_read_only(self):
+        """A populated tools.hosts used to flatten into ordinary editable text
+        inputs even though its empty parent promised a read-only collection."""
+        bot = _bot()
+        bot.config = Config(
+            discord={"token": "fake"},
+            tools={
+                "hosts": {
+                    "prod": {
+                        "address": "10.0.0.8",
+                        "ssh_user": "deploy",
+                        "os": "linux",
+                    }
+                }
+            },
+        )
+        app, _ = _app(register_discord_config, bot=bot)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        records = {
+            record["path"]: record
+            for record in body["fields"]
+            if record["path"].startswith("tools.hosts.prod.")
+        }
+        assert set(records) == {
+            "tools.hosts.prod.address",
+            "tools.hosts.prod.ssh_user",
+            "tools.hosts.prod.os",
+        }
+        assert all(record["structured_container_child"] for record in records.values())
+        assert all(not record["structured_container"] for record in records.values())
 
     @pytest.mark.asyncio
     async def test_apply_modes_are_from_the_known_vocabulary(self):

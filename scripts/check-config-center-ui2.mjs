@@ -132,12 +132,15 @@ assert.doesNotMatch(discord, /Bot credential configured/, 'Discord page reports 
 assert.match(apiTokens, /Manage API tokens[\s\S]*api\.get\('\/api\/tokens'\)/s, 'API Tokens owner page does not own the token collection');
 assert.doesNotMatch(config, /OWNER_LINKS|sectionOwner\(|Temporary expert JSON editor|setJsonFieldValue|Edit section|meta\.value\?\.status\?\.counts/, 'legacy owner/edit/JSON gate returned');
 assert.match(config, /Read-only here\. Edit this collection in config\.yml\./, 'public structured containers do not name their real edit path');
-assert.match(config, /Values are hidden\. Read-only here\. Edit this collection in config\.yml\./, 'secret containers do not name their safe read-only shape and edit path');
-assert.match(config, /field\.structured_container && field\.sensitivity !== 'public'/, 'credential-bearing containers no longer have their dedicated safe summary');
-assert.match(config, /v-else-if="field\.structured_container"/, 'schema-free containers no longer use the registry marker');
+assert.match(config, /Values are hidden\. <\/template><template v-if="field\.structured_container_child">Part of a structured collection\. <\/template>Read-only here\. Edit this collection in config\.yml\./, 'secret containers do not name their safe read-only shape and edit path');
+assert.match(config, /field\.structured_container \|\| field\.structured_container_child/, 'container descendants no longer use the read-only summary path');
+assert.match(config, /Part of a structured collection\./, 'container descendants do not explain why they are read-only');
+assert.match(config, /!field\.structured_container_child/, 'scalar arrays do not exclude structured-container descendants');
 assert.match(config, /!field\.structured_container/, 'scalar arrays do not defer to the registry container marker');
 assert.doesNotMatch(config, /STRUCTURED_CONTAINER_PATHS/, 'duplicated local container-path registry returned');
 assert.match(config, /function structuredApplyCopy\(field\)/, 'structured containers do not explain their real apply boundary');
+assert.ok(config.includes("live_apply: 'Dedicated live apply'"), 'live-apply badge implies generic Config reload');
+assert.equal(config.includes("live_apply: 'Reloads live'"), false, 'stale generic-reload badge returned');
 assert.match(config, /No activation control exists in this release/, 'activation-required containers imply a nonexistent flow');
 assert.doesNotMatch(config, /purpose-built table is required before release/i, 'temporary release-gate copy returned');
 const expandedFunction = namedFunction(configAst, 'isSectionExpanded');
@@ -262,3 +265,23 @@ assert.match(internals, /failedEndpointSummary/, 'Internals does not name failed
 for (const endpoint of ['/api/pools/ssh', '/api/compression/stats']) {
   assert.ok(internals.includes(endpoint), `Internals endpoint inventory missing ${endpoint}`);
 }
+
+const internalsBindings = [
+  'sshPool.active_connections', 'sshPool.active_hosts', 'sshPool.total_opened', 'sshPool.total_reused',
+  'pool.http_pool_active_connections', 'pool.http_pool_max_connections',
+  'pool.http_pool_total_requests', 'pool.http_pool_keepalive_timeout',
+  'pool.total_requests', 'pool.model',
+  'riskStats.totals?.critical', 'riskStats.totals?.high', 'riskStats.totals?.medium', 'riskStats.totals?.low',
+  'recoveryStats.totals?.attempts', 'recoveryStats.totals?.successes', 'recoveryStats.totals?.failures',
+  'freshnessStats.total_checks', 'freshnessStats.stale_found', 'freshnessStats.fetch_failures',
+];
+for (const binding of internalsBindings) {
+  assert.ok(internals.includes(binding), `Internals response binding missing: ${binding}`);
+}
+for (const staleBinding of [
+  'sshPool.connections', 'httpPool.connections', 'riskStats.total ||',
+  'recoveryStats.total ||', 'freshnessStats.total ||', 'freshnessStats.stale ||',
+]) {
+  assert.equal(internals.includes(staleBinding), false, `Internals stale response binding returned: ${staleBinding}`);
+}
+assert.match(internals, /v-for="\(pool, provider\) in httpPool"/, 'HTTP pools are not rendered from provider-keyed responses');

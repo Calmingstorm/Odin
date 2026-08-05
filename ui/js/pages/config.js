@@ -22,7 +22,7 @@ const CATEGORY_GROUPS = [
 
 const APPLY_MODE_LABELS = {
   live_read: 'Applies immediately',
-  live_apply: 'Reloads live',
+  live_apply: 'Dedicated live apply',
   live_for_new_work: 'Applies to new work',
   restart: 'Restart required',
   activation_required: 'Saved only — see activation note',
@@ -362,10 +362,11 @@ export default {
                           </div>
 
                           <div class="cfgc-field-control">
-                            <template v-if="field.structured_container && field.sensitivity !== 'public'">
+                            <template v-if="field.structured_container || field.structured_container_child">
                               <div class="cfgc-structured-summary">
-                                <span><odin-icon name="shield" :size="15" /> {{ field.configured ? 'Configured collection' : 'Empty collection' }}</span>
-                                <small>Values are hidden. Read-only here. Edit this collection in config.yml. {{ structuredApplyCopy(field) }}</small>
+                                <span v-if="field.sensitivity !== 'public'"><odin-icon name="shield" :size="15" /> {{ field.configured ? 'Configured value' : 'Not configured' }}</span>
+                                <span v-else>{{ compactValue(field.value) }}</span>
+                                <small><template v-if="field.sensitivity !== 'public'">Values are hidden. </template><template v-if="field.structured_container_child">Part of a structured collection. </template>Read-only here. Edit this collection in config.yml. {{ structuredApplyCopy(field) }}</small>
                               </div>
                             </template>
 
@@ -427,11 +428,6 @@ export default {
                                      type="number" :min="field.constraints?.minimum" :max="field.constraints?.maximum"
                                      :step="field.type === 'integer' ? 1 : 'any'" :value="numberInputValue(field)"
                                      @focus="beginInputEdit(field.path)" @input="setNumberFieldValue(field, $event.target.value)" @blur="endInputEdit(field)" />
-
-                              <div v-else-if="field.structured_container" class="cfgc-structured-summary">
-                                <span>{{ compactValue(field.value) }}</span>
-                                <small>Read-only here. Edit this collection in config.yml. {{ structuredApplyCopy(field) }}</small>
-                              </div>
 
                               <input v-else :id="fieldInputId(field.path)" class="hm-input font-mono" type="text"
                                      :value="field.value ?? ''" @focus="beginInputEdit(field.path)"
@@ -1083,6 +1079,7 @@ export default {
     function isScalarArray(field) {
       return field.type === 'array' && Array.isArray(field.value)
         && !field.structured_container
+        && !field.structured_container_child
         && field.sensitivity === 'public'
         && field.value.every(item => ['string', 'number', 'boolean'].includes(typeof item));
     }

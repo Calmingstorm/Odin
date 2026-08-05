@@ -1,6 +1,6 @@
 # Configuration Center — campaign plan of record
 
-**Status:** R0 (settled design; implementation in progress on `feat/config-center`)
+**Status:** R1 (campaign implementation complete on `feat/config-center`; deferred lanes recorded below)
 **Baseline:** master `43738fe` (v3.72.0)
 **Origin:** operator report that Settings > Config is dated, unintuitive, and largely not live.
 Two independent audits (Claude: code audit of every section's consumers; Odin: rendered-UI
@@ -16,12 +16,11 @@ consumer re-reads `bot.config` at call time or captured config at construction:
 - built in `wiring.build_services(config)` → boot snapshot → **restart required**;
 - built in `wiring.build_components(bot, services)` with `get_config=lambda: bot.config` → **live**.
 
-The UI reports `Config saved successfully` in every case, including when the change is inert,
-restart-bound, owned by a dedicated endpoint, or failed to persist at all.
-
-Of 35 sections / 228 leaf fields: 6 fully live, 10 partially live (with split-brain traps), ~15
-restart-only with no indication, 4 dormant. There is no restart affordance, no pending-restart
-state, and no per-field liveness information in the UI, the API, or the docs.
+That was the campaign baseline. The implemented branch now has one transactional writer,
+server-authored metadata for 35 sections / 262 schema leaves, desired-versus-effective health,
+plain-language apply boundaries, and a clean-restart affordance. Generic Config saves deliberately
+persist dedicated-endpoint fields without dispatching their live apply handlers; the metadata says
+so rather than reporting a reload that did not happen.
 
 Cross-validated defect inventory (IDs used throughout this plan): see
 `/home/odin/reviews/config-page-consolidated.md` §2 and the per-feature settlement in
@@ -53,16 +52,17 @@ Cross-validated defect inventory (IDs used throughout this plan): see
   (`${VAR}` placeholders and literal values) round-trip. Legacy `GET`/`PUT /api/config` request and
   response *shapes* stay stable; richer results arrive through new endpoints.
 - **C2 — no functionality or capability loss.** Every capability reachable today stays reachable.
-  Where a path is deliberately closed (secret writes through generic PUT), an equivalent dedicated
-  path ships **in the same release**.
+  Generic API writes now refuse the opaque secret mask, while real replacement values remain
+  accepted on existing secret-bearing routes. Purpose-built set/clear secret routes and provenance
+  are deferred to X1; Config Center exposes no fake secret-write affordance meanwhile.
 - **C3 — intuitive.** The reflection-dump renderer is retired in favour of a real configuration
   product: searchable, labelled, typed controls, honest state.
 - **C4 — maximize live-in-place.** Convert snapshot consumers to live application wherever it can
   be done safely; classify honestly where it cannot.
-- **C5 — dormant config is preserved, never removed, never auto-activated.** Unwired features
-  become genuinely enable-able and configurable from the WebUI, shown plainly as *Disabled* when
-  off. A legacy `enabled: true` never activates a newly wired feature on upgrade; activation is
-  always an explicit operator action.
+- **C5 — dormant config is preserved, never auto-activated.** Unwired features remain stored and
+  are labelled honestly; this campaign does not manufacture Enable actions before their complete
+  runtime chain exists. Dead settings whose behavior was already always-on or unsupported were
+  removed compatibly, and legacy files carrying them still load.
 
 Delivery fence for the whole campaign: **branch and PRs only — no deploy to `/opt/odin`, no release
 pipeline, no version bump, no website update** until the operator says otherwise.
@@ -91,11 +91,10 @@ Compatibility boundary:
 3. Sensitivity is derived from the server registry (§4); key-name heuristics remain only as defence
    in depth. Arbitrary-value containers (MCP `headers`/`env`) are opaque unless a child is
    explicitly classified safe.
-4. Generic PUT rejects sentinels and every registry-classified sensitive path, recursing dicts,
-   lists, and nested models. **C2 rider:** each path newly rejected here gains a dedicated
-   set/clear route in the same release — rejection without a replacement path would be capability
-   loss. This closes the write-side half of B2, which today lets `web.api_tokens[].token` and
-   `outbound_webhooks.targets[].secret` through.
+4. API middleware rejects the stable opaque sentinel in every JSON POST/PUT/PATCH body under
+   `/api/`, including nested lists and mappings. Generic PUT continues to accept real replacement
+   values where it did before; purpose-built set/clear routes, provenance, and Config Center secret
+   editing are deferred to X1.
 5. `configured` never implies `usable`: feature status separately reports desired, configured,
    effective, and healthy.
 
@@ -149,15 +148,16 @@ disable/drain, shutdown, status, audit, secret handling, failure rollback. "The 
   leaves** (never regenerate from `model_dump()`), atomic (mkstemp → fsync → `os.replace` → dir
   fsync), loud failure, and one lock serializing *all* config writers (generic, LLM, personality).
   Closes B1, B10, B11, O1, O2, O7 structurally.
-- **One apply layer.** Generic and dedicated writes dispatch through the same per-field apply
-  handlers. `llm_provider` writes delegate to `switch_provider()`; personality writes to its
-  registration/rebuild path. Ownership, not duplication.
-- **Desired vs effective.** `bot.config` stops being simultaneously the persisted document, runtime
-  truth, apply transaction, UI schema, and restart ledger. Track desired/persisted value,
-  runtime-effective value, boot snapshot for restart-owned consumers, and last apply outcome.
-  Restart-class saves persist and mark pending **without** injecting into live readers. The
-  pending-restart banner lists only fields whose desired ≠ effective and whose classification says
-  a restart resolves it (never a raw boot-diff — live-applied fields legitimately differ from boot).
+- **Apply truth before dispatch.** Dedicated provider endpoints own their runtime transitions.
+  Generic Config saves validate and persist those fields but do **not** dispatch the named handler;
+  `/api/config/meta` says the running provider remains unchanged until that endpoint succeeds.
+  Unifying generic and dedicated writes behind one apply dispatcher is deferred S3 work.
+- **Desired vs effective.** Metadata reports desired/persisted state, consumer-aware effective
+  state where the process can prove it, boot snapshots for restart-owned consumers, and `unknown`
+  rather than inventing certainty for named apply handlers. Restart-class saves persist and mark
+  pending **without** injecting into live readers. The pending-restart banner lists only fields
+  whose desired differs from the boot-backed effective value and whose classification says a
+  restart resolves it.
 
 ## 4. The field/apply registry (foundation)
 
@@ -170,7 +170,8 @@ FieldSpec(path)                 # supports wildcard segments for dict/list entri
   type/enum/constraints         # derived from pydantic where possible, never hand-duplicated
   default
   sensitivity      # public | sensitive (opaque) | secret_container
-  secret_route     # dedicated set/clear endpoint when sensitivity != public
+  structured_container / structured_container_child  # schema-derived read-only collection shape
+  secret_route     # null until a real dedicated set/clear endpoint exists
   apply_mode       # live_read | live_apply | live_for_new_work | restart | activation_required
                    # | legacy_control | dormant
   apply_handler    # callable owning the runtime transition
@@ -184,27 +185,26 @@ ratchet discipline as the lint/type/coverage gates. The UI derives widgets, vali
 sensitivity from a sanitized projection of this registry, deleting all three hand-maintained
 front-end lists (`SENSITIVE_KEYS`, `ENUM_FIELDS`, `VALIDATION_RULES`).
 
-New endpoints (legacy `GET`/`PUT /api/config` shapes untouched, per C1):
+Implemented endpoints (legacy `GET`/`PUT /api/config` response shapes remain untouched, per C1):
 
-- `GET  /api/config/meta` — sanitized registry projection + per-field desired/effective/apply state.
-- `POST /api/config/plan` — dry-run: validation, apply classification, blast radius, plan token.
-- `GET  /api/config/status` — configuration health: applied / pending-restart / dormant / invalid
-  counts, unsafe overrides, desired-vs-effective drift.
-- feature activation + secret set/clear routes (per §5), admin-gated and revision-bound.
+- `GET  /api/config/meta` — sanitized registry projection, per-field desired/effective/apply state,
+  health counts, persistence error, and pending-restart evidence.
+- `POST /api/restart` — admin-gated, idempotent clean restart scheduling for proven pending fields.
 
-## 5. Per-feature settlement (C5 set — all become enable-able from the WebUI)
+Deferred: dry-run plans, a standalone config-status route, generic apply dispatch, feature activation
+receipts/flows, and dedicated secret set/clear routes (the deferred S3/F/X1 lanes). Metadata
+advertises no action or secret route until a real endpoint exists.
 
-> The apply-mode column below is the **target** each feature is being moved to,
-> not what the code does today. Present behaviour lives in
-> `src/config/apply_registry.py`, which is leaf-level and CI-gated; where the
-> two differ, the registry is the fact and this table is the intent. Example:
-> `agents.max_children_per_agent` is `activation_required` in the registry
-> because no spawn path reads it at all, and reaches the `live_for_new_work`
-> below only once the one-time apply described here exists.
+## 5. Per-feature settlement and deferred activation work
 
-Post-campaign apply classes; none requires a restart provided controllers and dormant holders are
-constructed at ordinary startup. Where staging and atomic swap cannot be guaranteed, the registry
-must classify the field `restart` rather than impersonate liveness.
+> The apply-mode column below is a deferred target unless explicitly marked implemented. Present
+> behavior lives in `src/config/apply_registry.py`, which is leaf-level and CI-gated; where the two
+> differ, the registry is the fact and this table is future intent.
+
+Deferred target apply classes are listed below. They are not claims about this release: where the
+staging/runtime chain is absent, the registry says `dormant` or `activation_required`; where a
+component is boot-captured, it says `restart`. `agents.max_children_per_agent` and
+`agents.max_concurrent_agents` are exceptions already completed as `live_for_new_work`.
 
 | Feature | Class | Boundary / key gates |
 |---|---|---|
@@ -212,7 +212,8 @@ must classify the field `restart` rather than impersonate liveness.
 | **Message triggers** | `live_apply` | Bind the loaded cog to the canonical scheduler + an immutable effective snapshot, refreshed by one apply handler; `Pending readiness` before Discord is ready. Empty allowlists mean **all** today (`message_triggers.py:57,67`) — the activation dialog renders that as an explicit wildcard requiring separate "All channels"/"All users" acknowledgement. Default-deny DMs, bot/webhook authors, unscoped guilds. Preview every matching scheduled `discord_message` trigger before Enable. Dedupe, rate limits, cooldowns, bounded regex. Activation enables the event source only — it never creates schedules. |
 | **Reaction triggers** | `live_apply` | Same scheduler binding, scope rules, preview, dedupe, cooldown. Strengthen from ignoring only Odin's own reactions (`reaction_triggers.py:89`) to rejecting all bot identities by default. Normalize custom-emoji IDs/names and Unicode in the preview. Independent receipt from message triggers. |
 | **Issue tracker** | `live_apply` | One `IssueTrackerRuntime` holder feeding **both** consumers (`/api/issues/*` and the executor tool handler) — removes today's bot-client vs executor-client trap. Catalog visibility requires an effective healthy client, not `config.enabled`. Provider-specific required fields, write-only token, HTTPS/SSRF/rebinding controls for self-hosted Jira, bounded read-only Test Connection, review states that the tool can create/comment/transition external issues, prefer split read/write permission policy. Provider/URL/token change stages and tests a new client before swap; failure retains the old client and reports drift. |
-| **`agents.max_children_per_agent`** | `live_for_new_work` | Snapshot onto each newly spawned parent; running trees keep their limit. Legacy values stay unapplied (effective 3, `manager.py:39`) until a one-time **Apply configured limit**; enforce a hard maximum and show worst-case tree breadth against `max_nesting_depth` before confirming. |
+| **`agents.max_children_per_agent`** | `live_for_new_work` (**implemented**) | A root snapshots the 1–10 value when spawned; every descendant inherits the root snapshot, enforcement and prompts use it, and the immutable 25-agent lifetime tree cap remains the runaway backstop. No one-time activation ceremony exists or is needed. |
+| **`agents.max_concurrent_agents`** | `live_for_new_work` (**implemented**) | The live 1–25 value is read on every spawn admission and caps concurrently running agents per channel. Lowering it blocks later admissions without terminating work already running; an absent key preserves the historical default of 5. |
 | **`usage.directory`** | `live_apply` (target) | Today it writes nothing (CostTracker is memory-only) but *is* a boot-captured workspace protected root. Add explicit **Enable durable usage history**, default off for legacy installs: validate ownership/permissions/space, create a bounded store, snapshot in-memory aggregates, swap CostTracker persistence, update protected roots. Directory change stages a new store, flushes/copies bounded state, swaps, keeps the old path protected until no writer holds it. Failure keeps in-memory tracking. Never write to a filesystem path merely because an old config names one. |
 | **`slack.forward_alerts`** | `live_apply` | Requires defining "alert": a normalized internal alert stream (initially Grafana alerts + health/subsystem transitions) that the Slack notifier subscribes to — **not** an alias for `forward_webhooks`. Source filters, dedupe/cooldown, rate limits, scrubbing. The stored default `true` is inert today and stays inert without a receipt; prerequisites are an effective notifier and a tested destination. |
 | **Outbound webhooks** (`scrub_secrets`, `verify_ssl`) | `live_apply` | Unify config persistence with runtime CRUD (today the API mutates only the dispatcher and boot wiring drops both safety flags at `wiring.py:493-499`); stable target IDs without migrating untouched legacy lists. **Safe-activation rule:** on upgrade every legacy target's effective `scrub_secrets`/`verify_ssl` remain `true` regardless of stored `false`, until that *specific* target is reviewed and saved with a safety-override receipt. No bulk trust action; unrelated edits never activate stored unsafe values; `scrub_secrets=false` warns about credential disclosure per subscribed event class; `verify_ssl=false` needs a separate high-risk acknowledgement (labelled not-applicable for HTTP). Clearing an override returns immediately to the safe value. URL safety enforced on create, edit, test, **and every dispatch** (resolution + redirects) so a registered target cannot later rebind to localhost or metadata. |
@@ -221,28 +222,26 @@ must classify the field `restart` rather than impersonate liveness.
 
 Retire the reflection dump. The page becomes an operator settings workspace:
 
-- **Navigation:** category rail with counts (modified, pending restart, invalid, dormant); search
-  across labels, raw paths, descriptions, aliases; sections collapsed by default with remembered
-  state; raw paths shown as secondary technical detail, not primary labels.
+- **Navigation:** one selected category at a time, with health counts and search across labels,
+  raw paths, descriptions, and aliases. Sections default expanded inside that category; explicit
+  collapses are remembered. Mobile keeps one section open at a time.
 - **Configuration health header:** applied / pending restart / dormant configured / invalid /
   persistence error / drift — each filterable. Unsafe effective overrides surface here.
-- **Single ownership:** LLM and Personality become summary cards linking to their dedicated pages
-  (no duplicate weaker editors). Discord global defaults are labelled as such with a precedence
-  explanation and a link to per-guild/channel overrides. Secrets route to their dedicated flows.
-- **Editing:** section-level drafts, not a 228-field global form; a global review tray groups
-  changes by apply class and is the commit gate; per-field server validation mapped back to the
-  field; typed editors from metadata — host rows with connection test, chips for ID allowlists,
-  cards/tables for webhook targets and Grafana rules, fieldsets for retry/pool/governor, real row
-  editors for object arrays. Raw JSON survives only as a labelled expert escape hatch with live
-  parse/schema errors (never silent discard, closing O6). Browser `prompt()` is removed.
-- **Liveness badges** per field: *Applies immediately* · *Reloads live* · *Applies to new work* ·
+- **Single ownership:** LLM/provider settings, Personality, Discord globals, and API tokens live
+  only on their dedicated pages; Config has no duplicate stubs. `tools.hosts` stays in Config because
+  Host Access owns user grants, not the host inventory. Secret set/clear flows remain deferred.
+- **Editing:** direct typed leaf controls use section drafts, undo/redo, field validation, and a
+  review tray. Scalar arrays use purpose-built chip editors. Structured maps and record collections
+  — including every concrete descendant emitted when one is populated — are read-only in this
+  release, show only a safe summary/value, name `config.yml` as the real edit path, and state their
+  actual apply boundary. Purpose-built container tables are the next UI campaign; no raw JSON editor
+  or browser `prompt()` remains.
+- **Liveness badges** per field: *Applies immediately* · *Dedicated live apply* · *Applies to new work* ·
   *Restart required* · *Activation required* · *Managed in X* · *Not wired*. Mixed fields show
   per-consumer detail ("new agents: immediate; tool executor: restart").
-- **Feature panels** (per D-B): header with effective/desired state, apply class, health, last
-  apply/test; plain-language "what enabling causes"; Configure area with typed editors and
-  write-only secret controls; Safety & access area; Activity area (resources, recent events,
-  failures, audit links); separate **Save settings**, **Test**, **Enable**, **Disable** actions —
-  saving never arms a dormant feature.
+- **Deferred feature panels** (per D-B): effective/desired state, health, write-only secrets,
+  test, and explicit enable/disable belong to the F/X lanes. This release shows truthful dormant
+  copy and no action button; saving never arms a dormant feature.
 - **Mobile:** one subpanel at a time, sticky bottom bar (Cancel · Review · Save) with Undo/Redo in
   overflow, no clipped actions (closes B12), tab-strip overflow affordance, persistent
   pending-restart banner.
@@ -255,25 +254,26 @@ One author + one reviewer per work item; never both of us in the same code
 | Lane | Owner | Reviewer | Scope |
 |---|---|---|---|
 | **S1** correctness & security | Claude | Odin | Shared writer, recursive redaction/blocking + sentinel rejection, truthful persistence failure, `health_server` backlink, `/api/tools/timeouts` ownership, recovery closure, personality `active_config_path()` |
-| **S2** registry & metadata | Claude | Odin | Field/apply registry, CI classification gate, `/api/config/meta`, `/api/config/plan`, `/api/config/status` |
-| **S3** apply layer & liveness | Claude | Odin | Unified apply dispatch, desired-vs-effective state, snapshot→live conversions (timezone parser, prompt caches/presets, executor timeout ownership, permissions tiers, logging level, learning caps, email behaviour), restart endpoint + pending model |
-| **U1** page shell & IA | Odin | Claude | Category rail, search, health header, collapsed sections, section drafts, review tray, mobile action model |
-| **U2** typed editors & badges | Odin | Claude | Metadata-driven widgets, host/chip/target/rule editors, liveness badges, JSON escape hatch, removal of the three hand-maintained front-end lists |
+| **S2** registry & metadata | Claude | Odin | Shipped field/apply registry, CI classification gate, and `/api/config/meta`. Dry-run plan and standalone status endpoints are deferred. |
+| **S3** apply truth & restart | Claude | Odin | Desired-vs-effective metadata and restart endpoint shipped. Generic dispatch into dedicated apply handlers is deferred; generic saves persist those values and say the running provider is unchanged. |
+| **U1** page shell & IA | Odin | Claude | Shipped: category rail, search, pinned health/header, expanded sections with remembered collapses, direct drafts, review tray, responsive scroll model. |
+| **U2** typed editors & badges | Odin | Claude | Shipped scalar/chip controls, badges, group disclosures, and read-only structured containers. Purpose-built host/target/server/rule table editors are deferred; no JSON escape hatch ships. |
 | **F1** MCP wiring & activation | Odin | Claude | Manager lifecycle, catalog merge, dispatch across all contexts, stdio/HTTP safety gates, per-server activation, panel |
 | **F2** triggers + issue tracker | Claude | Odin | Cog binding + live refresh, scope acknowledgement, `IssueTrackerRuntime`, health-gated catalog visibility, panels |
-| **F3** dormant flags | Claude | Odin | agent child limit, prompt budget, usage persistence, slack alert stream, outbound-webhook safe activation |
+| **F3** dormant flags | Claude | Odin | Agent child and per-channel concurrency limits shipped. Dead prompt/Codex token controls were removed; usage persistence, Slack alert stream, and outbound-webhook safe activation remain deferred. |
 | **X1** secret flows | Claude | Odin | Set/clear routes, provenance, canary gates (rides S1/S2) |
 
-Sequencing: S1 and U1 start in parallel (U1 builds against the §4 contract). S2 lands before U2
-switches from fixture to live metadata. S3 precedes F-lane activation work, which depends on the
-apply/receipt machinery. Docs and the generated liveness column ride the lane that owns each field.
+Campaign sequence completed through S1/S2, the truthful subset of S3, U1/U2, and the two agent
+limits in F3. F1/F2, the remaining F3 integrations, generic-to-dedicated apply dispatch, structured
+container editors, and X1 secret flows are explicit next-campaign work.
 
 ## 8. Gates
 
 Standard repo gates on every PR (suite, ruff, mypy, coverage ratchet, `npm run check` including the
 template and binding validators for any `ui/` change, with `ui/dist` committed alongside source),
-plus campaign-specific gates: the registry classification gate; secret canary tests at every shape
-across API responses, audit diffs, logs, exports, and errors; round-trip persistence tests proving
-comments/placeholders/mode survive and that both config styles are preserved; activation tests
-proving a legacy `enabled: true` never activates without a receipt; and rollback tests proving a
-failed activation leaves no catalog entry, listener, process, or client behind.
+plus campaign-specific gates: the registry classification gate and Python/JavaScript vocabulary
+parity; secret canaries across API responses, audit diffs, logs, exports, and errors; round-trip
+persistence tests for comments/placeholders/mode and legacy config; populated-container tests proving
+parent and descendants stay read-only; and real endpoint-to-template binding contracts for Internals.
+Activation receipts and their rollback/catalog tests move with the deferred F lane rather than
+pretending an activation path shipped.

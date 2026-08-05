@@ -532,6 +532,50 @@ class TestSchemaDerivedFacts:
             "discord.allowed_users", ["123"]
         )["structured_container"]
 
+    def test_populated_container_children_get_the_read_only_marker(self):
+        records = build_meta_payload(
+            {
+                "tools": {
+                    "hosts": {
+                        "prod": {
+                            "address": "10.0.0.8",
+                            "ssh_user": "deploy",
+                            "os": "linux",
+                        }
+                    }
+                }
+            }
+        )["fields"]
+        host_children = [
+            record for record in records
+            if record["path"].startswith("tools.hosts.prod.")
+        ]
+        assert len(host_children) == 3
+        assert all(record["structured_container_child"] for record in host_children)
+        assert all(not record["structured_container"] for record in host_children)
+        assert not build_field_record(
+            "tools.ssh_retry.max_retries", 2
+        )["structured_container_child"]
+
+        # This is schema ancestry, not a tools.hosts allowlist. A populated
+        # record-list container must acquire the same marker through its
+        # arbitrary index segment.
+        token_records = build_meta_payload(
+            {
+                "web": {
+                    "api_tokens": [
+                        {"token": "secret", "tier": "admin", "label": "ops"}
+                    ]
+                }
+            }
+        )["fields"]
+        token_children = [
+            record for record in token_records
+            if record["path"].startswith("web.api_tokens.0.")
+        ]
+        assert len(token_children) == 3
+        assert all(record["structured_container_child"] for record in token_children)
+
     def test_list_entry_paths_resolve_to_their_record_field(self):
         """An entry's fields are schema, so web.api_tokens.0.tier must pick up
         the tier field's facts rather than be treated as an unknown path — and
@@ -830,9 +874,36 @@ class TestPlainLanguageEffects:
         assert "startup value" in record["save_effect"]
         assert record["runtime_effect"] == record["restart_reason"]
 
-    def test_live_apply_names_its_handler(self):
+    def test_dedicated_live_apply_does_not_claim_generic_reload(self):
         record = build_field_record("openai_codex.model", "sol")
+        assert record["save_effect"] == (
+            "Saving through Config updates config.yml but does not reload the "
+            "running provider."
+        )
         assert "PUT /api/llm/codex/config" in record["runtime_effect"]
+        assert "unchanged until that endpoint succeeds" in record["runtime_effect"]
+
+    def test_generic_live_apply_keeps_its_real_apply_claim(self):
+        record = build_field_record("personality.user_presets", {})
+        assert record["save_effect"] == (
+            "Saving updates config.yml and reconfigures the running process."
+        )
+        assert "PUT /api/config" in record["runtime_effect"]
+
+    def test_issue_tracker_copy_names_visibility_without_usability(self):
+        enabled = build_field_record("issue_tracker.enabled", True)
+        assert enabled["apply_mode"] == "live_read"
+        assert enabled["effective"] is None
+        assert "tool catalog" in enabled["description"]
+        assert "answers 'not configured'" in enabled["description"]
+        assert "planned for the next campaign" in enabled["description"]
+        assert {consumer["name"] for consumer in enabled["consumers"]} == {
+            "Tool catalog visibility",
+            "Tool execution",
+        }
+        provider = build_field_record("issue_tracker.provider", "linear")
+        assert provider["apply_mode"] == "dormant"
+        assert "no production issue-tracker client" in provider["description"]
 
     def test_logging_directory_names_only_the_workspace_fence(self):
         record = build_field_record("logging.directory", "/srv/not-a-log-sink")

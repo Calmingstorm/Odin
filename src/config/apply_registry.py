@@ -15,8 +15,9 @@ leaves genuinely agree — that one inherits deliberately.
 Apply modes
 -----------
 ``live_read``           consumers re-read config; the next read sees it.
-``live_apply``          the generic save persists it, and a named apply handler
-                        reconfigures the running component.
+``live_apply``          a named apply handler reconfigures the running
+                        component. Generic Config saves persist the value but
+                        do not dispatch that handler.
 ``live_for_new_work``   effective for the next spawn/turn; work already running
                         keeps the values it started with, by design.
 ``restart``             a boot-time snapshot; persisted, effective next start.
@@ -276,11 +277,11 @@ SECTIONS: dict[str, SectionSpec] = {
     ),
     "issue_tracker": SectionSpec(
         "dormant",
-        "Issue tracker provider and tool lifecycle.",
+        "Issue-tracker configuration and its currently incomplete tool lifecycle.",
         owner="issue_tracker",
         activation_policy="No production path constructs an issue-tracker "
-        "client, so these values are stored and read by nothing. Configure "
-        "them freely; wiring comes later.",
+        "client. Provider settings are stored only; configured-and-healthy "
+        "tool gating is planned for the next campaign, not present today.",
     ),
     "audit": SectionSpec(
         "restart",
@@ -349,6 +350,7 @@ MIXED_SECTIONS: frozenset[str] = frozenset({
     "personality",
     "agents",
     "observability",
+    "issue_tracker",
 })
 
 #: Heading copy for every two-segment subgroup the page renders as a card.
@@ -493,6 +495,64 @@ FIELDS: dict[str, FieldSpec] = {
         "destinations.",
         activation_policy="Requires an effective notifier, a tested destination, "
         "and an activation receipt.",
+    ),
+    # ---------------- issue_tracker ----------------
+    # The enabled switch has one real effect today: the generic Config save
+    # invalidates the tool catalog, whose next read includes or removes the
+    # built-in definition. No production client is constructed, so visibility
+    # is not usability; the advertised tool returns "not configured".
+    "issue_tracker.enabled": FieldSpec(
+        apply_mode="live_read",
+        description="Controls whether issue_tracker is offered in the tool "
+        "catalog. The catalog re-reads this value after a generic save, but no "
+        "production client is constructed, so enabling it advertises a tool "
+        "that answers 'not configured'. Configured-and-healthy gating is "
+        "planned for the next campaign, not present in this release.",
+        consumers=(
+            Consumer(
+                "Tool catalog visibility",
+                "live_read",
+                "The generic save invalidates the catalog; its next read uses "
+                "this switch to include or remove issue_tracker.",
+            ),
+            Consumer(
+                "Tool execution",
+                "activation_required",
+                "No production issue-tracker client is constructed, so an "
+                "advertised tool answers 'not configured'. The next campaign "
+                "will require a configured, healthy client before publication.",
+            ),
+        ),
+    ),
+    "issue_tracker.provider": FieldSpec(
+        apply_mode="dormant",
+        description="Stored provider choice; no production issue-tracker client "
+        "reads it in this release.",
+    ),
+    "issue_tracker.api_token": FieldSpec(
+        apply_mode="dormant",
+        description="Stored issue-tracker credential; no production client is "
+        "constructed to use it in this release.",
+    ),
+    "issue_tracker.base_url": FieldSpec(
+        apply_mode="dormant",
+        description="Stored Jira base URL; no production client is constructed "
+        "to use it in this release.",
+    ),
+    "issue_tracker.project_key": FieldSpec(
+        apply_mode="dormant",
+        description="Stored default Jira project; no production client is "
+        "constructed to use it in this release.",
+    ),
+    "issue_tracker.default_team_id": FieldSpec(
+        apply_mode="dormant",
+        description="Stored default Linear team; no production client is "
+        "constructed to use it in this release.",
+    ),
+    "issue_tracker.scrub_secrets": FieldSpec(
+        apply_mode="dormant",
+        description="Stored output-scrubbing preference; no production client is "
+        "constructed to produce issue-tracker output in this release.",
     ),
     # ---------------- agents ----------------
     "agents.max_concurrent_agents": FieldSpec(
@@ -1656,6 +1716,23 @@ def schema_facts() -> dict[str, dict[str, Any]]:
     return out
 
 
+def _is_structured_container_child(path: str) -> bool:
+    """Whether ``path`` is a concrete descendant of a schema container.
+
+    ``flatten`` expands populated maps and record collections into paths such
+    as ``tools.hosts.prod.address``. The leaf itself is a string, but editing it
+    as an independent scalar would patch the whole container through a fake
+    affordance. Container ancestry comes from the Pydantic schema — never a
+    duplicated list of paths in the UI.
+    """
+    facts = schema_facts()
+    segments = path.split(".")
+    return any(
+        facts.get(".".join(segments[:end]), {}).get("structured_container")
+        for end in range(1, len(segments))
+    )
+
+
 def _facts_for(path: str) -> dict[str, Any]:
     """Schema facts for a path, with container entry keys normalised away.
 
@@ -1783,9 +1860,16 @@ def _plain_effects(
         )
     if apply_mode == "live_apply":
         handler = spec.apply_handler or "its dedicated endpoint"
+        if handler.startswith("PUT /api/config"):
+            return (
+                "Saving updates config.yml and reconfigures the running process.",
+                f"Applied live through {handler}.",
+            )
         return (
-            "Saving updates config.yml and reconfigures the running process.",
-            f"Applied live through {handler}.",
+            "Saving through Config updates config.yml but does not reload the "
+            "running provider.",
+            f"Apply the saved value through {handler}; the running provider is "
+            "unchanged until that endpoint succeeds.",
         )
     if apply_mode == "live_for_new_work":
         return (
@@ -1872,6 +1956,7 @@ def build_field_record(
         "examples": [],
         "type": resolved_type,
         "structured_container": bool(facts.get("structured_container")),
+        "structured_container_child": _is_structured_container_child(path),
         "enum": resolved_enum,
         "constraints": resolved_constraints,
         "default": facts.get("default"),
