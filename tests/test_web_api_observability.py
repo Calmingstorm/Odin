@@ -209,6 +209,24 @@ class TestMiscStats:
                 assert (await (await c.get("/api/usage")).json())["c"] == 2
                 assert (await (await c.get("/api/subsystems/status")).json())["s"] == 1
 
+    async def test_subsystem_status_exposes_server_computed_failure_age(self):
+        from src.health.subsystem_guard import SubsystemGuard
+
+        bot = _bot()
+        guard = SubsystemGuard()
+        guard.register("browser")
+        info = guard.get_subsystem("browser")
+        assert info is not None
+        info.last_failure_at = 100.0
+        bot.subsystem_guard = guard
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("src.health.subsystem_guard.time.monotonic", lambda: 220.25)
+            async with TestClient(TestServer(_app(obs.register_degradation, bot=bot))) as c:
+                response = await c.get("/api/subsystems/status")
+                body = await response.json()
+        assert response.status == 200
+        assert body["subsystems"][0]["last_failure_age_seconds"] == 120.25
+
     async def test_compression_stats_use_composed_service(self):
         bot = _bot()
         bot.compression_stats = None

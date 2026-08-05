@@ -165,6 +165,23 @@ class TestClaimsAreComplete:
 
 
 class TestResolution:
+    def test_discord_precedence_copy_matches_intake_policy(self):
+        section_copy = SECTIONS["discord"].description
+        assert "absolute global" in section_copy
+        assert "cannot bypass" in section_copy
+        assert "Prefix commands use their own authorization" in section_copy
+        assert "test-webhook path bypasses the user gate" in section_copy
+        assert "explicit mention bypasses" in section_copy
+
+        allowed_users = spec_for("discord.allowed_users").description
+        channels = spec_for("discord.channels").description
+        ignored_bots = spec_for("discord.ignore_bot_ids").description
+        assert "cannot readmit" in allowed_users
+        assert "cannot readmit" in channels
+        assert "explicit mention bypasses" in ignored_bots
+        assert "may override" in spec_for("discord.require_mention").description
+        assert "may override" in spec_for("discord.respond_to_bots").description
+
     def test_removed_noop_switches_are_absent_and_siblings_require_restart(self):
         from src.config.apply_registry import schema_facts
 

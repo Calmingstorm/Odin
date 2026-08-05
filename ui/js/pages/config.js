@@ -272,7 +272,7 @@ export default {
             </div>
           </aside>
 
-          <main class="cfgc-main">
+          <main ref="configMain" class="cfgc-main">
             <div class="cfgc-toolbar">
               <label class="cfgc-search">
                 <span class="sr-only">Search configuration</span>
@@ -560,6 +560,7 @@ export default {
     const config = ref(null);
     const meta = ref(null);
     const loading = ref(true);
+    const configMain = ref(null);
     const saving = ref(false);
     const error = ref(null);
     const toast = ref(null);
@@ -1182,7 +1183,8 @@ export default {
       restartPromptOpen.value = false;
       healthFilter.value = 'pending_restart';
       searchQuery.value = '';
-      window.scrollTo?.({ top: 0, behavior: 'smooth' });
+      if (isMobile.value) window.scrollTo?.({ top: 0, behavior: 'smooth' });
+      else if (configMain.value) configMain.value.scrollTop = 0;
     }
 
     function restartLater() {
@@ -1326,7 +1328,7 @@ export default {
     });
 
     return {
-      config, meta, loading, saving, error, toast, metaRefreshError, restartPromptOpen, restartScheduled, restartError,
+      config, meta, loading, saving, error, toast, metaRefreshError, restartPromptOpen, restartScheduled, restartError, configMain,
       searchQuery, healthFilter, activeCategory, reviewOpen, mobileOverflowOpen, warningThresholdInput, arrayInputs,
       healthFilters, visibleCategories, displayGroups, reviewGroups,
       sectionCount, fieldCount, hasChanges, changeCount, changedSectionCount,

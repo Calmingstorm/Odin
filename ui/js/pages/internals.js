@@ -4,7 +4,7 @@
  * risk stats, recovery stats, freshness stats, context compression, governor stats.
  */
 import { api } from '../api.js';
-import { formatTime } from '../utils.js';
+import { formatAgeSeconds } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 
@@ -73,7 +73,7 @@ export default {
               </div>
               <div class="text-xs text-gray-500 mt-1">
                 {{ s.total_successes || 0 }} ok / {{ s.total_failures || 0 }} fail
-                <span v-if="s.last_failure_at"> &mdash; last fail: {{ formatTime(s.last_failure_at) }}</span>
+                <span v-if="s.last_failure_age_seconds != null"> &mdash; last fail: {{ formatAgeSeconds(s.last_failure_age_seconds) }}</span>
               </div>
             </div>
           </div>
@@ -289,7 +289,7 @@ export default {
     return {
       loading, error, failedCount, failedEndpoints, failedEndpointSummary, endpoints, retry, startup, subsystems, sshPool, httpPool,
       riskStats, riskTotal, recoveryStats, compressionStats, freshnessStats,
-      governorStats, statusColor, formatTime,
+      governorStats, statusColor, formatAgeSeconds,
     };
   },
 };

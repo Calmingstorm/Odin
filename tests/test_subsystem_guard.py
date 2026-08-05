@@ -522,6 +522,24 @@ class TestGuardObservability:
         assert status["subsystems"] == []
         assert status["total"] == 0
 
+    def test_get_status_reports_server_computed_failure_age(self, monkeypatch):
+        guard = SubsystemGuard()
+        guard.register("knowledge")
+        info = guard.get_subsystem("knowledge")
+        assert info is not None
+        info.last_failure_at = 100.0
+        monkeypatch.setattr("src.health.subsystem_guard.time.monotonic", lambda: 370.5)
+
+        record = guard.get_status()["subsystems"][0]
+        assert record["last_failure_at"] == 100.0
+        assert record["last_failure_age_seconds"] == 270.5
+
+    def test_get_status_omits_failure_age_without_a_failure(self):
+        guard = SubsystemGuard()
+        guard.register("knowledge")
+        record = guard.get_status()["subsystems"][0]
+        assert "last_failure_age_seconds" not in record
+
     def test_get_status_all_available(self):
         guard = SubsystemGuard()
         guard.register("knowledge")

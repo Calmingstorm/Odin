@@ -144,7 +144,13 @@ SECTIONS: dict[str, SectionSpec] = {
     ),
     "discord": SectionSpec(
         "live_read",
-        "Global Discord defaults. Guild and channel overrides take precedence.",
+        "Discord conversational-intake policy. Allowed users and channels are "
+        "absolute global gates within that path; guild and channel settings "
+        "cannot bypass them. Prefix commands use their own authorization, and "
+        "the explicitly allowed test-webhook path bypasses the user gate. "
+        "Require-mention and bot-response behavior can be overridden per guild "
+        "or channel; an explicit mention bypasses the ignored-bot check, but "
+        "the effective respond-to-bots policy still applies.",
     ),
     "llm_provider": SectionSpec(
         "live_apply",
@@ -442,19 +448,29 @@ FIELDS: dict[str, FieldSpec] = {
         "startup.",
     ),
     "discord.allowed_users": FieldSpec(
-        description="Global allowlist of Discord user IDs. An empty list allows "
-        "all users.",
+        description="Absolute global user gate for ordinary conversational "
+        "intake. An empty list allows all users; guild and channel settings "
+        "cannot readmit a blocked user. Prefix commands use separate "
+        "authorization, and explicitly allowed test webhooks bypass this gate.",
     ),
     "discord.channels": FieldSpec(
-        description="Global allowlist of Discord channel IDs. An empty list "
-        "allows all channels.",
+        description="Absolute global channel gate for ordinary conversational "
+        "intake. An empty list allows all channels; guild and channel settings "
+        "cannot readmit a blocked channel. Prefix commands use separate "
+        "authorization.",
     ),
     "discord.require_mention": FieldSpec(
-        description="Require a mention by default unless a guild or channel "
-        "override says otherwise.",
+        description="Require a mention by default. Guild and channel settings "
+        "may override this behavior.",
     ),
     "discord.respond_to_bots": FieldSpec(
-        description="Allow replies to bot-authored messages by default.",
+        description="Allow replies to bot-authored messages by default. Guild "
+        "and channel settings may override this behavior.",
+    ),
+    "discord.ignore_bot_ids": FieldSpec(
+        description="Bot IDs ignored by default. An explicit mention bypasses "
+        "this ignore check, but the effective respond-to-bots policy still "
+        "applies.",
     ),
     "llm_provider.active_provider": FieldSpec(
         description="Provider used for new primary requests.",

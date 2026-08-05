@@ -5,6 +5,7 @@
 import { api } from '../api.js';
 import { computed, onMounted, ref } from 'vue';
 import { DiscordUserCombobox, discordMemberDisplayName } from '../discord-user-combobox.js';
+import { guildBehaviorValue } from '../discord-config-policy.js';
 
 
 export default {
@@ -18,7 +19,9 @@ export default {
         </button>
       </div>
       <p class="text-xs text-gray-500 mb-4">
-        Configure response behavior per guild and channel. Channel overrides take priority over guild defaults.
+        For ordinary conversational intake, allowed users and channels are absolute global gates; guild and channel settings cannot readmit a blocked message.
+        Prefix commands use separate authorization, and explicitly allowed test webhooks bypass the user gate. Require-mention and bot-response behavior
+        resolve channel → guild → global. An explicit mention bypasses the ignored-bot list, but the effective respond-to-bots policy still applies.
         Changes take effect immediately.
       </p>
 
@@ -35,7 +38,7 @@ export default {
           <div class="discord-global-heading">
             <div>
               <h2 class="text-sm font-semibold text-gray-300">Global defaults</h2>
-              <p>These settings apply when a guild or channel has no narrower override.</p>
+              <p>Allowed users and channels are absolute. Require-mention and bot-response values are defaults that guild or channel settings may override.</p>
             </div>
           </div>
           <div v-if="globalError" class="text-xs text-red-400 mb-3" role="alert">{{ globalError }}</div>
@@ -69,7 +72,7 @@ export default {
             </div>
           </div>
           <div class="discord-global-footer">
-            <span>Saving changes only these global defaults. Guild and channel overrides remain untouched.</span>
+            <span>Saving changes these global gates and defaults. Guild and channel behavior overrides remain untouched and cannot bypass the allowlists.</span>
             <button type="button" class="btn btn-primary text-xs" @click="saveGlobalDefaults" :disabled="globalSaving || !globalChanged">{{ globalSaving ? 'Saving…' : 'Save global defaults' }}</button>
           </div>
         </section>
@@ -193,9 +196,9 @@ export default {
     const globalArrayInputs = ref({});
     const globalMembers = ref([]);
     const globalListEditors = Object.freeze([
-      { key: 'allowed_users', label: 'Allowed users', description: 'Discord user IDs allowed by the global bot policy.', placeholder: 'Search Discord users…', userAutocomplete: true, fullWidth: true },
-      { key: 'channels', label: 'Allowed channels', description: 'Channel IDs included by the global bot policy.', placeholder: 'Discord channel ID', fullWidth: true },
-      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Bot identities Odin never responds to automatically.', placeholder: 'Search Discord users or bots…', userAutocomplete: true, fullWidth: true },
+      { key: 'allowed_users', label: 'Allowed users', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked users; prefix commands use separate authorization and allowed test webhooks bypass this gate.', placeholder: 'Search Discord users…', userAutocomplete: true, fullWidth: true },
+      { key: 'channels', label: 'Allowed channels', description: 'Absolute gate for ordinary conversational intake. Guild/channel settings cannot readmit blocked channels; prefix commands use separate authorization.', placeholder: 'Discord channel ID', fullWidth: true },
+      { key: 'ignore_bot_ids', label: 'Ignored bot IDs', description: 'Ignored unless the bot explicitly mentions Odin; the effective respond-to-bots policy still applies.', placeholder: 'Search Discord users or bots…', userAutocomplete: true, fullWidth: true },
     ]);
     const globalChanged = computed(() => JSON.stringify(globalConfig.value) !== JSON.stringify(globalDraft.value));
     const globalMembersById = computed(() => new Map(
@@ -208,13 +211,11 @@ export default {
     }
 
     function guildMention(guild) {
-      if (guild.config && guild.config.require_mention !== undefined) return guild.config.require_mention;
-      return false;
+      return guildBehaviorValue(guild, 'require_mention', globalConfig.value);
     }
 
     function guildBots(guild) {
-      if (guild.config && guild.config.respond_to_bots !== undefined) return guild.config.respond_to_bots;
-      return false;
+      return guildBehaviorValue(guild, 'respond_to_bots', globalConfig.value);
     }
 
     function hasOverride(ch) {
@@ -229,27 +230,24 @@ export default {
       loading.value = true;
       error.value = null;
       try {
-        const [loadedGuilds, loadedMembers] = await Promise.all([
+        const [loadedGuilds, loadedMembers, loadedConfig] = await Promise.all([
           api.get('/api/discord/guilds'),
           api.get('/api/discord/members').catch(() => []),
+          api.get('/api/config'),
         ]);
-        guilds.value = loadedGuilds;
+        const discord = loadedConfig.discord || {};
+        const loadedGlobalConfig = {
+          allowed_users: [...(discord.allowed_users || [])],
+          channels: [...(discord.channels || [])],
+          respond_to_bots: Boolean(discord.respond_to_bots),
+          require_mention: Boolean(discord.require_mention),
+          ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
+        };
+        globalConfig.value = loadedGlobalConfig;
+        globalDraft.value = JSON.parse(JSON.stringify(loadedGlobalConfig));
         globalMembers.value = loadedMembers;
-        try {
-          const loadedConfig = await api.get('/api/config');
-          const discord = loadedConfig.discord || {};
-          globalConfig.value = {
-            allowed_users: [...(discord.allowed_users || [])],
-            channels: [...(discord.channels || [])],
-            respond_to_bots: Boolean(discord.respond_to_bots),
-            require_mention: Boolean(discord.require_mention),
-            ignore_bot_ids: [...(discord.ignore_bot_ids || [])],
-          };
-          globalDraft.value = JSON.parse(JSON.stringify(globalConfig.value));
-          globalError.value = null;
-        } catch (globalLoadError) {
-          globalError.value = globalLoadError.message || 'Global defaults could not be loaded.';
-        }
+        guilds.value = loadedGuilds;
+        globalError.value = null;
       } catch (e) {
         error.value = e.message;
       }

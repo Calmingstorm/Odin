@@ -240,7 +240,7 @@ export default {
                 </label>
               </section>
               <div class="llm-advanced-footer">
-                <p>Transport and retry changes apply now. Connection pool and context compression are saved for the next restart.</p>
+                <p>Transport and retry changes apply to the primary client now. An existing auxiliary client keeps the transport and retry settings captured when it was built until it is rebuilt. The primary client’s connection pool and context compression are saved for the next restart.</p>
                 <button type="button" class="btn btn-primary text-xs" @click="saveCodexConfigNow" :disabled="savingCodex">{{ savingCodex ? 'Saving…' : 'Save advanced settings' }}</button>
               </div>
             </div>

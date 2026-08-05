@@ -175,7 +175,7 @@ Odin supports three LLM backends, switchable at runtime from the WebUI (System >
 | **Kimi** (Moonshot AI) | API key | Alternative cloud — K2.6, 262K context, competitive pricing |
 | **Ollama** (Local/Remote) | None / bearer token | Self-hosted open-source models (Qwen, Llama, etc.) |
 
-All providers are configured from the WebUI with inline auto-save — no config file editing or restarts required. Enable/disable, set API keys, select models, and switch the active provider live.
+All providers are configured from the WebUI with inline auto-save, without editing the config file. Enable/disable, API keys, model selection, and provider switching apply live. Codex connection-pool and context-compression changes are saved immediately but require an Odin restart.
 
 ### Codex Authentication
 
@@ -222,7 +222,7 @@ Tokens auto-refresh at runtime. Re-run the login script if the bot is offline fo
 ### Key Config Sections
 
 - **`discord`**: token, allowed users/channels, mention-only mode, bot interaction
-- **`openai_codex`**: model, max tokens, credentials, model routing, context compression
+- **`openai_codex`**: model, credentials, model routing, transport, connection pooling, context compression
 - **`tools`**: SSH hosts, command timeout, per-tool timeout overrides, Claude Code host
 - **`browser`**: native Playwright (empty `cdp_url`) or remote CDP endpoint
 - **`web`**: port, API token, session timeout

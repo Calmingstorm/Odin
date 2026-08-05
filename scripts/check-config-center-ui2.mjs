@@ -2,15 +2,18 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse as parseJs } from '@babel/parser';
 import { parse as parseTemplate, NodeTypes } from '@vue/compiler-dom';
+import { guildBehaviorValue } from '../ui/js/discord-config-policy.js';
 
 const config = readFileSync('ui/js/pages/config.js', 'utf8');
 const configAst = parseJs(config, { sourceType: 'module' });
 const llm = readFileSync('ui/js/pages/llm-config.js', 'utf8');
 const css = readFileSync('ui/css/style.css', 'utf8');
 const discord = readFileSync('ui/js/pages/discord-config.js', 'utf8');
+const discordPolicy = readFileSync('ui/js/discord-config-policy.js', 'utf8');
 const hostAccess = readFileSync('ui/js/pages/host-access.js', 'utf8');
 const discordUserCombobox = readFileSync('ui/js/discord-user-combobox.js', 'utf8');
 const apiTokens = readFileSync('ui/js/pages/api-tokens.js', 'utf8');
+const readme = readFileSync('README.md', 'utf8');
 
 function pageTemplate(source, label, ast = parseJs(source, { sourceType: 'module' })) {
   for (const statement of ast.program.body) {
@@ -212,6 +215,32 @@ walkJs(pollFunction.body, node => {
 });
 assert.ok(freshMetaAssignment, 'restart polling does not refresh authoritative metadata');
 assert.ok(proofBoundClear, 'restart success is not bound to fresh zero-pending metadata');
+const reviewPendingFunction = namedFunction(configAst, 'reviewPendingRestart');
+let desktopConfigMainReset = false;
+let mobileWindowReset = false;
+for (const statement of reviewPendingFunction.body.body) {
+  if (statement.type !== 'IfStatement') continue;
+  if (isRefMember(statement.test, 'isMobile')) {
+    walkJs(statement.consequent, node => {
+      if ((node.type === 'CallExpression' || node.type === 'OptionalCallExpression')
+          && (node.callee?.type === 'MemberExpression' || node.callee?.type === 'OptionalMemberExpression')
+          && node.callee.object?.name === 'window'
+          && node.callee.property?.name === 'scrollTo') mobileWindowReset = true;
+    });
+    walkJs(statement.alternate, node => {
+      if (node.type === 'AssignmentExpression'
+          && node.operator === '='
+          && node.left?.type === 'MemberExpression'
+          && node.left.property?.name === 'scrollTop'
+          && node.left.object?.type === 'MemberExpression'
+          && isRefMember(node.left.object, 'configMain')
+          && node.right?.value === 0) desktopConfigMainReset = true;
+    });
+  }
+}
+assert.ok(desktopConfigMainReset, 'Review settings does not reset the real desktop Config Center scroll region');
+assert.ok(mobileWindowReset, 'Review settings does not reset the mobile document-flow scroll owner');
+assert.match(config, /<main ref="configMain" class="cfgc-main">/, 'Config Center scroll region is not bound to configMain');
 
 for (const provider of ['codex', 'ollama', 'kimi']) {
   assert.match(llm, new RegExp(`advancedOpen\\.${provider}`), `${provider} advanced expander missing`);
@@ -222,11 +251,13 @@ for (const field of ['request_timeout_seconds', 'stream_stall_timeout_seconds', 
 }
 assert.ok((llm.match(/v-model\.number="(?:ollama|kimi)Form\.timeout"/g) || []).length === 2, 'provider timeout controls drifted');
 assert.doesNotMatch(llm, /codexForm\.max_tokens|current Codex provider[\s\S]*max_tokens/, 'removed Codex max_tokens control returned');
+assert.doesNotMatch(readme, /openai_codex[^\n]*max tokens/i, 'README restored the removed Codex max-tokens setting');
+assert.match(readme, /Codex connection-pool and context-compression changes are saved immediately but require an Odin restart/, 'README falsely claims every provider setting applies without restart');
 for (const field of ['effective_connection_pool', 'connection_pool_pending_restart', 'effective_context_compression', 'context_compression_pending_restart']) {
   assert.ok(llm.includes(field), `Codex owner page does not consume status truth: ${field}`);
 }
 assert.doesNotMatch(llm, /These settings reload through the Codex provider endpoint|Connection-pool changes rebuild its transport/, 'boot-bound settings are falsely described as live');
-assert.match(llm, /Transport and retry changes apply now[\s\S]*saved for the next restart/, 'advanced apply-boundary copy is missing');
+assert.match(llm, /Transport and retry changes apply to the primary client now[\s\S]*existing auxiliary client keeps the transport and retry settings captured when it was built until it is rebuilt[\s\S]*saved for the next restart/, 'advanced apply-boundary copy drifted from the registry truth');
 assert.match(css, /\.cfgc-field\s*\{[^}]*grid-template-columns:\s*minmax\([^}]*4fr[^}]*5fr/s, 'wide two-column field grid missing');
 assert.match(css, /\.config-center-page\s*\{[^}]*max-width:\s*1600px/s, 'wide shell has no readable max width');
 
@@ -249,6 +280,18 @@ assert.match(discord, /globalMembersById\.value\.get\(id\)/, 'Discord global chi
 assert.match(discord, /member \? discordMemberDisplayName\(member\) : id/, 'unknown Discord users no longer fall back to raw IDs');
 assert.match(discord, /key: ['"]channels['"][^}]*fullWidth: true/, 'Allowed channels is no longer full-width');
 assert.match(discord, /'discord-global-list-full': editor\.fullWidth/, 'Discord global list width no longer follows editor metadata');
+assert.match(discord, /ordinary conversational intake, allowed users and channels are absolute global gates/, 'Discord page no longer distinguishes scoped absolute intake gates');
+assert.match(discord, /Prefix commands use separate authorization[\s\S]*test webhooks bypass the user gate/, 'Discord page hides the non-conversational authorization exceptions');
+assert.match(discord, /explicit mention bypasses the ignored-bot list/, 'Discord page no longer discloses the ignored-bot mention bypass');
+assert.match(discordPolicy, /guild\?\.config\?\.\[key\] != null[\s\S]*globalDefaults\?\.\[key\]/, 'guild behavior does not treat null as no override and fall back to loaded globals');
+assert.equal(guildBehaviorValue({ config: {} }, 'require_mention', { require_mention: true }), true, 'global require_mention=true is displayed as false on a guild without an override');
+assert.equal(guildBehaviorValue({ config: {} }, 'respond_to_bots', { respond_to_bots: true }), true, 'global respond_to_bots=true is displayed as false on a guild without an override');
+assert.equal(guildBehaviorValue({ config: { require_mention: false } }, 'require_mention', { require_mention: true }), false, 'guild override no longer wins over the loaded global default');
+assert.equal(guildBehaviorValue({ config: { require_mention: null } }, 'require_mention', { require_mention: true }), true, 'legacy null guild override does not inherit global require_mention=true');
+assert.equal(guildBehaviorValue({ config: {} }, 'require_mention', null), undefined, 'missing globals invent a false behavior value');
+assert.match(discord, /const \[loadedGuilds, loadedMembers, loadedConfig\] = await Promise\.all\(\[[\s\S]*api\.get\('\/api\/discord\/guilds'\)[\s\S]*api\.get\('\/api\/config'\)[\s\S]*\]\);[\s\S]*globalConfig\.value = loadedGlobalConfig;[\s\S]*guilds\.value = loadedGuilds;/, 'guild rows can render before loaded global defaults are available');
+assert.match(discord, /guildBehaviorValue\(guild, 'require_mention', globalConfig\.value\)/, 'guild mention toggle does not use loaded global defaults');
+assert.match(discord, /guildBehaviorValue\(guild, 'respond_to_bots', globalConfig\.value\)/, 'guild bot toggle does not use loaded global defaults');
 
 console.log('config-center-ui2: de-dup, typed editing, restart flow, and provider advanced controls pinned');
 
@@ -285,3 +328,8 @@ for (const staleBinding of [
   assert.equal(internals.includes(staleBinding), false, `Internals stale response binding returned: ${staleBinding}`);
 }
 assert.match(internals, /v-for="\(pool, provider\) in httpPool"/, 'HTTP pools are not rendered from provider-keyed responses');
+assert.match(internals, /formatAgeSeconds\(s\.last_failure_age_seconds\)/, 'Subsystem failure age is not rendered from the server-computed age');
+assert.doesNotMatch(internals, /formatTime\(s\.last_failure_at\)/, 'Subsystem monotonic timestamp is still passed to a wall-clock formatter');
+assert.match(internals, /import \{ formatAgeSeconds \} from ['"]\.\.\/utils\.js['"];/, 'Internals does not import the server-age formatter');
+assert.match(internals, /s\.last_failure_age_seconds != null/, 'Internals does not gate relative age on the additive server field');
+assert.match(internals, /statusColor, formatAgeSeconds/, 'Internals does not expose the server-age formatter to its template');

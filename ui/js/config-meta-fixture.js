@@ -12,7 +12,7 @@ const REDACTED = '••••••••';
 
 const SECTION_DEFAULTS = {
   timezone: { apply_mode: 'restart', description: 'Locale and scheduling defaults used across Odin.' },
-  discord: { apply_mode: 'live_read', description: 'Global Discord defaults. Guild and channel overrides take precedence.' },
+  discord: { apply_mode: 'live_read', description: 'Allowed users and channels are absolute gates for ordinary conversational intake; guild and channel settings cannot bypass them. Prefix commands use separate authorization, and explicitly allowed test webhooks bypass the user gate. Guild and channel settings may override mention and bot-response behavior; an explicit mention bypasses the ignored-bot check.' },
   llm_provider: { apply_mode: 'live_apply', owner: 'llm', description: 'Active language-model provider and failover ownership.' },
   openai_codex: { apply_mode: 'live_apply', owner: 'llm', description: 'Codex models, reasoning, transport, and pool behaviour.' },
   ollama: { apply_mode: 'restart', owner: 'llm', description: 'Local or remote Ollama provider settings.' },
