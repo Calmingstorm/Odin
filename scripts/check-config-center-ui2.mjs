@@ -260,6 +260,8 @@ for (const field of ['request_timeout_seconds', 'stream_stall_timeout_seconds', 
 assert.ok((llm.match(/v-model\.number="(?:ollama|kimi)Form\.timeout"/g) || []).length === 2, 'provider timeout controls drifted');
 assert.doesNotMatch(llm, /codexForm\.max_tokens|current Codex provider[\s\S]*max_tokens/, 'removed Codex max_tokens control returned');
 assert.doesNotMatch(readme, /openai_codex[^\n]*max tokens/i, 'README restored the removed Codex max-tokens setting');
+assert.doesNotMatch(readme, /All providers are configured from the WebUI with inline auto-save/, 'README falsely claims the explicit-save Codex Advanced panel auto-saves');
+assert.match(readme, /Codex Advanced panel uses an explicit save action/, 'README does not disclose the Codex Advanced save action');
 assert.match(readme, /Codex connection-pool and context-compression changes are saved immediately but require an Odin restart/, 'README falsely claims every provider setting applies without restart');
 for (const field of ['effective_connection_pool', 'connection_pool_pending_restart', 'effective_context_compression', 'context_compression_pending_restart']) {
   assert.ok(llm.includes(field), `Codex owner page does not consume status truth: ${field}`);

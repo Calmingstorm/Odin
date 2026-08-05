@@ -175,7 +175,7 @@ Odin supports three LLM backends, switchable at runtime from the WebUI (System >
 | **Kimi** (Moonshot AI) | API key | Alternative cloud — K2.6, 262K context, competitive pricing |
 | **Ollama** (Local/Remote) | None / bearer token | Self-hosted open-source models (Qwen, Llama, etc.) |
 
-All providers are configured from the WebUI with inline auto-save, without editing the config file. Enable/disable, API keys, model selection, and provider switching apply live. Codex connection-pool and context-compression changes are saved immediately but require an Odin restart.
+All providers are configured from the WebUI without editing the config file. Provider toggles, API keys, model selection, and provider switching save and apply live; the Codex Advanced panel uses an explicit save action. Codex connection-pool and context-compression changes are saved immediately but require an Odin restart.
 
 ### Codex Authentication
 
