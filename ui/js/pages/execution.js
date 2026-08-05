@@ -3,7 +3,7 @@
  * Shows active tool calls, streaming output, and execution history
  */
 import { api, ws } from '../api.js';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 export default {
   setup() {
@@ -17,8 +17,15 @@ export default {
       const type = payload.type || event.type;
 
       if (type === 'tool_start') {
+        const callId = payload.metadata?.call_id || null;
         const task = {
-          id: `${payload.action}-${Date.now()}`,
+          // The model's tool_use id when the backend supplies it. Pairing
+          // start with end by tool NAME cannot distinguish concurrent
+          // same-name calls, and no ordering rule fixes that — LIFO closed the
+          // newest card, FIFO closes the oldest, and both are wrong whenever a
+          // later call finishes first.
+          callId,
+          id: callId || `${payload.action}-${Date.now()}`,
           tool: payload.action,
           actor: payload.actor || '',
           channel: payload.channel_id || '',
@@ -34,9 +41,23 @@ export default {
       }
 
       if (type === 'tool_end') {
-        const idx = activeTasks.value.findIndex(
-          t => t.tool === payload.action && t.status === 'running'
-        );
+        // Pair by call id — the only identity that survives concurrency.
+        const endCallId = payload.metadata?.call_id || null;
+        let idx = -1;
+        if (endCallId) {
+          idx = activeTasks.value.findIndex(
+            t => t.callId === endCallId && t.status === 'running'
+          );
+        }
+        if (idx < 0 && !endCallId) {
+          // Older backends (and any event predating this field) send no id.
+          // Fall back to oldest-running by name: still a guess, but it can
+          // only mispair events that were already unpairable.
+          for (let i = activeTasks.value.length - 1; i >= 0; i--) {
+            const t = activeTasks.value[i];
+            if (t.tool === payload.action && t.status === 'running') { idx = i; break; }
+          }
+        }
         if (idx >= 0) {
           const task = activeTasks.value[idx];
           task.status = payload.metadata?.error ? 'error' : 'success';
@@ -56,13 +77,18 @@ export default {
       }
 
       if (type === 'tool_stream') {
-        const key = payload.tool_name || 'unknown';
+        // Key by invocation, not tool name: two concurrent run_command calls
+        // stream under the SAME name, so a name key merged their output onto
+        // both cards and let either completion delete both streams.
+        const key = payload.call_id || payload.tool_name || 'unknown';
         if (payload.finished) {
-          delete streamOutput.value[key];
+          const next = { ...streamOutput.value };
+          delete next[key];
+          streamOutput.value = next;
         } else {
           const current = streamOutput.value[key] || '';
           const lines = (current + (payload.chunk || '')).split('\n');
-          streamOutput.value[key] = lines.slice(-30).join('\n');
+          streamOutput.value = { ...streamOutput.value, [key]: lines.slice(-30).join('\n') };
         }
         return;
       }
@@ -78,15 +104,34 @@ export default {
       });
     }
 
-    onMounted(() => {
-      ws.on('events', handleEvent);
-      timer = setInterval(updateElapsed, 500);
-    });
+    let armed = false;
 
-    onUnmounted(() => {
+    function arm() {
+      if (armed) return;
+      armed = true;
+      // Vue fires BOTH onMounted and onActivated on the initial keep-alive
+      // mount, so arming must be idempotent — otherwise the websocket
+      // handler is registered twice and unsubscribe() (which removes one
+      // occurrence) leaves a live copy behind on every visit.
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
+      ws.on('events', handleEvent);
+      if (!timer) timer = setInterval(updateElapsed, 500);
+    }
+
+    function disarm() {
+      if (!armed) return;
+      armed = false;
       ws.off('events', handleEvent);
-      if (timer) clearInterval(timer);
-    });
+      if (timer) { clearInterval(timer); timer = null; }
+    }
+
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     function formatMs(ms) {
       if (ms < 1000) return `${ms}ms`;
@@ -132,8 +177,8 @@ export default {
             <span :class="task.fadingOut ? 'text-gray-400' : 'text-blue-400'" class="font-mono text-sm">{{ formatMs(task.elapsed) }}</span>
           </div>
           <!-- Streaming output for this tool -->
-          <div v-if="streamOutput[task.tool]"
-               class="bg-black rounded p-2 mt-2 max-h-48 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap">{{ streamOutput[task.tool] }}</div>
+          <div v-if="streamOutput[task.callId || task.tool]"
+               class="bg-black rounded p-2 mt-2 max-h-48 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap break-all">{{ streamOutput[task.callId || task.tool] }}</div>
         </div>
       </div>
 
@@ -142,8 +187,11 @@ export default {
         <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3">Live Output</h3>
         <div v-for="(output, tool) in streamOutput" :key="tool"
              class="bg-black rounded p-2 mb-2">
-          <div class="text-gray-400 text-xs mb-1 font-mono">{{ tool }}</div>
-          <div class="max-h-64 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap">{{ output }}</div>
+          <div class="text-gray-400 text-xs mb-1 font-mono break-all">{{ tool }}</div>
+          <!-- break-all: one long unbroken token (a URL, a base64 blob, a deep
+               path) widened this div past the viewport and scrolled the whole
+               Operations page sideways on a phone. -->
+          <div class="max-h-64 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap break-all">{{ output }}</div>
         </div>
       </div>
 

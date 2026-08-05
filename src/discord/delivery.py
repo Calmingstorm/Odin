@@ -173,6 +173,17 @@ class ResponseDelivery:
             discord.File(io.BytesIO(data), filename=fname) for data, fname in pending
         ]
 
+        # A deliberately-silent turn (work done, nothing to add) delivers
+        # nothing — Discord rejects empty content, and fabricating filler to
+        # satisfy the API would be worse. Files still go out: an attachment
+        # with no commentary is a complete reply.
+        if not text.strip():
+            if discord_files:
+                await self.send_with_retry(message, "", files=discord_files)
+            else:
+                log.debug("Empty response with no files — nothing to send")
+            return
+
         # If the response is extremely long, send as file
         if len(text) > DISCORD_MAX_LEN * 4:
             text_file = discord.File(

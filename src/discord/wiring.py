@@ -116,6 +116,7 @@ class BotServices:
     subsystem_guard: SubsystemGuard
     diff_tracker: DiffTracker
     context_compressor: object | None
+    compression_stats: object | None
     prefix_tracker: object | None
     auxiliary_llm_client: object | None
     outbound_webhook_dispatcher: object | None
@@ -131,7 +132,11 @@ class BotServices:
     recovery_policy_source: Callable[[], RecoveryPolicy] | None = None
 
 
-def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear composition root
+def build_services(
+    config: Config,
+    *,
+    get_config: Callable[[], Config] | None = None,
+) -> BotServices:  # noqa: PLR0915 — linear composition root
     # Configure timezone for time parser module
     from ..tools.time_parser import set_default_timezone
 
@@ -141,8 +146,15 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     # (RFC-002 P2; the bot keeps facade aliases to its dicts until P7).
     channel_state = ChannelStateRegistry()
 
-    # Multi-agent orchestration
-    agent_manager = AgentManager()
+    # Multi-agent orchestration. Spawn admission must read the live config
+    # root rather than the boot object; config updates replace bot.config.
+    agent_manager = AgentManager(
+        max_concurrent_agents_provider=(
+            (lambda: get_config().agents.max_concurrent_agents)
+            if get_config is not None
+            else None
+        )
+    )
     # Autonomous loop manager (agent-aware)
     loop_manager = LoopManager(agents_enabled=True)
     # Trajectory savers — constructed before the loop bridge, which
@@ -301,7 +313,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
             codex_client = CodexChatClient(
                 auth=codex_auth,
                 model=config.openai_codex.model,
-                max_tokens=config.openai_codex.max_tokens,
                 reasoning_effort=config.openai_codex.reasoning_effort,
                 max_retries=config.openai_codex.retry.max_retries,
                 retry_base_delay=config.openai_codex.retry.base_delay,
@@ -416,10 +427,14 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     )
 
     def recovery_policy_source() -> RecoveryPolicy:
-        live = config  # config object is replaced wholesale on hot reload
+        # BOOT fallback only — this closure captures the Config object passed to
+        # build_services, and a config update REBINDS bot.config rather than
+        # mutating that object, so this source can never see a live change.
+        # build_components replaces it with _live_recovery_policy_source(bot);
+        # this one serves callers that build services without a bot.
         return RecoveryPolicy(
-            deadline_seconds=live.llm_recovery.generation_deadline_seconds,
-            backoff_cap=live.llm_recovery.backoff_cap_seconds,
+            deadline_seconds=config.llm_recovery.generation_deadline_seconds,
+            backoff_cap=config.llm_recovery.backoff_cap_seconds,
         )
 
     turn_store = None
@@ -436,18 +451,20 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
 
     # Context compressor — summarizes prior tool iterations when context grows.
     context_compressor = None
+    compression_stats = None
     prefix_tracker = None
     _compress = getattr(config.openai_codex, "context_compression", None)
     if _compress and _compress.enabled:
-        from ..llm.context_compressor import PrefixTracker
+        from ..llm.context_compressor import CompressionStats, PrefixTracker
 
-        prefix_tracker = PrefixTracker()
+        compression_stats = CompressionStats()
+        prefix_tracker = PrefixTracker(compression_stats)
         context_compressor = _compress  # config object itself acts as the on/off + thresholds
 
     # Auxiliary LLM client — a cheaper Codex model for background jobs
     # (compaction / reflection / consolidation / background follow-up), with
-    # transparent fallback to the primary. Shares the main Codex OAuth + token
-    # limit; only the MODEL differs. Off unless enabled.
+    # transparent fallback to the primary. Shares the main Codex OAuth; only
+    # the MODEL differs. Off unless enabled.
     auxiliary_llm_client = None
     _aux = getattr(config.openai_codex, "auxiliary", None)
     if _aux and _aux.enabled and codex_client:
@@ -461,7 +478,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
                 aux_client = CodexChatClient(
                     auth=codex_client.auth,
                     model=_aux.model,
-                    max_tokens=config.openai_codex.max_tokens,
                     max_retries=config.openai_codex.retry.max_retries,
                     retry_base_delay=config.openai_codex.retry.base_delay,
                     retry_max_delay=config.openai_codex.retry.max_delay,
@@ -547,6 +563,7 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
         subsystem_guard=subsystem_guard,
         diff_tracker=diff_tracker,
         context_compressor=context_compressor,
+        compression_stats=compression_stats,
         prefix_tracker=prefix_tracker,
         auxiliary_llm_client=auxiliary_llm_client,
         outbound_webhook_dispatcher=outbound_webhook_dispatcher,
@@ -583,6 +600,25 @@ class BotComponents:
     intake: MessageIntake
 
 
+def _live_recovery_policy_source(bot) -> Callable[[], RecoveryPolicy]:
+    """A recovery-policy source that reads the CURRENT config.
+
+    Components resolve config through ``lambda: bot.config`` precisely because
+    a config update rebinds that attribute; a closure over the boot Config sees
+    nothing. Recovery deadlines were the one policy that claimed liveness in a
+    comment while capturing the boot object.
+    """
+
+    def source() -> RecoveryPolicy:
+        live = bot.config.llm_recovery
+        return RecoveryPolicy(
+            deadline_seconds=live.generation_deadline_seconds,
+            backoff_cap=live.backoff_cap_seconds,
+        )
+
+    return source
+
+
 def build_components(bot, services: BotServices) -> BotComponents:
     """Bot-coupled component assembly — moved verbatim from ``OdinBot.__init__``
     (RFC-002 P2), in the exact construction order it used.
@@ -607,7 +643,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         sessions=services.sessions,
         reflector=services.reflector,
         model_breakers=services.model_breakers,
-        recovery_policy_source=services.recovery_policy_source,
+        recovery_policy_source=_live_recovery_policy_source(bot),
     )
 
     # Wire LLM callbacks to whichever provider is active
@@ -720,10 +756,12 @@ def build_components(bot, services: BotServices) -> BotComponents:
             # live: the web layer rebuilds it via prompt_builder.rebuild_default()
             get_default_system_prompt=lambda: prompt_builder.default_prompt,
             get_context_compressor=lambda: bot.context_compressor,
+            get_compression_stats=lambda: services.compression_stats,
             llm_gateway=llm_gateway,
             prompt_builder=prompt_builder,
             tool_catalog=tool_catalog,
             channel_state=services.channel_state,
+            channel_config=services.channel_config,
             delivery=delivery,
             turn_recorder=turn_recorder,
             completion_classifier=completion_classifier,

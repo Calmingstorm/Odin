@@ -368,11 +368,35 @@ class TestStorageRedactionAllCopies:
         assert "https://x" in encoded  # innocent values untouched
 
     def test_sensitive_key_matching_is_exact_not_substring(self):
+        from src.config.sensitivity import is_storage_sensitive_key
         from src.turn_state.codec import _is_sensitive_key
 
+        # Storage and config metadata have intentionally different matching
+        # contracts, but each contract has one implementation authority.
+        assert _is_sensitive_key is is_storage_sensitive_key
         assert _is_sensitive_key("Authorization")
         assert _is_sensitive_key("API-Key")
         assert _is_sensitive_key("refresh_token")
         assert not _is_sensitive_key("author")  # "auth" must not substring-match
         assert not _is_sensitive_key("tokenizer")
         assert not _is_sensitive_key(42)
+
+    def test_config_public_control_names_do_not_change_checkpoint_policy(self):
+        """Config-only false-positive exceptions must not alter checkpoints.
+
+        These exact compound names were not checkpoint-sensitive before the
+        shared config rule existed. Keep that behavior explicit rather than
+        letting PUBLIC_NON_SECRET_KEYS accidentally become a third policy.
+        """
+        from src.turn_state.codec import _deep_scrub_strings, _is_sensitive_key
+
+        keys = (
+            "scrub_secrets",
+            "max_tokens",
+            "token_budget",
+            "context_token_budget",
+            "injection_token_budget",
+        )
+        payload = {key: "operator-value" for key in keys}
+        assert not any(_is_sensitive_key(key) for key in keys)
+        assert _deep_scrub_strings(payload) == payload

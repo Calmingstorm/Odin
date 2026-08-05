@@ -2,6 +2,11 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { computed, onMounted, onUnmounted, ref } from 'vue';
+import {
+  codexAdvancedPayload, codexBasicPayload,
+  kimiAdvancedPayload, kimiBasicPayload,
+  ollamaAdvancedPayload, ollamaBasicPayload,
+} from '../llm-config-payloads.js';
 
 
 // Trailing debounce: selects fire @change on EVERY arrow keypress, and each
@@ -166,23 +171,85 @@ export default {
               </select>
               </label>
             </div>
-            <div>
-              <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="codexForm.max_tokens" type="number" @keydown.enter="saveCodexConfigNow"
-                     class="hm-input" />
-              </label>
-            </div>
           </div>
           <p class="text-xs text-gray-500 mt-3">
             The Auxiliary Model runs the background jobs (compaction, reflection, consolidation,
             background follow-up) on a cheaper Codex model, with automatic fallback to the primary
-            on error. It shares the main Codex login and token limit — only the model differs.
+            on error. It shares the main Codex login; only the model differs.
             "Off" runs those jobs on the primary model.
           </p>
           <div v-if="auxData.unavailable_reason"
                class="text-sm text-yellow-400 bg-yellow-900/20 rounded p-2 border border-yellow-800 mt-3">
             {{ auxData.unavailable_reason }}
           </div>
+          <details class="llm-advanced" :open="advancedOpen.codex" @toggle="advancedOpen.codex = $event.target.open">
+            <summary>
+              <span>Advanced Settings</span>
+              <small>Transport, retries, connection pool, and context compression</small>
+            </summary>
+            <div class="llm-advanced-body">
+              <section class="llm-advanced-group">
+                <header><strong>Transport</strong><span>Request lifecycle limits</span></header>
+                <label>Request timeout <small>seconds</small>
+                  <input v-model.number="codexForm.request_timeout_seconds" type="number" min="60" max="86400" class="hm-input" />
+                </label>
+                <label>Stream stall timeout <small>seconds</small>
+                  <input v-model.number="codexForm.stream_stall_timeout_seconds" type="number" min="10" max="3600" class="hm-input" />
+                </label>
+              </section>
+              <section class="llm-advanced-group">
+                <header><strong>Retry policy</strong><span>Transient request failures</span></header>
+                <label>Maximum retries
+                  <input v-model.number="codexForm.retry.max_retries" type="number" min="0" class="hm-input" />
+                </label>
+                <label>Base delay <small>seconds</small>
+                  <input v-model.number="codexForm.retry.base_delay" type="number" min="0" step="any" class="hm-input" />
+                </label>
+                <label>Maximum delay <small>seconds</small>
+                  <input v-model.number="codexForm.retry.max_delay" type="number" min="0" step="any" class="hm-input" />
+                </label>
+              </section>
+              <section class="llm-advanced-group">
+                <header><strong>Connection pool</strong><span>Shared Codex HTTP transport</span></header>
+                <p v-if="llmStatus?.codex?.connection_pool_pending_restart === true" class="llm-advanced-state pending" role="status">
+                  Saved values need a restart. This process still uses {{ llmStatus.codex.effective_connection_pool?.max_connections }} connections with {{ llmStatus.codex.effective_connection_pool?.keepalive_timeout }}s keepalive.
+                </p>
+                <p v-else-if="llmStatus?.codex?.connection_pool_pending_restart === false" class="llm-advanced-state">
+                  Saved values match this process. Future changes take effect after restart.
+                </p>
+                <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
+                <label>Maximum connections
+                  <input v-model.number="codexForm.connection_pool.max_connections" type="number" min="1" class="hm-input" />
+                </label>
+                <label>Keepalive timeout <small>seconds</small>
+                  <input v-model.number="codexForm.connection_pool.keepalive_timeout" type="number" min="0" class="hm-input" />
+                </label>
+              </section>
+              <section class="llm-advanced-group">
+                <header><strong>Context compression</strong><span>Long-conversation compaction</span></header>
+                <p v-if="llmStatus?.codex?.context_compression_pending_restart === true" class="llm-advanced-state pending" role="status">
+                  Saved values need a restart. This process still uses compression {{ llmStatus.codex.effective_context_compression?.enabled ? 'on' : 'off' }}, {{ Number(llmStatus.codex.effective_context_compression?.max_context_chars || 0).toLocaleString() }} characters, and {{ llmStatus.codex.effective_context_compression?.keep_recent_iterations }} recent iterations.
+                </p>
+                <p v-else-if="llmStatus?.codex?.context_compression_pending_restart === false" class="llm-advanced-state">
+                  Saved values match this process. Future changes take effect after restart.
+                </p>
+                <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
+                <label class="llm-advanced-toggle">Enabled
+                  <span class="toggle-switch"><input v-model="codexForm.context_compression.enabled" type="checkbox" /><span class="toggle-slider"></span></span>
+                </label>
+                <label>Maximum context characters
+                  <input v-model.number="codexForm.context_compression.max_context_chars" type="number" min="1" class="hm-input" />
+                </label>
+                <label>Recent iterations to keep
+                  <input v-model.number="codexForm.context_compression.keep_recent_iterations" type="number" min="1" class="hm-input" />
+                </label>
+              </section>
+              <div class="llm-advanced-footer">
+                <p>Transport and retry changes apply to the primary client now. An existing auxiliary client keeps the transport and retry settings captured when it was built until it is rebuilt. The primary client’s connection pool and context compression are saved for the next restart.</p>
+                <button type="button" class="btn btn-primary text-xs" @click="saveCodexAdvancedConfigNow" :disabled="savingCodex">{{ savingCodex ? 'Saving…' : 'Save advanced settings' }}</button>
+              </div>
+            </div>
+          </details>
           <div class="border-t border-gray-700 pt-4">
           <h3 class="text-xs font-semibold text-gray-400 mb-2">Authentication</h3>
           <p class="text-xs text-gray-500 mb-4">
@@ -346,6 +413,17 @@ export default {
               </div>
             </div>
           </div>
+          <details class="llm-advanced compact" :open="advancedOpen.kimi" @toggle="advancedOpen.kimi = $event.target.open">
+            <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
+            <div class="llm-advanced-body">
+              <section class="llm-advanced-group single">
+                <label>Request timeout <small>seconds</small>
+                  <input v-model.number="kimiForm.timeout" type="number" min="10" max="3600" class="hm-input" />
+                </label>
+              </section>
+              <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveKimiAdvancedConfigNow" :disabled="savingKimi">Save timeout</button></div>
+            </div>
+          </details>
           <div v-if="kimiStatus.health && kimiStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ kimiStatus.health.error }}
@@ -396,6 +474,17 @@ export default {
               </label>
             </div>
           </div>
+          <details class="llm-advanced compact" :open="advancedOpen.ollama" @toggle="advancedOpen.ollama = $event.target.open">
+            <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
+            <div class="llm-advanced-body">
+              <section class="llm-advanced-group single">
+                <label>Request timeout <small>seconds</small>
+                  <input v-model.number="ollamaForm.timeout" type="number" min="10" max="3600" class="hm-input" />
+                </label>
+              </section>
+              <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveOllamaAdvancedConfigNow" :disabled="savingOllama">Save timeout</button></div>
+            </div>
+          </details>
           <div v-if="ollamaStatus.health && ollamaStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ ollamaStatus.health.error }}
@@ -417,7 +506,13 @@ export default {
     // agent_reasoning_effort / agent_model: '' = inherit the chat setting
     // (the server normalizes ''/null to inherit; distinct from the literal
     // effort "none")
-    const codexForm = ref({ enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '' });
+    const codexForm = ref({
+      enabled: false, model: 'gpt-5.5', reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '',
+      request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180,
+      retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
+      connection_pool: { max_connections: 10, keepalive_timeout: 30 },
+      context_compression: { enabled: true, max_context_chars: 750000, keep_recent_iterations: 30 },
+    });
 
     // Codex model catalog — ONE ordered list renders the Model, Agent Model,
     // and Auxiliary Model selects so the dropdowns can never drift apart.
@@ -490,8 +585,9 @@ export default {
       saveAuxConfigDebounced();
     }
     const savingAux = ref(false);
-    const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096 });
-    const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 });
+    const advancedOpen = ref({ codex: false, ollama: false, kimi: false });
+    const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
+    const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 , timeout: 300 });
     const ollamaKeyDirty = ref(false);
     const kimiKeyDirty = ref(false);
     const savingCodex = ref(false);
@@ -546,7 +642,7 @@ export default {
       loading.value = false;
     }
 
-    async function fetchLLMStatus() {
+    async function fetchLLMStatus({ preserveBasic = false, preserveAdvanced = false } = {}) {
       try {
         const data = await api.get('/api/llm/status');
         llmStatus.value = data;
@@ -554,25 +650,39 @@ export default {
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
         if (data.codex && !saveCodexConfigDebounced.pending()) {
-          codexForm.value.enabled = data.codex.enabled;
-          codexForm.value.model = data.codex.model || 'gpt-5.5';
-          codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
-          // null (inherit) maps to the '' select option
-          codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
-          codexForm.value.agent_model = data.codex.agent_model || '';
-          codexForm.value.max_tokens = data.codex.max_tokens || 4096;
+          if (!preserveBasic) {
+            codexForm.value.enabled = data.codex.enabled;
+            codexForm.value.model = data.codex.model || 'gpt-5.5';
+            codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
+            // null (inherit) maps to the '' select option
+            codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
+            codexForm.value.agent_model = data.codex.agent_model || '';
+          }
+          if (!preserveAdvanced) {
+            codexForm.value.request_timeout_seconds = data.codex.request_timeout_seconds ?? codexForm.value.request_timeout_seconds;
+            codexForm.value.stream_stall_timeout_seconds = data.codex.stream_stall_timeout_seconds ?? codexForm.value.stream_stall_timeout_seconds;
+            codexForm.value.retry = { ...codexForm.value.retry, ...(data.codex.retry || {}) };
+            codexForm.value.connection_pool = { ...codexForm.value.connection_pool, ...(data.codex.connection_pool || {}) };
+            codexForm.value.context_compression = { ...codexForm.value.context_compression, ...(data.codex.context_compression || {}) };
+          }
         }
         if (data.ollama && !saveOllamaConfigDebounced.pending()) {
-          ollamaForm.value.enabled = data.ollama.enabled;
-          ollamaForm.value.base_url = data.ollama.base_url || '';
-          ollamaForm.value.model = data.ollama.model || '';
-          ollamaForm.value.max_tokens = data.ollama.max_tokens || 4096;
+          if (!preserveBasic) {
+            ollamaForm.value.enabled = data.ollama.enabled;
+            ollamaForm.value.base_url = data.ollama.base_url || '';
+            ollamaForm.value.model = data.ollama.model || '';
+            ollamaForm.value.max_tokens = data.ollama.max_tokens || 4096;
+          }
+          if (!preserveAdvanced) ollamaForm.value.timeout = data.ollama.timeout ?? ollamaForm.value.timeout;
           // Don't overwrite api_key from server (it's masked)
         }
         if (data.kimi && !saveKimiConfigDebounced.pending()) {
-          kimiForm.value.enabled = data.kimi.enabled;
-          kimiForm.value.model = data.kimi.model || '';
-          kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
+          if (!preserveBasic) {
+            kimiForm.value.enabled = data.kimi.enabled;
+            kimiForm.value.model = data.kimi.model || '';
+            kimiForm.value.max_tokens = data.kimi.max_tokens || 4096;
+          }
+          if (!preserveAdvanced) kimiForm.value.timeout = data.kimi.timeout ?? kimiForm.value.timeout;
         }
         if (data.auxiliary) {
           auxData.value = data.auxiliary;
@@ -714,17 +824,36 @@ export default {
     }
 
     // --- Provider config saves ---
+    // Basic controls auto-save only their own fields. Advanced drafts remain
+    // unreachable until the operator presses the panel's explicit Save.
     async function saveCodexConfig() {
       if (savingCodex.value) { saveCodexConfigDebounced(); return; }
       savingCodex.value = true;
+      const submitted = codexBasicPayload(codexForm.value);
       try {
-        await api.put('/api/llm/codex/config', codexForm.value);
+        await api.put('/api/llm/codex/config', submitted);
         showToast('Codex config saved');
-        await Promise.all([fetchLLMStatus(), fetchCodexStatus()]);
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCodexStatus()]);
       } catch (e) {
         showToast(e.message || 'Failed', 'error');
-        // restore the last confirmed server state (form repopulates from llm/status)
-        await Promise.all([fetchLLMStatus(), fetchCodexStatus()]);
+        const changedWhileSaving = JSON.stringify(codexBasicPayload(codexForm.value)) !== JSON.stringify(submitted);
+        await Promise.all([fetchLLMStatus({ preserveBasic: changedWhileSaving, preserveAdvanced: true }), fetchCodexStatus()]);
+      }
+      finally { savingCodex.value = false; }
+    }
+
+    async function saveCodexAdvancedConfig() {
+      if (savingCodex.value) return;
+      savingCodex.value = true;
+      const submitted = codexAdvancedPayload(codexForm.value);
+      try {
+        await api.put('/api/llm/codex/config', submitted);
+        showToast('Codex advanced settings saved');
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCodexStatus()]);
+      } catch (e) {
+        showToast(e.message || 'Failed', 'error');
+        const changedWhileSaving = JSON.stringify(codexAdvancedPayload(codexForm.value)) !== JSON.stringify(submitted);
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: changedWhileSaving }), fetchCodexStatus()]);
       }
       finally { savingCodex.value = false; }
     }
@@ -733,19 +862,26 @@ export default {
       if (savingOllama.value) { saveOllamaConfigDebounced(); return; }
       savingOllama.value = true;
       try {
-        const payload = { ...ollamaForm.value };
         const sentKey = ollamaKeyDirty.value ? ollamaForm.value.api_key : null;
-        if (sentKey === null) delete payload.api_key;
+        const payload = ollamaBasicPayload(ollamaForm.value, { includeApiKey: sentKey !== null });
         await api.put('/api/llm/ollama/config', payload);
         showToast('Ollama config saved');
-        // Revision-aware cleanup: only clear key state the COMPLETED save
-        // actually sent — a key typed mid-flight must survive to be sent
-        // by its queued save, not be silently erased.
         if (sentKey !== null && ollamaForm.value.api_key === sentKey) {
           ollamaForm.value.api_key = '';
           ollamaKeyDirty.value = false;
         }
-        await Promise.all([fetchLLMStatus(), fetchOllamaStatus()]);
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchOllamaStatus()]);
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      finally { savingOllama.value = false; }
+    }
+
+    async function saveOllamaAdvancedConfig() {
+      if (savingOllama.value) return;
+      savingOllama.value = true;
+      try {
+        await api.put('/api/llm/ollama/config', ollamaAdvancedPayload(ollamaForm.value));
+        showToast('Ollama timeout saved');
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchOllamaStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingOllama.value = false; }
     }
@@ -754,19 +890,26 @@ export default {
       if (savingKimi.value) { saveKimiConfigDebounced(); return; }
       savingKimi.value = true;
       try {
-        const payload = { ...kimiForm.value };
         const sentKey = kimiKeyDirty.value ? kimiForm.value.api_key : null;
-        if (sentKey === null) delete payload.api_key;
+        const payload = kimiBasicPayload(kimiForm.value, { includeApiKey: sentKey !== null });
         await api.put('/api/llm/kimi/config', payload);
         showToast('Kimi config saved');
-        // Revision-aware cleanup: only clear key state the COMPLETED save
-        // actually sent — a key typed mid-flight must survive to be sent
-        // by its queued save, not be silently erased.
         if (sentKey !== null && kimiForm.value.api_key === sentKey) {
           kimiForm.value.api_key = '';
           kimiKeyDirty.value = false;
         }
-        await Promise.all([fetchLLMStatus(), fetchKimiStatus()]);
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchKimiStatus()]);
+      } catch (e) { showToast(e.message || 'Failed', 'error'); }
+      finally { savingKimi.value = false; }
+    }
+
+    async function saveKimiAdvancedConfig() {
+      if (savingKimi.value) return;
+      savingKimi.value = true;
+      try {
+        await api.put('/api/llm/kimi/config', kimiAdvancedPayload(kimiForm.value));
+        showToast('Kimi timeout saved');
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchKimiStatus()]);
       } catch (e) { showToast(e.message || 'Failed', 'error'); }
       finally { savingKimi.value = false; }
     }
@@ -796,6 +939,11 @@ export default {
     const saveCodexConfigNow = () => { saveCodexConfigDebounced.cancel(); return saveCodexConfig(); };
     const saveOllamaConfigNow = () => { saveOllamaConfigDebounced.cancel(); return saveOllamaConfig(); };
     const saveKimiConfigNow = () => { saveKimiConfigDebounced.cancel(); return saveKimiConfig(); };
+    // Advanced Save never cancels a pending basic auto-save. If both overlap,
+    // the basic saver requeues behind the explicit advanced request.
+    const saveCodexAdvancedConfigNow = () => saveCodexAdvancedConfig();
+    const saveOllamaAdvancedConfigNow = () => saveOllamaAdvancedConfig();
+    const saveKimiAdvancedConfigNow = () => saveKimiAdvancedConfig();
 
     // --- Codex account management ---
     async function activateAccount(index) {
@@ -892,7 +1040,7 @@ export default {
     });
 
     return {
-      loading, llmStatus, selectedProvider, switching,
+      loading, llmStatus, selectedProvider, switching, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainMaxAllowed, agentMaxAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
@@ -904,8 +1052,10 @@ export default {
       fetchAll, switchProvider, reloadOllama, setOllamaModel,
       reloadKimi, setKimiModel, probeOllamaModels,
       saveCodexConfig, saveOllamaConfig, saveKimiConfig,
+      saveCodexAdvancedConfig, saveOllamaAdvancedConfig, saveKimiAdvancedConfig,
       saveCodexConfigDebounced, saveOllamaConfigDebounced, saveKimiConfigDebounced,
       saveCodexConfigNow, saveOllamaConfigNow, saveKimiConfigNow,
+      saveCodexAdvancedConfigNow, saveOllamaAdvancedConfigNow, saveKimiAdvancedConfigNow,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
     };

@@ -69,6 +69,51 @@ WEBHOOK_MAX_URL_LEN = 2048
 WEBHOOK_MAX_BODY_LEN = 1_000_000  # 1 MB
 
 
+def _reject_multiple_timing_modes(
+    *, cron: str | None, run_at: str | None, trigger: dict | None
+) -> None:
+    """A schedule fires one way. Supplying several used to keep one silently.
+
+    ``add`` and ``update`` picked trigger, then cron, then run_at, and dropped
+    the rest without a word — so a form that left Cron populated while the
+    operator filled in a one-time date created a recurring schedule and said
+    it had succeeded.
+    """
+    supplied = [
+        name
+        for name, value in (("cron", cron), ("run_at", run_at), ("trigger", trigger))
+        if value
+    ]
+    if len(supplied) > 1:
+        raise ValueError(
+            "Specify exactly one of 'cron', 'run_at', or 'trigger' — got "
+            + ", ".join(sorted(supplied))
+        )
+
+
+def _reject_naive_run_at(run_at: str | None) -> None:
+    """An offsetless ``run_at`` names a wall clock, not an instant.
+
+    It used to be stamped UTC regardless, so on a New York install a schedule
+    fired five hours early, and on a fall-back night the same wall time
+    happened twice. Every caller has an offset available: the web API sends one
+    from the browser, and the schedule_task tool directs the model through
+    parse_time, which always returns an offset-aware value.
+    """
+    if not run_at or not isinstance(run_at, str):
+        return
+    try:
+        parsed = datetime.fromisoformat(run_at)
+    except ValueError:
+        return  # add()/update() report malformed input with their own message
+    if parsed.tzinfo is None:
+        raise ValueError(
+            f"run_at must carry a UTC 'Z' or an explicit offset — {run_at!r} "
+            "names a wall clock, which is ambiguous across timezones and "
+            "repeats on a daylight-saving fall-back. Use parse_time."
+        )
+
+
 class Scheduler:
     """Manages scheduled tasks — recurring (cron), one-time, and webhook-triggered."""
 
@@ -182,6 +227,9 @@ class Scheduler:
             self._validate_webhook_config(webhook_config)
         elif action == "workflow":
             self._validate_workflow_steps(steps)
+
+        _reject_multiple_timing_modes(cron=cron, run_at=run_at, trigger=trigger)
+        _reject_naive_run_at(run_at)
 
         if trigger is not None:
             self._validate_trigger(trigger)
@@ -662,6 +710,8 @@ class Scheduler:
                 target["timezone"] = cron_timezone
 
             # --- timing mode changes ---
+            _reject_multiple_timing_modes(cron=cron, run_at=run_at, trigger=trigger)
+            _reject_naive_run_at(run_at)
             new_timing = trigger is not None or cron is not None or run_at is not None
             if new_timing:
                 # Clear previous timing fields

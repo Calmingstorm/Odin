@@ -56,6 +56,7 @@ class TestListCreate:
                                  json={"description": "j", "channel_id": "1"})).status == 400
 
 
+
 class TestUpdate:
     async def test_validation(self):
         async with TestClient(TestServer(_app())) as c:
@@ -124,3 +125,48 @@ class TestValidateCron:
             valid = await (await c.post("/api/schedules/validate-cron",
                                         json={"expression": "0 9 * * *"})).json()
             assert valid["valid"] is True and len(valid["next_runs"]) == 5
+
+
+class TestCronPreviewClock:
+    """The preview must be computed on the SAME clock the scheduler fires on.
+
+    next_runs used to come from a naive datetime.now() (server-local),
+    serialized without an offset, while the real next_run comes from
+    _cron_next_run in UTC. The browser then parsed the offset-less string as
+    LOCAL time, so the preview an operator trusts before clicking Create was
+    wrong by the server/browser offset.
+    """
+
+    async def test_next_runs_carry_an_explicit_utc_offset(self):
+        from datetime import datetime
+
+        app = _app()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/schedules/validate-cron", json={"expression": "0 9 * * *"})
+            assert r.status == 200
+            body = await r.json()
+
+        assert body["valid"] is True
+        assert body["next_runs"], "no preview times returned"
+        for value in body["next_runs"]:
+            parsed = datetime.fromisoformat(value)
+            assert parsed.tzinfo is not None, f"offset-less timestamp: {value}"
+            assert parsed.utcoffset().total_seconds() == 0, f"not UTC: {value}"
+
+    async def test_preview_agrees_with_the_schedulers_own_computation(self):
+        """Same expression, same clock: the preview's first entry must match
+        what the scheduler would store as next_run."""
+        from datetime import datetime
+
+        from src.scheduler.scheduler import _cron_next_run
+
+        app = _app()
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/schedules/validate-cron", json={"expression": "*/30 * * * *"})
+            body = await r.json()
+
+        preview_first = datetime.fromisoformat(body["next_runs"][0])
+        scheduler_next = datetime.fromisoformat(_cron_next_run("*/30 * * * *"))
+        # Both anchor on "now", so allow a small window for clock movement
+        # between the calls; the offset bug produced hours of skew.
+        assert abs((preview_first - scheduler_next).total_seconds()) < 120

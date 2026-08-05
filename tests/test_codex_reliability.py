@@ -124,7 +124,6 @@ def _client(auth=None, max_retries: int = 1) -> CodexChatClient:
     return CodexChatClient(
         auth=auth or FakeSingleAuth(),
         model="gpt-test",
-        max_tokens=100,
         max_retries=max_retries,
         retry_base_delay=0.001,
         retry_max_delay=0.002,

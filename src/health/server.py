@@ -17,6 +17,7 @@ from ..config.schema import GrafanaAlertConfig, SlackConfig, WebConfig, WebhookC
 from ..notifications.slack import SlackNotifier
 from ..odin_log import get_logger
 from ..version import get_version
+from ..web.api_common import contains_redaction_mask
 from .grafana_alerts import (
     GrafanaAlertHandler,
     RemediationRule,
@@ -65,6 +66,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/mcp", "/api/tokens", "/api/personality",
     "/api/tools/timeouts", "/api/pools",
     "/api/outbound-webhooks", "/api/grafana-alerts", "/api/slack",
+    "/api/restart",
 )
 
 
@@ -310,6 +312,52 @@ def _make_admin_middleware(web_config) -> Middleware:
     return admin_middleware
 
 
+def _make_redaction_mask_middleware() -> Middleware:
+    """Refuse any request body carrying the mask this API hands out.
+
+    Every read path reports secrets as ``••••••••``. A client that renders one
+    as an editable control sends it straight back, and the handler installs
+    eight bullets as the live credential and persists them.
+
+    This lives in middleware because guarding handlers one at a time kept
+    missing doors — the generic config save was fenced while the dedicated
+    provider routes still installed the sentinel, and fencing those still left
+    MCP headers and outbound-webhook secrets. Nine route modules accept
+    secret-bearing bodies; enumerating them is how the hole reopens. Nobody
+    sets a credential to eight bullets deliberately, so refusing it here costs
+    no legitimate capability.
+    """
+    @web.middleware
+    async def redaction_mask_middleware(
+        request: web.Request,
+        handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
+    ) -> web.StreamResponse:
+        if request.method not in ("POST", "PUT", "PATCH"):
+            return await handler(request)
+        if not request.path.startswith("/api/"):
+            return await handler(request)
+        try:
+            # Do not trust Content-Type here. aiohttp's request.json() does not
+            # enforce it, and every API handler uses that permissive parser: a
+            # valid JSON credential body labelled text/plain would otherwise
+            # bypass this fence and still be installed by the handler. aiohttp
+            # caches the payload, so the handler can parse it again unchanged.
+            body = await request.json()
+        except Exception:
+            return await handler(request)  # malformed — the handler reports it
+        if contains_redaction_mask(body):
+            return web.json_response(
+                {
+                    "error": "Request contains a redacted placeholder. Send the "
+                    "real value, or omit the field to leave it unchanged."
+                },
+                status=400,
+            )
+        return await handler(request)
+
+    return redaction_mask_middleware
+
+
 def _make_rate_limit_middleware(trusted_proxies: tuple[str, ...] = ()) -> Middleware:
     """Simple in-memory rate limiter for /api/ routes (per client IP)."""
     # {ip: [timestamp, ...]}
@@ -533,6 +581,9 @@ class HealthServer:
             middlewares.append(_make_auth_middleware(self._web_config, self._session_manager))
             middlewares.append(_make_admin_middleware(self._web_config))
             middlewares.append(_make_web_audit_middleware(trusted_proxies))
+        # Outside the auth block on purpose: the mask this API emits is never
+        # valid input, with or without tokens configured.
+        middlewares.append(_make_redaction_mask_middleware())
         self._app = web.Application(middlewares=middlewares, client_max_size=10 * 1024 * 1024)
         # Store session_manager on app for access by API routes
         self._app["session_manager"] = self._session_manager
@@ -609,6 +660,14 @@ class HealthServer:
 
     def set_bot(self, bot: OdinBot) -> None:
         """Wire the bot instance to enable the REST API and WebSocket endpoints."""
+        # Backlink first, and before the enabled check: the bot-facing admin
+        # routes reach the Slack notifier and Grafana handler through
+        # ``bot.health_server``, and nothing ever assigned it — so
+        # /api/slack/status and /api/grafana-alerts/status reported
+        # ``enabled: false`` on a working install while every mutating route
+        # 503'd. Doing it here rather than at the __main__ call site covers
+        # every construction path, including tests and future entry points.
+        bot.health_server = self
         if not self._web_config.enabled:
             return
         from ..web.api import setup_api
@@ -677,7 +736,14 @@ class HealthServer:
         # handlers) alive past the stop window.
         try:
             if self._runner:
+                # Both shutdown_services (via the bot backlink) and __main__
+                # hold a reference now, so stop() can be called twice. The
+                # runner is dropped only AFTER cleanup succeeds: clearing it
+                # first would make a second call a no-op that silently
+                # abandons unfinished cleanup, so a raised cleanup could never
+                # be retried by the later caller.
                 await self._runner.cleanup()
+                self._runner = None
         finally:
             if self._slack_notifier:
                 try:

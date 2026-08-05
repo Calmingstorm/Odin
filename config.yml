@@ -15,7 +15,6 @@ openai_codex:
   # ChatGPT-account Codex backend only supports the GPT-5 family
   # (gpt-4o et al return "model not supported" via this auth path).
   model: gpt-5.5
-  max_tokens: 4096
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).
   # "max" is gpt-5.6-family only — config load rejects a known-incompatible
@@ -52,7 +51,7 @@ openai_codex:
   # Auxiliary model: when enabled, a cheaper Codex model runs the background
   # jobs (compaction, reflection, consolidation, background follow-up) with
   # automatic fallback to the primary model on error. It shares the main Codex
-  # OAuth and token limit — only the model differs. Editable live from the WebUI.
+  # OAuth credentials; only the model differs. Editable live from the WebUI.
   auxiliary:
     enabled: false
     model: gpt-5.6-luna
@@ -77,7 +76,6 @@ llm_provider:
 
 context:
   directory: ./data/context
-  max_system_prompt_tokens: 32000
 
 sessions:
   max_history: 50
@@ -145,6 +143,9 @@ webhook:
 agents:
   max_nesting_depth: 2
   max_children_per_agent: 3
+  # Maximum concurrently running agents per Discord channel. This is checked
+  # for each new spawn; lowering it does not stop agents already running.
+  max_concurrent_agents: 5
   # LLM iterations (turns) per agent before forced completion
   max_iterations: 120              # interactive spawns
   scheduled_max_iterations: 180    # scheduled workflow spawns (higher for autonomous coding)
@@ -336,7 +337,6 @@ message_triggers:
 
 # # Grafana alert auto-remediation
 # grafana_alerts:
-#   enabled: false
 #   auto_remediate: false
 #   rules: []
 #   cooldown_seconds: 300
@@ -362,8 +362,7 @@ message_triggers:
 #   #     timeout_seconds: 120
 
 # # Graceful degradation thresholds
-# graceful_degradation:
-#   enabled: true
+# graceful_degradation:         # request guarding is always on
 #   degraded_threshold: 3       # consecutive failures before DEGRADED state
 #   unavailable_threshold: 10   # consecutive failures before UNAVAILABLE state
 

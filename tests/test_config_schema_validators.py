@@ -96,6 +96,48 @@ class TestLoadConfig:
         cfg = load_config(p)
         assert cfg.discord.token == "abc"
 
+    @pytest.mark.parametrize("legacy_guard_enabled", [False, True])
+    @pytest.mark.parametrize("legacy_grafana_enabled", [False, True])
+    def test_removed_settings_are_ignored_without_losing_neighbors(
+        self, tmp_path, legacy_guard_enabled, legacy_grafana_enabled
+    ):
+        """Old config files keep booting and both old boolean values are inert.
+
+        ``false`` was ignored by both runtime construction paths before removal,
+        so dropping it now is behaviour-preserving. Pin adjacent supported values
+        so a future ``extra=forbid`` change cannot strand an upgrade or discard
+        the settings that actually construct the guard and Grafana handler.
+        """
+        old_guard_bool = str(legacy_guard_enabled).lower()
+        old_grafana_bool = str(legacy_grafana_enabled).lower()
+        p = self._write(
+            tmp_path,
+            "discord:\n  token: legacy\n"
+            "context:\n  directory: ./legacy-context\n  max_system_prompt_tokens: 12345\n"
+            "openai_codex:\n  enabled: true\n  model: gpt-5.6-terra\n"
+            "  max_tokens: 98765\n  reasoning_effort: high\n"
+            f"graceful_degradation:\n  enabled: {old_guard_bool}\n"
+            "  degraded_threshold: 7\n  unavailable_threshold: 19\n"
+            f"grafana_alerts:\n  enabled: {old_grafana_bool}\n  auto_remediate: true\n"
+            "  cooldown_seconds: 612\n  max_concurrent_remediations: 4\n",
+        )
+
+        cfg = load_config(p)
+
+        assert cfg.discord.token == "legacy"
+        assert cfg.context.directory == "./legacy-context"
+        assert not hasattr(cfg.context, "max_system_prompt_tokens")
+        assert cfg.openai_codex.model == "gpt-5.6-terra"
+        assert cfg.openai_codex.reasoning_effort == "high"
+        assert not hasattr(cfg.openai_codex, "max_tokens")
+        assert not hasattr(cfg.graceful_degradation, "enabled")
+        assert cfg.graceful_degradation.degraded_threshold == 7
+        assert cfg.graceful_degradation.unavailable_threshold == 19
+        assert not hasattr(cfg.grafana_alerts, "enabled")
+        assert cfg.grafana_alerts.auto_remediate is True
+        assert cfg.grafana_alerts.cooldown_seconds == 612
+        assert cfg.grafana_alerts.max_concurrent_remediations == 4
+
     def test_env_substituted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ODIN_TOKEN_TEST", "from-env")
         p = self._write(tmp_path, "discord:\n  token: ${ODIN_TOKEN_TEST}\n")
@@ -255,3 +297,32 @@ class TestAgentModelConfig:
     def test_surrounding_whitespace_stripped(self):
         from src.config.schema import OpenAICodexConfig
         assert OpenAICodexConfig(agent_model=" gpt-5.5 ").agent_model == "gpt-5.5"
+
+
+def test_max_children_per_agent_upper_bound():
+    """1-10: breadth compounds with depth, so a single config value must not
+    ask for absurd fan-out; the manager's tree cap is the backstop."""
+    import pytest
+
+    from src.config.schema import Config
+
+    with pytest.raises(ValueError, match="between 1 and 10"):
+        Config(discord={"token": "x"}, agents={"max_children_per_agent": 11})
+    cfg = Config(discord={"token": "x"}, agents={"max_children_per_agent": 10})
+    assert cfg.agents.max_children_per_agent == 10
+
+
+def test_max_concurrent_agents_default_and_bounds():
+    """1-25 permits useful parallelism without exceeding the immutable
+    per-tree lifetime backstop; an absent key preserves the historical cap 5.
+    """
+    from src.config.schema import Config
+
+    assert AgentsConfig().max_concurrent_agents == 5
+    assert Config(discord={"token": "x"}, agents={}).agents.max_concurrent_agents == 5
+    assert AgentsConfig(max_concurrent_agents=1).max_concurrent_agents == 1
+    assert AgentsConfig(max_concurrent_agents=25).max_concurrent_agents == 25
+    with pytest.raises(ValidationError):
+        AgentsConfig(max_concurrent_agents=0)
+    with pytest.raises(ValidationError):
+        AgentsConfig(max_concurrent_agents=26)

@@ -43,6 +43,7 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
+from ..tools.output_streamer import current_call_id as _current_call_id
 from ..turn_state import LedgerIntentError
 from ..turn_state.durability import TurnDurability
 
@@ -54,6 +55,7 @@ if TYPE_CHECKING:
     from ..tools.executor import ToolExecutor
     from ..tools.skill_manager import SkillManager
     from ..trajectories.saver import TrajectoryTurn
+    from .channel_config import ChannelConfigManager
     from .channel_state import ChannelStateRegistry
     from .completion import CompletionClassifier
     from .delivery import ResponseDelivery
@@ -380,6 +382,7 @@ class ToolLoopDeps:
     prompt_builder: PromptBuilder
     tool_catalog: ToolCatalog
     channel_state: ChannelStateRegistry  # cancel events, active requests, op details
+    channel_config: ChannelConfigManager  # shared guild/channel response resolution
     delivery: ResponseDelivery  # presence updates
     turn_recorder: TurnRecorder  # trajectories, traces, lifecycle events, reflection
     completion_classifier: CompletionClassifier
@@ -390,6 +393,7 @@ class ToolLoopDeps:
     audit: AuditLogger
     loop_manager: LoopManager
     stuck_loop_tracker_cls: type[StuckLoopTracker]
+    get_compression_stats: Callable = lambda: None
     # Durable turn-state store (None = checkpointing off). Default keeps
     # every existing construction working; wiring passes the real store.
     turn_store: object | None = None
@@ -403,10 +407,12 @@ class ToolLoopRunner:
         self._get_config = deps.get_config
         self._get_default_system_prompt = deps.get_default_system_prompt
         self._get_context_compressor = deps.get_context_compressor
+        self._get_compression_stats = deps.get_compression_stats
         self._llm_gateway = deps.llm_gateway
         self._prompt_builder = deps.prompt_builder
         self._tool_catalog = deps.tool_catalog
         self._channel_state = deps.channel_state
+        self._channel_config = deps.channel_config
         self._delivery = deps.delivery
         self._turn_recorder = deps.turn_recorder
         self._completion_classifier = deps.completion_classifier
@@ -431,6 +437,7 @@ class ToolLoopRunner:
         system_prompt_override: str | None = None,
         trace=None,
         policy: LoopPolicy = CHAT_POLICY,
+        from_another_bot: bool | None = None,
     ) -> tuple[str, bool, bool, list[str], bool]:
         """Process a message with the tool loop — see module docstring.
 
@@ -444,7 +451,12 @@ class ToolLoopRunner:
         - handoff: True if the response should be handed off to another handler
         """
         st = await self._prepare_chat_turn(
-            message, history, system_prompt_override, trace, policy
+            message,
+            history,
+            system_prompt_override,
+            trace,
+            policy,
+            from_another_bot=from_another_bot,
         )
         # Admission refusal: this message identity already has durable state
         # (terminal / in-flight / suspended). A redelivered or duplicate
@@ -648,6 +660,8 @@ class ToolLoopRunner:
         system_prompt_override: str | None,
         trace,
         policy: LoopPolicy,
+        *,
+        from_another_bot: bool | None = None,
     ) -> _ChatTurn:
         """Turn setup: prompt/tools resolution, request preamble, permission
         filtering, trajectory + correlation init, cancellation wiring."""
@@ -660,9 +674,28 @@ class ToolLoopRunner:
 
         # Insert context separator between history and the current user request
         # so Codex evaluates tools fresh instead of repeating patterns from history
-        is_bot_message = (
-            getattr(message.author, "bot", False) and self._get_config().discord.respond_to_bots
-        )
+        if from_another_bot is None:
+            # Direct callers have no intake snapshot, so resolve through the
+            # exact same channel > guild > global ladder as MessageIntake.
+            _guild = getattr(message, "guild", None)
+            _guild_id = str(_guild.id) if _guild is not None else None
+            _channel_id = str(message.channel.id)
+            _respond_to_bots = self._channel_config.should_respond_to_bots(
+                _guild_id,
+                _channel_id,
+                self._get_config().discord.respond_to_bots,
+            )
+            is_allowed_webhook = (
+                message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+            )
+            is_bot_message = bool(
+                getattr(message.author, "bot", False)
+                and (_respond_to_bots or is_allowed_webhook)
+            )
+        else:
+            # Intake already made the admission decision. Do not re-resolve a
+            # live setting after buffering/queueing and mislabel admitted work.
+            is_bot_message = from_another_bot
         from .tool_loop_helpers import (
             build_request_preamble,
             compute_request_id,
@@ -857,6 +890,7 @@ class ToolLoopRunner:
                         st.messages,
                         max_context_chars=_cc.max_context_chars,
                         keep_recent=_cc.keep_recent_iterations,
+                        stats=self._get_compression_stats(),
                     )
                     log.info("context_compressor: trimmed %d chars", _saved)
             except Exception:
@@ -1372,7 +1406,20 @@ class ToolLoopRunner:
                 st.continuation_count += 1
                 return ("retry", None)
 
-        _final = llm_resp.text or _EMPTY_RESPONSE_FALLBACK
+        # Empty final text after a turn that DID its work is a choice, not a
+        # failure: the completion classifier has already judged the turn
+        # complete, and every anti-fabrication guard runs upstream of here.
+        # Converting that silence into "I couldn't generate a response" was
+        # itself the fabricated failure (thumbs-up reaction lands, apology
+        # follows; video posts with its commentary, apology follows). With no
+        # tools used, the fallback stands — a bare empty generation IS a
+        # failure worth reporting.
+        if llm_resp.text:
+            _final = llm_resp.text
+        elif st.tools_used_in_loop:
+            _final = ""
+        else:
+            _final = _EMPTY_RESPONSE_FALLBACK
         await self._turn_recorder._save_turn_trajectory(
             st._trajectory,
             final_response=_final,
@@ -1429,6 +1476,11 @@ class ToolLoopRunner:
                 metadata={
                     "tool_input_keys": list((tool_input or {}).keys()),
                     "iteration": st.iteration,
+                    # The model's tool_use id. Consumers pair start with end by
+                    # THIS, not by tool name: concurrent same-name calls cannot
+                    # be told apart by name, and neither LIFO nor FIFO ordering
+                    # is correct when a later call finishes first.
+                    "call_id": block.id,
                 },
             )
         except Exception:
@@ -1463,11 +1515,17 @@ class ToolLoopRunner:
                 # audit record picks up the metadata like the executor path.
                 tool_result, result = _unwrap_native_result(result)
             else:
-                tool_result = await self._tool_executor.execute(
-                    tool_name,
-                    tool_input,
-                    user_id=st.user_id,
-                )
+                # Bind this invocation's identity so streamed output can be
+                # attributed to ONE call rather than merged by tool name.
+                _call_token = _current_call_id.set(block.id)
+                try:
+                    tool_result = await self._tool_executor.execute(
+                        tool_name,
+                        tool_input,
+                        user_id=st.user_id,
+                    )
+                finally:
+                    _current_call_id.reset(_call_token)
                 result = str(tool_result)
         except TimeoutError as e:
             error = str(e)
@@ -1512,7 +1570,8 @@ class ToolLoopRunner:
             result = ensure_failure_visible(result, tool_result.ok)
 
         await self._audit_tool_outcome(
-            st, tool_name, tool_input, result, elapsed_ms, error, tool_result
+            st, tool_name, tool_input, result, elapsed_ms, error, tool_result,
+            call_id=block.id,
         )
 
         # Track for conversational context
@@ -1551,7 +1610,8 @@ class ToolLoopRunner:
         }
 
     async def _audit_tool_outcome(
-        self, st: _ChatTurn, tool_name, tool_input, result, elapsed_ms, error, tool_result
+        self, st: _ChatTurn, tool_name, tool_input, result, elapsed_ms, error, tool_result,
+        *, call_id: str | None = None,
     ) -> None:
         """Write execution + tool_end audit records — never crash tool
         execution on audit failure. (Inline block of the old `_run_tool`.)"""
@@ -1584,7 +1644,12 @@ class ToolLoopRunner:
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
                 detail=result[:150],
-                metadata={"elapsed_ms": elapsed_ms, "error": error, "iteration": st.iteration},
+                metadata={
+                    "elapsed_ms": elapsed_ms,
+                    "error": error,
+                    "iteration": st.iteration,
+                    "call_id": call_id,
+                },
             )
         except Exception as audit_err:
             log.warning("Audit log failed for %s: %s", tool_name, audit_err)
@@ -2074,15 +2139,26 @@ class ToolLoopRunner:
         error = None
         try:
             _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else st.tool_timeout
-            raw = await asyncio.wait_for(
-                self.dispatch_loop_tool(
-                    tool_name,
-                    tool_input,
-                    st.msg_proxy,
-                    st.user_id,
-                ),
-                timeout=_t,
+            dispatch = self.dispatch_loop_tool(
+                tool_name,
+                tool_input,
+                st.msg_proxy,
+                st.user_id,
             )
+            if self._native_tools.handles(tool_name):
+                # Do not bind across native tools such as spawn_agent: child
+                # tasks copy ContextVars at creation and would inherit the
+                # parent's call id for their whole lifetime.
+                raw = await asyncio.wait_for(dispatch, timeout=_t)
+            else:
+                # Autonomous-loop executor calls use the same streamer as
+                # chat. Bind their model tool-use id too, or concurrent
+                # same-name calls cross streams in the WebUI.
+                _call_token = _current_call_id.set(block.id)
+                try:
+                    raw = await asyncio.wait_for(dispatch, timeout=_t)
+                finally:
+                    _current_call_id.reset(_call_token)
             # Skill CRUD invalidates caches
             if tool_name in (
                 "create_skill",

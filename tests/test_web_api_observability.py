@@ -5,8 +5,10 @@ aiohttp route layer with a faked bot. SAFE: every route delegates to a bot
 subsystem; file-reading aggregates (context/failure/affordances) are patched, so
 nothing touches real trajectory/audit files.
 """
+
 from __future__ import annotations
 
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -50,6 +52,7 @@ def _bot():
     bot.cost_tracker.get_totals.return_value = {"c": 1}
     bot.cost_tracker.get_summary.return_value = {"c": 2}
     bot.compression_stats.as_dict.return_value = {"comp": 1}
+    bot.services = None
     bot.subsystem_guard.get_status.return_value = {"s": 1}
     return bot
 
@@ -62,8 +65,11 @@ class TestToolsMeta:
             {"name": "t", "description": "d", "is_core": True}
         ]
         with pytest.MonkeyPatch().context() as mp:
-            mp.setattr(obs, "get_tool_definitions",
-                       lambda: [{"name": "t", "description": "d", "is_core": True}])
+            mp.setattr(
+                obs,
+                "get_tool_definitions",
+                lambda: [{"name": "t", "description": "d", "is_core": True}],
+            )
             async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
                 assert (await (await c.get("/api/tools")).json())[0]["name"] == "t"
                 assert (await (await c.get("/api/tools/stats")).json())["run_command"] == 5
@@ -74,14 +80,12 @@ class TestToolsMeta:
         async with TestClient(TestServer(_app(obs.register_tools_meta, bot=bot))) as c:
             assert (await c.put("/api/tools/timeouts", data="bad")).status == 400
             assert (await c.put("/api/tools/timeouts", json=[1])).status == 400
-            assert (await c.put("/api/tools/timeouts",
-                                json={"overrides": "notdict"})).status == 400
-            assert (await c.put("/api/tools/timeouts",
-                                json={"overrides": {"t": -1}})).status == 400
-            assert (await c.put("/api/tools/timeouts",
-                                json={"default_timeout": 0})).status == 400
-            r = await c.put("/api/tools/timeouts",
-                            json={"overrides": {"t": 30}, "default_timeout": 60})
+            assert (await c.put("/api/tools/timeouts", json={"overrides": "notdict"})).status == 400
+            assert (await c.put("/api/tools/timeouts", json={"overrides": {"t": -1}})).status == 400
+            assert (await c.put("/api/tools/timeouts", json={"default_timeout": 0})).status == 400
+            r = await c.put(
+                "/api/tools/timeouts", json={"overrides": {"t": 30}, "default_timeout": 60}
+            )
             assert r.status == 200 and (await r.json())["default_timeout"] == 60
 
 
@@ -97,18 +101,17 @@ class TestBulkheadsAndAggregates:
     async def test_aggregates(self):
         bot = _bot()
         with pytest.MonkeyPatch().context() as mp:
-            mp.setattr("src.observability.aggregates.context_aggregates",
-                       lambda d, w: {"ctx": w})
-            mp.setattr("src.observability.aggregates.failure_aggregates",
-                       lambda p, w: {"fail": w})
+            mp.setattr("src.observability.aggregates.context_aggregates", lambda d, w: {"ctx": w})
+            mp.setattr("src.observability.aggregates.failure_aggregates", lambda p, w: {"fail": w})
             async with TestClient(TestServer(_app(obs.register_aggregates, bot=bot))) as c:
-                assert (await (await c.get(
-                    "/api/observability/context?window=5")).json())["ctx"] == 5
+                assert (await (await c.get("/api/observability/context?window=5")).json())[
+                    "ctx"
+                ] == 5
                 # non-integer window falls back to the 24h default
-                assert (await (await c.get(
-                    "/api/observability/context?window=abc")).json())["ctx"] == 24
-                assert (await (await c.get(
-                    "/api/observability/failures")).json())["fail"] == 24
+                assert (await (await c.get("/api/observability/context?window=abc")).json())[
+                    "ctx"
+                ] == 24
+                assert (await (await c.get("/api/observability/failures")).json())["fail"] == 24
                 assert (await (await c.get("/api/usage/totals")).json())["c"] == 1
         # disabled prompt-budget → 503
         bot.config.observability.prompt_budget_accounting = False
@@ -136,16 +139,19 @@ class TestAuditAndLogs:
         bot = _bot()
         async with TestClient(TestServer(_app(obs.register_log_search, bot=bot))) as c:
             assert (await c.get("/api/logs/search?level=bogus")).status == 400
-            assert (await (await c.get(
-                "/api/logs/search?level=error&q=x")).json())["count"] == 1
+            assert (await (await c.get("/api/logs/search?level=error&q=x")).json())["count"] == 1
             assert (await (await c.get("/api/logs/stats")).json())["total"] == 3
 
 
 class TestExecutorStats:
     async def test_risk_recovery_freshness_validation(self):
         bot = _bot()
-        regs = (obs.register_risk_classification, obs.register_recovery_stats,
-                obs.register_branch_freshness, obs.register_validation_stats)
+        regs = (
+            obs.register_risk_classification,
+            obs.register_recovery_stats,
+            obs.register_branch_freshness,
+            obs.register_validation_stats,
+        )
         async with TestClient(TestServer(_app(*regs, bot=bot))) as c:
             assert (await (await c.get("/api/risk/stats")).json())["risk"] == 1
             assert (await (await c.get("/api/risk/recent")).json())["entries"][0]["e"] == 1
@@ -160,28 +166,41 @@ class TestExecutorStats:
     async def test_executor_unavailable_503(self):
         bot = _bot()
         bot.tool_executor = None
-        regs = (obs.register_risk_classification, obs.register_recovery_stats,
-                obs.register_branch_freshness, obs.register_validation_stats)
+        regs = (
+            obs.register_risk_classification,
+            obs.register_recovery_stats,
+            obs.register_branch_freshness,
+            obs.register_validation_stats,
+        )
         async with TestClient(TestServer(_app(*regs, bot=bot))) as c:
-            for path in ("/api/risk/stats", "/api/risk/recent", "/api/governor/stats",
-                         "/api/recovery/stats", "/api/recovery/recent",
-                         "/api/freshness/stats", "/api/freshness/recent",
-                         "/api/validation/stats"):
+            for path in (
+                "/api/risk/stats",
+                "/api/risk/recent",
+                "/api/governor/stats",
+                "/api/recovery/stats",
+                "/api/recovery/recent",
+                "/api/freshness/stats",
+                "/api/freshness/recent",
+                "/api/validation/stats",
+            ):
                 assert (await c.get(path)).status == 503
 
     async def test_governor_missing(self):
         bot = _bot()
         bot.tool_executor.command_governor = None
-        async with TestClient(TestServer(
-                _app(obs.register_risk_classification, bot=bot))) as c:
+        async with TestClient(TestServer(_app(obs.register_risk_classification, bot=bot))) as c:
             assert (await c.get("/api/governor/stats")).status == 503
 
 
 class TestMiscStats:
     async def test_affordances_compression_usage_degradation(self):
         bot = _bot()
-        regs = (obs.register_affordances, obs.register_compression_stats,
-                obs.register_usage_cost, obs.register_degradation)
+        regs = (
+            obs.register_affordances,
+            obs.register_compression_stats,
+            obs.register_usage_cost,
+            obs.register_degradation,
+        )
         with pytest.MonkeyPatch().context() as mp:
             mp.setattr("src.tools.affordances.all_affordances", lambda: [{"tool": "t"}])
             async with TestClient(TestServer(_app(*regs, bot=bot))) as c:
@@ -190,13 +209,41 @@ class TestMiscStats:
                 assert (await (await c.get("/api/usage")).json())["c"] == 2
                 assert (await (await c.get("/api/subsystems/status")).json())["s"] == 1
 
+    async def test_subsystem_status_exposes_server_computed_failure_age(self):
+        from src.health.subsystem_guard import SubsystemGuard
+
+        bot = _bot()
+        guard = SubsystemGuard()
+        guard.register("browser")
+        info = guard.get_subsystem("browser")
+        assert info is not None
+        info.last_failure_at = 100.0
+        bot.subsystem_guard = guard
+        with pytest.MonkeyPatch().context() as mp:
+            mp.setattr("src.health.subsystem_guard.time.monotonic", lambda: 220.25)
+            async with TestClient(TestServer(_app(obs.register_degradation, bot=bot))) as c:
+                response = await c.get("/api/subsystems/status")
+                body = await response.json()
+        assert response.status == 200
+        assert body["subsystems"][0]["last_failure_age_seconds"] == 120.25
+
+    async def test_compression_stats_use_composed_service(self):
+        bot = _bot()
+        bot.compression_stats = None
+        stats = MagicMock()
+        stats.as_dict.return_value = {"compressions": 4}
+        bot.services = SimpleNamespace(compression_stats=stats)
+        async with TestClient(TestServer(_app(obs.register_compression_stats, bot=bot))) as c:
+            response = await c.get("/api/compression/stats")
+            assert response.status == 200
+            assert (await response.json())["compressions"] == 4
+
     async def test_misc_unavailable_503(self):
         bot = _bot()
         bot.compression_stats = None
         bot.cost_tracker = None
         bot.subsystem_guard = None
-        regs = (obs.register_compression_stats,
-                obs.register_usage_cost, obs.register_degradation)
+        regs = (obs.register_compression_stats, obs.register_usage_cost, obs.register_degradation)
         async with TestClient(TestServer(_app(*regs, bot=bot))) as c:
             assert (await c.get("/api/compression/stats")).status == 503
             assert (await c.get("/api/usage")).status == 503

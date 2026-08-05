@@ -376,7 +376,11 @@ export default {
         await api.del(`/api/knowledge/${encodeURIComponent(deleteTarget.value)}`);
         delete sourceChunks.value[deleteTarget.value];
         await fetchSources();
-      } catch { /* ignore */ }
+      } catch (e) {
+        // Swallowing this closed the modal and refetched, leaving the item
+        // still listed with zero feedback — indistinguishable from a UI bug.
+        toast.error(`Failed to delete source: ${e.message || 'unknown error'}`);
+      }
       deleting.value = false;
       deleteTarget.value = null;
     }

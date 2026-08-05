@@ -212,6 +212,7 @@ class MessageIntake:
         # secrets to command handlers.
         await self._process_commands(message)
 
+        from_another_bot = False
         if message.author.bot:
             # Ignore specific bot IDs unless they explicitly @mention us in message text
             if str(message.author.id) in self._get_config().discord.ignore_bot_ids:
@@ -231,6 +232,9 @@ class MessageIntake:
             )
             if not is_allowed_webhook and not _respond_bots:
                 return
+            # Snapshot intake admission. Buffering and channel locks can
+            # outlive a live config change; provenance must not rejudge it.
+            from_another_bot = True
 
         is_test_webhook = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
         if not is_test_webhook and not self.is_allowed_user(message.author):
@@ -336,7 +340,12 @@ class MessageIntake:
                     combined = combined.replace(f"<@{self._get_user().id}>", "").strip()
                     combined = combined.replace(f"<@!{self._get_user().id}>", "").strip()
                 if combined:
-                    await self._pipeline.run(orig_msg, combined, image_blocks=[])
+                    await self._pipeline.run(
+                        orig_msg,
+                        combined,
+                        image_blocks=[],
+                        from_another_bot=True,
+                    )
 
             self._channel_state.bot_msg_tasks[buf_key] = asyncio.create_task(
                 _flush_bot_buffer(buf_key, message)
@@ -391,7 +400,12 @@ class MessageIntake:
                 pass  # best-effort notice; the scrub already happened
             return
 
-        await self._pipeline.run(message, content, image_blocks=image_blocks)
+        await self._pipeline.run(
+            message,
+            content,
+            image_blocks=image_blocks,
+            from_another_bot=from_another_bot,
+        )
 
 
 @dataclass(frozen=True)
@@ -431,6 +445,7 @@ class MessagePipeline:
         content: str,
         *,
         image_blocks: list[dict] | None = None,
+        from_another_bot: bool | None = None,
     ) -> None:
         channel_id = str(message.channel.id)
 
@@ -482,6 +497,7 @@ class MessagePipeline:
                 content,
                 channel_id,
                 image_blocks=image_blocks or [],
+                from_another_bot=from_another_bot,
             )
 
     async def _run_inner(
@@ -491,6 +507,7 @@ class MessagePipeline:
         channel_id: str,
         *,
         image_blocks: list[dict] | None = None,
+        from_another_bot: bool | None = None,
     ) -> None:
         from .tool_loop_helpers import _EMPTY_RESPONSE_FALLBACK
 
@@ -653,6 +670,7 @@ class MessagePipeline:
                             task_history,
                             system_prompt_override=_sp,
                             trace=_trace,
+                            from_another_bot=from_another_bot,
                         )
                 except TimeoutError as codex_err:
                     _err = format_user_facing_error(codex_err)

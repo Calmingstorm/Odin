@@ -473,7 +473,7 @@ class TestCodexPoolConfig:
     def test_default_pool_params(self):
         from src.llm.openai_codex import CodexChatClient
         auth = MagicMock()
-        client = CodexChatClient(auth=auth, model="test", max_tokens=100)
+        client = CodexChatClient(auth=auth, model="test")
         assert client.pool_max_connections == 10
         assert client.pool_keepalive_timeout == 30
 
@@ -481,7 +481,7 @@ class TestCodexPoolConfig:
         from src.llm.openai_codex import CodexChatClient
         auth = MagicMock()
         client = CodexChatClient(
-            auth=auth, model="test", max_tokens=100,
+            auth=auth, model="test",
             pool_max_connections=20, pool_keepalive_timeout=60,
         )
         assert client.pool_max_connections == 20
@@ -490,7 +490,7 @@ class TestCodexPoolConfig:
     def test_total_requests_starts_zero(self):
         from src.llm.openai_codex import CodexChatClient
         auth = MagicMock()
-        client = CodexChatClient(auth=auth, model="test", max_tokens=100)
+        client = CodexChatClient(auth=auth, model="test")
         assert client._total_requests == 0
 
 
@@ -502,7 +502,7 @@ class TestCodexPoolMetrics:
     def test_metrics_no_session(self):
         from src.llm.openai_codex import CodexChatClient
         auth = MagicMock()
-        client = CodexChatClient(auth=auth, model="test", max_tokens=100)
+        client = CodexChatClient(auth=auth, model="test")
         m = client.get_pool_metrics()
         assert m["http_pool_max_connections"] == 10
         assert m["http_pool_keepalive_timeout"] == 30
@@ -513,7 +513,7 @@ class TestCodexPoolMetrics:
         from src.llm.openai_codex import CodexChatClient
         auth = MagicMock()
         client = CodexChatClient(
-            auth=auth, model="test", max_tokens=100,
+            auth=auth, model="test",
             pool_max_connections=20, pool_keepalive_timeout=60,
         )
         m = client.get_pool_metrics()
@@ -523,7 +523,7 @@ class TestCodexPoolMetrics:
     def test_metrics_tracks_requests(self):
         from src.llm.openai_codex import CodexChatClient
         auth = MagicMock()
-        client = CodexChatClient(auth=auth, model="test", max_tokens=100)
+        client = CodexChatClient(auth=auth, model="test")
         client._total_requests = 42
         m = client.get_pool_metrics()
         assert m["http_pool_total_requests"] == 42
@@ -633,7 +633,7 @@ class TestPoolAPI:
             "active_connections": 2, "total_opened": 5, "total_reused": 3,
         }
         executor.ssh_pool = pool
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/ssh")
             assert resp.status == 200
@@ -644,7 +644,7 @@ class TestPoolAPI:
         from aiohttp.test_utils import TestClient, TestServer
         executor = MagicMock()
         executor.ssh_pool = None
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.get("/api/pools/ssh")
             assert resp.status == 503
@@ -683,7 +683,7 @@ class TestPoolAPI:
         pool = AsyncMock()
         pool.close_all.return_value = 3
         executor.ssh_pool = pool
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.post("/api/pools/ssh/close", json={})
             assert resp.status == 200
@@ -696,7 +696,7 @@ class TestPoolAPI:
         pool = AsyncMock()
         pool.close_host.return_value = True
         executor.ssh_pool = pool
-        bot = _make_bot(executor=executor)
+        bot = _make_bot(tool_executor=executor)
         async with TestClient(TestServer(_make_app(bot))) as client:
             resp = await client.post(
                 "/api/pools/ssh/close",

@@ -24,7 +24,9 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Callable
+from dataclasses import dataclass
 
+from ..config.persistence import config_transaction
 from ..llm import CodexChatClient, KimiClient, OllamaClient
 from ..llm.circuit_breaker import CircuitOpenError
 from ..llm.codex_auth import CodexAuthPool
@@ -34,6 +36,41 @@ from ..llm.recovery import RecoveryPolicy
 from ..odin_log import get_logger
 
 log = get_logger("discord")
+
+
+@dataclass(frozen=True)
+class _AuxBuildInputs:
+    """Immutable config consumed while constructing an auxiliary candidate."""
+
+    retry_max_retries: int
+    retry_base_delay: float
+    retry_max_delay: float
+    pool_max_connections: int
+    pool_keepalive_timeout: int
+    request_timeout: int
+    stream_stall_timeout: int
+
+
+@dataclass(frozen=True)
+class _AuxReloadPlan:
+    """State captured atomically before a network probe.
+
+    The probe may take arbitrarily long. Commit compares this evidence under
+    the config lock and provider lock so a candidate can never overwrite newer
+    config or bind to a retired primary generation.
+    """
+
+    desired_enabled: bool
+    desired_model: str
+    prior_enabled: bool
+    prior_model: str
+    build: _AuxBuildInputs
+    primary: object | None
+    generation: int
+
+    @property
+    def desired(self) -> dict:
+        return {"enabled": self.desired_enabled, "model": self.desired_model}
 
 
 class LLMGateway:
@@ -132,8 +169,9 @@ class LLMGateway:
         # Compaction emits a segment of up to ~2500 chars (≈625 tokens) plus
         # structured header lines; reflection emits multi-lesson JSON. The old
         # 300/500 caps guaranteed mid-output truncation on providers that honor
-        # max_tokens (Ollama/Kimi) — truncated reflection JSON parsed to [] and
-        # silently dropped lessons. (Codex ignores max_tokens entirely.)
+        # the per-call output budget (Ollama/Kimi) — truncated reflection JSON
+        # parsed to [] and silently dropped lessons. The Codex request shape is
+        # unchanged because that backend has no corresponding request field.
         # These callbacks resolve the auxiliary pointer at CALL TIME, not wire
         # time — capturing aux.make_chat_fn() here would pin the wrapper and
         # break the live reload swap. When a named task is enabled on the
@@ -210,8 +248,8 @@ class LLMGateway:
             auth = getattr(self.codex_client, "auth", None)
             if isinstance(auth, CodexAuthPool):
                 count = await auth.reload_async()
-                # Config changes (model/max_tokens) must land on the live
-                # client too — it reads self.model per request, and without
+                # Model changes must land on the live client too — it reads
+                # self.model per request, and without
                 # this a WebUI model switch only took effect after a restart.
                 if self.codex_client.model != config.openai_codex.model:
                     log.info(
@@ -229,7 +267,6 @@ class LLMGateway:
                         config.openai_codex.reasoning_effort,
                     )
                 self.codex_client.model = config.openai_codex.model
-                self.codex_client.max_tokens = config.openai_codex.max_tokens
                 self.codex_client.reasoning_effort = config.openai_codex.reasoning_effort
                 # Per-request transport values apply live; pool sizing is
                 # session-construction state and needs a client rebuild.
@@ -249,7 +286,6 @@ class LLMGateway:
         self.codex_client = CodexChatClient(
             auth=auth,
             model=config.openai_codex.model,
-            max_tokens=config.openai_codex.max_tokens,
             reasoning_effort=config.openai_codex.reasoning_effort,
             max_retries=config.openai_codex.retry.max_retries,
             retry_base_delay=config.openai_codex.retry.base_delay,
@@ -288,28 +324,73 @@ class LLMGateway:
         aux_cfg.enabled = desired["enabled"]
         aux_cfg.model = desired["model"]
 
-    def _build_aux_candidate(self, desired: dict, primary):
-        """Construct a candidate wrapper from an IMMUTABLE desired spec bound
-        to ``primary``. Only the aux MODEL is spec-driven; the auth pool is
-        SHARED with the primary client (same account selection / rotation /
-        refresh lock) and the token limit is read from live config once here."""
+    def _snapshot_aux_build_inputs(self) -> _AuxBuildInputs:
+        config = self.get_config().openai_codex
+        return _AuxBuildInputs(
+            retry_max_retries=config.retry.max_retries,
+            retry_base_delay=config.retry.base_delay,
+            retry_max_delay=config.retry.max_delay,
+            pool_max_connections=config.connection_pool.max_connections,
+            pool_keepalive_timeout=config.connection_pool.keepalive_timeout,
+            request_timeout=config.request_timeout_seconds,
+            stream_stall_timeout=config.stream_stall_timeout_seconds,
+        )
+
+    def prepare_auxiliary_reload(self, desired: dict | None = None) -> _AuxReloadPlan:
+        """Capture every dependency for a reload while the caller holds the
+        global config transaction.
+
+        This method is synchronous, so its reads cannot interleave on the event
+        loop. The returned plan is immutable and safe to carry across the live
+        network probe; reload_auxiliary CAS-checks it before publishing.
+        """
+        aux = self.get_config().openai_codex.auxiliary
+        wanted = desired or {"enabled": aux.enabled, "model": aux.model}
+        return _AuxReloadPlan(
+            desired_enabled=bool(wanted["enabled"]),
+            desired_model=str(wanted["model"]),
+            prior_enabled=aux.enabled,
+            prior_model=aux.model,
+            build=self._snapshot_aux_build_inputs(),
+            primary=self.codex_client,
+            generation=self._aux_reload_gen,
+        )
+
+    def _aux_plan_is_current(self, plan: _AuxReloadPlan) -> str | None:
+        """Return a retry reason if a reload plan lost its compare-and-swap."""
+        aux = self.get_config().openai_codex.auxiliary
+        if (aux.enabled, aux.model) != (plan.prior_enabled, plan.prior_model):
+            return "concurrent auxiliary config change; retry"
+        if self._aux_reload_gen != plan.generation:
+            return "concurrent reload; retry"
+        if plan.desired_enabled:
+            if self.codex_client is not plan.primary:
+                return "concurrent reload: primary changed; retry"
+            if self._snapshot_aux_build_inputs() != plan.build:
+                return "concurrent Codex config change; retry"
+        return None
+
+    def _build_aux_candidate(self, desired: dict, primary, build: _AuxBuildInputs):
+        """Construct a candidate solely from an immutable pre-probe plan.
+
+        The auth pool is SHARED with the captured primary client. No live config
+        is read here: every construction input is CAS-checked at commit.
+        """
         from ..llm.auxiliary import AuxiliaryLLMClient
 
-        config = self.get_config()
         aux_auth = primary.auth
         if not aux_auth.is_configured():
             return None, None
         candidate_client = CodexChatClient(
             auth=aux_auth,
             model=desired["model"],
-            max_tokens=config.openai_codex.max_tokens,
-            max_retries=config.openai_codex.retry.max_retries,
-            retry_base_delay=config.openai_codex.retry.base_delay,
-            retry_max_delay=config.openai_codex.retry.max_delay,
-            pool_max_connections=config.openai_codex.connection_pool.max_connections,
-            pool_keepalive_timeout=config.openai_codex.connection_pool.keepalive_timeout,
-            request_timeout=config.openai_codex.request_timeout_seconds,
-            stream_stall_timeout=config.openai_codex.stream_stall_timeout_seconds,
+            max_retries=build.retry_max_retries,
+            retry_base_delay=build.retry_base_delay,
+            retry_max_delay=build.retry_max_delay,
+            pool_max_connections=build.pool_max_connections,
+            pool_keepalive_timeout=build.pool_keepalive_timeout,
+            request_timeout=build.request_timeout,
+            stream_stall_timeout=build.stream_stall_timeout,
         )
         candidate = AuxiliaryLLMClient(
             aux_client=candidate_client,
@@ -363,33 +444,40 @@ class LLMGateway:
         aux_cfg = self.get_config().openai_codex.auxiliary
         return {"enabled": aux_cfg.enabled, "model": aux_cfg.model}
 
-    async def reload_auxiliary(self, desired: dict | None = None, persist=None) -> dict:
-        """Transactional live reload of the auxiliary wrapper.
+    async def reload_auxiliary(
+        self,
+        desired: dict | None = None,
+        persist=None,
+        *,
+        plan: _AuxReloadPlan | None = None,
+    ) -> dict:
+        """Transactional auxiliary reload using prepare/probe/CAS-commit.
 
-        Self-locking — must NOT be called under ``provider_lock``. ``desired``
-        is an IMMUTABLE spec; when None the current config is snapshotted. The
-        candidate is built and compatibility-probed OUTSIDE the lock. UNDER the
-        lock, ONE transaction: verify primary + reload generation, apply
-        candidate pointers/config, then — if ``persist`` is given — run it as
-        part of the same transaction; a persist failure restores the EXACT
-        prior pointers/config before the lock releases (never a fresh probed
-        reload). The retired wrapper drains only AFTER a successful persist;
-        the candidate drains on any non-install exit. Nothing changes on disk
-        or in runtime unless the whole transaction commits.
+        Preparation snapshots the merge base, candidate construction inputs,
+        primary identity, and auxiliary generation under the global config
+        lock. Candidate construction and the compatibility probe run with NO
+        config/provider lock held. Commit reacquires config_transaction() OUTER
+        and provider_lock inner, verifies the immutable plan, then swaps and
+        persists atomically. A stale plan returns a retry result instead of
+        overwriting newer state.
         """
-        if desired is None:
-            desired = self._snapshot_aux_config()
-        gen_at_build = self._aux_reload_gen
+        if plan is None:
+            async with config_transaction():
+                plan = self.prepare_auxiliary_reload(desired)
+        elif desired is not None and plan.desired != desired:
+            raise ValueError("auxiliary reload plan does not match desired state")
+        desired = plan.desired
 
         # --- disabled: retire + persist as one locked transaction ---
         if not desired["enabled"]:
             committed = False
             was_cancelled = False
             prior_aux = None
-            async with self.provider_lock:
-                if self._aux_reload_gen != gen_at_build:
+            async with config_transaction(), self.provider_lock:
+                stale_reason = self._aux_plan_is_current(plan)
+                if stale_reason is not None:
                     return {"committed": False, "effective_enabled": False,
-                            "reason": "concurrent reload; retry"}
+                            "reason": stale_reason}
                 prior_cfg = self._snapshot_aux_config()
                 prior_aux = self.auxiliary_llm_client
                 self.auxiliary_llm_client = None
@@ -419,14 +507,23 @@ class LLMGateway:
             return {"committed": True, "effective_enabled": False,
                     "reason": "auxiliary disabled"}
 
-        primary_at_build = self.codex_client
+        primary_at_build = plan.primary
         if primary_at_build is None:
             return {"committed": False, "effective_enabled": False,
                     "reason": "no primary Codex client to bind"}
+        # Reject already-stale plans before constructing or probing a client.
+        # Commit repeats this check because state may change while the network
+        # request is in flight.
+        stale_reason = self._aux_plan_is_current(plan)
+        if stale_reason is not None:
+            return {"committed": False, "effective_enabled": False,
+                    "reason": stale_reason}
 
-        # --- phase 1: build + probe OUTSIDE the lock ---
+        # --- phase 1: build + probe with neither mutation lock held ---
         try:
-            candidate, candidate_client = self._build_aux_candidate(desired, primary_at_build)
+            candidate, candidate_client = self._build_aux_candidate(
+                desired, primary_at_build, plan.build
+            )
         except Exception as exc:
             log.exception("Auxiliary reload: candidate build failed")
             return {"committed": False, "effective_enabled": False,
@@ -435,10 +532,9 @@ class LLMGateway:
             return {"committed": False, "effective_enabled": False,
                     "reason": "auxiliary credentials missing"}
 
-        # A single ``finally`` retires the candidate on EVERY non-install exit —
-        # probe failure, generation rejection, persist failure, and cancellation
-        # during the probe or while awaiting the lock — so an uninstalled session
-        # can't leak. Cancellation stays authoritative (re-raised after drain).
+        # A single finally retires the candidate on EVERY non-install exit —
+        # probe failure, CAS rejection, persist failure, and cancellation while
+        # probing or waiting for either lock.
         installed = False
         retired = None
         was_cancelled = False
@@ -447,13 +543,11 @@ class LLMGateway:
             if probe_reason is not None:
                 return {"committed": False, "effective_enabled": False,
                         "reason": probe_reason}
-            async with self.provider_lock:
-                if self.codex_client is not primary_at_build:
+            async with config_transaction(), self.provider_lock:
+                stale_reason = self._aux_plan_is_current(plan)
+                if stale_reason is not None:
                     return {"committed": False, "effective_enabled": False,
-                            "reason": "primary changed during reload"}
-                if self._aux_reload_gen != gen_at_build:
-                    return {"committed": False, "effective_enabled": False,
-                            "reason": "concurrent reload; retry"}
+                            "reason": stale_reason}
                 prior_cfg = self._snapshot_aux_config()
                 prior_aux = self.auxiliary_llm_client
                 self.auxiliary_llm_client = candidate
@@ -462,8 +556,6 @@ class LLMGateway:
                 if persist is not None:
                     persist_exc, was_cancelled = await self.run_persist_settled(persist)
                     if persist_exc is not None:
-                        # EXACT restore of the prior generation, then drain the
-                        # candidate (installed stays False → finally handles it).
                         self.auxiliary_llm_client = prior_aux
                         self._apply_aux_desired(prior_cfg)
                         self._aux_reload_gen += 1
@@ -471,16 +563,12 @@ class LLMGateway:
                         if not was_cancelled:
                             return {"committed": False, "effective_enabled": False,
                                     "reason": "persist failed"}
-                        # cancelled + restored → candidate drains via finally,
-                        # cancellation re-raised after the lock.
                     else:
                         retired = prior_aux
                         installed = True
                 else:
                     retired = prior_aux
                     installed = True
-            # Post-lock: drain the retired generation on commit; a cancellation
-            # that arrived during persistence is re-raised now (coherent state).
             if installed:
                 self._schedule_drain(retired)
             if was_cancelled:

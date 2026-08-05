@@ -3,7 +3,7 @@
  * Conversation threading, filter presets, sort options, visual improvements
  */
 import { api, ws } from '../api.js';
-import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 
 
 const FILTER_PRESETS = [
@@ -291,7 +291,8 @@ export default {
                       </div>
                     </div>
                   </div>
-                  <div v-if="threads.length === 0 && detail.messages && detail.messages.length === 0"
+                  <div v-if="detail.error" class="text-red-400 text-sm" role="alert">{{ detail.error }}</div>
+                  <div v-else-if="threads.length === 0 && detail.messages && detail.messages.length === 0"
                        class="text-gray-500 text-sm">No messages in this session</div>
                 </div>
 
@@ -310,7 +311,8 @@ export default {
                     </div>
                     <div class="whitespace-pre-wrap break-words text-gray-200 session-msg-content">{{ truncateContent(m.content) }}</div>
                   </div>
-                  <div v-if="detail.messages && detail.messages.length === 0" class="text-gray-500 text-sm">No messages in this session</div>
+                  <div v-if="detail.error" class="text-red-400 text-sm" role="alert">{{ detail.error }}</div>
+                  <div v-else-if="detail.messages && detail.messages.length === 0" class="text-gray-500 text-sm">No messages in this session</div>
                 </div>
               </div>
             </div>
@@ -358,6 +360,11 @@ export default {
     const expandedId = ref(null);
     const detail = ref(null);
     const detailLoading = ref(false);
+    // Monotonic token: comparing only expandedId cannot distinguish two
+    // requests for the SAME session (expand A, collapse, expand A again), so
+    // an older A response could still overwrite a newer one. Every writer of
+    // `detail` claims a token and commits only if it is still the latest.
+    let detailRequest = 0;
     const clearTarget = ref(null);
     const clearing = ref(false);
     const selected = ref(new Set());
@@ -676,12 +683,20 @@ export default {
       detail.value = null;
       detailLoading.value = true;
       collapsedThreads.value = new Set();
+      const token = ++detailRequest;
       try {
-        detail.value = await api.get(`/api/sessions/${encodeURIComponent(channelId)}`);
+        const loaded = await api.get(`/api/sessions/${encodeURIComponent(channelId)}`);
+        if (token === detailRequest && expandedId.value === channelId) detail.value = loaded;
       } catch (e) {
-        detail.value = { messages: [], summary: '' };
+        if (token === detailRequest && expandedId.value === channelId) {
+          detail.value = { messages: [], summary: '', error: e.message || 'Failed to load session' };
+        }
+      } finally {
+        // Settle the spinner unconditionally for the LATEST request. Returning
+        // early on supersession left it spinning forever over data that had
+        // already arrived.
+        if (token === detailRequest) detailLoading.value = false;
       }
-      detailLoading.value = false;
     }
 
     // Selection
@@ -745,16 +760,24 @@ export default {
     }
 
     // Export
-    function exportSession(channelId, format) {
-      const token = api._token;
-      let url = `/api/sessions/${encodeURIComponent(channelId)}/export?format=${format}`;
-      if (token) url += `&token=${encodeURIComponent(token)}`;
-      const a = document.createElement('a');
-      a.href = url;
-      a.download = `session-${channelId}.${format === 'text' ? 'txt' : 'json'}`;
-      document.body.appendChild(a);
-      a.click();
-      document.body.removeChild(a);
+    async function exportSession(channelId, format) {
+      // Fetch with the Authorization header and download from a Blob. The old
+      // path reached past the public getter for api._token and appended it as
+      // a query parameter, which lands the credential in browser history, the
+      // referrer chain, and any access log that records query strings.
+      const path = `/api/sessions/${encodeURIComponent(channelId)}/export?format=${format}`;
+      try {
+        const blob = await api.getBlob(path);
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `session-${channelId}.${format === 'text' ? 'txt' : 'json'}`;
+        a.click();
+        URL.revokeObjectURL(url);
+      } catch (e) {
+        // Previously the browser navigated and failure was invisible.
+        error.value = e.message || 'Failed to export session';
+      }
     }
 
     // WebSocket: debounced refresh on new message events
@@ -765,24 +788,57 @@ export default {
         debounceTimer = setTimeout(() => {
           fetchSessions();
           if (expandedId.value && data.payload.channel_id === expandedId.value) {
-            api.get(`/api/sessions/${encodeURIComponent(expandedId.value)}`)
-              .then(d => { detail.value = d; })
+            // A BACKGROUND refresh: it must yield to the foreground rather
+            // than supersede it. Claiming a new token stranded the spinner —
+            // the in-flight foreground request saw a stale token, returned
+            // early, and never settled detailLoading.
+            const channelId = expandedId.value;
+            const seen = detailRequest;
+            api.get(`/api/sessions/${encodeURIComponent(channelId)}`)
+              .then(d => {
+                if (seen !== detailRequest || expandedId.value !== channelId) return;
+                detail.value = d;
+              })
               .catch(() => {});
           }
         }, 2000);
       }
     }
 
-    onMounted(() => {
-      loadCustomPresets();
+    let armed = false;
+
+    // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+    // DEACTIVATES this component without unmounting it — anything armed in
+    // onMounted alone would keep running invisibly until a route change.
+    function arm() {
+      if (armed) return;
+      armed = true;
+      // Vue fires BOTH onMounted and onActivated on the initial keep-alive
+      // mount, so arming must be idempotent — otherwise the websocket
+      // handler is registered twice and unsubscribe() (which removes one
+      // occurrence) leaves a live copy behind on every visit.
       fetchSessions();
       ws.subscribe('events', onEvent);
+    }
+
+    onMounted(() => {
+      loadCustomPresets();
+      arm();
     });
 
-    onUnmounted(() => {
+    onActivated(() => {
+      arm();
+    });
+
+    function disarm() {
+      if (!armed) return;
+      armed = false;
       ws.unsubscribe('events', onEvent);
       clearTimeout(debounceTimer);
-    });
+    }
+
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
       sessions, loading, error,

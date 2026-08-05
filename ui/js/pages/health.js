@@ -4,7 +4,7 @@
  */
 import { api } from '../api.js';
 import { formatTime } from '../utils.js';
-import { computed, onMounted, onUnmounted, ref } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
 
 const STATUS_COLORS = {
@@ -40,13 +40,20 @@ export default {
       </div>
 
       <!-- Error state -->
-      <div v-else-if="error" class="hm-card border-red-900 error-state" role="alert">
+      <!-- Full-page error ONLY when there is nothing to show. A failed
+           background refresh must not replace data we already have:
+           one 502 during a restart used to blank a page that had been
+           rendering fine, until the next poll a full interval later. -->
+      <div v-else-if="error && !hasData" class="hm-card border-red-900 error-state" role="alert">
         <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
         <button @click="retry" class="btn btn-ghost text-xs">Retry</button>
       </div>
 
       <div v-else>
+        <div v-if="error && hasData" class="hm-card border-amber-900 mb-3" role="status" aria-live="polite">
+          <p class="text-amber-400 text-sm">Last refresh failed: {{ error }} — showing the most recent data.</p>
+        </div>
         <!-- Overall status banner -->
         <div class="hm-card mb-4" style="padding:1.25rem 1.5rem;">
           <div style="display:flex;align-items:center;justify-content:space-between;flex-wrap:wrap;gap:0.75rem;">
@@ -164,6 +171,10 @@ export default {
     const data = ref({});
     const loading = ref(true);
     const error = ref(null);
+    // Set only after a response actually arrives. The initial value of
+    // `data` is a placeholder shape in some pages, so its truthiness cannot
+    // distinguish "never loaded" from "loaded and now stale".
+    const hasData = ref(false);
     const refreshing = ref(false);
 
     const components = computed(() => data.value.components || []);
@@ -221,6 +232,7 @@ export default {
       try {
         data.value = await api.get('/api/health/components');
         error.value = null;
+        hasData.value = true;
       } catch (e) {
         error.value = e.message;
       } finally {
@@ -236,17 +248,36 @@ export default {
     }
 
     let interval = null;
-    onMounted(async () => {
-      await fetchHealth();
-      interval = setInterval(fetchHealth, 30000);
-    });
+    let armed = false;
 
-    onUnmounted(() => {
-      if (interval) clearInterval(interval);
-    });
+    function arm() {
+      if (armed) return;
+      armed = true;
+      // Vue fires BOTH onMounted and onActivated on the initial keep-alive
+      // mount, so arming must be idempotent — otherwise the websocket
+      // handler is registered twice and unsubscribe() (which removes one
+      // occurrence) leaves a live copy behind on every visit.
+      // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
+      // DEACTIVATES this component without unmounting it. Anything armed in
+      // onMounted would keep running invisibly until a top-level route change.
+      // Same pattern as loops.js/agents.js/logs.js.
+      fetchHealth();
+      if (!interval) interval = setInterval(fetchHealth, 30000);
+    }
+
+    function disarm() {
+      if (!armed) return;
+      armed = false;
+      if (interval) { clearInterval(interval); interval = null; }
+    }
+
+    onMounted(arm);
+    onActivated(arm);
+    onDeactivated(disarm);
+    onUnmounted(disarm);
 
     return {
-      data, loading, error, refreshing, components,
+      data, hasData, loading, error, refreshing, components,
       overallColor, overallIcon, overallLabel,
       statusColor, statusIcon, badgeClass, circuitColor,
       formatName, formatTime, formatNumber,

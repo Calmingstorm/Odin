@@ -125,6 +125,101 @@ class TestSchedulerAdd:
 # Tests — delete()
 # ---------------------------------------------------------------------------
 
+class TestOneTimingModeOnly:
+    """A schedule fires one way, and used to keep whichever won a hidden race.
+
+    add() and update() preferred trigger, then cron, then run_at, and dropped
+    the rest silently — so a form that left Cron populated while the operator
+    filled in a one-time date created a RECURRING schedule and reported
+    success. Rejecting is the only answer that cannot surprise anyone.
+    """
+
+    async def test_cron_and_run_at_together_are_rejected(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        run_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        with pytest.raises(ValueError, match="exactly one"):
+            await s.add("both", "reminder", "chan1", cron="*/5 * * * *", run_at=run_at)
+        assert s.list_all() == []
+
+    async def test_trigger_and_cron_together_are_rejected(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="exactly one"):
+            await s.add(
+                "both", "reminder", "chan1",
+                cron="*/5 * * * *", trigger={"type": "webhook", "name": "x"},
+            )
+
+    async def test_the_message_names_what_was_supplied(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        run_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        with pytest.raises(ValueError) as exc:
+            await s.add("both", "reminder", "chan1", cron="*/5 * * * *", run_at=run_at)
+        assert "cron" in str(exc.value) and "run_at" in str(exc.value)
+
+    async def test_update_rejects_two_timing_modes(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        created = await s.add("job", "reminder", "chan1", cron="*/5 * * * *")
+        run_at = (datetime.now(UTC) + timedelta(hours=1)).isoformat()
+        with pytest.raises(ValueError, match="exactly one"):
+            await s.update(created["id"], cron="0 * * * *", run_at=run_at)
+        # The original timing survives a rejected update.
+        assert s.list_all()[0]["cron"] == "*/5 * * * *"
+
+    async def test_a_single_mode_still_works(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        created = await s.add("job", "reminder", "chan1", cron="*/5 * * * *")
+        updated = await s.update(created["id"], cron="0 * * * *")
+        assert updated["cron"] == "0 * * * *"
+
+
+class TestAmbiguousRunAt:
+    """An offsetless run_at names a wall clock, not an instant.
+
+    It was stamped UTC regardless, so a New York install fired five hours
+    early and a fall-back night ran it twice. The rule lives HERE rather than
+    at the web boundary so every caller is covered — the Discord tool path
+    included, where schedule_task directs the model through parse_time, which
+    always returns an offset-aware value.
+    """
+
+    async def test_a_naive_run_at_is_rejected(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="explicit offset"):
+            await s.add("job", "reminder", "chan1", run_at="2026-11-01T01:30:30")
+        assert s.list_all() == []
+
+    async def test_update_rejects_a_naive_run_at(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        created = await s.add("job", "reminder", "chan1", cron="*/5 * * * *")
+        with pytest.raises(ValueError, match="explicit offset"):
+            await s.update(created["id"], run_at="2026-11-01T01:30:30")
+        assert s.list_all()[0]["cron"] == "*/5 * * * *"
+
+    @pytest.mark.parametrize(
+        "stamp", ["2026-11-01T01:30:30Z", "2026-11-01T01:30:30-04:00"]
+    )
+    async def test_offset_aware_values_are_accepted(self, tmp_path, stamp):
+        s = _make_scheduler(tmp_path)
+        created = await s.add("job", "reminder", "chan1", run_at=stamp)
+        assert created["one_time"] is True
+
+    async def test_parse_time_output_is_always_acceptable(self, tmp_path):
+        """The tool tells the model to use parse_time, so its output must
+        satisfy this rule — otherwise the rule breaks reminders."""
+        from src.tools.time_parser import parse_time
+
+        s = _make_scheduler(tmp_path)
+        created = await s.add(
+            "job", "reminder", "chan1", run_at=parse_time("tomorrow at 9am")
+        )
+        assert created["one_time"] is True
+
+    async def test_a_malformed_value_falls_through_to_the_iso_check(self, tmp_path):
+        s = _make_scheduler(tmp_path)
+        with pytest.raises(ValueError, match="Invalid ISO datetime"):
+            await s.add("job", "reminder", "chan1", run_at="not-a-date")
+
+
 class TestSchedulerDelete:
     async def test_delete_existing(self, tmp_path):
         s = _make_scheduler(tmp_path)
@@ -353,12 +448,20 @@ class TestSchedulerUpdate:
         assert updated["channel_id"] == "chan2"
 
     async def test_update_cron_expression(self, tmp_path):
+        """next_run must follow the NEW cron.
+
+        This used to assert only that next_run CHANGED, which is a coincidence
+        of the wall clock: between 11:55 and 12:00 UTC, "*/5 * * * *" and
+        "0 12 * * *" both resolve to 12:00:00 and the test failed for five
+        minutes a day. Compare against the new expression instead.
+        """
+        from src.scheduler.scheduler import _cron_next_run
+
         s = _make_scheduler(tmp_path)
         sched = await s.add("cron job", "reminder", "chan1", cron="*/5 * * * *")
-        old_next = sched["next_run"]
         updated = await s.update(sched["id"], cron="0 12 * * *")
         assert updated["cron"] == "0 12 * * *"
-        assert updated["next_run"] != old_next
+        assert updated["next_run"] == _cron_next_run("0 12 * * *")
         assert updated["one_time"] is False
 
     async def test_update_cron_to_one_time(self, tmp_path):

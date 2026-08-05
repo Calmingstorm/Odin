@@ -5,6 +5,7 @@ Kimi admin routes through the real route layer with a real Config + faked
 components. Network is never touched: aiohttp sessions are faked, provider
 reloads are AsyncMocks, and `_persist_config` is stubbed so no test writes disk.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,11 +17,9 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import Config
+from src.discord.llm_gateway import LLMGateway
 from src.web.api.llm_admin import (
     _parse_int,
-    _persist_llm_sections_sync,
-    _safe_secret,
-    _ui_set_secrets,
     _validate_ollama_url,
     register_connection_pools,
     register_kimi_admin,
@@ -37,15 +36,17 @@ def _isolate_cwd(tmp_path, monkeypatch):
     # the isolated tmp dir so nothing touches the repo root.
     monkeypatch.chdir(tmp_path)
     from src.config import schema
+
     monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", tmp_path / "config.yml")
 
 
 @pytest.fixture(autouse=True)
 def _no_persist(monkeypatch):
-    # Stub the SYNC inner (not the async _persist_config wrapper) so route tests
-    # still exercise _persist_config's to_thread hop without writing config.yml,
-    # while the direct-import references in TestPersistHelpers keep the real one.
-    monkeypatch.setattr("src.web.api.llm_admin._persist_llm_sections_sync", MagicMock())
+    async def persist(_changes):
+        return None, False
+
+    monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", persist)
+    monkeypatch.setattr("src.web.api.llm_admin.patch_config_paths", MagicMock())
 
 
 def _bot():
@@ -66,6 +67,12 @@ def _gw(bot):
     gw.reload_kimi_inner = AsyncMock()
     # Settle-safe persist runner (real gateway method): default = clean write.
     gw.run_persist_settled = AsyncMock(return_value=(None, False))
+    # Auxiliary route preparation is synchronous but now a concrete gateway
+    # responsibility; bind the real methods rather than letting MagicMock hide
+    # the plan contract.
+    gw._aux_reload_gen = 0
+    gw.prepare_auxiliary_reload = LLMGateway.prepare_auxiliary_reload.__get__(gw)
+    gw._snapshot_aux_build_inputs = LLMGateway._snapshot_aux_build_inputs.__get__(gw)
     return gw
 
 
@@ -113,12 +120,12 @@ class _FakeSession:
 
 def _provider_client(models=None, healthy=True):
     client = SimpleNamespace(model="m1", base_url="http://localhost:11434")
-    client.health_check = AsyncMock(
-        return_value={"healthy": healthy, "models": models or []})
+    client.health_check = AsyncMock(return_value={"healthy": healthy, "models": models or []})
     client.pool_stats = lambda: {"active": 1}
     client._headers = lambda: {}
     client._get_session = AsyncMock(
-        return_value=_FakeSession(_FakeResp(200, {"models": models or []})))
+        return_value=_FakeSession(_FakeResp(200, {"models": models or []}))
+    )
     return client
 
 
@@ -136,6 +143,7 @@ class TestLlmStatus:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["configured"] is True
+            assert "max_tokens" not in body["codex"]
             assert body["codex"]["reasoning_effort"] == "medium"
             assert body["codex"]["active_reasoning_effort"] is None  # object() has no attr
             assert body["ollama"]["configured"] is False
@@ -276,13 +284,11 @@ class TestLlmStatus:
             return {"active_provider": provider}
 
         bot.llm_gateway.switch_provider = _switch
-        ran = []
-        with patch("src.web.api.llm_admin._persist_llm_sections_sync",
-                   new=lambda _b: ran.append(True)):
+        with patch("src.web.api.llm_admin.patch_config_paths") as persist:
             async with TestClient(TestServer(app)) as c:
                 assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 200
         assert captured["persist"] is not None
-        assert ran == [True]
+        persist.assert_called_once_with([(("llm_provider", "active_provider"), "codex")])
 
     @pytest.mark.asyncio
     async def test_llm_switch_persist_failure_500(self):
@@ -290,8 +296,7 @@ class TestLlmStatus:
         # failed"} → the route 500s (not 400).
         app, bot = _app(register_llm_provider)
         _gw(bot)
-        bot.llm_gateway.switch_provider = AsyncMock(
-            return_value={"error": "persist failed"})
+        bot.llm_gateway.switch_provider = AsyncMock(return_value={"error": "persist failed"})
         async with TestClient(TestServer(app)) as c:
             assert (await c.post("/api/llm/switch", json={"provider": "codex"})).status == 500
 
@@ -303,17 +308,27 @@ class TestConnectionPools:
     @pytest.mark.asyncio
     async def test_ssh_pool_unavailable(self):
         app, bot = _app(register_connection_pools)
-        bot.executor = None
+        bot.tool_executor = None
         async with TestClient(TestServer(app)) as c:
             assert (await c.get("/api/pools/ssh")).status == 503
 
     @pytest.mark.asyncio
     async def test_ssh_pool_metrics(self):
         app, bot = _app(register_connection_pools)
-        bot.executor.ssh_pool.get_metrics.return_value = {"connections": 3}
+        bot.tool_executor.ssh_pool.get_metrics.return_value = {"connections": 3}
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/pools/ssh")).json()
             assert body["connections"] == 3
+
+    @pytest.mark.asyncio
+    async def test_ssh_pool_uses_public_tool_executor_handle(self):
+        app, bot = _app(register_connection_pools)
+        bot.executor = None
+        bot.tool_executor.ssh_pool.get_metrics.return_value = {"connections": 7}
+        async with TestClient(TestServer(app)) as c:
+            response = await c.get("/api/pools/ssh")
+            assert response.status == 200
+            assert (await response.json())["connections"] == 7
 
     @pytest.mark.asyncio
     async def test_http_pools(self):
@@ -337,8 +352,8 @@ class TestConnectionPools:
     @pytest.mark.asyncio
     async def test_ssh_close_host_and_all(self):
         app, bot = _app(register_connection_pools)
-        bot.executor.ssh_pool.close_host = AsyncMock(return_value=True)
-        bot.executor.ssh_pool.close_all = AsyncMock(return_value=4)
+        bot.tool_executor.ssh_pool.close_host = AsyncMock(return_value=True)
+        bot.tool_executor.ssh_pool.close_all = AsyncMock(return_value=4)
         async with TestClient(TestServer(app)) as c:
             r = await c.post("/api/pools/ssh/close", json={"host": "server"})
             assert (await r.json())["closed"] is True
@@ -359,7 +374,7 @@ class TestConnectionPools:
     @pytest.mark.asyncio
     async def test_ssh_close_unavailable(self):
         app, bot = _app(register_connection_pools)
-        bot.executor = None
+        bot.tool_executor = None
         async with TestClient(TestServer(app)) as c:
             assert (await c.post("/api/pools/ssh/close", json={})).status == 503
 
@@ -367,6 +382,7 @@ class TestConnectionPools:
 # --------------------------------------------------------------------------- #
 # Provider config PUTs
 # --------------------------------------------------------------------------- #
+
 class TestProviderConfig:
     @pytest.mark.asyncio
     async def test_codex_config(self):
@@ -375,17 +391,42 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         async with TestClient(TestServer(app)) as c:
             assert (await c.put("/api/llm/codex/config", data="bad")).status == 400
-            r = await c.put("/api/llm/codex/config",
-                            json={"enabled": True, "model": "gpt-5.5", "max_tokens": 8000,
-                                  "reasoning_effort": "high"})
+            r = await c.put(
+                "/api/llm/codex/config",
+                json={
+                    "enabled": True,
+                    "model": "gpt-5.5",
+                    "reasoning_effort": "high",
+                },
+            )
             rbody = await r.json()
             assert r.status == 200 and rbody["status"] == "updated"
+            assert "max_tokens" not in rbody
             assert rbody["reasoning_effort"] == "high"
             assert bot.config.openai_codex.reasoning_effort == "high"
             bot.llm_gateway.reload_codex_inner.assert_awaited()
-            # invalid max_tokens → ValueError → 400
-            assert (await c.put("/api/llm/codex/config",
-                                json={"max_tokens": "nope"})).status == 400
+
+    @pytest.mark.asyncio
+    async def test_codex_config_value_error_is_a_clean_400(self, monkeypatch):
+        """The route's schema-error boundary remains covered after removing the
+        dead top-level integer parser."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+
+        async def invalid(_changes):
+            raise ValueError("schema rejected desired value")
+
+        monkeypatch.setattr(
+            "src.web.api.llm_admin.persist_config_paths_locked", invalid
+        )
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put(
+                "/api/llm/codex/config", json={"model": "gpt-5.6-terra"}
+            )
+            response_body = await response.json()
+
+        assert response.status == 400
+        assert response_body["error"] == "schema rejected desired value"
 
     @pytest.mark.asyncio
     async def test_codex_config_accepts_agent_axis_auto(self):
@@ -394,8 +435,10 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         bot.tool_catalog = MagicMock()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_reasoning_effort": "auto", "agent_model": "auto"})
+            r = await c.put(
+                "/api/llm/codex/config",
+                json={"agent_reasoning_effort": "auto", "agent_model": "auto"},
+            )
             rbody = await r.json()
             assert r.status == 200 and rbody["status"] == "updated"
             assert bot.config.openai_codex.agent_reasoning_effort == "auto"
@@ -403,8 +446,9 @@ class TestProviderConfig:
             # changing an agent axis rebuilds the tool catalog
             bot.tool_catalog.invalidate.assert_called()
             # an invalid (non-auto) agent effort value is still rejected
-            assert (await c.put("/api/llm/codex/config",
-                                json={"agent_reasoning_effort": "ultra"})).status == 400
+            assert (
+                await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": "ultra"})
+            ).status == 400
 
     @pytest.mark.asyncio
     async def test_codex_config_no_lock_503(self):
@@ -421,15 +465,17 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"enabled": False, "model": "changed-model",
-                                  "reasoning_effort": "banana"})
+            r = await c.put(
+                "/api/llm/codex/config",
+                json={"enabled": False, "model": "changed-model", "reasoning_effort": "banana"},
+            )
             assert r.status == 400
             assert "reasoning_effort" in (await r.json())["error"]
             # "minimal" is grammar-valid upstream but unsupported by every
             # model on this auth path — the PUT layer rejects it too
-            assert (await c.put("/api/llm/codex/config",
-                                json={"reasoning_effort": "minimal"})).status == 400
+            assert (
+                await c.put("/api/llm/codex/config", json={"reasoning_effort": "minimal"})
+            ).status == 400
         # nothing mutated, nothing reloaded
         assert bot.config.openai_codex.reasoning_effort == "medium"
         assert bot.config.openai_codex.model != "changed-model"
@@ -442,18 +488,19 @@ class TestProviderConfig:
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.llm_gateway.codex_client = object()
-        bot.llm_gateway.reload_auxiliary = AsyncMock(
-            return_value={"committed": True, "effective_enabled": True,
-                          "model": "gpt-5.6-terra"}
+        gateway = bot.llm_gateway
+        gateway.reload_auxiliary = AsyncMock(
+            return_value={"committed": True, "effective_enabled": True, "model": "gpt-5.6-terra"}
         )
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/auxiliary/config",
-                            json={"enabled": True, "model": "gpt-5.6-terra"})
+            r = await c.put(
+                "/api/llm/auxiliary/config", json={"enabled": True, "model": "gpt-5.6-terra"}
+            )
             assert r.status == 200
-            desired = bot.llm_gateway.reload_auxiliary.call_args.args[0]
-            assert desired["enabled"] is True
-            assert desired["model"] == "gpt-5.6-terra"
-            assert "tasks" not in desired
+            plan = bot.llm_gateway.reload_auxiliary.call_args.kwargs["plan"]
+            assert plan.desired["enabled"] is True
+            assert plan.desired["model"] == "gpt-5.6-terra"
+            assert "tasks" not in plan.desired
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_invokes_persist_callable(self):
@@ -462,21 +509,23 @@ class TestProviderConfig:
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.llm_gateway.codex_client = object()
-        ran = []
 
-        async def _reload(desired=None, persist=None):
+        async def _reload(desired=None, persist=None, *, plan=None):
             persist()  # SYNC persist callable — exercise the route's closure
-            return {"committed": True, "effective_enabled": True,
-                    "model": desired["model"]}
+            return {
+                "committed": True,
+                "effective_enabled": True,
+                "model": (plan.desired if plan else desired)["model"],
+            }
 
         bot.llm_gateway.reload_auxiliary = _reload
-        with patch("src.web.api.llm_admin._persist_llm_sections_sync",
-                   new=lambda _b: ran.append(True)):
+        with patch("src.web.api.llm_admin.patch_config_paths") as persist:
             async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/auxiliary/config",
-                                json={"enabled": True, "model": "gpt-5.6-terra"})
+                r = await c.put(
+                    "/api/llm/auxiliary/config", json={"enabled": True, "model": "gpt-5.6-terra"}
+                )
                 assert r.status == 200
-        assert ran == [True]
+        persist.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_guards(self):
@@ -489,8 +538,7 @@ class TestProviderConfig:
             bot.llm_gateway.reload_auxiliary.assert_not_awaited()
             # reload raising → 500
             bot.llm_gateway.reload_auxiliary = AsyncMock(side_effect=RuntimeError("boom"))
-            assert (await c.put("/api/llm/auxiliary/config",
-                                json={"enabled": True})).status == 500
+            assert (await c.put("/api/llm/auxiliary/config", json={"enabled": True})).status == 500
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_generation_reject_409(self):
@@ -498,13 +546,15 @@ class TestProviderConfig:
         app, bot = _app(register_provider_config)
         _gw(bot)
         bot.llm_gateway.reload_auxiliary = AsyncMock(
-            return_value={"committed": False, "effective_enabled": False,
-                          "reason": "concurrent reload; retry"})
-        with patch("src.web.api.llm_admin._persist_config", new=AsyncMock()) as persist:
-            async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/llm/auxiliary/config", json={"enabled": False})
-                assert r.status == 409
-            persist.assert_not_awaited()
+            return_value={
+                "committed": False,
+                "effective_enabled": False,
+                "reason": "concurrent reload; retry",
+            }
+        )
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/auxiliary/config", json={"enabled": False})
+            assert r.status == 409
 
     @pytest.mark.asyncio
     async def test_auxiliary_config_persist_failure_500_via_transaction(self):
@@ -516,15 +566,19 @@ class TestProviderConfig:
         _gw(bot)
         captured = {}
 
-        async def _reload(desired=None, persist=None):
+        async def _reload(desired=None, persist=None, *, plan=None):
             captured["persist"] = persist
-            return {"committed": False, "effective_enabled": False,
-                    "reason": "persist failed: disk full"}
+            return {
+                "committed": False,
+                "effective_enabled": False,
+                "reason": "persist failed: disk full",
+            }
 
         bot.llm_gateway.reload_auxiliary = _reload
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/auxiliary/config",
-                            json={"enabled": True, "model": "gpt-5.6-terra"})
+            r = await c.put(
+                "/api/llm/auxiliary/config", json={"enabled": True, "model": "gpt-5.6-terra"}
+            )
             assert r.status == 500
             assert "persist failed" in (await r.json())["error"]
         assert captured["persist"] is not None  # persist folded into the reload
@@ -536,9 +590,8 @@ class TestProviderConfig:
         app, bot = _app(register_provider_config)
         _gw(bot)
 
-        async def _reload(desired=None, persist=None):
-            return {"committed": False, "effective_enabled": False,
-                    "reason": "persist failed"}
+        async def _reload(desired=None, persist=None, *, plan=None):
+            return {"committed": False, "effective_enabled": False, "reason": "persist failed"}
 
         bot.llm_gateway.reload_auxiliary = _reload
         async with TestClient(TestServer(app)) as c:
@@ -567,8 +620,9 @@ class TestProviderConfig:
             return_value={"effective_enabled": False, "reason": "credentials missing"}
         )
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/auxiliary/config",
-                            json={"enabled": True, "model": "gpt-5.6-terra"})
+            r = await c.put(
+                "/api/llm/auxiliary/config", json={"enabled": True, "model": "gpt-5.6-terra"}
+            )
             assert r.status == 400
             assert "credentials" in (await r.json())["error"]
         # config NOT committed (reload never committed on failure) — the PUT
@@ -585,8 +639,7 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_reasoning_effort": "low"})
+            r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": "low"})
             body = await r.json()
             assert r.status == 200 and body["agent_reasoning_effort"] == "low"
             assert bot.config.openai_codex.agent_reasoning_effort == "low"
@@ -599,15 +652,13 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         bot.config.openai_codex.agent_reasoning_effort = "high"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_reasoning_effort": None})
+            r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": None})
             assert r.status == 200
             assert (await r.json())["agent_reasoning_effort"] is None
             assert bot.config.openai_codex.agent_reasoning_effort is None
             # "" (the UI's inherit sentinel) behaves like null
             bot.config.openai_codex.agent_reasoning_effort = "high"
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_reasoning_effort": ""})
+            r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": ""})
             assert r.status == 200
             assert bot.config.openai_codex.agent_reasoning_effort is None
 
@@ -620,7 +671,7 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         bot.config.openai_codex.agent_reasoning_effort = "high"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"max_tokens": 5000})
+            r = await c.put("/api/llm/codex/config", json={"enabled": False})
             assert r.status == 200
             assert bot.config.openai_codex.agent_reasoning_effort == "high"
 
@@ -630,9 +681,10 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"model": "changed-model",
-                                  "agent_reasoning_effort": "banana"})
+            r = await c.put(
+                "/api/llm/codex/config",
+                json={"model": "changed-model", "agent_reasoning_effort": "banana"},
+            )
             assert r.status == 400
             assert "agent_reasoning_effort" in (await r.json())["error"]
         assert bot.config.openai_codex.agent_reasoning_effort is None
@@ -651,8 +703,7 @@ class TestProviderConfig:
         bot.llm_gateway.kimi_client = None
         bot.llm_gateway.active_client = None
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_model": "gpt-5.6-luna"})
+            r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.6-luna"})
             body = await r.json()
             assert r.status == 200 and body["agent_model"] == "gpt-5.6-luna"
             assert bot.config.openai_codex.agent_model == "gpt-5.6-luna"
@@ -669,8 +720,7 @@ class TestProviderConfig:
         async with TestClient(TestServer(app)) as c:
             for inherit_value in (None, "", "   "):
                 bot.config.openai_codex.agent_model = "gpt-5.6-luna"
-                r = await c.put("/api/llm/codex/config",
-                                json={"agent_model": inherit_value})
+                r = await c.put("/api/llm/codex/config", json={"agent_model": inherit_value})
                 assert r.status == 200
                 assert (await r.json())["agent_model"] is None
                 assert bot.config.openai_codex.agent_model is None
@@ -684,8 +734,7 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_model": "  gpt-9-future  "})
+            r = await c.put("/api/llm/codex/config", json={"agent_model": "  gpt-9-future  "})
             assert r.status == 200
             assert bot.config.openai_codex.agent_model == "gpt-9-future"
 
@@ -698,7 +747,7 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         bot.config.openai_codex.agent_model = "gpt-5.6-luna"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"max_tokens": 5000})
+            r = await c.put("/api/llm/codex/config", json={"enabled": False})
             assert r.status == 200
             assert bot.config.openai_codex.agent_model == "gpt-5.6-luna"
 
@@ -710,9 +759,10 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"model": "gpt-5.6-sol",
-                                  "agent_model": "gpt-5.6-luna"})
+            r = await c.put(
+                "/api/llm/codex/config",
+                json={"model": "gpt-5.6-sol", "agent_model": "gpt-5.6-luna"},
+            )
             assert r.status == 200
         assert bot.config.openai_codex.model == "gpt-5.6-sol"
         assert bot.config.openai_codex.agent_model == "gpt-5.6-luna"
@@ -724,9 +774,10 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.codex_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"reasoning_effort": "high",
-                                  "agent_reasoning_effort": "low"})
+            r = await c.put(
+                "/api/llm/codex/config",
+                json={"reasoning_effort": "high", "agent_reasoning_effort": "low"},
+            )
             assert r.status == 200
             bot.llm_gateway.reload_codex_inner.assert_awaited()
             assert bot.config.openai_codex.reasoning_effort == "high"
@@ -738,14 +789,23 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.ollama_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/ollama/config", json={
-                "enabled": True, "base_url": "http://localhost:11434",
-                "model": "qwen3", "max_tokens": 4096, "api_key": "k", "timeout": 120})
+            r = await c.put(
+                "/api/llm/ollama/config",
+                json={
+                    "enabled": True,
+                    "base_url": "http://localhost:11434",
+                    "model": "qwen3",
+                    "max_tokens": 4096,
+                    "api_key": "k",
+                    "timeout": 120,
+                },
+            )
             assert r.status == 200 and (await r.json())["base_url"] == "http://localhost:11434"
             bot.llm_gateway.reload_ollama_inner.assert_awaited()
             # SSRF-blocked public url → 400
-            assert (await c.put("/api/llm/ollama/config",
-                                json={"base_url": "http://8.8.8.8"})).status == 400
+            assert (
+                await c.put("/api/llm/ollama/config", json={"base_url": "http://8.8.8.8"})
+            ).status == 400
 
     @pytest.mark.asyncio
     async def test_kimi_config(self):
@@ -753,9 +813,16 @@ class TestProviderConfig:
         _gw(bot)
         bot.llm_gateway.kimi_client = object()
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/kimi/config", json={
-                "enabled": True, "api_key": "k", "model": "kimi-k2",
-                "max_tokens": 8000, "timeout": 120})
+            r = await c.put(
+                "/api/llm/kimi/config",
+                json={
+                    "enabled": True,
+                    "api_key": "k",
+                    "model": "kimi-k2",
+                    "max_tokens": 8000,
+                    "timeout": 120,
+                },
+            )
             assert r.status == 200 and (await r.json())["status"] == "updated"
             bot.llm_gateway.reload_kimi_inner.assert_awaited()
             assert (await c.put("/api/llm/kimi/config", data="bad")).status == 400
@@ -791,17 +858,21 @@ class TestOllamaAdmin:
         app, bot = _app(register_ollama_admin)
         async with TestClient(TestServer(app)) as c:
             assert (await c.post("/api/ollama/probe-models", data="bad")).status == 400
-            assert (await c.post("/api/ollama/probe-models",
-                                 json={"base_url": "http://8.8.8.8"})).status == 400  # SSRF
-            with patch("aiohttp.ClientSession",
-                       return_value=_FakeSession(_FakeResp(200, {"models": [{"name": "q"}]}))):
-                r = await c.post("/api/ollama/probe-models",
-                                 json={"base_url": "http://localhost:11434"})
+            assert (
+                await c.post("/api/ollama/probe-models", json={"base_url": "http://8.8.8.8"})
+            ).status == 400  # SSRF
+            with patch(
+                "aiohttp.ClientSession",
+                return_value=_FakeSession(_FakeResp(200, {"models": [{"name": "q"}]})),
+            ):
+                r = await c.post(
+                    "/api/ollama/probe-models", json={"base_url": "http://localhost:11434"}
+                )
                 assert r.status == 200 and (await r.json())["models"][0]["name"] == "q"
-            with patch("aiohttp.ClientSession",
-                       return_value=_FakeSession(_FakeResp(500))):
-                r = await c.post("/api/ollama/probe-models",
-                                 json={"base_url": "http://localhost:11434"})
+            with patch("aiohttp.ClientSession", return_value=_FakeSession(_FakeResp(500))):
+                r = await c.post(
+                    "/api/ollama/probe-models", json={"base_url": "http://localhost:11434"}
+                )
                 assert r.status == 502
 
     @pytest.mark.asyncio
@@ -921,8 +992,7 @@ class TestErrorBranches:
         _gw(bot)
         bot.llm_gateway.kimi_client = object()
         async with TestClient(TestServer(app)) as c:
-            assert (await c.put("/api/llm/kimi/config",
-                                json={"max_tokens": "nope"})).status == 400
+            assert (await c.put("/api/llm/kimi/config", json={"max_tokens": "nope"})).status == 400
         bot.llm_gateway.provider_lock = None
         async with TestClient(TestServer(app)) as c:
             assert (await c.put("/api/llm/kimi/config", json={"enabled": True})).status == 503
@@ -948,8 +1018,9 @@ class TestErrorBranches:
         app, bot = _app(register_ollama_admin)
         with patch("aiohttp.ClientSession", side_effect=RuntimeError("net down")):
             async with TestClient(TestServer(app)) as c:
-                r = await c.post("/api/ollama/probe-models",
-                                 json={"base_url": "http://localhost:11434"})
+                r = await c.post(
+                    "/api/ollama/probe-models", json={"base_url": "http://localhost:11434"}
+                )
                 assert r.status == 502
 
 
@@ -972,13 +1043,11 @@ class TestValidateOllamaUrl:
             _validate_ollama_url("http://8.8.8.8")
 
     def test_hostname_resolves_private(self):
-        with patch("socket.getaddrinfo",
-                   return_value=[(2, 1, 6, "", ("10.1.2.3", 0))]):
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("10.1.2.3", 0))]):
             assert _validate_ollama_url("http://ollama.local").startswith("http")
 
     def test_hostname_resolves_public_rejected(self):
-        with patch("socket.getaddrinfo",
-                   return_value=[(2, 1, 6, "", ("1.2.3.4", 0))]):
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("1.2.3.4", 0))]):
             with pytest.raises(ValueError):
                 _validate_ollama_url("http://evil.example")
 
@@ -993,8 +1062,7 @@ class TestValidateOllamaUrl:
                 _validate_ollama_url("http://empty.example")
 
     def test_hostname_resolves_link_local_rejected(self):
-        with patch("socket.getaddrinfo",
-                   return_value=[(2, 1, 6, "", ("169.254.9.9", 0))]):
+        with patch("socket.getaddrinfo", return_value=[(2, 1, 6, "", ("169.254.9.9", 0))]):
             with pytest.raises(ValueError):
                 _validate_ollama_url("http://ll.example")
 
@@ -1009,28 +1077,48 @@ class TestParseInt:
 
 
 class TestPersistHelpers:
-    def test_safe_secret_branches(self):
-        _ui_set_secrets.discard("t.key")
-        # env-var placeholder preserved when not UI-set
-        assert _safe_secret("t.key", "${ENV_VAR}", "real") == "${ENV_VAR}"
-        # plain existing value → memory value wins
-        assert _safe_secret("t.key", "old", "real") == "real"
-        # explicitly UI-set → memory value
-        _ui_set_secrets.add("t.key")
-        try:
-            assert _safe_secret("t.key", "${ENV_VAR}", "real") == "real"
-        finally:
-            _ui_set_secrets.discard("t.key")
+    @staticmethod
+    def _changes(bot):
+        return [
+            (("openai_codex", "enabled"), bot.config.openai_codex.enabled),
+            (("openai_codex", "model"), bot.config.openai_codex.model),
+            (("openai_codex", "reasoning_effort"), bot.config.openai_codex.reasoning_effort),
+            (
+                ("openai_codex", "agent_reasoning_effort"),
+                bot.config.openai_codex.agent_reasoning_effort,
+            ),
+            (("openai_codex", "agent_model"), bot.config.openai_codex.agent_model),
+            (("openai_codex", "auxiliary", "enabled"), bot.config.openai_codex.auxiliary.enabled),
+            (("openai_codex", "auxiliary", "model"), bot.config.openai_codex.auxiliary.model),
+            (("ollama", "enabled"), bot.config.ollama.enabled),
+            (("ollama", "base_url"), bot.config.ollama.base_url),
+            (("ollama", "model"), bot.config.ollama.model),
+            (("ollama", "max_tokens"), bot.config.ollama.max_tokens),
+            (("ollama", "api_key"), bot.config.ollama.api_key),
+            (("ollama", "timeout"), bot.config.ollama.timeout),
+            (("kimi", "enabled"), bot.config.kimi.enabled),
+            (("kimi", "api_key"), bot.config.kimi.api_key),
+            (("kimi", "model"), bot.config.kimi.model),
+            (("kimi", "max_tokens"), bot.config.kimi.max_tokens),
+            (("kimi", "timeout"), bot.config.kimi.timeout),
+            (("llm_provider", "active_provider"), bot.config.llm_provider.active_provider),
+        ]
+
+    def _patch_all_llm_fields(self, bot):
+        from src.config.persistence import patch_config_paths
+
+        patch_config_paths(self._changes(bot))
 
     def test_persist_no_file_raises(self):
         # A mutation endpoint must not claim success when nothing persisted —
         # missing config.yml is now a loud failure, not a silent no-op.
         from pathlib import Path
 
-        from src.web.api.llm_admin import PersistError
+        from src.config.persistence import ConfigPersistError
+
         Path("config.yml").unlink(missing_ok=True)  # active path set, file absent
-        with pytest.raises(PersistError, match="does not exist"):
-            _persist_llm_sections_sync(_bot())
+        with pytest.raises(ConfigPersistError, match="does not exist"):
+            self._patch_all_llm_fields(_bot())
 
     def test_persist_refuses_when_no_active_config_path(self, monkeypatch):
         # THE guard against the config-wipe class: a fabricated Config (never
@@ -1040,22 +1128,24 @@ class TestPersistHelpers:
         from pathlib import Path
 
         from src.config import schema
-        from src.web.api.llm_admin import PersistError
+        from src.config.persistence import ConfigPersistError
+
         monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", None)
         Path("config.yml").write_text("discord:\n  token: real-do-not-touch\n")
-        with pytest.raises(PersistError, match="not loaded from disk"):
-            _persist_llm_sections_sync(_bot())
+        with pytest.raises(ConfigPersistError, match="not loaded from disk"):
+            self._patch_all_llm_fields(_bot())
         # The bystander config.yml in the CWD was left untouched.
         assert Path("config.yml").read_text() == "discord:\n  token: real-do-not-touch\n"
 
     def test_persist_round_trips_config(self):
         from pathlib import Path
+
         Path("config.yml").write_text("discord:\n  token: fake\n")
         bot = _bot()
         bot.config.openai_codex.model = "gpt-5.5"
         bot.config.openai_codex.reasoning_effort = "xhigh"
         bot.config.ollama.model = "qwen3"
-        _persist_llm_sections_sync(bot)
+        self._patch_all_llm_fields(bot)
         written = Path("config.yml").read_text()
         assert "openai_codex" in written and "gpt-5.5" in written
         assert "reasoning_effort" in written and "xhigh" in written
@@ -1068,6 +1158,7 @@ class TestPersistHelpers:
         from pathlib import Path
 
         from ruamel.yaml import YAML
+
         Path("config.yml").write_text(
             "discord:\n  token: fake\n"
             "openai_codex:\n"
@@ -1078,10 +1169,16 @@ class TestPersistHelpers:
         bot = _bot()
         bot.config.openai_codex.auxiliary.enabled = True
         bot.config.openai_codex.auxiliary.model = "gpt-5.6-terra"
-        _persist_llm_sections_sync(bot)
+        self._patch_all_llm_fields(bot)
         oc = YAML().load(Path("config.yml").read_text())["openai_codex"]
-        assert "model_routing" not in oc  # removed-feature block gone
-        assert set(oc["auxiliary"]) == {"enabled", "model"}  # only the 2 real knobs
+        assert "model_routing" in oc  # unrelated legacy block is preserved
+        assert set(oc["auxiliary"]) == {
+            "enabled",
+            "model",
+            "tasks",
+            "max_tokens",
+            "credentials_path",
+        }  # leaf writer preserves unrelated legacy keys
         assert oc["auxiliary"]["model"] == "gpt-5.6-terra"
 
     def test_persist_preserves_file_mode(self):
@@ -1089,10 +1186,11 @@ class TestPersistHelpers:
         # 0664 config — the original mode is restored before replace.
         import os
         from pathlib import Path
+
         p = Path("config.yml")
         p.write_text("discord:\n  token: fake\n")
         os.chmod(p, 0o664)
-        _persist_llm_sections_sync(_bot())
+        self._patch_all_llm_fields(_bot())
         assert (os.stat(p).st_mode & 0o777) == 0o664
 
     def test_persist_dir_fsync_failure_is_nonfatal_disk_committed(self, monkeypatch):
@@ -1100,6 +1198,7 @@ class TestPersistHelpers:
         # failure must NOT raise (that would split disk-new vs runtime-old).
         import os
         from pathlib import Path
+
         Path("config.yml").write_text("discord:\n  token: fake\n")
         bot = _bot()
         bot.config.openai_codex.model = "gpt-5.6-sol"
@@ -1111,7 +1210,7 @@ class TestPersistHelpers:
             return real_open(path, *a, **k)
 
         monkeypatch.setattr(os, "open", _open)
-        _persist_llm_sections_sync(bot)  # must NOT raise
+        self._patch_all_llm_fields(bot)  # must NOT raise
         assert "gpt-5.6-sol" in Path("config.yml").read_text()  # disk committed
 
     def test_persist_malformed_error_has_no_secret_values(self):
@@ -1119,15 +1218,17 @@ class TestPersistHelpers:
         # are secrets in this file. The raised message must be generic.
         from pathlib import Path
 
-        from src.web.api.llm_admin import PersistError
+        from src.config.persistence import ConfigPersistError
+
         Path("config.yml").write_text(
-            "discord:\n  token: SECRET_TOKEN_AAA\n  token: SECRET_TOKEN_BBB\n")
+            "discord:\n  token: SECRET_TOKEN_AAA\n  token: SECRET_TOKEN_BBB\n"
+        )
         try:
-            _persist_llm_sections_sync(_bot())
+            self._patch_all_llm_fields(_bot())
             raise AssertionError("expected PersistError")
-        except PersistError as e:
+        except ConfigPersistError as e:
             assert "SECRET_TOKEN" not in str(e)
-            assert str(e) == "config.yml unreadable or malformed"
+            assert str(e) == "config file unreadable or malformed"
 
     def test_persist_atomic_write_failure_cleans_temp_and_original_intact(self, monkeypatch):
         # An os.replace failure must clean the temp file and NOT corrupt the
@@ -1135,12 +1236,13 @@ class TestPersistHelpers:
         import glob
         import os
         from pathlib import Path
+
         Path("config.yml").write_text("discord:\n  token: fake\n")
         bot = _bot()
         bot.config.openai_codex.model = "gpt-5.6-sol"
         monkeypatch.setattr(os, "replace", MagicMock(side_effect=OSError("disk full")))
         with pytest.raises(OSError, match="disk full"):
-            _persist_llm_sections_sync(bot)
+            self._patch_all_llm_fields(bot)
         # original untouched, no leaked temp files
         assert Path("config.yml").read_text() == "discord:\n  token: fake\n"
         assert glob.glob("*.yml.tmp") == []
@@ -1149,15 +1251,16 @@ class TestPersistHelpers:
         """The YAML allowlist writes the field explicitly — without it, UI
         saves of the agent effort would silently never persist."""
         from pathlib import Path
+
         Path("config.yml").write_text("discord:\n  token: fake\n")
         bot = _bot()
         bot.config.openai_codex.agent_reasoning_effort = "low"
-        _persist_llm_sections_sync(bot)
+        self._patch_all_llm_fields(bot)
         written = Path("config.yml").read_text()
         assert "agent_reasoning_effort: low" in written
         # null (inherit) round-trips as an explicit empty value
         bot.config.openai_codex.agent_reasoning_effort = None
-        _persist_llm_sections_sync(bot)
+        self._patch_all_llm_fields(bot)
         written = Path("config.yml").read_text()
         assert "agent_reasoning_effort" in written
         assert "agent_reasoning_effort: low" not in written
@@ -1166,14 +1269,15 @@ class TestPersistHelpers:
         """Same allowlist requirement as agent_reasoning_effort — without the
         explicit write, UI saves of the agent model would never persist."""
         from pathlib import Path
+
         Path("config.yml").write_text("discord:\n  token: fake\n")
         bot = _bot()
         bot.config.openai_codex.agent_model = "gpt-5.6-luna"
-        _persist_llm_sections_sync(bot)
+        self._patch_all_llm_fields(bot)
         written = Path("config.yml").read_text()
         assert "agent_model: gpt-5.6-luna" in written
         bot.config.openai_codex.agent_model = None
-        _persist_llm_sections_sync(bot)
+        self._patch_all_llm_fields(bot)
         written = Path("config.yml").read_text()
         assert "agent_model" in written
         assert "agent_model: gpt-5.6-luna" not in written
@@ -1181,51 +1285,20 @@ class TestPersistHelpers:
     def test_persist_empty_file_raises(self):
         from pathlib import Path
 
-        from src.web.api.llm_admin import PersistError
+        from src.config.persistence import ConfigPersistError
+
         Path("config.yml").write_text("")  # ry.load → None
-        with pytest.raises(PersistError, match="empty"):
-            _persist_llm_sections_sync(_bot())
+        with pytest.raises(ConfigPersistError, match="empty"):
+            self._patch_all_llm_fields(_bot())
 
     def test_persist_malformed_yaml_raises(self):
         from pathlib import Path
 
-        from src.web.api.llm_admin import PersistError
+        from src.config.persistence import ConfigPersistError
+
         Path("config.yml").write_text("discord: {token: 'unterminated")  # ry.load raises
-        with pytest.raises(PersistError, match="unreadable or malformed"):
-            _persist_llm_sections_sync(_bot())
-
-
-class TestLegacyPersistConfig:
-    """The fail-soft `_persist_config` shared by the sibling provider routes
-    (Codex/Ollama/Kimi config + model-set). The filesystem worker settles via
-    the gateway's run_persist_settled; PersistError is swallowed (master's
-    silent no-op), a genuine write error propagates (500), and a cancellation
-    that arrived mid-write is re-raised — never swallowed."""
-
-    @pytest.mark.asyncio
-    async def test_persist_error_swallowed_fail_soft(self):
-        from src.web.api.llm_admin import PersistError, _persist_config
-        bot = _bot()
-        bot.llm_gateway.run_persist_settled = AsyncMock(
-            return_value=(PersistError("config.yml does not exist"), False))
-        await _persist_config(bot)  # must NOT raise — legacy no-op
-
-    @pytest.mark.asyncio
-    async def test_genuine_write_error_propagates(self):
-        from src.web.api.llm_admin import _persist_config
-        bot = _bot()
-        bot.llm_gateway.run_persist_settled = AsyncMock(
-            return_value=(OSError("disk full"), False))
-        with pytest.raises(OSError, match="disk full"):
-            await _persist_config(bot)
-
-    @pytest.mark.asyncio
-    async def test_cancellation_reraised_never_swallowed(self):
-        from src.web.api.llm_admin import _persist_config
-        bot = _bot()
-        bot.llm_gateway.run_persist_settled = AsyncMock(return_value=(None, True))
-        with pytest.raises(asyncio.CancelledError):
-            await _persist_config(bot)
+        with pytest.raises(ConfigPersistError, match="unreadable or malformed"):
+            self._patch_all_llm_fields(_bot())
 
 
 class TestCodexMaxEffortPairValidation:
@@ -1238,8 +1311,9 @@ class TestCodexMaxEffortPairValidation:
         app, bot = _app(register_provider_config)
         gw = _gw(bot)
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"model": "gpt-5.6-sol", "reasoning_effort": "max"})
+            r = await c.put(
+                "/api/llm/codex/config", json={"model": "gpt-5.6-sol", "reasoning_effort": "max"}
+            )
             assert r.status == 200
         assert bot.config.openai_codex.reasoning_effort == "max"
         gw.reload_codex_inner.assert_awaited()
@@ -1293,8 +1367,7 @@ class TestCodexMaxEffortPairValidation:
         _gw(bot)
         bot.config.openai_codex.agent_model = "gpt-5.5"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_reasoning_effort": "max"})
+            r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": "max"})
             assert r.status == 400
         assert bot.config.openai_codex.agent_reasoning_effort is None
 
@@ -1307,8 +1380,9 @@ class TestCodexMaxEffortPairValidation:
         bot.config.openai_codex.model = "gpt-5.6-sol"
         bot.config.openai_codex.reasoning_effort = "max"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"model": "gpt-5.5", "reasoning_effort": "xhigh"})
+            r = await c.put(
+                "/api/llm/codex/config", json={"model": "gpt-5.5", "reasoning_effort": "xhigh"}
+            )
             assert r.status == 200
         assert bot.config.openai_codex.model == "gpt-5.5"
         assert bot.config.openai_codex.reasoning_effort == "xhigh"
@@ -1321,8 +1395,10 @@ class TestCodexMaxEffortPairValidation:
         _gw(bot)
         bot.config.openai_codex.model = "gpt-5.5"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config",
-                            json={"agent_model": "auto", "agent_reasoning_effort": "max"})
+            r = await c.put(
+                "/api/llm/codex/config",
+                json={"agent_model": "auto", "agent_reasoning_effort": "max"},
+            )
             assert r.status == 200
         assert bot.config.openai_codex.agent_reasoning_effort == "max"
 
@@ -1370,17 +1446,6 @@ class TestCatalogInvalidationOnModelChange:
         gw.reload_codex_inner.assert_not_awaited()
         assert bot.config.openai_codex.model == "gpt-5.6-sol"
 
-    @pytest.mark.asyncio
-    async def test_non_catalog_change_does_not_invalidate(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.tool_catalog = MagicMock()
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"max_tokens": 8192})
-            assert r.status == 200
-        bot.tool_catalog.invalidate.assert_not_called()
-
-
 class TestCatalogInvalidationOnEffortChange:
     """PR #246 round 1 follow-through: the required-ness of the exposed
     effort field depends on the MAIN effort (the inherited default), so an
@@ -1396,3 +1461,541 @@ class TestCatalogInvalidationOnEffortChange:
             r = await c.put("/api/llm/codex/config", json={"reasoning_effort": "max"})
             assert r.status == 200
         bot.tool_catalog.invalidate.assert_called_once()
+
+
+class TestProviderPersistenceTransactions:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "section", "reload_name"),
+        [
+            ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
+            ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
+            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+        ],
+    )
+    async def test_persist_failure_leaves_runtime_unpublished(
+        self, monkeypatch, route, section, reload_name
+    ):
+        async def fail(_changes):
+            return OSError("disk full"), False
+
+        monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", fail)
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        before = getattr(bot.config, section).model
+
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put(route, json={"model": "new-model"})
+
+        assert response.status == 500
+        assert getattr(bot.config, section).model == before
+        getattr(gw, reload_name).assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "section", "reload_name"),
+        [
+            ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
+            ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
+            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+        ],
+    )
+    async def test_cancelled_success_publishes_before_cancellation(
+        self, monkeypatch, route, section, reload_name
+    ):
+        async def cancelled_success(_changes):
+            return None, True
+
+        monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", cancelled_success)
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+
+        async with TestClient(TestServer(app)) as c:
+            with pytest.raises(Exception):
+                await c.put(route, json={"model": "new-model"})
+
+        assert getattr(bot.config, section).model == "new-model"
+        getattr(gw, reload_name).assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "section", "reload_name"),
+        [
+            ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
+            ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
+            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+        ],
+    )
+    async def test_cancelled_failure_keeps_runtime_unpublished(
+        self, monkeypatch, route, section, reload_name
+    ):
+        async def cancelled_failure(_changes):
+            return OSError("disk full"), True
+
+        monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", cancelled_failure)
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        before = getattr(bot.config, section).model
+
+        async with TestClient(TestServer(app)) as c:
+            with pytest.raises(Exception):
+                await c.put(route, json={"model": "new-model"})
+
+        assert getattr(bot.config, section).model == before
+        getattr(gw, reload_name).assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "section", "reload_name"),
+        [
+            ("/api/llm/codex/config", "openai_codex", "reload_codex_inner"),
+            ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
+            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+        ],
+    )
+    async def test_rollback_failure_republishes_committed_desired_state(
+        self, monkeypatch, route, section, reload_name
+    ):
+        calls = 0
+
+        async def persist_then_rollback_fails(_changes):
+            nonlocal calls
+            calls += 1
+            return (None, False) if calls == 1 else (OSError("rollback failed"), False)
+
+        monkeypatch.setattr(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            persist_then_rollback_fails,
+        )
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        reload_mock = getattr(gw, reload_name)
+        reload_mock.side_effect = [RuntimeError("apply failed"), None]
+
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put(route, json={"model": "new-model"})
+
+        assert response.status == 500
+        assert getattr(bot.config, section).model == "new-model"
+        assert reload_mock.await_count == 2
+
+
+class TestRemainingPersistenceBranches:
+    @pytest.mark.asyncio
+    async def test_codex_apply_failure_with_successful_rollback_reloads_prior_state(
+        self,
+    ):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        old_model = bot.config.openai_codex.model
+        gw.reload_codex_inner.side_effect = [RuntimeError("apply failed"), None]
+
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put(
+                "/api/llm/codex/config", json={"model": "new-model"}
+            )
+
+        assert response.status == 500
+        assert bot.config.openai_codex.model == old_model
+        assert gw.reload_codex_inner.await_count == 2
+
+    @pytest.mark.asyncio
+    async def test_codex_apply_failure_reports_rollback_cancellation(
+        self, monkeypatch
+    ):
+        outcomes = iter(((None, False), (None, True)))
+
+        async def persist_then_cancelled_rollback(_changes):
+            return next(outcomes)
+
+        monkeypatch.setattr(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            persist_then_cancelled_rollback,
+        )
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        old_model = bot.config.openai_codex.model
+        gw.reload_codex_inner.side_effect = [RuntimeError("apply failed"), None]
+
+        async with TestClient(TestServer(app)) as c:
+            with pytest.raises(Exception):
+                await c.put(
+                    "/api/llm/codex/config", json={"model": "new-model"}
+                )
+
+        assert bot.config.openai_codex.model == old_model
+        assert gw.reload_codex_inner.await_count == 2
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("route", "section", "reload_name"),
+        [
+            ("/api/llm/ollama/config", "ollama", "reload_ollama_inner"),
+            ("/api/llm/kimi/config", "kimi", "reload_kimi_inner"),
+        ],
+    )
+    async def test_apply_failure_preserves_initial_cancellation(
+        self, monkeypatch, route, section, reload_name
+    ):
+        outcomes = iter(((None, True), (None, False)))
+
+        async def cancelled_commit_then_rollback(_changes):
+            return next(outcomes)
+
+        monkeypatch.setattr(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            cancelled_commit_then_rollback,
+        )
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        old_model = getattr(bot.config, section).model
+        getattr(gw, reload_name).side_effect = RuntimeError("apply failed")
+
+        async with TestClient(TestServer(app)) as c:
+            with pytest.raises(Exception):
+                await c.put(route, json={"model": "new-model"})
+
+        assert getattr(bot.config, section).model == old_model
+        assert getattr(gw, reload_name).await_count == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("registrar", "route", "client_attr", "section", "model"),
+    [
+        (register_ollama_admin, "/api/ollama/model", "ollama_client", "ollama", "q:7b"),
+        (register_kimi_admin, "/api/kimi/model", "kimi_client", "kimi", "kimi-k2"),
+    ],
+)
+@pytest.mark.parametrize(
+    ("persist_result", "expected_status", "cancelled"),
+    [
+        ((OSError("disk full"), False), 500, False),
+        ((OSError("disk full"), True), None, True),
+        ((None, True), None, True),
+    ],
+)
+async def test_model_route_persistence_outcomes(
+    monkeypatch, registrar, route, client_attr, section, model,
+    persist_result, expected_status, cancelled
+):
+    async def persist(_changes):
+        return persist_result
+
+    monkeypatch.setattr("src.web.api.llm_admin.persist_config_paths_locked", persist)
+    app, bot = _app(registrar)
+    _gw(bot)
+    client = _provider_client(models=[model])
+    setattr(bot.llm_gateway, client_attr, client)
+    old_model = getattr(bot.config, section).model
+
+    async with TestClient(TestServer(app)) as c:
+        if cancelled:
+            with pytest.raises(Exception):
+                await c.post(route, json={"model": model})
+        else:
+            response = await c.post(route, json={"model": model})
+            assert response.status == expected_status
+
+    if persist_result[0] is None:
+        assert getattr(bot.config, section).model == model
+        assert client.model == model
+    else:
+        assert getattr(bot.config, section).model == old_model
+        assert client.model == "m1"
+
+
+class TestAuxiliaryRoutePrepareProbeCAS:
+    @pytest.mark.asyncio
+    async def test_route_releases_global_config_lock_during_reload(self):
+        from src.config.persistence import config_transaction
+
+        app, bot = _app(register_provider_config)
+        gateway = _gw(bot)
+        gateway.codex_client = object()
+        probe_started = asyncio.Event()
+        release_probe = asyncio.Event()
+        captured = {}
+
+        async def _reload(desired=None, persist=None, *, plan=None):
+            captured["plan"] = plan
+            probe_started.set()
+            await release_probe.wait()
+            return {"committed": True, "effective_enabled": True, "model": plan.desired_model}
+
+        gateway.reload_auxiliary = _reload
+        async with TestClient(TestServer(app)) as client:
+            request_task = asyncio.create_task(client.put(
+                "/api/llm/auxiliary/config",
+                json={"enabled": True, "model": "gpt-5.6-terra"},
+            ))
+            await probe_started.wait()
+            await asyncio.wait_for(config_transaction().acquire(), timeout=0.1)
+            config_transaction().release()
+            release_probe.set()
+            response = await request_task
+        assert response.status == 200
+        assert captured["plan"].desired_model == "gpt-5.6-terra"
+
+
+class TestCodexAdvancedKnobs:
+    """The LLM page's Advanced panel edits transport/retry/pool/compression.
+
+    The old handler silently DROPPED every one of these keys and returned
+    200 — the panel toasted "saved" for a save that never happened, and
+    /api/llm/status never returned them, so it displayed schema defaults
+    forever regardless of config.yml truth.
+    """
+
+    def _harness(self):
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+        bot.llm_gateway.codex_client = object()
+        return app, bot
+
+    @pytest.mark.asyncio
+    async def test_advanced_keys_persist_and_apply(self):
+        app, bot = self._harness()
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))) as persist:
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "request_timeout_seconds": 7200,
+                    "stream_stall_timeout_seconds": 240,
+                    "retry": {"max_retries": 5, "base_delay": 1.5},
+                    "connection_pool": {"max_connections": 20},
+                    "context_compression": {
+                        "max_context_chars": 500000,
+                        "keep_recent_iterations": 12,
+                    },
+                })
+        assert r.status == 200
+        cfg = bot.config.openai_codex
+        assert cfg.request_timeout_seconds == 7200
+        assert cfg.retry.max_retries == 5
+        assert cfg.retry.base_delay == 1.5
+        assert cfg.connection_pool.max_connections == 20
+        assert cfg.context_compression.max_context_chars == 500000
+        assert cfg.stream_stall_timeout_seconds == 240
+        assert cfg.context_compression.keep_recent_iterations == 12
+        persisted = {change[0] for change in persist.call_args[0][0]}
+        assert ("openai_codex", "request_timeout_seconds") in persisted
+        assert ("openai_codex", "retry", "max_retries") in persisted
+        assert ("openai_codex", "connection_pool", "max_connections") in persisted
+        # Transport/retry reach the live client through the reload path.
+        bot.llm_gateway.reload_codex_inner.assert_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pool_and_compression_alone_do_not_reload(self):
+        """They are restart/rebuild-bound — persisting them must not churn
+        the live client or the auth pool."""
+        app, bot = self._harness()
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "connection_pool": {"keepalive_timeout": 60},
+                    "context_compression": {"enabled": False},
+                })
+        assert r.status == 200
+        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
+        assert bot.config.openai_codex.context_compression.enabled is False
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(("body", "fragment"), [
+        ({"request_timeout_seconds": 30}, "between 60 and 86400"),
+        ({"stream_stall_timeout_seconds": 5}, "between 10 and 3600"),
+        ({"retry": {"max_retries": -1}}, ">= 0"),
+        ({"connection_pool": {"max_connections": 0}}, ">= 1"),
+        ({"request_timeout_seconds": "soon"}, "must be an integer"),
+        # Schema-exact rejections the first hand-mirrored validator got wrong:
+        ({"retry": {"max_retries": 1.9}}, "integer"),
+        ({"retry": [1, 2]}, "must be an object"),
+        ({"retry": {"bogus_knob": 1}}, "unknown retry field"),
+        ({"request_timeout_seconds": True}, "must be an integer"),
+        ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
+    ])
+    async def test_bounds_are_enforced_before_any_mutation(self, body, fragment):
+        app, bot = self._harness()
+        before = bot.config.openai_codex.request_timeout_seconds
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/llm/codex/config", json=body)
+            payload = await r.json()
+        assert r.status == 400
+        assert fragment in payload["error"]
+        assert bot.config.openai_codex.request_timeout_seconds == before
+
+    @pytest.mark.asyncio
+    async def test_top_level_timeouts_use_schema_lax_integer_coercion(self):
+        """Pydantic accepts integer strings but this endpoint still rejects bool.
+
+        The first validator hand-mirrored the schema and incorrectly rejected
+        the value a YAML/JSON config load accepts.
+        """
+        app, bot = self._harness()
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))):
+            async with TestClient(TestServer(app)) as c:
+                accepted = await c.put("/api/llm/codex/config", json={
+                    "request_timeout_seconds": "600.0",
+                    "stream_stall_timeout_seconds": "90",
+                })
+                rejected = await c.put("/api/llm/codex/config", json={
+                    "request_timeout_seconds": True,
+                })
+        assert accepted.status == 200
+        assert bot.config.openai_codex.request_timeout_seconds == 600
+        assert bot.config.openai_codex.stream_stall_timeout_seconds == 90
+        assert rejected.status == 400
+
+    @pytest.mark.asyncio
+    async def test_nested_groups_are_replaced_not_mutated_in_place(self):
+        """The boot-built compressor holds the boot config's nested object BY
+        IDENTITY. In-place mutation made compression live-before-rebind and
+        stale-after; replacement makes persist-only deterministic."""
+        app, bot = self._harness()
+        boot_held = bot.config.openai_codex.context_compression
+        before = boot_held.max_context_chars
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "context_compression": {"max_context_chars": 123456},
+                })
+        assert r.status == 200
+        assert boot_held.max_context_chars == before  # captor untouched
+        assert bot.config.openai_codex.context_compression is not boot_held
+        assert bot.config.openai_codex.context_compression.max_context_chars == 123456
+
+    @pytest.mark.asyncio
+    async def test_schema_lax_coercions_apply_not_hand_rolled_ones(self):
+        """bool("false") was True under the hand-rolled validator; the schema
+        model coerces the string honestly. And the invented floor on
+        max_context_chars is gone — the schema accepts 1, so this does."""
+        app, bot = self._harness()
+        with patch("src.web.api.llm_admin.persist_config_paths_locked",
+                   new=AsyncMock(return_value=(None, False))):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "context_compression": {"enabled": "false", "max_context_chars": 1},
+                })
+        assert r.status == 200
+        assert bot.config.openai_codex.context_compression.enabled is False
+        assert bot.config.openai_codex.context_compression.max_context_chars == 1
+
+    @pytest.mark.asyncio
+    async def test_double_failure_republishes_nested_desired(self):
+        """Reload fails AND the persistence rollback fails: disk kept the
+        desired nested values, so runtime must follow them — the prior code
+        left runtime on the restored priors while disk held desired, a
+        split-brain between process and file."""
+        app, bot = self._harness()
+        bot.llm_gateway.reload_codex_inner = AsyncMock(
+            side_effect=[RuntimeError("apply blew up"), None]
+        )
+        persist = AsyncMock(side_effect=[
+            (None, False),                       # forward persist succeeds
+            (RuntimeError("disk full"), False),  # rollback persist fails
+        ])
+        with patch("src.web.api.llm_admin.persist_config_paths_locked", new=persist):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json={
+                    "model": "gpt-5.6-terra",
+                    "retry": {"max_retries": 7},
+                    "request_timeout_seconds": 7200,
+                })
+                body_text = await r.text()
+        assert r.status == 500, body_text
+        # Runtime follows the disk it could not roll back.
+        assert bot.config.openai_codex.retry.max_retries == 7
+        assert bot.config.openai_codex.request_timeout_seconds == 7200
+        assert bot.config.openai_codex.model == "gpt-5.6-terra"
+
+    @pytest.mark.asyncio
+    async def test_status_reports_desired_boot_effective_and_pending_restart(self):
+        """The owner page must not present desired boot-bound values as live."""
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = SimpleNamespace(
+            model="gpt-5.5", provider_name="codex"
+        )
+        bot.llm_gateway.auxiliary_llm_client = None
+        bot.boot_config_snapshot = bot.config.model_dump()
+        boot_pool = dict(bot.boot_config_snapshot["openai_codex"]["connection_pool"])
+        boot_compression = dict(
+            bot.boot_config_snapshot["openai_codex"]["context_compression"]
+        )
+        bot.config.openai_codex.request_timeout_seconds = 7200
+        bot.config.openai_codex.retry.max_retries = 7
+        bot.config.openai_codex.connection_pool.max_connections += 1
+        bot.config.openai_codex.context_compression.enabled = not (
+            bot.config.openai_codex.context_compression.enabled
+        )
+        bot.config.kimi.timeout = 123
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/llm/status")).json()
+        codex = body["codex"]
+        assert codex["request_timeout_seconds"] == 7200
+        assert codex["retry"]["max_retries"] == 7
+        assert codex["connection_pool"] != boot_pool
+        assert codex["effective_connection_pool"] == boot_pool
+        assert codex["connection_pool_pending_restart"] is True
+        assert codex["context_compression"] != boot_compression
+        assert codex["effective_context_compression"] == boot_compression
+        assert codex["context_compression_pending_restart"] is True
+        assert body["kimi"]["timeout"] == 123
+
+    @pytest.mark.asyncio
+    async def test_status_reports_no_pending_restart_when_boot_values_match(self):
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        bot.llm_gateway.auxiliary_llm_client = None
+        bot.boot_config_snapshot = bot.config.model_dump()
+        async with TestClient(TestServer(app)) as c:
+            codex = (await (await c.get("/api/llm/status")).json())["codex"]
+        assert codex["connection_pool_pending_restart"] is False
+        assert codex["context_compression_pending_restart"] is False
+        assert codex["effective_connection_pool"] == codex["connection_pool"]
+        assert codex["effective_context_compression"] == codex["context_compression"]
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("snapshot", [
+        {"openai_codex": None},
+        {"openai_codex": {"connection_pool": None, "context_compression": None}},
+    ])
+    async def test_status_rejects_malformed_boot_group_evidence(self, snapshot):
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        bot.llm_gateway.auxiliary_llm_client = None
+        bot.boot_config_snapshot = snapshot
+        async with TestClient(TestServer(app)) as c:
+            codex = (await (await c.get("/api/llm/status")).json())["codex"]
+        assert codex["effective_connection_pool"] is None
+        assert codex["connection_pool_pending_restart"] is None
+        assert codex["effective_context_compression"] is None
+        assert codex["context_compression_pending_restart"] is None
+
+    @pytest.mark.asyncio
+    async def test_status_does_not_invent_effective_boot_values(self):
+        app, bot = _app(register_llm_provider)
+        bot.llm_gateway.codex_client = object()
+        bot.llm_gateway.ollama_client = None
+        bot.llm_gateway.kimi_client = None
+        bot.llm_gateway.active_client = None
+        bot.llm_gateway.auxiliary_llm_client = None
+        # A test harness or old embedder may not expose a boot snapshot.
+        del bot.boot_config_snapshot
+        async with TestClient(TestServer(app)) as c:
+            codex = (await (await c.get("/api/llm/status")).json())["codex"]
+        assert codex["effective_connection_pool"] is None
+        assert codex["connection_pool_pending_restart"] is None
+        assert codex["effective_context_compression"] is None
+        assert codex["context_compression_pending_restart"] is None

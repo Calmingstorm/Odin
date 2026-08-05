@@ -362,6 +362,9 @@ def register_compression_stats(routes: web.RouteTableDef, bot) -> None:
     async def compression_stats(_request: web.Request) -> web.Response:
         tracker = getattr(bot, "compression_stats", None)
         if tracker is None:
+            services = getattr(bot, "services", None)
+            tracker = getattr(services, "compression_stats", None) if services is not None else None
+        if tracker is None:
             return web.json_response({"error": "compression stats not available"}, status=503)
         return web.json_response(tracker.as_dict())
 

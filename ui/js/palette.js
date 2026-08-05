@@ -3,19 +3,26 @@
  */
 import { computed, nextTick, reactive, ref, watch } from 'vue';
 import { useRouter } from 'vue-router';
+import { TABS as OPERATIONS_TABS } from './pages/operations.js';
+import { TABS as HISTORY_TABS } from './pages/history.js';
+import { TABS as CAPABILITIES_TABS } from './pages/capabilities.js';
+import { TABS as SYSTEM_TABS } from './pages/system.js';
+
+// Derived from the SAME tab lists the host pages render, so a renamed or
+// removed tab cannot leave the palette pointing at an id that silently falls
+// back to the default tab.
+const tabGroup = (group, icon, path, tabs) => tabs.map(({ id, label }) => ({
+  group, label, icon, to: { path, query: { tab: id } },
+}));
 
 const DESTINATIONS = [
   { group: 'Workspace', label: 'Dashboard', icon: 'dashboard', to: { path: '/dashboard' } },
   { group: 'Workspace', label: 'Chat', icon: 'chat', to: { path: '/chat' } },
-  ...['Live', 'Agents', 'Loops', 'Processes', 'Schedules'].map(label => ({ group: 'Operations', label, icon: 'operations', to: { path: '/operations', query: { tab: label.toLowerCase() } } })),
-  ...['Audit', 'Sessions', 'Traces', 'Usage'].map(label => ({ group: 'History', label, icon: 'history', to: { path: '/history', query: { tab: label.toLowerCase() } } })),
-  ...['Tools', 'Skills', 'Knowledge', 'Memory', 'Learned'].map(label => ({ group: 'Capabilities', label, icon: 'capabilities', to: { path: '/capabilities', query: { tab: label.toLowerCase() } } })),
+  ...tabGroup('Operations', 'operations', '/operations', OPERATIONS_TABS),
+  ...tabGroup('History', 'history', '/history', HISTORY_TABS),
+  ...tabGroup('Capabilities', 'capabilities', '/capabilities', CAPABILITIES_TABS),
   { group: 'Manage', label: 'Personality', icon: 'personality', to: { path: '/personality' } },
-  ...[
-    ['Health', 'health'], ['Resources', 'resources'], ['Logs', 'logs'], ['Config', 'config'],
-    ['Discord', 'discord'], ['Host Access', 'host-access'], ['API Tokens', 'api-tokens'],
-    ['LLM Config', 'llm'], ['Internals', 'internals'], ['Update', 'update'],
-  ].map(([label, tab]) => ({ group: 'System', label, icon: 'system', to: { path: '/system', query: { tab } } })),
+  ...tabGroup('System', 'system', '/system', SYSTEM_TABS),
 ];
 
 const state = reactive({ open: false, query: '', selected: 0 });

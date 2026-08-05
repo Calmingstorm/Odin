@@ -226,6 +226,7 @@ def _make_runner(recorder_save=None):
         channel_state=SimpleNamespace(
             clear_active_request=lambda ch, req: cleared.append((ch, req))
         ),
+        channel_config=SimpleNamespace(),
         delivery=SimpleNamespace(),
         turn_recorder=SimpleNamespace(_save_turn_trajectory=recorder_save or _default_save),
         completion_classifier=SimpleNamespace(),
@@ -388,6 +389,7 @@ class TestCallSitesSurviveTypingFailure:
 # fail-safes, and pipeline-level coverage of the _run_inner error paths.
 # ---------------------------------------------------------------------------
 
+
 class _RaisingInstanceCheckMeta(type):
     def __instancecheck__(cls, instance):
         raise RuntimeError("isinstance exploded")
@@ -459,7 +461,13 @@ def _make_pipeline(tool_loop_exc=None, sessions=None):
     sessions = sessions or _FakeSessions()
     delivery = _FakeDelivery()
 
-    async def _run(message, history, system_prompt_override=None, trace=None):
+    async def _run(
+        message,
+        history,
+        system_prompt_override=None,
+        trace=None,
+        from_another_bot=None,
+    ):
         if tool_loop_exc is not None:
             raise tool_loop_exc
         return ("ok-response", False, False, [], False)
@@ -669,3 +677,144 @@ class TestTypingAttemptTimeout:
             pass
         assert ch.entered == 1
         assert ch.exits == 1
+
+
+class TestToolEventCallId:
+    """tool_start/tool_end must carry the model's tool_use id.
+
+    The WebUI pairs a completion with its card by this id. Pairing by tool
+    NAME cannot distinguish concurrent same-name calls, and no ordering rule
+    saves it: newest-first closes the wrong card when an earlier call finishes
+    first, oldest-first when a later one does.
+    """
+
+    async def test_tool_end_event_carries_the_call_id(self):
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        events = []
+
+        class _Audit:
+            async def log_event(self, **kwargs):
+                events.append(kwargs)
+
+            async def log_execution(self, **kwargs):
+                pass
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._audit = _Audit()
+        st = SimpleNamespace(
+            message=SimpleNamespace(
+                author=SimpleNamespace(id=1),
+                channel=SimpleNamespace(id=2),
+            ),
+            iteration=3,
+        )
+
+        await runner._audit_tool_outcome(
+            st,
+            "run_command",
+            {"command": "echo hi"},
+            "ok",
+            12,
+            None,
+            None,
+            call_id="call_abc123",
+        )
+
+        end = [e for e in events if e.get("event_type") == "tool_end"]
+        assert end, "no tool_end event emitted"
+        assert end[0]["metadata"]["call_id"] == "call_abc123"
+
+    async def test_call_id_is_keyword_only_and_optional(self):
+        """Optional so an older caller cannot break; keyword-only so it can
+        never be filled positionally by accident."""
+        import inspect
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        sig = inspect.signature(ToolLoopRunner._audit_tool_outcome)
+        assert sig.parameters["call_id"].kind is inspect.Parameter.KEYWORD_ONLY
+
+        events = []
+
+        class _Audit:
+            async def log_event(self, **kwargs):
+                events.append(kwargs)
+
+            async def log_execution(self, **kwargs):
+                pass
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._audit = _Audit()
+        st = SimpleNamespace(
+            message=SimpleNamespace(author=SimpleNamespace(id=1), channel=SimpleNamespace(id=2)),
+            iteration=0,
+        )
+        await runner._audit_tool_outcome(st, "t", {}, "r", 1, None, None)
+        end = [e for e in events if e.get("event_type") == "tool_end"]
+        assert end and end[0]["metadata"]["call_id"] is None
+
+
+class TestDeliberateSilence:
+    """Empty final text after a tool-using turn is a choice, not a failure.
+
+    Field reality, twice: a thumbs-up reaction landed, then Odin posted
+    "I couldn't generate a response. Please try again."; a video posted with
+    its commentary on the attachment, then the same apology. The classifier
+    had judged both turns complete — only the terminal fallback fabricated a
+    failure out of chosen silence. With NO tools used the fallback stands.
+    """
+
+    def _final_state(self, tools_used):
+        st = _stub_state()
+        st.tools_used_in_loop = list(tools_used)
+        st._validation_required = False
+        st._validation_retries = 0
+        st._max_validation_retries = 2
+        # Every response-guard flag set 'already retried' so the cascade
+        # falls through to the terminal fallback — the actor under test.
+        st.promise_retried = True
+        st.unavail_retried = True
+        st.hedging_retried = True
+        st.fabrication_retried = True
+        st.code_hedging_retried = True
+        st.premature_failure_retried = True
+        # Classifier already ran its budget — the fallback is the only actor.
+        st.continuation_count = 3
+        st.max_continuations = 3
+        return st
+
+    async def test_silence_after_work_is_delivered_as_silence(self):
+        runner, saved, cleared = _make_runner()
+        st = self._final_state(["add_reaction"])
+        kind, result = await runner._finalize_or_retry(
+            st, SimpleNamespace(text="", tool_calls=None)
+        )
+        assert kind == "done"
+        final = result[0]
+        assert final == ""
+        assert "couldn't generate" not in final
+        # Trajectory records the truthful empty final, not the apology.
+        assert saved and saved[0][1]["final_response"] == ""
+
+    async def test_empty_with_no_tools_is_still_reported_as_failure(self):
+        from src.discord.tool_loop_helpers import _EMPTY_RESPONSE_FALLBACK
+
+        runner, saved, cleared = _make_runner()
+        st = self._final_state([])
+        kind, result = await runner._finalize_or_retry(
+            st, SimpleNamespace(text="", tool_calls=None)
+        )
+        assert kind == "done"
+        assert result[0] == _EMPTY_RESPONSE_FALLBACK
+
+    async def test_real_text_is_untouched(self):
+        runner, saved, cleared = _make_runner()
+        st = self._final_state(["add_reaction"])
+        kind, result = await runner._finalize_or_retry(
+            st, SimpleNamespace(text="done, reacted.", tool_calls=None)
+        )
+        assert result[0] == "done, reacted."

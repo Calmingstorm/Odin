@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from src.health.subsystem_guard import (
     _DEFAULT_MESSAGES,
     _FALLBACK_MESSAGE,
@@ -520,6 +522,24 @@ class TestGuardObservability:
         assert status["subsystems"] == []
         assert status["total"] == 0
 
+    def test_get_status_reports_server_computed_failure_age(self, monkeypatch):
+        guard = SubsystemGuard()
+        guard.register("knowledge")
+        info = guard.get_subsystem("knowledge")
+        assert info is not None
+        info.last_failure_at = 100.0
+        monkeypatch.setattr("src.health.subsystem_guard.time.monotonic", lambda: 370.5)
+
+        record = guard.get_status()["subsystems"][0]
+        assert record["last_failure_at"] == 100.0
+        assert record["last_failure_age_seconds"] == 270.5
+
+    def test_get_status_omits_failure_age_without_a_failure(self):
+        guard = SubsystemGuard()
+        guard.register("knowledge")
+        record = guard.get_status()["subsystems"][0]
+        assert "last_failure_age_seconds" not in record
+
     def test_get_status_all_available(self):
         guard = SubsystemGuard()
         guard.register("knowledge")
@@ -727,33 +747,41 @@ class TestGracefulDegradationConfig:
     def test_defaults(self):
         from src.config.schema import GracefulDegradationConfig
         cfg = GracefulDegradationConfig()
-        assert cfg.enabled is True
+        assert not hasattr(cfg, "enabled")
         assert cfg.degraded_threshold == 3
         assert cfg.unavailable_threshold == 10
 
     def test_custom_values(self):
         from src.config.schema import GracefulDegradationConfig
         cfg = GracefulDegradationConfig(
-            enabled=False, degraded_threshold=5, unavailable_threshold=20,
+            degraded_threshold=5, unavailable_threshold=20,
         )
-        assert cfg.enabled is False
         assert cfg.degraded_threshold == 5
         assert cfg.unavailable_threshold == 20
 
-    def test_in_main_config(self):
-        from src.config.schema import Config, DiscordConfig
-        cfg = Config(discord=DiscordConfig(token="test", prefix="!"))
-        assert cfg.graceful_degradation.enabled is True
-        assert cfg.graceful_degradation.degraded_threshold == 3
+    @pytest.mark.parametrize("legacy_enabled", [False, True])
+    def test_real_bot_guard_is_always_constructed_with_supported_thresholds(
+        self, legacy_enabled
+    ):
+        """The removed switch never gated construction, even when stored false."""
+        from src.config.schema import Config
+        from src.discord.client import OdinBot
 
-    def test_from_dict(self):
-        from src.config.schema import Config, DiscordConfig
         cfg = Config(
-            discord=DiscordConfig(token="test", prefix="!"),
-            graceful_degradation={"enabled": False, "degraded_threshold": 7},
+            discord={"token": "test"},
+            openai_codex={"enabled": False},
+            graceful_degradation={
+                "enabled": legacy_enabled,
+                "degraded_threshold": 7,
+                "unavailable_threshold": 19,
+            },
         )
-        assert cfg.graceful_degradation.enabled is False
-        assert cfg.graceful_degradation.degraded_threshold == 7
+        bot = OdinBot(cfg)
+
+        assert not hasattr(cfg.graceful_degradation, "enabled")
+        assert bot.subsystem_guard._degraded_threshold == 7
+        assert bot.subsystem_guard._unavailable_threshold == 19
+        assert "llm_codex" in bot.subsystem_guard.registered
 
 
 # ---------------------------------------------------------------------------

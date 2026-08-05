@@ -24,6 +24,7 @@ import hashlib
 from dataclasses import asdict
 from typing import Any
 
+from ..config.sensitivity import is_storage_sensitive_key as _is_sensitive_key
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 
@@ -101,26 +102,9 @@ def compute_content_digest(text: str) -> str:
 # ── storage redaction ────────────────────────────────────────────────
 
 
-# Case-insensitive sensitive-KEY redaction (round-4 blocker #4, PR #242):
-# opaque credentials carry no `sk-`/`token=` signature for the pattern
-# scrub, so any value stored under a credential-shaped key is redacted
-# wholesale. Keys are normalized (lowercased, `-`/`_` stripped) and matched
-# EXACTLY — "auth" redacts, "author" does not.
-_SENSITIVE_KEYS = frozenset({
-    "password", "passwd", "pwd", "passphrase",
-    "secret", "clientsecret", "secretkey",
-    "token", "apitoken", "accesstoken", "refreshtoken", "sessiontoken",
-    "idtoken", "bearertoken", "authtoken",
-    "apikey", "authorization", "auth", "bearer",
-    "credential", "credentials", "privatekey", "accesskey", "secretaccesskey",
-    "cookie", "setcookie", "sessionid", "csrftoken",
-})
-
-
-def _is_sensitive_key(key: Any) -> bool:
-    if not isinstance(key, str):
-        return False
-    return key.lower().replace("-", "").replace("_", "") in _SENSITIVE_KEYS
+# Case-insensitive sensitive-KEY redaction (round-4 blocker #4, PR #242)
+# is owned by config.sensitivity. Checkpoint storage deliberately uses its
+# exact normalized-key policy, not the broader config-metadata substring rule.
 
 
 def _deep_scrub_strings(value: Any) -> Any:

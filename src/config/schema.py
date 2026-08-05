@@ -22,7 +22,6 @@ class DiscordConfig(BaseModel):
 
 class ContextConfig(BaseModel):
     directory: str = "./data/context"
-    max_system_prompt_tokens: int = 32000
 
 
 class SessionsConfig(BaseModel):
@@ -108,6 +107,10 @@ class StreamingConfig(BaseModel):
 class AgentsConfig(BaseModel):
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
+    # Per-channel admission cap for concurrently running agents. Twenty-five
+    # matches the immutable lifetime ceiling for one tree, so operators can
+    # raise useful parallelism without configuring beyond the runaway backstop.
+    max_concurrent_agents: int = Field(default=5, ge=1, le=25)
     max_iterations: int = 120
     scheduled_max_iterations: int = 180
     hard_max_iterations: int = 300
@@ -131,6 +134,16 @@ class AgentsConfig(BaseModel):
     def _agents_non_negative(cls, v):
         if v < 1:
             raise ValueError("agent limits must be >= 1")
+        return v
+
+    @field_validator("max_children_per_agent")
+    @classmethod
+    def _children_bounded(cls, v):
+        # Direct-child breadth compounds with nesting depth; the tree-lifetime
+        # cap in the agent manager is the hard backstop, this keeps a single
+        # config value from asking for absurd fan-out in the first place.
+        if v > 10:
+            raise ValueError("max_children_per_agent must be between 1 and 10")
         return v
 
     @field_validator("iteration_timeout_seconds", "max_lifetime_seconds")
@@ -317,8 +330,8 @@ class UsageConfig(BaseModel):
 class AuxiliaryLLMConfig(BaseModel):
     """A cheaper Codex model for fixed background jobs (compaction, reflection,
     consolidation, background follow-up), with transparent fallback to the
-    primary model. It shares the main Codex OAuth and token limit — only the
-    MODEL differs. When ``enabled`` and a Codex provider is active, those four
+    primary model. It shares the main Codex OAuth credentials; only the MODEL
+    differs. When ``enabled`` and a Codex provider is active, those four
     jobs route here; otherwise they use the primary model.
 
     Default Luna: the Codex catalog positions it for the cheap extraction /
@@ -420,7 +433,6 @@ class OpenAICodexConfig(BaseModel):
 
     enabled: bool = False
     model: str = "gpt-4o"
-    max_tokens: int = 4096
     reasoning_effort: ReasoningEffort = "medium"
     # Effort for SPAWNED-AGENT iterations only. None = inherit
     # reasoning_effort (the string "none" is a real effort level, not
@@ -649,7 +661,6 @@ class OutboundWebhooksConfig(BaseModel):
 
 
 class GracefulDegradationConfig(BaseModel):
-    enabled: bool = True
     degraded_threshold: int = 3  # consecutive failures before DEGRADED
     unavailable_threshold: int = 10  # consecutive failures before UNAVAILABLE
 
@@ -870,7 +881,6 @@ class GrafanaRemediationRuleConfig(BaseModel):
 
 
 class GrafanaAlertConfig(BaseModel):
-    enabled: bool = False
     auto_remediate: bool = False
     rules: list[GrafanaRemediationRuleConfig] = Field(default_factory=list)
     cooldown_seconds: int = 300

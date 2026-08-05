@@ -384,9 +384,12 @@ const App = {
 
     function startLive() {
       ws.onStatusChange = (connected) => { wsConnected.value = connected; };
+      // Published on every pong. Without this the readout was dead code:
+      // onStateChange is the only other publisher and _setState suppresses it
+      // when the state has not changed, so a steady connection never reported.
+      ws.onLatency = (ms) => { wsLatency.value = ms; };
       ws.onStateChange = (state, detail) => {
         wsState.value = state;
-        wsLatency.value = detail.latency ?? -1;
         if (state === 'connected') {
           if (wasConnected) {
             showWsToast('Connection restored', 'success');

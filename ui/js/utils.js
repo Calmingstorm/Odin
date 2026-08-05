@@ -49,6 +49,16 @@ export function formatAge(ts) {
   return `${Math.floor(sec / 86400)}d ago`;
 }
 
+/** Server-computed elapsed age: "less than 1 min ago", "5 min ago". */
+export function formatAgeSeconds(seconds) {
+  if (seconds == null || !isFinite(seconds)) return '—';
+  const sec = Math.max(0, Math.floor(Number(seconds)));
+  if (sec < 60) return 'less than 1 min ago';
+  if (sec < 3600) return `${Math.floor(sec / 60)} min ago`;
+  if (sec < 86400) return `${Math.floor(sec / 3600)} hr ago`;
+  return `${Math.floor(sec / 86400)} day ago`;
+}
+
 /** Duration in seconds: "45s", "2m 30s", "1h 12m". */
 export function formatDuration(seconds) {
   if (seconds == null || !isFinite(seconds)) return '—';

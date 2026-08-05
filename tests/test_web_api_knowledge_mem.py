@@ -251,6 +251,12 @@ class TestMemoryNotes:
         async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
             assert (await c.post("/api/memory/bulk-delete", data="bad")).status == 400
             assert (await c.post("/api/memory/bulk-delete", json={"entries": []})).status == 400
+            assert (await c.post(
+                "/api/memory/bulk-delete", json={"entries": ["not-an-object"]}
+            )).status == 400
+            assert (await c.post(
+                "/api/memory/bulk-delete", json={"entries": [{"scope": "global"}]}
+            )).status == 400
             r = await c.post("/api/memory/bulk-delete", json={"entries": [
                 {"scope": "global", "key": "a"},
                 {"scope": "global", "key": "c"},
@@ -344,3 +350,181 @@ class TestLearnedContext:
             after = await (await c.get("/api/learned")).json()
             current = next(e for e in after["entries"] if e["key"] == "e2")
             assert current == original
+
+
+class TestMemoryScopeEndpoint:
+    """GET /api/memory/{scope} — the whole scope in one request.
+
+    The per-key route loads the ENTIRE memory file to return one value, so a
+    scope with a few hundred keys cost that many requests and that many full
+    loads — enough for the WebUI to trip its own per-IP rate limit (120/60s)
+    just by expanding a scope. Bounding client concurrency cannot fix that;
+    only asking once can.
+    """
+
+    async def test_returns_every_entry_in_one_request(self):
+        bot = _memory_bot({"global": {"a": "1", "b": "2"}, "user_5": {"x": "9"}})
+        async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            r = await c.get("/api/memory/global")
+            assert r.status == 200
+            body = await r.json()
+            assert body["scope"] == "global"
+            assert body["entries"] == {"a": "1", "b": "2"}
+
+    async def test_unknown_scope_is_404(self):
+        bot = _memory_bot({"global": {"a": "1"}})
+        async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            assert (await c.get("/api/memory/nope")).status == 404
+
+    async def test_empty_scope_returns_empty_entries(self):
+        bot = _memory_bot({"global": {}})
+        async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            body = await (await c.get("/api/memory/global")).json()
+            assert body["entries"] == {}
+
+    async def test_corrupt_store_reports_503(self):
+        from src.json_store import StoreCorruptError
+
+        bot = _memory_bot({"global": {"a": "1"}})
+        def boom():
+            raise StoreCorruptError("corrupt")
+        bot.tool_executor._load_all_memory = boom
+        async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            assert (await c.get("/api/memory/global")).status == 503
+
+
+class TestMemoryScopeOwnership:
+    """Memory is not under ADMIN_ONLY_PREFIXES, so every route here served any
+    scope to any authenticated caller — a user-tier token could read and write
+    `user_<someone-else>` directly. The per-key route made that tedious; a
+    scope route would have made it a single request."""
+
+    def _identity(self, tier, user_id):
+        from types import SimpleNamespace
+
+        return SimpleNamespace(tier=tier, user_id=user_id)
+
+    def _with_identity(self, bot, identity):
+        """Attach an identity the way the auth middleware does."""
+        from aiohttp import web as _web
+
+        @_web.middleware
+        async def _mw(request, handler):
+            request._api_identity = identity
+            return await handler(request)
+
+        routes = _web.RouteTableDef()
+        register_memory_notes(routes, bot)
+        app = _web.Application(middlewares=[_mw])
+        app.router.add_routes(routes)
+        return app
+
+    def _authed_bot(self, memory):
+        from types import SimpleNamespace
+
+        bot = _memory_bot(memory)
+        # Auth IS configured, so the guard must enforce rather than fall back
+        # to dev mode.
+        bot.config = SimpleNamespace(
+            web=SimpleNamespace(api_token="configured", api_tokens=[])
+        )
+        return bot
+
+    async def test_user_tier_cannot_read_another_users_scope(self):
+        bot = self._authed_bot({"user_alice": {"note": "alice-secret"},
+                                "user_bob": {"note": "bob-secret"}})
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get("/api/memory/user_bob")
+            assert r.status == 403, await r.text()
+            assert "bob-secret" not in await r.text()
+
+    async def test_user_tier_list_hides_other_users_scope_metadata(self):
+        bot = self._authed_bot({
+            "global": {"shared": "g"},
+            "user_alice": {"mine": "a"},
+            "user_bob": {"private-key-name": "bob-secret"},
+        })
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get("/api/memory")
+            assert r.status == 200
+            body = await r.json()
+            assert set(body) == {"global", "user_alice"}
+            assert "private-key-name" not in await r.text()
+
+    async def test_user_tier_cannot_bulk_delete_another_users_key(self):
+        bot = self._authed_bot({
+            "user_alice": {"mine": "a"},
+            "user_bob": {"private": "bob-secret"},
+        })
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/memory/bulk-delete", json={"entries": [
+                {"scope": "user_alice", "key": "mine"},
+                {"scope": "user_bob", "key": "private"},
+            ]})
+            assert r.status == 403
+        # Authorization is checked for the complete request before mutation:
+        # neither the unauthorized key nor the preceding authorized key moved.
+        assert bot._backing["user_alice"] == {"mine": "a"}
+        assert bot._backing["user_bob"] == {"private": "bob-secret"}
+
+    async def test_user_tier_can_bulk_delete_own_and_global_keys(self):
+        bot = self._authed_bot({
+            "global": {"shared": "g"},
+            "user_alice": {"mine": "a"},
+        })
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post("/api/memory/bulk-delete", json={"entries": [
+                {"scope": "global", "key": "shared"},
+                {"scope": "user_alice", "key": "mine"},
+            ]})
+            assert r.status == 200
+            assert (await r.json())["count"] == 2
+
+    async def test_user_tier_cannot_read_another_users_key(self):
+        bot = self._authed_bot({"user_bob": {"note": "bob-secret"}})
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get("/api/memory/user_bob/note")
+            assert r.status == 403
+            assert "bob-secret" not in await r.text()
+
+    async def test_user_tier_cannot_write_another_users_scope(self):
+        bot = self._authed_bot({"user_bob": {"note": "bob-secret"}})
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.put("/api/memory/user_bob/note", json={"value": "x"})).status == 403
+            assert (await c.delete("/api/memory/user_bob/note")).status == 403
+
+    async def test_user_tier_reads_its_own_scope_and_global(self):
+        bot = self._authed_bot({"global": {"g": "shared"}, "user_alice": {"note": "mine"}})
+        app = self._with_identity(bot, self._identity("user", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            own = await (await c.get("/api/memory/user_alice")).json()
+            shared = await (await c.get("/api/memory/global")).json()
+            assert own["entries"] == {"note": "mine"}
+            assert shared["entries"] == {"g": "shared"}
+
+    async def test_admin_tier_is_unrestricted(self):
+        bot = self._authed_bot({"user_bob": {"note": "bob-secret"}})
+        app = self._with_identity(bot, self._identity("admin", "alice"))
+        async with TestClient(TestServer(app)) as c:
+            r = await c.get("/api/memory/user_bob")
+            assert r.status == 200
+            assert (await r.json())["entries"] == {"note": "bob-secret"}
+
+    async def test_missing_identity_fails_closed_when_auth_is_configured(self):
+        bot = self._authed_bot({"user_bob": {"note": "bob-secret"}})
+        async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            assert (await c.get("/api/memory")).status == 403
+            assert (await c.get("/api/memory/user_bob")).status == 403
+
+    async def test_no_auth_configured_still_allows_access(self):
+        """Dev mode: no tokens anywhere means auth is disabled wholesale, and
+        this guard must not become the only thing enforcing it."""
+        bot = _memory_bot({"user_bob": {"note": "bob-secret"}})
+        async with TestClient(TestServer(_app(register_memory_notes, bot=bot))) as c:
+            assert (await c.get("/api/memory/user_bob")).status == 200

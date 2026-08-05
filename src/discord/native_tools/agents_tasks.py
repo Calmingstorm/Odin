@@ -595,16 +595,27 @@ class AgentTaskTools:
         # the expected child depth from the parent so terminal children don't
         # even see spawn_agent in their tool list.
         parent_depth = 0
+        parent = None
         if parent_id_arg:
             parent = self._agent_manager._agents.get(parent_id_arg)
             if parent is not None:
                 parent_depth = parent.depth + 1
-        max_depth = getattr(
+        configured_max_depth = getattr(
             getattr(self._get_config(), "agents", None),
             "max_nesting_depth",
             2,
         )
-        tools = filter_agent_tools(all_tools, depth=parent_depth, max_depth=max_depth)
+        # A nested tree keeps the root's snapshot in both enforcement and its
+        # visible tool catalogue. Using live config here could hide spawn_agent
+        # from a tree whose original limit still permits it.
+        effective_max_depth = (
+            getattr(parent, "max_depth", configured_max_depth)
+            if parent is not None
+            else configured_max_depth
+        )
+        tools = filter_agent_tools(
+            all_tools, depth=parent_depth, max_depth=effective_max_depth
+        )
 
         # Iteration callback — wraps Codex chat_with_tools, returns dict
         async def _iteration_cb(
@@ -647,7 +658,10 @@ class AgentTaskTools:
             if tool_name == "spawn_agent":
                 # Nested spawn — forward this agent's id so AgentManager.spawn
                 # enforces max_nesting_depth and children linkage.
-                if _self_id["id"] and not tool_input.get("parent_id"):
+                if _self_id["id"]:
+                    # Invocation ancestry is authoritative. Chat-level callers
+                    # may still choose parent_id, but an agent invoking the tool
+                    # cannot select a different active tree to evade limits.
                     tool_input = {**tool_input, "parent_id": _self_id["id"]}
             elif tool_name in AGENT_BLOCKED_TOOLS:
                 # Other agent-management tools (kill/send_to/wait_for/get_results/
@@ -700,7 +714,13 @@ class AgentTaskTools:
             tools=tools,
             system_prompt=system_prompt,
             parent_id=parent_id_arg,
-            max_depth=max_depth,
+            max_depth=configured_max_depth,
+            # Root snapshot: config read at spawn time; descendants inherit
+            # the root's value inside the manager. Fallback stays the
+            # manager's constant for omitted/None.
+            max_children=getattr(agents_cfg, "max_children_per_agent", None)
+            if agents_cfg
+            else None,
             tool_timeouts=self._get_config().tools.tool_timeouts,
             trajectory_saver=self._agent_trajectory_saver,
             max_iterations=iter_cap,
@@ -999,6 +1019,14 @@ class AgentTaskTools:
             max_iterations=self._get_config().agents.max_iterations,
             iteration_timeout=self._get_config().agents.iteration_timeout_seconds,
             max_lifetime=self._get_config().agents.max_lifetime_seconds,
+            # Close the loop-path gap: depth and child limits now reach
+            # loop-spawned agents too, instead of silently using built-ins.
+            max_depth=getattr(
+                self._get_config().agents, "max_nesting_depth", None
+            ),
+            max_children=getattr(
+                self._get_config().agents, "max_children_per_agent", None
+            ),
             context_compression_enabled=bool(cc),
             max_context_chars=cc.max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,

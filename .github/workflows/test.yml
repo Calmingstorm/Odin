@@ -89,6 +89,25 @@ jobs:
       - name: No new type findings vs base
         run: python scripts/ci/type_gate.py
 
+  config-apply-classified:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        run: pip install -e ".[dev]"
+      # The WebUI renders apply-mode badges from src/config/apply_registry.py.
+      # A schema section with no entry would put the page back to guessing how
+      # a setting reaches the running bot, which is the defect the config
+      # campaign existed to remove. See scripts/ci/apply_registry_gate.py.
+      - name: Every config section declares how it applies
+        run: python scripts/ci/apply_registry_gate.py
+
   coverage-no-drop:
     runs-on: ubuntu-latest
     timeout-minutes: 20

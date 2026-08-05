@@ -439,7 +439,15 @@ class SubsystemGuard:
         """Full status snapshot for the REST API."""
         for name in list(self._subsystems):
             self._resolve(name)  # lapse expired transient degradations
-        subsystems = [info.to_dict() for info in self._subsystems.values()]
+        now = time.monotonic()
+        subsystems = []
+        for info in self._subsystems.values():
+            record = info.to_dict()
+            if info.last_failure_at:
+                record["last_failure_age_seconds"] = max(
+                    0.0, now - info.last_failure_at
+                )
+            subsystems.append(record)
         available_count = sum(1 for i in self._subsystems.values()
             if i.state == SubsystemState.AVAILABLE)
         degraded_count = sum(1 for i in self._subsystems.values()

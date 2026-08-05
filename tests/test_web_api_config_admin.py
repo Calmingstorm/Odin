@@ -30,10 +30,32 @@ from src.web.api.config_admin import (
 
 @pytest.fixture(autouse=True)
 def _isolate_cwd(tmp_path, monkeypatch):
-    # Several config_admin handlers persist to a RELATIVE Path("config.yml")
+    # The setup-wizard handler persists to a RELATIVE Path("config.yml")
     # (correct at /opt/odin in prod). Chdir to a temp dir so no test can
     # write the repo's tracked config.yml template.
     monkeypatch.chdir(tmp_path)
+
+
+@pytest.fixture(autouse=True)
+def _active_config(tmp_path):
+    """Point config persistence at a temp file.
+
+    Config and personality writes go through the shared round-trip writer,
+    which targets the file the live config was LOADED from and refuses to
+    guess a CWD-relative one — a fabricated Config must never clobber whatever
+    config.yml happens to sit in the working directory. Tests therefore have
+    to declare an active path like a real deployment does.
+    """
+    from pathlib import Path
+
+    from src.config.schema import active_config_path, set_active_config_path
+
+    path = tmp_path / "active-config.yml"
+    path.write_text("discord:\n  token: fake\n")
+    previous = active_config_path()
+    set_active_config_path(Path(path))
+    yield path
+    set_active_config_path(previous)
 
 
 @pytest.fixture(autouse=True)
@@ -267,7 +289,7 @@ class TestDiscordConfig:
             assert (await c.put("/api/discord/channel/9/config", data="bad")).status == 400
 
     @pytest.mark.asyncio
-    async def test_update_config_persists_normalized_dropping_removed_keys(self):
+    async def test_update_config_persists_normalized_dropping_removed_keys(self, _active_config):
         # The general /api/config write must persist the VALIDATED config, not
         # the raw merge — a removed key named in the update (model_routing)
         # can't linger on disk.
@@ -284,13 +306,32 @@ class TestDiscordConfig:
             app, bot = _app(register_discord_config)
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/config", json={
-                    "openai_codex": {"model_routing": {"enabled": True}},
+                    "context": {"max_system_prompt_tokens": 12345},
+                    "openai_codex": {
+                        "model_routing": {"enabled": True},
+                        "max_tokens": 98765,
+                    },
+                    "graceful_degradation": {
+                        "enabled": False,
+                        "degraded_threshold": 7,
+                    },
+                    "grafana_alerts": {
+                        "enabled": False,
+                        "cooldown_seconds": 612,
+                    },
                 })
                 assert r.status == 200
         finally:
             set_active_config_path(previous)
-        oc = YAML().load(Path("config.yml").read_text()).get("openai_codex", {})
+        saved = YAML().load(Path("config.yml").read_text())
+        oc = saved.get("openai_codex", {})
         assert "model_routing" not in oc
+        assert "max_tokens" not in oc
+        assert "max_system_prompt_tokens" not in saved.get("context", {})
+        assert "enabled" not in saved["graceful_degradation"]
+        assert saved["graceful_degradation"]["degraded_threshold"] == 7
+        assert "enabled" not in saved["grafana_alerts"]
+        assert saved["grafana_alerts"]["cooldown_seconds"] == 612
 
     @pytest.mark.asyncio
     async def test_blanking_the_workspace_normalizes_everywhere(self):
@@ -417,24 +458,43 @@ class TestDiscordConfig:
             assert bot.config.tools.max_tool_iterations_chat == 7
 
     @pytest.mark.asyncio
-    async def test_config_put_persists_when_file_exists(self):
-        from pathlib import Path
-        Path("config.yml").write_text("discord:\n  token: fake\n")
+    async def test_config_put_persists_when_file_exists(self, _active_config):
+        from ruamel.yaml import YAML
+
         app, bot = _app(register_discord_config)
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 9}})
-            assert r.status == 200  # persist branch taken (file exists)
+            assert r.status == 200
+        on_disk = YAML().load(_active_config.read_text())
+        assert on_disk["tools"]["max_tool_iterations_chat"] == 9
 
     @pytest.mark.asyncio
-    async def test_config_put_persist_failure_still_200(self):
-        from pathlib import Path
-        Path("config.yml").write_text("discord:\n  token: fake\n")
+    async def test_config_put_persist_failure_is_reported_and_changes_nothing(self):
+        """A save that cannot reach disk must fail loudly.
+
+        The old handler applied the change to bot.config FIRST and merely
+        logged a write failure, so the UI reported "Config saved successfully"
+        for a change that silently reverted at the next restart. Persistence
+        now happens before the runtime swap: a failed write means 500 AND an
+        untouched runtime config."""
         app, bot = _app(register_discord_config)
-        with patch("src.web.api.config_admin._write_config", side_effect=OSError("ro")):
+        before = bot.config.tools.max_tool_iterations_chat
+        with patch("src.config.persistence.patch_config_paths", side_effect=OSError("ro")):
             async with TestClient(TestServer(app)) as c:
-                # persist fails but the in-memory apply still succeeds
                 r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 6}})
-                assert r.status == 200
+                assert r.status == 500
+        assert bot.config.tools.max_tool_iterations_chat == before
+
+    @pytest.mark.asyncio
+    async def test_config_put_missing_file_is_reported(self, _active_config):
+        """A missing target used to skip persistence and still return 200."""
+        _active_config.unlink()
+        app, bot = _app(register_discord_config)
+        before = bot.config.tools.max_tool_iterations_chat
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 6}})
+            assert r.status == 500
+        assert bot.config.tools.max_tool_iterations_chat == before
 
     @pytest.mark.asyncio
     async def test_config_put_diff_failure_still_200(self):
@@ -555,3 +615,777 @@ class TestStartupDiagnostics:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/startup/diagnostics")).json()
             assert body["checks"] == 8
+
+
+class TestPersonalityPersistFirst:
+    """A failed personality write must leave nothing live.
+
+    All three endpoints used to install the new personality — and register its
+    presets into the process-global registry — BEFORE persisting, so a 500
+    left the new identity effective with nothing on disk behind it.
+    """
+
+    @pytest.mark.asyncio
+    async def test_update_failure_leaves_runtime_untouched(self):
+        app, bot = _app(register_personality)
+        before = bot.config.personality.preset
+        with patch("src.config.persistence.patch_config_paths",
+                   side_effect=OSError("read-only fs")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/personality", json={"preset": "pirate"})
+                assert r.status == 500
+        assert bot.config.personality.preset == before
+
+    @pytest.mark.asyncio
+    async def test_failed_save_preset_does_not_register_globally(self):
+        from src.llm import system_prompt
+
+        app, bot = _app(register_personality)
+        with patch("src.config.persistence.patch_config_paths",
+                   side_effect=OSError("read-only fs")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.post("/api/personality/presets", json={
+                    "name": "ghost", "identity": "spooky",
+                })
+                assert r.status == 500
+        assert "ghost" not in bot.config.personality.user_presets
+        assert "ghost" not in system_prompt._USER_PRESETS
+
+    @pytest.mark.asyncio
+    async def test_failed_delete_keeps_the_preset(self):
+        from src.config.schema import PersonalityPreset
+
+        app, bot = _app(register_personality)
+        bot.config.personality.user_presets["keeper"] = PersonalityPreset(
+            name="keeper", identity="stays", voice="",
+        )
+        with patch("src.config.persistence.patch_config_paths",
+                   side_effect=OSError("read-only fs")):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.delete("/api/personality/presets/keeper")
+                assert r.status == 500
+        assert "keeper" in bot.config.personality.user_presets
+
+    @pytest.mark.asyncio
+    async def test_successful_update_still_applies_and_persists(self, _active_config):
+        from ruamel.yaml import YAML
+
+        app, bot = _app(register_personality)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/personality", json={
+                "preset": "custom", "custom_name": "Test", "custom_identity": "id",
+            })
+            assert r.status == 200
+        assert bot.config.personality.preset == "custom"
+        on_disk = YAML().load(_active_config.read_text())["personality"]
+        assert on_disk["preset"] == "custom"
+        assert on_disk["custom_name"] == "Test"
+
+
+class TestConfigTransaction:
+    """The whole mutation runs under one lock.
+
+    Odin's repro: an LLM update overwritten by a stale generic document. A
+    generic save reads bot.config, validates a merged copy, persists, then
+    rebinds bot.config. If another writer commits between the read and the
+    rebind, the rebind is built from a snapshot that predates it — so the
+    change vanishes from runtime while the leaf-scoped write leaves it on
+    disk, and runtime and disk silently disagree.
+    """
+
+    @pytest.mark.asyncio
+    async def test_concurrent_writer_is_not_clobbered(self, _active_config):
+        import asyncio
+
+        from src.config.persistence import config_transaction
+
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            # Hold the transaction like a concurrent LLM route would, mutate
+            # bot.config underneath, and only then let the generic save run.
+            async with config_transaction():
+                request = asyncio.create_task(
+                    c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 7}})
+                )
+                await asyncio.sleep(0.05)
+                # The generic handler must still be waiting for the lock — if it
+                # read bot.config already, this change would be lost below.
+                assert not request.done()
+                bot.config.openai_codex.model = "concurrently-set-model"
+
+            r = await request
+            assert r.status == 200
+
+        assert bot.config.tools.max_tool_iterations_chat == 7, "the save applied"
+        assert bot.config.openai_codex.model == "concurrently-set-model", (
+            "the concurrent writer's change survived the rebind"
+        )
+
+    @pytest.mark.asyncio
+    async def test_lock_is_released_after_a_rejected_save(self, _active_config):
+        """A 400 returns from inside the transaction — the lock must not leak."""
+        from src.config.persistence import config_transaction
+
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": "no"}})
+            assert r.status == 400
+        assert not config_transaction().locked()
+
+
+class TestCancellationCoherence:
+    """A cancelled save must not leave disk and runtime disagreeing.
+
+    The write commits before the cancellation is observed, so raising at that
+    point would strand the handler before it updates bot.config — disk would
+    say DEBUG while the process kept serving INFO.
+    """
+
+    @pytest.mark.asyncio
+    async def test_runtime_matches_disk_after_a_cancelled_save(self, _active_config):
+        import asyncio
+        import threading
+
+        from ruamel.yaml import YAML
+
+        import src.config.persistence as persistence
+
+        app, bot = _app(register_discord_config)
+        real = persistence.patch_config_paths
+
+        # Synchronise on EVENTS, not sleeps. Cancelling after a fixed delay is
+        # a guess about scheduling: under full-suite load the write had not
+        # always begun when the cancel landed, so this test failed for a reason
+        # that had nothing to do with the behaviour it pins.
+        write_started = threading.Event()
+        may_finish = threading.Event()
+
+        def slow(changes, *, path=None):
+            write_started.set()
+            assert may_finish.wait(timeout=10), "test never released the write"
+            real(changes, path=path)
+
+        with patch.object(persistence, "patch_config_paths", slow):
+            async with TestClient(TestServer(app)) as c:
+                request = asyncio.create_task(
+                    c.put("/api/config", json={"logging": {"level": "DEBUG"}})
+                )
+                # The write is genuinely in flight before we cancel.
+                assert await asyncio.to_thread(write_started.wait, 10), "write never started"
+                request.cancel()
+                may_finish.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+
+        on_disk = YAML().load(_active_config.read_text())["logging"]["level"]
+        assert on_disk == "DEBUG"
+        assert bot.config.logging.level == "DEBUG", (
+            "runtime must match what was committed to disk"
+        )
+
+
+class TestPersonalityTransaction:
+    """Read → compute → persist → publish must be one transaction: computing
+    outside the lock and publishing after releasing it lets two concurrent
+    saves land with runtime holding one value and disk the other."""
+
+    @pytest.mark.asyncio
+    async def test_personality_save_blocks_on_the_shared_lock(self, _active_config):
+        import asyncio
+
+        from src.config.persistence import config_transaction
+
+        app, bot = _app(register_personality)
+        async with TestClient(TestServer(app)) as c:
+            async with config_transaction():
+                request = asyncio.create_task(
+                    c.put("/api/personality", json={"preset": "pirate"})
+                )
+                await asyncio.sleep(0.05)
+                assert not request.done(), (
+                    "the handler must wait for the lock before reading bot.config"
+                )
+            r = await request
+            assert r.status == 200
+        assert bot.config.personality.preset == "pirate"
+
+    @pytest.mark.asyncio
+    async def test_personality_placeholder_is_not_flattened(self, _active_config, monkeypatch):
+        _active_config.write_text(
+            "discord:\n  token: x\npersonality:\n  custom_name: ${ODIN_NAME}\n"
+        )
+        monkeypatch.setenv("ODIN_NAME", "Odin")
+        app, bot = _app(register_personality)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put("/api/personality", json={
+                "preset": "custom", "custom_name": "Odin", "custom_identity": "id",
+            })
+            assert r.status == 200
+        text = _active_config.read_text()
+        assert "custom_name: ${ODIN_NAME}" in text, (
+            "an unchanged placeholder must survive a personality save"
+        )
+        assert "preset: custom" in text
+
+
+class TestCancellationDerivedPublication:
+    @pytest.mark.asyncio
+    async def test_generic_personality_save_publishes_derived_state_before_cancel(
+        self, _active_config
+    ):
+        import asyncio
+        import threading
+
+        import src.config.persistence as persistence
+        from src.llm import system_prompt
+
+        app, bot = _app(register_discord_config)
+        started = threading.Event()
+        release = threading.Event()
+        real = persistence.patch_config_paths
+
+        def slow(changes, *, path=None):
+            started.set()
+            release.wait()
+            real(changes, path=path)
+
+        with patch.object(persistence, "patch_config_paths", slow):
+            async with TestClient(TestServer(app)) as c:
+                request = asyncio.create_task(
+                    c.put(
+                        "/api/config",
+                        json={
+                            "personality": {
+                                "preset": "custom",
+                                "custom_name": "Cancelled Odin",
+                                "custom_identity": "still committed",
+                                "user_presets": {
+                                    "cancelled": {
+                                        "name": "Cancelled",
+                                        "identity": "committed",
+                                        "voice": "steady",
+                                    }
+                                },
+                            }
+                        },
+                    )
+                )
+                while not started.is_set():
+                    await asyncio.sleep(0.005)
+                request.cancel()
+                release.set()
+                with pytest.raises(asyncio.CancelledError):
+                    await request
+
+        assert bot.config.personality.custom_name == "Cancelled Odin"
+        assert "cancelled" in system_prompt._USER_PRESETS
+        bot.prompt_builder.rebuild_default.assert_called_once()
+        bot.tool_catalog.invalidate.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("method", "route", "body"),
+    [
+        ("put", "/api/personality", {"preset": "pirate"}),
+        ("post", "/api/personality/presets", {"name": "cancelled", "identity": "still here"}),
+    ],
+)
+async def test_cancelled_failed_personality_write_does_not_publish(
+    monkeypatch, method, route, body
+):
+    async def cancelled_failure(_changes):
+        return OSError("disk full"), True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
+    )
+    app, bot = _app(register_personality)
+    before = bot.config.personality.model_copy(deep=True)
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await getattr(c, method)(route, json=body)
+
+    assert bot.config.personality == before
+    bot.prompt_builder.invalidate.assert_not_called()
+    bot.tool_catalog.invalidate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_failed_generic_write_does_not_publish(monkeypatch):
+    async def cancelled_failure(_changes):
+        return OSError("disk full"), True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
+    )
+    app, bot = _app(register_discord_config)
+    before = bot.config.tools.max_tool_iterations_chat
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 7}})
+
+    assert bot.config.tools.max_tool_iterations_chat == before
+    bot.tool_catalog.invalidate.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_successful_personality_update_publishes_before_escape(
+    monkeypatch,
+):
+    async def cancelled_success(_changes):
+        return None, True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
+    )
+    app, bot = _app(register_personality)
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.put("/api/personality", json={"preset": "pirate"})
+
+    assert bot.config.personality.preset == "pirate"
+    bot.prompt_builder.rebuild_default.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_successful_active_preset_save_publishes_derived_state(
+    monkeypatch,
+):
+    async def cancelled_success(_changes):
+        return None, True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
+    )
+    app, bot = _app(register_personality)
+    bot.config.personality.preset = "active"
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.post(
+                "/api/personality/presets",
+                json={"name": "active", "identity": "committed"},
+            )
+
+    assert "active" in bot.config.personality.user_presets
+    bot.prompt_builder.invalidate.assert_called_once()
+    bot.tool_catalog.invalidate.assert_called_once()
+    bot.prompt_builder.rebuild_default.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_cancelled_failed_preset_delete_does_not_publish(monkeypatch):
+    from src.config.schema import PersonalityPreset
+
+    async def cancelled_failure(_changes):
+        return OSError("disk full"), True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
+    )
+    app, bot = _app(register_personality)
+    bot.config.personality.user_presets["keep"] = PersonalityPreset(
+        name="Keep", identity="still present"
+    )
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.delete("/api/personality/presets/keep")
+
+    assert "keep" in bot.config.personality.user_presets
+
+
+@pytest.mark.asyncio
+async def test_cancelled_successful_preset_delete_publishes_before_escape(monkeypatch):
+    from src.config.schema import PersonalityPreset
+
+    async def cancelled_success(_changes):
+        return None, True
+
+    monkeypatch.setattr(
+        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
+    )
+    app, bot = _app(register_personality)
+    bot.config.personality.user_presets["gone"] = PersonalityPreset(
+        name="Gone", identity="committed deletion"
+    )
+
+    async with TestClient(TestServer(app)) as c:
+        with pytest.raises(Exception):
+            await c.delete("/api/personality/presets/gone")
+
+    assert "gone" not in bot.config.personality.user_presets
+
+
+class TestConfigMeta:
+    """GET /api/config/meta — how each section reaches the running bot.
+
+    The page renders apply-mode badges from this. Before it existed the UI
+    inferred everything from a value's shape, which is how it came to report
+    "Config saved successfully" for changes that needed a restart, were owned
+    by another endpoint, or were not wired to anything at all.
+    """
+
+    #: The complete server record contract consumed by Config Center. The page
+    #: reads this route directly; keeping the exact key set pinned makes schema
+    #: additions and removals deliberate rather than silent UI drift.
+    RECORD_KEYS = {
+        "path", "owner", "label", "description", "aliases", "unit", "examples",
+        "type", "structured_container", "structured_container_child", "enum",
+        "constraints", "default",
+        "sensitivity", "secret_route",
+        "apply_mode", "apply_handler", "consumers", "restart_reason",
+        "activation_policy", "group_description", "save_effect",
+        "runtime_effect", "action_available", "action_label",
+        "action_endpoint", "action_method", "action_body",
+        "desired", "effective", "configured", "provenance",
+        "valid", "validation_errors", "pending_restart", "drift", "last_apply",
+        "apply_state",
+    }
+
+
+    @pytest.mark.asyncio
+    async def test_an_ordinary_save_is_unaffected(self):
+        app, bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.put(
+                "/api/config", json={"discord": {"require_mention": False}}
+            )
+
+        assert resp.status == 200
+        assert bot.config.discord.require_mention is False
+
+    def test_the_route_sits_behind_the_admin_gate(self):
+        """It returns every non-secret configuration value. Route-level tests
+        run without the auth middleware, so nothing else here would notice the
+        route being moved somewhere the gate does not cover."""
+        from src.health.server import ADMIN_ONLY_PREFIXES
+
+        assert any(
+            "/api/config/meta".startswith(prefix) for prefix in ADMIN_ONLY_PREFIXES
+        )
+
+    @pytest.mark.asyncio
+    async def test_payload_is_the_envelope_the_page_consumes(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        assert body["schema_version"] == 1
+        assert body["revision"]
+        assert isinstance(body["fields"], list) and body["fields"]
+        status = body["status"]
+        assert set(status["counts"]) == {
+            "applied", "pending_restart", "dormant", "invalid", "drift", "unknown",
+        }
+        assert sum(status["counts"].values()) == len(body["fields"])
+        assert status["desired_revision"] == body["revision"]
+
+    @pytest.mark.asyncio
+    async def test_every_record_carries_the_full_contract(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for record in body["fields"]:
+            assert set(record) == self.RECORD_KEYS, (
+                f"{record['path']} does not match the fixture contract: "
+                f"{set(record) ^ self.RECORD_KEYS}"
+            )
+
+    @pytest.mark.asyncio
+    async def test_every_schema_leaf_is_a_field(self):
+        """Nested leaves too — a section entry cannot stand in for the leaves
+        underneath it, which is how the retry and pool settings went
+        unclassified."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        paths = {record["path"] for record in body["fields"]}
+        for expected in (
+            "timezone",
+            "openai_codex.model",
+            "openai_codex.retry.max_retries",
+            "openai_codex.connection_pool.max_connections",
+            "tools.max_tool_iterations_chat",
+            "turn_state.resume_ttl_hours",
+        ):
+            assert expected in paths, f"{expected} has no field record"
+        assert "graceful_degradation.enabled" not in paths
+        assert "grafana_alerts.enabled" not in paths
+
+    @pytest.mark.asyncio
+    async def test_populated_container_descendants_are_read_only(self):
+        """A populated tools.hosts used to flatten into ordinary editable text
+        inputs even though its empty parent promised a read-only collection."""
+        bot = _bot()
+        bot.config = Config(
+            discord={"token": "fake"},
+            tools={
+                "hosts": {
+                    "prod": {
+                        "address": "10.0.0.8",
+                        "ssh_user": "deploy",
+                        "os": "linux",
+                    }
+                }
+            },
+        )
+        app, _ = _app(register_discord_config, bot=bot)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        records = {
+            record["path"]: record
+            for record in body["fields"]
+            if record["path"].startswith("tools.hosts.prod.")
+        }
+        assert set(records) == {
+            "tools.hosts.prod.address",
+            "tools.hosts.prod.ssh_user",
+            "tools.hosts.prod.os",
+        }
+        assert all(record["structured_container_child"] for record in records.values())
+        assert all(not record["structured_container"] for record in records.values())
+
+    @pytest.mark.asyncio
+    async def test_apply_modes_are_from_the_known_vocabulary(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        # Mirrors APPLY_MODE_LABELS in ui/js/pages/config.js — the page maps
+        # anything else onto its Restart group.
+        allowed = {
+            "live_read", "live_apply", "live_for_new_work", "restart",
+            "activation_required", "legacy_control", "dormant",
+        }
+        for record in body["fields"]:
+            assert record["apply_mode"] in allowed, (
+                f"{record['path']}: {record['apply_mode']} is a mode the page "
+                f"cannot render, and unknown modes fall into its Restart group"
+            )
+            assert record["description"], f"{record['path']} has no description"
+
+    @pytest.mark.asyncio
+    async def test_restart_fields_say_why(self):
+        """A restart badge with no reason is the kind of unexplained claim
+        this campaign kept finding in comments."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for record in body["fields"]:
+            if record["apply_mode"] == "restart":
+                assert record["restart_reason"], (
+                    f"{record['path']} claims restart without a reason"
+                )
+
+    @pytest.mark.asyncio
+    async def test_live_apply_fields_name_their_handler(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        for record in body["fields"]:
+            if record["apply_mode"] == "live_apply":
+                assert record["apply_handler"], (
+                    f"{record['path']} claims a live apply with no handler"
+                )
+
+    @pytest.mark.asyncio
+    async def test_activation_required_fields_say_what_activation_means(self):
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        dormant = [
+            r for r in body["fields"] if r["apply_mode"] == "activation_required"
+        ]
+        assert dormant, "no dormant fields — the vocabulary would be untested"
+        for record in dormant:
+            assert record["activation_policy"], f"{record['path']}"
+            assert record["apply_state"] == "dormant"
+
+    @pytest.mark.asyncio
+    async def test_disagreeing_consumers_are_published_not_averaged(self):
+        """timezone is live for prompts and restart for the time parser. One
+        badge for both would be false whichever it showed."""
+        app, _bot = _app(register_discord_config)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(r for r in body["fields"] if r["path"] == "timezone")
+        modes = {c["apply_mode"] for c in record["consumers"]}
+        assert "live_read" in modes and "restart" in modes
+        assert all(c["detail"] for c in record["consumers"])
+
+    @pytest.mark.asyncio
+    async def test_secret_state_without_secret_values(self):
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = "super-secret-token-value"
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get("/api/config/meta")
+            raw = await resp.text()
+            body = await resp.json()
+
+        record = next(r for r in body["fields"] if r["path"] == "discord.token")
+        assert record["sensitivity"] == "sensitive"
+        assert record["configured"] is True
+        # Null until the dedicated set/clear route exists — a link that 404s
+        # is worse than no link.
+        assert record["secret_route"] is None
+        assert "super-secret-token-value" not in raw
+        # Not even a length, which would narrow a brute force.
+        assert record["desired"] == "•" * 8
+
+    @pytest.mark.asyncio
+    async def test_unset_secret_reports_not_configured(self):
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = ""
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(r for r in body["fields"] if r["path"] == "discord.token")
+        assert record["configured"] is False
+        assert record["desired"] == ""
+        assert record["provenance"] == "unset"
+
+    @pytest.mark.asyncio
+    async def test_no_secret_value_appears_anywhere_in_the_payload(self):
+        """Populates the LIST-shaped sections deliberately. A default config
+        leaves api_tokens and webhook targets empty, so a scan over defaults
+        passes while every real install serves its tokens."""
+        app, bot = _app(register_discord_config)
+        bot.config.discord.token = "tok-discord-leak"
+        bot.config.web.api_token = "tok-web-leak"
+        bot.config.audit.hmac_key = "tok-audit-leak"
+        bot.config.slack.default_webhook_url = "tok-slack-webhook-url-leak"
+        raw_config = bot.config.model_dump()
+        raw_config["web"]["api_tokens"] = [
+            {"name": "ops", "token": "tok-in-a-list-leak"}
+        ]
+        raw_config["outbound_webhooks"]["targets"] = [
+            {"name": "a", "url": "https://x", "secret": "tok-target-leak"}
+        ]
+        bot.config = SimpleNamespace(model_dump=lambda: raw_config)
+
+        async with TestClient(TestServer(app)) as c:
+            raw = await (await c.get("/api/config/meta")).text()
+
+        for secret in (
+            "tok-discord-leak",
+            "tok-web-leak",
+            "tok-audit-leak",
+            "tok-slack-webhook-url-leak",
+            "tok-in-a-list-leak",
+            "tok-target-leak",
+        ):
+            assert secret not in raw, f"{secret} reached the config page"
+
+    @pytest.mark.asyncio
+    async def test_restart_field_reports_the_boot_value_as_effective(self):
+        """Changing a restart-mode setting must not read back as applied. The
+        page's whole purpose is to stop claiming success for changes the
+        running process has not adopted."""
+        app, bot = _app(register_discord_config)
+        bot.boot_config_snapshot = bot.config.model_dump()
+        bot.config.sessions.max_history = bot.config.sessions.max_history + 7
+
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(
+            r for r in body["fields"] if r["path"] == "sessions.max_history"
+        )
+        assert record["apply_mode"] == "restart"
+        assert record["desired"] == bot.config.sessions.max_history
+        assert record["effective"] == bot.boot_config_snapshot["sessions"]["max_history"]
+        assert record["pending_restart"] is True
+        assert record["apply_state"] == "pending_restart"
+        assert body["status"]["counts"]["pending_restart"] >= 1
+        assert body["status"]["effective_revision"] != body["revision"]
+
+    @pytest.mark.asyncio
+    async def test_live_field_is_applied_the_moment_it_changes(self):
+        app, bot = _app(register_discord_config)
+        bot.boot_config_snapshot = bot.config.model_dump()
+        bot.config.discord.respond_to_bots = not bot.config.discord.respond_to_bots
+
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/config/meta")).json()
+
+        record = next(
+            r for r in body["fields"] if r["path"] == "discord.respond_to_bots"
+        )
+        assert record["apply_mode"] == "live_read"
+        assert record["pending_restart"] is False
+        assert record["effective"] == record["desired"]
+        assert record["apply_state"] == "applied"
+
+
+class TestRestartEndpoint:
+    """POST /api/restart — the Config page's pending-restart flow.
+
+    Restart-mode settings save but keep startup values; the page offers a
+    clean restart instead of pointing the operator at a shell. The wizard's
+    delayed-SIGTERM pattern lets the 202 flush before the process exits.
+    """
+
+    @pytest.mark.asyncio
+    async def test_restarts_cleanly_and_returns_202(self):
+        from src import restart as restart_mod
+
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None  # dev mode: no auth configured → gate allows
+        bot.config.web.api_token = ""
+        with patch.object(restart_mod, "request_restart") as req, \
+             patch.object(restart_mod, "restart_requested", return_value=False), \
+             patch("os.kill") as kill:
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/restart", json={})
+                body = await resp.json()
+            kill.assert_not_called()  # scheduled via call_later, not fired in-test
+        assert resp.status == 202
+        assert body["status"] == "restarting"
+        req.assert_called_once_with()  # NO env overrides — first-boot-only power
+
+    @pytest.mark.asyncio
+    async def test_idempotent_while_a_restart_is_scheduled(self):
+        from src import restart as restart_mod
+
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None
+        bot.config.web.api_token = ""
+        with patch.object(restart_mod, "request_restart") as req, \
+             patch.object(restart_mod, "restart_requested", return_value=True):
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/restart", json={})
+        assert resp.status == 202
+        req.assert_not_called()  # already scheduled — do not double-arm
+
+    def test_the_route_sits_behind_the_admin_gate(self):
+        from src.health.server import _is_admin_only_path
+
+        assert _is_admin_only_path("/api/restart")
+
+
+    @pytest.mark.asyncio
+    async def test_denied_without_admin_identity(self):
+        """Auth configured + no identity on the request = the gate refuses,
+        and nothing gets scheduled."""
+        from src import restart as restart_mod
+
+        app, bot = _app(register_quick_actions)
+        bot.api_token_manager = None
+        bot.config.web.api_token = "configured-token"
+        with patch.object(restart_mod, "request_restart") as req:
+            async with TestClient(TestServer(app)) as c:
+                resp = await c.post("/api/restart", json={})
+        assert resp.status == 403
+        req.assert_not_called()

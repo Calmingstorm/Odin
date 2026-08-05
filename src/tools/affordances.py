@@ -134,7 +134,7 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
             (),
             (
                 "workflow steps need populated tool_input with all required fields",
-                "run_at must be ISO format — use parse_time first for natural language",
+                "run_at must be offset-aware ISO — use parse_time first for natural language",
             ),
         ),
     ),

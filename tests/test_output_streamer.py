@@ -73,8 +73,29 @@ class TestStreamChunk:
             tool_name="t", chunk="c", sequence=0,
             timestamp="ts", channel_id="ch",
         ).to_dict()
-        expected_keys = {"tool_name", "chunk", "sequence", "timestamp", "channel_id", "finished"}
+        # call_id joined the wire payload so consumers can attribute streamed
+        # output to ONE invocation: two concurrent calls to the same tool
+        # stream under the same name, and a name-keyed consumer merges their
+        # output and lets either completion clear both. Additive, so existing
+        # consumers that ignore unknown keys are unaffected.
+        expected_keys = {
+            "tool_name", "chunk", "sequence", "timestamp", "channel_id",
+            "finished", "call_id",
+        }
         assert set(d.keys()) == expected_keys
+
+    def test_call_id_defaults_to_none_for_untracked_invocations(self):
+        d = StreamChunk(
+            tool_name="t", chunk="c", sequence=0, timestamp="ts", channel_id="ch",
+        ).to_dict()
+        assert d["call_id"] is None
+
+    def test_call_id_round_trips(self):
+        d = StreamChunk(
+            tool_name="t", chunk="c", sequence=0, timestamp="ts", channel_id="ch",
+            call_id="call_xyz",
+        ).to_dict()
+        assert d["call_id"] == "call_xyz"
 
 
 # ---------------------------------------------------------------------------
@@ -1150,3 +1171,169 @@ class TestEdgeCases:
         from datetime import datetime
         # Should parse as valid ISO timestamp
         datetime.fromisoformat(chunk.timestamp)
+
+
+class TestCallIdAttribution:
+    """Streamed chunks must carry the invocation they belong to.
+
+    Keying by tool_name cannot separate two concurrent run_command calls:
+    their output merges onto both cards and either completion deletes both
+    streams.
+    """
+
+    async def test_unbound_callbacks_get_distinct_wire_ids(self):
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        stream_a, out_a, finish_a = streamer.create_callback("run_command", channel_id="h")
+        stream_b, out_b, finish_b = streamer.create_callback("run_command", channel_id="h")
+        await out_a("a\n")
+        await out_b("b\n")
+        await finish_a()
+        await finish_b()
+
+        assert stream_a != stream_b
+        assert {chunk.call_id for chunk in seen} == {stream_a, stream_b}
+
+    async def test_chunks_carry_the_bound_call_id(self):
+        from src.tools.output_streamer import ToolOutputStreamer, current_call_id
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        token = current_call_id.set("call_alpha")
+        try:
+            _, on_output, finish = streamer.create_callback("run_command", channel_id="h")
+            await on_output("hello\n")
+            await finish()
+        finally:
+            current_call_id.reset(token)
+
+        assert seen, "no chunks emitted"
+        assert {c.call_id for c in seen} == {"call_alpha"}
+
+    async def test_concurrent_same_name_calls_get_distinct_ids(self):
+        from src.tools.output_streamer import ToolOutputStreamer, current_call_id
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        token_a = current_call_id.set("call_a")
+        _, out_a, fin_a = streamer.create_callback("run_command", channel_id="h")
+        current_call_id.reset(token_a)
+
+        token_b = current_call_id.set("call_b")
+        _, out_b, fin_b = streamer.create_callback("run_command", channel_id="h")
+        current_call_id.reset(token_b)
+
+        await out_a("from a\n")
+        await out_b("from b\n")
+        await fin_a()
+        await fin_b()
+
+        by_id = {}
+        for c in seen:
+            by_id.setdefault(c.call_id, []).append(c.chunk)
+        assert set(by_id) == {"call_a", "call_b"}
+        assert "from a\n" in "".join(by_id["call_a"])
+        assert "from b\n" in "".join(by_id["call_b"])
+        assert "from b" not in "".join(by_id["call_a"])
+
+    async def test_autonomous_loop_binds_block_id_for_streams(self):
+        """The loop pipeline is a separate executor entry point from chat.
+
+        It must bind the model tool-use id too; otherwise two concurrent
+        same-name calls from one loop iteration still emit call_id=None.
+        """
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+        from src.tools.output_streamer import ToolOutputStreamer
+
+        seen = []
+        streamer = ToolOutputStreamer(enabled_tools={"run_command"}, chunk_interval=0.0)
+        streamer.add_listener(lambda chunk: seen.append(chunk) or _noop())
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._native_tools = SimpleNamespace(handles=lambda _name: False)
+
+        async def dispatch(*_args):
+            _, on_output, finish = streamer.create_callback("run_command", channel_id="h")
+            await on_output("loop output\n")
+            await finish()
+            return "ok"
+
+        runner.dispatch_loop_tool = dispatch
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        st = SimpleNamespace(
+            tool_timeout=5,
+            msg_proxy=object(),
+            user_id="1",
+            system_prompt="",
+            channel=object(),
+            requester_name="u",
+            channel_id_str="c",
+        )
+        block = SimpleNamespace(
+            id="loop_call_alpha",
+            name="run_command",
+            input={"command": "echo hi"},
+            parse_error=None,
+        )
+
+        result = await runner._run_one_loop_tool(st, block)
+
+        assert result["tool_use_id"] == "loop_call_alpha"
+        assert seen
+        assert {chunk.call_id for chunk in seen} == {"loop_call_alpha"}
+
+    async def test_autonomous_loop_does_not_leak_parent_id_into_native_child(self):
+        """A native spawn can create a long-lived child task.
+
+        ContextVars are copied when that task is created, so the parent tool id
+        must not be bound around native dispatch or every child stream would be
+        attributed to the spawn invocation.
+        """
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+        from src.tools.output_streamer import current_call_id
+
+        observed = []
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._native_tools = SimpleNamespace(handles=lambda _name: True)
+
+        async def dispatch(*_args):
+            observed.append(current_call_id.get())
+            return "ok"
+
+        runner.dispatch_loop_tool = dispatch
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        st = SimpleNamespace(
+            tool_timeout=5,
+            msg_proxy=object(),
+            user_id="1",
+            system_prompt="",
+            channel=object(),
+            requester_name="u",
+            channel_id_str="c",
+        )
+        block = SimpleNamespace(
+            id="spawn_parent",
+            name="spawn_agent",
+            input={},
+            parse_error=None,
+        )
+
+        await runner._run_one_loop_tool(st, block)
+
+        assert observed == [None]
+
+
+async def _noop():
+    return None

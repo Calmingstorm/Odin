@@ -145,7 +145,7 @@ class TestCodexClientRetryConfig:
         from src.llm.openai_codex import CodexChatClient
 
         auth = MagicMock()
-        client = CodexChatClient(auth=auth, model="gpt-4o", max_tokens=4096)
+        client = CodexChatClient(auth=auth, model="gpt-4o")
         assert client.max_retries == DEFAULT_MAX_RETRIES
         assert client.retry_base_delay == DEFAULT_BASE_DELAY
         assert client.retry_max_delay == DEFAULT_MAX_DELAY
@@ -155,7 +155,7 @@ class TestCodexClientRetryConfig:
 
         auth = MagicMock()
         client = CodexChatClient(
-            auth=auth, model="gpt-4o", max_tokens=4096,
+            auth=auth, model="gpt-4o",
             max_retries=5, retry_base_delay=2.0, retry_max_delay=60.0,
         )
         assert client.max_retries == 5

@@ -36,7 +36,10 @@ TOOL_EXEC_TIMEOUT = 300          # 5 min timeout per tool execution
 # callback via src/llm/recovery.py. AgentInfo.recovery_attempts remains for
 # API/trajectory shape compatibility and stays 0.)
 MAX_NESTING_DEPTH = 2            # default max sub-agent depth (root=0)
-MAX_CHILDREN_PER_AGENT = 3       # max direct children one agent can spawn
+MAX_CHILDREN_PER_AGENT = 3       # fallback direct-child limit (config overrides at spawn)
+TREE_MAX_AGENTS = 25             # hard ceiling on agents in one tree's lifetime —
+                                 # breadth x depth must never compound into a
+                                 # geometric invoice, whatever config says
 
 # Agent-management tools — allowed or blocked based on nesting depth
 AGENT_MANAGEMENT_TOOLS = frozenset({
@@ -286,6 +289,15 @@ class AgentInfo:
     # (chat/scheduled/hard limits differ) so progress can be computed honestly
     # instead of against a hardcoded guess.
     max_iterations: int = MAX_AGENT_ITERATIONS
+    # Lifetime direct-child and depth limits, snapshotted from config when
+    # the ROOT of the tree was spawned. Every descendant inherits the root's
+    # values, so a live config change never changes the rules under a running
+    # tree. The agent's own prompt advertises these same effective limits.
+    max_children: int = MAX_CHILDREN_PER_AGENT
+    max_depth: int = MAX_NESTING_DEPTH
+    # Root of this agent's tree (self for roots) — the unit the tree-lifetime
+    # agent cap is enforced against.
+    root_id: str = ""
     depth: int = 0
     parent_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
@@ -330,9 +342,23 @@ class AgentInfo:
 class AgentManager:
     """Manages autonomous agent lifecycle — spawn, message, list, kill, cleanup."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_concurrent_agents_provider: Callable[[], int | None] | None = None,
+    ) -> None:
         self._agents: dict[str, AgentInfo] = {}
+        # Admission reads this provider for every spawn. The callable is bound
+        # to the bot's live config root in production, so a save affects new
+        # spawns without changing agents already admitted. None preserves the
+        # historical constant for standalone/test managers.
+        self._max_concurrent_agents_provider = max_concurrent_agents_provider
         self._cleanup_tasks: dict[str, asyncio.Task] = {}
+        # Lifetime spawn count per tree, keyed by root id. Deliberately NOT
+        # derived from the registry: cleanup removes finished agents, and a
+        # registry count would let a tree spend its budget in waves forever.
+        # Entries are pruned only when the tree has no registered members
+        # left (nothing can spawn into it again — parents must exist).
+        self._tree_spawn_counts: dict[str, int] = {}
 
     def spawn(
         self,
@@ -350,6 +376,7 @@ class AgentManager:
         trajectory_saver: AgentTrajectorySaver | None = None,
         parent_id: str | None = None,
         max_depth: int = MAX_NESTING_DEPTH,
+        max_children: int | None = None,
         max_iterations: int | None = None,
         budget_warnings: builtins.list[int] | None = None,
         iteration_timeout: float | None = None,
@@ -361,14 +388,27 @@ class AgentManager:
         keep_recent_iterations: int = 30,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
-        # Check per-channel limit
+        # Check the live per-channel admission limit. Existing agents are
+        # never evicted when the setting falls; only subsequent spawns see it.
+        configured_limit = (
+            self._max_concurrent_agents_provider()
+            if self._max_concurrent_agents_provider is not None
+            else None
+        )
+        concurrent_limit = (
+            configured_limit
+            if configured_limit is not None
+            else MAX_CONCURRENT_AGENTS
+        )
         channel_count = sum(
             1 for a in self._agents.values()
             if a.channel_id == channel_id and a._sm.is_active
         )
-        if channel_count >= MAX_CONCURRENT_AGENTS:
-            return (f"Error: Maximum concurrent agents ({MAX_CONCURRENT_AGENTS}) reached for this "
-                    f"channel.")
+        if channel_count >= concurrent_limit:
+            return (
+                f"Error: Maximum concurrent agents ({concurrent_limit}) "
+                "reached for this channel."
+            )
 
         if not label or not goal:
             return "Error: Both 'label' and 'goal' are required."
@@ -380,15 +420,34 @@ class AgentManager:
             if not parent:
                 return f"Error: Parent agent '{parent_id}' not found."
             depth = parent.depth + 1
-            if depth > max_depth:
+            # The root's depth snapshot governs every descendant. The
+            # caller-supplied max_depth is only meaningful when starting a
+            # new root; rereading live config here would split one tree across
+            # two different limits.
+            if depth > parent.max_depth:
                 return (
-                    f"Error: Maximum nesting depth ({max_depth}) exceeded. "
+                    f"Error: Maximum nesting depth ({parent.max_depth}) exceeded. "
                     f"Parent '{parent_id}' is at depth {parent.depth}."
                 )
-            if len(parent.children_ids) >= MAX_CHILDREN_PER_AGENT:
+            # The PARENT's snapshot governs — taken from config when its
+            # tree's root spawned. A live config change applies to the next
+            # tree, never to one already running. Counts children ever
+            # spawned (lifetime), not merely concurrent.
+            if len(parent.children_ids) >= parent.max_children:
                 return (
                     f"Error: Parent agent '{parent_id}' has reached the "
-                    f"maximum of {MAX_CHILDREN_PER_AGENT} children."
+                    f"maximum of {parent.max_children} children."
+                )
+            tree_root = parent.root_id or parent.id
+            # Lifetime counter, never the registry: cleanup shrinks the
+            # registry, and counting it would let a tree respawn its whole
+            # budget every cleanup cycle — the exact geometric invoice the
+            # cap exists to prevent.
+            tree_spawned = self._tree_spawn_counts.get(tree_root, 0)
+            if tree_spawned >= TREE_MAX_AGENTS:
+                return (
+                    f"Error: This agent tree has reached the lifetime "
+                    f"maximum of {TREE_MAX_AGENTS} agents."
                 )
 
         agent_id = uuid.uuid4().hex[:8]
@@ -406,7 +465,24 @@ class AgentManager:
             model_override=model_override,
             reasoning_effort_override=reasoning_effort_override,
             max_iterations=max_iterations or MAX_AGENT_ITERATIONS,
+            max_children=(
+                self._agents[parent_id].max_children
+                if parent_id and parent_id in self._agents
+                else (max_children or MAX_CHILDREN_PER_AGENT)
+            ),
+            max_depth=(
+                self._agents[parent_id].max_depth
+                if parent_id and parent_id in self._agents
+                else max_depth
+            ),
+            root_id=(
+                (self._agents[parent_id].root_id or parent_id)
+                if parent_id and parent_id in self._agents
+                else ""
+            ),
         )
+        if not agent.root_id:
+            agent.root_id = agent_id
 
         # Register as child of parent
         if parent_id and parent_id in self._agents:
@@ -419,12 +495,12 @@ class AgentManager:
         else:
             agent_system = ""
 
-        can_nest = depth < max_depth
+        can_nest = depth < agent.max_depth
         if can_nest:
-            remaining = max_depth - depth
+            remaining = agent.max_depth - depth
             agent_system += (
                 f"AGENT CONTEXT: You are agent '{label}' (depth {depth}). "
-                f"You may spawn up to {MAX_CHILDREN_PER_AGENT} sub-agents "
+                f"You may spawn up to {agent.max_children} sub-agents "
                 f"({remaining} nesting level{'s' if remaining != 1 else ''} remaining). "
                 f"When done, provide a clear summary of results."
             )
@@ -436,7 +512,9 @@ class AgentManager:
             )
 
         # Filter tools based on depth
-        filtered_tools = filter_agent_tools(tools or [], depth=depth, max_depth=max_depth)
+        filtered_tools = filter_agent_tools(
+            tools or [], depth=depth, max_depth=agent.max_depth
+        )
 
         # Seed messages with the goal
         agent.messages = [{"role": "user", "content": goal}]
@@ -466,6 +544,9 @@ class AgentManager:
         # Schedule cleanup when the agent task finishes (any exit path)
         task.add_done_callback(lambda _t: self._schedule_cleanup(agent_id))
         self._agents[agent_id] = agent
+        self._tree_spawn_counts[agent.root_id] = (
+            self._tree_spawn_counts.get(agent.root_id, 0) + 1
+        )
 
         log.info(
             "Spawned agent %s (%s) depth=%d for channel %s by %s: %s",
@@ -758,6 +839,13 @@ class AgentManager:
         if ct and not ct.done():
             ct.cancel()
         if agent:
+            root = agent.root_id or agent_id
+            if not any(
+                (a.root_id or a.id) == root for a in self._agents.values()
+            ):
+                # Last member gone: nothing can ever spawn into this tree
+                # again (a parent must exist), so the lifetime counter can go.
+                self._tree_spawn_counts.pop(root, None)
             log.debug("Removed agent %s (%s) via %s", agent_id, agent.label, source or "cleanup")
             return True
         return False

@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import time
+from typing import TYPE_CHECKING
 
 from discord.ext import commands
 
@@ -26,6 +27,9 @@ from ..tools import get_tool_definitions
 from .slash_commands import register_commands
 from .tool_loop_helpers import init_allowed_webhook_ids as _init_allowed_webhook_ids_impl
 from .wiring import build_components, build_services, shutdown_services
+
+if TYPE_CHECKING:  # health.server imports this module at runtime — cycle-free typing only
+    from ..health.server import HealthServer
 
 log = get_logger("discord")
 
@@ -44,6 +48,13 @@ INITIAL_EXTENSIONS: tuple[str, ...] = (
 
 
 class OdinBot(commands.Bot):
+    # Late-bound by HealthServer.set_bot(). ANNOTATION ONLY, deliberately not
+    # assigned: this declares the attribute for the type gate while keeping it
+    # absent on a fresh bot, which the RFC-002 late-bound contract pins because
+    # health-check hasattr semantics depend on it. Assigning None here would
+    # make hasattr(bot, "health_server") true from construction.
+    health_server: HealthServer | None
+
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()
         intents.message_content = True
@@ -56,6 +67,11 @@ class OdinBot(commands.Bot):
         )
 
         self.config = config
+        # What the running components were actually built from. Restart-mode
+        # settings keep using this after config.yml changes, so the config page
+        # needs it to report "effective" honestly instead of echoing the
+        # desired value back and calling it applied.
+        self.boot_config_snapshot = config.model_dump()
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
         self.start_time = time.monotonic()
 
@@ -63,7 +79,7 @@ class OdinBot(commands.Bot):
         # Stage 1: bot-independent services (wiring.build_services).
         # Flat handles are the documented public composition surface.
         # ------------------------------------------------------------------
-        services = build_services(config)
+        services = build_services(config, get_config=lambda: self.config)
         self.services = services
 
         # Per-channel mutable state — owned by ChannelStateRegistry.

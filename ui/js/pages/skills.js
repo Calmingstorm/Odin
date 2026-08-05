@@ -4,6 +4,7 @@
  * skill status indicators, search/filter
  */
 import { api } from '../api.js';
+import { toast } from '../toast.js';
 import { truncate, formatTs } from '../utils.js';
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 
@@ -442,7 +443,11 @@ export default {
       try {
         await api.del(`/api/skills/${encodeURIComponent(deleteTarget.value)}`);
         await fetchSkills();
-      } catch { /* ignore */ }
+      } catch (e) {
+        // Swallowing this closed the modal and refetched, leaving the item
+        // still listed with zero feedback — indistinguishable from a UI bug.
+        toast.error(`Failed to delete skill: ${e.message || 'unknown error'}`);
+      }
       deleting.value = false;
       deleteTarget.value = null;
     }

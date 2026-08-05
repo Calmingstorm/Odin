@@ -5,7 +5,7 @@ Covers:
 - audit size-based rotation (keeps N old files, bounds growth)
 - audit search streams (bounded) and reads across rotated files
 - config loader warns on unknown top-level keys
-- graceful_degradation thresholds are passed into SubsystemGuard
+- subsystem-guard thresholds are passed into SubsystemGuard
 """
 from __future__ import annotations
 
@@ -137,7 +137,7 @@ def test_known_config_keys_no_warning(caplog):
 
 
 # ---------------------------------------------------------------------------
-# graceful_degradation thresholds wired
+# subsystem-guard thresholds wired
 # ---------------------------------------------------------------------------
 
 def test_subsystem_guard_receives_configured_thresholds():
