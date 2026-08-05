@@ -165,6 +165,25 @@ class TestClaimsAreComplete:
 
 
 class TestResolution:
+    def test_removed_noop_switches_are_absent_and_siblings_require_restart(self):
+        from src.config.apply_registry import schema_facts
+
+        facts = schema_facts()
+        assert len(facts) == 261
+        assert "graceful_degradation.enabled" not in facts
+        assert "grafana_alerts.enabled" not in facts
+        for path in (
+            "graceful_degradation.degraded_threshold",
+            "graceful_degradation.unavailable_threshold",
+            "grafana_alerts.auto_remediate",
+            "grafana_alerts.rules",
+            "grafana_alerts.cooldown_seconds",
+            "grafana_alerts.max_concurrent_remediations",
+        ):
+            spec = spec_for(path)
+            assert spec.apply_mode == "restart", path
+            assert spec.restart_reason, path
+
     def test_explicit_leaf_beats_the_section_default(self):
         assert SECTIONS["turn_state"].apply_mode == "restart"
         assert spec_for("turn_state.payload_retention_days").apply_mode == "live_read"

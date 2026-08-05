@@ -96,19 +96,30 @@ class TestLoadConfig:
         cfg = load_config(p)
         assert cfg.discord.token == "abc"
 
-    def test_removed_settings_are_ignored_without_losing_neighbors(self, tmp_path):
-        """Old config files must keep booting after the dead controls disappear.
+    @pytest.mark.parametrize("legacy_guard_enabled", [False, True])
+    @pytest.mark.parametrize("legacy_grafana_enabled", [False, True])
+    def test_removed_settings_are_ignored_without_losing_neighbors(
+        self, tmp_path, legacy_guard_enabled, legacy_grafana_enabled
+    ):
+        """Old config files keep booting and both old boolean values are inert.
 
-        Pydantic's default extra-field policy is the compatibility mechanism,
-        but pin both nested locations and adjacent supported values so changing
-        either model to extra=forbid cannot strand an upgrade later.
+        ``false`` was ignored by both runtime construction paths before removal,
+        so dropping it now is behaviour-preserving. Pin adjacent supported values
+        so a future ``extra=forbid`` change cannot strand an upgrade or discard
+        the settings that actually construct the guard and Grafana handler.
         """
+        old_guard_bool = str(legacy_guard_enabled).lower()
+        old_grafana_bool = str(legacy_grafana_enabled).lower()
         p = self._write(
             tmp_path,
             "discord:\n  token: legacy\n"
             "context:\n  directory: ./legacy-context\n  max_system_prompt_tokens: 12345\n"
             "openai_codex:\n  enabled: true\n  model: gpt-5.6-terra\n"
-            "  max_tokens: 98765\n  reasoning_effort: high\n",
+            "  max_tokens: 98765\n  reasoning_effort: high\n"
+            f"graceful_degradation:\n  enabled: {old_guard_bool}\n"
+            "  degraded_threshold: 7\n  unavailable_threshold: 19\n"
+            f"grafana_alerts:\n  enabled: {old_grafana_bool}\n  auto_remediate: true\n"
+            "  cooldown_seconds: 612\n  max_concurrent_remediations: 4\n",
         )
 
         cfg = load_config(p)
@@ -119,6 +130,13 @@ class TestLoadConfig:
         assert cfg.openai_codex.model == "gpt-5.6-terra"
         assert cfg.openai_codex.reasoning_effort == "high"
         assert not hasattr(cfg.openai_codex, "max_tokens")
+        assert not hasattr(cfg.graceful_degradation, "enabled")
+        assert cfg.graceful_degradation.degraded_threshold == 7
+        assert cfg.graceful_degradation.unavailable_threshold == 19
+        assert not hasattr(cfg.grafana_alerts, "enabled")
+        assert cfg.grafana_alerts.auto_remediate is True
+        assert cfg.grafana_alerts.cooldown_seconds == 612
+        assert cfg.grafana_alerts.max_concurrent_remediations == 4
 
     def test_env_substituted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ODIN_TOKEN_TEST", "from-env")

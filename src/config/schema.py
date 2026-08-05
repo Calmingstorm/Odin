@@ -657,7 +657,6 @@ class OutboundWebhooksConfig(BaseModel):
 
 
 class GracefulDegradationConfig(BaseModel):
-    enabled: bool = True
     degraded_threshold: int = 3  # consecutive failures before DEGRADED
     unavailable_threshold: int = 10  # consecutive failures before UNAVAILABLE
 
@@ -878,7 +877,6 @@ class GrafanaRemediationRuleConfig(BaseModel):
 
 
 class GrafanaAlertConfig(BaseModel):
-    enabled: bool = False
     auto_remediate: bool = False
     rules: list[GrafanaRemediationRuleConfig] = Field(default_factory=list)
     cooldown_seconds: int = 300

@@ -4,6 +4,8 @@ from __future__ import annotations
 import json
 import time
 
+import pytest
+
 from src.health.subsystem_guard import (
     _DEFAULT_MESSAGES,
     _FALLBACK_MESSAGE,
@@ -727,33 +729,41 @@ class TestGracefulDegradationConfig:
     def test_defaults(self):
         from src.config.schema import GracefulDegradationConfig
         cfg = GracefulDegradationConfig()
-        assert cfg.enabled is True
+        assert not hasattr(cfg, "enabled")
         assert cfg.degraded_threshold == 3
         assert cfg.unavailable_threshold == 10
 
     def test_custom_values(self):
         from src.config.schema import GracefulDegradationConfig
         cfg = GracefulDegradationConfig(
-            enabled=False, degraded_threshold=5, unavailable_threshold=20,
+            degraded_threshold=5, unavailable_threshold=20,
         )
-        assert cfg.enabled is False
         assert cfg.degraded_threshold == 5
         assert cfg.unavailable_threshold == 20
 
-    def test_in_main_config(self):
-        from src.config.schema import Config, DiscordConfig
-        cfg = Config(discord=DiscordConfig(token="test", prefix="!"))
-        assert cfg.graceful_degradation.enabled is True
-        assert cfg.graceful_degradation.degraded_threshold == 3
+    @pytest.mark.parametrize("legacy_enabled", [False, True])
+    def test_real_bot_guard_is_always_constructed_with_supported_thresholds(
+        self, legacy_enabled
+    ):
+        """The removed switch never gated construction, even when stored false."""
+        from src.config.schema import Config
+        from src.discord.client import OdinBot
 
-    def test_from_dict(self):
-        from src.config.schema import Config, DiscordConfig
         cfg = Config(
-            discord=DiscordConfig(token="test", prefix="!"),
-            graceful_degradation={"enabled": False, "degraded_threshold": 7},
+            discord={"token": "test"},
+            openai_codex={"enabled": False},
+            graceful_degradation={
+                "enabled": legacy_enabled,
+                "degraded_threshold": 7,
+                "unavailable_threshold": 19,
+            },
         )
-        assert cfg.graceful_degradation.enabled is False
-        assert cfg.graceful_degradation.degraded_threshold == 7
+        bot = OdinBot(cfg)
+
+        assert not hasattr(cfg.graceful_degradation, "enabled")
+        assert bot.subsystem_guard._degraded_threshold == 7
+        assert bot.subsystem_guard._unavailable_threshold == 19
+        assert "llm_codex" in bot.subsystem_guard.registered
 
 
 # ---------------------------------------------------------------------------

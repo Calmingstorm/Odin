@@ -311,6 +311,14 @@ class TestDiscordConfig:
                         "model_routing": {"enabled": True},
                         "max_tokens": 98765,
                     },
+                    "graceful_degradation": {
+                        "enabled": False,
+                        "degraded_threshold": 7,
+                    },
+                    "grafana_alerts": {
+                        "enabled": False,
+                        "cooldown_seconds": 612,
+                    },
                 })
                 assert r.status == 200
         finally:
@@ -320,6 +328,10 @@ class TestDiscordConfig:
         assert "model_routing" not in oc
         assert "max_tokens" not in oc
         assert "max_system_prompt_tokens" not in saved.get("context", {})
+        assert "enabled" not in saved["graceful_degradation"]
+        assert saved["graceful_degradation"]["degraded_threshold"] == 7
+        assert "enabled" not in saved["grafana_alerts"]
+        assert saved["grafana_alerts"]["cooldown_seconds"] == 612
 
     @pytest.mark.asyncio
     async def test_blanking_the_workspace_normalizes_everywhere(self):
@@ -1103,6 +1115,8 @@ class TestConfigMeta:
             "turn_state.resume_ttl_hours",
         ):
             assert expected in paths, f"{expected} has no field record"
+        assert "graceful_degradation.enabled" not in paths
+        assert "grafana_alerts.enabled" not in paths
 
     @pytest.mark.asyncio
     async def test_apply_modes_are_from_the_known_vocabulary(self):

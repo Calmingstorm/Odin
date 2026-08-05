@@ -334,7 +334,6 @@ message_triggers:
 
 # # Grafana alert auto-remediation
 # grafana_alerts:
-#   enabled: false
 #   auto_remediate: false
 #   rules: []
 #   cooldown_seconds: 300
@@ -360,8 +359,7 @@ message_triggers:
 #   #     timeout_seconds: 120
 
 # # Graceful degradation thresholds
-# graceful_degradation:
-#   enabled: true
+# graceful_degradation:         # request guarding is always on
 #   degraded_threshold: 3       # consecutive failures before DEGRADED state
 #   unavailable_threshold: 10   # consecutive failures before UNAVAILABLE state
 

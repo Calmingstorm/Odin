@@ -41,9 +41,9 @@ const SECTION_DEFAULTS = {
   issue_tracker: { apply_mode: 'activation_required', owner: 'issue_tracker', description: 'Issue tracker provider and tool lifecycle.' },
   audit: { apply_mode: 'restart', description: 'Audit signing, verification, and retention.' },
   agents: { apply_mode: 'live_for_new_work', description: 'Spawned-agent budgets, inheritance, and tree limits.' },
-  grafana_alerts: { apply_mode: 'activation_required', owner: 'grafana_alerts', description: 'Grafana alert intake, routing, and remediation.' },
+  grafana_alerts: { apply_mode: 'restart', owner: 'grafana_alerts', description: 'Grafana alert routing and remediation policy.', restart_reason: 'The GrafanaAlertHandler is constructed from these values at startup; saving does not rebuild it.' },
   outbound_webhooks: { apply_mode: 'live_apply', owner: 'outbound_webhooks', description: 'Outbound event targets, delivery, and safety policy.' },
-  graceful_degradation: { apply_mode: 'activation_required', description: 'Subsystem failure thresholds and request guarding.' },
+  graceful_degradation: { apply_mode: 'restart', description: 'Always-on subsystem request guarding and its failure thresholds.', restart_reason: 'The SubsystemGuard is constructed with these thresholds at startup; saving does not rebuild it.' },
   llm_recovery: { apply_mode: 'restart', description: 'Provider recovery, breaker, and retry policy.' },
   turn_state: { apply_mode: 'restart', description: 'Durable turn checkpoints, expiry, and resume behaviour.' },
 };
@@ -168,16 +168,6 @@ const FIELD_OVERRIDES = {
     apply_mode: 'activation_required',
     description: 'Forward normalized internal alerts to tested Slack destinations.',
     activation_policy: 'Requires an effective notifier, tested destination, and activation receipt.',
-  },
-  'grafana_alerts.enabled': {
-    apply_mode: 'activation_required',
-    description: 'Adopt explicit Grafana processing control without changing legacy webhook behaviour on upgrade.',
-    activation_policy: 'Explicit adoption preserves working legacy-control installations.',
-  },
-  'graceful_degradation.enabled': {
-    apply_mode: 'activation_required',
-    description: 'Allow subsystem guards to short-circuit calls while a dependency is unhealthy.',
-    activation_policy: 'Explicit adoption resolves the legacy always-on behaviour.',
   },
 };
 

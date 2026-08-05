@@ -86,7 +86,7 @@ def _legacy_payload(title="Disk Full", message="Disk /dev/sda1 is 95% full"):
 class TestGrafanaAlertConfigDefaults:
     def test_defaults(self):
         cfg = GrafanaAlertConfig()
-        assert cfg.enabled is False
+        assert not hasattr(cfg, "enabled")
         assert cfg.auto_remediate is False
         assert cfg.rules == []
         assert cfg.cooldown_seconds == 300
@@ -94,12 +94,10 @@ class TestGrafanaAlertConfigDefaults:
 
     def test_custom_values(self):
         cfg = GrafanaAlertConfig(
-            enabled=True,
             auto_remediate=True,
             cooldown_seconds=600,
             max_concurrent_remediations=3,
         )
-        assert cfg.enabled is True
         assert cfg.auto_remediate is True
         assert cfg.cooldown_seconds == 600
         assert cfg.max_concurrent_remediations == 3
@@ -108,21 +106,19 @@ class TestGrafanaAlertConfigDefaults:
         cfg = Config(discord={"token": "test"})
         assert hasattr(cfg, "grafana_alerts")
         assert isinstance(cfg.grafana_alerts, GrafanaAlertConfig)
-        assert cfg.grafana_alerts.enabled is False
+        assert not hasattr(cfg.grafana_alerts, "enabled")
 
     def test_config_with_grafana_alerts(self):
         cfg = Config(
             discord={"token": "test"},
-            grafana_alerts={"enabled": True, "auto_remediate": True},
+            grafana_alerts={"auto_remediate": True},
         )
-        assert cfg.grafana_alerts.enabled is True
         assert cfg.grafana_alerts.auto_remediate is True
 
     def test_config_with_rules(self):
         cfg = Config(
             discord={"token": "test"},
             grafana_alerts={
-                "enabled": True,
                 "rules": [
                     {
                         "id": "cpu_high",
@@ -872,7 +868,6 @@ def _make_grafana_server(
 ):
     wh_cfg = WebhookConfig(enabled=True, secret=webhook_secret, grafana_channel_id="chan1")
     ga_cfg = GrafanaAlertConfig(
-        enabled=True,
         auto_remediate=auto_remediate,
         rules=[
             GrafanaRemediationRuleConfig(
@@ -891,6 +886,35 @@ def _make_grafana_server(
 
 
 class TestHealthServerGrafanaIntegration:
+    @pytest.mark.parametrize("legacy_enabled", [False, True])
+    def test_removed_switch_never_changes_handler_construction(self, legacy_enabled):
+        """Both historical values construct the same fully configured handler."""
+        cfg = GrafanaAlertConfig.model_validate({
+            "enabled": legacy_enabled,
+            "auto_remediate": True,
+            "cooldown_seconds": 612,
+            "max_concurrent_remediations": 4,
+            "rules": [{
+                "id": "legacy-rule",
+                "name_pattern": "High*",
+                "remediation_goal": "Inspect load",
+                "mode": "act",
+            }],
+        })
+
+        server = HealthServer(
+            port=0,
+            webhook_config=WebhookConfig(enabled=False),
+            grafana_alert_config=cfg,
+        )
+        status = server.grafana_handler.get_status()
+
+        assert not hasattr(cfg, "enabled")
+        assert status["auto_remediate"] is True
+        assert status["cooldown_seconds"] == 612
+        assert status["max_concurrent"] == 4
+        assert [rule.id for rule in server.grafana_handler.rules] == ["legacy-rule"]
+
     async def test_grafana_handler_created(self):
         server = _make_grafana_server()
         assert server.grafana_handler is not None

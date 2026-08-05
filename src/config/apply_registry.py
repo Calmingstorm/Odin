@@ -292,11 +292,11 @@ SECTIONS: dict[str, SectionSpec] = {
         "Spawned-agent budgets, inheritance, and tree limits.",
     ),
     "grafana_alerts": SectionSpec(
-        "activation_required",
-        "Grafana alert intake, routing, and remediation.",
+        "restart",
+        "Grafana alert routing and remediation policy.",
         owner="grafana_alerts",
-        activation_policy="Explicit adoption preserves installations that rely "
-        "on the legacy webhook-gated behaviour.",
+        restart_reason="The GrafanaAlertHandler is constructed from these values "
+        "at startup; saving does not rebuild it.",
     ),
     "outbound_webhooks": SectionSpec(
         "restart",
@@ -320,10 +320,10 @@ SECTIONS: dict[str, SectionSpec] = {
         ),
     ),
     "graceful_degradation": SectionSpec(
-        "activation_required",
-        "Subsystem failure thresholds and request guarding.",
-        activation_policy="Explicit adoption resolves the legacy always-on "
-        "behaviour without changing it underneath a running install.",
+        "restart",
+        "Always-on subsystem request guarding and its failure thresholds.",
+        restart_reason="The SubsystemGuard is constructed with these thresholds "
+        "at startup; saving does not rebuild it.",
     ),
     "llm_recovery": SectionSpec(
         "restart",
@@ -493,20 +493,6 @@ FIELDS: dict[str, FieldSpec] = {
         "destinations.",
         activation_policy="Requires an effective notifier, a tested destination, "
         "and an activation receipt.",
-    ),
-    "grafana_alerts.enabled": FieldSpec(
-        apply_mode="activation_required",
-        description="Adopt explicit Grafana processing control without changing "
-        "legacy webhook behaviour on upgrade.",
-        activation_policy="Explicit adoption preserves working legacy-control "
-        "installations.",
-    ),
-    "graceful_degradation.enabled": FieldSpec(
-        apply_mode="activation_required",
-        description="Allow subsystem guards to short-circuit calls while a "
-        "dependency is unhealthy.",
-        activation_policy="Explicit adoption resolves the legacy always-on "
-        "behaviour.",
     ),
     # ---------------- agents ----------------
     "agents.max_children_per_agent": FieldSpec(
