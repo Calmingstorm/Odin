@@ -9,6 +9,7 @@ import { api } from '../api.js';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { collectApplyDetails } from '../config-apply-details.js';
 import { HEALTH_FILTERS } from '../config-health.js';
+import { findVerticalScrollOwner } from '../config-scroll-owner.js';
 
 const CATEGORY_GROUPS = [
   { key: 'core', label: 'Core', icon: 'sliders', sections: ['timezone', 'logging', 'permissions', 'graceful_degradation'] },
@@ -1183,10 +1184,8 @@ export default {
       restartPromptOpen.value = false;
       healthFilter.value = 'pending_restart';
       searchQuery.value = '';
-      if (isMobile.value) {
-        const documentFlowOwner = configMain.value?.closest('.hm-main');
-        if (documentFlowOwner) documentFlowOwner.scrollTop = 0;
-      } else if (configMain.value) configMain.value.scrollTop = 0;
+      const scrollOwner = findVerticalScrollOwner(configMain.value);
+      if (scrollOwner) scrollOwner.scrollTop = 0;
     }
 
     function restartLater() {

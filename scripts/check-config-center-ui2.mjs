@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { parse as parseJs } from '@babel/parser';
 import { parse as parseTemplate, NodeTypes } from '@vue/compiler-dom';
 import { guildBehaviorValue } from '../ui/js/discord-config-policy.js';
+import { findVerticalScrollOwner } from '../ui/js/config-scroll-owner.js';
 
 const config = readFileSync('ui/js/pages/config.js', 'utf8');
 const configAst = parseJs(config, { sourceType: 'module' });
@@ -216,38 +217,46 @@ walkJs(pollFunction.body, node => {
 assert.ok(freshMetaAssignment, 'restart polling does not refresh authoritative metadata');
 assert.ok(proofBoundClear, 'restart success is not bound to fresh zero-pending metadata');
 const reviewPendingFunction = namedFunction(configAst, 'reviewPendingRestart');
-let desktopConfigMainReset = false;
-let mobileDocumentFlowReset = false;
-for (const statement of reviewPendingFunction.body.body) {
-  if (statement.type !== 'IfStatement') continue;
-  if (isRefMember(statement.test, 'isMobile')) {
-    let resolvesHmMain = false;
-    let resetsResolvedOwner = false;
-    walkJs(statement.consequent, node => {
-      if ((node.type === 'CallExpression' || node.type === 'OptionalCallExpression')
-          && node.callee?.property?.name === 'closest'
-          && node.arguments?.[0]?.value === '.hm-main') resolvesHmMain = true;
-      if (node.type === 'AssignmentExpression'
-          && node.operator === '='
-          && node.left?.type === 'MemberExpression'
-          && node.left.object?.name === 'documentFlowOwner'
-          && node.left.property?.name === 'scrollTop'
-          && node.right?.value === 0) resetsResolvedOwner = true;
-    });
-    mobileDocumentFlowReset = resolvesHmMain && resetsResolvedOwner;
-    walkJs(statement.alternate, node => {
-      if (node.type === 'AssignmentExpression'
-          && node.operator === '='
-          && node.left?.type === 'MemberExpression'
-          && node.left.property?.name === 'scrollTop'
-          && node.left.object?.type === 'MemberExpression'
-          && isRefMember(node.left.object, 'configMain')
-          && node.right?.value === 0) desktopConfigMainReset = true;
-    });
+let derivesScrollOwner = false;
+let resetsDerivedOwner = false;
+walkJs(reviewPendingFunction.body, node => {
+  if (node.type === 'CallExpression'
+      && node.callee?.type === 'Identifier'
+      && node.callee.name === 'findVerticalScrollOwner'
+      && node.arguments?.some(argument => isRefMember(argument, 'configMain'))) {
+    derivesScrollOwner = true;
   }
+  if (node.type === 'AssignmentExpression'
+      && node.operator === '='
+      && node.left?.type === 'MemberExpression'
+      && node.left.object?.name === 'scrollOwner'
+      && node.left.property?.name === 'scrollTop'
+      && node.right?.value === 0) resetsDerivedOwner = true;
+});
+assert.ok(derivesScrollOwner, 'Review settings does not derive the active scroll owner from rendered geometry');
+assert.ok(resetsDerivedOwner, 'Review settings does not reset the geometry-derived scroll owner');
+let reviewReadsMobileBreakpoint = false;
+walkJs(reviewPendingFunction.body, node => {
+  if (isRefMember(node, 'isMobile')) reviewReadsMobileBreakpoint = true;
+});
+assert.equal(reviewReadsMobileBreakpoint, false, 'Review settings duplicates a JavaScript breakpoint instead of detecting the scroll owner');
+
+function mockElement({ overflowY, clientHeight, scrollHeight, parentElement = null }) {
+  return { overflowY, clientHeight, scrollHeight, parentElement, scrollTop: 0 };
 }
-assert.ok(desktopConfigMainReset, 'Review settings does not reset the real desktop Config Center scroll region');
-assert.ok(mobileDocumentFlowReset, 'Review settings does not reset the mobile .hm-main document-flow scroll owner');
+const documentOwner800 = mockElement({ overflowY: 'auto', clientHeight: 800, scrollHeight: 2400 });
+const configMain800 = mockElement({ overflowY: 'visible', clientHeight: 1500, scrollHeight: 1500, parentElement: documentOwner800 });
+assert.equal(
+  findVerticalScrollOwner(configMain800, { getStyle: element => ({ overflowY: element.overflowY }), fallback: null }),
+  documentOwner800,
+  '800px intermediate layout does not select the real document-flow scroll owner',
+);
+const configMainDesktop = mockElement({ overflowY: 'auto', clientHeight: 500, scrollHeight: 5000, parentElement: documentOwner800 });
+assert.equal(
+  findVerticalScrollOwner(configMainDesktop, { getStyle: element => ({ overflowY: element.overflowY }), fallback: null }),
+  configMainDesktop,
+  'desktop layout does not select the internal Config Center scroll region',
+);
 assert.match(config, /<main ref="configMain" class="cfgc-main">/, 'Config Center scroll region is not bound to configMain');
 
 for (const provider of ['codex', 'ollama', 'kimi']) {

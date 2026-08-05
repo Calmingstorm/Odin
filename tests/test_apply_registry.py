@@ -935,6 +935,68 @@ class TestPlainLanguageEffects:
             for consumer in record["consumers"]
         )
 
+    def test_every_workspace_protected_config_path_publishes_restart_truth(self):
+        from src.config.workspace_paths import WORKSPACE_PROTECTED_CONFIG_PATH_NAMES
+        from src.tools.workspace import _DECLARED_STATE_PATHS
+
+        assert WORKSPACE_PROTECTED_CONFIG_PATH_NAMES == {
+            path for path, _is_file in _DECLARED_STATE_PATHS
+        }
+        assert len(WORKSPACE_PROTECTED_CONFIG_PATH_NAMES) == 13
+
+        for path in WORKSPACE_PROTECTED_CONFIG_PATH_NAMES:
+            spec = spec_for(path)
+            fence = [
+                consumer
+                for consumer in spec.consumers
+                if consumer.name == "Local command workspace fence"
+            ]
+            assert len(fence) == 1, path
+            assert fence[0].apply_mode == "restart", path
+            assert "captured" in fence[0].detail, path
+            if path == "usage.directory":
+                assert spec.apply_mode == "activation_required"
+            else:
+                assert spec.apply_mode == "restart", path
+                assert spec.restart_reason, path
+
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "tools.audit_log_path",
+            "tools.trajectory_path",
+            "attachments.temp_directory",
+            "usage.directory",
+        ],
+    )
+    def test_missed_workspace_paths_report_boot_effective_pending_restart(self, path):
+        record = build_field_record(
+            path,
+            "/srv/new-state",
+            boot_value="/srv/boot-state",
+            has_boot=True,
+        )
+        assert record["effective"] == "/srv/boot-state"
+        assert record["pending_restart"] is True
+        assert record["apply_state"] == "pending_restart"
+        assert any(
+            consumer["name"] == "Local command workspace fence"
+            and consumer["apply_mode"] == "restart"
+            for consumer in record["consumers"]
+        )
+
+    def test_live_path_consumers_remain_visible_alongside_the_fence(self):
+        paths = (
+            "tools.audit_log_path",
+            "tools.trajectory_path",
+            "attachments.temp_directory",
+        )
+        for path in paths:
+            assert {c.apply_mode for c in spec_for(path).consumers} == {
+                "live_read",
+                "restart",
+            }
+
     def test_every_record_carries_both_sentences(self):
         from src.config.schema import Config
 

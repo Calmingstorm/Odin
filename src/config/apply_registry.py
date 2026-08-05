@@ -52,6 +52,7 @@ from typing import Any, Literal
 from pydantic import BaseModel
 
 from .sensitivity import is_sensitive_key
+from .workspace_paths import WORKSPACE_PROTECTED_CONFIG_PATH_NAMES
 
 ApplyMode = Literal[
     "live_read",
@@ -498,6 +499,17 @@ FIELDS: dict[str, FieldSpec] = {
     "browser.viewport_height": FieldSpec(unit="px"),
     "sessions.max_history": FieldSpec(unit="messages"),
     "sessions.max_age_hours": FieldSpec(unit="hours"),
+    "attachments.temp_directory": FieldSpec(
+        apply_mode="live_read",
+        description="Workspace for downloaded and processed message attachments.",
+        consumers=(
+            Consumer(
+                "Attachment intake and cleanup",
+                "live_read",
+                "New attachment operations read the current configured path.",
+            ),
+        ),
+    ),
     "usage.directory": FieldSpec(
         apply_mode="activation_required",
         description="Target for durable usage history; no durable store is active "
@@ -1159,15 +1171,29 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     "tools.audit_log_path": FieldSpec(
         apply_mode="live_read",
-        description="Audit log the observability endpoints read. The audit "
-        "writer's own path is fixed in code, so changing this redirects "
-        "reading, not writing — a restart will not move the log.",
+        description="Audit log path used by the observability read endpoint. "
+        "The audit writer's own path is fixed in code, so this redirects "
+        "reading, not writing.",
+        consumers=(
+            Consumer(
+                "Audit observability endpoint",
+                "live_read",
+                "The endpoint reads the current configured path on each request.",
+            ),
+        ),
     ),
     "tools.trajectory_path": FieldSpec(
         apply_mode="live_read",
-        description="Trajectory directory the observability endpoints read. "
-        "The writer's own path is fixed in code, so changing this redirects "
-        "reading, not writing — a restart will not move the records.",
+        description="Trajectory directory used by the observability read "
+        "endpoint. The writer's own path is fixed in code, so this redirects "
+        "reading, not writing.",
+        consumers=(
+            Consumer(
+                "Trajectory observability endpoint",
+                "live_read",
+                "The endpoint reads the current configured path on each request.",
+            ),
+        ),
     ),
     "tools.skill_allowed_urls": FieldSpec(
         apply_mode="restart",
@@ -1520,6 +1546,36 @@ def spec_for(path: str) -> FieldSpec:
             resolved,
             apply_handler=section_spec.apply_handler if section_spec else None,
         )
+
+    # The command executor snapshots the full configuration used by its
+    # workspace-overlap fence. Every declared protected path therefore has a
+    # restart-bound consumer even when another subsystem reads it live. This
+    # inventory is shared with tools.workspace so safety and UI truth cannot
+    # silently diverge.
+    if path in WORKSPACE_PROTECTED_CONFIG_PATH_NAMES:
+        fence_name = "Local command workspace fence"
+        if not any(consumer.name == fence_name for consumer in resolved.consumers):
+            resolved = replace(
+                resolved,
+                consumers=resolved.consumers + (
+                    Consumer(
+                        fence_name,
+                        "restart",
+                        "The running executor protects the path captured when "
+                        "it was built; restart adopts the saved path.",
+                    ),
+                ),
+            )
+        # Keep explicit deferred/dormant semantics (notably usage.directory),
+        # but otherwise make the field badge no stronger than its slowest
+        # consumer.
+        if resolved.apply_mode in {"live_read", "live_apply", "live_for_new_work"}:
+            resolved = replace(
+                resolved,
+                apply_mode="restart",
+                restart_reason="The command executor snapshots this path for "
+                "the local-workspace overlap fence when it is built.",
+            )
     return resolved
 
 
@@ -1934,10 +1990,15 @@ def build_field_record(
     desired = _public_value(desired_value, sensitivity)
     pending_restart = False
     effective_known = True
-    if apply_mode == "restart":
+    has_restart_consumer = any(
+        consumer.apply_mode == "restart" for consumer in spec.consumers
+    )
+    if apply_mode == "restart" or has_restart_consumer:
         # A boot snapshot is evidence only when wiring actually passed that
-        # schema value to the running component. Per-target webhook safety
-        # values are currently dropped, so echoing their boot value would lie.
+        # schema value to the running component. For consumer-split fields it
+        # is the restart-bound consumer's effective value; consumer records
+        # state that scope. Per-target webhook safety values are currently
+        # dropped, so echoing their boot value would lie.
         if has_boot and spec.boot_snapshot_is_effective:
             effective = _public_value(boot_value, sensitivity)
             pending_restart = boot_value != desired_value

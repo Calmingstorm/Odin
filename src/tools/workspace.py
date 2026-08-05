@@ -37,6 +37,8 @@ from collections.abc import Callable, Sequence
 from pathlib import Path
 from types import SimpleNamespace
 
+from ..config.workspace_paths import WORKSPACE_PROTECTED_CONFIG_PATHS
+
 # The accepted operational contract: a real directory owned by the execution
 # identity, private, and fully usable by that owner (0700). 0300 is private
 # and writable but not readable, which breaks ordinary workspace use.
@@ -127,22 +129,7 @@ def _reject_overlap(
 # Odin's own state; protecting them would reject legitimate configurations.
 # Paths wiring hardcodes (channel_config.json, channel_logs) sit beside
 # memory.json and are covered by its parent.
-_DECLARED_STATE_PATHS: tuple[tuple[str, bool], ...] = (
-    ("tools.audit_log_path", True),
-    ("tools.trajectory_path", False),
-    ("tools.ssh_key_path", True),
-    ("tools.ssh_known_hosts_path", True),
-    ("tools.ssh_pool.socket_dir", False),
-    ("context.directory", False),
-    ("sessions.persist_directory", False),
-    ("logging.directory", False),
-    ("usage.directory", False),
-    # Treated as a file: wiring derives its sibling fts.db via `.parent`.
-    ("search.search_db_path", True),
-    ("permissions.overrides_path", True),
-    ("openai_codex.credentials_path", True),
-    ("attachments.temp_directory", False),
-)
+_DECLARED_STATE_PATHS = WORKSPACE_PROTECTED_CONFIG_PATHS
 
 
 def _active_config_roots() -> list[str]:
