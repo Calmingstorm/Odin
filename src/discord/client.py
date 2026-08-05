@@ -79,7 +79,7 @@ class OdinBot(commands.Bot):
         # Stage 1: bot-independent services (wiring.build_services).
         # Flat handles are the documented public composition surface.
         # ------------------------------------------------------------------
-        services = build_services(config)
+        services = build_services(config, get_config=lambda: self.config)
         self.services = services
 
         # Per-channel mutable state — owned by ChannelStateRegistry.

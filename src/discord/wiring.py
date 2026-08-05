@@ -132,7 +132,11 @@ class BotServices:
     recovery_policy_source: Callable[[], RecoveryPolicy] | None = None
 
 
-def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear composition root
+def build_services(
+    config: Config,
+    *,
+    get_config: Callable[[], Config] | None = None,
+) -> BotServices:  # noqa: PLR0915 — linear composition root
     # Configure timezone for time parser module
     from ..tools.time_parser import set_default_timezone
 
@@ -142,8 +146,15 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
     # (RFC-002 P2; the bot keeps facade aliases to its dicts until P7).
     channel_state = ChannelStateRegistry()
 
-    # Multi-agent orchestration
-    agent_manager = AgentManager()
+    # Multi-agent orchestration. Spawn admission must read the live config
+    # root rather than the boot object; config updates replace bot.config.
+    agent_manager = AgentManager(
+        max_concurrent_agents_provider=(
+            (lambda: get_config().agents.max_concurrent_agents)
+            if get_config is not None
+            else None
+        )
+    )
     # Autonomous loop manager (agent-aware)
     loop_manager = LoopManager(agents_enabled=True)
     # Trajectory savers — constructed before the loop bridge, which

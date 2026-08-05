@@ -107,6 +107,10 @@ class StreamingConfig(BaseModel):
 class AgentsConfig(BaseModel):
     max_nesting_depth: int = 2
     max_children_per_agent: int = 3
+    # Per-channel admission cap for concurrently running agents. Twenty-five
+    # matches the immutable lifetime ceiling for one tree, so operators can
+    # raise useful parallelism without configuring beyond the runaway backstop.
+    max_concurrent_agents: int = Field(default=5, ge=1, le=25)
     max_iterations: int = 120
     scheduled_max_iterations: int = 180
     hard_max_iterations: int = 300

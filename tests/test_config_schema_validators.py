@@ -310,3 +310,19 @@ def test_max_children_per_agent_upper_bound():
         Config(discord={"token": "x"}, agents={"max_children_per_agent": 11})
     cfg = Config(discord={"token": "x"}, agents={"max_children_per_agent": 10})
     assert cfg.agents.max_children_per_agent == 10
+
+
+def test_max_concurrent_agents_default_and_bounds():
+    """1-25 permits useful parallelism without exceeding the immutable
+    per-tree lifetime backstop; an absent key preserves the historical cap 5.
+    """
+    from src.config.schema import Config
+
+    assert AgentsConfig().max_concurrent_agents == 5
+    assert Config(discord={"token": "x"}, agents={}).agents.max_concurrent_agents == 5
+    assert AgentsConfig(max_concurrent_agents=1).max_concurrent_agents == 1
+    assert AgentsConfig(max_concurrent_agents=25).max_concurrent_agents == 25
+    with pytest.raises(ValidationError):
+        AgentsConfig(max_concurrent_agents=0)
+    with pytest.raises(ValidationError):
+        AgentsConfig(max_concurrent_agents=26)

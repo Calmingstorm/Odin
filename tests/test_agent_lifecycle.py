@@ -351,6 +351,68 @@ class TestAgentInfoCompat:
 
 
 # ---------------------------------------------------------------------------
+# AgentManager — live per-channel admission limit
+# ---------------------------------------------------------------------------
+
+
+class TestMaxConcurrentAgentsConfig:
+    @staticmethod
+    def _active_agent(agent_id: str, channel_id: str = "c1") -> AgentInfo:
+        return AgentInfo(
+            id=agent_id,
+            label=agent_id,
+            goal="hold",
+            channel_id=channel_id,
+            requester_id="u1",
+            requester_name="user",
+        )
+
+    @staticmethod
+    def _spawn(mgr: AgentManager) -> str:
+        return mgr.spawn(
+            label="new",
+            goal="go",
+            channel_id="c1",
+            requester_id="u1",
+            requester_name="user",
+            iteration_callback=AsyncMock(
+                return_value={"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
+            ),
+            tool_executor_callback=AsyncMock(return_value="ok"),
+        )
+
+    def _fill(self, mgr: AgentManager, count: int = 5) -> None:
+        for index in range(count):
+            agent = self._active_agent(f"existing-{index}")
+            mgr._agents[agent.id] = agent
+
+    def test_absent_provider_preserves_historical_default_five(self):
+        mgr = AgentManager()
+        self._fill(mgr)
+        result = self._spawn(mgr)
+        assert result == "Error: Maximum concurrent agents (5) reached for this channel."
+        assert mgr.active_count == 5
+
+    async def test_live_raised_cap_admits_sixth_spawn(self):
+        live = {"limit": 5}
+        mgr = AgentManager(lambda: live["limit"])
+        self._fill(mgr)
+
+        blocked = self._spawn(mgr)
+        assert blocked.startswith("Error: Maximum concurrent agents (5)")
+
+        # The same manager consults the provider again at admission; no
+        # reconstruction or restart is needed for new work.
+        live["limit"] = 6
+        sixth = self._spawn(mgr)
+        assert not sixth.startswith("Error")
+        assert mgr.active_count == 6
+        await mgr._agents[sixth]._task
+        await asyncio.sleep(0)
+        mgr._remove_agent(sixth, source="test_cleanup")
+
+
+# ---------------------------------------------------------------------------
 # AgentManager — spawn / list / kill with state machine
 # ---------------------------------------------------------------------------
 

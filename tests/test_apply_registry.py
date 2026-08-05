@@ -169,7 +169,7 @@ class TestResolution:
         from src.config.apply_registry import schema_facts
 
         facts = schema_facts()
-        assert len(facts) == 261
+        assert len(facts) == 262
         assert "graceful_degradation.enabled" not in facts
         assert "grafana_alerts.enabled" not in facts
         for path in (
@@ -556,6 +556,14 @@ class TestEffectiveIsNeverGuessed:
     9 while the runtime went on using its hardcoded 3. That is the original
     defect of this page wearing a more authoritative JSON shape.
     """
+
+    def test_concurrent_limit_reports_per_channel_new_spawn_semantics(self):
+        record = build_field_record("agents.max_concurrent_agents", 6)
+        assert record["label"] == "Maximum concurrent agents per channel"
+        assert "concurrently running agents per channel" in record["description"]
+        assert record["apply_mode"] == "live_for_new_work"
+        assert record["effective"] == 6
+        assert record["constraints"] == {"minimum": 1, "maximum": 25}
 
     def test_the_wired_child_limit_reports_next_tree_semantics(self):
         """Was THE dormant exemplar; the spawn path consults it now — root

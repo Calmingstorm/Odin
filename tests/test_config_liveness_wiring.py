@@ -118,3 +118,21 @@ class TestLiveRecoveryPolicySource:
         updated.llm_recovery.backoff_cap_seconds = 5
         bot.config = updated
         assert source().backoff_cap == 5
+
+
+class TestLiveAgentAdmissionSource:
+    """Agent admission follows the rebound bot.config root, not boot config."""
+
+    def test_manager_provider_follows_config_rebind(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        from tests.fakes import make_bot
+
+        bot = make_bot()
+        provider = bot.agent_manager._max_concurrent_agents_provider
+        assert provider is not None
+        assert provider() == 5
+
+        updated = bot.config.model_copy(deep=True)
+        updated.agents.max_concurrent_agents = 6
+        bot.config = updated
+        assert provider() == 6

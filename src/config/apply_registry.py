@@ -495,6 +495,13 @@ FIELDS: dict[str, FieldSpec] = {
         "and an activation receipt.",
     ),
     # ---------------- agents ----------------
+    "agents.max_concurrent_agents": FieldSpec(
+        apply_mode="live_for_new_work",
+        label="Maximum concurrent agents per channel",
+        description="Maximum concurrently running agents per channel. "
+        "Saving applies to new spawn admissions; agents already running are "
+        "not stopped.",
+    ),
     "agents.max_children_per_agent": FieldSpec(
         apply_mode="live_for_new_work",
         description="Lifetime direct-child limit per agent (1-10). Counts "

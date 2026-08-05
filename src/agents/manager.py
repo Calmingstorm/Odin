@@ -342,8 +342,16 @@ class AgentInfo:
 class AgentManager:
     """Manages autonomous agent lifecycle — spawn, message, list, kill, cleanup."""
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        max_concurrent_agents_provider: Callable[[], int | None] | None = None,
+    ) -> None:
         self._agents: dict[str, AgentInfo] = {}
+        # Admission reads this provider for every spawn. The callable is bound
+        # to the bot's live config root in production, so a save affects new
+        # spawns without changing agents already admitted. None preserves the
+        # historical constant for standalone/test managers.
+        self._max_concurrent_agents_provider = max_concurrent_agents_provider
         self._cleanup_tasks: dict[str, asyncio.Task] = {}
         # Lifetime spawn count per tree, keyed by root id. Deliberately NOT
         # derived from the registry: cleanup removes finished agents, and a
@@ -380,14 +388,27 @@ class AgentManager:
         keep_recent_iterations: int = 30,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
-        # Check per-channel limit
+        # Check the live per-channel admission limit. Existing agents are
+        # never evicted when the setting falls; only subsequent spawns see it.
+        configured_limit = (
+            self._max_concurrent_agents_provider()
+            if self._max_concurrent_agents_provider is not None
+            else None
+        )
+        concurrent_limit = (
+            configured_limit
+            if configured_limit is not None
+            else MAX_CONCURRENT_AGENTS
+        )
         channel_count = sum(
             1 for a in self._agents.values()
             if a.channel_id == channel_id and a._sm.is_active
         )
-        if channel_count >= MAX_CONCURRENT_AGENTS:
-            return (f"Error: Maximum concurrent agents ({MAX_CONCURRENT_AGENTS}) reached for this "
-                    f"channel.")
+        if channel_count >= concurrent_limit:
+            return (
+                f"Error: Maximum concurrent agents ({concurrent_limit}) "
+                "reached for this channel."
+            )
 
         if not label or not goal:
             return "Error: Both 'label' and 'goal' are required."

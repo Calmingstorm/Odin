@@ -143,6 +143,9 @@ webhook:
 agents:
   max_nesting_depth: 2
   max_children_per_agent: 3
+  # Maximum concurrently running agents per Discord channel. This is checked
+  # for each new spawn; lowering it does not stop agents already running.
+  max_concurrent_agents: 5
   # LLM iterations (turns) per agent before forced completion
   max_iterations: 120              # interactive spawns
   scheduled_max_iterations: 180    # scheduled workflow spawns (higher for autonomous coding)
