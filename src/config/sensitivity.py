@@ -53,7 +53,6 @@ PUBLIC_NON_SECRET_KEYS: frozenset[str] = frozenset(
     {
         "scrub_secrets",
         "max_tokens",
-        "max_system_prompt_tokens",
         "token_budget",
         "context_token_budget",
         "injection_token_budget",

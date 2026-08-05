@@ -500,6 +500,19 @@ class TestSchemaDerivedFacts:
         assert record["type"] == "integer"
         assert record["default"] is None
 
+    def test_only_schema_free_containers_get_read_only_summary_marker(self):
+        assert build_field_record("tools.hosts", {})["structured_container"] is True
+        assert build_field_record("mcp.servers", {})["structured_container"] is True
+        assert not build_field_record(
+            "agents.final_warning_iterations", [20, 10]
+        )["structured_container"]
+        assert not build_field_record(
+            "tools.skill_allowed_urls", ["https://x"]
+        )["structured_container"]
+        assert not build_field_record(
+            "discord.allowed_users", ["123"]
+        )["structured_container"]
+
     def test_list_entry_paths_resolve_to_their_record_field(self):
         """An entry's fields are schema, so web.api_tokens.0.tier must pick up
         the tier field's facts rather than be treated as an unknown path — and
@@ -524,12 +537,6 @@ class TestEffectiveIsNeverGuessed:
     9 while the runtime went on using its hardcoded 3. That is the original
     defect of this page wearing a more authoritative JSON shape.
     """
-
-    def test_a_field_nothing_reads_reports_no_effective_value(self):
-        record = build_field_record("openai_codex.max_tokens", 9000)
-        assert record["desired"] == 9000
-        assert record["effective"] is None
-        assert record["apply_state"] == "dormant"
 
     def test_the_wired_child_limit_reports_next_tree_semantics(self):
         """Was THE dormant exemplar; the spawn path consults it now — root
@@ -784,13 +791,6 @@ class TestPlainLanguageEffects:
     drift in meaning, so they are pinned verbatim.
     """
 
-    def test_an_unwired_field_says_so_in_the_settled_words(self):
-        record = build_field_record("openai_codex.max_tokens", 9000)
-        assert record["save_effect"] == (
-            "Saving updates config.yml. This version of Odin does not use "
-            "this setting. Restarting will not activate it."
-        )
-
     def test_a_gated_field_says_current_behavior_is_kept(self):
         record = build_field_record("usage.directory", "./x")
         assert record["save_effect"] == (
@@ -806,6 +806,19 @@ class TestPlainLanguageEffects:
     def test_live_apply_names_its_handler(self):
         record = build_field_record("openai_codex.model", "sol")
         assert "PUT /api/llm/codex/config" in record["runtime_effect"]
+
+    def test_logging_directory_names_only_the_workspace_fence(self):
+        record = build_field_record("logging.directory", "/srv/not-a-log-sink")
+        assert record["apply_mode"] == "restart"
+        assert "workspace" in record["description"].lower()
+        assert "does not write logs" in record["description"].lower()
+        assert {consumer["name"] for consumer in record["consumers"]} == {
+            "Local command workspace fence",
+        }
+        assert all(
+            "handler" not in consumer["name"].lower()
+            for consumer in record["consumers"]
+        )
 
     def test_every_record_carries_both_sentences(self):
         from src.config.schema import Config

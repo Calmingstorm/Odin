@@ -122,7 +122,7 @@ class TestCodexConformance:
     @staticmethod
     def _client() -> CodexChatClient:
         # _convert_messages_with_tools is a pure function of messages; auth unused.
-        return CodexChatClient(auth=None, model="gpt-5", max_tokens=1000)
+        return CodexChatClient(auth=None, model="gpt-5")
 
     def test_function_call_and_output_pairing(self):
         out = self._client()._convert_messages_with_tools(TRANSCRIPT)

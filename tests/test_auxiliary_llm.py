@@ -271,7 +271,7 @@ class TestMakeCodexCallback:
     async def test_callback_signature(self):
         client, _, _ = _make_client()
         fn = client.make_codex_callback()
-        # CodexCallback signature: async (messages, system, max_tokens) -> str
+        # Background callback signature: async (messages, system, output_budget) -> str
         result = await fn([{"role": "user", "content": "x"}], "system", 200)
         assert isinstance(result, str)
 

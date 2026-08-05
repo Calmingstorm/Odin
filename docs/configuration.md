@@ -70,7 +70,6 @@ tools:
 openai_codex:
   enabled: true
   model: gpt-5.5                 # ChatGPT subscription path
-  max_tokens: 4096
   reasoning_effort: medium       # none | low | medium | high | xhigh | max
   agent_reasoning_effort: null   # spawned agents; null = inherit, "auto" = per-spawn choice
   agent_model: null              # spawned agents; null = inherit, "auto" = per-spawn choice
@@ -100,7 +99,7 @@ efforts that model does accept. Unknown model strings pass through unchecked
 The **auxiliary** model is an optional cheaper Codex model that runs the fixed
 background jobs — compaction, reflection, consolidation, and background
 follow-up — with automatic fallback to the primary model on error. It shares
-the main Codex OAuth and token limit; only the model differs. Set it live from
+the main Codex OAuth credentials; only the model differs. Set it live from
 the Web UI (Auxiliary Model dropdown, "Off" to run those jobs on the primary).
 
 Generate credentials: `python3 scripts/codex_login.py`
@@ -248,7 +247,6 @@ Place `.md` files in `data/context/` — they are injected into every LLM prompt
 ```yaml
 context:
   directory: ./data/context
-  max_system_prompt_tokens: 32000
 ```
 
 ## Logging

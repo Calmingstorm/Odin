@@ -219,7 +219,6 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "configured": codex_configured,
                 "enabled": bot.config.openai_codex.enabled,
                 "model": bot.config.openai_codex.model,
-                "max_tokens": bot.config.openai_codex.max_tokens,
                 "reasoning_effort": bot.config.openai_codex.reasoning_effort,
                 "active_reasoning_effort": getattr(
                     bot.llm_gateway.codex_client, "reasoning_effort", None
@@ -584,11 +583,6 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                 desired = {
                     "enabled": bool(body["enabled"]) if "enabled" in body else cfg.enabled,
                     "model": str(body["model"]) if body.get("model") else cfg.model,
-                    "max_tokens": (
-                        _parse_int(body["max_tokens"], "max_tokens", 1, 128000)
-                        if "max_tokens" in body
-                        else cfg.max_tokens
-                    ),
                     "reasoning_effort": (
                         str(effort) if effort is not None else cfg.reasoning_effort
                     ),
@@ -620,7 +614,7 @@ def register_provider_config(routes: web.RouteTableDef, bot) -> None:
                     adv_inverse = _apply_ops(cfg, adv_ops)
                     needs_reload = adv_reload or any(
                         key in body
-                        for key in ("enabled", "model", "max_tokens", "reasoning_effort")
+                        for key in ("enabled", "model", "reasoning_effort")
                     )
                     try:
                         if needs_reload:

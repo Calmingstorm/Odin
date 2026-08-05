@@ -171,7 +171,7 @@ SECTIONS: dict[str, SectionSpec] = {
     ),
     "context": SectionSpec(
         "restart",
-        "System-prompt sources and prompt-budget controls.",
+        "System-prompt source files.",
         restart_reason="Prompt sources are assembled when the prompt builder is "
         "constructed at startup.",
     ),
@@ -187,8 +187,9 @@ SECTIONS: dict[str, SectionSpec] = {
     ),
     "logging": SectionSpec(
         "restart",
-        "Runtime log verbosity and storage policy.",
-        restart_reason="Log handlers are installed once during startup.",
+        "Runtime log verbosity and workspace-fence declarations.",
+        restart_reason="Logging verbosity is selected when startup installs the "
+        "process handlers.",
     ),
     "usage": SectionSpec(
         "activation_required",
@@ -457,6 +458,21 @@ FIELDS: dict[str, FieldSpec] = {
         description="Provider used for new primary requests.",
     ),
     "logging.level": FieldSpec(description="Minimum runtime log level."),
+    "logging.directory": FieldSpec(
+        apply_mode="restart",
+        description="Declared path protected from overlap with the local command "
+        "workspace. Odin does not write logs here or configure a log handler "
+        "from this value.",
+        restart_reason="The command executor snapshots the full configuration "
+        "used by its workspace fence at startup.",
+        consumers=(
+            Consumer(
+                "Local command workspace fence",
+                "restart",
+                "The executor protects the path captured when it was built.",
+            ),
+        ),
+    ),
     "browser.default_timeout_ms": FieldSpec(
         unit="ms", description="Default browser operation timeout."
     ),
@@ -464,12 +480,6 @@ FIELDS: dict[str, FieldSpec] = {
     "browser.viewport_height": FieldSpec(unit="px"),
     "sessions.max_history": FieldSpec(unit="messages"),
     "sessions.max_age_hours": FieldSpec(unit="hours"),
-    "context.max_system_prompt_tokens": FieldSpec(
-        apply_mode="activation_required",
-        description="Optional hard budget for future assembled system prompts.",
-        activation_policy="Preview mandatory prompt usage and omissions before "
-        "applying the budget, so activation cannot silently truncate a prompt.",
-    ),
     "usage.directory": FieldSpec(
         apply_mode="activation_required",
         description="Target for durable usage history; no durable store is active "
@@ -728,15 +738,6 @@ FIELDS: dict[str, FieldSpec] = {
                 "so agents adopt it before chat does.",
             ),
         ),
-    ),
-    "openai_codex.max_tokens": FieldSpec(
-        apply_mode="dormant",
-        unit="tokens",
-        description="Maximum Codex response tokens.",
-        activation_policy="The Codex Responses API carries no token-limit "
-        "field, so no request sends this value; it is copied onto the live "
-        "client and read by nothing. It becomes meaningful only under a "
-        "provider whose API accepts a token limit.",
     ),
     "openai_codex.reasoning_effort": FieldSpec(
         apply_mode="live_apply",
@@ -1631,6 +1632,12 @@ def schema_facts() -> dict[str, dict[str, Any]]:
             facts["default"] = (
                 None if repr(default) == "PydanticUndefined" else default
             )
+            # Object maps have operator-defined keys, while record containers
+            # have a schema per entry but no scalar editor. Plain scalar arrays
+            # remain chip-editable and are deliberately not marked read-only.
+            facts["structured_container"] = (
+                facts.get("type") == "object" or element is not None
+            )
             if not isinstance(facts["default"], (str, int, float, bool, type(None))):
                 facts["default"] = None
             out[path] = facts
@@ -1871,6 +1878,7 @@ def build_field_record(
         "unit": spec.unit,
         "examples": [],
         "type": resolved_type,
+        "structured_container": bool(facts.get("structured_container")),
         "enum": resolved_enum,
         "constraints": resolved_constraints,
         "default": facts.get("default"),

@@ -96,6 +96,30 @@ class TestLoadConfig:
         cfg = load_config(p)
         assert cfg.discord.token == "abc"
 
+    def test_removed_settings_are_ignored_without_losing_neighbors(self, tmp_path):
+        """Old config files must keep booting after the dead controls disappear.
+
+        Pydantic's default extra-field policy is the compatibility mechanism,
+        but pin both nested locations and adjacent supported values so changing
+        either model to extra=forbid cannot strand an upgrade later.
+        """
+        p = self._write(
+            tmp_path,
+            "discord:\n  token: legacy\n"
+            "context:\n  directory: ./legacy-context\n  max_system_prompt_tokens: 12345\n"
+            "openai_codex:\n  enabled: true\n  model: gpt-5.6-terra\n"
+            "  max_tokens: 98765\n  reasoning_effort: high\n",
+        )
+
+        cfg = load_config(p)
+
+        assert cfg.discord.token == "legacy"
+        assert cfg.context.directory == "./legacy-context"
+        assert not hasattr(cfg.context, "max_system_prompt_tokens")
+        assert cfg.openai_codex.model == "gpt-5.6-terra"
+        assert cfg.openai_codex.reasoning_effort == "high"
+        assert not hasattr(cfg.openai_codex, "max_tokens")
+
     def test_env_substituted(self, tmp_path, monkeypatch):
         monkeypatch.setenv("ODIN_TOKEN_TEST", "from-env")
         p = self._write(tmp_path, "discord:\n  token: ${ODIN_TOKEN_TEST}\n")

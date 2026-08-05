@@ -76,12 +76,6 @@ const FIELD_OVERRIDES = {
       { name: 'Chat and autonomous loops', apply_mode: 'live_apply', detail: 'The dedicated Codex endpoint reloads the live client.' },
     ],
   },
-  'openai_codex.max_tokens': {
-    apply_mode: 'live_apply',
-    constraints: { minimum: 1, maximum: 128000 },
-    unit: 'tokens',
-    description: 'Maximum Codex response tokens; requires the dedicated Codex reload path.',
-  },
   'openai_codex.reasoning_effort': {
     apply_mode: 'live_apply',
     description: 'Main Codex reasoning effort; requires the dedicated Codex reload path.',
@@ -164,11 +158,6 @@ const FIELD_OVERRIDES = {
     apply_mode: 'activation_required',
     description: 'Child limit adopted by newly spawned parent agents after explicit activation.',
     activation_policy: 'Explicitly apply the configured limit after reviewing worst-case tree breadth.',
-  },
-  'context.max_system_prompt_tokens': {
-    apply_mode: 'activation_required',
-    description: 'Optional hard budget for future assembled system prompts.',
-    activation_policy: 'Preview mandatory prompt usage and omissions before applying the budget.',
   },
   'usage.directory': {
     apply_mode: 'activation_required',

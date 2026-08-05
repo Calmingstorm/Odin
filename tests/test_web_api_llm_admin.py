@@ -143,6 +143,7 @@ class TestLlmStatus:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["configured"] is True
+            assert "max_tokens" not in body["codex"]
             assert body["codex"]["reasoning_effort"] == "medium"
             assert body["codex"]["active_reasoning_effort"] is None  # object() has no attr
             assert body["ollama"]["configured"] is False
@@ -395,17 +396,37 @@ class TestProviderConfig:
                 json={
                     "enabled": True,
                     "model": "gpt-5.5",
-                    "max_tokens": 8000,
                     "reasoning_effort": "high",
                 },
             )
             rbody = await r.json()
             assert r.status == 200 and rbody["status"] == "updated"
+            assert "max_tokens" not in rbody
             assert rbody["reasoning_effort"] == "high"
             assert bot.config.openai_codex.reasoning_effort == "high"
             bot.llm_gateway.reload_codex_inner.assert_awaited()
-            # invalid max_tokens → ValueError → 400
-            assert (await c.put("/api/llm/codex/config", json={"max_tokens": "nope"})).status == 400
+
+    @pytest.mark.asyncio
+    async def test_codex_config_value_error_is_a_clean_400(self, monkeypatch):
+        """The route's schema-error boundary remains covered after removing the
+        dead top-level integer parser."""
+        app, bot = _app(register_provider_config)
+        _gw(bot)
+
+        async def invalid(_changes):
+            raise ValueError("schema rejected desired value")
+
+        monkeypatch.setattr(
+            "src.web.api.llm_admin.persist_config_paths_locked", invalid
+        )
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put(
+                "/api/llm/codex/config", json={"model": "gpt-5.6-terra"}
+            )
+            response_body = await response.json()
+
+        assert response.status == 400
+        assert response_body["error"] == "schema rejected desired value"
 
     @pytest.mark.asyncio
     async def test_codex_config_accepts_agent_axis_auto(self):
@@ -650,7 +671,7 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         bot.config.openai_codex.agent_reasoning_effort = "high"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"max_tokens": 5000})
+            r = await c.put("/api/llm/codex/config", json={"enabled": False})
             assert r.status == 200
             assert bot.config.openai_codex.agent_reasoning_effort == "high"
 
@@ -726,7 +747,7 @@ class TestProviderConfig:
         bot.llm_gateway.codex_client = object()
         bot.config.openai_codex.agent_model = "gpt-5.6-luna"
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"max_tokens": 5000})
+            r = await c.put("/api/llm/codex/config", json={"enabled": False})
             assert r.status == 200
             assert bot.config.openai_codex.agent_model == "gpt-5.6-luna"
 
@@ -1061,7 +1082,6 @@ class TestPersistHelpers:
         return [
             (("openai_codex", "enabled"), bot.config.openai_codex.enabled),
             (("openai_codex", "model"), bot.config.openai_codex.model),
-            (("openai_codex", "max_tokens"), bot.config.openai_codex.max_tokens),
             (("openai_codex", "reasoning_effort"), bot.config.openai_codex.reasoning_effort),
             (
                 ("openai_codex", "agent_reasoning_effort"),
@@ -1425,17 +1445,6 @@ class TestCatalogInvalidationOnModelChange:
         bot.tool_catalog.invalidate.assert_not_called()
         gw.reload_codex_inner.assert_not_awaited()
         assert bot.config.openai_codex.model == "gpt-5.6-sol"
-
-    @pytest.mark.asyncio
-    async def test_non_catalog_change_does_not_invalidate(self):
-        app, bot = _app(register_provider_config)
-        _gw(bot)
-        bot.tool_catalog = MagicMock()
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json={"max_tokens": 8192})
-            assert r.status == 200
-        bot.tool_catalog.invalidate.assert_not_called()
-
 
 class TestCatalogInvalidationOnEffortChange:
     """PR #246 round 1 follow-through: the required-ness of the exposed

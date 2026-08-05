@@ -122,7 +122,6 @@ class CodexChatClient:
         self,
         auth: CodexAuth | CodexAuthPool,
         model: str,
-        max_tokens: int,
         reasoning_effort: str | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
         retry_base_delay: float = DEFAULT_BASE_DELAY,
@@ -134,7 +133,6 @@ class CodexChatClient:
     ) -> None:
         self.auth = auth
         self.model = model
-        self.max_tokens = max_tokens
         # None omits the reasoning field entirely (backend default applies) —
         # the auxiliary client stays None until its model is compatibility-probed.
         self.reasoning_effort = reasoning_effort
@@ -257,9 +255,8 @@ class CodexChatClient:
     ) -> str:
         """Send a chat request via the Codex backend API (streaming).
 
-        Args:
-            max_tokens: Per-call token limit override. Falls back to
-                        ``self.max_tokens`` when *None*.
+        The optional third argument is accepted for the shared provider
+        interface. The Responses request shape is intentionally unchanged.
         """
         _reject_known_bad_pair(self.model, self.reasoning_effort)
         body = {

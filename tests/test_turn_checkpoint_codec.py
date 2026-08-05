@@ -396,7 +396,6 @@ class TestStorageRedactionAllCopies:
             "token_budget",
             "context_token_budget",
             "injection_token_budget",
-            "max_system_prompt_tokens",
         )
         payload = {key: "operator-value" for key in keys}
         assert not any(_is_sensitive_key(key) for key in keys)

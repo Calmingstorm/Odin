@@ -15,7 +15,6 @@ openai_codex:
   # ChatGPT-account Codex backend only supports the GPT-5 family
   # (gpt-4o et al return "model not supported" via this auth path).
   model: gpt-5.5
-  max_tokens: 4096
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).
   # "max" is gpt-5.6-family only — config load rejects a known-incompatible
@@ -52,7 +51,7 @@ openai_codex:
   # Auxiliary model: when enabled, a cheaper Codex model runs the background
   # jobs (compaction, reflection, consolidation, background follow-up) with
   # automatic fallback to the primary model on error. It shares the main Codex
-  # OAuth and token limit — only the model differs. Editable live from the WebUI.
+  # OAuth credentials; only the model differs. Editable live from the WebUI.
   auxiliary:
     enabled: false
     model: gpt-5.6-luna
@@ -77,7 +76,6 @@ llm_provider:
 
 context:
   directory: ./data/context
-  max_system_prompt_tokens: 32000
 
 sessions:
   max_history: 50

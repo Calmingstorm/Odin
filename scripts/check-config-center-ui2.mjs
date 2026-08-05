@@ -131,6 +131,15 @@ assert.match(discord, /api\.put\('\/api\/config', \{ discord:/, 'Discord global 
 assert.doesNotMatch(discord, /Bot credential configured/, 'Discord page reports an unverified credential state');
 assert.match(apiTokens, /Manage API tokens[\s\S]*api\.get\('\/api\/tokens'\)/s, 'API Tokens owner page does not own the token collection');
 assert.doesNotMatch(config, /OWNER_LINKS|sectionOwner\(|Temporary expert JSON editor|setJsonFieldValue|Edit section|meta\.value\?\.status\?\.counts/, 'legacy owner/edit/JSON gate returned');
+assert.match(config, /Read-only here\. Edit this collection in config\.yml\./, 'public structured containers do not name their real edit path');
+assert.match(config, /Values are hidden\. Read-only here\. Edit this collection in config\.yml\./, 'secret containers do not name their safe read-only shape and edit path');
+assert.match(config, /field\.structured_container && field\.sensitivity !== 'public'/, 'credential-bearing containers no longer have their dedicated safe summary');
+assert.match(config, /v-else-if="field\.structured_container"/, 'schema-free containers no longer use the registry marker');
+assert.match(config, /!field\.structured_container/, 'scalar arrays do not defer to the registry container marker');
+assert.doesNotMatch(config, /STRUCTURED_CONTAINER_PATHS/, 'duplicated local container-path registry returned');
+assert.match(config, /function structuredApplyCopy\(field\)/, 'structured containers do not explain their real apply boundary');
+assert.match(config, /No activation control exists in this release/, 'activation-required containers imply a nonexistent flow');
+assert.doesNotMatch(config, /purpose-built table is required before release/i, 'temporary release-gate copy returned');
 const expandedFunction = namedFunction(configAst, 'isSectionExpanded');
 const expandedStatements = expandedFunction.body.body;
 assert.equal(expandedStatements.at(-1)?.type, 'ReturnStatement', 'section expansion has no desktop default');
@@ -209,7 +218,7 @@ for (const field of ['request_timeout_seconds', 'stream_stall_timeout_seconds', 
   assert.ok(parts.every(part => llm.includes(part)), `Codex advanced field missing: ${field}`);
 }
 assert.ok((llm.match(/v-model\.number="(?:ollama|kimi)Form\.timeout"/g) || []).length === 2, 'provider timeout controls drifted');
-assert.match(llm, /Unsupported by the current Codex provider/, 'unsupported max_tokens is not labelled');
+assert.doesNotMatch(llm, /codexForm\.max_tokens|current Codex provider[\s\S]*max_tokens/, 'removed Codex max_tokens control returned');
 for (const field of ['effective_connection_pool', 'connection_pool_pending_restart', 'effective_context_compression', 'context_compression_pending_restart']) {
   assert.ok(llm.includes(field), `Codex owner page does not consume status truth: ${field}`);
 }

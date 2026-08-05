@@ -46,7 +46,7 @@ if TYPE_CHECKING:
     from ..tools.mcp_client import MCPManager
     from ..tools.skill_manager import SkillManager
 
-# Type for Codex chat callback: takes (messages, system, max_tokens) -> response text
+# Type for background chat callback: takes (messages, system, output_budget) -> response text
 CodexCallback = Callable[[list[dict], str, int], Awaitable[str]]
 
 log = get_logger("background_task")

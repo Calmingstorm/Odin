@@ -43,12 +43,6 @@ function isExcludedConfigPath(path) {
   return CONFIG_EXCLUDED_PATH_PREFIXES.some(prefix => path === prefix || path.startsWith(`${prefix}.`));
 }
 
-const STRUCTURED_CONTAINER_PATHS = new Set([
-  'sessions.context_budget_overrides', 'tools.governor.host_overrides', 'tools.hosts',
-  'tools.tool_timeouts', 'permissions.tiers', 'mcp.servers', 'slack.webhook_urls',
-  'grafana_alerts.rules', 'outbound_webhooks.targets',
-]);
-
 const EXPANDED_STORAGE_KEY = 'odin_config_center_expanded_v1';
 const CATEGORY_STORAGE_KEY = 'odin_config_center_category_v1';
 const MAX_UNDO = 50;
@@ -368,7 +362,14 @@ export default {
                           </div>
 
                           <div class="cfgc-field-control">
-                            <template v-if="field.sensitivity !== 'public'">
+                            <template v-if="field.structured_container && field.sensitivity !== 'public'">
+                              <div class="cfgc-structured-summary">
+                                <span><odin-icon name="shield" :size="15" /> {{ field.configured ? 'Configured collection' : 'Empty collection' }}</span>
+                                <small>Values are hidden. Read-only here. Edit this collection in config.yml. {{ structuredApplyCopy(field) }}</small>
+                              </div>
+                            </template>
+
+                            <template v-else-if="field.sensitivity !== 'public'">
                               <div class="cfgc-write-only">
                                 <span><odin-icon name="shield" :size="15" /> {{ field.configured ? 'Configured' : 'Not configured' }}</span>
                                 <small>{{ field.provenance === 'unset' ? 'No credential source' : 'Source: ' + field.provenance.replace('_', ' ') }}</small>
@@ -427,9 +428,9 @@ export default {
                                      :step="field.type === 'integer' ? 1 : 'any'" :value="numberInputValue(field)"
                                      @focus="beginInputEdit(field.path)" @input="setNumberFieldValue(field, $event.target.value)" @blur="endInputEdit(field)" />
 
-                              <div v-else-if="field.type === 'object' || field.type === 'array'" class="cfgc-structured-summary">
+                              <div v-else-if="field.structured_container" class="cfgc-structured-summary">
                                 <span>{{ compactValue(field.value) }}</span>
-                                <small>A purpose-built table is required before release.</small>
+                                <small>Read-only here. Edit this collection in config.yml. {{ structuredApplyCopy(field) }}</small>
                               </div>
 
                               <input v-else :id="fieldInputId(field.path)" class="hm-input font-mono" type="text"
@@ -1065,9 +1066,23 @@ export default {
       setFieldValue(field, (field.value || []).filter(item => item !== value));
     }
 
+    function structuredApplyCopy(field) {
+      if (field.apply_mode === 'live_read') return 'Odin reads the saved file value on next use.';
+      if (field.apply_mode === 'live_for_new_work') return 'New work uses the saved file value.';
+      if (field.apply_mode === 'live_apply') {
+        return field.apply_handler
+          ? `Apply the saved value through ${field.apply_handler}.`
+          : 'Apply it through its dedicated owner page or endpoint.';
+      }
+      if (field.apply_mode === 'restart') return 'Restart Odin for the saved collection to take effect.';
+      if (field.apply_mode === 'activation_required') return 'Saving does not enable it. No activation control exists in this release.';
+      if (field.apply_mode === 'dormant') return 'This release does not use the saved collection.';
+      return 'Follow the runtime details shown for this setting.';
+    }
+
     function isScalarArray(field) {
       return field.type === 'array' && Array.isArray(field.value)
-        && !STRUCTURED_CONTAINER_PATHS.has(field.path)
+        && !field.structured_container
         && field.sensitivity === 'public'
         && field.value.every(item => ['string', 'number', 'boolean'].includes(typeof item));
     }
@@ -1328,7 +1343,7 @@ export default {
       setFieldValue, setNumberFieldValue, numberInputValue, beginInputEdit, endTextInputEdit, endInputEdit,
       addWarningThreshold, removeWarningThreshold, isScalarArray, addScalarArrayItem, removeScalarArrayItem, fieldError, sectionHasErrors,
       undo, redo, openReview, closeReview, mobileCancel,
-      applyModeLabel, applyClass, compactValue, formatValue, fieldId, fieldInputId, focusField,
+      applyModeLabel, applyClass, compactValue, formatValue, structuredApplyCopy, fieldId, fieldInputId, focusField,
       fetchConfig, saveConfig, restartOdin, restartLater, reviewPendingRestart,
     };
   },

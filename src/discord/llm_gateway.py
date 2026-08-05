@@ -42,7 +42,6 @@ log = get_logger("discord")
 class _AuxBuildInputs:
     """Immutable config consumed while constructing an auxiliary candidate."""
 
-    max_tokens: int
     retry_max_retries: int
     retry_base_delay: float
     retry_max_delay: float
@@ -170,8 +169,9 @@ class LLMGateway:
         # Compaction emits a segment of up to ~2500 chars (≈625 tokens) plus
         # structured header lines; reflection emits multi-lesson JSON. The old
         # 300/500 caps guaranteed mid-output truncation on providers that honor
-        # max_tokens (Ollama/Kimi) — truncated reflection JSON parsed to [] and
-        # silently dropped lessons. (Codex ignores max_tokens entirely.)
+        # the per-call output budget (Ollama/Kimi) — truncated reflection JSON
+        # parsed to [] and silently dropped lessons. The Codex request shape is
+        # unchanged because that backend has no corresponding request field.
         # These callbacks resolve the auxiliary pointer at CALL TIME, not wire
         # time — capturing aux.make_chat_fn() here would pin the wrapper and
         # break the live reload swap. When a named task is enabled on the
@@ -248,8 +248,8 @@ class LLMGateway:
             auth = getattr(self.codex_client, "auth", None)
             if isinstance(auth, CodexAuthPool):
                 count = await auth.reload_async()
-                # Config changes (model/max_tokens) must land on the live
-                # client too — it reads self.model per request, and without
+                # Model changes must land on the live client too — it reads
+                # self.model per request, and without
                 # this a WebUI model switch only took effect after a restart.
                 if self.codex_client.model != config.openai_codex.model:
                     log.info(
@@ -267,7 +267,6 @@ class LLMGateway:
                         config.openai_codex.reasoning_effort,
                     )
                 self.codex_client.model = config.openai_codex.model
-                self.codex_client.max_tokens = config.openai_codex.max_tokens
                 self.codex_client.reasoning_effort = config.openai_codex.reasoning_effort
                 # Per-request transport values apply live; pool sizing is
                 # session-construction state and needs a client rebuild.
@@ -287,7 +286,6 @@ class LLMGateway:
         self.codex_client = CodexChatClient(
             auth=auth,
             model=config.openai_codex.model,
-            max_tokens=config.openai_codex.max_tokens,
             reasoning_effort=config.openai_codex.reasoning_effort,
             max_retries=config.openai_codex.retry.max_retries,
             retry_base_delay=config.openai_codex.retry.base_delay,
@@ -329,7 +327,6 @@ class LLMGateway:
     def _snapshot_aux_build_inputs(self) -> _AuxBuildInputs:
         config = self.get_config().openai_codex
         return _AuxBuildInputs(
-            max_tokens=config.max_tokens,
             retry_max_retries=config.retry.max_retries,
             retry_base_delay=config.retry.base_delay,
             retry_max_delay=config.retry.max_delay,
@@ -387,7 +384,6 @@ class LLMGateway:
         candidate_client = CodexChatClient(
             auth=aux_auth,
             model=desired["model"],
-            max_tokens=build.max_tokens,
             max_retries=build.retry_max_retries,
             retry_base_delay=build.retry_base_delay,
             retry_max_delay=build.retry_max_delay,

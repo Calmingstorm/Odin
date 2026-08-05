@@ -306,13 +306,20 @@ class TestDiscordConfig:
             app, bot = _app(register_discord_config)
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/config", json={
-                    "openai_codex": {"model_routing": {"enabled": True}},
+                    "context": {"max_system_prompt_tokens": 12345},
+                    "openai_codex": {
+                        "model_routing": {"enabled": True},
+                        "max_tokens": 98765,
+                    },
                 })
                 assert r.status == 200
         finally:
             set_active_config_path(previous)
-        oc = YAML().load(Path("config.yml").read_text()).get("openai_codex", {})
+        saved = YAML().load(Path("config.yml").read_text())
+        oc = saved.get("openai_codex", {})
         assert "model_routing" not in oc
+        assert "max_tokens" not in oc
+        assert "max_system_prompt_tokens" not in saved.get("context", {})
 
     @pytest.mark.asyncio
     async def test_blanking_the_workspace_normalizes_everywhere(self):
@@ -1011,13 +1018,13 @@ class TestConfigMeta:
     by another endpoint, or were not wired to anything at all.
     """
 
-    #: The record keys the page consumes, mirroring the fieldSpec() literal in
-    #: ui/js/config-meta-fixture.js. The fixture exists so the page could be
-    #: built before this route did; the swap is only real if the server emits
-    #: the same keys, so drift on either side has to fail here.
+    #: The complete server record contract consumed by Config Center. The page
+    #: reads this route directly; keeping the exact key set pinned makes schema
+    #: additions and removals deliberate rather than silent UI drift.
     RECORD_KEYS = {
         "path", "owner", "label", "description", "aliases", "unit", "examples",
-        "type", "enum", "constraints", "default", "sensitivity", "secret_route",
+        "type", "structured_container", "enum", "constraints", "default",
+        "sensitivity", "secret_route",
         "apply_mode", "apply_handler", "consumers", "restart_reason",
         "activation_policy", "group_description", "save_effect",
         "runtime_effect", "action_available", "action_label",

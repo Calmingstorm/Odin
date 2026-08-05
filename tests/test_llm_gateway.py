@@ -23,8 +23,7 @@ def _cfg(active="codex", codex_enabled=True, ollama_enabled=False,
     return SimpleNamespace(
         llm_provider=SimpleNamespace(active_provider=active),
         openai_codex=SimpleNamespace(enabled=codex_enabled, credentials_path="/creds",
-                                     model="gpt-5.5", max_tokens=8000,
-                                     reasoning_effort="medium",
+                                     model="gpt-5.5", reasoning_effort="medium",
                                      request_timeout_seconds=3600,
                                      stream_stall_timeout_seconds=180,
                                      retry=SimpleNamespace(max_retries=3, base_delay=1.0,
@@ -110,25 +109,23 @@ class TestReloadCodex:
         from src.discord.llm_gateway import CodexAuthPool
         pool = MagicMock(spec=CodexAuthPool)
         pool.reload_async = AsyncMock(return_value=3)
-        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000,
+        client = SimpleNamespace(auth=pool, model="gpt-5.5",
                                  reasoning_effort="medium")
         gw = _gw(codex=client)
         r = await gw.reload_codex_inner()
         assert r["reloaded"] is True and r["accounts"] == 3
 
-    async def test_existing_client_gets_model_and_max_tokens_from_config(self):
-        """Regression: a reload after a config PUT must land model/max_tokens
-        on the LIVE client. The auth-pool branch used to return early without
-        applying them, so WebUI model switches silently no-opped until the
-        next restart while /api/llm/status kept reporting the old model."""
+    async def test_existing_client_gets_model_from_config(self):
+        """Regression: a reload after a config PUT must land the model on the
+        live client. The auth-pool branch used to return early, so WebUI model
+        switches silently no-opped until restart."""
         from src.discord.llm_gateway import CodexAuthPool
         pool = MagicMock(spec=CodexAuthPool)
         pool.reload_async = AsyncMock(return_value=3)
-        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000,
+        client = SimpleNamespace(auth=pool, model="gpt-5.5",
                                  reasoning_effort="medium")
         cfg = _cfg()
         cfg.openai_codex.model = "gpt-5.6-terra"
-        cfg.openai_codex.max_tokens = 4096
         cfg.openai_codex.reasoning_effort = "xhigh"
         gw = _gw(cfg, codex=client)
         r = await gw.reload_codex_inner()
@@ -136,17 +133,16 @@ class TestReloadCodex:
         # same client object — auth pool, breaker, and session are preserved
         assert gw.codex_client is client
         assert client.model == "gpt-5.6-terra"
-        assert client.max_tokens == 4096
         assert client.reasoning_effort == "xhigh"
 
     async def test_existing_client_gets_transport_values_from_config(self):
-        """Companion to the model/max_tokens reload fix: the per-request
+        """Companion to the model reload fix: the per-request
         transport values (timeouts, retry policy) must land on the LIVE
         client too, so a config change applies without a restart."""
         from src.discord.llm_gateway import CodexAuthPool
         pool = MagicMock(spec=CodexAuthPool)
         pool.reload_async = AsyncMock(return_value=3)
-        client = SimpleNamespace(auth=pool, model="gpt-5.5", max_tokens=8000,
+        client = SimpleNamespace(auth=pool, model="gpt-5.5",
                                  reasoning_effort="medium",
                                  request_timeout=3600, stream_stall_timeout=180,
                                  max_retries=3, retry_base_delay=1.0,
@@ -1121,7 +1117,7 @@ class TestAuxiliaryPrepareProbeCAS:
             task = asyncio.create_task(gw.reload_auxiliary(plan=plan))
             await probe_started.wait()
             async with config_transaction():
-                cfg.openai_codex.max_tokens += 1
+                cfg.openai_codex.retry.max_retries += 1
             release_probe.set()
             result = await task
         await self._flush_drains(gw)

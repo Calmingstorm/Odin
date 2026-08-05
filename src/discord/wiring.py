@@ -302,7 +302,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
             codex_client = CodexChatClient(
                 auth=codex_auth,
                 model=config.openai_codex.model,
-                max_tokens=config.openai_codex.max_tokens,
                 reasoning_effort=config.openai_codex.reasoning_effort,
                 max_retries=config.openai_codex.retry.max_retries,
                 retry_base_delay=config.openai_codex.retry.base_delay,
@@ -453,8 +452,8 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
 
     # Auxiliary LLM client — a cheaper Codex model for background jobs
     # (compaction / reflection / consolidation / background follow-up), with
-    # transparent fallback to the primary. Shares the main Codex OAuth + token
-    # limit; only the MODEL differs. Off unless enabled.
+    # transparent fallback to the primary. Shares the main Codex OAuth; only
+    # the MODEL differs. Off unless enabled.
     auxiliary_llm_client = None
     _aux = getattr(config.openai_codex, "auxiliary", None)
     if _aux and _aux.enabled and codex_client:
@@ -468,7 +467,6 @@ def build_services(config: Config) -> BotServices:  # noqa: PLR0915 — linear c
                 aux_client = CodexChatClient(
                     auth=codex_client.auth,
                     model=_aux.model,
-                    max_tokens=config.openai_codex.max_tokens,
                     max_retries=config.openai_codex.retry.max_retries,
                     retry_base_delay=config.openai_codex.retry.base_delay,
                     retry_max_delay=config.openai_codex.retry.max_delay,

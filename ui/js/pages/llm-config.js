@@ -166,18 +166,11 @@ export default {
               </select>
               </label>
             </div>
-            <div>
-              <label class="text-xs text-gray-400 block">Max Tokens
-              <input v-model.number="codexForm.max_tokens" type="number" disabled aria-describedby="codex-max-tokens-note"
-                     class="hm-input" />
-              <small id="codex-max-tokens-note" class="llm-field-note">Unsupported by the current Codex provider. Preserved in config, never sent to Responses requests.</small>
-              </label>
-            </div>
           </div>
           <p class="text-xs text-gray-500 mt-3">
             The Auxiliary Model runs the background jobs (compaction, reflection, consolidation,
             background follow-up) on a cheaper Codex model, with automatic fallback to the primary
-            on error. It shares the main Codex login and token limit — only the model differs.
+            on error. It shares the main Codex login; only the model differs.
             "Off" runs those jobs on the primary model.
           </p>
           <div v-if="auxData.unavailable_reason"
@@ -509,7 +502,7 @@ export default {
     // (the server normalizes ''/null to inherit; distinct from the literal
     // effort "none")
     const codexForm = ref({
-      enabled: false, model: 'gpt-5.5', max_tokens: 4096, reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '',
+      enabled: false, model: 'gpt-5.5', reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '',
       request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180,
       retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
       connection_pool: { max_connections: 10, keepalive_timeout: 30 },
@@ -658,7 +651,6 @@ export default {
           // null (inherit) maps to the '' select option
           codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
           codexForm.value.agent_model = data.codex.agent_model || '';
-          codexForm.value.max_tokens = data.codex.max_tokens || 4096;
           codexForm.value.request_timeout_seconds = data.codex.request_timeout_seconds ?? codexForm.value.request_timeout_seconds;
           codexForm.value.stream_stall_timeout_seconds = data.codex.stream_stall_timeout_seconds ?? codexForm.value.stream_stall_timeout_seconds;
           codexForm.value.retry = { ...codexForm.value.retry, ...(data.codex.retry || {}) };
