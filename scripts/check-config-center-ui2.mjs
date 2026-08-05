@@ -217,16 +217,24 @@ assert.ok(freshMetaAssignment, 'restart polling does not refresh authoritative m
 assert.ok(proofBoundClear, 'restart success is not bound to fresh zero-pending metadata');
 const reviewPendingFunction = namedFunction(configAst, 'reviewPendingRestart');
 let desktopConfigMainReset = false;
-let mobileWindowReset = false;
+let mobileDocumentFlowReset = false;
 for (const statement of reviewPendingFunction.body.body) {
   if (statement.type !== 'IfStatement') continue;
   if (isRefMember(statement.test, 'isMobile')) {
+    let resolvesHmMain = false;
+    let resetsResolvedOwner = false;
     walkJs(statement.consequent, node => {
       if ((node.type === 'CallExpression' || node.type === 'OptionalCallExpression')
-          && (node.callee?.type === 'MemberExpression' || node.callee?.type === 'OptionalMemberExpression')
-          && node.callee.object?.name === 'window'
-          && node.callee.property?.name === 'scrollTo') mobileWindowReset = true;
+          && node.callee?.property?.name === 'closest'
+          && node.arguments?.[0]?.value === '.hm-main') resolvesHmMain = true;
+      if (node.type === 'AssignmentExpression'
+          && node.operator === '='
+          && node.left?.type === 'MemberExpression'
+          && node.left.object?.name === 'documentFlowOwner'
+          && node.left.property?.name === 'scrollTop'
+          && node.right?.value === 0) resetsResolvedOwner = true;
     });
+    mobileDocumentFlowReset = resolvesHmMain && resetsResolvedOwner;
     walkJs(statement.alternate, node => {
       if (node.type === 'AssignmentExpression'
           && node.operator === '='
@@ -239,7 +247,7 @@ for (const statement of reviewPendingFunction.body.body) {
   }
 }
 assert.ok(desktopConfigMainReset, 'Review settings does not reset the real desktop Config Center scroll region');
-assert.ok(mobileWindowReset, 'Review settings does not reset the mobile document-flow scroll owner');
+assert.ok(mobileDocumentFlowReset, 'Review settings does not reset the mobile .hm-main document-flow scroll owner');
 assert.match(config, /<main ref="configMain" class="cfgc-main">/, 'Config Center scroll region is not bound to configMain');
 
 for (const provider of ['codex', 'ollama', 'kimi']) {

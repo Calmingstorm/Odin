@@ -1183,8 +1183,10 @@ export default {
       restartPromptOpen.value = false;
       healthFilter.value = 'pending_restart';
       searchQuery.value = '';
-      if (isMobile.value) window.scrollTo?.({ top: 0, behavior: 'smooth' });
-      else if (configMain.value) configMain.value.scrollTop = 0;
+      if (isMobile.value) {
+        const documentFlowOwner = configMain.value?.closest('.hm-main');
+        if (documentFlowOwner) documentFlowOwner.scrollTop = 0;
+      } else if (configMain.value) configMain.value.scrollTop = 0;
     }
 
     function restartLater() {
