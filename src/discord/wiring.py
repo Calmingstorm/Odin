@@ -761,6 +761,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             prompt_builder=prompt_builder,
             tool_catalog=tool_catalog,
             channel_state=services.channel_state,
+            channel_config=services.channel_config,
             delivery=delivery,
             turn_recorder=turn_recorder,
             completion_classifier=completion_classifier,

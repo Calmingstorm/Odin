@@ -340,6 +340,7 @@ class _LoopIterClient:
                     merged_definitions=lambda: [{"name": "run_command"}]
                 ),
                 channel_state=SimpleNamespace(),
+                channel_config=SimpleNamespace(),
                 delivery=SimpleNamespace(),
                 turn_recorder=self._turn_recorder,
                 completion_classifier=SimpleNamespace(),

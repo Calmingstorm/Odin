@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     from ..tools.executor import ToolExecutor
     from ..tools.skill_manager import SkillManager
     from ..trajectories.saver import TrajectoryTurn
+    from .channel_config import ChannelConfigManager
     from .channel_state import ChannelStateRegistry
     from .completion import CompletionClassifier
     from .delivery import ResponseDelivery
@@ -381,6 +382,7 @@ class ToolLoopDeps:
     prompt_builder: PromptBuilder
     tool_catalog: ToolCatalog
     channel_state: ChannelStateRegistry  # cancel events, active requests, op details
+    channel_config: ChannelConfigManager  # shared guild/channel response resolution
     delivery: ResponseDelivery  # presence updates
     turn_recorder: TurnRecorder  # trajectories, traces, lifecycle events, reflection
     completion_classifier: CompletionClassifier
@@ -410,6 +412,7 @@ class ToolLoopRunner:
         self._prompt_builder = deps.prompt_builder
         self._tool_catalog = deps.tool_catalog
         self._channel_state = deps.channel_state
+        self._channel_config = deps.channel_config
         self._delivery = deps.delivery
         self._turn_recorder = deps.turn_recorder
         self._completion_classifier = deps.completion_classifier
@@ -663,8 +666,24 @@ class ToolLoopRunner:
 
         # Insert context separator between history and the current user request
         # so Codex evaluates tools fresh instead of repeating patterns from history
-        is_bot_message = (
-            getattr(message.author, "bot", False) and self._get_config().discord.respond_to_bots
+        _guild = getattr(message, "guild", None)
+        _guild_id = str(_guild.id) if _guild is not None else None
+        _channel_id = str(message.channel.id)
+        _respond_to_bots = self._channel_config.should_respond_to_bots(
+            _guild_id,
+            _channel_id,
+            self._get_config().discord.respond_to_bots,
+        )
+        # Intake admits bot-authored messages through this same resolution
+        # ladder, with one deliberate exception for explicitly allowed
+        # webhooks. Preserve that exception here so every admitted bot turn is
+        # identified truthfully in the request preamble.
+        is_allowed_webhook = (
+            message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+        )
+        is_bot_message = bool(
+            getattr(message.author, "bot", False)
+            and (_respond_to_bots or is_allowed_webhook)
         )
         from .tool_loop_helpers import (
             build_request_preamble,

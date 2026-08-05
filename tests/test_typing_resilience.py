@@ -226,6 +226,7 @@ def _make_runner(recorder_save=None):
         channel_state=SimpleNamespace(
             clear_active_request=lambda ch, req: cleared.append((ch, req))
         ),
+        channel_config=SimpleNamespace(),
         delivery=SimpleNamespace(),
         turn_recorder=SimpleNamespace(_save_turn_trajectory=recorder_save or _default_save),
         completion_classifier=SimpleNamespace(),

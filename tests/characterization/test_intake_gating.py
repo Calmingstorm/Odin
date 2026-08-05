@@ -16,7 +16,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from tests.fakes import FakeAuthor, FakeChannel, FakeLLM, FakeMessage, make_bot
+from tests.fakes import FakeAuthor, FakeChannel, FakeLLM, FakeMessage, make_bot, text_response
 
 
 class FakeClientUser:
@@ -208,3 +208,138 @@ class TestBotMessageBuffering:
         await bot.on_message(FakeMessage("no mention", author=other_bot, channel=ch, guild=guild))
         await asyncio.sleep(0.1)
         bot.pipeline.run.assert_not_awaited()
+
+
+class TestBotAdmissionPreambleConsistency:
+    """Bot admission and tool-loop provenance must use one resolution ladder."""
+
+    @staticmethod
+    def _build_real_pipeline(global_default: bool):
+        fake = FakeLLM([text_response("ok")])
+        bot = make_bot(
+            fake_llm=fake,
+            config_overrides={"discord": {"respond_to_bots": global_default}},
+        )
+        bot._connection.user = FakeClientUser(BOT_USER_ID)
+        bot.process_commands = AsyncMock()
+        bot.intake._process_attachments = AsyncMock(return_value=("", []))
+        bot.channel_state.bot_msg_buffer_delay = 0.01
+        return bot, fake
+
+    @staticmethod
+    def _seed_history(bot, channel_id: int) -> None:
+        # The bot-provenance block is part of the full history separator;
+        # seed a prior exchange so the emitted developer message is observable.
+        key = str(channel_id)
+        bot.sessions.add_message(key, "user", "[human]: earlier")
+        bot.sessions.add_message(key, "assistant", "earlier reply")
+
+    @pytest.mark.parametrize("global_default", [False, True])
+    @pytest.mark.parametrize("guild_override", [None, False, True])
+    @pytest.mark.parametrize("channel_override", [None, False, True])
+    async def test_every_config_admitted_bot_turn_is_labeled(
+        self,
+        global_default,
+        guild_override,
+        channel_override,
+    ):
+        """Covers global-on preservation and every override precedence shape."""
+        bot, fake = self._build_real_pipeline(global_default)
+        guild = _FakeGuild(id=424242)
+        channel = FakeChannel(id=99, guild=guild)
+        if guild_override is not None:
+            bot.channel_config.set_guild_config(
+                str(guild.id), respond_to_bots=guild_override
+            )
+        if channel_override is not None:
+            bot.channel_config.set_channel_config(
+                str(channel.id), respond_to_bots=channel_override
+            )
+        self._seed_history(bot, channel.id)
+
+        expected_admitted = (
+            channel_override
+            if channel_override is not None
+            else guild_override
+            if guild_override is not None
+            else global_default
+        )
+        await bot.on_message(
+            FakeMessage(
+                "bot request",
+                author=FakeAuthor(id=555, name="otherbot", bot=True),
+                channel=channel,
+                guild=guild,
+            )
+        )
+        if expected_admitted:
+            await asyncio.sleep(0.08)
+
+        assert bool(fake.calls) is expected_admitted
+        if expected_admitted:
+            developer_text = "\n".join(fake.developer_messages_of_call(0))
+            assert "from ANOTHER BOT" in developer_text
+            assert "EXECUTE immediately" in developer_text
+
+    async def test_allowed_webhook_admission_is_also_labeled(self, monkeypatch):
+        """The intake's non-config admission exception retains bot provenance."""
+        from src.discord import tool_loop, tool_loop_helpers
+
+        webhook_id = 777_001
+        allowed = frozenset({str(webhook_id)})
+        monkeypatch.setattr(tool_loop_helpers, "_ALLOWED_WEBHOOK_IDS", allowed)
+        monkeypatch.setattr(tool_loop, "_ALLOWED_WEBHOOK_IDS", allowed)
+
+        bot, fake = self._build_real_pipeline(False)
+        guild = _FakeGuild(id=424242)
+        channel = FakeChannel(id=99, guild=guild)
+        self._seed_history(bot, channel.id)
+
+        await bot.on_message(
+            FakeMessage(
+                "allowed webhook request",
+                author=FakeAuthor(id=555, name="allowed-hook", bot=True),
+                channel=channel,
+                guild=guild,
+                webhook_id=webhook_id,
+            )
+        )
+
+        assert len(fake.calls) == 1
+        assert "from ANOTHER BOT" in "\n".join(fake.developer_messages_of_call(0))
+
+    @pytest.mark.parametrize(
+        ("guild_override", "channel_override"),
+        [(True, None), (False, True)],
+        ids=["guild-admits", "channel-admits"],
+    )
+    async def test_global_off_override_admission_is_labeled(
+        self,
+        guild_override,
+        channel_override,
+    ):
+        """Regression: the intake-admitted override case cannot be mislabeled."""
+        bot, fake = self._build_real_pipeline(False)
+        guild = _FakeGuild(id=424242)
+        channel = FakeChannel(id=99, guild=guild)
+        bot.channel_config.set_guild_config(
+            str(guild.id), respond_to_bots=guild_override
+        )
+        if channel_override is not None:
+            bot.channel_config.set_channel_config(
+                str(channel.id), respond_to_bots=channel_override
+            )
+        self._seed_history(bot, channel.id)
+
+        await bot.on_message(
+            FakeMessage(
+                "override-admitted bot request",
+                author=FakeAuthor(id=555, name="otherbot", bot=True),
+                channel=channel,
+                guild=guild,
+            )
+        )
+        await asyncio.sleep(0.08)
+
+        assert len(fake.calls) == 1
+        assert "from ANOTHER BOT" in "\n".join(fake.developer_messages_of_call(0))
