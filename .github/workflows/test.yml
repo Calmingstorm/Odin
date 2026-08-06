@@ -11,7 +11,7 @@ concurrency:
 
 jobs:
   tests:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -26,7 +26,7 @@ jobs:
         run: pytest -q
 
   browser-network-guard:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -38,7 +38,13 @@ jobs:
       - name: Install browser test dependencies
         run: |
           pip install -e ".[dev,browser]"
-          python -m playwright install --with-deps chromium
+          # Hosted images need system libs installed each run; the self-hosted
+          # runner already has them (and its user has no passwordless sudo).
+          if [ "${{ runner.environment }}" = "self-hosted" ]; then
+            python -m playwright install chromium
+          else
+            python -m playwright install --with-deps chromium
+          fi
       - name: Exercise real Chromium request guard paths
         env:
           # The tests may skip on developer machines without Chromium, but this
@@ -50,7 +56,7 @@ jobs:
             tests/test_browser_automation.py::test_real_browser_blocks_redirects_and_subresources_to_private_loopback
 
   lint-no-new:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -68,7 +74,7 @@ jobs:
         run: python scripts/ci/lint_gate.py
 
   types-no-new:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
@@ -90,7 +96,7 @@ jobs:
         run: python scripts/ci/type_gate.py
 
   config-apply-classified:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
@@ -109,7 +115,7 @@ jobs:
         run: python scripts/ci/apply_registry_gate.py
 
   coverage-no-drop:
-    runs-on: ubuntu-latest
+    runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
