@@ -1,3 +1,11 @@
+# Trust routing: push events and same-repo pull requests run on the
+# repository's self-hosted runners (label odin-ci); fork pull requests run on
+# GitHub-hosted ubuntu-latest. The LOAD-BEARING guard is the repository
+# setting "Require approval for all outside collaborators" (fork-PR approval
+# policy: all_external_contributors) — a fork can edit this file, so the
+# runs-on expressions below are defense-in-depth, not the boundary itself.
+# MAINTAINERS: never approve a fork PR that touches .github/workflows without
+# line-reviewing the workflow diff first.
 name: WebUI
 
 on:
