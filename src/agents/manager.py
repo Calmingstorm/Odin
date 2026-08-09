@@ -41,6 +41,36 @@ TREE_MAX_AGENTS = 25             # hard ceiling on agents in one tree's lifetime
                                  # breadth x depth must never compound into a
                                  # geometric invoice, whatever config says
 
+# --- Agent context-overflow recovery (design settled with Odin, 2026-08-09) ---
+# Served context window on the Codex/ChatGPT path, probed 2026-08-09 from
+# /backend-api/codex/models: uniform 272K across sol/terra/luna/5.5 (luna
+# served 372K in July and was re-tiered since — treat as observation, not
+# spec). System prompt, response, and reasoning ride OUTSIDE agent.messages,
+# hence the reserve; the remainder converts at a deliberately DENSE
+# chars-per-token so a char measure can never overshoot real tokens on
+# scraped content. Private constants, never config: a raisable knob would
+# resurrect the overflow class this recovery exists to close.
+_SERVED_CONTEXT_WINDOW_TOKENS = 272_000
+_EMERGENCY_RESERVE_TOKENS = 42_000
+_EMERGENCY_CHARS_PER_TOKEN = 2.5
+_EMERGENCY_TARGET_CHARS = int(
+    (_SERVED_CONTEXT_WINDOW_TOKENS - _EMERGENCY_RESERVE_TOKENS)
+    * _EMERGENCY_CHARS_PER_TOKEN
+)
+_EMERGENCY_TARGET_CHARS_AGGRESSIVE = 400_000
+_EMERGENCY_TARGETS = (_EMERGENCY_TARGET_CHARS, _EMERGENCY_TARGET_CHARS_AGGRESSIVE)
+
+
+def _is_context_overflow(exc: BaseException) -> bool:
+    """Structural check for the provider-reported context overflow class."""
+    from ..llm.errors import LLMRequestError
+
+    return (
+        isinstance(exc, LLMRequestError)
+        and getattr(exc, "code", None) == "context_length_exceeded"
+    )
+
+
 # Agent-management tools — allowed or blocked based on nesting depth
 AGENT_MANAGEMENT_TOOLS = frozenset({
     "spawn_agent",
@@ -263,6 +293,12 @@ class AgentInfo:
     iteration_count: int = 0
     last_activity: float = field(default_factory=time.time)
     recovery_attempts: int = 0
+    # Context-overflow recovery (agent-local, lifetime-only): after the first
+    # real overflow, the ceiling latches to the size that SUCCEEDED so later
+    # iterations compact BEFORE sending instead of paying a doomed 400. Never
+    # persisted, never config — dies with the agent.
+    context_char_ceiling: int | None = None
+    context_recoveries: list[dict] = field(default_factory=list)
     # Snapshotted at spawn — a live config change never shortens (or extends)
     # an already-running agent's deadline or per-call budget.
     iteration_timeout: float = ITERATION_CB_TIMEOUT
@@ -654,6 +690,14 @@ class AgentManager:
             "runtime_seconds": round(runtime, 1),
             "goal": agent.goal,
             "recovery_attempts": agent.recovery_attempts,
+            **(
+                {
+                    "context_char_ceiling": agent.context_char_ceiling,
+                    "context_recoveries": list(agent.context_recoveries),
+                }
+                if agent.context_recoveries
+                else {}
+            ),
             "state_history": agent._sm.history_as_dicts(),
             "depth": agent.depth,
             "parent_id": agent.parent_id,
@@ -1034,6 +1078,39 @@ async def _run_agent(
             agent.iteration_count = iteration + 1
             iter_start = time.time()
 
+            # Overflow-latch compaction (agent-local, lifetime-only): once an
+            # emergency recovery has proven a survivable size, compact BEFORE
+            # sending whenever the payload crosses it — an already-proven
+            # scraper must not pay a doomed 400 on every later iteration.
+            # Independent of context_compression_enabled: this is recovery
+            # machinery, not the config feature.
+            if agent.context_char_ceiling is not None:
+                try:
+                    from ..llm.context_compressor import (
+                        emergency_compress_for_window,
+                        estimate_message_chars,
+                    )
+                    if (
+                        estimate_message_chars(agent.messages)
+                        > agent.context_char_ceiling
+                    ):
+                        agent.messages, latch_report = emergency_compress_for_window(
+                            agent.messages,
+                            target_chars=agent.context_char_ceiling,
+                        )
+                        latch_report["attempt"] = 0
+                        latch_report["trigger"] = "latch"
+                        agent.context_recoveries.append(latch_report)
+                        log.info(
+                            "agent overflow-latch: agent=%s compacted to %d chars",
+                            agent.id,
+                            latch_report["compressed_chars"],
+                        )
+                except Exception:
+                    log.exception(
+                        "agent overflow-latch compaction failed (non-fatal)"
+                    )
+
             # Call LLM with recovery support
             response = await _call_llm_with_recovery(
                 agent, iteration_callback, system_prompt, tools,
@@ -1248,46 +1325,92 @@ async def _call_llm_with_recovery(
 
     Returns the LLM response dict, or None if agent reached terminal state.
     """
-    remaining = _remaining_lifetime(agent)
-    if remaining <= 0:
-        _lifetime_timeout(agent)
-        return None
-    call_timeout = min(agent.iteration_timeout, remaining)
-    try:
-        return await asyncio.wait_for(
-            iteration_callback(agent.messages, system_prompt, tools),
-            timeout=call_timeout,
-        )
-    except TimeoutError:
-        if _remaining_lifetime(agent) <= 0:
-            # The wait was lifetime-capped and the deadline has passed:
-            # this is lifetime exhaustion, not a stuck LLM call.
+    emergency_passes = 0
+    while True:
+        remaining = _remaining_lifetime(agent)
+        if remaining <= 0:
             _lifetime_timeout(agent)
             return None
-        # str(asyncio.TimeoutError()) is EMPTY — always store the formatted
-        # description, never the bare exception string.
-        err_desc = f"LLM timeout after {int(call_timeout)}s"
-        log.error("Agent %s LLM call failed: %s", agent.id, err_desc)
-        agent.transition(AgentState.FAILED, err_desc)
-        agent.error = err_desc
-        agent.ended_at = time.time()
-        return None
-    except Exception as exc:
-        if _remaining_lifetime(agent) <= 0:
-            # Lifetime exhaustion wins over failure classification (the
-            # v3.59.0 rule: exhaustion is TIMEOUT, never FAILED).
-            _lifetime_timeout(agent)
+        call_timeout = min(agent.iteration_timeout, remaining)
+        try:
+            return await asyncio.wait_for(
+                iteration_callback(agent.messages, system_prompt, tools),
+                timeout=call_timeout,
+            )
+        except TimeoutError:
+            if _remaining_lifetime(agent) <= 0:
+                # The wait was lifetime-capped and the deadline has passed:
+                # this is lifetime exhaustion, not a stuck LLM call.
+                _lifetime_timeout(agent)
+                return None
+            # str(asyncio.TimeoutError()) is EMPTY — always store the
+            # formatted description, never the bare exception string.
+            err_desc = f"LLM timeout after {int(call_timeout)}s"
+            log.error("Agent %s LLM call failed: %s", agent.id, err_desc)
+            agent.transition(AgentState.FAILED, err_desc)
+            agent.error = err_desc
+            agent.ended_at = time.time()
             return None
-        # Typed fast-fail (auth / malformed request / quota-exhausted after
-        # rotation) or a programming defect: neither earns a manager-level
-        # retry — transient classes were already retried inside the callback
-        # for up to the generation deadline.
-        err_desc = f"LLM error: {exc}" if str(exc) else f"LLM error: {type(exc).__name__}"
-        log.error("Agent %s LLM call failed (no retry): %s", agent.id, err_desc)
-        agent.transition(AgentState.FAILED, err_desc)
-        agent.error = err_desc
-        agent.ended_at = time.time()
-        return None
+        except Exception as exc:
+            if _remaining_lifetime(agent) <= 0:
+                # Lifetime exhaustion wins over failure classification (the
+                # v3.59.0 rule: exhaustion is TIMEOUT, never FAILED).
+                _lifetime_timeout(agent)
+                return None
+            if (
+                _is_context_overflow(exc)
+                and emergency_passes < len(_EMERGENCY_TARGETS)
+            ):
+                # Window overflow: deterministic for THIS payload, so a plain
+                # retry is doomed — but a smaller payload is not. Bound the
+                # entire message list (recent iterations by SIZE, single huge
+                # results truncated, task preserved) and retry within the SAME
+                # agent iteration. Never counted as provider health — the
+                # provider raised a fast-fail request error precisely so no
+                # breaker/rotation machinery engaged. Bounded passes, no loop.
+                from ..llm.context_compressor import emergency_compress_for_window
+
+                target = _EMERGENCY_TARGETS[emergency_passes]
+                emergency_passes += 1
+                compressed, report = emergency_compress_for_window(
+                    agent.messages, target_chars=target
+                )
+                report["attempt"] = emergency_passes
+                report["trigger"] = "overflow"
+                agent.context_recoveries.append(report)
+                if report["fits"]:
+                    agent.messages = compressed
+                    # Latch: later iterations compact BEFORE sending once they
+                    # cross the size that just proved survivable.
+                    agent.context_char_ceiling = report["compressed_chars"]
+                    log.warning(
+                        "Agent %s context overflow: emergency pass %d "
+                        "compressed %d -> %d chars; retrying iteration",
+                        agent.id,
+                        emergency_passes,
+                        report["original_chars"],
+                        report["compressed_chars"],
+                    )
+                    continue
+                log.error(
+                    "Agent %s context overflow: payload cannot be bounded "
+                    "under %d chars (prefix %d); failing",
+                    agent.id,
+                    target,
+                    report["prefix_chars"],
+                )
+            # Typed fast-fail (auth / malformed request / quota-exhausted
+            # after rotation) or a programming defect: neither earns a
+            # manager-level retry — transient classes were already retried
+            # inside the callback for up to the generation deadline.
+            err_desc = (
+                f"LLM error: {exc}" if str(exc) else f"LLM error: {type(exc).__name__}"
+            )
+            log.error("Agent %s LLM call failed (no retry): %s", agent.id, err_desc)
+            agent.transition(AgentState.FAILED, err_desc)
+            agent.error = err_desc
+            agent.ended_at = time.time()
+            return None
 
 
 def _get_last_progress(agent: AgentInfo) -> str:

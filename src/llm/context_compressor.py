@@ -370,3 +370,165 @@ def compress_tool_context(
     )
 
     return result, compressed_count
+
+
+# ------------------------------------------------------------------
+# Emergency window-overflow compression (agent recovery path)
+# ------------------------------------------------------------------
+
+# One kept iteration may not exceed 1/N of the retained budget: a single
+# enormous scrape must never crowd out every other retained iteration.
+EMERGENCY_SINGLE_RESULT_SHARE = 3
+# Reserved headroom for the emergency summary message itself.
+_EMERGENCY_SUMMARY_RESERVE = 2_000
+_EMERGENCY_ELISION = "\n...[emergency truncation: {elided} chars elided]...\n"
+
+
+def _iteration_chars(iteration: list[dict]) -> int:
+    return estimate_message_chars(iteration)
+
+
+def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dict], int]:
+    """Shrink one iteration under *max_chars* by eliding its largest strings.
+
+    Only string payloads (message content, text/content/input/arguments block
+    fields) are shortened, head+tail around an elision marker — tool_use and
+    tool_result STRUCTURE is untouched, so call/result pairing stays valid.
+    Returns ``(new_iteration, chars_elided)``; the input is not modified.
+    """
+    import copy
+
+    work = copy.deepcopy(iteration)
+    elided_total = 0
+
+    def _strings() -> list[tuple[dict, str, str]]:
+        out: list[tuple[dict, str, str]] = []
+        for msg in work:
+            content = msg.get("content", "")
+            if isinstance(content, str):
+                out.append((msg, "content", content))
+            elif isinstance(content, list):
+                for block in content:
+                    if not isinstance(block, dict):
+                        continue
+                    for key in ("text", "content", "input", "arguments"):
+                        val = block.get(key)
+                        if isinstance(val, str):
+                            out.append((block, key, val))
+        return out
+
+    for _ in range(32):  # bounded: each pass shrinks the largest string
+        if _iteration_chars(work) <= max_chars:
+            break
+        strings = _strings()
+        if not strings:
+            break
+        holder, key, val = max(strings, key=lambda t: len(t[2]))
+        overshoot = _iteration_chars(work) - max_chars
+        keep = max(len(val) - overshoot - 80, 400)
+        if keep >= len(val):
+            break
+        head = val[: int(keep * 0.7)]
+        tail = val[len(val) - int(keep * 0.3):]
+        elided = len(val) - len(head) - len(tail)
+        holder[key] = head + _EMERGENCY_ELISION.format(elided=elided) + tail
+        elided_total += elided
+    return work, elided_total
+
+
+def emergency_compress_for_window(
+    messages: list[dict],
+    *,
+    target_chars: int,
+    stats: CompressionStats | None = None,
+) -> tuple[list[dict], dict]:
+    """Bound the ENTIRE payload under *target_chars* for overflow recovery.
+
+    Unlike :func:`compress_tool_context` (a soft budget whose newest
+    ``keep_recent`` iterations are exempt by COUNT), this recovery pass:
+
+    - retains recent iterations dynamically by SIZE, newest first, always
+      keeping at least the newest one (truncated if it alone overflows);
+    - truncates any single kept iteration larger than its fair share of the
+      retained budget (``EMERGENCY_SINGLE_RESULT_SHARE``) so one enormous
+      tool result cannot crowd out everything else;
+    - summarizes every older iteration with the same local summarizer the
+      soft pass uses;
+    - never modifies the prefix (the agent task and any parent messages).
+
+    Returns ``(new_messages, report)``. The input list is not modified. When
+    the prefix alone exceeds the target the payload cannot be bounded here:
+    the original list is returned with ``report["fits"] = False``.
+    """
+    original_chars = estimate_message_chars(messages)
+    prefix, iterations = split_prefix_and_iterations(messages)
+    prefix_chars = estimate_message_chars(prefix)
+
+    report: dict = {
+        "original_chars": original_chars,
+        "prefix_chars": prefix_chars,
+        "iterations_total": len(iterations),
+        "iterations_kept": 0,
+        "iterations_summarized": 0,
+        "results_truncated": 0,
+        "chars_elided": 0,
+        "target_chars": target_chars,
+        "fits": False,
+    }
+
+    iter_budget = target_chars - prefix_chars - _EMERGENCY_SUMMARY_RESERVE
+    if iter_budget <= 0 or not iterations:
+        report["compressed_chars"] = original_chars
+        report["fits"] = original_chars <= target_chars
+        return messages, report
+
+    single_cap = max(iter_budget // EMERGENCY_SINGLE_RESULT_SHARE, 2_000)
+    kept: list[list[dict]] = []
+    used = 0
+    for idx in range(len(iterations) - 1, -1, -1):
+        iteration = iterations[idx]
+        size = _iteration_chars(iteration)
+        if size > single_cap:
+            iteration, elided = _truncate_iteration(iteration, single_cap)
+            if elided:
+                report["results_truncated"] += 1
+                report["chars_elided"] += elided
+            size = _iteration_chars(iteration)
+        if kept and used + size > iter_budget:
+            break
+        if not kept and size > iter_budget:
+            # The newest iteration alone overflows even the full budget:
+            # truncate harder — it must always survive.
+            iteration, elided = _truncate_iteration(iteration, iter_budget)
+            report["results_truncated"] += 1
+            report["chars_elided"] += elided
+            size = _iteration_chars(iteration)
+        kept.append(iteration)
+        used += size
+    kept.reverse()
+    n_kept = len(kept)
+    older = iterations[: len(iterations) - n_kept]
+
+    new_messages = list(prefix)
+    if older:
+        summaries = [summarize_iteration(it) for it in older]
+        new_messages.append({
+            "role": "user",
+            "content": "[Emergency context compression - earlier tool calls: "
+            + "; ".join(summaries) + "]",
+        })
+    for iteration in kept:
+        new_messages.extend(iteration)
+
+    compressed_chars = estimate_message_chars(new_messages)
+    report["iterations_kept"] = n_kept
+    report["iterations_summarized"] = len(older)
+    report["compressed_chars"] = compressed_chars
+    report["fits"] = compressed_chars <= target_chars
+    if not report["fits"]:
+        return messages, report
+    if stats:
+        stats.compressions += 1
+        stats.iterations_compressed += len(older)
+        stats.chars_saved += max(0, original_chars - compressed_chars)
+    return new_messages, report

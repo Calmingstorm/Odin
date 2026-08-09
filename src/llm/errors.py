@@ -15,7 +15,9 @@ Compatibility constraints (both load-bearing):
   ``src/agents/manager.py`` and ``src/tools/autonomous_loop.py``.
 
 Only whitelisted, safe fields ride on the exception: ``provider``,
-``model``, ``retry_after``. Raise sites are responsible for bounding any
+``model``, ``retry_after``, ``code`` (the provider's structured error code,
+e.g. ``context_length_exceeded`` — consumers key recovery decisions on it
+instead of substring-matching message text). Raise sites are responsible for bounding any
 response-body text they put in the message (the existing ``[:200]`` /
 ``[:500]`` discipline); user-facing presentation still goes through
 ``format_user_facing_error`` at the boundary.
@@ -41,11 +43,13 @@ class LLMError(RuntimeError):
         provider: str | None = None,
         model: str | None = None,
         retry_after: float | None = None,
+        code: str | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.model = model
         self.retry_after = retry_after
+        self.code = code
 
 
 class LLMCapacityError(LLMError):
