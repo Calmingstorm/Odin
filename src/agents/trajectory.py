@@ -46,6 +46,11 @@ class AgentTrajectoryTurn:
     # per-iteration execution provenance, which records what ACTUALLY ran.
     model_override: str | None = None
     reasoning_effort_override: str | None = None
+    # Context-overflow recovery evidence (empty for the overwhelming majority
+    # of agents): each entry carries sizes, retention, trigger, and attempt;
+    # the ceiling is the latched survivable size the agent compacted to.
+    context_recoveries: list[dict] = field(default_factory=list)
+    context_char_ceiling: int | None = None
 
     iterations: list[ToolIteration] = field(default_factory=list)
 
@@ -93,6 +98,8 @@ class AgentTrajectoryTurn:
         recovery_attempts: int = 0,
         state_history: list[dict] | None = None,
         total_duration_ms: int = 0,
+        context_recoveries: list[dict] | None = None,
+        context_char_ceiling: int | None = None,
     ) -> None:
         self.final_state = final_state
         self.result = result
@@ -102,6 +109,8 @@ class AgentTrajectoryTurn:
         self.recovery_attempts = recovery_attempts
         self.state_history = state_history or []
         self.total_duration_ms = total_duration_ms
+        self.context_recoveries = list(context_recoveries or [])
+        self.context_char_ceiling = context_char_ceiling
 
     def to_dict(self) -> dict:
         return {
@@ -120,6 +129,14 @@ class AgentTrajectoryTurn:
             "max_lifetime": self.max_lifetime,
             "model_override": self.model_override,
             "reasoning_effort_override": self.reasoning_effort_override,
+            **(
+                {
+                    "context_recoveries": list(self.context_recoveries),
+                    "context_char_ceiling": self.context_char_ceiling,
+                }
+                if self.context_recoveries
+                else {}
+            ),
             "iterations": [asdict(it) for it in self.iterations],
             "final_state": self.final_state,
             "result": self.result,

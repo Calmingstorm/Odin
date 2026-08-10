@@ -381,6 +381,9 @@ def compress_tool_context(
 EMERGENCY_SINGLE_RESULT_SHARE = 3
 # Reserved headroom for the emergency summary message itself.
 _EMERGENCY_SUMMARY_RESERVE = 2_000
+# Hard cap on the emergency summary text itself: hundreds of summarized
+# iterations must not rebuild the overflow inside the summary message.
+_EMERGENCY_SUMMARY_MAX = 20_000
 _EMERGENCY_ELISION = "\n...[emergency truncation: {elided} chars elided]...\n"
 
 
@@ -506,29 +509,62 @@ def emergency_compress_for_window(
         kept.append(iteration)
         used += size
     kept.reverse()
-    n_kept = len(kept)
-    older = iterations[: len(iterations) - n_kept]
 
-    new_messages = list(prefix)
-    if older:
-        summaries = [summarize_iteration(it) for it in older]
-        new_messages.append({
+    def _summary_message(older_iters: list[list[dict]]) -> dict | None:
+        if not older_iters:
+            return None
+        summaries = [summarize_iteration(it) for it in older_iters]
+        text = "; ".join(summaries)
+        if len(text) > _EMERGENCY_SUMMARY_MAX:
+            # The summary itself must stay bounded no matter how many
+            # iterations it covers: keep the newest summaries whole and
+            # collapse the rest into a count.
+            kept_summaries: list[str] = []
+            used_chars = 0
+            for s in reversed(summaries):
+                if used_chars + len(s) > _EMERGENCY_SUMMARY_MAX:
+                    break
+                kept_summaries.append(s)
+                used_chars += len(s) + 2
+            kept_summaries.reverse()
+            elided_n = len(summaries) - len(kept_summaries)
+            text = f"{elided_n} earlier iterations elided; " + "; ".join(kept_summaries)
+        return {
             "role": "user",
             "content": "[Emergency context compression - earlier tool calls: "
-            + "; ".join(summaries) + "]",
-        })
-    for iteration in kept:
-        new_messages.extend(iteration)
+            + text + "]",
+        }
 
-    compressed_chars = estimate_message_chars(new_messages)
+    def _assemble(kept_iters: list[list[dict]]) -> tuple[list[dict], int]:
+        older_iters = iterations[: len(iterations) - len(kept_iters)]
+        out = list(prefix)
+        summary = _summary_message(older_iters)
+        if summary is not None:
+            out.append(summary)
+        for iteration in kept_iters:
+            out.extend(iteration)
+        return out, estimate_message_chars(out)
+
+    # The fixed reserve is only an ESTIMATE of the summary's size: many
+    # summarized iterations can exceed it and leave the candidate a few
+    # characters over target (Odin's adversarial repro). Converge instead:
+    # drop the oldest kept iteration into the summary until the candidate
+    # actually fits. Bounded by len(kept); the floor (prefix + summary only)
+    # is a legitimate emergency payload.
+    new_messages, compressed_chars = _assemble(kept)
+    while compressed_chars > target_chars and kept:
+        kept = kept[1:]
+        new_messages, compressed_chars = _assemble(kept)
+
+    n_kept = len(kept)
     report["iterations_kept"] = n_kept
-    report["iterations_summarized"] = len(older)
+    report["iterations_summarized"] = len(iterations) - n_kept
     report["compressed_chars"] = compressed_chars
     report["fits"] = compressed_chars <= target_chars
     if not report["fits"]:
         return messages, report
     if stats:
         stats.compressions += 1
-        stats.iterations_compressed += len(older)
+        stats.iterations_compressed += len(iterations) - n_kept
         stats.chars_saved += max(0, original_chars - compressed_chars)
     return new_messages, report

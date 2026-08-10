@@ -1279,6 +1279,8 @@ async def _run_agent(
             recovery_attempts=agent.recovery_attempts,
             state_history=agent._sm.history_as_dicts(),
             total_duration_ms=int((time.time() - agent_start) * 1000),
+            context_recoveries=agent.context_recoveries,
+            context_char_ceiling=agent.context_char_ceiling,
         )
         if trajectory_saver:
             try:
@@ -1326,16 +1328,41 @@ async def _call_llm_with_recovery(
     Returns the LLM response dict, or None if agent reached terminal state.
     """
     emergency_passes = 0
+    # ONE monotonic deadline bounds the whole logical iteration — the initial
+    # attempt, any emergency compaction, and every retry share it (Odin's
+    # adversarial repro: per-attempt timeouts let one iteration consume ~3x
+    # its configured budget).
+    remaining = _remaining_lifetime(agent)
+    if remaining <= 0:
+        _lifetime_timeout(agent)
+        return None
+    call_timeout = min(agent.iteration_timeout, remaining)
+    iteration_deadline = time.monotonic() + call_timeout
+    first_attempt = True
     while True:
-        remaining = _remaining_lifetime(agent)
-        if remaining <= 0:
+        if _remaining_lifetime(agent) <= 0:
             _lifetime_timeout(agent)
             return None
-        call_timeout = min(agent.iteration_timeout, remaining)
+        # The first attempt gets the exact configured budget (bit-identical
+        # to the pre-recovery behavior); only retries pay the deadline
+        # arithmetic for time already burned by failed attempts and
+        # compaction.
+        if first_attempt:
+            attempt_budget = call_timeout
+            first_attempt = False
+        else:
+            attempt_budget = iteration_deadline - time.monotonic()
+        if attempt_budget <= 0:
+            err_desc = f"LLM timeout after {int(call_timeout)}s"
+            log.error("Agent %s LLM call failed: %s", agent.id, err_desc)
+            agent.transition(AgentState.FAILED, err_desc)
+            agent.error = err_desc
+            agent.ended_at = time.time()
+            return None
         try:
             return await asyncio.wait_for(
                 iteration_callback(agent.messages, system_prompt, tools),
-                timeout=call_timeout,
+                timeout=attempt_budget,
             )
         except TimeoutError:
             if _remaining_lifetime(agent) <= 0:

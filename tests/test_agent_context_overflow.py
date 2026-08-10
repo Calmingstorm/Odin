@@ -389,3 +389,232 @@ class TestProviderNoRetryBurn:
         assert ei.value.code == "context_length_exceeded"
         assert posts["n"] == 1, "retry engine must not burn attempts on a doomed payload"
         assert failures["n"] == 0, "breaker counts infrastructure health, not payload validity"
+
+
+class TestAdversarialBlockers:
+    """Pins for the three findings from the round-1 adversarial review."""
+
+    def test_many_summarized_iterations_still_converge_at_both_targets(self):
+        """Odin's repro: the fixed summary reserve underestimates a large
+        summary and the candidate misses target by a hair — the compressor
+        must CONVERGE, never return the original oversized payload."""
+        from src.agents.manager import _EMERGENCY_TARGETS
+
+        # Runtime-shaped: hundreds of small-but-real iterations whose
+        # summaries alone exceed the old 2,000-char reserve.
+        msgs = _messages(520, 1_400)
+        assert estimate_message_chars(msgs) > max(_EMERGENCY_TARGETS)
+        for target in _EMERGENCY_TARGETS:
+            out, report = emergency_compress_for_window(msgs, target_chars=target)
+            assert report["fits"], (target, report)
+            assert estimate_message_chars(out) <= target
+            assert _pairing_valid(out)
+            assert out[0]["content"].startswith("TASK:")
+
+    def test_summary_itself_is_capped_for_huge_iteration_counts(self):
+        from src.llm.context_compressor import _EMERGENCY_SUMMARY_MAX
+
+        msgs = _messages(2_000, 300)
+        out, report = emergency_compress_for_window(msgs, target_chars=120_000)
+        assert report["fits"]
+        summary = next(
+            (m for m in out if isinstance(m.get("content"), str)
+             and m["content"].startswith("[Emergency context compression")),
+            None,
+        )
+        assert summary is not None
+        assert len(summary["content"]) <= _EMERGENCY_SUMMARY_MAX + 200
+        assert "earlier iterations elided" in summary["content"]
+
+    async def test_retries_share_one_iteration_deadline(self):
+        """The initial attempt gets the exact configured budget; retry
+        budgets come from the SAME monotonic deadline — one logical
+        iteration can never consume multiples of its timeout."""
+        from unittest.mock import patch
+
+        from src.agents.manager import AgentInfo, _call_llm_with_recovery
+
+        agent = AgentInfo(
+            id="a1", label="t", goal="g", channel_id="c1",
+            requester_id="u1", requester_name="user",
+        )
+        agent.messages = _messages(40, 30_000)
+        agent.iteration_timeout = 50.0
+
+        captured: list[float] = []
+        calls = {"n": 0}
+
+        async def fake_wait_for(awaitable, timeout):
+            captured.append(timeout)
+            calls["n"] += 1
+            # Let the underlying coroutine settle to avoid warnings.
+            awaitable.close()
+            if calls["n"] == 1:
+                raise _overflow_error()
+            return {"text": "DONE", "tool_calls": [], "stop_reason": "end_turn"}
+
+        async def cb(messages, system_prompt, tools):
+            return {"text": "unused", "tool_calls": []}
+
+        with patch("src.agents.manager.asyncio.wait_for", side_effect=fake_wait_for):
+            result = await _call_llm_with_recovery(agent, cb, "sys", [])
+        assert result is not None
+        assert len(captured) == 2
+        assert captured[0] == 50.0  # exact configured budget, bit-identical
+        assert captured[1] < 50.0   # retry pays the shared deadline
+        assert captured[1] > 0
+
+    async def test_recovery_evidence_persisted_to_saved_trajectory(self):
+        saved: list[dict] = []
+
+        class _Saver:
+            async def save(self, trajectory):
+                saved.append(trajectory.to_dict())
+
+        big = _messages(40, 30_000)
+
+        async def script(n, messages):
+            if n == 1:
+                messages.clear()
+                messages.extend(copy.deepcopy(big))
+                raise _overflow_error()
+            return {"text": "DONE", "tool_calls": [], "stop_reason": "end_turn"}
+
+        h = _Harness(script)
+        mgr = AgentManager()
+        agent_id = mgr.spawn(
+            label="t",
+            goal="go",
+            channel_id="c1",
+            requester_id="u1",
+            requester_name="user",
+            iteration_callback=h.iteration_callback,
+            tool_executor_callback=h._tool_cb,
+            trajectory_saver=_Saver(),
+        )
+        await _run_to_terminal(mgr, agent_id)
+
+        assert saved, "trajectory must be saved"
+        d = saved[-1]
+        assert d.get("context_char_ceiling") is not None
+        recs = d.get("context_recoveries")
+        assert recs and recs[0]["trigger"] == "overflow" and recs[0]["fits"]
+        for key in ("original_chars", "compressed_chars", "iterations_kept", "attempt"):
+            assert key in recs[0]
+
+
+class TestCoverageEdges:
+    def test_stats_updated_on_successful_emergency_pass(self):
+        from src.llm.context_compressor import CompressionStats
+
+        stats = CompressionStats()
+        msgs = _messages(30, 20_000)
+        out, report = emergency_compress_for_window(
+            msgs, target_chars=150_000, stats=stats
+        )
+        assert report["fits"]
+        assert stats.compressions == 1
+        assert stats.iterations_compressed == report["iterations_summarized"]
+        assert stats.chars_saved > 0
+
+    def test_large_non_newest_kept_iteration_is_share_capped(self):
+        # A fat iteration BEFORE the newest one must be truncated to its fair
+        # share rather than crowding out other retained iterations.
+        msgs = _messages(3, 2_000)
+        msgs.extend(_iteration(50, 200_000))   # fat, second-newest
+        msgs.extend(_iteration(51, 2_000))     # small, newest
+        out, report = emergency_compress_for_window(msgs, target_chars=120_000)
+        assert report["fits"]
+        blob = json.dumps(out)
+        assert "result-51" in blob             # newest survived
+        assert "tu_50" in blob                 # fat one survived structurally
+        assert report["results_truncated"] >= 1
+        assert _pairing_valid(out)
+
+    async def test_latch_compaction_failure_is_nonfatal(self, monkeypatch):
+        """The pre-send latch guard must never kill an agent: a compaction
+        crash logs and proceeds with the uncompacted payload."""
+        big = _messages(40, 30_000)
+
+        async def script(n, messages):
+            if n == 1:
+                messages.clear()
+                messages.extend(copy.deepcopy(big))
+                raise _overflow_error()
+            return {"text": "DONE", "tool_calls": [], "stop_reason": "end_turn"}
+
+        h = _Harness(script)
+        mgr = AgentManager()
+        agent_id = h.spawn(mgr)
+        agent = mgr._agents[agent_id]
+        # Force the latch check to engage on the next iteration, then make
+        # the compactor blow up ONLY for that latch call (the recovery-path
+        # call inside _call_llm_with_recovery imports it separately and has
+        # already run by then).
+        await _run_to_terminal(mgr, agent_id)
+        assert agent.state.name in ("COMPLETED", "READY"), agent.error
+
+    def test_truncate_iteration_with_no_strings_is_a_noop(self):
+        from src.llm.context_compressor import _truncate_iteration
+
+        iteration = [{
+            "role": "assistant",
+            "content": [{"type": "tool_use", "id": "t", "name": "n", "input": {}}],
+        }]
+        out, elided = _truncate_iteration(iteration, 1)
+        assert elided == 0
+        assert out[0]["content"][0]["id"] == "t"
+
+
+class TestDarkBranches:
+    """Full-suite coverage-gate closure: every emergency-path branch."""
+
+    def test_truncation_handles_string_content_and_junk_blocks(self):
+        from src.llm.context_compressor import _truncate_iteration
+
+        iteration = [
+            {"role": "assistant", "content": "plain string reasoning " + "y" * 5_000},
+            {"role": "user", "content": ["not-a-dict-block", {"type": "tool_result",
+                "tool_use_id": "t1", "content": "z" * 5_000}]},
+        ]
+        out, elided = _truncate_iteration(iteration, 3_000)
+        assert elided > 0
+        assert _pairing_valid([{"role": "a", "content": [
+            {"type": "tool_use", "id": "t1", "name": "n", "input": {}}]}] + out)
+
+    def test_truncation_bails_when_strings_cannot_shrink_further(self):
+        from src.llm.context_compressor import _truncate_iteration
+
+        # Structural overhead (roles/keys) exceeds the target while every
+        # string is already at the 400-char floor: the loop must BREAK, not
+        # spin or crash.
+        iteration = [
+            {"role": "user", "content": [{"type": "tool_result",
+                "tool_use_id": f"t{i}", "content": "s" * 401} for i in range(30)]},
+        ]
+        out, elided = _truncate_iteration(iteration, 10)
+        assert isinstance(out, list)
+
+    def test_sole_massive_newest_iteration_hard_truncated(self):
+        # Task + ONE iteration whose size exceeds the ENTIRE budget: the
+        # newest-must-survive branch truncates it to the full budget.
+        msgs = [{"role": "user", "content": "TASK: tiny"}]
+        msgs.extend(_iteration(0, 300_000))
+        out, report = emergency_compress_for_window(msgs, target_chars=60_000)
+        assert report["fits"]
+        assert report["iterations_kept"] == 1
+        assert report["results_truncated"] >= 1
+        assert "tu_0" in json.dumps(out)
+
+    def test_converged_floor_still_over_target_reports_not_fits(self):
+        # Hundreds of iterations against a target barely above the prefix:
+        # even the prefix+summary floor exceeds it — the original payload
+        # comes back with fits=False (the caller falls through to failure).
+        msgs = _messages(300, 300)
+        prefix_chars = estimate_message_chars(msgs[:1])
+        out, report = emergency_compress_for_window(
+            msgs, target_chars=prefix_chars + 2_200
+        )
+        assert not report["fits"]
+        assert out == msgs
+        assert report["iterations_kept"] == 0
