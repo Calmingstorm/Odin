@@ -1048,7 +1048,8 @@ async def _run_agent(
                             keep_recent=keep_recent_iterations,
                         )
                         log.info(
-                            "agent context_compressor: agent=%s trimmed %d chars",
+                            "agent context_compressor: agent=%s "
+                            "compressed %d older tool iterations",
                             agent.id,
                             saved,
                         )
