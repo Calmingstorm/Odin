@@ -705,7 +705,7 @@ class TestRoundThreeAdversarialPins:
         ]
         results = [
             {"type": "tool_result", "tool_use_id": f"bulk_{i}",
-             "content": f"bulk-result-{i}:" + "x" * 8_000}
+             "content": f"bulk-result-{i}:" + "x" * 12_000}
             for i in range(count)
         ]
         msgs = [{"role": "user", "content": "TASK: preserve newest"}]
@@ -714,7 +714,10 @@ class TestRoundThreeAdversarialPins:
             {"role": "assistant", "content": uses},
             {"role": "user", "content": results},
         ])
-        assert estimate_message_chars(msgs) > _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        # At 12K/result, the round-2 truncator's two 32-pass calls still
+        # leave this newest cycle above target; convergence then summarized it
+        # away.  The former 8K fixture was accidentally rescued by those calls.
+        assert estimate_message_chars(msgs) > 1_200_000
 
         out, report = emergency_compress_for_window(
             msgs, target_chars=_EMERGENCY_TARGET_CHARS_AGGRESSIVE
