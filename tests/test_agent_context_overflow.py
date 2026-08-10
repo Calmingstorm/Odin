@@ -554,6 +554,15 @@ class TestCoverageEdges:
         await _run_to_terminal(mgr, agent_id)
         assert agent.state.name in ("COMPLETED", "READY"), agent.error
 
+    def test_truncate_iteration_already_under_limit_is_unchanged(self):
+        from src.llm.context_compressor import _truncate_iteration
+
+        iteration = _iteration(1, 20)
+        out, elided = _truncate_iteration(iteration, 10_000)
+        assert out == iteration
+        assert out is not iteration
+        assert elided == 0
+
     def test_truncate_iteration_with_no_strings_is_a_noop(self):
         from src.llm.context_compressor import _truncate_iteration
 
@@ -606,15 +615,141 @@ class TestDarkBranches:
         assert report["results_truncated"] >= 1
         assert "tu_0" in json.dumps(out)
 
-    def test_converged_floor_still_over_target_reports_not_fits(self):
+    def test_tiny_target_shrinks_summary_but_keeps_newest_iteration(self):
         # Hundreds of iterations against a target barely above the prefix:
-        # even the prefix+summary floor exceeds it — the original payload
-        # comes back with fits=False (the caller falls through to failure).
+        # shrink the replaceable summary before sacrificing the newest tool
+        # cycle.  The output may fail to fit only when preserved structure
+        # itself is wider than the target; it must never collapse to summary.
         msgs = _messages(300, 300)
         prefix_chars = estimate_message_chars(msgs[:1])
         out, report = emergency_compress_for_window(
             msgs, target_chars=prefix_chars + 2_200
         )
-        assert not report["fits"]
-        assert out == msgs
-        assert report["iterations_kept"] == 0
+        assert report["fits"]
+        assert estimate_message_chars(out) <= prefix_chars + 2_200
+        assert report["iterations_kept"] == 1
+        assert "tu_299" in json.dumps(out)
+        assert _pairing_valid(out)
+
+
+class TestRoundThreeAdversarialPins:
+    """Pins for Odin's three round-2 compressor findings."""
+
+    def test_aggressive_pass_reopens_first_pass_summary(self):
+        # Runtime-shaped history: primary recovery creates a substantial
+        # emergency summary.  The aggressive pass must replace/recompact it,
+        # not classify it as immutable prefix and return the first payload.
+        prefix = [{"role": "user", "content": "P" * (398_500 - len("user"))}]
+        msgs = list(prefix)
+        for i in range(300):
+            msgs.extend(_iteration(i, 1_400))
+        primary, first = emergency_compress_for_window(
+            msgs, target_chars=_EMERGENCY_TARGET_CHARS
+        )
+        assert first["fits"]
+        first_size = estimate_message_chars(primary)
+        assert first_size > _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        summaries = [
+            m for m in primary
+            if isinstance(m.get("content"), str)
+            and m["content"].startswith("[Emergency context compression")
+        ]
+        assert len(summaries) == 1
+        # This is the original failure boundary: if the generated summary is
+        # misclassified as immutable prefix on pass two, the prefix alone is
+        # already wider than the aggressive target.
+        assert estimate_message_chars(prefix + summaries) > 400_000
+
+        aggressive, second = emergency_compress_for_window(
+            primary, target_chars=_EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        )
+        assert second["fits"], second
+        assert estimate_message_chars(aggressive) <= _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        assert estimate_message_chars(aggressive) < first_size
+        assert aggressive[0] == msgs[0]
+        assert "tu_299" in json.dumps(aggressive)
+        assert _pairing_valid(aggressive)
+        assert sum(
+            isinstance(m.get("content"), str)
+            and m["content"].startswith("[Emergency context compression")
+            for m in aggressive
+        ) <= 1
+
+    def test_user_text_resembling_summary_is_not_removed_from_real_prefix(self):
+        # Recognition is boundary-aware: a task may literally quote the
+        # compressor marker, and that user-authored content remains immutable.
+        quoted = {
+            "role": "user",
+            "content": "[Emergency context compression - earlier tool calls: quoted]",
+        }
+        parent = {"role": "user", "content": "TASK: real parent context"}
+        msgs = [quoted, parent]
+        for i in range(300):
+            msgs.extend(_iteration(i, 1_400))
+
+        out, report = emergency_compress_for_window(
+            msgs, target_chars=_EMERGENCY_TARGET_CHARS
+        )
+        assert report["fits"]
+        assert out[:2] == [quoted, parent]
+
+    def test_newest_multi_tool_iteration_survives_more_than_32_results(self):
+        # One assistant turn may issue many tools.  All uses/results belong to
+        # ONE newest iteration and must survive structurally even when every
+        # result needs truncation.  A fixed 32-pass truncator lost this cycle.
+        count = 100
+        uses = [
+            {"type": "tool_use", "id": f"bulk_{i}", "name": "web_search",
+             "input": {"q": str(i)}}
+            for i in range(count)
+        ]
+        results = [
+            {"type": "tool_result", "tool_use_id": f"bulk_{i}",
+             "content": f"bulk-result-{i}:" + "x" * 8_000}
+            for i in range(count)
+        ]
+        msgs = [{"role": "user", "content": "TASK: preserve newest"}]
+        msgs.extend(_iteration(0, 10_000))
+        msgs.extend([
+            {"role": "assistant", "content": uses},
+            {"role": "user", "content": results},
+        ])
+        assert estimate_message_chars(msgs) > _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+
+        out, report = emergency_compress_for_window(
+            msgs, target_chars=_EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        )
+        blob = json.dumps(out)
+        assert report["fits"], report
+        assert estimate_message_chars(out) <= _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        assert report["iterations_kept"] >= 1
+        assert all(f'"id": "bulk_{i}"' in blob for i in range(count))
+        assert all(f'"tool_use_id": "bulk_{i}"' in blob for i in range(count))
+        assert _pairing_valid(out)
+
+    def test_no_summary_reserve_for_398500_prefix_and_one_iteration(self):
+        # Exact adversarial shape: a 398,500-char prefix leaves 1,500 real
+        # characters at the 400K target.  The sole newest iteration is
+        # compressible into that space, and no summary will exist.  Charging
+        # the old hypothetical 2K reserve rejected this recoverable payload.
+        target = _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        prefix_content = "P" * (398_500 - len("user"))
+        prefix = [{"role": "user", "content": prefix_content}]
+        assert estimate_message_chars(prefix) == 398_500
+        msgs = prefix + _iteration(7, 5_000)
+        assert estimate_message_chars(msgs) > target
+
+        out, report = emergency_compress_for_window(msgs, target_chars=target)
+        assert report["fits"], report
+        assert estimate_message_chars(out) <= target
+        assert out[0] == prefix[0]
+        assert report["iterations_kept"] == 1
+        assert report["iterations_summarized"] == 0
+        assert report["results_truncated"] >= 1
+        assert "tu_7" in json.dumps(out)
+        assert _pairing_valid(out)
+        assert not any(
+            isinstance(m.get("content"), str)
+            and m["content"].startswith("[Emergency context compression")
+            for m in out
+        )
