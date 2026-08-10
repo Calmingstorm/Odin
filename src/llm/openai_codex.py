@@ -634,6 +634,24 @@ class CodexChatClient:
                                     model=str(body.get("model") or self.model),
                                     retry_after=e.retry_after,
                                 ) from e
+                            if (
+                                e.error_type == "invalid_request_error"
+                                or e.error_code == "context_length_exceeded"
+                            ):
+                                # The request itself is invalid for this model
+                                # (context overflow is the dominant case):
+                                # deterministic, so retrying the identical
+                                # payload burns attempts on a guaranteed
+                                # failure. Fast-fail as a REQUEST error — the
+                                # agent overflow recovery keys on ``code``.
+                                # The client breaker counts infrastructure
+                                # health, not payload validity: untouched.
+                                raise LLMRequestError(
+                                    f"Codex stream failed: {e}",
+                                    provider="codex",
+                                    model=str(body.get("model") or self.model),
+                                    code=e.error_code or e.error_type,
+                                ) from e
                             # response.failed / error event: the "200" turned
                             # out to be a failure mid-stream — retryable.
                             self.breaker.record_failure()

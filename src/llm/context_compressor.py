@@ -370,3 +370,338 @@ def compress_tool_context(
     )
 
     return result, compressed_count
+
+
+# ------------------------------------------------------------------
+# Emergency window-overflow compression (agent recovery path)
+# ------------------------------------------------------------------
+
+# One kept iteration may not exceed 1/N of the retained budget: a single
+# enormous scrape must never crowd out every other retained iteration.
+EMERGENCY_SINGLE_RESULT_SHARE = 3
+# Hard cap on the emergency summary text itself: hundreds of summarized
+# iterations must not rebuild the overflow inside the summary message.
+_EMERGENCY_SUMMARY_MAX = 20_000
+_EMERGENCY_SUMMARY_PREFIX = "[Emergency context compression - earlier tool calls: "
+_EMERGENCY_SUMMARY_SUFFIX = "]"
+_EMERGENCY_ELISION = "\n...[emergency truncation: {elided} chars elided]...\n"
+
+
+def _iteration_chars(iteration: list[dict]) -> int:
+    return estimate_message_chars(iteration)
+
+
+def _elide_string(value: str, max_output_chars: int) -> str:
+    """Return a head/tail elision no longer than *max_output_chars*.
+
+    ``max_output_chars`` is an exact bound on the replacement, including its
+    marker.  A tiny bound may therefore retain only the marker; the enclosing
+    tool block and call/result IDs remain untouched.
+    """
+    max_output_chars = max(0, max_output_chars)
+    lo = 0
+    hi = len(value) - 1
+    best = ""
+    while lo <= hi:
+        keep = (lo + hi) // 2
+        head_len = int(keep * 0.7)
+        tail_len = keep - head_len
+        elided = len(value) - keep
+        marker = _EMERGENCY_ELISION.format(elided=elided)
+        candidate = value[:head_len] + marker
+        if tail_len:
+            candidate += value[-tail_len:]
+        if len(candidate) <= max_output_chars:
+            best = candidate
+            lo = keep + 1
+        else:
+            hi = keep - 1
+
+    if best:
+        return best
+    # Even the normal marker may be wider than an exceptionally small bound.
+    # Keep an explicit elision signal rather than leaking beyond the target.
+    compact = f"...[{len(value)} chars elided]..."
+    return compact[:max_output_chars]
+
+
+def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dict], int]:
+    """Shrink one iteration under *max_chars* by eliding string payloads.
+
+    Only payload strings from message content and the established block fields
+    are shortened.  IDs, names, types, roles, and arbitrary metadata remain
+    untouched, preserving call/result pairing and the existing compression
+    contract.  There is deliberately no fixed pass count: one multi-tool
+    iteration may legitimately contain hundreds of large results.
+    Returns ``(new_iteration, chars_elided)``; the input is not modified.
+    """
+    import copy
+
+    work = copy.deepcopy(iteration)
+    original_chars = _iteration_chars(work)
+    if original_chars <= max_chars:
+        return work, 0
+
+    strings: list[tuple[dict, str, str]] = []
+    for msg in work:
+        content = msg.get("content", "")
+        if isinstance(content, str):
+            strings.append((msg, "content", content))
+        elif isinstance(content, list):
+            for block in content:
+                if not isinstance(block, dict):
+                    continue
+                for key in ("text", "content", "input", "arguments"):
+                    value = block.get(key)
+                    if isinstance(value, str):
+                        strings.append((block, key, value))
+
+    # Largest-first waterline.  Every original string is considered at most
+    # once, so runtime is bounded by payload shape rather than an arbitrary 32
+    # passes that can abandon a 100-result newest iteration above target.
+    strings.sort(key=lambda item: len(item[2]), reverse=True)
+    for holder, key, original in strings:
+        current_chars = _iteration_chars(work)
+        if current_chars <= max_chars:
+            break
+        overshoot = current_chars - max_chars
+        holder[key] = _elide_string(original, max(0, len(original) - overshoot))
+
+    compressed_chars = _iteration_chars(work)
+    return work, max(0, original_chars - compressed_chars)
+
+
+def _is_emergency_summary(msg: dict) -> bool:
+    """Identify the exact user-message shape emitted by this compressor."""
+    content = msg.get("content")
+    return (
+        msg.get("role") == "user"
+        and isinstance(content, str)
+        and content.startswith(_EMERGENCY_SUMMARY_PREFIX)
+        and content.endswith(_EMERGENCY_SUMMARY_SUFFIX)
+    )
+
+
+def _emergency_summary_body(msg: dict) -> str:
+    content = msg.get("content", "")
+    if not isinstance(content, str):
+        return ""
+    if content.startswith(_EMERGENCY_SUMMARY_PREFIX) and content.endswith(
+        _EMERGENCY_SUMMARY_SUFFIX
+    ):
+        return content[len(_EMERGENCY_SUMMARY_PREFIX):-len(_EMERGENCY_SUMMARY_SUFFIX)]
+    return content
+
+
+def emergency_compress_for_window(
+    messages: list[dict],
+    *,
+    target_chars: int,
+    stats: CompressionStats | None = None,
+) -> tuple[list[dict], dict]:
+    """Bound the ENTIRE payload under *target_chars* for overflow recovery.
+
+    Unlike :func:`compress_tool_context` (a soft budget whose newest
+    ``keep_recent`` iterations are exempt by COUNT), this recovery pass:
+
+    - retains recent iterations dynamically by SIZE, newest first, always
+      keeping the newest one (truncated if it alone overflows);
+    - truncates any single kept iteration larger than its fair share of the
+      retained budget (``EMERGENCY_SINGLE_RESULT_SHARE``) so one enormous
+      tool result cannot crowd out everything else;
+    - summarizes every older iteration with the same local summarizer the
+      soft pass uses;
+    - re-opens a summary emitted by an earlier emergency pass, rather than
+      allowing that summary to ossify inside the immutable task prefix;
+    - never modifies the real prefix (the agent task and parent messages).
+
+    Returns ``(new_messages, report)``. The input list is not modified. When
+    the real prefix alone exceeds the target, or the newest iteration cannot
+    fit even after all of its string payloads are elided, the original list is
+    returned with ``report["fits"] = False``.  That fallback still preserves
+    the newest iteration; it is never summarized away merely to report fit.
+    """
+    original_chars = estimate_message_chars(messages)
+    raw_prefix, iterations = split_prefix_and_iterations(messages)
+
+    # Emergency summaries are compressor state, not immutable task context.
+    # Peel them out before measuring the prefix so an aggressive second pass
+    # can replace/recompact the first pass's summary.
+    prefix = list(raw_prefix)
+    carried_summaries: list[str] = []
+    # Only summaries at the compressor's own boundary are replaceable.  Do
+    # not search/remove matching text from the user's real task or parent
+    # context.  A real prefix must remain before the generated marker.
+    while len(prefix) > 1 and _is_emergency_summary(prefix[-1]):
+        body = _emergency_summary_body(prefix.pop())
+        if body:
+            carried_summaries.append(body)
+    carried_summaries.reverse()
+
+    prefix_chars = estimate_message_chars(prefix)
+    report: dict = {
+        "original_chars": original_chars,
+        "prefix_chars": prefix_chars,
+        "iterations_total": len(iterations),
+        "iterations_kept": 0,
+        "iterations_summarized": 0,
+        "results_truncated": 0,
+        "chars_elided": 0,
+        "target_chars": target_chars,
+        "fits": False,
+    }
+
+    # An already-fitting payload must stay byte-for-byte identical.  This is
+    # especially important for the agent lifetime latch and provider caching.
+    if original_chars <= target_chars:
+        report["compressed_chars"] = original_chars
+        report["fits"] = True
+        report["iterations_kept"] = len(iterations)
+        return messages, report
+
+    available_chars = target_chars - prefix_chars
+    if available_chars <= 0:
+        report["compressed_chars"] = original_chars
+        return messages, report
+
+    def _summary_message(
+        older_iters: list[list[dict]],
+        *,
+        max_content_chars: int = _EMERGENCY_SUMMARY_MAX,
+    ) -> dict | None:
+        summaries = list(carried_summaries)
+        summaries.extend(summarize_iteration(it) for it in older_iters)
+        if not summaries or max_content_chars <= 0:
+            return None
+
+        max_content_chars = min(max_content_chars, _EMERGENCY_SUMMARY_MAX)
+        fixed_chars = len(_EMERGENCY_SUMMARY_PREFIX) + len(_EMERGENCY_SUMMARY_SUFFIX)
+        body_budget = max_content_chars - fixed_chars
+        if body_budget <= 0:
+            return None
+
+        text = "; ".join(summaries)
+        if len(text) > body_budget:
+            # Keep the newest summaries whole and collapse the rest into an
+            # explicit count.  If even that count does not fit, emit a compact
+            # structural marker; the task and newest iteration take priority.
+            kept_summaries: list[str] = []
+            used_chars = 0
+            for summary in reversed(summaries):
+                extra = len(summary) + (2 if kept_summaries else 0)
+                if used_chars + extra > body_budget:
+                    break
+                kept_summaries.append(summary)
+                used_chars += extra
+            kept_summaries.reverse()
+            elided_n = len(summaries) - len(kept_summaries)
+            label = f"{elided_n} earlier iterations elided"
+            if kept_summaries:
+                candidate = label + "; " + "; ".join(kept_summaries)
+                while len(candidate) > body_budget and kept_summaries:
+                    kept_summaries.pop(0)
+                    elided_n += 1
+                    label = f"{elided_n} earlier iterations elided"
+                    candidate = label
+                    if kept_summaries:
+                        candidate += "; " + "; ".join(kept_summaries)
+                text = candidate
+            else:
+                text = label
+            if len(text) > body_budget:
+                text = text[:body_budget]
+
+        return {
+            "role": "user",
+            "content": _EMERGENCY_SUMMARY_PREFIX + text + _EMERGENCY_SUMMARY_SUFFIX,
+        }
+
+    def _assemble(
+        kept_iters: list[list[dict]],
+        *,
+        summary_limit: int = _EMERGENCY_SUMMARY_MAX,
+    ) -> tuple[list[dict], int, dict | None]:
+        older_iters = iterations[: len(iterations) - len(kept_iters)]
+        out = list(prefix)
+        summary = _summary_message(older_iters, max_content_chars=summary_limit)
+        if summary is not None:
+            out.append(summary)
+        for iteration in kept_iters:
+            out.extend(iteration)
+        return out, estimate_message_chars(out), summary
+
+    # No summary reserve is charged here.  If every iteration fits, no summary
+    # will exist.  If older iterations are excluded, convergence below measures
+    # the summary's real assembled size and trades retained history as needed.
+    iter_budget = available_chars
+    single_cap = max(iter_budget // EMERGENCY_SINGLE_RESULT_SHARE, 2_000)
+    kept: list[list[dict]] = []
+    used = 0
+    for idx in range(len(iterations) - 1, -1, -1):
+        iteration = iterations[idx]
+        size = _iteration_chars(iteration)
+        if size > single_cap:
+            iteration, elided = _truncate_iteration(iteration, single_cap)
+            if elided:
+                report["results_truncated"] += 1
+                report["chars_elided"] += elided
+            size = _iteration_chars(iteration)
+        if kept and used + size > iter_budget:
+            break
+        if not kept and size > iter_budget:
+            # The newest iteration alone gets the entire remaining budget.  It
+            # must survive even if every string payload has to be elided.
+            iteration, elided = _truncate_iteration(iteration, iter_budget)
+            if elided:
+                report["results_truncated"] += 1
+                report["chars_elided"] += elided
+            size = _iteration_chars(iteration)
+        kept.append(iteration)
+        used += size
+    kept.reverse()
+
+    new_messages, compressed_chars, summary = _assemble(kept)
+    # Converge by trading the oldest retained iteration into the summary, but
+    # NEVER trade away the newest one.  That is the emergency-path invariant.
+    while compressed_chars > target_chars and len(kept) > 1:
+        kept = kept[1:]
+        new_messages, compressed_chars, summary = _assemble(kept)
+
+    if compressed_chars > target_chars:
+        # At the newest-only floor, first shrink the real summary by exactly the
+        # pressure it creates.  Then give every remaining character to the
+        # newest iteration.  With no older context there is no summary charge.
+        summary_chars = estimate_message_chars([summary]) if summary is not None else 0
+        overflow = compressed_chars - target_chars
+        if summary is not None and overflow > 0:
+            summary_limit = max(0, summary_chars - overflow)
+            new_messages, compressed_chars, summary = _assemble(
+                kept, summary_limit=summary_limit,
+            )
+
+        if compressed_chars > target_chars:
+            base_messages = list(prefix)
+            if summary is not None:
+                base_messages.append(summary)
+            newest_budget = target_chars - estimate_message_chars(base_messages)
+            if newest_budget >= 0:
+                newest, elided = _truncate_iteration(kept[-1], newest_budget)
+                if elided:
+                    report["results_truncated"] += 1
+                    report["chars_elided"] += elided
+                kept = [newest]
+                new_messages = base_messages + newest
+                compressed_chars = estimate_message_chars(new_messages)
+
+    n_kept = len(kept)
+    report["iterations_kept"] = n_kept
+    report["iterations_summarized"] = len(iterations) - n_kept
+    report["compressed_chars"] = compressed_chars
+    report["fits"] = compressed_chars <= target_chars
+    if not report["fits"]:
+        return messages, report
+    if stats:
+        stats.compressions += 1
+        stats.iterations_compressed += len(iterations) - n_kept
+        stats.chars_saved += max(0, original_chars - compressed_chars)
+    return new_messages, report
