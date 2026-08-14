@@ -501,7 +501,7 @@ class TestStreamErrorEventSanitized:
         event = {
             "type": "error",
             "error": {
-                "type": "server_is_overloaded",
+                "type": "server_error",
                 "code": raw_code,
                 "message": "Capacity is temporarily unavailable",
             },
@@ -514,7 +514,7 @@ class TestStreamErrorEventSanitized:
         assert session.calls == 1
         assert ei.value.code is None  # LLMCapacityError .code semantics unchanged
         msg = str(ei.value)
-        assert "server_is_overloaded" in msg
+        assert "server_error" in msg
         assert "<html" not in msg.lower()
         assert "@everyone" not in msg
         assert "abcdefghijklmnopqrstuvwxyz" not in msg
