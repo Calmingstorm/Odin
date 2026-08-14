@@ -584,6 +584,16 @@ class TestSafeMime:
         assert _safe_mime("a/b/c") == "unknown"
         assert _safe_mime("text/" + "x" * 100) == "unknown"
         assert _safe_mime("text html/weird space") == "unknown"
+        assert _safe_mime("text/") == "unknown"
+        assert _safe_mime("/html") == "unknown"
+        assert _safe_mime("tëxt/html") == "unknown"
+
+    def test_token_shaped_secret_renders_unknown(self):
+        from src.llm.openai_codex import _safe_mime
+
+        secret = "sk-" + "A" * 32
+        assert len(f"application/{secret}") <= 64
+        assert _safe_mime(f"application/{secret}") == "unknown"
 
 
 class TestDescribeErrorBody:

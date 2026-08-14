@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import string
 import unicodedata
 
 import aiohttp
@@ -85,20 +86,31 @@ async def _read_error_body_bounded(content) -> tuple[bytes, bool]:
     return b"".join(chunks), overflowed
 
 
+_ASCII_MIME_TOKEN_CHARS = frozenset(
+    string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~"
+)
+
+
 def _safe_mime(content_type: str | None) -> str:
-    """Token-validate the Content-Type before it may name a MIME type
-    inside an LLMError message — the header is upstream-controlled bytes
-    like any other, so anything that is not a plain ``type/subtype`` token
-    (markup, mentions, oversized junk) renders as ``unknown``."""
-    mime = (content_type or "").split(";")[0].strip().lower()
+    """Return a safe ASCII ``type/subtype`` token or ``unknown``.
+
+    Content-Type is upstream-controlled. Validate both non-empty components
+    against the explicit RFC token alphabet (never Unicode ``isalnum``), bound
+    the rendered value, and reject any candidate changed by the shared secret
+    scrubber so token-shaped credentials cannot enter exception text or logs.
+    Parameters are not rendered.
+    """
+    candidate = (content_type or "").split(";", 1)[0].strip()
+    parts = candidate.split("/")
     if (
-        not mime
-        or len(mime) > 64
-        or mime.count("/") != 1
-        or not all(ch.isalnum() or ch in "/.+-" for ch in mime)
+        len(candidate) > 64
+        or len(parts) != 2
+        or any(not part for part in parts)
+        or any(ch not in _ASCII_MIME_TOKEN_CHARS for part in parts for ch in part)
+        or scrub_output_secrets(candidate) != candidate
     ):
         return "unknown"
-    return mime
+    return candidate.lower()
 
 
 def _parse_structured_error(error_body: str) -> dict | None:
