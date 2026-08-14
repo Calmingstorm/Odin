@@ -252,6 +252,33 @@ class TestChunkedBodyReassembly:
         assert await client._stream_request({"model": "m"}) == "hello"
         assert session.calls == 2
 
+    async def test_valid_json_prefix_with_unread_suffix_is_transport(self, monkeypatch):
+        """A valid JSON object padded to exactly the read cap, followed by
+        unread edge bytes, must not fast-fail from the truncated prefix."""
+        prefix = JSON_ERROR + b" " * (_ERROR_BODY_READ_CAP - len(JSON_ERROR))
+        resp = FakeResp(400, chunks=[prefix, HTML_PAGE])
+        client = _client(max_retries=1)
+        session = FakeSession([resp])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMTransportError):
+            await client._stream_request({"model": "m"})
+        assert session.calls == 1
+        assert resp.content.read_sizes == [_ERROR_BODY_READ_CAP, 1]
+
+    async def test_valid_json_body_exactly_at_cap_stays_request_class(self, monkeypatch):
+        """Hitting the cap is not itself overflow when the next read is EOF."""
+        body = JSON_ERROR + b" " * (_ERROR_BODY_READ_CAP - len(JSON_ERROR))
+        resp = FakeResp(400, body=body)
+        client = _client(max_retries=3)
+        session = FakeSession([resp])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMRequestError):
+            await client._stream_request({"model": "m"})
+        assert session.calls == 1
+        assert resp.content.read_sizes == [_ERROR_BODY_READ_CAP, 1]
+
 
 class TestStructuredBodiesStayRequestClass:
     async def test_json_403_fast_fails_one_attempt(self, monkeypatch):
@@ -411,7 +438,7 @@ class TestRaiseSiteInvariant:
 
         with pytest.raises(LLMTransportError) as ei:
             await client._stream_request({"model": "m"})
-        assert resp.content.read_sizes == [_ERROR_BODY_READ_CAP]
+        assert resp.content.read_sizes == [_ERROR_BODY_READ_CAP, 1]
         assert f"{_ERROR_BODY_READ_CAP} bytes" in str(ei.value)
 
     async def test_hostile_content_type_never_reaches_message(self, monkeypatch):

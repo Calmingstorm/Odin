@@ -60,25 +60,29 @@ CONNECT_TIMEOUT = 30
 _ERROR_BODY_READ_CAP = 65536
 
 
-async def _read_error_body_bounded(content) -> bytes:
-    """Drain the error body up to the cap, reassembling chunks.
+async def _read_error_body_bounded(content) -> tuple[bytes, bool]:
+    """Drain the error body up to the cap and report whether it overflowed.
 
     ``StreamReader.read(n)`` returns as soon as ANY bytes are buffered —
     up to *n*, not exactly *n* — so a single call can hand back a chunked
     JSON error truncated mid-object, and truncated JSON would misclassify
     a deterministic API rejection as a retryable transport failure. Loop
     to EOF (or the cap) so classification always sees the complete body
-    of any genuinely-sized error object.
+    of any genuinely-sized error object. When the body exactly fills the
+    cap, probe one additional byte: a valid JSON prefix must never classify
+    unread trailing data as a deterministic request rejection.
     """
     chunks: list[bytes] = []
     remaining = _ERROR_BODY_READ_CAP
     while remaining > 0:
         chunk = await content.read(remaining)
         if not chunk:
-            break
+            return b"".join(chunks), False
         chunks.append(chunk)
         remaining -= len(chunk)
-    return b"".join(chunks)
+
+    overflowed = bool(await content.read(1))
+    return b"".join(chunks), overflowed
 
 
 def _safe_mime(content_type: str | None) -> str:
@@ -828,9 +832,11 @@ class CodexChatClient:
                         self.breaker.record_failure()
                         return result
 
-                    raw_error = await _read_error_body_bounded(resp.content)
+                    raw_error, body_overflowed = await _read_error_body_bounded(resp.content)
                     error_body = raw_error.decode("utf-8", errors="replace")
-                    structured = _parse_structured_error(error_body)
+                    structured = (
+                        None if body_overflowed else _parse_structured_error(error_body)
+                    )
                     descriptor = _describe_error_body(
                         resp.headers.get("Content-Type"), raw_error, structured
                     )
