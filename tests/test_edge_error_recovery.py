@@ -48,9 +48,13 @@ JSON_ERROR = json.dumps(
 
 
 class FakeContent:
-    def __init__(self, lines: list[str], body: bytes):
+    """Models the REAL StreamReader contract: ``read(n)`` returns at most
+    *n* bytes from the current position (one queued chunk at a time when
+    chunked), advances, and returns ``b""`` at EOF."""
+
+    def __init__(self, lines: list[str], body: bytes, chunks: list[bytes] | None = None):
         self._lines = list(lines)
-        self._body = body
+        self._chunks = list(chunks) if chunks is not None else ([body] if body else [])
         self.read_sizes: list[int] = []
 
     def __aiter__(self):
@@ -62,15 +66,26 @@ class FakeContent:
 
     async def read(self, n: int = -1) -> bytes:
         self.read_sizes.append(n)
-        return self._body if n < 0 else self._body[:n]
+        if not self._chunks:
+            return b""
+        if n < 0:
+            data, self._chunks = b"".join(self._chunks), []
+            return data
+        chunk = self._chunks[0]
+        data, rest = chunk[:n], chunk[n:]
+        if rest:
+            self._chunks[0] = rest
+        else:
+            self._chunks.pop(0)
+        return data
 
 
 class FakeResp:
-    def __init__(self, status, body=b"", sse_lines=None, headers=None):
+    def __init__(self, status, body=b"", sse_lines=None, headers=None, chunks=None):
         self.status = status
-        self._body = body
+        self._body = body if chunks is None else b"".join(chunks)
         self.headers = headers or {}
-        self.content = FakeContent(sse_lines or [], body)
+        self.content = FakeContent(sse_lines or [], body, chunks=chunks)
 
     async def read(self):
         return self._body
@@ -201,6 +216,36 @@ class TestEdgeShapedBodiesAreTransport:
         client = _client(max_retries=2)
         session = FakeSession([
             FakeResp(400, body=HTML_PAGE, headers={"Content-Type": "application/json"}),
+            FakeResp(200, sse_lines=TEXT_OK_SSE),
+        ])
+        _wire(monkeypatch, client, session)
+        assert await client._stream_request({"model": "m"}) == "hello"
+        assert session.calls == 2
+
+
+class TestChunkedBodyReassembly:
+    """``StreamReader.read(n)`` returns as soon as ANY bytes are buffered,
+    so classification must reassemble to EOF (or the cap) — a chunked JSON
+    rejection must never be read truncated and retried as transport
+    (round-1 review blocker, reproduced against the production method)."""
+
+    async def test_chunked_json_400_reassembled_fast_fails(self, monkeypatch):
+        client = _client(max_retries=3)
+        mid = len(JSON_ERROR) // 2
+        session = FakeSession([
+            FakeResp(400, chunks=[JSON_ERROR[:mid], JSON_ERROR[mid:]]),
+        ])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMRequestError) as ei:
+            await client._stream_request({"model": "m"})
+        assert session.calls == 1
+        assert "does not exist" in str(ei.value)
+
+    async def test_chunked_html_body_still_transport(self, monkeypatch):
+        client = _client(max_retries=2)
+        session = FakeSession([
+            FakeResp(403, chunks=[HTML_PAGE[:40], HTML_PAGE[40:]]),
             FakeResp(200, sse_lines=TEXT_OK_SSE),
         ])
         _wire(monkeypatch, client, session)
@@ -369,6 +414,86 @@ class TestRaiseSiteInvariant:
         assert resp.content.read_sizes == [_ERROR_BODY_READ_CAP]
         assert f"{_ERROR_BODY_READ_CAP} bytes" in str(ei.value)
 
+    async def test_hostile_content_type_never_reaches_message(self, monkeypatch):
+        """The Content-Type header is upstream-controlled bytes: markup,
+        mentions, and oversized junk must token-validate to 'unknown'
+        (round-1 review blocker)."""
+        client = _client(max_retries=1)
+        hostile = "text/html<html>@everyone " + "x" * 5000
+        session = FakeSession([
+            FakeResp(403, body=b"junk", headers={"Content-Type": hostile}),
+        ])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMTransportError) as ei:
+            await client._stream_request({"model": "m"})
+        msg = str(ei.value)
+        assert "non-JSON error body (unknown, 4 bytes)" in msg
+        assert "<html" not in msg.lower()
+        assert "@everyone" not in msg
+        assert len(msg) < 300
+
+
+class TestStreamErrorEventSanitized:
+    """SSE terminal events are upstream-controlled dicts: their fields get
+    the same bounded known-field treatment as HTTP bodies — classification
+    and ``.code`` semantics ride the parsed attributes, never the message
+    (round-1 review blocker)."""
+
+    def _sse(self, event: dict) -> list[str]:
+        return [f"data: {json.dumps(event)}\n"]
+
+    async def test_transport_class_event_message_sanitized(self, monkeypatch):
+        client = _client(max_retries=1)
+        event = {
+            "type": "response.failed",
+            "response": {"error": {
+                "type": "weird_failure",
+                "message": "<html><body>@everyone attack</body></html>",
+            }},
+        }
+        session = FakeSession([FakeResp(200, sse_lines=self._sse(event))])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMTransportError) as ei:
+            await client._stream_request({"model": "m"})
+        msg = str(ei.value)
+        assert "weird_failure" in msg  # sanitized known field survives
+        assert "<html" not in msg.lower()
+        assert "@everyone" not in msg
+        assert '"response"' not in msg  # no raw event dump
+
+    async def test_request_class_event_keeps_code_with_clean_message(self, monkeypatch):
+        client = _client(max_retries=3)
+        event = {
+            "type": "error",
+            "error": {
+                "type": "invalid_request_error",
+                "code": "context_length_exceeded",
+                "message": "<html>hidden page</html>",
+            },
+        }
+        session = FakeSession([FakeResp(200, sse_lines=self._sse(event))])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMRequestError) as ei:
+            await client._stream_request({"model": "m"})
+        assert session.calls == 1  # fast-fail semantics unchanged
+        assert ei.value.code == "context_length_exceeded"  # .code unchanged
+        msg = str(ei.value)
+        assert "invalid_request_error" in msg
+        assert "<html" not in msg.lower()
+
+    async def test_unstructured_event_gets_placeholder(self, monkeypatch):
+        client = _client(max_retries=1)
+        event = {"type": "response.failed", "response": {"error": "just a string"}}
+        session = FakeSession([FakeResp(200, sse_lines=self._sse(event))])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMTransportError) as ei:
+            await client._stream_request({"model": "m"})
+        assert "unstructured stream error event" in str(ei.value)
+
 
 # ---------------------------------------------------------------------------
 # Helper units
@@ -385,6 +510,26 @@ class TestParseStructuredError:
         assert _parse_structured_error('{"error": {"code": "x"}}') == {"error": {"code": "x"}}
 
 
+class TestSafeMime:
+    def test_valid_tokens_pass(self):
+        from src.llm.openai_codex import _safe_mime
+
+        assert _safe_mime("text/html; charset=utf-8") == "text/html"
+        assert _safe_mime("Application/JSON") == "application/json"
+        assert _safe_mime("application/problem+json") == "application/problem+json"
+
+    def test_hostile_or_malformed_render_unknown(self):
+        from src.llm.openai_codex import _safe_mime
+
+        assert _safe_mime(None) == "unknown"
+        assert _safe_mime("") == "unknown"
+        assert _safe_mime("text/html<html>@everyone") == "unknown"
+        assert _safe_mime("no-slash") == "unknown"
+        assert _safe_mime("a/b/c") == "unknown"
+        assert _safe_mime("text/" + "x" * 100) == "unknown"
+        assert _safe_mime("text html/weird space") == "unknown"
+
+
 class TestDescribeErrorBody:
     def test_non_structured_shape_only(self):
         out = _describe_error_body("text/html; charset=utf-8", b"x" * 8437, None)
@@ -392,6 +537,12 @@ class TestDescribeErrorBody:
 
     def test_missing_content_type(self):
         assert _describe_error_body(None, b"zz", None) == "non-JSON error body (unknown, 2 bytes)"
+
+    def test_structured_field_mentions_neutralized(self):
+        structured = {"error": {"message": "notify @everyone now"}}
+        out = _describe_error_body(None, b"{}", structured)
+        assert "@everyone" not in out
+        assert "everyone" in out
 
     def test_structured_extracts_and_dedupes_fields(self):
         structured = {

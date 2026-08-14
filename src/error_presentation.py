@@ -65,6 +65,12 @@ def sanitize_error_text(text: str, limit: int = 200) -> str:
 def format_user_facing_error(exc: BaseException, limit: int = 200) -> str:
     """Bounded one-line exception summary safe to show an end user.
 
+    ``limit`` bounds THIS function's output; call sites may prepend short
+    context prefixes ("LLM API error: ", "LLM error: "), so a stored or
+    displayed string can exceed it by the prefix length — the safety
+    properties (HTML-free, control-free, mention-safe, scrubbed) are
+    prefix-independent.
+
     ``discord.HTTPException`` renders structured fields only — the reason
     phrase is upstream-controlled text, so it goes through the SAME
     ``_clean_detail`` normalization as generic detail, and a non-int

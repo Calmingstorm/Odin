@@ -52,11 +52,17 @@ def _write_json(path: Path, data) -> None:
 
 class FakeContent:
     """Stands in for aiohttp's StreamReader: async-iterable for the SSE
-    path AND ``.read(n)``-capable for the bounded error-body read."""
+    path AND ``.read(n)``-capable for the bounded error-body read.
 
-    def __init__(self, lines: list[str], body: bytes):
+    Models the REAL stream contract: ``read(n)`` returns at most *n*
+    bytes from the current position (one queued chunk at a time when the
+    body is chunked), advances, and returns ``b""`` at EOF — a
+    position-less fake here previously validated a truncation bug.
+    """
+
+    def __init__(self, lines: list[str], body: bytes, chunks: list[bytes] | None = None):
         self._lines = list(lines)
-        self._body = body
+        self._chunks = list(chunks) if chunks is not None else ([body] if body else [])
 
     def __aiter__(self):
         return self._iter()
@@ -66,7 +72,18 @@ class FakeContent:
             yield line.encode()
 
     async def read(self, n: int = -1) -> bytes:
-        return self._body if n < 0 else self._body[:n]
+        if not self._chunks:
+            return b""
+        if n < 0:
+            data, self._chunks = b"".join(self._chunks), []
+            return data
+        chunk = self._chunks[0]
+        data, rest = chunk[:n], chunk[n:]
+        if rest:
+            self._chunks[0] = rest
+        else:
+            self._chunks.pop(0)
+        return data
 
 
 class FakeResp:
@@ -78,11 +95,12 @@ class FakeResp:
         body: bytes = b"",
         sse_lines: list[str] | None = None,
         headers: dict | None = None,
+        chunks: list[bytes] | None = None,
     ):
         self.status = status
-        self._body = body
+        self._body = body if chunks is None else b"".join(chunks)
         self.headers = headers or {}
-        self.content = FakeContent(sse_lines or [], body)
+        self.content = FakeContent(sse_lines or [], body, chunks=chunks)
 
     async def read(self) -> bytes:
         return self._body

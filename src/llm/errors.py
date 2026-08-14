@@ -19,12 +19,13 @@ Only whitelisted, safe fields ride on the exception: ``provider``,
 e.g. ``context_length_exceeded`` — consumers key recovery decisions on it
 instead of substring-matching message text). Raise sites never embed raw
 response bytes in the message: HTTP-status branches embed a bounded,
-structure-aware descriptor (status + MIME + byte count for edge-shaped
-bodies; sanitized known JSON error fields for structured ones — see
-``openai_codex._describe_error_body``), so no LLMError message ever
-carries an HTML fragment. User-facing presentation still goes through
-``format_user_facing_error`` at the boundary — defense in depth, never
-single-layer.
+structure-aware descriptor (status + token-validated MIME + byte count
+for edge-shaped bodies; sanitized known JSON error fields for structured
+ones — see ``openai_codex._describe_error_body``), and SSE terminal
+events get the same known-field treatment (``CodexStreamError``), so no
+LLMError message ever carries an HTML fragment. User-facing presentation
+still goes through ``format_user_facing_error`` at the boundary —
+defense in depth, never single-layer.
 """
 
 from __future__ import annotations

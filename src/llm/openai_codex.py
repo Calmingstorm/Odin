@@ -53,8 +53,48 @@ CONNECT_TIMEOUT = 30
 # Cap the error-body read: error responses are only ever *described*
 # (status, MIME type, byte count, extracted JSON error fields — never raw
 # bytes), so a hostile or broken front door cannot trade an error page for
-# memory. Large enough that any genuine API error object fits whole.
+# memory. Large enough that any genuine API error object fits whole; a
+# body larger than the cap is truncated and therefore classified as
+# non-structured (transport) — acceptable, since real API error objects
+# are tiny and anything this size is an edge artifact.
 _ERROR_BODY_READ_CAP = 65536
+
+
+async def _read_error_body_bounded(content) -> bytes:
+    """Drain the error body up to the cap, reassembling chunks.
+
+    ``StreamReader.read(n)`` returns as soon as ANY bytes are buffered —
+    up to *n*, not exactly *n* — so a single call can hand back a chunked
+    JSON error truncated mid-object, and truncated JSON would misclassify
+    a deterministic API rejection as a retryable transport failure. Loop
+    to EOF (or the cap) so classification always sees the complete body
+    of any genuinely-sized error object.
+    """
+    chunks: list[bytes] = []
+    remaining = _ERROR_BODY_READ_CAP
+    while remaining > 0:
+        chunk = await content.read(remaining)
+        if not chunk:
+            break
+        chunks.append(chunk)
+        remaining -= len(chunk)
+    return b"".join(chunks)
+
+
+def _safe_mime(content_type: str | None) -> str:
+    """Token-validate the Content-Type before it may name a MIME type
+    inside an LLMError message — the header is upstream-controlled bytes
+    like any other, so anything that is not a plain ``type/subtype`` token
+    (markup, mentions, oversized junk) renders as ``unknown``."""
+    mime = (content_type or "").split(";")[0].strip().lower()
+    if (
+        not mime
+        or len(mime) > 64
+        or mime.count("/") != 1
+        or not all(ch.isalnum() or ch in "/.+-" for ch in mime)
+    ):
+        return "unknown"
+    return mime
 
 
 def _parse_structured_error(error_body: str) -> dict | None:
@@ -79,10 +119,11 @@ def _parse_structured_error(error_body: str) -> dict | None:
 
 
 def _clean_error_field(value: str, limit: int = 200) -> str:
-    """First line of a JSON error field: control chars stripped, secrets
-    scrubbed, bounded — and dropped entirely if it smuggles markup, keeping
-    the raise-site invariant (no LLMError message ever carries an HTML
-    fragment, even inside a structured error's own fields)."""
+    """First line of a JSON error field: control chars stripped, mass
+    mentions neutralized, secrets scrubbed, bounded — and dropped entirely
+    if it smuggles markup, keeping the raise-site invariant (no LLMError
+    message ever carries an HTML fragment, even inside a structured
+    error's own fields)."""
     stripped = value.strip()
     line = stripped.splitlines()[0].strip() if stripped else ""
     line = "".join(
@@ -91,7 +132,31 @@ def _clean_error_field(value: str, limit: int = 200) -> str:
     low = line.lower()
     if "<html" in low or "<!doctype" in low:
         return ""
+    line = line.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
     return scrub_output_secrets(line)[:limit]
+
+
+def _sanitized_error_fields(container: dict) -> list[str]:
+    """Sanitized known error fields from a parsed error container:
+    ``container["error"].{message,type,code}`` plus top-level
+    ``detail``/``message`` — deduped, order-preserving. Shared by the
+    HTTP-status descriptor and the SSE terminal-event message builder."""
+    fields: list[str] = []
+    err = container.get("error")
+    if isinstance(err, dict):
+        for key in ("message", "type", "code"):
+            val = err.get(key)
+            if isinstance(val, str):
+                cleaned = _clean_error_field(val)
+                if cleaned:
+                    fields.append(cleaned)
+    for key in ("detail", "message"):
+        val = container.get(key)
+        if isinstance(val, str):
+            cleaned = _clean_error_field(val)
+            if cleaned:
+                fields.append(cleaned)
+    return list(dict.fromkeys(fields))
 
 
 def _describe_error_body(
@@ -105,26 +170,11 @@ def _describe_error_body(
     code``, top-level ``detail``/``message``).
     """
     if structured is None:
-        mime = (content_type or "").split(";")[0].strip().lower() or "unknown"
-        return f"non-JSON error body ({mime}, {len(raw)} bytes)"
-    fields: list[str] = []
-    err = structured.get("error")
-    if isinstance(err, dict):
-        for key in ("message", "type", "code"):
-            val = err.get(key)
-            if isinstance(val, str):
-                cleaned = _clean_error_field(val)
-                if cleaned:
-                    fields.append(cleaned)
-    for key in ("detail", "message"):
-        val = structured.get(key)
-        if isinstance(val, str):
-            cleaned = _clean_error_field(val)
-            if cleaned:
-                fields.append(cleaned)
+        return f"non-JSON error body ({_safe_mime(content_type)}, {len(raw)} bytes)"
+    fields = _sanitized_error_fields(structured)
     if not fields:
         return "structured JSON error body"
-    return "; ".join(dict.fromkeys(fields))[:400]
+    return "; ".join(fields)[:400]
 
 
 # Markers the backend uses for model-tier capacity exhaustion. These arrive
@@ -144,7 +194,11 @@ class CodexStreamError(RuntimeError):
 
     Carries the structured fields parsed from the event's error object so the
     retry engine can classify capacity failures without substring matching.
-    The message keeps the historical ``{event_type}: {json[:500]}`` shape.
+    The message is ``{event_type}: {sanitized known error fields}`` — never a
+    raw event dump: SSE error fields are upstream-controlled text like any
+    response body, so they get the same bounded known-field treatment as the
+    HTTP-status descriptors (classification and ``.code`` semantics ride the
+    parsed attributes, not the message).
     """
 
     def __init__(
@@ -174,7 +228,10 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
     The error object lives at ``event["error"]`` for bare ``error`` events
     and at ``event["response"]["error"]`` for ``response.failed``; tolerate
     both plus absence (classification simply stays empty and the failure is
-    treated as transport, today's behavior).
+    treated as transport, today's behavior). The message carries only the
+    sanitized known fields — event dicts are upstream-controlled and can
+    smuggle markup or secrets through ``error.message``, so they never get
+    dumped raw into an exception that later boundaries render.
     """
     err = event.get("error")
     if not isinstance(err, dict):
@@ -185,8 +242,10 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
     error_type = err.get("type")
     error_code = err.get("code")
     retry_after = err.get("retry_after")
+    fields = _sanitized_error_fields({"error": err})
+    detail = "; ".join(fields)[:400] if fields else "unstructured stream error event"
     return CodexStreamError(
-        f"{event_type}: {json.dumps(event)[:500]}",
+        f"{event_type}: {detail}",
         error_type=error_type if isinstance(error_type, str) else None,
         error_code=error_code if isinstance(error_code, str) else None,
         retry_after=float(retry_after) if isinstance(retry_after, (int, float)) else None,
@@ -769,7 +828,7 @@ class CodexChatClient:
                         self.breaker.record_failure()
                         return result
 
-                    raw_error = await resp.content.read(_ERROR_BODY_READ_CAP)
+                    raw_error = await _read_error_body_bounded(resp.content)
                     error_body = raw_error.decode("utf-8", errors="replace")
                     structured = _parse_structured_error(error_body)
                     descriptor = _describe_error_body(
