@@ -867,7 +867,9 @@ class TestLLMRecovery:
         assert result is None
         assert call_count == 1
         assert agent.state == AgentState.FAILED
-        assert agent.error == "LLM error: transient error"
+        # Error text is formatter-shaped since the 2026-08-14 sanitization
+        # (type name + first line, bounded).
+        assert agent.error == "LLM error: ConnectionError: transient error"
         assert agent.recovery_attempts == 0
 
 
@@ -1954,3 +1956,59 @@ class TestIterationCapSnapshot:
         assert mgr._agents[aid].max_iterations == 3
         assert calls["n"] <= 3  # never exceeded the snapshotted cap
         mgr.kill(aid)
+
+
+class TestAgentErrorTextSanitized:
+    """agent.error and state-transition reasons surface through the agent
+    API, the WebUI detail modal, collect results, and saved trajectories
+    (error + state_history) — both failure paths must store the bounded
+    formatter summary, never raw exception text (2026-08-14 edge incident:
+    provider errors can carry whole HTML pages)."""
+
+    HTML_ERR = RuntimeError("<html><body>@everyone edge page</body></html>")
+
+    def _agent(self, agent_id: str) -> AgentInfo:
+        agent = AgentInfo(
+            id=agent_id, label="test", goal="test",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        agent.transition(AgentState.READY)
+        agent.transition(AgentState.EXECUTING)
+        return agent
+
+    async def test_recovery_terminal_error_sanitized(self):
+        agent = self._agent("san1")
+        iter_cb = AsyncMock(side_effect=self.HTML_ERR)
+
+        result = await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+
+        assert result is None
+        assert agent.state == AgentState.FAILED
+        assert agent.error.startswith("LLM error: RuntimeError")
+        assert "<html" not in agent.error.lower()
+        assert "@everyone" not in agent.error
+        failed = [t for t in agent.state_history if t.to_state == AgentState.FAILED]
+        assert failed and "<html" not in failed[-1].reason.lower()
+        assert "@everyone" not in failed[-1].reason
+
+    async def test_outer_crash_error_sanitized(self):
+        agent = self._agent("san2")
+        tool_cb = AsyncMock(return_value="ok")
+
+        with patch(
+            "src.agents.manager._call_llm_with_recovery",
+            side_effect=self.HTML_ERR,
+        ):
+            await _run_agent(agent, "sys", [], AsyncMock(), tool_cb)
+
+        assert agent.state == AgentState.FAILED
+        assert agent.error == "RuntimeError"  # HTML detail dropped by the formatter
+        failed = [t for t in agent.state_history if t.to_state == AgentState.FAILED]
+        assert failed and failed[-1].reason == "unhandled: RuntimeError"
+
+    async def test_empty_message_exception_keeps_type_name(self):
+        agent = self._agent("san3")
+        iter_cb = AsyncMock(side_effect=ValueError())
+
+        await _call_llm_with_recovery(agent, iter_cb, "sys", [])
+        assert agent.error == "LLM error: ValueError"

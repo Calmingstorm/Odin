@@ -139,9 +139,24 @@ class TestAsymmetryPins:
     async def test_generic_llm_error_returned_as_text(self):
         bot, fake = build([RuntimeError("provider exploded")])
         result = await run_iteration(bot)
-        assert result == "LLM call failed: provider exploded"
+        # Formatter-shaped since the 2026-08-14 sanitization (type name +
+        # first line, bounded).
+        assert result == "LLM call failed: RuntimeError: provider exploded"
         assert bot.turn_recorder._maybe_loop_reflect.calls[-1]["is_error"] is True
         assert bot.turn_recorder._maybe_loop_reflect.calls[-1]["failure_class"] == "provider"
+
+    async def test_llm_error_text_sanitized_for_reflection_and_response(self):
+        """2026-08-14 incident pin: an HTML-bearing provider exception must
+        reach neither the loop response nor the reflection error_text (which
+        also feeds the persisted trajectory)."""
+        bot, fake = build([RuntimeError("<html><body>@everyone edge page</body></html>")])
+        result = await run_iteration(bot)
+        assert result == "LLM call failed: RuntimeError"  # HTML detail dropped
+        assert "@everyone" not in result
+        reflect = bot.turn_recorder._maybe_loop_reflect.calls[-1]
+        assert reflect["is_error"] is True
+        assert "<html" not in reflect["error_text"].lower()
+        assert "@everyone" not in reflect["error_text"]
 
     async def test_cap_exhaustion_is_error_with_failure_class_cancelled(self):
         bot, fake = build(

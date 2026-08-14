@@ -15,6 +15,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
 
+from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 
@@ -297,9 +298,14 @@ class LoopManager:
                         consecutive_errors,
                         e,
                     )
-                    # Store error in history but don't crash the loop
+                    # Store error in history but don't crash the loop. The
+                    # history deque is next-iteration model context AND the
+                    # WebUI loop detail, and the channel post is user-facing
+                    # — both get the bounded formatter summary, never raw
+                    # exception text (which can carry upstream HTML pages).
+                    err_msg = format_user_facing_error(e)
                     info._iteration_history.append(
-                        f"Iteration {info.iteration_count}: ERROR - {str(e)[:200]}"
+                        f"Iteration {info.iteration_count}: ERROR - {err_msg}"
                     )
                     # Stop loop after too many consecutive errors
                     if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
@@ -307,7 +313,7 @@ class LoopManager:
                         try:
                             await channel.send(
                                 f"Loop `{info.id}` stopped after {MAX_CONSECUTIVE_ERRORS} "
-                                f"consecutive errors. Last error: {str(e)[:200]}"
+                                f"consecutive errors. Last error: {err_msg}"
                             )
                         except Exception:
                             pass
@@ -396,7 +402,8 @@ class LoopManager:
             log.error("Loop %s crashed: %s", info.id, e, exc_info=True)
             try:
                 await channel.send(
-                    f"Loop `{info.id}` encountered an error and stopped: {str(e)[:200]}"
+                    f"Loop `{info.id}` encountered an error and stopped: "
+                    f"{format_user_facing_error(e)}"
                 )
             except Exception:
                 pass

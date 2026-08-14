@@ -14,7 +14,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 
 import discord
-from src.error_presentation import format_user_facing_error
+from src.error_presentation import format_user_facing_error, sanitize_error_text
 
 CF_HTML = (
     "<html>\n  <head>\n    <title>Internal Server Error</title>\n  </head>\n"
@@ -156,3 +156,35 @@ class TestSecretScrubbing:
         )
         assert "abcdef0123456789" not in out
         assert "[REDACTED]" in out
+
+
+class TestSanitizeErrorText:
+    """String-input sibling of the formatter, used where reasons arrive as
+    text (subsystem guard storage) rather than as exceptions."""
+
+    def test_safe_literals_pass_through(self):
+        assert sanitize_error_text("manual") == "manual"
+        assert sanitize_error_text("capacity") == "capacity"
+        assert sanitize_error_text("") == ""
+
+    def test_html_page_dropped_entirely(self):
+        assert sanitize_error_text("<html>\n<body>edge error</body></html>") == ""
+
+    def test_first_line_only_and_bounded(self):
+        out = sanitize_error_text("first line " + "x" * 500 + "\nsecond line")
+        assert "second line" not in out
+        assert len(out) <= 200
+
+    def test_control_chars_stripped_mentions_neutralized(self):
+        out = sanitize_error_text("bad\x00\x1f @everyone thing")
+        assert "\x00" not in out
+        assert "@everyone" not in out
+        assert "everyone" in out  # neutralized, not deleted
+
+    def test_secrets_scrubbed(self):
+        out = sanitize_error_text("auth failed for sk-" + "a" * 24)
+        assert "sk-" + "a" * 24 not in out
+
+    def test_total_on_weird_input(self):
+        assert isinstance(sanitize_error_text(None), str)  # type: ignore[arg-type]
+        assert isinstance(sanitize_error_text(12345), str)  # type: ignore[arg-type]

@@ -15,6 +15,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
 
+from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
@@ -1264,11 +1265,16 @@ async def _run_agent(
         log.info("Agent %s (%s) was cancelled", agent.id, agent.label)
 
     except Exception as e:
+        # agent.error and the state-transition reason both surface through
+        # the agent API, the WebUI detail modal, collect results, and the
+        # saved trajectory (error + state_history) — store one bounded
+        # formatter summary everywhere; the traceback stays in the journal.
+        err_msg = format_user_facing_error(e)
         if not agent._sm.is_terminal:
-            agent.transition(AgentState.FAILED, f"unhandled: {e}")
-        agent.error = str(e)
+            agent.transition(AgentState.FAILED, f"unhandled: {err_msg}")
+        agent.error = err_msg
         agent.ended_at = time.time()
-        log.error("Agent %s (%s) crashed: %s", agent.id, agent.label, e)
+        log.error("Agent %s (%s) crashed: %s", agent.id, agent.label, err_msg, exc_info=e)
 
     finally:
         trajectory.finalize(
@@ -1430,11 +1436,14 @@ async def _call_llm_with_recovery(
             # Typed fast-fail (auth / malformed request / quota-exhausted
             # after rotation) or a programming defect: neither earns a
             # manager-level retry — transient classes were already retried
-            # inside the callback for up to the generation deadline.
-            err_desc = (
-                f"LLM error: {exc}" if str(exc) else f"LLM error: {type(exc).__name__}"
+            # inside the callback for up to the generation deadline. The
+            # formatter handles empty-str exceptions via its type-name
+            # fallback, and keeps upstream text out of agent.error /
+            # state_history (both API- and trajectory-visible).
+            err_desc = f"LLM error: {format_user_facing_error(exc)}"
+            log.error(
+                "Agent %s LLM call failed (no retry): %s", agent.id, err_desc, exc_info=exc
             )
-            log.error("Agent %s LLM call failed (no retry): %s", agent.id, err_desc)
             agent.transition(AgentState.FAILED, err_desc)
             agent.error = err_desc
             agent.ended_at = time.time()

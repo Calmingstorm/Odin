@@ -47,6 +47,21 @@ def _clean_detail(detail: str) -> str:
     return detail.strip()
 
 
+def sanitize_error_text(text: str, limit: int = 200) -> str:
+    """Bounded, HTML-free, mention-safe, secret-scrubbed form of an
+    error-reason STRING for operator-visible storage (subsystem status
+    reasons, transition history). String-input sibling of
+    ``format_user_facing_error`` — same normalization, same total
+    non-throwing contract; safe-looking literals ("manual", "capacity")
+    pass through unchanged.
+    """
+    try:
+        lines = [ln.strip() for ln in str(text).strip().splitlines() if ln.strip()]
+        return _clean_detail(lines[0] if lines else "")[:limit]
+    except Exception:
+        return ""
+
+
 def format_user_facing_error(exc: BaseException, limit: int = 200) -> str:
     """Bounded one-line exception summary safe to show an end user.
 
