@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 import string
 import unicodedata
 
@@ -147,8 +148,7 @@ def _clean_error_field(value: str, limit: int = 200) -> str:
     line = "".join(
         ch for ch in line if ch == "\t" or not unicodedata.category(ch).startswith("C")
     )
-    low = line.lower()
-    if "<html" in low or "<!doctype" in low:
+    if re.search(r"<(?:!|/?[A-Za-z])[^>]*>", line):
         return ""
     line = line.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
     return scrub_output_secrets(line)[:limit]
