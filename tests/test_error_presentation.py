@@ -188,3 +188,10 @@ class TestSanitizeErrorText:
     def test_total_on_weird_input(self):
         assert isinstance(sanitize_error_text(None), str)  # type: ignore[arg-type]
         assert isinstance(sanitize_error_text(12345), str)  # type: ignore[arg-type]
+
+    def test_internal_failure_returns_empty(self):
+        class _BrokenStr:
+            def __str__(self):
+                raise ValueError("no string for you")
+
+        assert sanitize_error_text(_BrokenStr()) == ""  # type: ignore[arg-type]
