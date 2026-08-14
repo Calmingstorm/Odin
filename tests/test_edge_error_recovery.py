@@ -431,6 +431,29 @@ class TestRaiseSiteInvariant:
         assert "<html" not in msg.lower()
         assert "structured JSON error body" in msg
 
+    @pytest.mark.parametrize(
+        "fragment",
+        [
+            "evil <html unclosed fragment",
+            "evil <!doctype unclosed fragment",
+        ],
+    )
+    async def test_structured_dict_with_unclosed_html_fragment_cannot_leak(
+        self, monkeypatch, fragment
+    ):
+        """Unclosed HTML markers are dropped before an LLMError is raised."""
+        body = json.dumps({"error": {"message": fragment}}).encode()
+        client = _client(max_retries=1)
+        session = FakeSession([FakeResp(422, body=body)])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMRequestError) as ei:
+            await client._stream_request({"model": "m"})
+        msg = str(ei.value).lower()
+        assert "<html" not in msg
+        assert "<!doctype" not in msg
+        assert "structured json error body" in msg
+
     async def test_error_body_read_is_bounded(self, monkeypatch):
         client = _client(max_retries=1)
         resp = FakeResp(403, body=b"x" * (_ERROR_BODY_READ_CAP * 3))
