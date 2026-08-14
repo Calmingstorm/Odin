@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import unicodedata
 
 import aiohttp
 
@@ -18,6 +19,7 @@ from .errors import (
     LLMRequestError,
     LLMTransportError,
 )
+from .secret_scrubber import scrub_output_secrets
 from .types import LLMResponse, ToolCall
 
 log = get_logger("codex")
@@ -47,6 +49,82 @@ CODEX_API_URL = "https://chatgpt.com/backend-api/codex/responses"
 DEFAULT_REQUEST_TIMEOUT = 3600
 DEFAULT_STREAM_STALL_TIMEOUT = 180
 CONNECT_TIMEOUT = 30
+
+# Cap the error-body read: error responses are only ever *described*
+# (status, MIME type, byte count, extracted JSON error fields — never raw
+# bytes), so a hostile or broken front door cannot trade an error page for
+# memory. Large enough that any genuine API error object fits whole.
+_ERROR_BODY_READ_CAP = 65536
+
+
+def _parse_structured_error(error_body: str) -> dict | None:
+    """Return the parsed JSON object when the API itself spoke, else None.
+
+    A JSON *object* body is the only shape the backend's error surface
+    produces; anything else — an HTML edge page, an empty body, bare
+    string/list JSON, truncated junk — is an edge/proxy artifact and gets
+    transport treatment. Content-Type is deliberately not consulted:
+    proxies mislabel in both directions, so the body bytes are authority
+    (2026-08-14 edge incident: HTTP 403 carrying chatgpt.com's HTML error
+    page killed a healthy turn as a "request" error).
+    """
+    text = error_body.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _clean_error_field(value: str, limit: int = 200) -> str:
+    """First line of a JSON error field: control chars stripped, secrets
+    scrubbed, bounded — and dropped entirely if it smuggles markup, keeping
+    the raise-site invariant (no LLMError message ever carries an HTML
+    fragment, even inside a structured error's own fields)."""
+    stripped = value.strip()
+    line = stripped.splitlines()[0].strip() if stripped else ""
+    line = "".join(
+        ch for ch in line if ch == "\t" or not unicodedata.category(ch).startswith("C")
+    )
+    low = line.lower()
+    if "<html" in low or "<!doctype" in low:
+        return ""
+    return scrub_output_secrets(line)[:limit]
+
+
+def _describe_error_body(
+    content_type: str | None, raw: bytes, structured: dict | None
+) -> str:
+    """Bounded, structure-aware descriptor of a non-2xx response body.
+
+    Raise sites embed THIS instead of raw body excerpts (``errors.py``
+    contract): non-structured bodies are described by shape only; structured
+    bodies contribute their sanitized known fields (``error.message/type/
+    code``, top-level ``detail``/``message``).
+    """
+    if structured is None:
+        mime = (content_type or "").split(";")[0].strip().lower() or "unknown"
+        return f"non-JSON error body ({mime}, {len(raw)} bytes)"
+    fields: list[str] = []
+    err = structured.get("error")
+    if isinstance(err, dict):
+        for key in ("message", "type", "code"):
+            val = err.get(key)
+            if isinstance(val, str):
+                cleaned = _clean_error_field(val)
+                if cleaned:
+                    fields.append(cleaned)
+    for key in ("detail", "message"):
+        val = structured.get(key)
+        if isinstance(val, str):
+            cleaned = _clean_error_field(val)
+            if cleaned:
+                fields.append(cleaned)
+    if not fields:
+        return "structured JSON error body"
+    return "; ".join(dict.fromkeys(fields))[:400]
 
 
 # Markers the backend uses for model-tier capacity exhaustion. These arrive
@@ -691,7 +769,12 @@ class CodexChatClient:
                         self.breaker.record_failure()
                         return result
 
-                    error_body = (await resp.read()).decode("utf-8", errors="replace")
+                    raw_error = await resp.content.read(_ERROR_BODY_READ_CAP)
+                    error_body = raw_error.decode("utf-8", errors="replace")
+                    structured = _parse_structured_error(error_body)
+                    descriptor = _describe_error_body(
+                        resp.headers.get("Content-Type"), raw_error, structured
+                    )
 
                     if resp.status == 401:
                         body_l = error_body.lower()
@@ -721,7 +804,7 @@ class CodexChatClient:
                             continue
                         self.breaker.record_failure()
                         raise LLMAuthError(
-                            f"Codex 401 (auth failed, no healthy account): {error_body[:200]}",
+                            f"Codex 401 (auth failed, no healthy account): {descriptor}",
                             provider="codex",
                             model=str(body.get("model") or self.model),
                         )
@@ -729,7 +812,7 @@ class CodexChatClient:
                     if resp.status == 429:
                         await self._mark_limited(acct_idx)
                         self.breaker.record_failure()
-                        last_error = f"HTTP 429: {error_body[:200]}"
+                        last_error = f"HTTP 429: {descriptor}"
                         if attempt < self.max_retries - 1:
                             wait = compute_backoff(
                                 attempt,
@@ -750,14 +833,23 @@ class CodexChatClient:
                         # spending its budget cycling limited accounts —
                         # quota semantics stay exactly as before.
                         raise LLMRateLimitError(
-                            f"Codex API error (429): {error_body[:500]}",
+                            f"Codex API error (429): {descriptor}",
                             provider="codex",
                             model=str(body.get("model") or self.model),
                         )
 
-                    if resp.status in (500, 502, 503, 504):
+                    if resp.status in (500, 502, 503, 504) or structured is None:
+                        # Retryable server errors — and, since the 2026-08-14
+                        # edge incident, ANY status whose body is not a JSON
+                        # object: an HTML/opaque error page means the front
+                        # door failed, not that this request is invalid, so
+                        # it gets the same transport treatment (backoff +
+                        # retry here, deadline recovery above) instead of
+                        # killing the turn on one attempt. 401/429 never
+                        # reach here — their branches keep dedicated
+                        # refresh/rotation and quota semantics.
                         self.breaker.record_failure()
-                        last_error = f"HTTP {resp.status}: {error_body[:200]}"
+                        last_error = f"HTTP {resp.status}: {descriptor}"
                         if attempt < self.max_retries - 1:
                             wait = compute_backoff(
                                 attempt,
@@ -771,16 +863,19 @@ class CodexChatClient:
                             await asyncio.sleep(wait)
                             continue
                         raise LLMTransportError(
-                            f"Codex API error ({resp.status}): {error_body[:500]}",
+                            f"Codex API error ({resp.status}): {descriptor}",
                             provider="codex",
                             model=str(body.get("model") or self.model),
                         )
 
-                    # Any other status (400 bad model/malformed request, ...):
-                    # the request itself is wrong — fast-fail, never retried.
+                    # Structured (JSON-object) non-2xx outside the dedicated
+                    # branches: the API itself rejected the request (bad
+                    # model, malformed input) — deterministic, so retrying
+                    # the identical payload burns attempts on a guaranteed
+                    # failure. Fast-fail, never retried.
                     self.breaker.record_failure()
                     raise LLMRequestError(
-                        f"Codex API error ({resp.status}): {error_body[:500]}",
+                        f"Codex API error ({resp.status}): {descriptor}",
                         provider="codex",
                         model=str(body.get("model") or self.model),
                     )

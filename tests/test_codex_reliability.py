@@ -50,18 +50,39 @@ def _write_json(path: Path, data) -> None:
     path.write_text(json.dumps(data, indent=2))
 
 
+class FakeContent:
+    """Stands in for aiohttp's StreamReader: async-iterable for the SSE
+    path AND ``.read(n)``-capable for the bounded error-body read."""
+
+    def __init__(self, lines: list[str], body: bytes):
+        self._lines = list(lines)
+        self._body = body
+
+    def __aiter__(self):
+        return self._iter()
+
+    async def _iter(self):
+        for line in self._lines:
+            yield line.encode()
+
+    async def read(self, n: int = -1) -> bytes:
+        return self._body if n < 0 else self._body[:n]
+
+
 class FakeResp:
     """Minimal aiohttp response stand-in for the streaming paths."""
 
-    def __init__(self, status: int, body: bytes = b"", sse_lines: list[str] | None = None):
+    def __init__(
+        self,
+        status: int,
+        body: bytes = b"",
+        sse_lines: list[str] | None = None,
+        headers: dict | None = None,
+    ):
         self.status = status
         self._body = body
-        self.content = self._iter_lines(sse_lines or [])
-
-    @staticmethod
-    async def _iter_lines(lines: list[str]):
-        for line in lines:
-            yield line.encode()
+        self.headers = headers or {}
+        self.content = FakeContent(sse_lines or [], body)
 
     async def read(self) -> bytes:
         return self._body
