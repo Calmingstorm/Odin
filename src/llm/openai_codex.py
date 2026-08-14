@@ -101,6 +101,7 @@ def _safe_mime(content_type: str | None) -> str:
     Parameters are not rendered.
     """
     candidate = (content_type or "").split(";", 1)[0].strip()
+    normalized = candidate.lower()
     parts = candidate.split("/")
     if (
         len(candidate) > 64
@@ -108,9 +109,10 @@ def _safe_mime(content_type: str | None) -> str:
         or any(not part for part in parts)
         or any(ch not in _ASCII_MIME_TOKEN_CHARS for part in parts for ch in part)
         or scrub_output_secrets(candidate) != candidate
+        or scrub_output_secrets(normalized) != normalized
     ):
         return "unknown"
-    return candidate.lower()
+    return normalized
 
 
 def _parse_structured_error(error_body: str) -> dict | None:

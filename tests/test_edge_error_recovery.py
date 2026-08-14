@@ -594,6 +594,7 @@ class TestSafeMime:
         secret = "sk-" + "A" * 32
         assert len(f"application/{secret}") <= 64
         assert _safe_mime(f"application/{secret}") == "unknown"
+        assert _safe_mime(f"application/{secret.upper()}") == "unknown"
 
 
 class TestDescribeErrorBody:
