@@ -255,7 +255,35 @@ class TestToolFailurePaths:
         bot, fake = build([RuntimeError("boom")])
         text, _, is_error, _, _ = await run_loop(bot, FakeMessage("go"))
         assert is_error is True
-        assert text == "LLM API error: boom"
+        # Formatter-shaped since the 2026-08-14 sanitization (type name +
+        # first line, bounded).
+        assert text == "LLM API error: RuntimeError: boom"
+
+    async def test_llm_error_text_and_trajectory_sanitized(self):
+        """2026-08-14 incident pin: a provider exception carrying a whole
+        HTML page must reach neither the chat reply nor the operator-visible
+        trajectory final_response (the Traces page renders it)."""
+        bot, fake = build([RuntimeError("<html><body>@everyone edge page</body></html>")])
+
+        class _RecordingSaver:
+            def __init__(self):
+                self.saved = []
+
+            async def save(self, trajectory):
+                self.saved.append(trajectory)
+
+        saver = _RecordingSaver()
+        bot.turn_recorder._trajectory_saver = saver
+
+        text, _, is_error, _, _ = await run_loop(bot, FakeMessage("go"))
+        assert is_error is True
+        assert text == "LLM API error: RuntimeError"  # HTML detail dropped
+        assert "@everyone" not in text
+        assert saver.saved
+        traj = saver.saved[-1]
+        assert traj.is_error is True
+        assert "<html" not in traj.final_response.lower()
+        assert "@everyone" not in traj.final_response
 
     async def test_circuit_open_waits_and_retries(self):
         # Amended 2026-07-30: the single hardcoded breaker retry became the
@@ -285,7 +313,7 @@ class TestToolFailurePaths:
         )
         text, _, is_error, _, _ = await run_loop(bot, FakeMessage("go"))
         assert is_error is True
-        assert text == "LLM API error: still down"
+        assert text == "LLM API error: RuntimeError: still down"
 
 
 # ---------------------------------------------------------------------------

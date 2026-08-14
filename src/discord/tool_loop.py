@@ -36,6 +36,7 @@ from typing import TYPE_CHECKING, Literal
 
 import discord
 
+from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
 from ..llm.errors import LLMCapacityError
 from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
@@ -982,9 +983,17 @@ class ToolLoopRunner:
         return ("ok", llm_resp)
 
     async def _llm_error_done(self, st: _ChatTurn, api_err: BaseException):
-        """The legacy terminal LLM-failure path (unchanged message shape)."""
-        err_msg = str(api_err) or f"{type(api_err).__name__} (no message)"
-        log.error("LLM API call failed: %s", err_msg, exc_info=True)
+        """Terminal LLM-failure path.
+
+        Every operator/user-visible copy of the failure — the chat reply,
+        the WebUI ``response`` field (same tuple), and the trajectory
+        ``final_response`` the Traces page renders — carries the bounded
+        formatter summary, never raw exception text (the 2026-08-14 edge
+        incident posted a whole HTML error page into Discord through this
+        line). Full diagnostics stay in the journal via ``exc_info``.
+        """
+        err_msg = format_user_facing_error(api_err)
+        log.error("LLM API call failed: %s", err_msg, exc_info=api_err)
         await self._turn_recorder._save_turn_trajectory(
             st._trajectory, error=err_msg, trace=st.trace
         )
@@ -2064,15 +2073,20 @@ class ToolLoopRunner:
         except CircuitOpenError:
             raise
         except Exception as e:
-            log.warning("Loop iteration Codex call failed: %s", e)
+            # Loop outcome text, trajectory final_response, AND the
+            # reflection error_text are all operator/user-visible — one
+            # formatted summary feeds all three; the journal keeps the
+            # full exception.
+            err_msg = format_user_facing_error(e)
+            log.warning("Loop iteration Codex call failed: %s", err_msg, exc_info=e)
             return (
                 "done",
                 await self._finish_loop(
                     st,
-                    f"LLM call failed: {e}",
+                    f"LLM call failed: {err_msg}",
                     is_error=True,
                     failure_class="provider",
-                    error_text=str(e),
+                    error_text=err_msg,
                 ),
             )
         # Bypass-path success: clear a latched llm_* guard key using the

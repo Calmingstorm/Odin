@@ -47,8 +47,29 @@ def _clean_detail(detail: str) -> str:
     return detail.strip()
 
 
+def sanitize_error_text(text: str, limit: int = 200) -> str:
+    """Bounded, HTML-free, mention-safe, secret-scrubbed form of an
+    error-reason STRING for operator-visible storage (subsystem status
+    reasons, transition history). String-input sibling of
+    ``format_user_facing_error`` — same normalization, same total
+    non-throwing contract; safe-looking literals ("manual", "capacity")
+    pass through unchanged.
+    """
+    try:
+        lines = [ln.strip() for ln in str(text).strip().splitlines() if ln.strip()]
+        return _clean_detail(lines[0] if lines else "")[:limit]
+    except Exception:
+        return ""
+
+
 def format_user_facing_error(exc: BaseException, limit: int = 200) -> str:
     """Bounded one-line exception summary safe to show an end user.
+
+    ``limit`` bounds THIS function's output; call sites may prepend short
+    context prefixes ("LLM API error: ", "LLM error: "), so a stored or
+    displayed string can exceed it by the prefix length — the safety
+    properties (HTML-free, control-free, mention-safe, scrubbed) are
+    prefix-independent.
 
     ``discord.HTTPException`` renders structured fields only — the reason
     phrase is upstream-controlled text, so it goes through the SAME

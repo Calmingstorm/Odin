@@ -1019,3 +1019,55 @@ class TestEdgeCases:
         guard.register("voice", initial_state=SubsystemState.UNAVAILABLE)
         status = guard.get_status()
         assert status["overall"] == "degraded"  # unavailable present = degraded overall
+
+
+class TestReasonSanitizedAtEntry:
+    """last_failure_reason is serialized by /api/subsystems/status and
+    reasons flow into transition history — every reason-accepting entry
+    point stores the sanitized form, so no caller (e.g. llm_gateway passing
+    str(exc)) can persist raw upstream bytes."""
+
+    HTML_REASON = "<html><body>@everyone edge page</body></html>"
+
+    def _guard(self):
+        guard = SubsystemGuard()
+        guard.register("llm_codex")
+        return guard
+
+    def _stored(self, guard):
+        return guard._subsystems["llm_codex"].last_failure_reason
+
+    def test_record_failure_reason_sanitized(self):
+        guard = self._guard()
+        guard.record_failure("llm_codex", self.HTML_REASON)
+        assert "<html" not in self._stored(guard).lower()
+
+    def test_mark_degraded_reason_sanitized(self):
+        guard = self._guard()
+        guard.mark_degraded("llm_codex", self.HTML_REASON)
+        assert "<html" not in self._stored(guard).lower()
+
+    def test_mark_unavailable_reason_sanitized(self):
+        guard = self._guard()
+        guard.mark_unavailable("llm_codex", self.HTML_REASON)
+        assert "<html" not in self._stored(guard).lower()
+
+    def test_mark_degraded_transient_reason_sanitized(self):
+        guard = self._guard()
+        guard.mark_degraded_transient("llm_codex", self.HTML_REASON)
+        assert "<html" not in self._stored(guard).lower()
+
+    def test_transition_history_reason_sanitized(self):
+        guard = self._guard()
+        guard.mark_degraded("llm_codex", "boom @everyone <html>x</html>")
+        transitions = guard.stats.transition_log
+        assert transitions
+        for t in transitions:
+            reason = str(t.get("reason", ""))
+            assert "<html" not in reason.lower()
+            assert "@everyone" not in reason
+
+    def test_safe_reasons_unchanged(self):
+        guard = self._guard()
+        guard.record_failure("llm_codex", "connection refused")
+        assert self._stored(guard) == "connection refused"

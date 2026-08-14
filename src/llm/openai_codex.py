@@ -2,6 +2,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
+import string
+import unicodedata
 
 import aiohttp
 
@@ -18,6 +21,7 @@ from .errors import (
     LLMRequestError,
     LLMTransportError,
 )
+from .secret_scrubber import scrub_output_secrets
 from .types import LLMResponse, ToolCall
 
 log = get_logger("codex")
@@ -48,6 +52,153 @@ DEFAULT_REQUEST_TIMEOUT = 3600
 DEFAULT_STREAM_STALL_TIMEOUT = 180
 CONNECT_TIMEOUT = 30
 
+# Cap the error-body read: error responses are only ever *described*
+# (status, MIME type, byte count, extracted JSON error fields — never raw
+# bytes), so a hostile or broken front door cannot trade an error page for
+# memory. Large enough that any genuine API error object fits whole; a
+# body larger than the cap is truncated and therefore classified as
+# non-structured (transport) — acceptable, since real API error objects
+# are tiny and anything this size is an edge artifact.
+_ERROR_BODY_READ_CAP = 65536
+
+
+async def _read_error_body_bounded(content) -> tuple[bytes, bool]:
+    """Drain the error body up to the cap and report whether it overflowed.
+
+    ``StreamReader.read(n)`` returns as soon as ANY bytes are buffered —
+    up to *n*, not exactly *n* — so a single call can hand back a chunked
+    JSON error truncated mid-object, and truncated JSON would misclassify
+    a deterministic API rejection as a retryable transport failure. Loop
+    to EOF (or the cap) so classification always sees the complete body
+    of any genuinely-sized error object. When the body exactly fills the
+    cap, probe one additional byte: a valid JSON prefix must never classify
+    unread trailing data as a deterministic request rejection.
+    """
+    chunks: list[bytes] = []
+    remaining = _ERROR_BODY_READ_CAP
+    while remaining > 0:
+        chunk = await content.read(remaining)
+        if not chunk:
+            return b"".join(chunks), False
+        chunks.append(chunk)
+        remaining -= len(chunk)
+
+    overflowed = bool(await content.read(1))
+    return b"".join(chunks), overflowed
+
+
+_ASCII_MIME_TOKEN_CHARS = frozenset(
+    string.ascii_letters + string.digits + "!#$%&'*+-.^_`|~"
+)
+
+
+def _safe_mime(content_type: str | None) -> str:
+    """Return a safe ASCII ``type/subtype`` token or ``unknown``.
+
+    Content-Type is upstream-controlled. Validate both non-empty components
+    against the explicit RFC token alphabet (never Unicode ``isalnum``), bound
+    the rendered value, and reject any candidate changed by the shared secret
+    scrubber so token-shaped credentials cannot enter exception text or logs.
+    Parameters are not rendered.
+    """
+    candidate = (content_type or "").split(";", 1)[0].strip()
+    normalized = candidate.lower()
+    parts = candidate.split("/")
+    if (
+        len(candidate) > 64
+        or len(parts) != 2
+        or any(not part for part in parts)
+        or any(ch not in _ASCII_MIME_TOKEN_CHARS for part in parts for ch in part)
+        or scrub_output_secrets(candidate) != candidate
+        or scrub_output_secrets(normalized) != normalized
+    ):
+        return "unknown"
+    return normalized
+
+
+def _parse_structured_error(error_body: str) -> dict | None:
+    """Return the parsed JSON object when the API itself spoke, else None.
+
+    A JSON *object* body is the only shape the backend's error surface
+    produces; anything else — an HTML edge page, an empty body, bare
+    string/list JSON, truncated junk — is an edge/proxy artifact and gets
+    transport treatment. Content-Type is deliberately not consulted:
+    proxies mislabel in both directions, so the body bytes are authority
+    (2026-08-14 edge incident: HTTP 403 carrying chatgpt.com's HTML error
+    page killed a healthy turn as a "request" error).
+    """
+    text = error_body.strip()
+    if not text:
+        return None
+    try:
+        parsed = json.loads(text)
+    except ValueError:
+        return None
+    return parsed if isinstance(parsed, dict) else None
+
+
+def _clean_error_field(value: str, limit: int = 200) -> str:
+    """First line of a JSON error field: control chars stripped, mass
+    mentions neutralized, secrets scrubbed, bounded — and dropped entirely
+    if it smuggles markup, keeping the raise-site invariant (no LLMError
+    message ever carries an HTML fragment, even inside a structured
+    error's own fields)."""
+    stripped = value.strip()
+    line = stripped.splitlines()[0].strip() if stripped else ""
+    line = "".join(
+        ch for ch in line if ch == "\t" or not unicodedata.category(ch).startswith("C")
+    )
+    low = line.lower()
+    if (
+        "<html" in low
+        or "<!doctype" in low
+        or re.search(r"<(?:!|/?[A-Za-z])[^>]*>", line)
+    ):
+        return ""
+    line = line.replace("@everyone", "@\u200beveryone").replace("@here", "@\u200bhere")
+    return scrub_output_secrets(line)[:limit]
+
+
+def _sanitized_error_fields(container: dict) -> list[str]:
+    """Sanitized known error fields from a parsed error container:
+    ``container["error"].{message,type,code}`` plus top-level
+    ``detail``/``message`` — deduped, order-preserving. Shared by the
+    HTTP-status descriptor and the SSE terminal-event message builder."""
+    fields: list[str] = []
+    err = container.get("error")
+    if isinstance(err, dict):
+        for key in ("message", "type", "code"):
+            val = err.get(key)
+            if isinstance(val, str):
+                cleaned = _clean_error_field(val)
+                if cleaned:
+                    fields.append(cleaned)
+    for key in ("detail", "message"):
+        val = container.get(key)
+        if isinstance(val, str):
+            cleaned = _clean_error_field(val)
+            if cleaned:
+                fields.append(cleaned)
+    return list(dict.fromkeys(fields))
+
+
+def _describe_error_body(
+    content_type: str | None, raw: bytes, structured: dict | None
+) -> str:
+    """Bounded, structure-aware descriptor of a non-2xx response body.
+
+    Raise sites embed THIS instead of raw body excerpts (``errors.py``
+    contract): non-structured bodies are described by shape only; structured
+    bodies contribute their sanitized known fields (``error.message/type/
+    code``, top-level ``detail``/``message``).
+    """
+    if structured is None:
+        return f"non-JSON error body ({_safe_mime(content_type)}, {len(raw)} bytes)"
+    fields = _sanitized_error_fields(structured)
+    if not fields:
+        return "structured JSON error body"
+    return "; ".join(fields)[:400]
+
 
 # Markers the backend uses for model-tier capacity exhaustion. These arrive
 # INSIDE an HTTP 200 as SSE error events, so no status-code branch ever sees
@@ -66,7 +217,11 @@ class CodexStreamError(RuntimeError):
 
     Carries the structured fields parsed from the event's error object so the
     retry engine can classify capacity failures without substring matching.
-    The message keeps the historical ``{event_type}: {json[:500]}`` shape.
+    The message is ``{event_type}: {sanitized known error fields}`` — never a
+    raw event dump: SSE error fields are upstream-controlled text like any
+    response body, so they get the same bounded known-field treatment as the
+    HTTP-status descriptors (classification and ``.code`` semantics ride the
+    parsed attributes, not the message).
     """
 
     def __init__(
@@ -96,7 +251,10 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
     The error object lives at ``event["error"]`` for bare ``error`` events
     and at ``event["response"]["error"]`` for ``response.failed``; tolerate
     both plus absence (classification simply stays empty and the failure is
-    treated as transport, today's behavior).
+    treated as transport, today's behavior). The message carries only the
+    sanitized known fields — event dicts are upstream-controlled and can
+    smuggle markup or secrets through ``error.message``, so they never get
+    dumped raw into an exception that later boundaries render.
     """
     err = event.get("error")
     if not isinstance(err, dict):
@@ -107,8 +265,10 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
     error_type = err.get("type")
     error_code = err.get("code")
     retry_after = err.get("retry_after")
+    fields = _sanitized_error_fields({"error": err})
+    detail = "; ".join(fields)[:400] if fields else "unstructured stream error event"
     return CodexStreamError(
-        f"{event_type}: {json.dumps(event)[:500]}",
+        f"{event_type}: {detail}",
         error_type=error_type if isinstance(error_type, str) else None,
         error_code=error_code if isinstance(error_code, str) else None,
         retry_after=float(retry_after) if isinstance(retry_after, (int, float)) else None,
@@ -628,8 +788,7 @@ class CodexChatClient:
                                 # counts one model-breaker failure per failed
                                 # logical generation.
                                 raise LLMCapacityError(
-                                    "Codex capacity: "
-                                    f"{e.error_code or e.error_type or 'unknown'}",
+                                    f"Codex capacity: {e}",
                                     provider="codex",
                                     model=str(body.get("model") or self.model),
                                     retry_after=e.retry_after,
@@ -691,7 +850,14 @@ class CodexChatClient:
                         self.breaker.record_failure()
                         return result
 
-                    error_body = (await resp.read()).decode("utf-8", errors="replace")
+                    raw_error, body_overflowed = await _read_error_body_bounded(resp.content)
+                    error_body = raw_error.decode("utf-8", errors="replace")
+                    structured = (
+                        None if body_overflowed else _parse_structured_error(error_body)
+                    )
+                    descriptor = _describe_error_body(
+                        resp.headers.get("Content-Type"), raw_error, structured
+                    )
 
                     if resp.status == 401:
                         body_l = error_body.lower()
@@ -721,7 +887,7 @@ class CodexChatClient:
                             continue
                         self.breaker.record_failure()
                         raise LLMAuthError(
-                            f"Codex 401 (auth failed, no healthy account): {error_body[:200]}",
+                            f"Codex 401 (auth failed, no healthy account): {descriptor}",
                             provider="codex",
                             model=str(body.get("model") or self.model),
                         )
@@ -729,7 +895,7 @@ class CodexChatClient:
                     if resp.status == 429:
                         await self._mark_limited(acct_idx)
                         self.breaker.record_failure()
-                        last_error = f"HTTP 429: {error_body[:200]}"
+                        last_error = f"HTTP 429: {descriptor}"
                         if attempt < self.max_retries - 1:
                             wait = compute_backoff(
                                 attempt,
@@ -750,14 +916,23 @@ class CodexChatClient:
                         # spending its budget cycling limited accounts —
                         # quota semantics stay exactly as before.
                         raise LLMRateLimitError(
-                            f"Codex API error (429): {error_body[:500]}",
+                            f"Codex API error (429): {descriptor}",
                             provider="codex",
                             model=str(body.get("model") or self.model),
                         )
 
-                    if resp.status in (500, 502, 503, 504):
+                    if resp.status in (500, 502, 503, 504) or structured is None:
+                        # Retryable server errors — and, since the 2026-08-14
+                        # edge incident, ANY status whose body is not a JSON
+                        # object: an HTML/opaque error page means the front
+                        # door failed, not that this request is invalid, so
+                        # it gets the same transport treatment (backoff +
+                        # retry here, deadline recovery above) instead of
+                        # killing the turn on one attempt. 401/429 never
+                        # reach here — their branches keep dedicated
+                        # refresh/rotation and quota semantics.
                         self.breaker.record_failure()
-                        last_error = f"HTTP {resp.status}: {error_body[:200]}"
+                        last_error = f"HTTP {resp.status}: {descriptor}"
                         if attempt < self.max_retries - 1:
                             wait = compute_backoff(
                                 attempt,
@@ -771,16 +946,19 @@ class CodexChatClient:
                             await asyncio.sleep(wait)
                             continue
                         raise LLMTransportError(
-                            f"Codex API error ({resp.status}): {error_body[:500]}",
+                            f"Codex API error ({resp.status}): {descriptor}",
                             provider="codex",
                             model=str(body.get("model") or self.model),
                         )
 
-                    # Any other status (400 bad model/malformed request, ...):
-                    # the request itself is wrong — fast-fail, never retried.
+                    # Structured (JSON-object) non-2xx outside the dedicated
+                    # branches: the API itself rejected the request (bad
+                    # model, malformed input) — deterministic, so retrying
+                    # the identical payload burns attempts on a guaranteed
+                    # failure. Fast-fail, never retried.
                     self.breaker.record_failure()
                     raise LLMRequestError(
-                        f"Codex API error ({resp.status}): {error_body[:500]}",
+                        f"Codex API error ({resp.status}): {descriptor}",
                         provider="codex",
                         model=str(body.get("model") or self.model),
                     )

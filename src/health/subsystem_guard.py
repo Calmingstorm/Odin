@@ -17,6 +17,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+# Failure reasons are operator-visible storage: last_failure_reason is
+# serialized by /api/subsystems/status and reasons flow into transition
+# history — sanitize once at every reason-accepting entry point so no
+# caller can store raw upstream bytes (HTML pages, control chars, secrets).
+from ..error_presentation import sanitize_error_text
 from ..odin_log import get_logger
 
 log = get_logger("health.subsystem_guard")
@@ -292,6 +297,7 @@ class SubsystemGuard:
 
     def mark_degraded(self, name: str, reason: str = "") -> None:
         """Force a subsystem to DEGRADED."""
+        reason = sanitize_error_text(reason)
         info = self._subsystems.get(name)
         if info is None:
             return
@@ -309,6 +315,7 @@ class SubsystemGuard:
 
     def mark_unavailable(self, name: str, reason: str = "") -> None:
         """Force a subsystem to UNAVAILABLE."""
+        reason = sanitize_error_text(reason)
         info = self._subsystems.get(name)
         if info is None:
             return
@@ -336,6 +343,7 @@ class SubsystemGuard:
         DEGRADED into a self-clearing one — real degradation still requires
         a real success to clear.
         """
+        reason = sanitize_error_text(reason)
         info = self._subsystems.get(name)
         if info is None:
             return
@@ -365,6 +373,7 @@ class SubsystemGuard:
         Increments the consecutive-failure counter and transitions state
         when thresholds are crossed.  Returns the (possibly new) state.
         """
+        reason = sanitize_error_text(reason)
         info = self._subsystems.get(name)
         if info is None:
             return SubsystemState.AVAILABLE  # not tracked

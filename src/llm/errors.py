@@ -17,10 +17,15 @@ Compatibility constraints (both load-bearing):
 Only whitelisted, safe fields ride on the exception: ``provider``,
 ``model``, ``retry_after``, ``code`` (the provider's structured error code,
 e.g. ``context_length_exceeded`` — consumers key recovery decisions on it
-instead of substring-matching message text). Raise sites are responsible for bounding any
-response-body text they put in the message (the existing ``[:200]`` /
-``[:500]`` discipline); user-facing presentation still goes through
-``format_user_facing_error`` at the boundary.
+instead of substring-matching message text). Raise sites never embed raw
+response bytes in the message: HTTP-status branches embed a bounded,
+structure-aware descriptor (status + token-validated MIME + byte count
+for edge-shaped bodies; sanitized known JSON error fields for structured
+ones — see ``openai_codex._describe_error_body``), and SSE terminal
+events get the same known-field treatment (``CodexStreamError``), so no
+LLMError message ever carries an HTML fragment. User-facing presentation
+still goes through ``format_user_facing_error`` at the boundary —
+defense in depth, never single-layer.
 """
 
 from __future__ import annotations
