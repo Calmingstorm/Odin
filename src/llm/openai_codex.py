@@ -769,8 +769,7 @@ class CodexChatClient:
                                 # counts one model-breaker failure per failed
                                 # logical generation.
                                 raise LLMCapacityError(
-                                    "Codex capacity: "
-                                    f"{e.error_code or e.error_type or 'unknown'}",
+                                    f"Codex capacity: {e}",
                                     provider="codex",
                                     model=str(body.get("model") or self.model),
                                     retry_after=e.retry_after,

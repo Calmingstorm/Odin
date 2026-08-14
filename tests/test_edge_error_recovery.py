@@ -26,6 +26,7 @@ import pytest
 
 from src.llm.errors import (
     LLMAuthError,
+    LLMCapacityError,
     LLMRateLimitError,
     LLMRequestError,
     LLMTransportError,
@@ -489,6 +490,34 @@ class TestStreamErrorEventSanitized:
         assert "<html" not in msg.lower()
         assert "@everyone" not in msg
         assert '"response"' not in msg  # no raw event dump
+
+    async def test_capacity_message_uses_sanitized_fields_not_raw_attributes(
+        self, monkeypatch
+    ):
+        """Classification keeps the raw structured attributes, but the raised
+        capacity message must use the separately sanitized field rendering."""
+        client = _client(max_retries=3)
+        raw_code = "<html>@everyone secret=abcdefghijklmnopqrstuvwxyz</html>"
+        event = {
+            "type": "error",
+            "error": {
+                "type": "server_is_overloaded",
+                "code": raw_code,
+                "message": "Capacity is temporarily unavailable",
+            },
+        }
+        session = FakeSession([FakeResp(200, sse_lines=self._sse(event))])
+        _wire(monkeypatch, client, session)
+
+        with pytest.raises(LLMCapacityError) as ei:
+            await client._stream_request({"model": "m"})
+        assert session.calls == 1
+        assert ei.value.code is None  # LLMCapacityError .code semantics unchanged
+        msg = str(ei.value)
+        assert "server_is_overloaded" in msg
+        assert "<html" not in msg.lower()
+        assert "@everyone" not in msg
+        assert "abcdefghijklmnopqrstuvwxyz" not in msg
 
     async def test_request_class_event_keeps_code_with_clean_message(self, monkeypatch):
         client = _client(max_retries=3)
