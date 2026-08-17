@@ -14,10 +14,14 @@ from __future__ import annotations
 import json
 import logging
 import os
+from datetime import UTC, datetime
 
+import pytest
 import yaml
 
 from src.config.migrations import (
+    MigrationCompletionError,
+    _atomic_write_marker,
     apply_legacy_ceiling_migration,
     ceiling_marker_path,
 )
@@ -59,7 +63,10 @@ class TestOneTimeRewrite:
         assert "operator comment that must survive" in config_path.read_text()
         assert on_disk["openai_codex"]["model"] == "gpt-5.6-sol"
         marker = ceiling_marker_path(config_path)
-        assert json.loads(marker.read_text())["reason"] == "migrated"
+        record = json.loads(marker.read_text())
+        assert record["version"] == 2
+        assert record["state"] == "completed"
+        assert record["reason"] == "migrated"
         assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
         # One-time: a second pass is gated by the marker and changes nothing.
@@ -68,19 +75,26 @@ class TestOneTimeRewrite:
             _migrate(config_path)
         assert not caplog.records
 
-    def test_marker_gates_even_a_literal_750k(self, tmp_path):
+    def test_valid_versioned_marker_gates_even_a_literal_750k(self, tmp_path):
         """Post-migration, a deliberately written 750000 is honored verbatim."""
         config_path = tmp_path / "config.yml"
         config_path.write_text(_LEGACY_YAML)
         marker = ceiling_marker_path(config_path)
-        marker.parent.mkdir(parents=True)
-        marker.write_text("{}")
+        _atomic_write_marker(
+            marker,
+            {
+                "version": 2,
+                "migration": "legacy_max_context_chars_to_auto",
+                "state": "completed",
+                "reason": "not_applicable",
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+        )
         data = _migrate(config_path)
         assert (
             data["openai_codex"]["context_compression"]["max_context_chars"]
             == LEGACY_MAX_CONTEXT_CHARS
         )
-        # File untouched.
         assert f"max_context_chars: {LEGACY_MAX_CONTEXT_CHARS}" in config_path.read_text()
 
 
@@ -89,7 +103,7 @@ class TestVacuousCompletion:
         """Review-round-1 reproduction #1: the fresh-install hole."""
         config_path = tmp_path / "config.yml"
         config_path.write_text(
-            "discord:\n  token: \"t\"\n"
+            'discord:\n  token: "t"\n'
             "openai_codex:\n  context_compression:\n    max_context_chars: null\n"
         )
         data = _migrate(config_path)
@@ -107,48 +121,56 @@ class TestVacuousCompletion:
         )
 
     def test_non_legacy_values_marked_and_untouched(self, tmp_path):
-        for value in ("750001", "1", "null"):
-            config_path = tmp_path / f"config-{value}.yml"
+        for value in (
+            "750001",
+            "1",
+            "null",
+            "750000.0",
+            "0xB71B0",
+            "750_000",
+            "+750000",
+            "!!int 750000",
+            "'750000'",
+            '"750000"',
+        ):
+            safe_name = str(abs(hash(value)))
+            config_path = tmp_path / f"config-{safe_name}.yml"
             config_path.write_text(
-                "openai_codex:\n  context_compression:\n"
-                f"    max_context_chars: {value}\n"
+                f"openai_codex:\n  context_compression:\n    max_context_chars: {value}\n"
             )
             before = config_path.read_text()
             _migrate(config_path)
             assert config_path.read_text() == before
-            assert ceiling_marker_path(config_path).exists()
+            record = json.loads(ceiling_marker_path(config_path).read_text())
+            assert record["version"] == 2
+            assert record["reason"] == "not_applicable"
 
     def test_absent_sections_complete_vacuously(self, tmp_path):
         config_path = tmp_path / "config.yml"
-        config_path.write_text("discord:\n  token: \"t\"\n")
+        config_path.write_text('discord:\n  token: "t"\n')
         _migrate(config_path)  # must not raise
         assert ceiling_marker_path(config_path).exists()
 
 
 class TestPlaceholderIsDeliberate:
-    def test_env_placeholder_resolving_to_750k_never_migrated(
-        self, tmp_path, monkeypatch
-    ):
+    def test_env_placeholder_resolving_to_750k_never_migrated(self, tmp_path, monkeypatch):
         """Review-round-1 reproduction #2: substitution happens before the
         migration, but the UNSUBSTITUTED text is the authority — a ${VAR}
         is operator configuration, not the legacy shipped default."""
         monkeypatch.setenv("MAX_CTX_TEST", str(LEGACY_MAX_CONTEXT_CHARS))
         config_path = tmp_path / "config.yml"
         config_path.write_text(
-            "discord:\n  token: \"t\"\n"
+            'discord:\n  token: "t"\n'
             "openai_codex:\n  context_compression:\n"
             "    max_context_chars: ${MAX_CTX_TEST}\n"
         )
         cfg = load_config(config_path)
-        assert (
-            cfg.openai_codex.context_compression.max_context_chars
-            == LEGACY_MAX_CONTEXT_CHARS
-        )
+        assert cfg.openai_codex.context_compression.max_context_chars == LEGACY_MAX_CONTEXT_CHARS
         # File untouched — the placeholder survives.
         assert "${MAX_CTX_TEST}" in config_path.read_text()
-        assert json.loads(ceiling_marker_path(config_path).read_text())[
-            "reason"
-        ] == "not_applicable"
+        assert (
+            json.loads(ceiling_marker_path(config_path).read_text())["reason"] == "not_applicable"
+        )
 
 
 class TestNoResurrection:
@@ -171,28 +193,36 @@ class TestNoResurrection:
 
 
 class TestFailureHonesty:
-    def test_rewrite_failure_is_this_boot_only_and_retries(self, tmp_path, caplog):
+    def test_rewrite_failure_is_this_boot_only_and_retries(self, tmp_path, caplog, monkeypatch):
         config_path = tmp_path / "config.yml"
         config_path.write_text(_LEGACY_YAML)
-        os.chmod(tmp_path, 0o555)  # atomic writer cannot create its tempfile
-        try:
-            with caplog.at_level(logging.WARNING, logger="odin.config"):
-                data = _migrate(config_path)
-        finally:
-            os.chmod(tmp_path, 0o755)
+        import src.config.persistence as persistence
+
+        real_patch = persistence.patch_config_paths
+
+        def fail_patch(*args, **kwargs):
+            raise OSError("config rewrite blocked")
+
+        monkeypatch.setattr(persistence, "patch_config_paths", fail_patch)
+        with caplog.at_level(logging.WARNING, logger="odin.config"):
+            data = _migrate(config_path)
         # In-memory auto so behavior is consistent this boot…
         assert data["openai_codex"]["context_compression"]["max_context_chars"] is None
         assert any("retries next boot" in r.getMessage() for r in caplog.records)
-        # …but NO completion recorded and the file untouched: the gate refires.
+        # …but no completion is durable and the file is untouched: the gate refires.
         assert not ceiling_marker_path(config_path).exists()
         assert f"max_context_chars: {LEGACY_MAX_CONTEXT_CHARS}" in config_path.read_text()
 
+        monkeypatch.setattr(persistence, "patch_config_paths", real_patch)
         data2 = _migrate(config_path)
         assert data2["openai_codex"]["context_compression"]["max_context_chars"] is None
-        assert yaml.safe_load(config_path.read_text())["openai_codex"][
-            "context_compression"
-        ]["max_context_chars"] is None
-        assert ceiling_marker_path(config_path).exists()
+        assert (
+            yaml.safe_load(config_path.read_text())["openai_codex"]["context_compression"][
+                "max_context_chars"
+            ]
+            is None
+        )
+        assert json.loads(ceiling_marker_path(config_path).read_text())["state"] == "completed"
 
 
 class TestDegenerateInputs:
@@ -208,32 +238,58 @@ class TestDegenerateInputs:
             == LEGACY_MAX_CONTEXT_CHARS
         )
         assert f"max_context_chars: {LEGACY_MAX_CONTEXT_CHARS}" in config_path.read_text()
-        assert json.loads(ceiling_marker_path(config_path).read_text())[
-            "reason"
-        ] == "not_applicable"
+        assert (
+            json.loads(ceiling_marker_path(config_path).read_text())["reason"] == "not_applicable"
+        )
 
-    def test_marker_write_failure_after_rewrite_self_heals(self, tmp_path, caplog):
-        """Rewrite lands but the completion record cannot be written: the next
-        boot takes the vacuous branch (the file no longer says 750000) and
-        heals the marker."""
+    @pytest.mark.parametrize(
+        "original_raw",
+        [
+            "",  # empty document
+            "openai_codex: scalar\n",  # non-mapping hierarchy
+            (
+                "openai_codex:\n  context_compression:\n"
+                "    max_context_chars:\n      nested: value\n"
+            ),  # mapping rather than scalar leaf
+        ],
+    )
+    def test_non_scalar_or_missing_lexical_shapes_complete_vacuously(self, tmp_path, original_raw):
+        path = tmp_path / str(abs(hash(original_raw))) / "config.yml"
+        path.parent.mkdir()
+        path.write_text("discord:\n  token: t\n")
+        data = {}
+        apply_legacy_ceiling_migration(data, path, original_raw)
+        assert json.loads(ceiling_marker_path(path).read_text())["reason"] == "not_applicable"
+
+    def test_marker_write_failure_after_rewrite_self_heals(self, tmp_path, caplog, monkeypatch):
+        """The rewrite removes ambiguity; vacuous completion heals next boot."""
         config_path = tmp_path / "config.yml"
         config_path.write_text(_LEGACY_YAML)
-        (tmp_path / "data").write_text("not a directory")  # blocks mkdir
+        import src.config.migrations as migrations
+
+        real_write = migrations._atomic_write_marker
+
+        def fail_write(marker, record):
+            raise OSError("completion blocked")
+
+        monkeypatch.setattr(migrations, "_atomic_write_marker", fail_write)
         with caplog.at_level(logging.WARNING, logger="odin.config"):
             data = _migrate(config_path)
         assert data["openai_codex"]["context_compression"]["max_context_chars"] is None
-        assert yaml.safe_load(config_path.read_text())["openai_codex"][
-            "context_compression"
-        ]["max_context_chars"] is None
-        assert any(
-            "Could not record ceiling-migration completion" in r.getMessage()
-            for r in caplog.records
+        assert (
+            yaml.safe_load(config_path.read_text())["openai_codex"]["context_compression"][
+                "max_context_chars"
+            ]
+            is None
         )
-        (tmp_path / "data").unlink()
+        assert not ceiling_marker_path(config_path).exists()
+        assert any("completion retries next boot" in r.getMessage() for r in caplog.records)
+
+        monkeypatch.setattr(migrations, "_atomic_write_marker", real_write)
         _migrate(config_path)
-        assert json.loads(ceiling_marker_path(config_path).read_text())[
-            "reason"
-        ] == "not_applicable"
+        record = json.loads(ceiling_marker_path(config_path).read_text())
+        assert record["state"] == "completed"
+        assert record["reason"] == "not_applicable"
 
 
 class TestPackagedSymlink:
@@ -255,9 +311,12 @@ class TestPackagedSymlink:
         apply_legacy_ceiling_migration(data, link, original)
 
         assert link.is_symlink()  # the link survives
-        assert yaml.safe_load(real.read_text())["openai_codex"][
-            "context_compression"
-        ]["max_context_chars"] is None
+        assert (
+            yaml.safe_load(real.read_text())["openai_codex"]["context_compression"][
+                "max_context_chars"
+            ]
+            is None
+        )
         assert ceiling_marker_path(link) == opt / "data" / "context_ceiling_migration.json"
         assert (opt / "data" / "context_ceiling_migration.json").is_file()
         assert not (etc / "data").exists()
@@ -272,9 +331,12 @@ class TestLoadConfigIntegration:
         cc = cfg.openai_codex.context_compression
         assert cc.max_context_chars is None
         assert cc.resolved_max_context_chars == LEGACY_MAX_CONTEXT_CHARS
-        assert yaml.safe_load(config_path.read_text())["openai_codex"][
-            "context_compression"
-        ]["max_context_chars"] is None
+        assert (
+            yaml.safe_load(config_path.read_text())["openai_codex"]["context_compression"][
+                "max_context_chars"
+            ]
+            is None
+        )
 
         # A deliberate explicit set of the SAME literal value now persists:
         # the one-time gate, not eternal coercion.
@@ -288,7 +350,345 @@ class TestLoadConfigIntegration:
             path=config_path,
         )
         cfg2 = load_config(config_path)
+        assert cfg2.openai_codex.context_compression.max_context_chars == LEGACY_MAX_CONTEXT_CHARS
+
+
+class TestLexicalLiteralGate:
+    def test_only_shipped_plain_decimal_scalar_is_rewritten(self, tmp_path):
+        forms = {
+            "750000": True,
+            "750000.0": False,
+            "0xB71B0": False,
+            "750_000": False,
+            "+750000": False,
+            "!!int 750000": False,
+            "'750000'": False,
+            '"750000"': False,
+        }
+        for index, (value, migrates) in enumerate(forms.items()):
+            path = tmp_path / str(index) / "config.yml"
+            path.parent.mkdir()
+            path.write_text(
+                f"openai_codex:\n  context_compression:\n    max_context_chars: {value}\n"
+            )
+            before = path.read_text()
+            data = _migrate(path)
+            if migrates:
+                assert data["openai_codex"]["context_compression"]["max_context_chars"] is None
+                assert (
+                    yaml.safe_load(path.read_text())["openai_codex"]["context_compression"][
+                        "max_context_chars"
+                    ]
+                    is None
+                )
+            else:
+                assert path.read_text() == before
+
+
+class TestCompletionRecordProvenance:
+    @pytest.mark.parametrize("kind", ["empty", "corrupt", "directory"])
+    def test_invalid_marker_never_counts_as_completion_or_gets_overwritten(self, tmp_path, kind):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir()
+        if kind == "empty":
+            marker.write_text("")
+        elif kind == "corrupt":
+            marker.write_text("{broken")
+        else:
+            marker.mkdir()
+        with pytest.raises(MigrationCompletionError):
+            _migrate(path)
+        assert f"max_context_chars: {LEGACY_MAX_CONTEXT_CHARS}" in path.read_text()
+        if kind == "empty":
+            assert marker.read_text() == ""
+        elif kind == "corrupt":
+            assert marker.read_text() == "{broken"
+        else:
+            assert marker.is_dir()
+
+    def test_unknown_record_fails_closed_without_overwrite(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        raw = '{"version": 99, "migration": "future"}\n'
+        marker.write_text(raw)
+        with pytest.raises(MigrationCompletionError):
+            _migrate(path)
+        assert marker.read_text() == raw
+        assert f"max_context_chars: {LEGACY_MAX_CONTEXT_CHARS}" in path.read_text()
+
+    def test_round1_legacy_marker_does_not_suppress_rewrite(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "legacy_value": LEGACY_MAX_CONTEXT_CHARS,
+                    "migrated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        _migrate(path)
         assert (
-            cfg2.openai_codex.context_compression.max_context_chars
+            yaml.safe_load(path.read_text())["openai_codex"]["context_compression"][
+                "max_context_chars"
+            ]
+            is None
+        )
+        assert json.loads(marker.read_text())["version"] == 2
+
+    def test_round1_operator_marker_preserves_and_upgrades(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "operator_saved": True,
+                    "saved_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        data = _migrate(path)
+        assert (
+            data["openai_codex"]["context_compression"]["max_context_chars"]
             == LEGACY_MAX_CONTEXT_CHARS
         )
+        record = json.loads(marker.read_text())
+        assert record["version"] == 2
+        assert record["reason"] == "prior_operator_saved"
+
+    def test_preversioned_round2_completion_is_validated_then_upgraded(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "reason": "not_applicable",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        data = _migrate(path)
+        assert (
+            data["openai_codex"]["context_compression"]["max_context_chars"]
+            == LEGACY_MAX_CONTEXT_CHARS
+        )
+        assert json.loads(marker.read_text())["version"] == 2
+
+    @pytest.mark.parametrize(
+        "record",
+        [
+            [],
+            {
+                "version": 2,
+                "migration": "legacy_max_context_chars_to_auto",
+                "state": "completed",
+                "reason": "not_applicable",
+                "completed_at": 123,
+            },
+            {
+                "version": 2,
+                "migration": "legacy_max_context_chars_to_auto",
+                "state": "completed",
+                "reason": "not_applicable",
+                "completed_at": "not-a-date",
+            },
+            {
+                "version": 2,
+                "migration": "legacy_max_context_chars_to_auto",
+                "state": "completed",
+                "reason": [],
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+            {
+                "migration": "legacy_max_context_chars_to_auto",
+                "reason": {},
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+        ],
+    )
+    def test_malformed_record_fields_are_unknown(self, tmp_path, record):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        marker.write_text(json.dumps(record))
+        with pytest.raises(MigrationCompletionError):
+            _migrate(path)
+
+    def test_unreadable_marker_is_not_completion(self, tmp_path, monkeypatch):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        marker.write_text("placeholder")
+        real_read_text = type(marker).read_text
+
+        def unreadable(self, *args, **kwargs):
+            if self == marker:
+                raise OSError("unreadable")
+            return real_read_text(self, *args, **kwargs)
+
+        monkeypatch.setattr(type(marker), "read_text", unreadable)
+        with pytest.raises(MigrationCompletionError):
+            _migrate(path)
+
+
+class TestVacuousFailureSequence:
+    def test_blocked_vacuous_record_prevents_later_750k_erasure(self, tmp_path):
+        """Exact round-2 blocker: failure must stop this boot truthfully."""
+        path = tmp_path / "config.yml"
+        path.write_text("openai_codex:\n  context_compression:\n    max_context_chars: null\n")
+        (tmp_path / "data").write_text("blocks marker directory")
+        with pytest.raises(MigrationCompletionError):
+            _migrate(path)
+        assert "max_context_chars: null" in path.read_text()
+
+        # No boot may have continued and handed control to an operator.  Once
+        # persistence is repaired, the original null completes vacuously; only
+        # then is a later literal 750000 unambiguously intentional.
+        (tmp_path / "data").unlink()
+        _migrate(path)
+        path.write_text(_LEGACY_YAML)
+        data = _migrate(path)
+        assert (
+            data["openai_codex"]["context_compression"]["max_context_chars"]
+            == LEGACY_MAX_CONTEXT_CHARS
+        )
+        assert f"max_context_chars: {LEGACY_MAX_CONTEXT_CHARS}" in path.read_text()
+
+    def test_load_config_reports_truthful_vacuous_completion_failure(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(
+            'discord:\n  token: "t"\n'
+            "openai_codex:\n  context_compression:\n"
+            "    max_context_chars: null\n"
+        )
+        (tmp_path / "data").write_text("blocks marker directory")
+        with pytest.raises(SystemExit, match="Configuration migration failed"):
+            load_config(path)
+
+
+class TestAtomicMarkerPersistence:
+    def test_marker_replace_is_fsynced_and_mode_0600(self, tmp_path, monkeypatch):
+        marker = tmp_path / "data" / "marker.json"
+        import src.config.migrations as migrations
+
+        calls = []
+        real_fsync = os.fsync
+        real_replace = os.replace
+
+        def spy_fsync(fd):
+            calls.append("fsync")
+            return real_fsync(fd)
+
+        def spy_replace(source, destination):
+            calls.append("replace")
+            return real_replace(source, destination)
+
+        monkeypatch.setattr(migrations.os, "fsync", spy_fsync)
+        monkeypatch.setattr(migrations.os, "replace", spy_replace)
+        _atomic_write_marker(marker, {"ok": True})
+        assert calls[0] == "fsync"
+        assert "replace" in calls
+        assert marker.stat().st_mode & 0o777 == 0o600
+        assert not list(marker.parent.glob("*.tmp"))
+
+
+class TestAtomicMarkerFailures:
+    def test_replace_failure_cleans_temporary_file(self, tmp_path, monkeypatch):
+        marker = tmp_path / "data" / "marker.json"
+        import src.config.migrations as migrations
+
+        def fail_replace(*args, **kwargs):
+            raise OSError("replace failed")
+
+        monkeypatch.setattr(migrations.os, "replace", fail_replace)
+        with pytest.raises(OSError, match="replace failed"):
+            _atomic_write_marker(marker, {"ok": True})
+        assert not marker.exists()
+        assert not list(marker.parent.glob("*.tmp"))
+
+
+class TestRemainingMigrationBranches:
+    def test_required_marker_write_error_is_truthful(self, tmp_path, monkeypatch):
+        path = tmp_path / "config.yml"
+        path.write_text("discord:\n  token: t\n")
+        import src.config.migrations as migrations
+
+        def fail_write(*args, **kwargs):
+            raise OSError("marker blocked")
+
+        monkeypatch.setattr(migrations, "_atomic_write_marker", fail_write)
+        with pytest.raises(MigrationCompletionError, match="configuration was left unchanged"):
+            _migrate(path)
+
+    def test_runtime_auto_tolerates_missing_or_non_mapping_sections(self):
+        import src.config.migrations as migrations
+
+        missing = {}
+        migrations._set_runtime_auto(missing)
+        assert missing == {}
+
+        non_mapping = {"openai_codex": {"context_compression": "disabled"}}
+        migrations._set_runtime_auto(non_mapping)
+        assert non_mapping["openai_codex"]["context_compression"] == "disabled"
+
+    def test_open_temp_stream_is_closed_and_removed_on_write_failure(self, tmp_path, monkeypatch):
+        marker = tmp_path / "marker.json"
+        import src.config.migrations as migrations
+
+        class BrokenStream:
+            closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *args):
+                return None
+
+            def write(self, value):
+                raise OSError("write failed")
+
+            def close(self):
+                self.closed = True
+
+        broken = BrokenStream()
+        monkeypatch.setattr(migrations.os, "fdopen", lambda *args, **kwargs: broken)
+        with pytest.raises(OSError, match="write failed"):
+            _atomic_write_marker(marker, {"ok": True})
+        assert broken.closed is True
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_fd_is_closed_and_temp_removed_when_fdopen_fails(self, tmp_path, monkeypatch):
+        marker = tmp_path / "marker.json"
+        import src.config.migrations as migrations
+
+        closed = []
+        real_close = os.close
+
+        def fail_fdopen(*args, **kwargs):
+            raise OSError("fdopen failed")
+
+        def spy_close(fd):
+            closed.append(fd)
+            return real_close(fd)
+
+        monkeypatch.setattr(migrations.os, "fdopen", fail_fdopen)
+        monkeypatch.setattr(migrations.os, "close", spy_close)
+        with pytest.raises(OSError, match="fdopen failed"):
+            _atomic_write_marker(marker, {"ok": True})
+        assert closed
+        assert not list(tmp_path.glob("*.tmp"))

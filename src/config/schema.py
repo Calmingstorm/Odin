@@ -1228,9 +1228,16 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # Runs on the raw dict so pydantic validates what will actually apply;
     # the unsubstituted text distinguishes a literal legacy default from a
     # deliberate ${VAR} placeholder.
-    from .migrations import apply_legacy_ceiling_migration
+    from .migrations import MigrationCompletionError, apply_legacy_ceiling_migration
 
-    apply_legacy_ceiling_migration(data, path, original_raw)
+    try:
+        apply_legacy_ceiling_migration(data, path, original_raw)
+    except MigrationCompletionError as exc:
+        raise SystemExit(
+            f"Configuration migration failed for {path}: {exc}\n"
+            "Inspect the ceiling-migration record and retry; Odin will not "
+            "guess at operator provenance."
+        ) from exc
     try:
         cfg = Config(**data)
     except Exception as exc:
