@@ -16,6 +16,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.config.schema import ContextCompressionConfig
 from tests.fakes import FakeChannel, FakeLLM, FakeMessage, make_bot
 
 
@@ -58,7 +59,10 @@ class TestSpawnLoopAgentsConfigPath:
         assert "AttributeError" not in result
         assert "agent-a" in result or "spawned" in result.lower()
         assert captured["context_compression_enabled"] is True
-        assert captured["max_context_chars"] == bot.context_compressor.max_context_chars
+        assert (
+            captured["max_context_chars"]
+            == bot.context_compressor.resolved_max_context_chars
+        )
         assert captured["keep_recent_iterations"] == bot.context_compressor.keep_recent_iterations
 
     async def test_defaults_used_when_compression_disabled(self):
@@ -74,7 +78,7 @@ class TestSpawnLoopAgentsConfigPath:
 
     async def test_compressor_values_forwarded_when_enabled(self):
         bot, captured = _bot_with_running_loop()
-        bot.context_compressor = SimpleNamespace(
+        bot.context_compressor = ContextCompressionConfig(
             enabled=True, max_context_chars=123456, keep_recent_iterations=7
         )
         await bot.agent_task_tools._handle_spawn_loop_agents(

@@ -65,6 +65,12 @@
   "percent": 100.0,
   "statements": 30
  },
+ "src/config/migrations.py": {
+  "covered": 44,
+  "missing": 2,
+  "percent": 95.65,
+  "statements": 46
+ },
  "src/config/schema.py": {
   "covered": 628,
   "missing": 1,
@@ -436,6 +442,12 @@
   "missing": 27,
   "percent": 93.28,
   "statements": 402
+ },
+ "src/llm/context_budget.py": {
+  "covered": 45,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 45
  },
  "src/llm/context_compressor.py": {
   "covered": 165,

@@ -187,10 +187,42 @@ class ConnectionPoolConfig(BaseModel):
         return v
 
 
+# The pre-campaign soft-compaction ceiling. For years this was the shipped
+# default of ``max_context_chars`` and is materialized verbatim in most
+# persisted configs — the legacy-ceiling migration (src/config/migrations.py)
+# keys off this exact value.
+LEGACY_MAX_CONTEXT_CHARS = 750_000
+
+
 class ContextCompressionConfig(BaseModel):
     enabled: bool = True
-    max_context_chars: int = 750_000
+    # None = "auto": the ceiling derives from the active model's input budget.
+    # Until the per-model resolver is wired to the runtime surfaces (context-
+    # budget campaign phase 3), auto resolves to the legacy constant so
+    # behavior is bit-identical to pre-campaign installs. An explicit value
+    # can only LOWER the derived target, never raise it (the resolver takes
+    # min(explicit, derived)).
+    max_context_chars: int | None = None
     keep_recent_iterations: int = 30
+
+    @field_validator("max_context_chars")
+    @classmethod
+    def _validate_max_context_chars(cls, v: int | None) -> int | None:
+        if v is not None and v < 1:
+            raise ValueError("max_context_chars must be positive, or null for auto")
+        return v
+
+    @property
+    def resolved_max_context_chars(self) -> int:
+        """The ceiling consumers compare against — legacy value when auto.
+
+        Campaign phase 3 replaces consumer reads with the per-model budget
+        resolver; until then this property keeps every consumer total (no
+        None comparisons) and byte-identical to pre-campaign behavior.
+        """
+        if self.max_context_chars is not None:
+            return self.max_context_chars
+        return LEGACY_MAX_CONTEXT_CHARS
 
 
 class GovernorConfig(BaseModel):
@@ -402,6 +434,73 @@ def effort_incompatibility_error(model: str | None, effort: str | None) -> str |
         f"{str(model).strip()!r} (allowed for this model: {allowed})"
     )
 
+# --- Per-model usable input budgets (context-budget campaign, 2026-08-17) ---
+# Values are KNOWN-SAFE USABLE INPUT BUDGETS (floors): each model's own
+# highest server-accepted input observation (usage-echo bracketing, Pro and
+# Team accounts served identically) — NOT vendor context-window claims. They
+# already sit below the server's output reservation; never subtract another
+# output reserve from them. A floor never exceeds its evidence: only sol
+# received the fine-refinement acceptances, which is why sol reads 921_601
+# while its window-mates read 917_506. The served models catalog reports
+# 272000 for every slug (stale through three regime changes) — never consume
+# it. Serving moves silently in both directions; these floors are refreshed
+# by manual probes, bounded downward at runtime only by observed clamps.
+CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
+    "gpt-5.6-sol": 921_601,
+    "gpt-5.6-terra": 917_506,
+    "gpt-5.6-luna": 917_506,
+    "gpt-5.4": 917_506,
+    "gpt-5.5": 270_001,
+    "gpt-5.4-mini": 262_146,
+    "gpt-5.3-codex-spark": 124_001,
+}
+
+# Unknown exact slugs assume the pre-campaign uniform window, so a new or
+# renamed model degrades to the long-proven conservative math — not a guess.
+CODEX_UNKNOWN_MODEL_INPUT_BUDGET = 272_000
+
+# Slugs the backend serves under another model's identity (probed via the
+# served_model echo). Canonicalization maps them BEFORE any registry,
+# override, or observer lookup — they are never registry rows themselves.
+_CODEX_MODEL_ALIASES: dict[str, str] = {
+    "codex-auto-review": "gpt-5.6-luna",
+}
+
+
+def canonical_codex_model(model: str | None) -> str:
+    """THE Codex model canonicalizer: trim, map aliases, preserve spelling.
+
+    Single authority for budget-registry lookups, override keys, observer
+    keys, and UI capability data — the UI consumes canonical keys served by
+    the backend and never reimplements this. Unknown models pass through
+    with their spelling preserved (no case folding: the server is the
+    authority on model names).
+    """
+    trimmed = str(model or "").strip()
+    return _CODEX_MODEL_ALIASES.get(trimmed, trimmed)
+
+
+def input_budget_floor_for_model(model: str | None) -> int:
+    """Known-safe usable input budget for ``model``.
+
+    Callers pass RAW model names; canonicalization happens here so no lookup
+    site can forget it. Unknown slugs get the conservative default.
+    """
+    return CODEX_MODEL_INPUT_BUDGETS.get(
+        canonical_codex_model(model), CODEX_UNKNOWN_MODEL_INPUT_BUDGET
+    )
+
+
+# Operator override bounds for per-model input budgets. The floor guarantees
+# a positive compactable allowance above the fixed 42K-token request envelope
+# (50_192 = 42_000 + 8_192); the ceiling bounds serialization/memory cost of
+# derived character targets. Observed clamps (runtime evidence) deliberately
+# BYPASS these bounds — evidence stays exact and the budget resolver is a
+# total function under any clamp value.
+CONTEXT_BUDGET_OVERRIDE_MIN = 50_192
+CONTEXT_BUDGET_OVERRIDE_MAX = 2_000_000
+
+
 # Sentinel for the agent model/effort config axes meaning "let the spawner pick
 # per-spawn from the exposed catalogue". Deliberately NOT a member of
 # CODEX_REASONING_EFFORTS — that set is the values legal to SEND to Codex; "auto"
@@ -498,6 +597,49 @@ class OpenAICodexConfig(BaseModel):
     connection_pool: ConnectionPoolConfig = ConnectionPoolConfig()
     auxiliary: AuxiliaryLLMConfig = AuxiliaryLLMConfig()
     context_compression: ContextCompressionConfig = ContextCompressionConfig()
+    # Per-model usable-input-budget overrides (tokens), keyed by canonical
+    # model name. Empty = built-in floors (CODEX_MODEL_INPUT_BUDGETS). An
+    # override may exceed the known-safe floor — overflow recovery is what
+    # makes that experimentation tolerable — but stays inside process-safety
+    # bounds. Consumed from campaign phase 3 (budget resolver).
+    context_budget_overrides: dict[str, int] = Field(default_factory=dict)
+    # Working-set policy: percent of the effective budget compaction actually
+    # targets (quality/latency/cost posture — NOT a capability claim). The
+    # resolver never lets utilization reduce budgets at or below 272K, so
+    # changing this may have no effect on smaller models by design.
+    context_utilization: int = 60
+
+    @field_validator("context_utilization")
+    @classmethod
+    def _validate_context_utilization(cls, v: int) -> int:
+        if isinstance(v, bool) or not 30 <= v <= 100:
+            raise ValueError("context_utilization must be an integer percent between 30 and 100")
+        return v
+
+    @field_validator("context_budget_overrides")
+    @classmethod
+    def _validate_context_budget_overrides(cls, v: dict[str, int]) -> dict[str, int]:
+        canonical: dict[str, int] = {}
+        for raw_key, value in v.items():
+            key = canonical_codex_model(raw_key)
+            if not key:
+                raise ValueError(
+                    "context_budget_overrides keys must be non-empty model names"
+                )
+            if key in canonical:
+                raise ValueError(
+                    f"context_budget_overrides: {raw_key!r} duplicates "
+                    f"{key!r} after canonicalization"
+                )
+            if isinstance(value, bool) or not (
+                CONTEXT_BUDGET_OVERRIDE_MIN <= value <= CONTEXT_BUDGET_OVERRIDE_MAX
+            ):
+                raise ValueError(
+                    f"context_budget_overrides[{key!r}] must be an integer between "
+                    f"{CONTEXT_BUDGET_OVERRIDE_MIN} and {CONTEXT_BUDGET_OVERRIDE_MAX} tokens"
+                )
+            canonical[key] = value
+        return canonical
 
     @model_validator(mode="after")
     def _validate_effort_model_pairs(self):
@@ -1082,6 +1224,12 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # and the intended setting never applies. We warn rather than error
     # (extra="forbid") so a slightly-ahead config can't hard-fail boot.
     _warn_unknown_config_keys(data)
+    # Legacy-default soft-compaction ceiling → auto (one-time, provenance-
+    # gated; see src/config/migrations.py). Runs on the raw dict so pydantic
+    # validates what will actually apply.
+    from .migrations import apply_legacy_ceiling_migration
+
+    apply_legacy_ceiling_migration(data, path)
     try:
         cfg = Config(**data)
     except Exception as exc:

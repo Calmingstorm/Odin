@@ -886,10 +886,10 @@ class ToolLoopRunner:
                 )
 
                 _cc = self._get_context_compressor()
-                if estimate_message_chars(st.messages) > _cc.max_context_chars:
+                if estimate_message_chars(st.messages) > _cc.resolved_max_context_chars:
                     st.messages, _saved = compress_tool_context(
                         st.messages,
-                        max_context_chars=_cc.max_context_chars,
+                        max_context_chars=_cc.resolved_max_context_chars,
                         keep_recent=_cc.keep_recent_iterations,
                         stats=self._get_compression_stats(),
                     )
