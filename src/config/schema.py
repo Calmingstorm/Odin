@@ -1197,9 +1197,9 @@ def set_active_config_path(path: str | Path | None) -> None:
 
 def load_config(path: str | Path = "config.yml") -> Config:
     path = Path(path)
-    raw = path.read_text()
+    original_raw = path.read_text()
     try:
-        raw = _substitute_env_vars(raw)
+        raw = _substitute_env_vars(original_raw)
     except ValueError as exc:
         raise SystemExit(
             f"Configuration error: {exc}\n"
@@ -1224,12 +1224,13 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # and the intended setting never applies. We warn rather than error
     # (extra="forbid") so a slightly-ahead config can't hard-fail boot.
     _warn_unknown_config_keys(data)
-    # Legacy-default soft-compaction ceiling → auto (one-time, provenance-
-    # gated; see src/config/migrations.py). Runs on the raw dict so pydantic
-    # validates what will actually apply.
+    # One-time legacy-ceiling migration gate (see src/config/migrations.py).
+    # Runs on the raw dict so pydantic validates what will actually apply;
+    # the unsubstituted text distinguishes a literal legacy default from a
+    # deliberate ${VAR} placeholder.
     from .migrations import apply_legacy_ceiling_migration
 
-    apply_legacy_ceiling_migration(data, path)
+    apply_legacy_ceiling_migration(data, path, original_raw)
     try:
         cfg = Config(**data)
     except Exception as exc:

@@ -351,17 +351,6 @@ def patch_config_paths(
 
     _dump_atomic(document, config_path, orig_mode)
 
-    # A deliberate save of the compression section establishes operator
-    # provenance: from now on the persisted value — including an intentional
-    # legacy-equal 750_000 — is honored verbatim on every load.
-    if any(
-        tuple(change[0][:2]) == ("openai_codex", "context_compression")
-        for change in changes
-    ):
-        from .migrations import record_ceiling_operator_provenance
-
-        record_ceiling_operator_provenance(config_path)
-
 
 async def _run_settled(write: Callable[[], None]) -> PersistOutcome:
     """Run a sync write to settlement; report result and cancellation.

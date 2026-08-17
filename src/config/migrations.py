@@ -1,36 +1,40 @@
-"""One-time, provenance-gated config migrations.
+"""One-time config migrations.
 
-Currently one migration: the legacy soft-compaction ceiling. For years the
-shipped default was ``max_context_chars: 750_000`` and most persisted
-configs materialized it verbatim. The context-budget campaign makes null
-("auto", model-derived) the schema default — a stale materialized 750_000
-would silently pin every install to the pre-campaign ceiling and defeat the
-feature (settled design, 2026-08-17).
+Currently one: the legacy soft-compaction ceiling. For years the shipped
+default was ``max_context_chars: 750_000`` and most persisted configs
+materialized it verbatim. The context-budget campaign makes null ("auto",
+model-derived) the schema default — a stale materialized 750_000 would
+silently pin every install to the pre-campaign ceiling and defeat the
+feature (plan of record R2, 2026-08-17).
 
-Mechanism — the "records migration completion" branch of the settled design:
-``load_config`` never rewrites config.yml (the file may carry environment
-placeholders and operator comments a YAML round-trip would destroy).
-Instead the marker file under ``data/`` is a two-state provenance ledger for
-the standing persisted value:
+Mechanism — the R2 primary branch: a genuine one-time ``750000 → null``
+rewrite of the config file, through the persistence layer's surgical
+comment/placeholder-preserving writer, gated by a completion marker:
 
-- value equals the legacy default EXACTLY and no marker exists → legacy
-  provenance: interpret as auto in memory, log one WARNING, write the
-  marker. The file itself is untouched.
-- marker exists WITHOUT operator provenance → the standing 750_000 is still
-  legacy: keep the auto interpretation, log at INFO (the file still says
-  750_000, so the reinterpretation must never be silent).
-- marker carries ``operator_saved`` → the persistence layer has since
-  written the compression section deliberately: whatever the file says —
-  including an intentional 750_000 — is honored verbatim, forever.
+- No marker + the file LITERALLY says ``750000`` (checked on the
+  UNSUBSTITUTED text — a ``${VAR}`` placeholder that happens to resolve to
+  750000 is deliberate operator configuration, never migrated): rewrite that
+  one leaf to null, log ONE warning, record completion. The ambiguous
+  standing value is gone from disk, so nothing can later mistake it for an
+  explicit choice.
+- No marker + any other value (null, absent, explicit, placeholder): record
+  completion vacuously. This closes the fresh-install hole — an operator who
+  later hand-writes ``750000`` is past the gate and honored verbatim.
+- Marker present: the gate never fires again. Whatever the file says —
+  including a deliberate post-migration ``750000`` — loads verbatim.
 
-The save path never DELETES the marker (a bare deletion would make the
-still-materialized 750_000 look legacy again on the next load); it stamps
-operator provenance onto it. Hand-editors who want exactly 750_000 without
-saving through the UI can stamp the marker themselves; every log line names
-the file.
+Failure honesty: if the rewrite cannot be persisted, the value is
+interpreted as auto for THIS boot only, a warning says so, and NO completion
+is recorded — the migration retries next boot. If the rewrite lands but the
+marker write fails, the next boot takes the vacuous branch (the file no
+longer says 750000) and self-heals the marker.
 
-A marker-write failure degrades gracefully: the in-memory interpretation
-still applies for this boot and the migration simply retries next boot.
+Paths on packaged installs: ``/opt/odin/config.yml`` is a symlink into
+``/etc/odin``. The REWRITE resolves the symlink and patches the real target
+(the atomic writer replaces its destination inode — writing the unresolved
+path would sever the link). The MARKER deliberately does NOT resolve: the
+durable data directory lives beside the symlink (``/opt/odin/data``), which
+is what the data backup covers.
 """
 
 from __future__ import annotations
@@ -40,122 +44,110 @@ import logging
 from datetime import UTC, datetime
 from pathlib import Path
 
+import yaml
+
 from .schema import LEGACY_MAX_CONTEXT_CHARS
 
 log = logging.getLogger("odin.config")
 
 LEGACY_CEILING_MARKER_NAME = "context_ceiling_migration.json"
 
+_CEILING_PATH = ("openai_codex", "context_compression", "max_context_chars")
+
 
 def ceiling_marker_path(config_path: str | Path) -> Path:
-    """Marker location: the ``data`` dir beside the config file."""
-    return Path(config_path).resolve().parent / "data" / LEGACY_CEILING_MARKER_NAME
+    """Completion marker beside the config path AS GIVEN (symlink unresolved)."""
+    return Path(config_path).absolute().parent / "data" / LEGACY_CEILING_MARKER_NAME
 
 
-def apply_legacy_ceiling_migration(data: dict, config_path: str | Path) -> None:
-    """Reinterpret a legacy-default soft-compaction ceiling as auto.
+def _literal_ceiling_value(original_raw: str) -> object:
+    """The ceiling value as WRITTEN in the file, before env substitution.
 
-    Mutates the RAW config dict (pre-pydantic) in place. Only the exact
-    legacy default is ever touched; any other explicit value — and a
-    deliberate 750_000 whose marker carries operator provenance — passes
-    through untouched.
+    Returns the parsed scalar (int for a literal number, str for a ``${VAR}``
+    placeholder) or None when absent/unparseable — only an exact literal
+    ``750000`` int qualifies as the legacy default.
     """
-    codex = data.get("openai_codex")
-    if not isinstance(codex, dict):
-        return
-    compression = codex.get("context_compression")
-    if not isinstance(compression, dict):
-        return
-    if compression.get("max_context_chars") != LEGACY_MAX_CONTEXT_CHARS:
-        return
+    try:
+        node: object = yaml.safe_load(original_raw)
+    except yaml.YAMLError:
+        return None
+    for segment in _CEILING_PATH:
+        if not isinstance(node, dict):
+            return None
+        node = node.get(segment)
+    return node
 
+
+def _record_completion(marker: Path, reason: str) -> None:
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        marker.write_text(
+            json.dumps(
+                {
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "reason": reason,
+                    "completed_at": datetime.now(UTC).isoformat(),
+                },
+                indent=2,
+            )
+        )
+    except OSError as exc:
+        # Self-healing: after a successful rewrite the file no longer says
+        # 750000, so the next boot records completion via the vacuous branch.
+        log.warning(
+            "Could not record ceiling-migration completion at %s: %s", marker, exc
+        )
+
+
+def apply_legacy_ceiling_migration(
+    data: dict, config_path: str | Path, original_raw: str
+) -> None:
+    """Run the one-time legacy-ceiling migration gate.
+
+    ``data`` is the substituted raw config dict (pre-pydantic), mutated in
+    place only when the migration fires; ``original_raw`` is the file text
+    BEFORE env substitution, used to distinguish a literal legacy default
+    from a placeholder-resolved value.
+    """
     marker = ceiling_marker_path(config_path)
     if marker.exists():
-        if _marker_has_operator_provenance(marker):
-            # The compression section was deliberately saved at some point:
-            # the persisted value is operator-authored, honor it verbatim.
-            return
-        compression["max_context_chars"] = None
-        log.info(
-            "max_context_chars %d carries legacy provenance; interpreting as "
-            "auto (model-derived). Save the compression settings once to make "
-            "an explicit value stick (provenance ledger: %s).",
-            LEGACY_MAX_CONTEXT_CHARS,
-            marker,
+        return
+
+    if _literal_ceiling_value(original_raw) != LEGACY_MAX_CONTEXT_CHARS:
+        _record_completion(marker, reason="not_applicable")
+        return
+
+    try:
+        # Resolve the symlink so the atomic replace lands on the real file
+        # instead of severing a packaged /opt→/etc link. The surgical writer
+        # preserves comments, ordering, and unrelated ${VAR} placeholders.
+        from .persistence import patch_config_paths
+
+        patch_config_paths(
+            [(_CEILING_PATH, None)], path=Path(config_path).resolve()
+        )
+    except Exception as exc:  # noqa: BLE001 — boot must not die on migration I/O
+        compression = data.get("openai_codex", {}).get("context_compression")
+        if isinstance(compression, dict):
+            compression["max_context_chars"] = None
+        log.warning(
+            "Could not rewrite legacy max_context_chars to auto (%s); "
+            "interpreting as auto for this boot only — the migration retries "
+            "next boot.",
+            exc,
         )
         return
 
-    compression["max_context_chars"] = None
-
+    compression = data.get("openai_codex", {}).get("context_compression")
+    if isinstance(compression, dict):
+        compression["max_context_chars"] = None
     log.warning(
-        "Migrated legacy max_context_chars %d to auto (model-derived). The "
-        "config file is not modified; provenance is recorded at %s. Saving "
-        "the compression settings makes any explicit value — including "
-        "%d — stick permanently.",
+        "Migrated legacy max_context_chars %d to auto (model-derived): the "
+        "config file now records null for this setting. Completion recorded "
+        "at %s; any explicit value set from now on — including %d — is "
+        "honored verbatim.",
         LEGACY_MAX_CONTEXT_CHARS,
         marker,
         LEGACY_MAX_CONTEXT_CHARS,
     )
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(
-            json.dumps(
-                {
-                    "migration": "legacy_max_context_chars_to_auto",
-                    "legacy_value": LEGACY_MAX_CONTEXT_CHARS,
-                    "migrated_at": datetime.now(UTC).isoformat(),
-                },
-                indent=2,
-            )
-        )
-    except OSError as exc:
-        log.warning(
-            "Could not record the ceiling-migration marker at %s (%s); the "
-            "auto interpretation still applies this boot and the migration "
-            "retries next boot.",
-            marker,
-            exc,
-        )
-
-
-def _marker_has_operator_provenance(marker: Path) -> bool:
-    try:
-        recorded = json.loads(marker.read_text())
-    except (OSError, ValueError):
-        # Unreadable/corrupt marker: fail toward the legacy interpretation —
-        # the conservative direction (auto), and the next deliberate save
-        # rewrites the marker cleanly.
-        return False
-    return isinstance(recorded, dict) and bool(recorded.get("operator_saved"))
-
-
-def record_ceiling_operator_provenance(config_path: str | Path) -> None:
-    """Deliberate persistence of compression settings stamps operator provenance.
-
-    Called by the config persistence layer whenever the compression section
-    is written: from that moment the persisted value is operator-authored
-    and must be honored verbatim on every future load — including a
-    deliberate re-set of the legacy 750_000. The marker is stamped, never
-    deleted: a bare deletion would make a still-materialized 750_000 look
-    legacy again on the next load.
-    """
-    marker = ceiling_marker_path(config_path)
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text(
-            json.dumps(
-                {
-                    "migration": "legacy_max_context_chars_to_auto",
-                    "operator_saved": True,
-                    "saved_at": datetime.now(UTC).isoformat(),
-                },
-                indent=2,
-            )
-        )
-    except OSError as exc:
-        log.warning(
-            "Could not stamp operator provenance on %s: %s — a persisted "
-            "legacy-equal ceiling may keep its auto interpretation.",
-            marker,
-            exc,
-        )
+    _record_completion(marker, reason="migrated")
