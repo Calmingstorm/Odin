@@ -24,7 +24,7 @@ import hashlib
 from dataclasses import asdict
 from typing import Any
 
-from ..config.schema import model_rejects_effort
+from ..config.schema import CODEX_REASONING_EFFORTS, model_rejects_effort
 from ..config.sensitivity import is_storage_sensitive_key as _is_sensitive_key
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
@@ -95,7 +95,7 @@ _GEN_IDENTITY_KEYS = {
 _GEN_IDENTITY_V3_KEYS = {"provider", "model", "effort", "ladder"}
 _GEN_ATTEMPT_KEYS = {"attempt", "account_key", "server_input_tokens"}
 _GEN_PROVIDERS = {"codex", "ollama", "kimi"}
-_GEN_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+_GEN_EFFORTS = CODEX_REASONING_EFFORTS
 
 #: Rebuilt by the resume flow from live state. Each entry documents why it
 #: is NOT persisted:
@@ -119,6 +119,7 @@ RECONSTRUCTED_FIELDS: frozenset[str] = frozenset({
     "tools",
     "policy",
     "trace",
+    "_generation_budget_snapshot",
     "durability",
 })
 

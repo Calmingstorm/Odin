@@ -51,6 +51,8 @@ def _generation_facts(
     effort: str | None = "low",
     ladder: list[int] | tuple[int, ...] = (400_000, 280_000),
     rescue_passes: int = 1,
+    account_key: str | None = None,
+    server_input_tokens: int | None = None,
 ) -> dict:
     return {
         "provider": "codex",
@@ -61,8 +63,8 @@ def _generation_facts(
         "attempts": [
             {
                 "attempt": attempt,
-                "account_key": None,
-                "server_input_tokens": None,
+                "account_key": account_key,
+                "server_input_tokens": server_input_tokens,
             }
             for attempt in range(1, rescue_passes + 1)
         ],
@@ -806,6 +808,50 @@ class TestResumeIdentityReconstruction:
         assert gw.calls[0]["kwargs"]["model"] == "gpt-5.5"
         assert gw.calls[0]["kwargs"]["reasoning_effort"] == "low"
         assert gw.breaker_keys == [("gpt-5.5", "codex")]
+
+    async def test_resumed_acceptance_publishes_latch_and_observer_evidence(self):
+        """A successful first request after resume completes the persisted
+        overflow pair exactly like uninterrupted recovery."""
+        from src.llm.context_compressor import estimate_message_chars
+
+        account = "a" * 32
+        recorded = []
+
+        async def script(n, messages):
+            return SimpleNamespace(
+                text="ok",
+                tool_calls=[],
+                stop_reason="end_turn",
+                server_input_tokens=408_004,
+                account_key=account,
+                provenance_model="gpt-5.5",
+            )
+
+        gw = _Gateway(script)
+        st = _chat_state(_history(4, 100) + _ENVELOPE)
+        st._rescue_passes = 1
+        st._gen_identity = _generation_facts(
+            rescue_passes=1,
+            account_key=account,
+            server_input_tokens=272_000,
+        )
+        runner = _runner(gw)
+
+        async def record(overflow, response):
+            recorded.append((overflow, response))
+
+        runner._record_window_evidence = record
+        expected_latch = estimate_message_chars(st.messages)
+        kind, response = await runner._call_llm(st)
+        assert kind == "ok"
+        assert st._char_latch == expected_latch
+        assert len(recorded) == 1
+        overflow, accepted = recorded[0]
+        assert overflow.code == "context_length_exceeded"
+        assert overflow.account_key == account
+        assert overflow.server_input_tokens == 272_000
+        assert accepted is response
+        assert st._gen_identity is None and st._rescue_passes == 0
 
     async def test_missing_frozen_provider_ends_honestly(self):
         """The frozen provider's client is gone: the generation ends as an

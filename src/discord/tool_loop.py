@@ -38,6 +38,8 @@ import discord
 
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
+from ..llm.context_budget import ContextBudgetSnapshot, snapshot_for_codex_config
+from ..llm.context_compressor import SurfaceBoundary
 from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ..llm.secret_scrubber import scrub_output_secrets
@@ -66,7 +68,6 @@ if TYPE_CHECKING:
     from .response_guards import StuckLoopTracker
     from .tool_catalog import ToolCatalog
     from .turn_recorder import TurnRecorder
-from ..llm.context_compressor import SurfaceBoundary
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .llm_gateway import LLMServingIdentity
 from .response_guards import (
@@ -402,6 +403,9 @@ class _ChatTurn:
     _char_latch: int | None = None
     _rescue_passes: int = 0
     _gen_identity: dict | None = None
+    # Process-local, per-generation cache captured beside serving identity.
+    # Rebuilt from durable _gen_identity on resume; never serialized directly.
+    _generation_budget_snapshot: ContextBudgetSnapshot | None = None
     # Process-local durability handle (write-invariant driver). Classified
     # RECONSTRUCTED in the checkpoint codec: a resumed turn gets a fresh
     # handle bound to the resume lease, never a deserialized one.
@@ -473,6 +477,9 @@ class ToolLoopDeps:
     # Called with (TurnKey, generation) when a turn suspends — wiring points
     # it at the resume manager's auto-resume registration.
     on_turn_suspended: Callable | None = None
+    # Passive window observer (phase 5): downward clamp source + rescue
+    # evidence sink. None = feature-inert (tests, minimal constructions).
+    window_observer: object | None = None
 
 
 class ToolLoopRunner:
@@ -497,6 +504,7 @@ class ToolLoopRunner:
         self._loop_manager = deps.loop_manager
         self._stuck_loop_tracker_cls = deps.stuck_loop_tracker_cls
         self._turn_store = deps.turn_store
+        self._window_observer = deps.window_observer
         self._on_turn_suspended = deps.on_turn_suspended
 
     # ------------------------------------------------------------------
@@ -650,9 +658,16 @@ class ToolLoopRunner:
             # ONE capture of this uninterrupted generation's serving
             # identity: soft compaction, preflight, breaker admission, and
             # every physical retry all describe this exact client/model/effort.
-            # Durable suspend/resume persistence remains phase 4.
+            # Durable suspend/resume persistence remains phase 4. Capture the
+            # serving identity and ONE budget snapshot together; soft policy
+            # and rescue must never observe different clamp generations.
             config = self._get_config()
             serving = self._llm_gateway.capture_serving_identity(config)
+            if st._gen_identity:
+                budget_snapshot = self._snapshot_from_generation_facts(st._gen_identity)
+            else:
+                budget_snapshot = self._capture_budget_snapshot(serving, config)
+            st._generation_budget_snapshot = budget_snapshot
             if not self._maybe_compress(st, serving.client, config):
                 return await self._llm_error_done(
                     st,
@@ -664,7 +679,12 @@ class ToolLoopRunner:
                     ),
                 )
 
-            kind, val = await self._call_llm(st, serving_identity=serving, request_config=config)
+            kind, val = await self._call_llm(
+                st,
+                serving_identity=serving,
+                request_config=config,
+                budget_snapshot=budget_snapshot,
+            )
             if kind == "done":
                 return val
             llm_resp = val
@@ -930,6 +950,30 @@ class ToolLoopRunner:
             durability=durability,
         )
 
+    def _observed_clamp(self, model: object) -> int | None:
+        """The window observer's active clamp for ``model`` (phase 5)."""
+        observer = getattr(self, "_window_observer", None)
+        if observer is None:
+            return None
+        try:
+            return observer.active_clamp(model)
+        except Exception:
+            log.exception("active_clamp failed (non-fatal); treating as unclamped")
+            return None
+
+    async def _record_window_evidence(self, overflow: object, response: object) -> None:
+        """Feed one rescue's overflow→acceptance pair to the observer.
+
+        Total: evidence is never worth failing the request that just
+        succeeded (plan §11 invariant)."""
+        observer = getattr(self, "_window_observer", None)
+        if observer is None or overflow is None:
+            return
+        try:
+            await observer.record_rescue(overflow=overflow, response=response)
+        except Exception:
+            log.exception("window-evidence recording failed (non-fatal)")
+
     def _clear_active(self, st: _ChatTurn) -> None:
         self._channel_state.clear_active_request(st._ch_id, st._req_id)
 
@@ -954,11 +998,42 @@ class ToolLoopRunner:
             False,
         )
 
+    @staticmethod
+    def _snapshot_from_generation_facts(facts: dict) -> ContextBudgetSnapshot:
+        payload = facts.get("budget") or {}
+        primary = payload.get("primary_chars", 0)
+        return ContextBudgetSnapshot(
+            canonical_model=facts.get("model", ""),
+            base_budget=0,
+            base_source="persisted",
+            effective_budget=0,
+            clamp_applied=False,
+            working_budget=0,
+            compactable_tokens=0,
+            derived_chars=primary,
+            primary_chars=primary,
+            ceiling_applied=False,
+            ladder=tuple(facts.get("ladder") or ()),
+        )
+
+    def _capture_budget_snapshot(self, serving, config) -> ContextBudgetSnapshot:
+        """Capture one budget snapshot beside one serving identity."""
+        compressor = self._get_context_compressor()
+        model_for_budget = serving.model if serving.is_codex else None
+        return snapshot_for_codex_config(
+            model_for_budget,
+            getattr(config, "openai_codex", None),
+            max_context_chars=(compressor.max_context_chars if compressor is not None else None),
+            observed_clamp=self._observed_clamp(model_for_budget),
+        )
+
     def _maybe_compress(
         self,
         st: _ChatTurn,
         request_client: object = None,
         request_config: object = None,
+        *,
+        budget_snapshot=None,
     ) -> bool:
         """Apply optional soft compaction and the mandatory accepted-size latch.
 
@@ -969,8 +1044,9 @@ class ToolLoopRunner:
         because resending a size already refused by the server is forbidden.
         """
         latch = getattr(st, "_char_latch", None)
+        if budget_snapshot is None:
+            budget_snapshot = getattr(st, "_generation_budget_snapshot", None)
         try:
-            from ..llm.context_budget import snapshot_for_codex_config
             from ..llm.context_compressor import (
                 SurfaceBoundary,
                 compress_tool_context,
@@ -979,24 +1055,29 @@ class ToolLoopRunner:
             )
 
             compressor = self._get_context_compressor()
-            if request_client is None and request_config is None:
-                request_client = self._llm_gateway.active_client
-            model_for_budget = (
-                getattr(request_client, "model", None)
-                if hasattr(request_client, "reasoning_effort")
-                else None
-            )
-            snapshot = snapshot_for_codex_config(
-                model_for_budget,
-                getattr(
-                    request_config if request_config is not None else self._get_config(),
-                    "openai_codex",
-                    None,
-                ),
-                max_context_chars=(
-                    compressor.max_context_chars if compressor is not None else None
-                ),
-            )
+            if budget_snapshot is None:
+                if request_client is None and request_config is None:
+                    request_client = self._llm_gateway.active_client
+                model_for_budget = (
+                    getattr(request_client, "model", None)
+                    if hasattr(request_client, "reasoning_effort")
+                    else None
+                )
+                from ..llm import context_budget
+
+                budget_snapshot = context_budget.snapshot_for_codex_config(
+                    model_for_budget,
+                    getattr(
+                        request_config if request_config is not None else self._get_config(),
+                        "openai_codex",
+                        None,
+                    ),
+                    max_context_chars=(
+                        compressor.max_context_chars if compressor is not None else None
+                    ),
+                    observed_clamp=self._observed_clamp(model_for_budget),
+                )
+            snapshot = budget_snapshot
             boundary = SurfaceBoundary(
                 request_start=getattr(st, "_boundary_request_start", 0),
                 elided_replay=getattr(st, "_boundary_elided_replay", 0),
@@ -1021,9 +1102,7 @@ class ToolLoopRunner:
                 )
                 log.info("context_compressor: trimmed %d chars", saved)
             except Exception:
-                log.exception(
-                    "context_compressor failed (non-fatal); continuing with full context"
-                )
+                log.exception("context_compressor failed (non-fatal); continuing with full context")
 
         if latch is None:
             return True
@@ -1059,6 +1138,7 @@ class ToolLoopRunner:
         *,
         serving_identity=None,
         request_config: object = None,
+        budget_snapshot=None,
     ):
         """Guarded LLM call with typing indicator and deadline-based recovery.
 
@@ -1169,28 +1249,37 @@ class ToolLoopRunner:
         # effort/ladder) so the continued generation stays the same
         # generation — and continues at the NEXT rung via the persisted
         # st._rescue_passes, never re-arming rung one.
-        from ..llm.context_budget import snapshot_for_codex_config
+        from ..llm.context_compressor import estimate_message_chars
 
-        _snapshot = None
         if st._gen_identity:
-            # Axes were reconstructed onto serving_identity above; the facts
-            # here supply the frozen budget ladder so the resumed generation
-            # continues at the NEXT rung of the SAME plan.
-            _ladder: tuple[int, ...] = tuple(st._gen_identity.get("ladder") or ())
+            # The durable generation owns its exact budget snapshot; current
+            # observer/config state is irrelevant until the next generation.
+            _snapshot = self._snapshot_from_generation_facts(st._gen_identity)
+        elif budget_snapshot is not None:
+            _snapshot = budget_snapshot
         else:
-            _chat_compressor = self._get_context_compressor()
             _root_config = request_config if request_config is not None else self._get_config()
-            _snapshot = snapshot_for_codex_config(
-                serving_identity.model if serving_identity.is_codex else None,
-                getattr(_root_config, "openai_codex", None),
-                max_context_chars=(
-                    _chat_compressor.max_context_chars if _chat_compressor is not None else None
-                ),
-            )
-            _ladder = _snapshot.ladder
+            _snapshot = self._capture_budget_snapshot(serving_identity, _root_config)
+        _ladder: tuple[int, ...] = _snapshot.ladder
         _generation_deadline = time.monotonic() + deadline_seconds
         _pending_latch: int | None = None
         _rescued_this_call = False
+        _last_overflow: BaseException | None = None
+        if st._gen_identity and st._rescue_passes:
+            # Resume reconstructs the pending rejection from durable attempt
+            # facts. The already-compressed payload is the acceptance
+            # candidate; on success it publishes both the latch and evidence.
+            _pending_latch = estimate_message_chars(st.messages)
+            prior_attempts = st._gen_identity.get("attempts") or []
+            prior = prior_attempts[-1] if prior_attempts else {}
+            _last_overflow = LLMRequestError(
+                "resumed structural context overflow",
+                provider=serving_identity.provider,
+                model=serving_identity.model,
+                code="context_length_exceeded",
+                account_key=prior.get("account_key"),
+                server_input_tokens=prior.get("server_input_tokens"),
+            )
 
         # Typing is best-effort (shared helper): a typing failure — setup or
         # cleanup — must never fail the call or misclassify provider errors.
@@ -1215,6 +1304,7 @@ class ToolLoopRunner:
                             # rule); the generation is settled, so its frozen
                             # facts and rung phase reset for the next one.
                             st._char_latch = _pending_latch
+                            await self._record_window_evidence(_last_overflow, llm_resp)
                         if st._gen_identity is not None or st._rescue_passes:
                             st._gen_identity = None
                             st._rescue_passes = 0
@@ -1249,6 +1339,7 @@ class ToolLoopRunner:
                         st.messages = compressed
                         st._rescue_passes += 1
                         _rescued_this_call = True
+                        _last_overflow = overflow_exc
                         if report.get("boundary_request_start") is not None:
                             st._boundary_request_start = report["boundary_request_start"]
                             st._boundary_elided_replay = report["boundary_elided_replay"]
@@ -2240,9 +2331,13 @@ class ToolLoopRunner:
             # every physical retry describe this exact client/model/effort.
             _config = self._get_config()
             _serving = _serving_identity_for(self._llm_gateway, _config)
-            self._maybe_compress_loop(st, _serving, _config)
+            _budget_snapshot = self._capture_budget_snapshot(_serving, _config)
+            self._maybe_compress_loop(st, _serving, _config, budget_snapshot=_budget_snapshot)
             kind, val = await self._call_loop_llm(
-                st, serving_identity=_serving, request_config=_config
+                st,
+                serving_identity=_serving,
+                request_config=_config,
+                budget_snapshot=_budget_snapshot,
             )
             if kind == "done":
                 return val
@@ -2405,7 +2500,7 @@ class ToolLoopRunner:
         )
         return outcome_text
 
-    def _maybe_compress_loop(self, st: _LoopTurn, serving, config) -> None:
+    def _maybe_compress_loop(self, st: _LoopTurn, serving, config, *, budget_snapshot=None) -> None:
         """Loop pre-send compaction (campaign phase 4 — loops previously had
         NO soft path at all): the shared soft pass at the serving model's
         derived target once tool iterations exist, plus the invocation-local
@@ -2413,20 +2508,16 @@ class ToolLoopRunner:
         Non-fatal like every compaction guard."""
         compressor = self._get_context_compressor()
         try:
-            from ..llm.context_budget import snapshot_for_codex_config
             from ..llm.context_compressor import (
                 compress_tool_context,
                 emergency_compress_for_window,
                 estimate_message_chars,
             )
 
-            model_for_budget = serving.model if serving.is_codex else None
-            snapshot = snapshot_for_codex_config(
-                model_for_budget,
-                getattr(config, "openai_codex", None),
-                max_context_chars=(
-                    compressor.max_context_chars if compressor is not None else None
-                ),
+            snapshot = (
+                budget_snapshot
+                if budget_snapshot is not None
+                else self._capture_budget_snapshot(serving, config)
             )
             if (
                 compressor is not None
@@ -2470,6 +2561,7 @@ class ToolLoopRunner:
         *,
         serving_identity=None,
         request_config=None,
+        budget_snapshot=None,
     ):
         """LLM call for one loop iteration with deadline-based recovery.
 
@@ -2509,13 +2601,10 @@ class ToolLoopRunner:
                 **pin_kwargs,
             )
 
-        from ..llm.context_budget import snapshot_for_codex_config
-
-        _compressor = self._get_context_compressor()
-        _snapshot = snapshot_for_codex_config(
-            serving_identity.model if serving_identity.is_codex else None,
-            getattr(request_config, "openai_codex", None),
-            max_context_chars=(_compressor.max_context_chars if _compressor is not None else None),
+        _snapshot = (
+            budget_snapshot
+            if budget_snapshot is not None
+            else self._capture_budget_snapshot(serving_identity, request_config)
         )
         # ONE monotonic deadline for the whole logical generation: the first
         # attempt runs on the policy's own budget; rescue retries pay for the
@@ -2523,6 +2612,7 @@ class ToolLoopRunner:
         generation_deadline = time.monotonic() + policy.deadline_seconds
         rescue_passes = 0
         pending_latch: int | None = None
+        last_overflow: BaseException | None = None
 
         try:
             # Pre-admission fast-fail, same contract as the chat path — and
@@ -2549,6 +2639,7 @@ class ToolLoopRunner:
                     if pending_latch is not None:
                         # Server-accepted evidence, per the settled latch rule.
                         st._char_latch = pending_latch
+                        await self._record_window_evidence(last_overflow, response)
                     break
                 except Exception as overflow_exc:
                     from ..llm.errors import LLMRequestError
@@ -2589,6 +2680,7 @@ class ToolLoopRunner:
                             envelope_len=_LOOP_ENVELOPE_LEN,
                         )
                     pending_latch = report["compressed_chars"]
+                    last_overflow = overflow_exc
                     if generation_deadline - time.monotonic() <= 0:
                         # Same rule as chat: recovery deadlines bound waiting,
                         # not an admitted stream — never start a request

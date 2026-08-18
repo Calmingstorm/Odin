@@ -327,6 +327,70 @@ class TestRound2GenerationIdentityPins:
         serving = runner._call_llm.await_args.kwargs["serving_identity"]
         assert serving.model == "gpt-5.6-sol"
 
+    async def test_chat_soft_and_rescue_share_one_observer_snapshot(self):
+        from src.llm.errors import LLMRequestError
+        from src.llm.recovery import RecoveryPolicy
+        from tests.test_typing_resilience import FakeChannel, _make_runner, _stub_state
+
+        class ChangingObserver:
+            def __init__(self):
+                self.calls = 0
+
+            def active_clamp(self, _model):
+                self.calls += 1
+                return 500_000 if self.calls == 1 else 100_000
+
+        class Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, **_kwargs):
+                raise LLMRequestError(
+                    "overflow",
+                    provider="codex",
+                    model=self.model,
+                    code="context_length_exceeded",
+                )
+
+        config = SimpleNamespace(
+            llm_provider=SimpleNamespace(active_provider="codex"),
+            openai_codex=OpenAICodexConfig(),
+        )
+        client = Client()
+        gateway = LLMGateway(
+            get_config=lambda: config,
+            codex_client=client,
+            ollama_client=None,
+            kimi_client=None,
+            subsystem_guard=None,
+            auxiliary_llm_client=None,
+            cost_tracker=None,
+            sessions=SimpleNamespace(),
+            reflector=SimpleNamespace(),
+            recovery_policy_source=lambda: RecoveryPolicy(deadline_seconds=1),
+        )
+        runner, _saved, _cleared = _make_runner()
+        runner._get_config = lambda: config
+        runner._llm_gateway = gateway
+        runner._window_observer = ChangingObserver()
+        runner._judge_entry_stuck = AsyncMock(return_value=None)
+        runner._get_context_compressor = lambda: None
+        st = _stub_state(channel=FakeChannel())
+        st._trajectory.context_recoveries = []
+        st.messages = [
+            {"role": "user", "content": "history" * 80_000},
+            {"role": "developer", "content": "preamble"},
+            {"role": "user", "content": "current"},
+        ]
+        st._boundary_request_start = 1
+        st._boundary_envelope_len = 2
+        result = await runner._run_chat_iterations(st)
+        assert result[2] is True
+        assert runner._window_observer.calls == 1
+        # Clamp 500K at 60% utilization yields this frozen ladder. A second
+        # read's 100K clamp would instead produce a much smaller ladder.
+        assert st._trajectory.context_recoveries[0]["target_chars"] == 451_500
+
     async def test_chat_physical_retries_keep_captured_identity(self):
         from src.llm.errors import LLMTransportError
         from src.llm.recovery import RecoveryPolicy
@@ -476,3 +540,78 @@ class TestRound2GenerationIdentityPins:
             await runner._call_llm(st, serving_identity=frozen)
         assert calls == 0
         assert breaker.snapshot()["state"] == "open"
+
+class TestSingleSnapshotAcrossLoopGeneration:
+    async def test_loop_soft_and_rescue_share_one_observer_snapshot(self):
+        from src.discord.llm_gateway import LLMServingIdentity
+        from src.llm.context_compressor import SurfaceBoundary
+        from src.llm.errors import LLMRequestError
+        from tests.test_chat_loop_recovery import _Gateway, _runner
+
+        class ChangingObserver:
+            def __init__(self):
+                self.calls = 0
+
+            def active_clamp(self, _model):
+                self.calls += 1
+                return 500_000 if self.calls == 1 else 100_000
+
+        class Client(SimpleNamespace):
+            calls = 0
+
+            async def chat_with_tools(self, **_kwargs):
+                self.calls += 1
+                if self.calls == 1:
+                    raise LLMRequestError(
+                        "overflow",
+                        provider="codex",
+                        model=self.model,
+                        code="context_length_exceeded",
+                    )
+                return SimpleNamespace(
+                    text="ok",
+                    tool_calls=[],
+                    provenance_provider="codex",
+                    provenance_model=self.model,
+                )
+
+        client = Client(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gw = _Gateway(None)
+        gw.client = client
+        gw.codex_client = client
+        runner = _runner(gw)
+        observer = ChangingObserver()
+        runner._window_observer = observer
+        config = SimpleNamespace(openai_codex=OpenAICodexConfig())
+        serving = LLMServingIdentity("codex", client, client.model, client.reasoning_effort)
+        snapshot = runner._capture_budget_snapshot(serving, config)
+        st = SimpleNamespace(
+            messages=[
+                {"role": "user", "content": "prior" * 100_000},
+                {"role": "assistant", "content": "ok"},
+                {"role": "user", "content": "goal"},
+            ],
+            system_prompt="sys",
+            tools=[],
+            _boundary=SurfaceBoundary(request_start=2, envelope_len=1),
+            _char_latch=None,
+            context_recoveries=[],
+            _iteration_index=0,
+            _trajectory=None,
+            _loop_details=[],
+            _trace=None,
+            _loop_id="L",
+            channel_id_str="c",
+            prompt="p",
+            user_id="u",
+        )
+        runner._maybe_compress_loop(st, serving, config, budget_snapshot=snapshot)
+        kind, _ = await runner._call_loop_llm(
+            st,
+            serving_identity=serving,
+            request_config=config,
+            budget_snapshot=snapshot,
+        )
+        assert kind == "ok"
+        assert observer.calls == 1
+        assert st.context_recoveries[0]["target_chars"] == 451_500

@@ -66,6 +66,7 @@ from .knowledge_mem import (
 )
 from .llm_admin import (  # noqa: E501
     register_connection_pools,
+    register_context_windows,
     register_kimi_admin,
     register_llm_provider,
     register_ollama_admin,
@@ -177,6 +178,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_llm_provider(routes, bot)
 
     register_provider_config(routes, bot)
+
+    register_context_windows(routes, bot)
 
     register_ollama_admin(routes, bot)
 

@@ -368,6 +368,25 @@ class CodexChatClient:
     def pool_stats(self) -> dict:
         return self.get_pool_metrics()
 
+    def eligible_account_keys_snapshot(self) -> frozenset[str]:
+        """Opaque identities for accounts the auth layer may serve now."""
+        try:
+            from .account_key import opaque_account_key
+
+            if isinstance(self.auth, CodexAuthPool):
+                raw_ids = self.auth.eligible_account_ids_snapshot()
+            else:
+                raw = self.auth.get_account_id()
+                raw_ids = frozenset({raw}) if isinstance(raw, str) and raw else frozenset()
+            return frozenset(
+                key
+                for account_id in raw_ids
+                if (key := opaque_account_key(account_id)) is not None
+            )
+        except Exception:
+            log.exception("Could not resolve eligible Codex account keys")
+            return frozenset()
+
     def get_pool_metrics(self) -> dict:
         """Return HTTP connection pool metrics for observability."""
         active = 0

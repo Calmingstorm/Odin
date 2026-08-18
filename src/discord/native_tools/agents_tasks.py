@@ -115,14 +115,22 @@ def _parse_spawn_overrides(
     from ...config.schema import CODEX_REASONING_EFFORTS
 
     if "model" in inp and model_mode != "auto":
-        return None, None, (
-            "model is not accepted because Agent Model is not set to Auto — select "
-            "'Auto — choose per spawn' in the WebUI to allow per-spawn model selection"
+        return (
+            None,
+            None,
+            (
+                "model is not accepted because Agent Model is not set to Auto — select "
+                "'Auto — choose per spawn' in the WebUI to allow per-spawn model selection"
+            ),
         )
     if "reasoning_effort" in inp and effort_mode != "auto":
-        return None, None, (
-            "reasoning_effort is not accepted because Agent Reasoning is not set to Auto — "
-            "select 'Auto — choose per spawn' in the WebUI to allow per-spawn effort selection"
+        return (
+            None,
+            None,
+            (
+                "reasoning_effort is not accepted because Agent Reasoning is not set to Auto — "
+                "select 'Auto — choose per spawn' in the WebUI to allow per-spawn effort selection"
+            ),
         )
 
     raw_model = inp.get("model")
@@ -165,7 +173,18 @@ def _spawn_pair_error(
     return effort_incompatibility_error(model_now, effort_now)
 
 
-def _generation_budget_snapshot(cfg, client, resolved_model, compressor):
+def _observer_clamp(observer, model) -> int | None:
+    """Total clamp lookup — a broken observer never breaks a spawn."""
+    if observer is None:
+        return None
+    try:
+        return observer.active_clamp(model)
+    except Exception:
+        log.exception("active_clamp failed (non-fatal); treating as unclamped")
+        return None
+
+
+def _generation_budget_snapshot(cfg, client, resolved_model, compressor, observer=None):
     """The frozen generation's budget snapshot, from the SAME identity capture
     as the request (collision-gated: non-Codex clients get unknown-model
     math regardless of what their model is named)."""
@@ -178,9 +197,8 @@ def _generation_budget_snapshot(cfg, client, resolved_model, compressor):
     return snapshot_for_codex_config(
         model_for_budget,
         getattr(cfg, "openai_codex", None),
-        max_context_chars=(
-            getattr(compressor, "max_context_chars", None) if compressor else None
-        ),
+        max_context_chars=(getattr(compressor, "max_context_chars", None) if compressor else None),
+        observed_clamp=_observer_clamp(observer, model_for_budget),
     )
 
 
@@ -203,6 +221,7 @@ def _capture_agent_generation_plan(
     *,
     model_override: str | None,
     effort_override: str | None,
+    observer=None,
 ) -> dict:
     """Capture one immutable agent-generation identity and budget plan.
 
@@ -235,11 +254,14 @@ def _capture_agent_generation_plan(
             client,
             resolved_model,
             get_compressor(),
+            observer=observer,
         ),
     }
 
 
-def _make_budget_snapshot_provider(get_config, get_client, get_compressor, model_override):
+def _make_budget_snapshot_provider(
+    get_config, get_client, get_compressor, model_override, observer=None
+):
     """Per-generation context-budget snapshot for a spawned agent.
 
     Resolves the EFFECTIVE agent model exactly like the iteration callback
@@ -274,9 +296,35 @@ def _make_budget_snapshot_provider(get_config, get_client, get_compressor, model
             max_context_chars=(
                 getattr(compressor, "max_context_chars", None) if compressor else None
             ),
+            observed_clamp=_observer_clamp(observer, model_for_budget),
         )
 
     return provider
+
+
+def _make_evidence_recorder(observer):
+    """Adapter feeding an agent rescue's (overflow, response-dict) pair to
+    the observer. The agent callback returns a plain dict, so the acceptance
+    facts are lifted into the attribute shape ``record_rescue`` reads.
+    Total — evidence never fails the iteration that just succeeded."""
+    if observer is None:
+        return None
+
+    async def recorder(overflow, response):
+        try:
+            if isinstance(response, dict):
+                from types import SimpleNamespace
+
+                response = SimpleNamespace(
+                    account_key=response.get("account_key"),
+                    server_input_tokens=response.get("server_input_tokens"),
+                    provenance_model=response.get("model"),
+                )
+            await observer.record_rescue(overflow=overflow, response=response)
+        except Exception:
+            log.exception("agent window-evidence recording failed (non-fatal)")
+
+    return recorder
 
 
 def _provenance_stamp(resp: object, client: object) -> dict:
@@ -322,11 +370,15 @@ class AgentTaskDeps:
     turn_recorder: TurnRecorder  # lifecycle webhook emission
     prompt_builder: PromptBuilder
     tool_catalog: ToolCatalog
+    # Passive window observer (phase 5): clamp source for agent budget
+    # snapshots + evidence sink for agent rescues. None = feature-inert.
+    window_observer: object | None = None
 
 
 class AgentTaskTools:
     def __init__(self, deps: AgentTaskDeps) -> None:
         self._get_config = deps.get_config
+        self._window_observer = deps.window_observer
         self._llm_gateway = deps.llm_gateway
         self._channel_state = deps.channel_state
         self._tool_executor = deps.tool_executor
@@ -658,9 +710,7 @@ class AgentTaskTools:
         resp = await generate_with_recovery(_attempt, policy=policy, breaker=breaker)
         # Bypass-path success clears a latched llm_* guard key — provenance
         # only, never the post-await active provider.
-        self._llm_gateway.notify_generation_success(
-            getattr(resp, "provenance_provider", None)
-        )
+        self._llm_gateway.notify_generation_success(getattr(resp, "provenance_provider", None))
         return resp
 
     async def _handle_spawn_agent(self, message: object, inp: dict) -> str:
@@ -728,9 +778,7 @@ class AgentTaskTools:
             if parent is not None
             else configured_max_depth
         )
-        tools = filter_agent_tools(
-            all_tools, depth=parent_depth, max_depth=effective_max_depth
-        )
+        tools = filter_agent_tools(all_tools, depth=parent_depth, max_depth=effective_max_depth)
 
         # Iteration callback — wraps Codex chat_with_tools, returns dict
         async def _iteration_cb(
@@ -754,6 +802,7 @@ class AgentTaskTools:
                     self._get_context_compressor,
                     model_override=model_override,
                     effort_override=effort_override,
+                    observer=self._window_observer,
                 )
                 generation_state["plan"] = plan
             client = plan["client"]
@@ -769,6 +818,10 @@ class AgentTaskTools:
                 "text": resp.text,
                 "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
                 "stop_reason": resp.stop_reason,
+                # Phase 5: server acceptance evidence rides the callback dict
+                # so a rescued iteration can qualify a window clamp.
+                "server_input_tokens": getattr(resp, "server_input_tokens", None),
+                "account_key": getattr(resp, "account_key", None),
                 **_provenance_stamp(resp, client),
             }
 
@@ -824,9 +877,7 @@ class AgentTaskTools:
         iteration_timeout = (
             getattr(agents_cfg, "iteration_timeout_seconds", 900) if agents_cfg else 900
         )
-        max_lifetime = (
-            getattr(agents_cfg, "max_lifetime_seconds", 14400) if agents_cfg else 14400
-        )
+        max_lifetime = getattr(agents_cfg, "max_lifetime_seconds", 14400) if agents_cfg else 14400
 
         agent_id = self._agent_manager.spawn(
             label=label,
@@ -866,7 +917,9 @@ class AgentTaskTools:
                 lambda: self._llm_gateway.active_client,
                 self._get_context_compressor,
                 model_override,
+                observer=self._window_observer,
             ),
+            evidence_recorder=_make_evidence_recorder(self._window_observer),
         )
 
         if agent_id.startswith("Error"):
@@ -1019,9 +1072,7 @@ class AgentTaskTools:
             # stays excluded — hashing elapsed time would make a hung
             # agent immortal.
             iters = r.get("iteration_count", 0)
-            lines.append(
-                f"**{label}** (`{aid}`): {status} [iterations={iters}]\n{content}"
-            )
+            lines.append(f"**{label}** (`{aid}`): {status} [iterations={iters}]\n{content}")
 
         return "\n\n".join(lines) if lines else "No results."
 
@@ -1079,12 +1130,14 @@ class AgentTaskTools:
             )
             if pair_err:
                 return f"Error: task '{t.get('label', '?')}': {pair_err}"
-            validated_tasks.append({
-                "label": t.get("label", ""),
-                "goal": t.get("goal", ""),
-                "model_override": mo,
-                "reasoning_effort_override": eo,
-            })
+            validated_tasks.append(
+                {
+                    "label": t.get("label", ""),
+                    "goal": t.get("goal", ""),
+                    "model_override": mo,
+                    "reasoning_effort_override": eo,
+                }
+            )
         tasks = validated_tasks
 
         # Per-task iteration callback FACTORY (same pattern as
@@ -1102,6 +1155,7 @@ class AgentTaskTools:
                         self._get_context_compressor,
                         model_override=model_override,
                         effort_override=effort_override,
+                        observer=self._window_observer,
                     )
                     generation_state["plan"] = plan
                 client = plan["client"]
@@ -1119,8 +1173,11 @@ class AgentTaskTools:
                         {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
                     ],
                     "stop_reason": resp.stop_reason or "end_turn",
+                    "server_input_tokens": getattr(resp, "server_input_tokens", None),
+                    "account_key": getattr(resp, "account_key", None),
                     **_provenance_stamp(resp, client),
                 }
+
             return _iteration_cb
 
         async def _tool_cb(tool_name, tool_input):
@@ -1159,12 +1216,8 @@ class AgentTaskTools:
             max_lifetime=self._get_config().agents.max_lifetime_seconds,
             # Close the loop-path gap: depth and child limits now reach
             # loop-spawned agents too, instead of silently using built-ins.
-            max_depth=getattr(
-                self._get_config().agents, "max_nesting_depth", None
-            ),
-            max_children=getattr(
-                self._get_config().agents, "max_children_per_agent", None
-            ),
+            max_depth=getattr(self._get_config().agents, "max_nesting_depth", None),
+            max_children=getattr(self._get_config().agents, "max_children_per_agent", None),
             context_compression_enabled=bool(cc),
             max_context_chars=cc.resolved_max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
@@ -1173,7 +1226,9 @@ class AgentTaskTools:
                 lambda: self._llm_gateway.active_client,
                 self._get_context_compressor,
                 mo,
+                observer=self._window_observer,
             ),
+            evidence_recorder=_make_evidence_recorder(self._window_observer),
         )
 
         # Format response
