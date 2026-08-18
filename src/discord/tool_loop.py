@@ -68,6 +68,33 @@ if TYPE_CHECKING:
     from .turn_recorder import TurnRecorder
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .llm_gateway import LLMServingIdentity
+
+
+def _serving_identity_for(gateway, config=None, fallback_client=None) -> LLMServingIdentity:
+    """Capture the serving identity, tolerating narrow test gateways.
+
+    Production gateways expose ``capture_serving_identity`` (one root read);
+    fixtures that fake only ``active_client`` get an equivalent identity
+    built from that client so the freeze semantics still hold in tests.
+    """
+    capture = getattr(gateway, "capture_serving_identity", None)
+    if capture is not None:
+        return capture(config) if config is not None else capture()
+    client = fallback_client or getattr(gateway, "active_client", None)
+    return LLMServingIdentity(
+        provider=(
+            "codex"
+            if client is None or hasattr(client, "reasoning_effort")
+            else getattr(client, "provider_name", "unknown")
+        ),
+        client=client,
+        model=getattr(client, "model", None) if client is not None else None,
+        reasoning_effort=(
+            getattr(client, "reasoning_effort", None)
+            if client is not None and hasattr(client, "reasoning_effort")
+            else None
+        ),
+    )
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
     _CONTINUATION_MSG,
@@ -254,6 +281,12 @@ class LoopPolicy:
     llm_via_gateway: bool  # chat: call_with_tools; autonomous: raw active client
     response_guards: bool
     completion_classifier: bool
+    # Context-budget campaign (phase 4) asymmetries — pinned so a later
+    # cleanup cannot "simplify" them into smoke:
+    overflow_recovery: bool  # both surfaces rescue in-iteration since phase 4
+    durable_recovery_checkpointing: bool  # chat only (v3.67.0 turn store)
+    soft_compaction: bool  # chat always had it; loops gained it in phase 4
+    latch_scope: str  # "turn" (durable chat turn) | "invocation" (one run_autonomous)
 
 
 CHAT_POLICY = LoopPolicy(
@@ -264,6 +297,10 @@ CHAT_POLICY = LoopPolicy(
     llm_via_gateway=True,
     response_guards=True,
     completion_classifier=True,
+    overflow_recovery=True,
+    durable_recovery_checkpointing=True,
+    soft_compaction=True,
+    latch_scope="turn",
 )
 
 AUTONOMOUS_POLICY = LoopPolicy(
@@ -274,6 +311,10 @@ AUTONOMOUS_POLICY = LoopPolicy(
     llm_via_gateway=False,
     response_guards=False,
     completion_classifier=False,
+    overflow_recovery=True,
+    durable_recovery_checkpointing=False,
+    soft_compaction=True,
+    latch_scope="invocation",
 )
 
 
@@ -371,6 +412,16 @@ class _LoopTurn:
     final_text: str = ""
     completed_naturally: bool = False  # True only when a tool-free turn ended the loop
     tool_calls_made: int = 0
+    # Context-budget campaign (phase 4): the surface boundary for emergency
+    # recovery (prev_context replay elidable, current prompt protected), the
+    # per-run_autonomous-invocation accepted-size latch (a later scheduled
+    # iteration starts fresh — cross-iteration protection is the global
+    # clamp's job, not a stale local latch), recovery evidence for the
+    # trajectory, and the loop-local iteration index the soft pass guards on.
+    _boundary: object = None
+    _char_latch: int | None = None
+    context_recoveries: list = field(default_factory=list)
+    _iteration_index: int = 0
 
 
 @dataclass(frozen=True)
@@ -956,27 +1007,9 @@ class ToolLoopRunner:
         """
         _channel_id = str(st.message.channel.id)
         if serving_identity is None:
-            capture = getattr(self._llm_gateway, "capture_serving_identity", None)
-            if capture is not None:
-                serving_identity = capture()
-            else:
-                # Compatibility for narrow test gateways; production always
-                # supplies the explicit capture from _run_chat_iterations.
-                client = request_client or getattr(self._llm_gateway, "active_client", None)
-                serving_identity = LLMServingIdentity(
-                    provider=(
-                        "codex"
-                        if client is None or hasattr(client, "reasoning_effort")
-                        else getattr(client, "provider_name", "unknown")
-                    ),
-                    client=client,
-                    model=getattr(client, "model", None) if client is not None else None,
-                    reasoning_effort=(
-                        getattr(client, "reasoning_effort", None)
-                        if client is not None and hasattr(client, "reasoning_effort")
-                        else None
-                    ),
-                )
+            serving_identity = _serving_identity_for(
+                self._llm_gateway, fallback_client=request_client
+            )
         request_client = serving_identity.client
         # Pre-admission and breaker identity are frozen beside the client that
         # every physical attempt will invoke.
@@ -1967,7 +2000,16 @@ class ToolLoopRunner:
         st = self._prepare_loop_turn(prompt, channel, prev_context, user_id, policy)
 
         for _iteration in range(st.loop_cap):
-            kind, val = await self._call_loop_llm(st)
+            st._iteration_index = _iteration
+            # ONE capture per uninterrupted loop generation (same contract as
+            # chat): compaction thresholds, preflight, breaker admission, and
+            # every physical retry describe this exact client/model/effort.
+            _config = self._get_config()
+            _serving = _serving_identity_for(self._llm_gateway, _config)
+            self._maybe_compress_loop(st, _serving, _config)
+            kind, val = await self._call_loop_llm(
+                st, serving_identity=_serving, request_config=_config
+            )
             if kind == "done":
                 return val
             response = val
@@ -2047,6 +2089,12 @@ class ToolLoopRunner:
                 }
             )
         messages.append({"role": "user", "content": prompt})
+        # Surface boundary: the prev-context exchange (two messages when
+        # present) is replayable context; the current autonomous prompt and
+        # everything after it is protected/iteration territory.
+        from ..llm.context_compressor import SurfaceBoundary
+
+        loop_boundary = SurfaceBoundary(request_start=2 if prev_context else 0)
 
         # Build system prompt and tool definitions
         if _trace is not None:
@@ -2070,6 +2118,7 @@ class ToolLoopRunner:
         loop_cap = self._get_config().tools.max_tool_iterations_loop
 
         return _LoopTurn(
+            _boundary=loop_boundary,
             prompt=prompt,
             channel=channel,
             user_id=user_id,
@@ -2119,39 +2168,202 @@ class ToolLoopRunner:
         )
         return outcome_text
 
-    async def _call_loop_llm(self, st: _LoopTurn):
+    def _maybe_compress_loop(self, st: _LoopTurn, serving, config) -> None:
+        """Loop pre-send compaction (campaign phase 4 — loops previously had
+        NO soft path at all): the shared soft pass at the serving model's
+        derived target once tool iterations exist, plus the invocation-local
+        accepted-size latch compaction with the loop's surface boundary.
+        Non-fatal like every compaction guard."""
+        compressor = self._get_context_compressor()
+        if compressor is None:
+            return
+        try:
+            from ..llm.context_budget import snapshot_for_codex_config
+            from ..llm.context_compressor import (
+                compress_tool_context,
+                emergency_compress_for_window,
+                estimate_message_chars,
+            )
+
+            model_for_budget = serving.model if serving.is_codex else None
+            snapshot = snapshot_for_codex_config(
+                model_for_budget,
+                getattr(config, "openai_codex", None),
+                max_context_chars=compressor.max_context_chars,
+            )
+            if (
+                st._iteration_index > 0
+                and estimate_message_chars(st.messages) > snapshot.primary_chars
+            ):
+                st.messages, _saved = compress_tool_context(
+                    st.messages,
+                    max_context_chars=snapshot.primary_chars,
+                    keep_recent=compressor.keep_recent_iterations,
+                    stats=self._get_compression_stats(),
+                )
+                log.info(
+                    "loop context_compressor: compressed %d older tool iterations",
+                    _saved,
+                )
+            if st._char_latch is not None:
+                latch_target = min(st._char_latch, snapshot.primary_chars)
+                if estimate_message_chars(st.messages) > latch_target:
+                    st.messages, latch_report = emergency_compress_for_window(
+                        st.messages,
+                        target_chars=latch_target,
+                        boundary=st._boundary,
+                    )
+                    if latch_report.get("boundary_request_start") is not None:
+                        from ..llm.context_compressor import SurfaceBoundary
+
+                        st._boundary = SurfaceBoundary(
+                            request_start=latch_report["boundary_request_start"],
+                            elided_replay=latch_report["boundary_elided_replay"],
+                        )
+                    latch_report["attempt"] = 0
+                    latch_report["trigger"] = "latch"
+                    st.context_recoveries.append(latch_report)
+        except Exception:
+            log.exception(
+                "loop compaction failed (non-fatal); continuing with full context"
+            )
+
+    async def _call_loop_llm(
+        self,
+        st: _LoopTurn,
+        *,
+        serving_identity=None,
+        request_config=None,
+    ):
         """LLM call for one loop iteration with deadline-based recovery.
 
         Typed capacity/transport failures are retried in-iteration by the
         shared recovery policy; CircuitOpenError still re-raises to the loop
         manager (policy asymmetry — the manager owns backoff between
         iterations). The gateway bypass itself is unchanged (RFC-001 §4.3).
+        Since phase 4, a structural context overflow rescues in-iteration:
+        boundary-aware emergency compression, then a retry of the SAME frozen
+        serving identity under the SAME monotonic deadline — rescue rungs
+        never mint fresh budget, and an exhausted ladder finalizes exactly
+        once through the existing failure path.
 
         Returns ("ok", response) or ("done", <run_autonomous() return str>).
         """
-        breaker = self._llm_gateway.capacity_breaker_for()
+        if serving_identity is None:
+            serving_identity = _serving_identity_for(
+                self._llm_gateway, request_config
+            )
+        if request_config is None:
+            request_config = self._get_config()
+        breaker = self._llm_gateway.capacity_breaker_for(
+            serving_identity.model, provider=serving_identity.provider
+        )
         policy = self._llm_gateway.recovery_policy()
 
+        pin_kwargs = {}
+        if serving_identity.is_codex:
+            if serving_identity.model:
+                pin_kwargs["model"] = serving_identity.model
+            if serving_identity.reasoning_effort is not None:
+                pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
+
         async def _attempt():
-            return await self._llm_gateway.active_client.chat_with_tools(
+            return await serving_identity.client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
                 tools=st.tools or [],
+                **pin_kwargs,
             )
+
+        from ..llm.context_budget import snapshot_for_codex_config
+
+        _compressor = self._get_context_compressor()
+        _snapshot = snapshot_for_codex_config(
+            serving_identity.model if serving_identity.is_codex else None,
+            getattr(request_config, "openai_codex", None),
+            max_context_chars=(
+                _compressor.max_context_chars if _compressor is not None else None
+            ),
+        )
+        # ONE monotonic deadline for the whole logical generation: the first
+        # attempt runs on the policy's own budget; rescue retries pay for the
+        # time already burned instead of minting a fresh window.
+        generation_deadline = time.monotonic() + policy.deadline_seconds
+        rescue_passes = 0
+        pending_latch: int | None = None
 
         try:
             # Pre-admission fast-fail, same contract as the chat path — and
             # INSIDE the try, so LLMRequestError completes the loop through
             # _finish_loop (trajectory + reflection finalization) exactly
             # like any other failed generation instead of escaping
-            # run_autonomous().
-            preflight_incompatible_effort(self._llm_gateway.active_client)
-            response = await generate_with_recovery(
-                _attempt,
-                policy=policy,
-                breaker=breaker,
-                retry_circuit_open=False,
-            )
+            # run_autonomous(). Frozen: the captured client, not live state.
+            while True:
+                try:
+                    preflight_incompatible_effort(serving_identity.client)
+                    response = await generate_with_recovery(
+                        _attempt,
+                        policy=policy,
+                        breaker=breaker,
+                        retry_circuit_open=False,
+                        deadline_seconds=(
+                            None
+                            if rescue_passes == 0
+                            else max(
+                                0.5, generation_deadline - time.monotonic()
+                            )
+                        ),
+                    )
+                    if pending_latch is not None:
+                        # Server-accepted evidence, per the settled latch rule.
+                        st._char_latch = pending_latch
+                    break
+                except Exception as overflow_exc:
+                    from ..llm.errors import LLMRequestError
+
+                    is_overflow = (
+                        isinstance(overflow_exc, LLMRequestError)
+                        and getattr(overflow_exc, "code", None)
+                        == "context_length_exceeded"
+                    )
+                    ladder = _snapshot.ladder
+                    if (
+                        not is_overflow
+                        or rescue_passes >= len(ladder)
+                        or generation_deadline - time.monotonic() <= 0
+                    ):
+                        raise
+                    from ..llm.context_compressor import (
+                        SurfaceBoundary,
+                        emergency_compress_for_window,
+                    )
+
+                    target = ladder[rescue_passes]
+                    rescue_passes += 1
+                    compressed, report = emergency_compress_for_window(
+                        st.messages,
+                        target_chars=target,
+                        boundary=st._boundary,
+                    )
+                    report["attempt"] = rescue_passes
+                    report["trigger"] = "overflow"
+                    st.context_recoveries.append(report)
+                    if not report.get("fits"):
+                        raise
+                    st.messages = compressed
+                    if report.get("boundary_request_start") is not None:
+                        st._boundary = SurfaceBoundary(
+                            request_start=report["boundary_request_start"],
+                            elided_replay=report["boundary_elided_replay"],
+                        )
+                    pending_latch = report["compressed_chars"]
+                    log.warning(
+                        "Loop context overflow: rescue pass %d compressed "
+                        "%d -> %d chars; retrying iteration",
+                        rescue_passes,
+                        report["original_chars"],
+                        report["compressed_chars"],
+                    )
         except CircuitOpenError:
             raise
         except Exception as e:
