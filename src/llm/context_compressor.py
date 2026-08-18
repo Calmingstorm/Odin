@@ -325,6 +325,7 @@ def compress_tool_context(
     max_context_chars: int = DEFAULT_MAX_CONTEXT_CHARS,
     keep_recent: int = DEFAULT_KEEP_RECENT,
     stats: CompressionStats | None = None,
+    boundary: SurfaceBoundary | None = None,
 ) -> tuple[list[dict], int]:
     """Compress older tool iterations when context exceeds *max_context_chars*.
 
@@ -346,6 +347,9 @@ def compress_tool_context(
         max_context_chars: Trigger compression above this threshold.
         keep_recent: Number of recent iterations to preserve verbatim.
         stats: Optional :class:`CompressionStats` to update.
+        boundary: Optional surface-declared replay/request partition. When
+            supplied, the declared request envelope is pinned structurally;
+            legacy string/tool-result heuristics never inspect it.
 
     Returns:
         ``(compressed_messages, iterations_compressed)``
@@ -354,7 +358,21 @@ def compress_tool_context(
     if total_chars <= max_context_chars:
         return messages, 0
 
-    prefix, iterations = split_prefix_and_iterations(messages)
+    if boundary is None:
+        prefix, iterations = split_prefix_and_iterations(messages)
+    else:
+        # Surface soft compaction must use the SAME structural partition as
+        # emergency recovery. A current request is allowed to look exactly
+        # like legacy agent tool history; content never moves the boundary.
+        request_start = max(0, min(boundary.request_start, len(messages)))
+        rest = messages[request_start:]
+        if boundary.envelope_len is not None:
+            envelope_len = max(0, min(boundary.envelope_len, len(rest)))
+        else:
+            envelope_len = _structural_envelope_end(rest)
+        prefix_end = request_start + envelope_len
+        prefix = messages[:prefix_end]
+        iterations = _group_iterations(messages[prefix_end:])
 
     if len(iterations) <= keep_recent:
         return messages, 0

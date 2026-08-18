@@ -24,13 +24,14 @@ import hashlib
 from dataclasses import asdict
 from typing import Any
 
+from ..config.schema import model_rejects_effort
 from ..config.sensitivity import is_storage_sensitive_key as _is_sensitive_key
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 
 log = get_logger("turn_state")
 
-CODEC_VERSION = 3
+CODEC_VERSION = 4
 
 # ── The classification (census-pinned) ───────────────────────────────
 
@@ -69,6 +70,7 @@ PERSISTED_FIELDS: frozenset[str] = frozenset({
     # suspend/resume so a rescued generation stays the SAME generation.
     "_boundary_request_start",
     "_boundary_elided_replay",
+    "_boundary_envelope_len",
     "_char_latch",
     "_rescue_passes",
     "_gen_identity",         # identity FACTS (provider/model/effort/ladder)
@@ -85,6 +87,15 @@ _V3_FIELD_DEFAULTS: dict[str, object] = {
     "_rescue_passes": 0,
     "_gen_identity": None,
 }
+
+_V4_FIELD_DEFAULTS: dict[str, object] = {"_boundary_envelope_len": None}
+_GEN_IDENTITY_KEYS = {
+    "provider", "model", "effort", "ladder", "budget", "attempts",
+}
+_GEN_IDENTITY_V3_KEYS = {"provider", "model", "effort", "ladder"}
+_GEN_ATTEMPT_KEYS = {"attempt", "account_key", "server_input_tokens"}
+_GEN_PROVIDERS = {"codex", "ollama", "kimi"}
+_GEN_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 
 #: Rebuilt by the resume flow from live state. Each entry documents why it
 #: is NOT persisted:
@@ -413,6 +424,7 @@ def snapshot_chat_turn(st, *, store_blob, generation_seq: int, extra: dict | Non
             "_trajectory": _trajectory_to_payload(st._trajectory),
             "_boundary_request_start": st._boundary_request_start,
             "_boundary_elided_replay": st._boundary_elided_replay,
+            "_boundary_envelope_len": st._boundary_envelope_len,
             "_char_latch": st._char_latch,
             "_rescue_passes": st._rescue_passes,
             "_gen_identity": dict(st._gen_identity) if st._gen_identity else None,
@@ -506,6 +518,10 @@ def validate_payload(payload: Any) -> None:
         for name, default in _V3_FIELD_DEFAULTS.items():
             if name not in fields:
                 fields[name] = default
+    if version <= 3:
+        for name, default in _V4_FIELD_DEFAULTS.items():
+            if name not in fields:
+                fields[name] = default
     missing = PERSISTED_FIELDS - fields.keys()
     if missing:
         raise CheckpointInvalidError(f"missing persisted fields: {sorted(missing)}")
@@ -585,12 +601,14 @@ def validate_payload(payload: Any) -> None:
         value = fields[name]
         if not _exact_int(value) or value < 0:
             _fail(name, "must be a non-negative integer")
+    envelope_len = fields["_boundary_envelope_len"]
+    if envelope_len is not None and (not _exact_int(envelope_len) or envelope_len < 0):
+        _fail("_boundary_envelope_len", "must be null or a non-negative integer")
+    if version >= 4 and envelope_len is None:
+        _fail("_boundary_envelope_len", "must be an integer in codec v4")
     latch = fields["_char_latch"]
     if latch is not None and (not _exact_int(latch) or latch < 0):
         _fail("_char_latch", "must be null or a non-negative integer")
-    gen_identity = fields["_gen_identity"]
-    if gen_identity is not None and not isinstance(gen_identity, dict):
-        _fail("_gen_identity", "must be null or an object of identity facts")
     for i, msg in enumerate(fields["messages"]):
         if not isinstance(msg, dict) or not isinstance(msg.get("role"), str):
             raise CheckpointInvalidError(f"messages[{i}] is not a message object")
@@ -604,6 +622,98 @@ def validate_payload(payload: Any) -> None:
             raise CheckpointInvalidError(
                 f"messages[{i}] content has invalid type {type(content).__name__}"
             )
+
+    messages = fields["messages"]
+    request_start = fields["_boundary_request_start"]
+    elided_replay = fields["_boundary_elided_replay"]
+    if request_start > len(messages):
+        _fail("_boundary_request_start", "exceeds message count")
+    if envelope_len is not None and request_start + envelope_len > len(messages):
+        _fail("_boundary_envelope_len", "extends beyond messages")
+    if elided_replay:
+        expected = f"[Context recovery: {elided_replay} older conversation messages elided]"
+        if request_start < 1 or not messages or messages[0].get("content") != expected:
+            _fail("_boundary_elided_replay", "does not match the leading replay marker")
+
+    gen_identity = fields["_gen_identity"]
+    rescue_passes = fields["_rescue_passes"]
+    if gen_identity is None:
+        if rescue_passes != 0:
+            _fail("_rescue_passes", "requires _gen_identity")
+    else:
+        if not isinstance(gen_identity, dict):
+            _fail("_gen_identity", "must be an object")
+        identity_keys = set(gen_identity)
+        legacy_v3_identity = version == 3 and identity_keys == _GEN_IDENTITY_V3_KEYS
+        if identity_keys != _GEN_IDENTITY_KEYS and not legacy_v3_identity:
+            _fail("_gen_identity", "has an invalid key set")
+        if gen_identity.get("provider") not in _GEN_PROVIDERS:
+            _fail("_gen_identity", "provider is invalid")
+        model = gen_identity.get("model")
+        if not isinstance(model, str) or not model.strip():
+            _fail("_gen_identity", "model must be a non-empty string")
+        effort = gen_identity.get("effort")
+        provider = gen_identity["provider"]
+        if provider == "codex":
+            if effort not in _GEN_EFFORTS:
+                _fail("_gen_identity", "codex effort must be resolved")
+            if model_rejects_effort(model, effort):
+                _fail("_gen_identity", "codex model/effort pair is incompatible")
+        elif effort is not None:
+            _fail("_gen_identity", "non-codex provider cannot carry codex effort")
+        ladder = gen_identity.get("ladder")
+        if (
+            not isinstance(ladder, list)
+            or not ladder
+            or not all(_exact_int(rung) and rung > 0 for rung in ladder)
+            or ladder != sorted(set(ladder), reverse=True)
+        ):
+            _fail("_gen_identity", "ladder must be positive, unique, and descending")
+        if rescue_passes < 1 or rescue_passes > len(ladder):
+            _fail("_rescue_passes", "is outside the frozen ladder")
+        if legacy_v3_identity:
+            # Early phase-4 checkpoints carried the frozen routing/ladder
+            # facts but predated provider-evidence fields. Normalize only
+            # that exact versioned shape; v4 is always the six-key schema.
+            gen_identity["budget"] = {"primary_chars": max(ladder)}
+            gen_identity["attempts"] = [
+                {
+                    "attempt": attempt,
+                    "account_key": None,
+                    "server_input_tokens": None,
+                }
+                for attempt in range(1, rescue_passes + 1)
+            ]
+        budget = gen_identity.get("budget")
+        if (
+            not isinstance(budget, dict)
+            or set(budget) != {"primary_chars"}
+            or not _exact_int(budget.get("primary_chars"))
+            or budget["primary_chars"] < 0
+        ):
+            _fail("_gen_identity", "budget must contain one non-negative primary_chars")
+        if any(rung > budget["primary_chars"] for rung in ladder):
+            _fail("_gen_identity", "ladder exceeds the frozen primary budget")
+        attempts = gen_identity.get("attempts")
+        if not isinstance(attempts, list) or len(attempts) != rescue_passes:
+            _fail("_gen_identity", "attempts must match the consumed rescue passes")
+        for index, attempt in enumerate(attempts, start=1):
+            if not isinstance(attempt, dict) or set(attempt) != _GEN_ATTEMPT_KEYS:
+                _fail("_gen_identity", f"attempt {index} has an invalid key set")
+            if attempt.get("attempt") != index:
+                _fail("_gen_identity", f"attempt {index} has an invalid ordinal")
+            account_key = attempt.get("account_key")
+            if account_key is not None and (
+                not isinstance(account_key, str)
+                or len(account_key) != 32
+                or any(ch not in "0123456789abcdef" for ch in account_key)
+            ):
+                _fail("_gen_identity", f"attempt {index} account_key is invalid")
+            server_tokens = attempt.get("server_input_tokens")
+            if server_tokens is not None and (
+                not _exact_int(server_tokens) or server_tokens < 0
+            ):
+                _fail("_gen_identity", f"attempt {index} server_input_tokens is invalid")
 
 
 def restore_field_values(payload: dict, *, load_blob, stuck_tracker_cls) -> dict:

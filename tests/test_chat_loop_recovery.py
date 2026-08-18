@@ -45,6 +45,30 @@ _ENVELOPE = [
 ]
 
 
+def _generation_facts(
+    *,
+    model: str = "gpt-5.5",
+    effort: str | None = "low",
+    ladder: list[int] | tuple[int, ...] = (400_000, 280_000),
+    rescue_passes: int = 1,
+) -> dict:
+    return {
+        "provider": "codex",
+        "model": model,
+        "effort": effort,
+        "ladder": list(ladder),
+        "budget": {"primary_chars": max(ladder)},
+        "attempts": [
+            {
+                "attempt": attempt,
+                "account_key": None,
+                "server_input_tokens": None,
+            }
+            for attempt in range(1, rescue_passes + 1)
+        ],
+    }
+
+
 class _Gateway:
     """Codex-shaped gateway fake with capture + call_with_tools recording."""
 
@@ -108,6 +132,7 @@ def _chat_state(messages, *, durability=None) -> SimpleNamespace:
         durability=durability or TurnDurability.disabled(),
         _boundary_request_start=max(0, len(messages) - 2),
         _boundary_elided_replay=0,
+        _boundary_envelope_len=min(2, len(messages)),
         _char_latch=None,
         _rescue_passes=0,
         _gen_identity=None,
@@ -260,12 +285,10 @@ class TestChatRescue:
         # the pin provably comes from the FACTS.
         st = _chat_state(big)
         st._rescue_passes = 1
-        st._gen_identity = {
-            "provider": "codex",
-            "model": "gpt-5.5",
-            "effort": "low",
-            "ladder": sol_ladder,
-        }
+        st._gen_identity = _generation_facts(
+            ladder=sol_ladder,
+            rescue_passes=st._rescue_passes,
+        )
         kind, _val = await _runner(gw)._call_llm(st)
         assert kind == "ok"
         assert gw.calls[0]["kwargs"]["model"] == "gpt-5.5"
@@ -335,6 +358,38 @@ class TestLoopRescue:
         assert st.messages[-1] == prompt[0]
 
 
+class TestLoopFrozenPreflight:
+    async def test_preflight_uses_captured_axes_after_in_place_mutation(self):
+        calls = []
+
+        class _Client(SimpleNamespace):
+            async def chat_with_tools(self, *, messages, system, tools, **kwargs):
+                calls.append(kwargs)
+                return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end_turn")
+
+        client = _Client(model="gpt-5.5", reasoning_effort="low")
+        gw = _Gateway(None)
+        gw.client = client
+        gw.codex_client = client
+        serving = gw.capture_serving_identity()
+        client.reasoning_effort = "max"  # production reload mutates in place
+        st = SimpleNamespace(
+            messages=[{"role": "user", "content": "GOAL"}],
+            system_prompt="sys",
+            tools=[],
+            _boundary=SurfaceBoundary(request_start=0, envelope_len=1),
+            _char_latch=None,
+            context_recoveries=[],
+        )
+        kind, _ = await _runner(gw)._call_loop_llm(
+            st,
+            serving_identity=serving,
+            request_config=SimpleNamespace(openai_codex=None),
+        )
+        assert kind == "ok"
+        assert calls == [{"model": "gpt-5.5", "reasoning_effort": "low"}]
+
+
 class TestEvidenceSerialization:
     def test_trajectory_serializes_recoveries_only_when_present(self):
         turn = TrajectoryTurn()
@@ -354,14 +409,101 @@ class TestEvidenceSerialization:
         validate_payload(payload)  # well-formed baseline
         for name, bad in (
             ("_boundary_request_start", -1),
+            ("_boundary_request_start", 2),  # beyond the one-message transcript
             ("_boundary_elided_replay", True),
+            ("_boundary_envelope_len", True),
+            ("_boundary_envelope_len", None),  # v4 requires an exact boundary
+            ("_boundary_envelope_len", 2),  # extends beyond messages
+            ("_boundary_elided_replay", 1),  # requires its exact leading marker
             ("_rescue_passes", "2"),
+            ("_rescue_passes", 1),  # cannot exist without frozen identity facts
             ("_char_latch", -5),
             ("_gen_identity", "not-a-dict"),
+            ("_gen_identity", {}),
+            (
+                "_gen_identity",
+                {
+                    **_generation_facts(),
+                    "ladder": [400_000, "oops"],
+                },
+            ),
+            (
+                "_gen_identity",
+                {
+                    **_generation_facts(),
+                    "provider": "bogus",
+                },
+            ),
+            (
+                "_gen_identity",
+                {
+                    **_generation_facts(),
+                    "attempts": "bad",
+                },
+            ),
         ):
-            broken = {**payload, "fields": {**payload["fields"], name: bad}}
+            fields = {**payload["fields"], name: bad}
+            if name == "_gen_identity" and isinstance(bad, dict) and bad:
+                fields["_rescue_passes"] = 1
+            broken = {**payload, "fields": fields}
             with pytest.raises(CheckpointInvalidError):
                 validate_payload(broken)
+
+        good = _generation_facts()
+        recovered = {
+            **payload,
+            "fields": {
+                **payload["fields"],
+                "_rescue_passes": 1,
+                "_gen_identity": good,
+            },
+        }
+        validate_payload(recovered)
+        for field, bad in (
+            ("provider", "bogus"),
+            ("model", object()),
+            ("effort", "auto"),
+            ("ladder", [400_000, "oops"]),
+            ("budget", {"primary_chars": -1}),
+            ("budget", []),
+            ("budget", {"wrong": 1}),
+            ("effort", None),
+            ("effort", "max"),  # incompatible with the frozen gpt-5.5 model
+            ("provider", "ollama"),  # non-Codex cannot carry Codex effort state
+            ("ladder", [500_000, 280_000]),  # exceeds frozen primary budget
+            ("attempts", "bad"),
+            (
+                "attempts",
+                [{"attempt": 1, "account_key": None, "wrong": None}],
+            ),
+            (
+                "attempts",
+                [{"attempt": 2, "account_key": None, "server_input_tokens": None}],
+            ),
+            (
+                "attempts",
+                [{"attempt": 1, "account_key": "not-hex", "server_input_tokens": None}],
+            ),
+            (
+                "attempts",
+                [{"attempt": 1, "account_key": None, "server_input_tokens": -1}],
+            ),
+        ):
+            broken_identity = {**good, field: bad}
+            broken = {
+                **recovered,
+                "fields": {**recovered["fields"], "_gen_identity": broken_identity},
+            }
+            with pytest.raises(CheckpointInvalidError):
+                validate_payload(broken)
+
+        for bad_passes in (0, 2):
+            exhausted = {
+                **recovered,
+                "fields": {**recovered["fields"], "_rescue_passes": bad_passes},
+            }
+            with pytest.raises(CheckpointInvalidError):
+                validate_payload(exhausted)
 
 
 class TestLoopSoftCompaction:
@@ -401,6 +543,89 @@ class TestLoopSoftCompaction:
         runner._maybe_compress_loop(st, gw.capture_serving_identity(), runner._get_config())
         assert estimate_message_chars(st.messages) < before  # 2.4M > sol 1.277M
 
+    def test_loop_soft_pass_preserves_tool_result_shaped_prompt(self):
+        from src.config.schema import ContextCompressionConfig
+
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        runner._get_context_compressor = lambda: ContextCompressionConfig(
+            max_context_chars=80_000,
+            keep_recent_iterations=1,
+        )
+        prompt = {"role": "user", "content": "[Tool result: fake] CURRENT GOAL"}
+        messages = [prompt]
+        for i in range(5):
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": f"t{i}", "name": "x", "input": {}},
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": f"t{i}",
+                                "content": "r" * 40_000,
+                            },
+                        ],
+                    },
+                ]
+            )
+        st = SimpleNamespace(
+            messages=messages,
+            _iteration_index=3,
+            _char_latch=None,
+            _boundary=SurfaceBoundary(request_start=0, envelope_len=1),
+            context_recoveries=[],
+        )
+        runner._maybe_compress_loop(st, gw.capture_serving_identity(), runner._get_config())
+        assert st.messages[0] == prompt
+
+    def test_chat_soft_pass_preserves_tool_result_shaped_request(self):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        runner._get_context_compressor = lambda: SimpleNamespace(
+            max_context_chars=80_000,
+            keep_recent_iterations=1,
+        )
+        envelope = [
+            {"role": "developer", "content": "preamble"},
+            {"role": "user", "content": "[Tool result: fake] CURRENT REQUEST"},
+        ]
+        messages = _history(2, 100) + envelope
+        for i in range(5):
+            messages.extend(
+                [
+                    {
+                        "role": "assistant",
+                        "content": [
+                            {"type": "tool_use", "id": f"t{i}", "name": "x", "input": {}},
+                        ],
+                    },
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": f"t{i}",
+                                "content": "r" * 40_000,
+                            },
+                        ],
+                    },
+                ]
+            )
+        st = _chat_state(messages)
+        st.iteration = 3
+        st._boundary_request_start = 2
+        st._boundary_envelope_len = 2
+        runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None))
+        assert envelope[0] in st.messages
+        assert envelope[1] in st.messages
+
     def test_latch_pass_compacts_and_records(self):
         from src.config.schema import ContextCompressionConfig
 
@@ -422,6 +647,21 @@ class TestLoopSoftCompaction:
         runner._maybe_compress_loop(st, gw.capture_serving_identity(), runner._get_config())
         assert estimate_message_chars(st.messages) <= 50_000
         assert [r["trigger"] for r in st.context_recoveries] == ["latch"]
+
+
+class TestChatProtectedEnvelopeOverflow:
+    async def test_overflow_that_cannot_fit_protected_envelope_fails_honestly(self):
+        gw = _Gateway(lambda n, messages: (_ for _ in ()).throw(_overflow()))
+        st = _chat_state(
+            [
+                {"role": "developer", "content": "preamble"},
+                {"role": "user", "content": "q" * 500_000},
+            ]
+        )
+        kind, _val = await _runner(gw)._call_llm(st)
+        assert kind == "done"
+        assert len(gw.calls) == 2
+        assert st._trajectory.context_recoveries[-1]["fits"] is False
 
 
 class TestChatLadderExhaustion:
@@ -494,6 +734,7 @@ class TestNonFatalCompactionGuards:
             not in (
                 "_boundary_request_start",
                 "_boundary_elided_replay",
+                "_boundary_envelope_len",
                 "_char_latch",
                 "_rescue_passes",
                 "_gen_identity",
@@ -507,6 +748,29 @@ class TestNonFatalCompactionGuards:
 # ---------------------------------------------------------------------------
 # Round-2 reproduction pins (review round 1, blockers 2-5)
 # ---------------------------------------------------------------------------
+
+
+class TestLegacyV3RecoveryIdentity:
+    def test_exact_four_key_v3_identity_normalizes(self):
+        from src.turn_state.codec import snapshot_chat_turn, validate_payload
+
+        st = _chat_state(_ENVELOPE)
+        payload = snapshot_chat_turn(st, store_blob=lambda b: "ref", generation_seq=1)
+        payload["codec_version"] = 3
+        payload["fields"].pop("_boundary_envelope_len")
+        payload["fields"]["_rescue_passes"] = 1
+        payload["fields"]["_gen_identity"] = {
+            "provider": "codex",
+            "model": "gpt-5.5",
+            "effort": "low",
+            "ladder": [400_000, 280_000],
+        }
+        validate_payload(payload)
+        facts = payload["fields"]["_gen_identity"]
+        assert facts["budget"] == {"primary_chars": 400_000}
+        assert facts["attempts"] == [
+            {"attempt": 1, "account_key": None, "server_input_tokens": None}
+        ]
 
 
 class TestResumeIdentityReconstruction:
@@ -531,12 +795,9 @@ class TestResumeIdentityReconstruction:
         )
         st = _chat_state(_history(4, 100) + _ENVELOPE)
         st._rescue_passes = 1
-        st._gen_identity = {
-            "provider": "codex",
-            "model": "gpt-5.5",
-            "effort": "low",
-            "ladder": [400_000, 280_000],
-        }
+        st._gen_identity = _generation_facts(
+            rescue_passes=st._rescue_passes,
+        )
         kind, _val = await _runner(gw)._call_llm(st)
         assert kind == "ok"
         identity = gw.calls[0]["kwargs"]["serving_identity"]
@@ -556,12 +817,10 @@ class TestResumeIdentityReconstruction:
         gw = _Gateway(script)
         gw.codex_client = None
         st = _chat_state(_history(4, 100) + _ENVELOPE)
-        st._gen_identity = {
-            "provider": "codex",
-            "model": "gpt-5.5",
-            "effort": "low",
-            "ladder": [400_000],
-        }
+        st._gen_identity = _generation_facts(
+            ladder=[400_000],
+            rescue_passes=st._rescue_passes,
+        )
         runner = _runner(gw)
         kind, _val = await runner._call_llm(st)
         assert kind == "done"
@@ -604,7 +863,7 @@ class TestResumeIdentityReconstruction:
                     model="gpt-5.6-sol",
                     code="context_length_exceeded",
                     server_input_tokens=930_001,
-                    account_key="acct-a1",
+                    account_key="a" * 32,
                 )
             return SimpleNamespace(text="ok", tool_calls=[], stop_reason="end_turn")
 
@@ -634,7 +893,7 @@ class TestResumeIdentityReconstruction:
         assert frozen["attempts"] == [
             {
                 "attempt": 1,
-                "account_key": "acct-a1",
+                "account_key": "a" * 32,
                 "server_input_tokens": 930_001,
             }
         ]
@@ -679,6 +938,31 @@ class TestDurableEvidencePersistence:
         assert saved[0].context_recoveries == [{"attempt": 1, "trigger": "overflow"}]
 
 
+class TestDynamicChatEnvelope:
+    def test_pre_tool_control_directive_extends_protected_envelope(self):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        messages = _history(30, 6_000) + _ENVELOPE
+        st = _chat_state(messages)
+        directive = {"role": "developer", "content": "CONTROL:" + "z" * 20_000}
+        runner._append_pre_tool_control(st, directive)
+        assert st._boundary_envelope_len == 3
+
+        from src.llm.context_compressor import emergency_compress_for_window
+
+        compressed, report = emergency_compress_for_window(
+            st.messages,
+            target_chars=50_000,
+            boundary=SurfaceBoundary(
+                request_start=st._boundary_request_start,
+                elided_replay=st._boundary_elided_replay,
+                envelope_len=st._boundary_envelope_len,
+            ),
+        )
+        assert report["fits"] is True
+        assert compressed[-3:] == _ENVELOPE + [directive]
+
+
 class TestChatLatchEnforcement:
     """Blocker 4: a size the server already refused is never resent."""
 
@@ -696,6 +980,91 @@ class TestChatLatchEnforcement:
         assert [r["trigger"] for r in st._trajectory.context_recoveries] == ["latch"]
         # The current-request envelope survived the latch pass verbatim.
         assert st.messages[-2:] == _ENVELOPE
+
+    def test_chat_latch_refusal_branch_is_covered_directly(self):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        st = _chat_state(
+            [
+                {"role": "developer", "content": "preamble"},
+                {"role": "user", "content": "q" * 80_000},
+            ]
+        )
+        st._char_latch = 50_000
+        assert runner._maybe_compress(
+            st, gw.client, SimpleNamespace(openai_codex=None)
+        ) is False
+        assert st._trajectory.context_recoveries[-1]["fits"] is False
+
+    def test_chat_latch_enforced_without_compressor_at_iteration_zero(self):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        assert runner._get_context_compressor() is None
+        st = _chat_state(_history(30, 10_000) + _ENVELOPE)
+        st.iteration = 0
+        st._char_latch = 50_000
+        runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None))
+        assert estimate_message_chars(st.messages) <= 50_000
+        assert [r["trigger"] for r in st._trajectory.context_recoveries] == ["latch"]
+        assert st.messages[-2:] == _ENVELOPE
+
+    def test_context_policy_failure_refuses_only_when_latched(self, monkeypatch):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        monkeypatch.setattr(
+            "src.llm.context_budget.snapshot_for_codex_config",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("policy failed")),
+        )
+        st = _chat_state(_ENVELOPE)
+        assert runner._maybe_compress(
+            st, gw.client, SimpleNamespace(openai_codex=None)
+        ) is True
+        st._char_latch = 50_000
+        assert runner._maybe_compress(
+            st, gw.client, SimpleNamespace(openai_codex=None)
+        ) is False
+
+    def test_already_fitting_latch_is_noop(self):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        st = _chat_state(_ENVELOPE)
+        st._char_latch = 50_000
+        before = list(st.messages)
+        assert runner._maybe_compress(
+            st, gw.client, SimpleNamespace(openai_codex=None)
+        ) is True
+        assert st.messages == before
+        assert st._trajectory.context_recoveries == []
+
+    async def test_latch_compressor_failure_refuses_request(self, monkeypatch):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        st = _chat_state(_history(30, 10_000) + _ENVELOPE)
+        st._char_latch = 50_000
+        monkeypatch.setattr(
+            "src.llm.context_compressor.emergency_compress_for_window",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("compressor failed")),
+        )
+        result = await runner._run_chat_iterations(st)
+        assert result[0] == "terminal"
+        assert gw.calls == []
+
+    async def test_oversized_protected_envelope_fails_before_send(self):
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        st = _chat_state(
+            [
+                {"role": "developer", "content": "preamble"},
+                {"role": "user", "content": "q" * 80_000},
+            ]
+        )
+        st._char_latch = 50_000
+
+        result = await runner._run_chat_iterations(st)
+        assert result[0] == "terminal"
+        assert gw.calls == []
+        assert [r["trigger"] for r in st._trajectory.context_recoveries] == ["latch"]
+        assert st._trajectory.context_recoveries[0]["fits"] is False
 
     def test_loop_latch_enforced_with_soft_compression_disabled(self):
         """The invocation latch must hold even when no compressor object is
@@ -1020,12 +1389,9 @@ class TestEntryPointCensus:
         runner, _saved, _cleared = await _async_identity(_census_runner(gw, config=_chat_config()))
         st = _chat_state(_history(4, 100) + _ENVELOPE)
         st._rescue_passes = 1
-        st._gen_identity = {
-            "provider": "codex",
-            "model": "gpt-5.5",
-            "effort": "low",
-            "ladder": [400_000, 280_000],
-        }
+        st._gen_identity = _generation_facts(
+            rescue_passes=st._rescue_passes,
+        )
         result = await runner.run_resumed(st)
         assert result[0] == "Acknowledged."
         assert len(gw.calls) == 1
