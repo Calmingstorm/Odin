@@ -4,6 +4,7 @@ Each agent runs as an independent asyncio task with its own LLM session,
 isolated message history, and full tool access. Agents may spawn sub-agents
 up to a configurable nesting depth (default 2).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -24,24 +25,24 @@ from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 log = get_logger("agents")
 
 # --- Constants ---
-MAX_CONCURRENT_AGENTS = 5        # per channel
-MAX_AGENT_LIFETIME = 3600        # 1 hour
-MAX_AGENT_ITERATIONS = 120       # LLM turns per agent (default, overridable via config/spawn)
-STALE_WARN_SECONDS = 120         # 2 min no activity → log warning
-CLEANUP_DELAY = 300              # 5 min after terminal state → remove
-WAIT_DEFAULT_TIMEOUT = 300       # default timeout for wait_for_agents
-WAIT_POLL_INTERVAL = 2           # poll interval for wait_for_agents
-ITERATION_CB_TIMEOUT = 120       # 2 min timeout per LLM call
-TOOL_EXEC_TIMEOUT = 300          # 5 min timeout per tool execution
+MAX_CONCURRENT_AGENTS = 5  # per channel
+MAX_AGENT_LIFETIME = 3600  # 1 hour
+MAX_AGENT_ITERATIONS = 120  # LLM turns per agent (default, overridable via config/spawn)
+STALE_WARN_SECONDS = 120  # 2 min no activity → log warning
+CLEANUP_DELAY = 300  # 5 min after terminal state → remove
+WAIT_DEFAULT_TIMEOUT = 300  # default timeout for wait_for_agents
+WAIT_POLL_INTERVAL = 2  # poll interval for wait_for_agents
+ITERATION_CB_TIMEOUT = 120  # 2 min timeout per LLM call
+TOOL_EXEC_TIMEOUT = 300  # 5 min timeout per tool execution
 # (The manager-level MAX_RECOVERY_ATTEMPTS retry ladder was removed
 # 2026-07-30: transient-failure recovery now lives inside the iteration
 # callback via src/llm/recovery.py. AgentInfo.recovery_attempts remains for
 # API/trajectory shape compatibility and stays 0.)
-MAX_NESTING_DEPTH = 2            # default max sub-agent depth (root=0)
-MAX_CHILDREN_PER_AGENT = 3       # fallback direct-child limit (config overrides at spawn)
-TREE_MAX_AGENTS = 25             # hard ceiling on agents in one tree's lifetime —
-                                 # breadth x depth must never compound into a
-                                 # geometric invoice, whatever config says
+MAX_NESTING_DEPTH = 2  # default max sub-agent depth (root=0)
+MAX_CHILDREN_PER_AGENT = 3  # fallback direct-child limit (config overrides at spawn)
+TREE_MAX_AGENTS = 25  # hard ceiling on agents in one tree's lifetime —
+# breadth x depth must never compound into a
+# geometric invoice, whatever config says
 
 # --- Agent context-overflow recovery (design settled with Odin, 2026-08-09;
 # per-model budgets since the context-budget campaign, 2026-08-17) ---
@@ -68,20 +69,21 @@ def _is_context_overflow(exc: BaseException) -> bool:
     from ..llm.errors import LLMRequestError
 
     return (
-        isinstance(exc, LLMRequestError)
-        and getattr(exc, "code", None) == "context_length_exceeded"
+        isinstance(exc, LLMRequestError) and getattr(exc, "code", None) == "context_length_exceeded"
     )
 
 
 # Agent-management tools — allowed or blocked based on nesting depth
-AGENT_MANAGEMENT_TOOLS = frozenset({
-    "spawn_agent",
-    "send_to_agent",
-    "list_agents",
-    "kill_agent",
-    "get_agent_results",
-    "wait_for_agents",
-})
+AGENT_MANAGEMENT_TOOLS = frozenset(
+    {
+        "spawn_agent",
+        "send_to_agent",
+        "list_agents",
+        "kill_agent",
+        "get_agent_results",
+        "wait_for_agents",
+    }
+)
 
 # Legacy alias for backward compatibility
 AGENT_BLOCKED_TOOLS = AGENT_MANAGEMENT_TOOLS
@@ -107,6 +109,7 @@ def filter_agent_tools(
 
 class AgentState(str, Enum):  # noqa: UP042 — str(member) output differs under StrEnum; deferred to a typed-verification pass
     """Typed lifecycle states for agent workers."""
+
     SPAWNING = "spawning"
     READY = "ready"
     EXECUTING = "executing"
@@ -117,34 +120,59 @@ class AgentState(str, Enum):  # noqa: UP042 — str(member) output differs under
     KILLED = "killed"
 
 
-TERMINAL_STATES = frozenset({
-    AgentState.COMPLETED, AgentState.FAILED,
-    AgentState.TIMEOUT, AgentState.KILLED,
-})
+TERMINAL_STATES = frozenset(
+    {
+        AgentState.COMPLETED,
+        AgentState.FAILED,
+        AgentState.TIMEOUT,
+        AgentState.KILLED,
+    }
+)
 
-ACTIVE_STATES = frozenset({
-    AgentState.SPAWNING, AgentState.READY,
-    AgentState.EXECUTING, AgentState.RECOVERING,
-})
+ACTIVE_STATES = frozenset(
+    {
+        AgentState.SPAWNING,
+        AgentState.READY,
+        AgentState.EXECUTING,
+        AgentState.RECOVERING,
+    }
+)
 
 VALID_TRANSITIONS: dict[AgentState, frozenset[AgentState]] = {
-    AgentState.SPAWNING: frozenset({
-        AgentState.READY, AgentState.KILLED,
-        AgentState.FAILED, AgentState.TIMEOUT,
-    }),
-    AgentState.READY: frozenset({
-        AgentState.EXECUTING, AgentState.COMPLETED,
-        AgentState.KILLED, AgentState.TIMEOUT,
-    }),
-    AgentState.EXECUTING: frozenset({
-        AgentState.READY, AgentState.RECOVERING,
-        AgentState.COMPLETED, AgentState.FAILED,
-        AgentState.KILLED, AgentState.TIMEOUT,
-    }),
-    AgentState.RECOVERING: frozenset({
-        AgentState.EXECUTING, AgentState.FAILED,
-        AgentState.KILLED, AgentState.TIMEOUT,
-    }),
+    AgentState.SPAWNING: frozenset(
+        {
+            AgentState.READY,
+            AgentState.KILLED,
+            AgentState.FAILED,
+            AgentState.TIMEOUT,
+        }
+    ),
+    AgentState.READY: frozenset(
+        {
+            AgentState.EXECUTING,
+            AgentState.COMPLETED,
+            AgentState.KILLED,
+            AgentState.TIMEOUT,
+        }
+    ),
+    AgentState.EXECUTING: frozenset(
+        {
+            AgentState.READY,
+            AgentState.RECOVERING,
+            AgentState.COMPLETED,
+            AgentState.FAILED,
+            AgentState.KILLED,
+            AgentState.TIMEOUT,
+        }
+    ),
+    AgentState.RECOVERING: frozenset(
+        {
+            AgentState.EXECUTING,
+            AgentState.FAILED,
+            AgentState.KILLED,
+            AgentState.TIMEOUT,
+        }
+    ),
     AgentState.COMPLETED: frozenset(),
     AgentState.FAILED: frozenset(),
     AgentState.TIMEOUT: frozenset(),
@@ -168,17 +196,17 @@ _STATE_TO_LEGACY = {
 
 class InvalidStateTransition(Exception):  # noqa: N818 — established public exception name; rename is an API break
     """Raised when an invalid state transition is attempted."""
+
     def __init__(self, from_state: AgentState, to_state: AgentState) -> None:
         self.from_state = from_state
         self.to_state = to_state
-        super().__init__(
-            f"Invalid state transition: {from_state.value} → {to_state.value}"
-        )
+        super().__init__(f"Invalid state transition: {from_state.value} → {to_state.value}")
 
 
 @dataclass
 class StateTransition:
     """Record of a single state transition."""
+
     from_state: AgentState
     to_state: AgentState
     timestamp: float
@@ -292,6 +320,7 @@ AnnounceCallback = Callable[
 @dataclass
 class AgentInfo:
     """Metadata and state for a running agent."""
+
     id: str
     label: str
     goal: str
@@ -382,8 +411,10 @@ class AgentInfo:
         record = self._sm.transition(to, reason)
         log.debug(
             "Agent %s (%s): %s → %s%s",
-            self.id, self.label,
-            record.from_state.value, record.to_state.value,
+            self.id,
+            self.label,
+            record.from_state.value,
+            record.to_state.value,
             f" ({reason})" if reason else "",
         )
         return record
@@ -437,6 +468,7 @@ class AgentManager:
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
         budget_snapshot_provider: Callable | None = None,
+        evidence_recorder: Callable | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string.
 
@@ -455,18 +487,14 @@ class AgentManager:
             else None
         )
         concurrent_limit = (
-            configured_limit
-            if configured_limit is not None
-            else MAX_CONCURRENT_AGENTS
+            configured_limit if configured_limit is not None else MAX_CONCURRENT_AGENTS
         )
         channel_count = sum(
-            1 for a in self._agents.values()
-            if a.channel_id == channel_id and a._sm.is_active
+            1 for a in self._agents.values() if a.channel_id == channel_id and a._sm.is_active
         )
         if channel_count >= concurrent_limit:
             return (
-                f"Error: Maximum concurrent agents ({concurrent_limit}) "
-                "reached for this channel."
+                f"Error: Maximum concurrent agents ({concurrent_limit}) reached for this channel."
             )
 
         if not label or not goal:
@@ -571,9 +599,7 @@ class AgentManager:
             )
 
         # Filter tools based on depth
-        filtered_tools = filter_agent_tools(
-            tools or [], depth=depth, max_depth=agent.max_depth
-        )
+        filtered_tools = filter_agent_tools(tools or [], depth=depth, max_depth=agent.max_depth)
 
         # Seed messages with the goal
         agent.messages = [{"role": "user", "content": goal}]
@@ -598,19 +624,23 @@ class AgentManager:
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,
                 budget_snapshot_provider=budget_snapshot_provider,
+                evidence_recorder=evidence_recorder,
             )
         )
         agent._task = task
         # Schedule cleanup when the agent task finishes (any exit path)
         task.add_done_callback(lambda _t: self._schedule_cleanup(agent_id))
         self._agents[agent_id] = agent
-        self._tree_spawn_counts[agent.root_id] = (
-            self._tree_spawn_counts.get(agent.root_id, 0) + 1
-        )
+        self._tree_spawn_counts[agent.root_id] = self._tree_spawn_counts.get(agent.root_id, 0) + 1
 
         log.info(
             "Spawned agent %s (%s) depth=%d for channel %s by %s: %s",
-            agent_id, label, depth, channel_id, requester_name, goal[:100],
+            agent_id,
+            label,
+            depth,
+            channel_id,
+            requester_name,
+            goal[:100],
         )
         return agent_id
 
@@ -635,19 +665,21 @@ class AgentManager:
             if channel_id and agent.channel_id != channel_id:
                 continue
             runtime = (agent.ended_at or time.time()) - agent.created_at
-            result.append({
-                "id": agent.id,
-                "label": agent.label,
-                "status": agent.status,
-                "state": agent.state.value,
-                "iteration_count": agent.iteration_count,
-                "runtime_seconds": round(runtime, 1),
-                "tools_used": len(agent.tools_used),
-                "goal": agent.goal[:100],
-                "depth": agent.depth,
-                "parent_id": agent.parent_id,
-                "children_count": len(agent.children_ids),
-            })
+            result.append(
+                {
+                    "id": agent.id,
+                    "label": agent.label,
+                    "status": agent.status,
+                    "state": agent.state.value,
+                    "iteration_count": agent.iteration_count,
+                    "runtime_seconds": round(runtime, 1),
+                    "tools_used": len(agent.tools_used),
+                    "goal": agent.goal[:100],
+                    "depth": agent.depth,
+                    "parent_id": agent.parent_id,
+                    "children_count": len(agent.children_ids),
+                }
+            )
         return result
 
     @staticmethod
@@ -686,14 +718,13 @@ class AgentManager:
 
         log.info(
             "Kill signal sent to agent %s (%s) and %d descendants",
-            agent_id, agent.label, len(killed_ids) - 1,
+            agent_id,
+            agent.label,
+            len(killed_ids) - 1,
         )
         if len(killed_ids) == 1:
             return f"Kill signal sent to agent '{agent.label}'."
-        return (
-            f"Kill signal sent to agent '{agent.label}' "
-            f"and {len(killed_ids) - 1} descendant(s)."
-        )
+        return f"Kill signal sent to agent '{agent.label}' and {len(killed_ids) - 1} descendant(s)."
 
     def get_results(self, agent_id: str) -> dict | None:
         """Get structured results of an agent."""
@@ -818,13 +849,12 @@ class AgentManager:
                     "error": f"Agent '{aid}' not found.",
                 }
 
-        still_running = [
-            aid for aid, r in results.items() if r.get("status") == "running"
-        ]
+        still_running = [aid for aid, r in results.items() if r.get("status") == "running"]
         if still_running:
             log.warning(
                 "wait_for_agents timed out with %d still running: %s",
-                len(still_running), still_running,
+                len(still_running),
+                still_running,
             )
 
         return results
@@ -908,9 +938,7 @@ class AgentManager:
             ct.cancel()
         if agent:
             root = agent.root_id or agent_id
-            if not any(
-                (a.root_id or a.id) == root for a in self._agents.values()
-            ):
+            if not any((a.root_id or a.id) == root for a in self._agents.values()):
                 # Last member gone: nothing can ever spawn into this tree
                 # again (a parent must exist), so the lifetime counter can go.
                 self._tree_spawn_counts.pop(root, None)
@@ -920,6 +948,7 @@ class AgentManager:
 
     def _schedule_cleanup(self, agent_id: str) -> None:
         """Schedule cleanup of an agent after CLEANUP_DELAY."""
+
         async def _delayed_cleanup():
             await asyncio.sleep(CLEANUP_DELAY)
             self._remove_agent(agent_id, source="delayed_cleanup")
@@ -949,13 +978,17 @@ class AgentManager:
                 killed += 1
                 log.warning(
                     "Force-killed stuck agent %s (%s): lifetime exceeded (%ds)",
-                    agent.id, agent.label, int(elapsed),
+                    agent.id,
+                    agent.label,
+                    int(elapsed),
                 )
             elif idle > STALE_WARN_SECONDS:
                 stale += 1
                 log.warning(
                     "Agent %s (%s) appears stale: %ds idle",
-                    agent.id, agent.label, int(idle),
+                    agent.id,
+                    agent.label,
+                    int(idle),
                 )
         return {"killed": killed, "stale": stale}
 
@@ -983,6 +1016,7 @@ async def _run_agent(
     max_context_chars: int = 750000,
     keep_recent_iterations: int = 30,
     budget_snapshot_provider: Callable | None = None,
+    evidence_recorder: Callable | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -1051,10 +1085,12 @@ async def _run_agent(
             while not agent._inbox.empty():  # type: ignore[union-attr]  # __post_init__ always sets it
                 try:
                     msg = agent._inbox.get_nowait()  # type: ignore[union-attr]  # __post_init__ always sets it
-                    agent.messages.append({
-                        "role": "user",
-                        "content": f"[Message from parent] {msg}",
-                    })
+                    agent.messages.append(
+                        {
+                            "role": "user",
+                            "content": f"[Message from parent] {msg}",
+                        }
+                    )
                     log.debug("Agent %s received inbox message", agent.id)
                 except asyncio.QueueEmpty:
                     break
@@ -1071,13 +1107,10 @@ async def _run_agent(
                     budget_snapshot = budget_snapshot_provider()
                 except Exception:
                     log.exception(
-                        "agent budget snapshot provider failed (non-fatal); "
-                        "using fallback targets"
+                        "agent budget snapshot provider failed (non-fatal); using fallback targets"
                     )
             soft_target_chars = (
-                budget_snapshot.primary_chars
-                if budget_snapshot is not None
-                else max_context_chars
+                budget_snapshot.primary_chars if budget_snapshot is not None else max_context_chars
             )
 
             # Context compression: summarize older tool iterations when context grows too large
@@ -1087,6 +1120,7 @@ async def _run_agent(
                         compress_tool_context,
                         estimate_message_chars,
                     )
+
                     if estimate_message_chars(agent.messages) > soft_target_chars:
                         agent.messages, saved = compress_tool_context(
                             agent.messages,
@@ -1100,8 +1134,9 @@ async def _run_agent(
                             saved,
                         )
                 except Exception:
-                    log.exception("agent context_compressor failed (non-fatal); continuing with "
-                                  "full context")
+                    log.exception(
+                        "agent context_compressor failed (non-fatal); continuing with full context"
+                    )
 
             # Budget warning: inject remaining-iterations notice before LLM call
             remaining = max_iterations - iteration
@@ -1109,8 +1144,10 @@ async def _run_agent(
                 if remaining == 1:
                     warn_text = "[Agent budget: FINAL iteration. Produce your final summary NOW.]"
                 elif remaining <= 5:
-                    warn_text = (f"[Agent budget: {remaining} iterations remaining. Commit any "
-                                 f"changes, run validation, and produce your final summary.]")
+                    warn_text = (
+                        f"[Agent budget: {remaining} iterations remaining. Commit any "
+                        f"changes, run validation, and produce your final summary.]"
+                    )
                 else:
                     warn_text = (
                         f"[Agent budget: {remaining} iterations remaining. "
@@ -1137,14 +1174,12 @@ async def _run_agent(
                         emergency_compress_for_window,
                         estimate_message_chars,
                     )
+
                     # The latch is capability evidence; the snapshot's primary
                     # is policy. Compact to whichever is LOWER — a live budget
                     # drop must not be out-waited by a stale larger latch.
                     latch_target = min(agent.context_char_ceiling, soft_target_chars)
-                    if (
-                        estimate_message_chars(agent.messages)
-                        > latch_target
-                    ):
+                    if estimate_message_chars(agent.messages) > latch_target:
                         agent.messages, latch_report = emergency_compress_for_window(
                             agent.messages,
                             target_chars=latch_target,
@@ -1158,18 +1193,18 @@ async def _run_agent(
                             latch_report["compressed_chars"],
                         )
                 except Exception:
-                    log.exception(
-                        "agent overflow-latch compaction failed (non-fatal)"
-                    )
+                    log.exception("agent overflow-latch compaction failed (non-fatal)")
 
             # Call LLM with recovery support
             generation_state: dict = {}
             response = await _call_llm_with_recovery(
-                agent, iteration_callback, system_prompt, tools,
-                rescue_ladder=(
-                    budget_snapshot.ladder if budget_snapshot is not None else None
-                ),
+                agent,
+                iteration_callback,
+                system_prompt,
+                tools,
+                rescue_ladder=(budget_snapshot.ladder if budget_snapshot is not None else None),
                 generation_state=generation_state,
+                evidence_recorder=evidence_recorder,
             )
             if response is None:
                 # Terminal state already set by recovery logic
@@ -1264,10 +1299,12 @@ async def _run_agent(
                 iter_tool_results.append({"name": tool_name, "result": result})
 
                 # Append tool result to messages
-                agent.messages.append({
-                    "role": "user",
-                    "content": f"[Tool result: {tool_name}]\n{result}",
-                })
+                agent.messages.append(
+                    {
+                        "role": "user",
+                        "content": f"[Tool result: {tool_name}]\n{result}",
+                    }
+                )
 
             trajectory.add_iteration(
                 iteration=iteration + 1,
@@ -1293,7 +1330,9 @@ async def _run_agent(
             if time.time() - agent.last_activity > STALE_WARN_SECONDS:
                 log.warning(
                     "Agent %s (%s) has been idle for >%ds",
-                    agent.id, agent.label, STALE_WARN_SECONDS,
+                    agent.id,
+                    agent.label,
+                    STALE_WARN_SECONDS,
                 )
 
         # Exhausted iterations — transition from READY → COMPLETED
@@ -1377,6 +1416,7 @@ async def _call_llm_with_recovery(
     tools: list[dict],
     rescue_ladder: tuple[int, ...] | None = None,
     generation_state: dict | None = None,
+    evidence_recorder: Callable | None = None,
 ) -> dict | None:
     """Call the LLM for one agent iteration.
 
@@ -1420,6 +1460,7 @@ async def _call_llm_with_recovery(
     call_timeout = min(agent.iteration_timeout, remaining)
     iteration_deadline = time.monotonic() + call_timeout
     first_attempt = True
+    last_overflow: BaseException | None = None
     while True:
         if _remaining_lifetime(agent) <= 0:
             _lifetime_timeout(agent)
@@ -1453,6 +1494,14 @@ async def _call_llm_with_recovery(
             if pending_ceiling is not None:
                 # The rescue rung is now server-accepted evidence.
                 agent.context_char_ceiling = pending_ceiling
+                if evidence_recorder is not None and last_overflow is not None:
+                    try:
+                        # Phase 5: the overflow→acceptance pair feeds the
+                        # window observer. Total — evidence never fails the
+                        # iteration that just succeeded.
+                        await evidence_recorder(last_overflow, response)
+                    except Exception:
+                        log.exception("agent window-evidence recording failed (non-fatal)")
             return response
         except TimeoutError:
             if _remaining_lifetime(agent) <= 0:
@@ -1508,6 +1557,7 @@ async def _call_llm_with_recovery(
                     agent.context_recoveries.append(report)
                     if report["fits"]:
                         agent.messages = compressed
+                        last_overflow = exc
                         # Latch candidate: held until the retry actually
                         # succeeds (the provider is the authority on
                         # survivable size).
@@ -1543,9 +1593,7 @@ async def _call_llm_with_recovery(
             # fallback, and keeps upstream text out of agent.error /
             # state_history (both API- and trajectory-visible).
             err_desc = f"LLM error: {format_user_facing_error(exc)}"
-            log.error(
-                "Agent %s LLM call failed (no retry): %s", agent.id, err_desc, exc_info=exc
-            )
+            log.error("Agent %s LLM call failed (no retry): %s", agent.id, err_desc, exc_info=exc)
             agent.transition(AgentState.FAILED, err_desc)
             agent.error = err_desc
             agent.ended_at = time.time()

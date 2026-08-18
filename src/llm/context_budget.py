@@ -108,6 +108,7 @@ def snapshot_for_codex_config(
     codex_config: object,
     *,
     max_context_chars: int | None,
+    observed_clamp: int | None = None,
 ) -> ContextBudgetSnapshot:
     """Resolve a snapshot from the live codex config section, getattr-safe.
 
@@ -117,12 +118,15 @@ def snapshot_for_codex_config(
     lifetime lives (the boot-frozen compression object for chat, the
     spawn-frozen value for agents) so the apply-registry classification of
     ``max_context_chars`` stays honest: this helper never re-reads it live.
+    ``observed_clamp`` is the window observer's runtime evidence (phase 5) —
+    callers with an observer pass ``active_clamp(model)``; None = unclamped.
     """
     return resolve_context_budget(
         model,
         overrides=getattr(codex_config, "context_budget_overrides", None),
         utilization=getattr(codex_config, "context_utilization", 60),
         max_context_chars=max_context_chars,
+        observed_clamp=observed_clamp,
     )
 
 
@@ -176,9 +180,7 @@ def resolve_context_budget(
     rung_1 = primary_chars * 7 // 10
     rung_2 = min(rung_1, RESCUE_CEILING_CHARS)
     ladder = tuple(
-        rung
-        for i, rung in enumerate((rung_1, rung_2))
-        if rung > 0 and (i == 0 or rung != rung_1)
+        rung for i, rung in enumerate((rung_1, rung_2)) if rung > 0 and (i == 0 or rung != rung_1)
     )
 
     return ContextBudgetSnapshot(

@@ -175,6 +175,8 @@ EXPECTED_ROUTES = [
     ("PUT", "/api/llm/auxiliary/config", "llm_auxiliary_config"),
     ("PUT", "/api/llm/ollama/config", "llm_ollama_config"),
     ("PUT", "/api/llm/kimi/config", "llm_kimi_config"),
+    ("GET", "/api/context/windows", "get_context_windows"),
+    ("POST", "/api/context/windows/clear", "clear_context_window_clamp"),
     ("GET", "/api/ollama/status", "ollama_status"),
     ("POST", "/api/ollama/reload", "ollama_reload"),
     ("POST", "/api/ollama/probe-models", "ollama_probe_models"),
@@ -235,7 +237,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 188
+        assert len(actual) == len(expected) == 190
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)
