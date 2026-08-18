@@ -69,10 +69,10 @@ tools:
 ```yaml
 openai_codex:
   enabled: true
-  model: gpt-5.5                 # ChatGPT subscription path
-  reasoning_effort: medium       # none | low | medium | high | xhigh | max
-  agent_reasoning_effort: null   # spawned agents; null = inherit, "auto" = per-spawn choice
-  agent_model: null              # spawned agents; null = inherit, "auto" = per-spawn choice
+  model: gpt-5.6-sol             # ChatGPT subscription path
+  reasoning_effort: xhigh        # none | low | medium | high | xhigh | max
+  agent_reasoning_effort: auto   # spawned agents; "auto" = per-spawn choice, null = inherit
+  agent_model: auto              # spawned agents; "auto" = per-spawn choice, null = inherit
   credentials_path: ./data/codex_auth.json
   request_timeout_seconds: 3600  # whole-request backstop; long reasoning turns stream past 10 min
   stream_stall_timeout_seconds: 180  # fail fast when no stream bytes arrive for this long
@@ -91,8 +91,8 @@ openai_codex:
   # (30-100). Never reduces budgets at or below 272K tokens.
   context_utilization: 60
   auxiliary:                     # cheaper model for background jobs
-    enabled: false
-    model: gpt-5.6-luna
+    enabled: true
+    model: gpt-5.6-terra
 ```
 
 A persisted `max_context_chars: 750000` from the pre-campaign default is

@@ -366,12 +366,13 @@ class AuxiliaryLLMConfig(BaseModel):
     differs. When ``enabled`` and a Codex provider is active, those four
     jobs route here; otherwise they use the primary model.
 
-    Default Luna: the Codex catalog positions it for the cheap extraction /
-    transformation tier that suits this workload.
+    Default Terra, enabled: the out-of-the-box configuration mirrors the
+    reference deployment — background jobs on the mid-tier model while the
+    primary handles conversation.
     """
 
-    enabled: bool = False
-    model: str = "gpt-5.6-luna"
+    enabled: bool = True
+    model: str = "gpt-5.6-terra"
 
 
 # "minimal" is deliberately absent: it sits in the Codex API's generic
@@ -531,19 +532,19 @@ class OpenAICodexConfig(BaseModel):
     model_config = ConfigDict(protected_namespaces=())
 
     enabled: bool = False
-    model: str = "gpt-4o"
-    reasoning_effort: ReasoningEffort = "medium"
+    model: str = "gpt-5.6-sol"
+    reasoning_effort: ReasoningEffort = "xhigh"
     # Effort for SPAWNED-AGENT iterations only. None = inherit
     # reasoning_effort (the string "none" is a real effort level, not
     # inherit); "auto" = expose per-spawn effort selection to the spawner
     # ("auto" is policy, never sent to a provider). Read at call time, so
     # live changes reach in-flight agents on their next iteration.
-    agent_reasoning_effort: ReasoningEffort | Literal["auto"] | None = None
+    agent_reasoning_effort: ReasoningEffort | Literal["auto"] | None = "auto"
     # Model for SPAWNED-AGENT iterations only. None = inherit ``model``;
     # "auto" = expose per-spawn model selection to the spawner. Free string
     # like ``model`` otherwise (the WebUI dropdown is the constraint; an
     # unsupported value fails per-request). Read at call time.
-    agent_model: str | None = None
+    agent_model: str | None = "auto"
     credentials_path: str = "./data/codex_auth.json"
     # Streaming transport timeouts: a generous whole-request backstop (long
     # high-effort reasoning turns stream well past 10 minutes) plus a stall

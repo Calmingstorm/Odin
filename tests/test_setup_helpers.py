@@ -40,6 +40,24 @@ class TestBuildConfig:
         cfg["discord"]["token"] = "mutated"
         assert build_config()["discord"]["token"] != "mutated"
 
+    def test_generated_codex_defaults_match_reference_deployment(self):
+        """The scaffold is the one supported first-boot writer: an explicit
+        legacy value here silently overrides the schema defaults, so the
+        GENERATED and the PARSED codex default tuple are pinned together."""
+        from src.config.schema import OpenAICodexConfig
+
+        generated = build_config()["openai_codex"]
+        assert generated["model"] == "gpt-5.6-sol"
+        parsed = OpenAICodexConfig(**generated)
+        assert (
+            parsed.model,
+            parsed.reasoning_effort,
+            parsed.agent_model,
+            parsed.agent_reasoning_effort,
+            parsed.auxiliary.enabled,
+            parsed.auxiliary.model,
+        ) == ("gpt-5.6-sol", "xhigh", "auto", "auto", True, "gpt-5.6-terra")
+
 
 class TestBuildEnv:
     def test_contains_discord_token_line(self):
