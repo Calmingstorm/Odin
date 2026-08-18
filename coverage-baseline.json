@@ -66,10 +66,10 @@
   "statements": 30
  },
  "src/config/migrations.py": {
-  "covered": 243,
+  "covered": 294,
   "missing": 0,
   "percent": 100.0,
-  "statements": 243
+  "statements": 294
  },
  "src/config/schema.py": {
   "covered": 706,
@@ -870,10 +870,10 @@
   "statements": 45
  },
  "src/tools/autonomous_loop.py": {
-  "covered": 155,
-  "missing": 83,
-  "percent": 65.13,
-  "statements": 238
+  "covered": 197,
+  "missing": 72,
+  "percent": 73.23,
+  "statements": 269
  },
  "src/tools/branch_freshness.py": {
   "covered": 99,

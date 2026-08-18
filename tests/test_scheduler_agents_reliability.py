@@ -397,6 +397,89 @@ async def test_stop_waits_until_inflight_iteration_is_cancelled_and_settled():
     await asyncio.sleep(0)
     assert effects == []
 
+async def test_self_stop_single_direct_callback_uses_logical_owner():
+    manager = LoopManager()
+    outcome: list[str] = []
+    holder: dict[str, str] = {}
+
+    async def _self_stop(_prompt, _channel, _prev, cancel_event):
+        assert not cancel_event.is_set()
+        outcome.append(await manager.stop_loop(holder["id"]))
+        return "settled"
+
+    loop_id = manager.start_loop(
+        goal="g",
+        channel=_SilentChannel(),
+        requester_id="u",
+        requester_name="U",
+        iteration_callback=_self_stop,
+        interval_seconds=10,
+        mode="silent",
+        max_iterations=2,
+    )
+    holder["id"] = loop_id
+    task = manager._loops[loop_id]._task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=2)
+
+    assert outcome == [f"Loop `{loop_id}` stop requested."]
+    assert manager._loops[loop_id].status == "stopped"
+
+
+async def test_stop_all_from_one_loop_cancels_and_awaits_other_loops():
+    manager = LoopManager()
+    other_started = asyncio.Event()
+    other_cancelled = asyncio.Event()
+    release_self = asyncio.Event()
+    outcome: list[str] = []
+
+    async def _other(_prompt, _channel, _prev, cancel_event):
+        other_started.set()
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            assert cancel_event.is_set()
+            other_cancelled.set()
+            raise
+
+    other_id = manager.start_loop(
+        goal="other",
+        channel=_SilentChannel(),
+        requester_id="u",
+        requester_name="U",
+        iteration_callback=_other,
+        interval_seconds=10,
+        mode="silent",
+        max_iterations=2,
+    )
+    await asyncio.wait_for(other_started.wait(), timeout=2)
+
+    async def _self(_prompt, _channel, _prev, _cancel):
+        await release_self.wait()
+        outcome.append(await manager.stop_loop("all"))
+        return "settled"
+
+    self_id = manager.start_loop(
+        goal="self",
+        channel=_SilentChannel(),
+        requester_id="u",
+        requester_name="U",
+        iteration_callback=_self,
+        interval_seconds=10,
+        mode="silent",
+        max_iterations=2,
+    )
+    release_self.set()
+    self_task = manager._loops[self_id]._task
+    assert self_task is not None
+    await asyncio.wait_for(self_task, timeout=2)
+
+    assert other_cancelled.is_set()
+    assert manager._loops[other_id].status == "stopped"
+    assert manager._loops[self_id].status == "stopped"
+    assert outcome == [f"Stop requested for 2 loop(s): {other_id}, {self_id}"]
+
+
 async def test_self_stop_all_never_awaits_its_own_manager_task():
     manager = LoopManager()
     outcome: list[str] = []

@@ -234,7 +234,7 @@ export default {
               <section class="llm-advanced-group">
                 <header><strong>Context compression</strong><span>Long-conversation compaction</span></header>
                 <p v-if="llmStatus?.codex?.context_compression_pending_restart === true" class="llm-advanced-state pending" role="status">
-                  Saved values need a restart. This process still uses compression {{ llmStatus.codex.effective_context_compression?.enabled ? 'on' : 'off' }}, {{ Number(llmStatus.codex.effective_context_compression?.max_context_chars || 0).toLocaleString() }} characters, and {{ llmStatus.codex.effective_context_compression?.keep_recent_iterations }} recent iterations.
+                  Saved values need a restart. This process still uses compression {{ llmStatus.codex.effective_context_compression?.enabled ? 'on' : 'off' }}, {{ formatContextCeiling(llmStatus.codex.effective_context_compression?.max_context_chars) }}, and {{ llmStatus.codex.effective_context_compression?.keep_recent_iterations }} recent iterations.
                 </p>
                 <p v-else-if="llmStatus?.codex?.context_compression_pending_restart === false" class="llm-advanced-state">
                   Saved values match this process. Future changes take effect after restart.
@@ -744,6 +744,12 @@ export default {
 
     function formatCount(value) {
       return Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
+    }
+
+    function formatContextCeiling(value) {
+      return value == null
+        ? 'automatic (model-derived)'
+        : Number(value).toLocaleString() + ' characters';
     }
 
     function formatExpiry(value) {
@@ -1264,7 +1270,7 @@ export default {
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
-      formatCount, formatExpiry, shortAccountKey, provenanceClass,
+      formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass,
     };
   },
 };

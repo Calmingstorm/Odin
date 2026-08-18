@@ -11,6 +11,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
@@ -41,6 +42,14 @@ RUNAWAY_THRESHOLD = 3  # Identical outputs before interval increase
 
 LOOP_STOP_SENTINEL = "LOOP_STOP"
 
+# Logical loop ownership follows child tasks created by the iteration pipeline.
+# asyncio.current_task() cannot identify self-stop from a gathered tool child: the
+# child is not LoopInfo._task, but cancelling/awaiting the parent from that child
+# creates a parent/child cancellation cycle. Context propagation is the authority.
+_current_loop: ContextVar[tuple[int, str] | None] = ContextVar(
+    "odin_current_autonomous_loop", default=None
+)
+
 
 @dataclass
 class LoopInfo:
@@ -61,6 +70,7 @@ class LoopInfo:
     status: str = "running"  # running, stopped, completed, error
     _task: asyncio.Task | None = field(default=None, repr=False)
     _cancel_event: asyncio.Event = field(default_factory=asyncio.Event)
+    _stop_requested: bool = field(default=False, repr=False)
     _iteration_history: deque[str] = field(
         default_factory=lambda: deque(maxlen=MAX_CONTEXT_HISTORY * 2),
     )
@@ -140,26 +150,36 @@ class LoopManager:
         contract: once this method says ``stopped``, no retry or tool side
         effect from that loop can begin afterward.
         """
+        logical_current = _current_loop.get()
+        current_loop_id = (
+            logical_current[1]
+            if logical_current is not None and logical_current[0] == id(self)
+            else None
+        )
         if loop_id == "all":
             running = [info for info in self._loops.values() if info.status == "running"]
             if not running:
                 return "No active loops to stop."
-            current = asyncio.current_task()
             for running_info in running:
-                self._request_stop(running_info)
+                if running_info.id == current_loop_id:
+                    # The real tool path runs in an asyncio.gather() child. It
+                    # must stop its logical parent cooperatively, never cancel
+                    # and await that parent from below it.
+                    running_info._stop_requested = True
+                    running_info._cancel_event.set()
+                else:
+                    self._request_stop(running_info)
             await asyncio.gather(
                 *(
                     running_info._task
                     for running_info in running
-                    if running_info._task is not None and running_info._task is not current
+                    if running_info.id != current_loop_id
+                    and running_info._task is not None
                 ),
                 return_exceptions=True,
             )
             ids = ", ".join(running_info.id for running_info in running)
-            if any(running_info._task is current for running_info in running):
-                for running_info in running:
-                    if running_info._task is current:
-                        running_info.status = "stopped"
+            if current_loop_id is not None:
                 return f"Stop requested for {len(running)} loop(s): {ids}"
             return f"Stopped {len(running)} loop(s): {ids}"
 
@@ -168,19 +188,23 @@ class LoopManager:
             return f"No loop found with ID `{loop_id}`."
         if info.status != "running":
             return f"Loop `{loop_id}` is not running (status: {info.status})."
-        self._request_stop(info)
-        if info._task is asyncio.current_task():
-            info.status = "stopped"
-            # A loop may invoke stop_loop on itself. It cannot await/cancel its
-            # own manager task from inside that task; cooperative cancellation
-            # stops the pipeline immediately after this tool call returns.
+        if info.id == current_loop_id:
+            info._stop_requested = True
+            info._cancel_event.set()
+            # ContextVar ownership reaches gathered tool children. The tool is
+            # allowed to return, then run_autonomous observes the event and the
+            # manager task settles without any parent/child cancellation cycle.
             return f"Loop `{loop_id}` stop requested."
+        self._request_stop(info)
         if info._task is not None:
             await asyncio.gather(info._task, return_exceptions=True)
+        if info.status == "running":
+            info.status = "stopped"
         return f"Loop `{loop_id}` stopped."
 
     @staticmethod
     def _request_stop(info: LoopInfo) -> None:
+        info._stop_requested = True
         info._cancel_event.set()
         task = info._task
         if task is not None and task is not asyncio.current_task() and not task.done():
@@ -306,11 +330,13 @@ class LoopManager:
                         turn_id=f"loop:{info.id}:{info.iteration_count}",
                         channel_id=info.channel_id,
                     )
+                    _loop_token = _current_loop.set((id(self), info.id))
                     try:
                         response = await iteration_callback(
                             prompt, channel, prev_context, info._cancel_event
                         )
                     finally:
+                        _current_loop.reset(_loop_token)
                         reset_turn(_turn_token)
                     response = scrub_output_secrets(response.strip()) if response else ""
                     if info._cancel_event.is_set():
@@ -420,15 +446,21 @@ class LoopManager:
                 if await self._interruptible_wait(info, info.interval_seconds):
                     break  # Cancel was set during the wait
 
-            # Loop ended normally (max iterations reached)
+            # Distinguish cooperative cancellation from natural exhaustion.
+            # A self-stop tool sets the event from a gathered child and cannot
+            # mark its logical parent settled; only this owner task publishes
+            # the terminal status after the callback/tool pipeline has unwound.
             if info.status == "running":
-                info.status = "completed"
-                try:
-                    await channel.send(
-                        f"Loop `{info.id}` completed after {info.iteration_count} iterations."
-                    )
-                except Exception:
-                    pass
+                if info._stop_requested:
+                    info.status = "stopped"
+                else:
+                    info.status = "completed"
+                    try:
+                        await channel.send(
+                            f"Loop `{info.id}` completed after {info.iteration_count} iterations."
+                        )
+                    except Exception:
+                        pass
 
         except asyncio.CancelledError:
             info.status = "stopped"

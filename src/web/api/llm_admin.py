@@ -974,7 +974,14 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         # truth directly from the compressor rather than pretending the saved
         # restart-bound value is effective.
         if effective_compression is not None:
-            runtime_ceiling = effective_compression.get("max_context_chars")
+            # Disabled-at-boot means the runtime has no compressor and generation
+            # applies no explicit ceiling. The saved scalar remains configuration,
+            # not runtime policy, until compression is enabled by a restart.
+            runtime_ceiling = (
+                effective_compression.get("max_context_chars")
+                if effective_compression.get("enabled")
+                else None
+            )
         else:
             compressor = getattr(bot, "context_compressor", None)
             # Production stores the boot-frozen ContextCompressionConfig object
@@ -983,10 +990,14 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
             runtime_available = runtime_cfg is not None and hasattr(
                 runtime_cfg, "max_context_chars"
             )
+            # With no boot snapshot and no runtime compressor, the only safe
+            # runtime ceiling is none: generation applies the model-derived
+            # target. Restart-pending provenance remains unknown rather than
+            # guessing from a mutable saved config object.
             runtime_ceiling = (
                 getattr(runtime_cfg, "max_context_chars", None)
                 if runtime_available
-                else configured_ceiling
+                else None
             )
             ceiling_pending_restart = (
                 runtime_ceiling != configured_ceiling if runtime_available else None
