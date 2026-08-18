@@ -1771,6 +1771,10 @@ class TestCodexAdvancedKnobs:
                         "max_context_chars": 500000,
                         "keep_recent_iterations": 12,
                     },
+                    "context_budget_overrides": {
+                        "codex-auto-review": 800000,
+                    },
+                    "context_utilization": 72,
                 })
         assert r.status == 200
         cfg = bot.config.openai_codex
@@ -1781,12 +1785,38 @@ class TestCodexAdvancedKnobs:
         assert cfg.context_compression.max_context_chars == 500000
         assert cfg.stream_stall_timeout_seconds == 240
         assert cfg.context_compression.keep_recent_iterations == 12
+        assert cfg.context_budget_overrides == {"gpt-5.6-luna": 800000}
+        assert cfg.context_utilization == 72
         persisted = {change[0] for change in persist.call_args[0][0]}
         assert ("openai_codex", "request_timeout_seconds") in persisted
         assert ("openai_codex", "retry", "max_retries") in persisted
         assert ("openai_codex", "connection_pool", "max_connections") in persisted
+        assert ("openai_codex", "context_budget_overrides") in persisted
+        assert ("openai_codex", "context_utilization") in persisted
         # Transport/retry reach the live client through the reload path.
         bot.llm_gateway.reload_codex_inner.assert_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("body", "expected_overrides", "expected_utilization"),
+        [
+            ({"context_budget_overrides": {"gpt-5.5": 300_000}}, {"gpt-5.5": 300_000}, 60),
+            ({"context_utilization": 75}, {}, 75),
+        ],
+    )
+    async def test_each_context_policy_leaf_saves_independently(
+        self, body, expected_overrides, expected_utilization
+    ):
+        app, bot = self._harness()
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(return_value=(None, False)),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                response = await c.put("/api/llm/codex/config", json=body)
+        assert response.status == 200
+        assert bot.config.openai_codex.context_budget_overrides == expected_overrides
+        assert bot.config.openai_codex.context_utilization == expected_utilization
 
     @pytest.mark.asyncio
     async def test_pool_and_compression_alone_do_not_reload(self):
@@ -1817,16 +1847,27 @@ class TestCodexAdvancedKnobs:
         ({"retry": {"bogus_knob": 1}}, "unknown retry field"),
         ({"request_timeout_seconds": True}, "must be an integer"),
         ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
+        ({"context_utilization": 29}, "between 30 and 100"),
+        ({"context_budget_overrides": {"gpt-5.5": 50_191}}, "between 50192 and 2000000"),
+        (
+            {"context_budget_overrides": {"gpt-5.6-luna": 800000, "codex-auto-review": 700000}},
+            "duplicates",
+        ),
     ])
     async def test_bounds_are_enforced_before_any_mutation(self, body, fragment):
         app, bot = self._harness()
-        before = bot.config.openai_codex.request_timeout_seconds
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json=body)
-            payload = await r.json()
+        before = bot.config.openai_codex.model_dump()
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(side_effect=AssertionError("invalid policy reached persistence")),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json=body)
+                payload = await r.json()
         assert r.status == 400
         assert fragment in payload["error"]
-        assert bot.config.openai_codex.request_timeout_seconds == before
+        assert bot.config.openai_codex.model_dump() == before
+        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_top_level_timeouts_use_schema_lax_integer_coercion(self):
@@ -1948,6 +1989,8 @@ class TestCodexAdvancedKnobs:
         assert codex["context_compression"] != boot_compression
         assert codex["effective_context_compression"] == boot_compression
         assert codex["context_compression_pending_restart"] is True
+        assert codex["context_budget_overrides"] == {}
+        assert codex["context_utilization"] == 60
         assert body["kimi"]["timeout"] == 123
 
     @pytest.mark.asyncio

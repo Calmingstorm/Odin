@@ -12,6 +12,8 @@ const CODEX_ADVANCED_FIELDS = Object.freeze([
   'retry',
   'connection_pool',
   'context_compression',
+  'context_budget_overrides',
+  'context_utilization',
 ]);
 
 const OLLAMA_BASIC_FIELDS = Object.freeze([

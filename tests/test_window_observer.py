@@ -228,6 +228,30 @@ class TestDownwardOnlyMergeAndTTL:
         eligible.clear()
         assert obs.active_clamp("gpt-5.6-sol") is None
 
+    async def test_account_clamps_are_active_eligible_and_management_ready(self, tmp_path):
+        eligible = {ACCT_A}
+        obs = WindowObserver(
+            tmp_path / "context_windows.json",
+            eligible_account_keys=lambda: frozenset(eligible),
+        )
+        await obs.record_rescue(
+            overflow=_overflow(key=ACCT_A), response=_acceptance(key=ACCT_A, tokens=500_000)
+        )
+        await obs.record_rescue(
+            overflow=_overflow(key=ACCT_B), response=_acceptance(key=ACCT_B, tokens=420_000)
+        )
+        rows = obs.account_clamps()
+        assert rows == [
+            {
+                "account_key": ACCT_A,
+                "model": "gpt-5.6-sol",
+                "value": 500_000,
+                "set_at": rows[0]["set_at"],
+                "expires_at": rows[0]["expires_at"],
+                "source": "rescue",
+            }
+        ]
+
     async def test_eligible_provider_none_or_failure_fails_open_not_stale(self, tmp_path):
         obs = WindowObserver(
             tmp_path / "context_windows.json",
@@ -789,9 +813,7 @@ def _api_app(observer, *, max_context_chars: int | None = None):
             openai_codex=SimpleNamespace(
                 context_budget_overrides={"gpt-5.5": 250_000},
                 context_utilization=60,
-                context_compression=ContextCompressionConfig(
-                    max_context_chars=max_context_chars
-                ),
+                context_compression=ContextCompressionConfig(max_context_chars=max_context_chars),
             )
         ),
         context_compressor=SimpleNamespace(resolved_max_context_chars=750_000),
@@ -818,11 +840,54 @@ class TestContextWindowsApi:
         assert sol["effective"]["clamp_applied"] is True
         assert sol["effective"]["effective_budget"] == 300_000
         assert sol["effective"]["primary_chars"] < sol["configured"]["primary_chars"]
+        assert sol["provenance"] == "temporary learned clamp"
+        assert sol["clamp_expires_at"] == body["clamps"][0]["expires_at"]
+        assert body["clamps"][0]["account_key"] == ACCT_A
         five = body["models"]["gpt-5.5"]
         assert five["override"] == 250_000
         assert five["configured"]["base_source"] == "override"
+        assert five["provenance"] == "override"
+        assert body["models"]["gpt-5.6-terra"]["provenance"] == "built-in"
         # Raw evidence rides along, opaque keys only.
         assert ACCT_A in body["evidence"]["accounts"]
+
+    async def test_get_clamp_expiry_describes_only_applied_effective_minimum(
+        self, tmp_path, monkeypatch
+    ):
+        obs = _observer(tmp_path)
+        now = wo._utc_now()
+        monkeypatch.setattr(wo, "_utc_now", lambda: now)
+        await obs.record_rescue(
+            overflow=_overflow(key=ACCT_A),
+            response=_acceptance(key=ACCT_A, tokens=300_000),
+        )
+        first_expiry = obs.account_clamps()[0]["expires_at"]
+        monkeypatch.setattr(wo, "_utc_now", lambda: now + timedelta(hours=1))
+        await obs.record_rescue(
+            overflow=_overflow(key=ACCT_B),
+            response=_acceptance(key=ACCT_B, tokens=300_000),
+        )
+        later_expiry = [
+            row["expires_at"] for row in obs.account_clamps() if row["account_key"] == ACCT_B
+        ][0]
+        assert later_expiry > first_expiry
+        # Equal minimum remains effective until the later account expiry.
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        assert body["models"]["gpt-5.6-sol"]["clamp_expires_at"] == later_expiry
+
+        # Evidence above the configured budget is visible account evidence but
+        # is not an applied clamp and must not put expiry copy on built-in truth.
+        high = _observer(tmp_path / "high")
+        await high.record_rescue(overflow=_overflow(), response=_acceptance(tokens=1_000_000))
+        app = _api_app(high)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        sol = body["models"]["gpt-5.6-sol"]
+        assert sol["provenance"] == "built-in"
+        assert sol["clamp_expires_at"] is None
+        assert body["clamps"]
 
     async def test_get_preserves_raw_auto_ceiling(self, tmp_path):
         obs = _observer(tmp_path)
@@ -869,7 +934,30 @@ class TestContextWindowsApi:
                 headers={"Content-Type": "application/json"},
             )
             assert resp.status == 400  # malformed body degrades to empty
+            for body in ([], None, "not an object"):
+                resp = await c.post("/api/context/windows/clear", json=body)
+                assert resp.status == 400
         assert obs.active_clamp("gpt-5.6-sol") is None
+
+    async def test_clear_endpoint_preserves_other_model_for_same_account(self, tmp_path):
+        obs = _observer(tmp_path)
+        await obs.record_rescue(
+            overflow=_overflow(model="gpt-5.6-sol"),
+            response=_acceptance(model="gpt-5.6-sol"),
+        )
+        await obs.record_rescue(
+            overflow=_overflow(model="gpt-5.6-terra"),
+            response=_acceptance(model="gpt-5.6-terra", tokens=390_000),
+        )
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            response = await c.post(
+                "/api/context/windows/clear",
+                json={"account_key": ACCT_A, "model": "gpt-5.6-sol"},
+            )
+            assert (await response.json())["cleared"] == 1
+        assert obs.active_clamp("gpt-5.6-sol") is None
+        assert obs.active_clamp("gpt-5.6-terra") == 390_000
 
     async def test_clear_without_observer_is_503(self):
         app = _api_app(None)
