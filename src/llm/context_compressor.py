@@ -7,6 +7,7 @@ Manages context growth during multi-iteration tool loops by:
 2. Compressing older tool iterations when context exceeds a character budget.
 3. Providing observability into compression events and cache efficiency.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -42,9 +43,7 @@ class CompressionStats:
             "prefix_misses": self.prefix_misses,
             "total_checks": self.total_checks,
             "prefix_hit_rate": (
-                round(self.prefix_hits / self.total_checks, 3)
-                if self.total_checks > 0
-                else 0.0
+                round(self.prefix_hits / self.total_checks, 3) if self.total_checks > 0 else 0.0
             ),
         }
 
@@ -101,9 +100,7 @@ def _hash_prefix(system: str, messages: list[dict]) -> str:
         if isinstance(content, str):
             h.update(content.encode("utf-8", errors="replace"))
         else:
-            h.update(
-                json.dumps(content, sort_keys=True, default=str).encode()
-            )
+            h.update(json.dumps(content, sort_keys=True, default=str).encode())
     return h.hexdigest()[:16]
 
 
@@ -111,14 +108,14 @@ def _hash_prefix(system: str, messages: list[dict]) -> str:
 # Message classification helpers
 # ------------------------------------------------------------------
 
+
 def _is_tool_message(msg: dict) -> bool:
     """True if a message contains tool_use or tool_result content blocks,
     or agent-style string tool result messages."""
     content = msg.get("content")
     if isinstance(content, list):
         return any(
-            isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result")
-            for b in content
+            isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result") for b in content
         )
     if isinstance(content, str) and content.startswith("[Tool result:"):
         return True
@@ -128,20 +125,14 @@ def _is_tool_message(msg: dict) -> bool:
 def _is_tool_use_message(msg: dict) -> bool:
     content = msg.get("content")
     if isinstance(content, list):
-        return any(
-            isinstance(b, dict) and b.get("type") == "tool_use"
-            for b in content
-        )
+        return any(isinstance(b, dict) and b.get("type") == "tool_use" for b in content)
     return False
 
 
 def _is_tool_result_message(msg: dict) -> bool:
     content = msg.get("content")
     if isinstance(content, list):
-        return any(
-            isinstance(b, dict) and b.get("type") == "tool_result"
-            for b in content
-        )
+        return any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
     if isinstance(content, str) and content.startswith("[Tool result:"):
         return True
     return False
@@ -150,6 +141,7 @@ def _is_tool_result_message(msg: dict) -> bool:
 # ------------------------------------------------------------------
 # Prefix / iteration splitting
 # ------------------------------------------------------------------
+
 
 def split_prefix_and_iterations(
     messages: list[dict],
@@ -178,9 +170,13 @@ def split_prefix_and_iterations(
     prefix = messages[:prefix_end]
     remaining = messages[prefix_end:]
 
-    if not remaining:
-        return prefix, []
+    return prefix, _group_iterations(remaining)
 
+
+def _group_iterations(remaining: list[dict]) -> list[list[dict]]:
+    """Group iteration-territory messages into tool-call cycles."""
+    if not remaining:
+        return []
     iterations: list[list[dict]] = []
     current: list[dict] = []
 
@@ -201,12 +197,31 @@ def split_prefix_and_iterations(
     if current:
         iterations.append(current)
 
-    return prefix, iterations
+    return iterations
+
+
+def _structural_envelope_end(messages: list[dict]) -> int:
+    """Index of the first message carrying STRUCTURED tool blocks.
+
+    Used only in surface-boundary mode: the request envelope is everything
+    before real tool traffic, judged by list-content ``tool_use`` /
+    ``tool_result`` blocks EXCLUSIVELY. String content is never consulted —
+    a user request that merely LOOKS like ``[Tool result: ...]`` or like a
+    compressor summary is envelope, not machinery (review round-1 blocker).
+    """
+    for i, msg in enumerate(messages):
+        content = msg.get("content")
+        if isinstance(content, list) and any(
+            isinstance(b, dict) and b.get("type") in ("tool_use", "tool_result") for b in content
+        ):
+            return i
+    return len(messages)
 
 
 # ------------------------------------------------------------------
 # Character estimation
 # ------------------------------------------------------------------
+
 
 def estimate_message_chars(messages: list[dict]) -> int:
     """Estimate total character payload across a message list."""
@@ -236,8 +251,13 @@ def estimate_message_chars(messages: list[dict]) -> int:
 # ------------------------------------------------------------------
 
 _ERROR_PREFIXES = (
-    "Error", "error", "ERROR", "Command failed", "Timeout",
-    "Permission denied", "Unknown tool",
+    "Error",
+    "error",
+    "ERROR",
+    "Command failed",
+    "Timeout",
+    "Permission denied",
+    "Unknown tool",
 )
 
 
@@ -277,7 +297,7 @@ def summarize_iteration(iteration: list[dict]) -> str:
             if end > 14:
                 name = content[14:end].strip()
                 tool_names.append(name)
-            result_body = content[end + 1:].strip() if end > 0 else content
+            result_body = content[end + 1 :].strip() if end > 0 else content
             if result_body.startswith(_ERROR_PREFIXES):
                 outcomes.append("ERR")
             else:
@@ -297,6 +317,7 @@ def summarize_iteration(iteration: list[dict]) -> str:
 # ------------------------------------------------------------------
 # Main compression entry point
 # ------------------------------------------------------------------
+
 
 def compress_tool_context(
     messages: list[dict],
@@ -489,7 +510,7 @@ def _emergency_summary_body(msg: dict) -> str:
     if content.startswith(_EMERGENCY_SUMMARY_PREFIX) and content.endswith(
         _EMERGENCY_SUMMARY_SUFFIX
     ):
-        return content[len(_EMERGENCY_SUMMARY_PREFIX):-len(_EMERGENCY_SUMMARY_SUFFIX)]
+        return content[len(_EMERGENCY_SUMMARY_PREFIX) : -len(_EMERGENCY_SUMMARY_SUFFIX)]
     return content
 
 
@@ -522,6 +543,14 @@ class SurfaceBoundary:
 
     request_start: int
     elided_replay: int = 0
+    # Number of messages in the protected request envelope, declared by the
+    # surface from its own STRUCTURE (chat: preamble + current user message;
+    # loops: the autonomous prompt). When set, the envelope/territory split
+    # is exactly this declaration — a prior pass's summary at territory head
+    # stays peelable, and no content heuristic runs at all. None falls back
+    # to the structural tool-block scan (first message carrying real tool
+    # blocks ends the envelope).
+    envelope_len: int | None = None
 
 
 def _replay_marker_message(elided: int) -> dict:
@@ -563,10 +592,29 @@ def _compress_with_boundary(
             head.append(_replay_marker_message(elided))
         return head + kept_replay + inner, len(head) + len(kept_replay)
 
+    # The envelope end is pinned STRUCTURALLY: the surface's own declared
+    # envelope length when it supplies one, else the first message carrying
+    # real tool blocks. Never content — no request text can be reclassified
+    # by the core's legacy string heuristics (review round-1 blocker #1).
+    # The declared form additionally keeps a PRIOR pass's summary (a string
+    # message sitting between envelope and iterations) in territory, where
+    # the core re-opens it instead of letting it ossify as pinned prefix.
+    if boundary.envelope_len is not None:
+        envelope_pin = max(0, min(boundary.envelope_len, len(rest)))
+    else:
+        envelope_pin = _structural_envelope_end(rest)
+
     best_inner, inner_report = emergency_compress_for_window(
-        rest, target_chars=max(0, target_chars - estimate_message_chars(
-            ([_replay_marker_message(elided_total)] if elided_total else []) + replay
-        )), stats=stats,
+        rest,
+        target_chars=max(
+            0,
+            target_chars
+            - estimate_message_chars(
+                ([_replay_marker_message(elided_total)] if elided_total else []) + replay
+            ),
+        ),
+        stats=stats,
+        _pinned_prefix=envelope_pin,
     )
     kept_replay = replay
     while True:
@@ -579,10 +627,16 @@ def _compress_with_boundary(
         kept_replay = kept_replay[1:]
         elided_total += 1
         best_inner, inner_report = emergency_compress_for_window(
-            rest, target_chars=max(0, target_chars - estimate_message_chars(
-                ([_replay_marker_message(elided_total)] if elided_total else [])
-                + kept_replay
-            )), stats=stats,
+            rest,
+            target_chars=max(
+                0,
+                target_chars
+                - estimate_message_chars(
+                    ([_replay_marker_message(elided_total)] if elided_total else []) + kept_replay
+                ),
+            ),
+            stats=stats,
+            _pinned_prefix=envelope_pin,
         )
 
     fits = assembled_chars <= target_chars and inner_report.get("fits", False)
@@ -619,6 +673,7 @@ def emergency_compress_for_window(
     target_chars: int,
     stats: CompressionStats | None = None,
     boundary: SurfaceBoundary | None = None,
+    _pinned_prefix: int | None = None,
 ) -> tuple[list[dict], dict]:
     """Bound the ENTIRE payload under *target_chars* for overflow recovery.
 
@@ -647,21 +702,34 @@ def emergency_compress_for_window(
             messages, target_chars=target_chars, boundary=boundary, stats=stats
         )
     original_chars = estimate_message_chars(messages)
-    raw_prefix, iterations = split_prefix_and_iterations(messages)
-
-    # Emergency summaries are compressor state, not immutable task context.
-    # Peel them out before measuring the prefix so an aggressive second pass
-    # can replace/recompact the first pass's summary.
-    prefix = list(raw_prefix)
     carried_summaries: list[str] = []
-    # Only summaries at the compressor's own boundary are replaceable.  Do
-    # not search/remove matching text from the user's real task or parent
-    # context.  A real prefix must remain before the generated marker.
-    while len(prefix) > 1 and _is_emergency_summary(prefix[-1]):
-        body = _emergency_summary_body(prefix.pop())
-        if body:
-            carried_summaries.append(body)
-    carried_summaries.reverse()
+    if _pinned_prefix is not None:
+        # Surface-boundary mode: the prefix is pinned STRUCTURALLY and taken
+        # verbatim — no content heuristic may reclassify request text as an
+        # iteration or a replaceable summary. Prior-pass summaries live at
+        # the head of iteration territory and are peeled from THERE.
+        pin = max(0, min(_pinned_prefix, len(messages)))
+        prefix = list(messages[:pin])
+        territory = list(messages[pin:])
+        while territory and _is_emergency_summary(territory[0]):
+            body = _emergency_summary_body(territory.pop(0))
+            if body:
+                carried_summaries.append(body)
+        iterations = _group_iterations(territory)
+    else:
+        raw_prefix, iterations = split_prefix_and_iterations(messages)
+
+        # Emergency summaries are compressor state, not immutable task
+        # context. Peel them out before measuring the prefix so an
+        # aggressive second pass can replace/recompact the first pass's
+        # summary. Only summaries at the compressor's own boundary are
+        # replaceable; a real prefix must remain before the marker.
+        prefix = list(raw_prefix)
+        while len(prefix) > 1 and _is_emergency_summary(prefix[-1]):
+            body = _emergency_summary_body(prefix.pop())
+            if body:
+                carried_summaries.append(body)
+        carried_summaries.reverse()
 
     prefix_chars = estimate_message_chars(prefix)
     report: dict = {
@@ -801,7 +869,8 @@ def emergency_compress_for_window(
         if summary is not None and overflow > 0:
             summary_limit = max(0, summary_chars - overflow)
             new_messages, compressed_chars, summary = _assemble(
-                kept, summary_limit=summary_limit,
+                kept,
+                summary_limit=summary_limit,
             )
 
         if compressed_chars > target_chars:

@@ -126,6 +126,7 @@ def _serving_identity_for(gateway, config=None, fallback_client=None) -> LLMServ
         ),
     )
 
+
 _LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})
 
 
@@ -222,9 +223,7 @@ async def _best_effort_typing(channel):
                     _TYPING_ATTEMPT_TIMEOUT,
                 )
             except Exception as exc:
-                log.warning(
-                    "Typing indicator cleanup failed (non-fatal): %s", _error_summary(exc)
-                )
+                log.warning("Typing indicator cleanup failed (non-fatal): %s", _error_summary(exc))
 
 
 class _LoopMessageProxy:
@@ -288,6 +287,14 @@ class LoopPolicy:
     durable_recovery_checkpointing: bool  # chat only (v3.67.0 turn store)
     soft_compaction: bool  # chat always had it; loops gained it in phase 4
     latch_scope: str  # "turn" (durable chat turn) | "invocation" (one run_autonomous)
+
+
+# Structural envelope lengths, declared per surface (never content-derived):
+# chat pins its developer preamble + current user message; the loop pins the
+# single autonomous prompt. A prior emergency summary therefore always lands
+# in territory, where later passes re-open it.
+_CHAT_ENVELOPE_LEN = 2
+_LOOP_ENVELOPE_LEN = 1
 
 
 CHAT_POLICY = LoopPolicy(
@@ -536,9 +543,7 @@ class ToolLoopRunner:
                     "run it again. Send it as a new message if you want a "
                     "fresh run."
                 ),
-                "in_progress": (
-                    "This exact request is already being processed elsewhere."
-                ),
+                "in_progress": ("This exact request is already being processed elsewhere."),
                 "resumable": (
                     "This request has preserved, resumable work — say "
                     "`resume` to continue it instead of starting over."
@@ -549,12 +554,12 @@ class ToolLoopRunner:
                     "execute it blind — try again shortly."
                 ),
             }
-            text = notices.get(
-                st.durability.blocked, "This request cannot be re-run."
-            )
+            text = notices.get(st.durability.blocked, "This request cannot be re-run.")
             log.warning(
                 "Turn admission refused (%s) for message %s in channel %s",
-                st.durability.blocked, st._trajectory.message_id, st._ch_id,
+                st.durability.blocked,
+                st._trajectory.message_id,
+                st._ch_id,
             )
             return (text, False, False, [], False)
         return await self._run_with_guards(st)
@@ -573,9 +578,7 @@ class ToolLoopRunner:
         await self._delivery.set_status("Resuming preserved work...", task_start=True)
         return await self._run_with_guards(st)
 
-    async def _run_with_guards(
-        self, st: _ChatTurn
-    ) -> tuple[str, bool, bool, list[str], bool]:
+    async def _run_with_guards(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
         try:
             result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
@@ -625,9 +628,7 @@ class ToolLoopRunner:
                 log.warning("Durable failure mark failed (non-fatal)")
             raise
 
-    async def _run_chat_iterations(
-        self, st: _ChatTurn
-    ) -> tuple[str, bool, bool, list[str], bool]:
+    async def _run_chat_iterations(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
         """The chat iteration loop — every phase-method exit returns through
         here; unexpected escapes are handled by run()'s guard above.
 
@@ -655,7 +656,7 @@ class ToolLoopRunner:
             serving = self._llm_gateway.capture_serving_identity(config)
             self._maybe_compress(st, serving.client, config)
 
-            kind, val = await self._call_llm(st, serving_identity=serving)
+            kind, val = await self._call_llm(st, serving_identity=serving, request_config=config)
             if kind == "done":
                 return val
             llm_resp = val
@@ -689,9 +690,7 @@ class ToolLoopRunner:
             # Build internal-format assistant content from LLMResponse
             # (the R5-extracted fragment; the pre-carve chat body inlined
             # the byte-identical block).
-            st.messages.append(
-                {"role": "assistant", "content": build_assistant_content(llm_resp)}
-            )
+            st.messages.append({"role": "assistant", "content": build_assistant_content(llm_resp)})
 
             tool_calls = llm_resp.tool_calls
             st.tools_used_in_loop.extend(t.name for t in tool_calls)
@@ -762,8 +761,7 @@ class ToolLoopRunner:
                 message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
             )
             is_bot_message = bool(
-                getattr(message.author, "bot", False)
-                and (_respond_to_bots or is_allowed_webhook)
+                getattr(message.author, "bot", False) and (_respond_to_bots or is_allowed_webhook)
             )
         else:
             # Intake already made the admission decision. Do not re-resolve a
@@ -852,9 +850,7 @@ class ToolLoopRunner:
             trace.provider(
                 name=getattr(provider_cfg, "active_provider", "codex") if provider_cfg else "codex",
                 model=getattr(self._llm_gateway.active_client, "model", "") or "",
-                reasoning_effort=getattr(
-                    self._llm_gateway.active_client, "reasoning_effort", None
-                ),
+                reasoning_effort=getattr(self._llm_gateway.active_client, "reasoning_effort", None),
             )
         _turn_ctx = get_turn() or {}
         _trajectory = TrajectoryTurn(
@@ -999,10 +995,35 @@ class ToolLoopRunner:
                         stats=self._get_compression_stats(),
                     )
                     log.info("context_compressor: trimmed %d chars", _saved)
+                latch = getattr(st, "_char_latch", None)
+                if latch is not None:
+                    # A size the server already refused must never be resent:
+                    # enforce min(accepted latch, policy primary) BEFORE the
+                    # generation, exactly like the agent and loop paths.
+                    latch_target = min(latch, snapshot.primary_chars)
+                    if estimate_message_chars(st.messages) > latch_target:
+                        from ..llm.context_compressor import (
+                            emergency_compress_for_window,
+                        )
+
+                        st.messages, latch_report = emergency_compress_for_window(
+                            st.messages,
+                            target_chars=latch_target,
+                            boundary=SurfaceBoundary(
+                                request_start=st._boundary_request_start,
+                                elided_replay=st._boundary_elided_replay,
+                                envelope_len=_CHAT_ENVELOPE_LEN,
+                            ),
+                        )
+                        if latch_report.get("boundary_request_start") is not None:
+                            st._boundary_request_start = latch_report["boundary_request_start"]
+                            st._boundary_elided_replay = latch_report["boundary_elided_replay"]
+                        latch_report["attempt"] = 0
+                        latch_report["trigger"] = "latch"
+                        if st._trajectory is not None:
+                            st._trajectory.context_recoveries.append(latch_report)
             except Exception:
-                log.exception(
-                    "context_compressor failed (non-fatal); continuing with full context"
-                )
+                log.exception("context_compressor failed (non-fatal); continuing with full context")
 
     async def _call_llm(
         self,
@@ -1010,6 +1031,7 @@ class ToolLoopRunner:
         request_client: object = None,
         *,
         serving_identity=None,
+        request_config: object = None,
     ):
         """Guarded LLM call with typing indicator and deadline-based recovery.
 
@@ -1024,7 +1046,39 @@ class ToolLoopRunner:
         interrupts any recovery wait immediately.
         """
         _channel_id = str(st.message.channel.id)
-        if serving_identity is None:
+        if st._gen_identity:
+            # A turn resumed MID-RECOVERY continues the SAME logical
+            # generation: the persisted identity FACTS select the provider,
+            # client, breaker key, and both request axes. The live serving
+            # identity is never spliced in — a live client wearing frozen
+            # axes is neither the frozen generation nor a coherent new one.
+            # If the frozen provider's client no longer exists, the
+            # generation ends honestly instead of switching providers.
+            _facts = st._gen_identity
+            _fact_provider = str(_facts.get("provider") or "")
+            _fact_client = {
+                "codex": getattr(self._llm_gateway, "codex_client", None),
+                "ollama": getattr(self._llm_gateway, "ollama_client", None),
+                "kimi": getattr(self._llm_gateway, "kimi_client", None),
+            }.get(_fact_provider)
+            if _fact_client is None:
+                return (
+                    "done",
+                    await self._llm_error_done(
+                        st,
+                        LLMRequestError(
+                            "resumed generation's provider "
+                            f"'{_fact_provider or 'unknown'}' is no longer configured"
+                        ),
+                    ),
+                )
+            serving_identity = LLMServingIdentity(
+                provider=_fact_provider,
+                client=_fact_client,
+                model=_facts.get("model"),
+                reasoning_effort=_facts.get("effort"),
+            )
+        elif serving_identity is None:
             serving_identity = _serving_identity_for(
                 self._llm_gateway, fallback_client=request_client
             )
@@ -1044,7 +1098,9 @@ class ToolLoopRunner:
         def _on_wait(wait: float, remaining: float, error: BaseException) -> None:
             log.info(
                 "LLM recovery (%s): waiting %.1fs, %.0fs of generation budget left",
-                type(error).__name__, wait, remaining,
+                type(error).__name__,
+                wait,
+                remaining,
             )
 
         # Pin both Codex request axes. The client object's attributes are
@@ -1074,9 +1130,7 @@ class ToolLoopRunner:
         # gets one attempt, not a fresh window. Later generations budget
         # normally.
         resume_budget = st.durability.pop_resume_budget()
-        deadline_seconds = (
-            policy.deadline_seconds if resume_budget is None else resume_budget
-        )
+        deadline_seconds = policy.deadline_seconds if resume_budget is None else resume_budget
 
         # Persist the absolute recovery deadline BEFORE the call: a restart
         # mid-recovery reconstructs only the remaining budget, never a fresh
@@ -1090,25 +1144,23 @@ class ToolLoopRunner:
         # st._rescue_passes, never re-arming rung one.
         from ..llm.context_budget import snapshot_for_codex_config
 
+        _snapshot = None
         if st._gen_identity:
+            # Axes were reconstructed onto serving_identity above; the facts
+            # here supply the frozen budget ladder so the resumed generation
+            # continues at the NEXT rung of the SAME plan.
             _ladder: tuple[int, ...] = tuple(st._gen_identity.get("ladder") or ())
-            _fact_model = st._gen_identity.get("model")
-            _fact_effort = st._gen_identity.get("effort")
-            if _fact_model:
-                pin_kwargs["model"] = _fact_model
-            if _fact_effort is not None:
-                pin_kwargs["reasoning_effort"] = _fact_effort
         else:
             _chat_compressor = self._get_context_compressor()
-            _ladder = snapshot_for_codex_config(
+            _root_config = request_config if request_config is not None else self._get_config()
+            _snapshot = snapshot_for_codex_config(
                 serving_identity.model if serving_identity.is_codex else None,
-                getattr(self._get_config(), "openai_codex", None),
+                getattr(_root_config, "openai_codex", None),
                 max_context_chars=(
-                    _chat_compressor.max_context_chars
-                    if _chat_compressor is not None
-                    else None
+                    _chat_compressor.max_context_chars if _chat_compressor is not None else None
                 ),
-            ).ladder
+            )
+            _ladder = _snapshot.ladder
         _generation_deadline = time.monotonic() + deadline_seconds
         _pending_latch: int | None = None
         _rescued_this_call = False
@@ -1126,10 +1178,7 @@ class ToolLoopRunner:
                             deadline_seconds=(
                                 deadline_seconds
                                 if not _rescued_this_call
-                                else max(
-                                    0.5,
-                                    _generation_deadline - time.monotonic(),
-                                )
+                                else _generation_deadline - time.monotonic()
                             ),
                             cancel_event=st._cancel,
                             on_wait=_on_wait,
@@ -1145,8 +1194,7 @@ class ToolLoopRunner:
                         break
                     except LLMRequestError as overflow_exc:
                         if (
-                            getattr(overflow_exc, "code", None)
-                            != "context_length_exceeded"
+                            getattr(overflow_exc, "code", None) != "context_length_exceeded"
                             or st._rescue_passes >= len(_ladder)
                             or _generation_deadline - time.monotonic() <= 0
                         ):
@@ -1162,6 +1210,7 @@ class ToolLoopRunner:
                             boundary=SurfaceBoundary(
                                 request_start=st._boundary_request_start,
                                 elided_replay=st._boundary_elided_replay,
+                                envelope_len=_CHAT_ENVELOPE_LEN,
                             ),
                         )
                         report["attempt"] = st._rescue_passes + 1
@@ -1174,19 +1223,30 @@ class ToolLoopRunner:
                         st._rescue_passes += 1
                         _rescued_this_call = True
                         if report.get("boundary_request_start") is not None:
-                            st._boundary_request_start = report[
-                                "boundary_request_start"
-                            ]
-                            st._boundary_elided_replay = report[
-                                "boundary_elided_replay"
-                            ]
+                            st._boundary_request_start = report["boundary_request_start"]
+                            st._boundary_elided_replay = report["boundary_elided_replay"]
                         if st._gen_identity is None:
                             st._gen_identity = {
                                 "provider": serving_identity.provider,
                                 "model": serving_identity.model,
                                 "effort": serving_identity.reasoning_effort,
                                 "ladder": list(_ladder),
+                                "budget": (
+                                    {"primary_chars": _snapshot.primary_chars}
+                                    if _snapshot is not None
+                                    else None
+                                ),
+                                "attempts": [],
                             }
+                        st._gen_identity.setdefault("attempts", []).append(
+                            {
+                                "attempt": st._rescue_passes,
+                                "account_key": getattr(overflow_exc, "account_key", None),
+                                "server_input_tokens": getattr(
+                                    overflow_exc, "server_input_tokens", None
+                                ),
+                            }
+                        )
                         _pending_latch = report["compressed_chars"]
                         # Durable BEFORE the resend (contract §7): mutated
                         # transcript + boundary + rung phase checkpoint with
@@ -1194,6 +1254,13 @@ class ToolLoopRunner:
                         # A write failure PROPAGATES — the retry never runs
                         # ahead of what resume can reconstruct.
                         await st.durability.on_context_recovery(st)
+                        if _generation_deadline - time.monotonic() <= 0:
+                            # The deadline expired during compression or the
+                            # durability write. generate_with_recovery admits
+                            # one attempt regardless of budget (it bounds
+                            # WAITING), so refusal must happen HERE — never
+                            # start a physical request after expiry.
+                            raise
                         log.warning(
                             "Chat context overflow: rescue pass %d compressed "
                             "%d -> %d chars; retrying generation",
@@ -1247,9 +1314,7 @@ class ToolLoopRunner:
         if not preserved:
             return await self._llm_error_done(st, cap_err)
 
-        minutes = max(
-            1, round(self._llm_gateway.recovery_policy().deadline_seconds / 60.0)
-        )
+        minutes = max(1, round(self._llm_gateway.recovery_policy().deadline_seconds / 60.0))
         model = cap_err.model or "The model"
         n_tools = len(st.tools_used_in_loop)
         text = (
@@ -1268,9 +1333,7 @@ class ToolLoopRunner:
         self._clear_active(st)
         if self._on_turn_suspended is not None and st.durability.lease is not None:
             try:
-                self._on_turn_suspended(
-                    st.durability.lease.key, st.durability.lease.generation
-                )
+                self._on_turn_suspended(st.durability.lease.key, st.durability.lease.generation)
             except Exception:
                 log.exception("Auto-resume registration failed (non-fatal)")
         return (text, False, True, st.tools_used_in_loop, False)
@@ -1285,8 +1348,7 @@ class ToolLoopRunner:
         from ..trajectories.saver import ToolIteration
 
         iter_tool_calls = [
-            {"id": tc.id, "name": tc.name, "input": tc.input}
-            for tc in (llm_resp.tool_calls or [])
+            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in (llm_resp.tool_calls or [])
         ]
         st._trajectory.iterations.append(
             ToolIteration(
@@ -1375,9 +1437,7 @@ class ToolLoopRunner:
             return None
         last_fp = st.stuck_tracker.last_fingerprint
         if st.stuck_tracker.warned:
-            log.warning(
-                "Restored tracker already confirmed-stuck — terminating before generation"
-            )
+            log.warning("Restored tracker already confirmed-stuck — terminating before generation")
             await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
             await self._turn_recorder._emit_lifecycle_event(
                 "loop.stuck",
@@ -1407,14 +1467,18 @@ class ToolLoopRunner:
             # Alive-ness rides IN the fingerprint (wait:mp:<pid>:<status>:…).
             parts = last_fp.split(":")
             alive = len(parts) > 3 and parts[3] == "running"
-            nudge = dict(_WAIT_PROCESS_NUDGE) if alive else {
-                "role": "developer",
-                "content": (
-                    "You are repeating the same call against a finished or "
-                    "missing target and getting the same result. Act on the "
-                    "result you already have, or report and stop."
-                ),
-            }
+            nudge = (
+                dict(_WAIT_PROCESS_NUDGE)
+                if alive
+                else {
+                    "role": "developer",
+                    "content": (
+                        "You are repeating the same call against a finished or "
+                        "missing target and getting the same result. Act on the "
+                        "result you already have, or report and stop."
+                    ),
+                }
+            )
         else:
             # Pending is set only by wait iterations, so the last
             # fingerprint is always wait:* — mp handled above, agents here.
@@ -1441,9 +1505,7 @@ class ToolLoopRunner:
 
         Returns True iff this was a wait-class iteration.
         """
-        iter_tool_calls = [
-            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls
-        ]
+        iter_tool_calls = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls]
         if not is_wait_iteration(iter_tool_calls):
             return False
         tc = tool_calls[0]
@@ -1478,9 +1540,7 @@ class ToolLoopRunner:
         if not st.stuck_tracker.check():
             return None
         if st.stuck_tracker.warned:
-            log.warning(
-                "Frozen wait repetition confirmed after warning — terminating tool loop"
-            )
+            log.warning("Frozen wait repetition confirmed after warning — terminating tool loop")
             await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
             await self._turn_recorder._emit_lifecycle_event(
                 "loop.stuck",
@@ -1508,9 +1568,7 @@ class ToolLoopRunner:
             )
         st.stuck_tracker.warned = True
         if wait_target_alive(tc.name, result_text):
-            nudge = (
-                _WAIT_PROCESS_NUDGE if tc.name == "manage_process" else _WAIT_AGENTS_NUDGE
-            )
+            nudge = _WAIT_PROCESS_NUDGE if tc.name == "manage_process" else _WAIT_AGENTS_NUDGE
             log.info("Frozen wait pattern detected (target alive) — injecting wait nudge")
         else:
             # Terminal/error results repeating: the target is NOT alive, so
@@ -1541,8 +1599,7 @@ class ToolLoopRunner:
         if st._validation_required and st._validation_retries < st._max_validation_retries:
             st._validation_retries += 1
             log.warning(
-                "Validation required but model returned text — "
-                "forcing continuation (attempt %d)",
+                "Validation required but model returned text — forcing continuation (attempt %d)",
                 st._validation_retries,
             )
             st.messages.append(
@@ -1711,9 +1768,7 @@ class ToolLoopRunner:
                 block, ok=False, uncertain=False, result_text=_rbac_denial
             )
             return {"type": "tool_result", "tool_use_id": block.id, "content": _rbac_denial}
-        await self._delivery.set_status(
-            TOOL_STATUS_LABELS.get(tool_name, f"Running: {tool_name}")
-        )
+        await self._delivery.set_status(TOOL_STATUS_LABELS.get(tool_name, f"Running: {tool_name}"))
 
         try:
             await self._audit.log_event(
@@ -1801,9 +1856,7 @@ class ToolLoopRunner:
         # Handle special image block return from analyze_image
         if isinstance(result, dict) and "__image_block__" in result:
             st.pending_image_blocks.append(result["__image_block__"])
-            result = (
-                f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
-            )
+            result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
 
         # Scrub secrets from tool output
         result = scrub_output_secrets(result)
@@ -1818,7 +1871,13 @@ class ToolLoopRunner:
             result = ensure_failure_visible(result, tool_result.ok)
 
         await self._audit_tool_outcome(
-            st, tool_name, tool_input, result, elapsed_ms, error, tool_result,
+            st,
+            tool_name,
+            tool_input,
+            result,
+            elapsed_ms,
+            error,
+            tool_result,
             call_id=block.id,
         )
 
@@ -1858,8 +1917,16 @@ class ToolLoopRunner:
         }
 
     async def _audit_tool_outcome(
-        self, st: _ChatTurn, tool_name, tool_input, result, elapsed_ms, error, tool_result,
-        *, call_id: str | None = None,
+        self,
+        st: _ChatTurn,
+        tool_name,
+        tool_input,
+        result,
+        elapsed_ms,
+        error,
+        tool_result,
+        *,
+        call_id: str | None = None,
     ) -> None:
         """Write execution + tool_end audit records — never crash tool
         execution on audit failure. (Inline block of the old `_run_tool`.)"""
@@ -2145,9 +2212,7 @@ class ToolLoopRunner:
 
             # Build assistant content with tool_use blocks (matches the chat
             # pipeline's format)
-            st.messages.append(
-                {"role": "assistant", "content": build_assistant_content(response)}
-            )
+            st.messages.append({"role": "assistant", "content": build_assistant_content(response)})
 
             await self._execute_loop_tools(st, response)
 
@@ -2216,7 +2281,10 @@ class ToolLoopRunner:
         # Surface boundary: the prev-context exchange (two messages when
         # present) is replayable context; the current autonomous prompt and
         # everything after it is protected/iteration territory.
-        loop_boundary = SurfaceBoundary(request_start=2 if prev_context else 0)
+        loop_boundary = SurfaceBoundary(
+            request_start=2 if prev_context else 0,
+            envelope_len=_LOOP_ENVELOPE_LEN,
+        )
 
         # Build system prompt and tool definitions
         if _trace is not None:
@@ -2271,6 +2339,10 @@ class ToolLoopRunner:
         """Persist the loop turn and run gated reflection at every exit.
         (The old `_finish` closure.)"""
         if st._trajectory is not None:
+            if st.context_recoveries:
+                # Evidence rides the SAVED artifact, not a working list that
+                # dies with the turn object (review round-1 blocker #3).
+                st._trajectory.context_recoveries = list(st.context_recoveries)
             await self._turn_recorder._save_turn_trajectory(
                 st._trajectory,
                 error=error_text if is_error else "",
@@ -2297,8 +2369,6 @@ class ToolLoopRunner:
         accepted-size latch compaction with the loop's surface boundary.
         Non-fatal like every compaction guard."""
         compressor = self._get_context_compressor()
-        if compressor is None:
-            return
         try:
             from ..llm.context_budget import snapshot_for_codex_config
             from ..llm.context_compressor import (
@@ -2311,10 +2381,13 @@ class ToolLoopRunner:
             snapshot = snapshot_for_codex_config(
                 model_for_budget,
                 getattr(config, "openai_codex", None),
-                max_context_chars=compressor.max_context_chars,
+                max_context_chars=(
+                    compressor.max_context_chars if compressor is not None else None
+                ),
             )
             if (
-                st._iteration_index > 0
+                compressor is not None
+                and st._iteration_index > 0
                 and estimate_message_chars(st.messages) > snapshot.primary_chars
             ):
                 st.messages, _saved = compress_tool_context(
@@ -2339,14 +2412,13 @@ class ToolLoopRunner:
                         st._boundary = SurfaceBoundary(
                             request_start=latch_report["boundary_request_start"],
                             elided_replay=latch_report["boundary_elided_replay"],
+                            envelope_len=_LOOP_ENVELOPE_LEN,
                         )
                     latch_report["attempt"] = 0
                     latch_report["trigger"] = "latch"
                     st.context_recoveries.append(latch_report)
         except Exception:
-            log.exception(
-                "loop compaction failed (non-fatal); continuing with full context"
-            )
+            log.exception("loop compaction failed (non-fatal); continuing with full context")
 
     async def _call_loop_llm(
         self,
@@ -2370,9 +2442,7 @@ class ToolLoopRunner:
         Returns ("ok", response) or ("done", <run_autonomous() return str>).
         """
         if serving_identity is None:
-            serving_identity = _serving_identity_for(
-                self._llm_gateway, request_config
-            )
+            serving_identity = _serving_identity_for(self._llm_gateway, request_config)
         if request_config is None:
             request_config = self._get_config()
         breaker = self._llm_gateway.capacity_breaker_for(
@@ -2401,9 +2471,7 @@ class ToolLoopRunner:
         _snapshot = snapshot_for_codex_config(
             serving_identity.model if serving_identity.is_codex else None,
             getattr(request_config, "openai_codex", None),
-            max_context_chars=(
-                _compressor.max_context_chars if _compressor is not None else None
-            ),
+            max_context_chars=(_compressor.max_context_chars if _compressor is not None else None),
         )
         # ONE monotonic deadline for the whole logical generation: the first
         # attempt runs on the policy's own budget; rescue retries pay for the
@@ -2427,11 +2495,7 @@ class ToolLoopRunner:
                         breaker=breaker,
                         retry_circuit_open=False,
                         deadline_seconds=(
-                            None
-                            if rescue_passes == 0
-                            else max(
-                                0.5, generation_deadline - time.monotonic()
-                            )
+                            None if rescue_passes == 0 else generation_deadline - time.monotonic()
                         ),
                     )
                     if pending_latch is not None:
@@ -2443,8 +2507,7 @@ class ToolLoopRunner:
 
                     is_overflow = (
                         isinstance(overflow_exc, LLMRequestError)
-                        and getattr(overflow_exc, "code", None)
-                        == "context_length_exceeded"
+                        and getattr(overflow_exc, "code", None) == "context_length_exceeded"
                     )
                     ladder = _snapshot.ladder
                     if (
@@ -2475,8 +2538,14 @@ class ToolLoopRunner:
                         st._boundary = SurfaceBoundary(
                             request_start=report["boundary_request_start"],
                             elided_replay=report["boundary_elided_replay"],
+                            envelope_len=_LOOP_ENVELOPE_LEN,
                         )
                     pending_latch = report["compressed_chars"]
+                    if generation_deadline - time.monotonic() <= 0:
+                        # Same rule as chat: recovery deadlines bound waiting,
+                        # not an admitted stream — never start a request
+                        # after expiry.
+                        raise
                     log.warning(
                         "Loop context overflow: rescue pass %d compressed "
                         "%d -> %d chars; retrying iteration",
@@ -2506,9 +2575,7 @@ class ToolLoopRunner:
         # Bypass-path success: clear a latched llm_* guard key using the
         # response's immutable provenance (never the post-await active
         # provider) — the production mark_available wiring.
-        self._llm_gateway.notify_generation_success(
-            getattr(response, "provenance_provider", None)
-        )
+        self._llm_gateway.notify_generation_success(getattr(response, "provenance_provider", None))
         return ("ok", response)
 
     def _record_loop_iteration(self, st: _LoopTurn, response, _iteration: int) -> bool:

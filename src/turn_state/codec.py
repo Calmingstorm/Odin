@@ -325,6 +325,7 @@ def _trajectory_to_payload(trajectory) -> dict:
         "total_input_tokens": trajectory.total_input_tokens,
         "total_output_tokens": trajectory.total_output_tokens,
         "total_duration_ms": trajectory.total_duration_ms,
+        "context_recoveries": list(trajectory.context_recoveries or []),
         "iteration_revision": len(trajectory.iterations),
     }
 
@@ -360,6 +361,7 @@ def trajectory_from_payload(data: dict):
     turn.user_content_truncated = bool(data.get("user_content_truncated", False))
     turn.user_content_original_chars = int(data.get("user_content_original_chars", 0) or 0)
     turn.total_input_tokens = int(data.get("total_input_tokens", 0) or 0)
+    turn.context_recoveries = list(data.get("context_recoveries") or [])
     turn.total_output_tokens = int(data.get("total_output_tokens", 0) or 0)
     turn.total_duration_ms = int(data.get("total_duration_ms", 0) or 0)
     return turn
