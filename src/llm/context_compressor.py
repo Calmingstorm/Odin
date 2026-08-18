@@ -602,6 +602,9 @@ def _compress_with_boundary(
     report = dict(inner_report)
     report["original_chars"] = original_chars
     report["compressed_chars"] = assembled_chars
+    # Evidence truth: the report names the RUNG the caller requested, not
+    # the replay-reduced inner target the core happened to run with.
+    report["target_chars"] = target_chars
     report["fits"] = fits
     report["replay_original"] = len(replay)
     report["replay_elided"] = elided_total - boundary.elided_replay
