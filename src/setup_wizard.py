@@ -27,7 +27,11 @@ _DEFAULT_CONFIG: dict[str, Any] = {
     },
     "openai_codex": {
         "enabled": True,
-        "model": "gpt-5.5",
+        # Matches the schema default (the reference-deployment primary): an
+        # explicit legacy value here would silently override it on the one
+        # supported first-boot path and pin fresh installs to a 272K-class
+        # budget instead of sol's floor.
+        "model": "gpt-5.6-sol",
         "credentials_path": "./data/codex_auth.json",
     },
     "context": {
