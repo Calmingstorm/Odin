@@ -66,10 +66,10 @@
   "statements": 30
  },
  "src/config/migrations.py": {
-  "covered": 184,
+  "covered": 243,
   "missing": 0,
   "percent": 100.0,
-  "statements": 184
+  "statements": 243
  },
  "src/config/schema.py": {
   "covered": 706,

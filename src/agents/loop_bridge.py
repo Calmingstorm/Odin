@@ -102,6 +102,7 @@ class LoopAgentBridge:
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
         budget_snapshot_provider_factory=None,
+        generation_plan_provider_factory=None,
         evidence_recorder=None,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
@@ -209,6 +210,11 @@ class LoopAgentBridge:
                 budget_snapshot_provider=(
                     budget_snapshot_provider_factory(model_override)
                     if budget_snapshot_provider_factory is not None
+                    else None
+                ),
+                generation_plan_provider=(
+                    generation_plan_provider_factory(model_override, effort_override)
+                    if generation_plan_provider_factory is not None
                     else None
                 ),
                 evidence_recorder=evidence_recorder,

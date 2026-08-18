@@ -177,7 +177,9 @@ class TestLoops:
     @pytest.mark.asyncio
     async def test_stop_loop_found_and_missing(self):
         bot = MagicMock()
-        bot.loop_manager.stop_loop.side_effect = ["Stopped loop.", "Loop not found."]
+        bot.loop_manager.stop_loop = AsyncMock(
+            side_effect=["Stopped loop.", "Loop not found."]
+        )
         async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
             assert (await c.delete("/api/loops/L1")).status == 200
             assert (await c.delete("/api/loops/L1")).status == 404
@@ -193,6 +195,7 @@ class TestLoops:
     async def test_restart_success(self):
         bot = MagicMock()
         bot.loop_manager._loops = {"L1": _loop_info(status="running", channel_id="123")}
+        bot.loop_manager.stop_loop = AsyncMock(return_value="Loop stopped.")
         bot.get_channel.return_value = MagicMock()
         bot.loop_manager.start_loop.return_value = "loop-new"
         async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
@@ -214,6 +217,7 @@ class TestLoops:
     async def test_restart_manager_error(self):
         bot = MagicMock()
         bot.loop_manager._loops = {"L1": _loop_info(status="running", channel_id="123")}
+        bot.loop_manager.stop_loop = AsyncMock(return_value="Loop stopped.")
         bot.get_channel.return_value = MagicMock()
         bot.loop_manager.start_loop.return_value = "Error: too many loops"
         async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:

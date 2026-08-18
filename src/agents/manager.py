@@ -468,16 +468,18 @@ class AgentManager:
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
         budget_snapshot_provider: Callable | None = None,
+        generation_plan_provider: Callable | None = None,
         evidence_recorder: Callable | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string.
 
-        ``budget_snapshot_provider`` resolves the effective agent model's
-        ContextBudgetSnapshot per logical generation (live config reaches the
-        NEXT iteration; the in-flight one keeps its snapshot). Absent, the
-        spawn-frozen ``max_context_chars`` and the unknown-model fallback
-        ladder preserve pre-campaign budget behavior. The iteration callback
-        must implement the required ``generation_state=`` channel.
+        ``generation_plan_provider`` captures the authoritative serving
+        identity and ContextBudgetSnapshot once before pre-send compaction;
+        that exact plan is threaded through every physical attempt and rescue.
+        ``budget_snapshot_provider`` remains a compatibility fallback for
+        standalone callers that do not own a full serving identity. The
+        iteration callback must implement the required ``generation_state=``
+        channel.
         """
         # Check the live per-channel admission limit. Existing agents are
         # never evicted when the setting falls; only subsequent spawns see it.
@@ -624,6 +626,7 @@ class AgentManager:
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,
                 budget_snapshot_provider=budget_snapshot_provider,
+                generation_plan_provider=generation_plan_provider,
                 evidence_recorder=evidence_recorder,
             )
         )
@@ -1016,6 +1019,7 @@ async def _run_agent(
     max_context_chars: int = 750000,
     keep_recent_iterations: int = 30,
     budget_snapshot_provider: Callable | None = None,
+    generation_plan_provider: Callable | None = None,
     evidence_recorder: Callable | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
@@ -1095,14 +1099,22 @@ async def _run_agent(
                 except asyncio.QueueEmpty:
                     break
 
-            # Per-generation budget snapshot: the effective agent model's
-            # targets, resolved fresh each iteration (live config and a live
-            # model change reach the NEXT generation; retries and rescue
-            # rungs inside one generation reuse this snapshot). Provider
-            # failure or absence falls back to the spawn-frozen soft value
-            # and the unknown-model ladder — pre-campaign behavior.
+            # ONE authoritative plan is captured before any compaction for
+            # this logical generation. Its serving identity and budget snapshot
+            # then govern the soft pass, latch pass, physical request, and every
+            # rescue rung. Live config reaches only the next generation.
+            generation_state: dict = {}
             budget_snapshot = None
-            if budget_snapshot_provider is not None:
+            if generation_plan_provider is not None:
+                try:
+                    plan = generation_plan_provider()
+                    generation_state["plan"] = plan
+                    budget_snapshot = plan.get("snapshot") if isinstance(plan, dict) else None
+                except Exception:
+                    log.exception(
+                        "agent generation plan provider failed (non-fatal); using fallback targets"
+                    )
+            elif budget_snapshot_provider is not None:
                 try:
                     budget_snapshot = budget_snapshot_provider()
                 except Exception:
@@ -1195,8 +1207,8 @@ async def _run_agent(
                 except Exception:
                     log.exception("agent overflow-latch compaction failed (non-fatal)")
 
-            # Call LLM with recovery support
-            generation_state: dict = {}
+            # Call LLM with recovery support using the plan captured before
+            # compaction (when one is available).
             response = await _call_llm_with_recovery(
                 agent,
                 iteration_callback,

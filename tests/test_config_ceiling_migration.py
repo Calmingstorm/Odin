@@ -64,7 +64,7 @@ class TestOneTimeRewrite:
         assert on_disk["openai_codex"]["model"] == "gpt-5.6-sol"
         marker = ceiling_marker_path(config_path)
         record = json.loads(marker.read_text())
-        assert record["version"] == 2
+        assert record["version"] == 3
         assert record["state"] == "completed"
         assert record["reason"] == "migrated"
         assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
@@ -83,8 +83,9 @@ class TestOneTimeRewrite:
         _atomic_write_marker(
             marker,
             {
-                "version": 2,
+                "version": 3,
                 "migration": "legacy_max_context_chars_to_auto",
+                "config_id": marker.name.rsplit(".", 2)[-2],
                 "state": "completed",
                 "reason": "not_applicable",
                 "completed_at": datetime.now(UTC).isoformat(),
@@ -142,7 +143,7 @@ class TestVacuousCompletion:
             _migrate(config_path)
             assert config_path.read_text() == before
             record = json.loads(ceiling_marker_path(config_path).read_text())
-            assert record["version"] == 2
+            assert record["version"] == 3
             assert record["reason"] == "not_applicable"
 
     def test_absent_sections_complete_vacuously(self, tmp_path):
@@ -317,8 +318,9 @@ class TestPackagedSymlink:
             ]
             is None
         )
-        assert ceiling_marker_path(link) == opt / "data" / "context_ceiling_migration.json"
-        assert (opt / "data" / "context_ceiling_migration.json").is_file()
+        marker = ceiling_marker_path(link)
+        assert marker.parent == opt / "data" / "config_migrations"
+        assert marker.is_file()
         assert not (etc / "data").exists()
 
 
@@ -391,7 +393,7 @@ class TestCompletionRecordProvenance:
         path = tmp_path / "config.yml"
         path.write_text(_LEGACY_YAML)
         marker = ceiling_marker_path(path)
-        marker.parent.mkdir()
+        marker.parent.mkdir(parents=True)
         if kind == "empty":
             marker.write_text("")
         elif kind == "corrupt":
@@ -441,7 +443,7 @@ class TestCompletionRecordProvenance:
             ]
             is None
         )
-        assert json.loads(marker.read_text())["version"] == 2
+        assert json.loads(marker.read_text())["version"] == 3
 
     def test_round1_operator_marker_preserves_and_upgrades(self, tmp_path):
         path = tmp_path / "config.yml"
@@ -463,7 +465,7 @@ class TestCompletionRecordProvenance:
             == LEGACY_MAX_CONTEXT_CHARS
         )
         record = json.loads(marker.read_text())
-        assert record["version"] == 2
+        assert record["version"] == 3
         assert record["reason"] == "prior_operator_saved"
 
     def test_preversioned_round2_completion_is_validated_then_upgraded(self, tmp_path):
@@ -485,7 +487,7 @@ class TestCompletionRecordProvenance:
             data["openai_codex"]["context_compression"]["max_context_chars"]
             == LEGACY_MAX_CONTEXT_CHARS
         )
-        assert json.loads(marker.read_text())["version"] == 2
+        assert json.loads(marker.read_text())["version"] == 3
 
     @pytest.mark.parametrize(
         "record",
@@ -692,3 +694,226 @@ class TestRemainingMigrationBranches:
             _atomic_write_marker(marker, {"ok": True})
         assert closed
         assert not list(tmp_path.glob("*.tmp"))
+
+class TestConfigIdentityBinding:
+    def test_symlink_aliases_in_different_directories_share_completion(self, tmp_path):
+        real_dir = tmp_path / "real"
+        alias_a_dir = tmp_path / "alias-a"
+        alias_b_dir = tmp_path / "alias-b"
+        for directory in (real_dir, alias_a_dir, alias_b_dir):
+            directory.mkdir()
+        target = real_dir / "odin.yml"
+        target.write_text(_LEGACY_YAML)
+        alias_a = alias_a_dir / "config.yml"
+        alias_b = alias_b_dir / "other.yml"
+        alias_a.symlink_to(target)
+        alias_b.symlink_to(target)
+
+        _migrate(alias_a)
+        assert yaml.safe_load(target.read_text())["openai_codex"][
+            "context_compression"
+        ]["max_context_chars"] is None
+
+        # A deliberate post-migration value must survive loading through a
+        # different launch alias whose local marker did not exist yet.
+        patch_config_paths(
+            [(("openai_codex", "context_compression", "max_context_chars"), 750_000)],
+            path=target,
+        )
+        data = _migrate(alias_b)
+        assert data["openai_codex"]["context_compression"]["max_context_chars"] == 750_000
+        assert yaml.safe_load(target.read_text())["openai_codex"][
+            "context_compression"
+        ]["max_context_chars"] == 750_000
+        assert ceiling_marker_path(alias_a).is_file()
+        assert ceiling_marker_path(alias_b).is_file()
+        assert json.loads(ceiling_marker_path(alias_a).read_text())["config_id"] == json.loads(
+            ceiling_marker_path(alias_b).read_text()
+        )["config_id"]
+
+    def test_distinct_configs_in_one_directory_do_not_share_completion(self, tmp_path):
+        first = tmp_path / "first.yml"
+        second = tmp_path / "second.yml"
+        first.write_text(_LEGACY_YAML)
+        second.write_text(_LEGACY_YAML)
+
+        _migrate(first)
+        _migrate(second)
+
+        assert yaml.safe_load(first.read_text())["openai_codex"]["context_compression"][
+            "max_context_chars"
+        ] is None
+        assert yaml.safe_load(second.read_text())["openai_codex"]["context_compression"][
+            "max_context_chars"
+        ] is None
+        assert ceiling_marker_path(first) != ceiling_marker_path(second)
+        first_record = json.loads(ceiling_marker_path(first).read_text())
+        second_record = json.loads(ceiling_marker_path(second).read_text())
+        assert first_record["config_id"] != second_record["config_id"]
+
+    def test_preidentity_directory_marker_is_bound_not_shared(self, tmp_path):
+        first = tmp_path / "first.yml"
+        second = tmp_path / "second.yml"
+        first.write_text(_LEGACY_YAML)
+        second.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        legacy.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "state": "completed",
+                    "reason": "not_applicable",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+
+        # The first config adopts the old provenance and therefore preserves a
+        # value the old migration had already classified as operator-authored.
+        first_data = _migrate(first)
+        assert first_data["openai_codex"]["context_compression"][
+            "max_context_chars"
+        ] == 750_000
+
+        # The legacy marker is now identity-bound. A distinct sibling no longer
+        # inherits it and performs its own one-time rewrite.
+        second_data = _migrate(second)
+        assert second_data["openai_codex"]["context_compression"][
+            "max_context_chars"
+        ] is None
+        assert json.loads(ceiling_marker_path(first).read_text())["config_id"] != json.loads(
+            ceiling_marker_path(second).read_text()
+        )["config_id"]
+
+class TestIdentityMarkerAdversarialBranches:
+    def test_identity_marker_reread_failure_is_fail_closed(self, tmp_path, monkeypatch):
+        import src.config.migrations as migrations
+
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        config_id = marker.name.rsplit(".", 2)[-2]
+        migrations._atomic_write_marker(
+            marker,
+            {
+                "version": 3,
+                "migration": "legacy_max_context_chars_to_auto",
+                "config_id": config_id,
+                "state": "completed",
+                "reason": "not_applicable",
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        real_read = type(marker).read_text
+        reads = 0
+
+        def fail_second_read(self, *args, **kwargs):
+            nonlocal reads
+            if self == marker:
+                reads += 1
+                if reads == 2:
+                    raise OSError("reread failed")
+            return real_read(self, *args, **kwargs)
+
+        monkeypatch.setattr(type(marker), "read_text", fail_second_read)
+        with pytest.raises(MigrationCompletionError):
+            _migrate(path)
+
+    def test_identity_directory_inspection_failure_is_fail_closed(self, tmp_path, monkeypatch):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        marker = ceiling_marker_path(path)
+        marker.parent.mkdir(parents=True)
+        real_iterdir = type(marker).iterdir
+
+        def fail_iterdir(self):
+            if self == marker.parent:
+                raise OSError("cannot inspect")
+            return real_iterdir(self)
+
+        monkeypatch.setattr(type(marker), "iterdir", fail_iterdir)
+        with pytest.raises(MigrationCompletionError, match="inspect identity-bound"):
+            _migrate(path)
+
+    def test_corrupt_bound_legacy_marker_is_fail_closed(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        legacy.write_text("{broken")
+        with pytest.raises(MigrationCompletionError, match="legacy ceiling-migration"):
+            _migrate(path)
+
+    def test_bound_legacy_marker_for_other_identity_is_ignored(self, tmp_path):
+        import src.config.migrations as migrations
+
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        migrations._atomic_write_marker(
+            legacy,
+            {
+                "version": 3,
+                "migration": "legacy_max_context_chars_to_auto",
+                "config_id": "f" * 64,
+                "state": "completed",
+                "reason": "not_applicable",
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        data = _migrate(path)
+        assert data["openai_codex"]["context_compression"]["max_context_chars"] is None
+
+    def test_round1_legacy_at_old_path_rewrites_and_binds(self, tmp_path):
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        legacy.write_text(
+            json.dumps(
+                {
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "legacy_value": 750_000,
+                    "migrated_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        data = _migrate(path)
+        assert data["openai_codex"]["context_compression"]["max_context_chars"] is None
+
+    def test_bound_legacy_marker_reread_failure_is_fail_closed(self, tmp_path, monkeypatch):
+        import src.config.migrations as migrations
+
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        migrations._atomic_write_marker(
+            legacy,
+            {
+                "version": 3,
+                "migration": "legacy_max_context_chars_to_auto",
+                "config_id": migrations._config_identity(path),
+                "state": "completed",
+                "reason": "not_applicable",
+                "completed_at": datetime.now(UTC).isoformat(),
+            },
+        )
+        real_read = type(legacy).read_text
+        reads = 0
+
+        def fail_second_read(self, *args, **kwargs):
+            nonlocal reads
+            if self == legacy:
+                reads += 1
+                if reads == 2:
+                    raise OSError("reread failed")
+            return real_read(self, *args, **kwargs)
+
+        monkeypatch.setattr(type(legacy), "read_text", fail_second_read)
+        with pytest.raises(MigrationCompletionError, match="legacy ceiling-migration"):
+            _migrate(path)

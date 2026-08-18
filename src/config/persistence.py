@@ -136,18 +136,33 @@ def submitted_leaves(
     def walk(new: Mapping[str, Any], known: Any, model: Any, prefix: tuple[str, ...]) -> None:
         lookup = _field_lookup(model) if model is not None else {}
         for key, value in new.items():
-            canonical, nested, aliases = lookup.get(str(key), (str(key), None, ()))
+            field = lookup.get(str(key))
+            canonical, nested, aliases = field or (str(key), None, ())
             path = (*prefix, canonical)
             if not isinstance(known, Mapping) or canonical not in known:
                 # Validation dropped this path (unknown/removed field) — the
                 # runtime ignores it, so disk must not carry it either.
                 continue
             known_value = known[canonical]
-            if isinstance(value, Mapping) and isinstance(known_value, Mapping):
+            if (
+                isinstance(value, Mapping)
+                and isinstance(known_value, Mapping)
+                and nested is not None
+            ):
+                # A nested BaseModel has schema-owned child fields, so preserve
+                # the ordinary leaf-only walk through those children.
                 walk(value, known_value, nested, path)
+            elif isinstance(value, Mapping) and isinstance(known_value, Mapping) and field is None:
+                # Schema-less callers retain the historical recursive helper
+                # behavior. Config persistence always supplies a model class.
+                walk(value, known_value, None, path)
             elif aliases:
                 out.append((path, known_value, aliases))
             else:
+                # A schema-owned Mapping (for example context-budget overrides)
+                # is ONE normalized leaf. Its validator may canonicalize keys,
+                # so walking raw submitted keys against the validated mapping
+                # would drop aliases that changed spelling during validation.
                 out.append((path, known_value))
 
     walk(updates, validated, model_cls, ())

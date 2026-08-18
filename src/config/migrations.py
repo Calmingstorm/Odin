@@ -18,6 +18,7 @@ record is committed by temp-file write, file fsync, and atomic replacement.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import json
 import logging
 import os
@@ -39,7 +40,7 @@ LEGACY_CEILING_MARKER_NAME = "context_ceiling_migration.json"
 
 _CEILING_PATH = ("openai_codex", "context_compression", "max_context_chars")
 _MIGRATION_ID = "legacy_max_context_chars_to_auto"
-_MARKER_VERSION = 2
+_MARKER_VERSION = 3
 _COMPLETION_REASONS = frozenset(
     {
         "migrated",
@@ -75,9 +76,42 @@ class _ScalarLexeme:
     token: str
 
 
+def _config_identity(config_path: str | Path) -> str:
+    """Stable identity for the config rewrite target.
+
+    The canonical path survives atomic config replacement (unlike inode
+    identity), makes symlink aliases rendezvous on one identity, and keeps two
+    config files in one directory distinct.
+    """
+    target = Path(config_path).resolve()
+    material = b"odin-config-identity-v1\0" + os.fsencode(str(target))
+    return hashlib.sha256(material).hexdigest()
+
+
 def ceiling_marker_path(config_path: str | Path) -> Path:
-    """Return the marker beside *config_path* as given (symlink unresolved)."""
+    """Return this config identity's marker in the unresolved data anchor."""
+    launch = Path(config_path).absolute()
+    return launch.parent / "data" / "config_migrations" / (
+        f"{_MIGRATION_ID}.{_config_identity(config_path)}.json"
+    )
+
+
+def _legacy_ceiling_marker_path(config_path: str | Path) -> Path:
+    """The pre-identity directory-wide marker, retained only for upgrade."""
     return Path(config_path).absolute().parent / "data" / LEGACY_CEILING_MARKER_NAME
+
+
+def _shared_ceiling_marker_path(config_path: str | Path) -> Path:
+    """Alias rendezvous marker beside the canonical rewrite target.
+
+    Launch-local provenance remains in the durable data directory. This second
+    identity-bound record is what lets aliases in different launch directories
+    observe one completed migration.
+    """
+    target = Path(config_path).resolve()
+    return target.parent / ".odin-data" / "config_migrations" / (
+        f"{_MIGRATION_ID}.{_config_identity(config_path)}.json"
+    )
 
 
 def _mapping_value(node: Node, key: str) -> Node | None:
@@ -146,6 +180,7 @@ def _classify_record(record: object) -> _MarkerKind:
     if set(record) == {
         "version",
         "migration",
+        "config_id",
         "state",
         "reason",
         "completed_at",
@@ -154,12 +189,35 @@ def _classify_record(record: object) -> _MarkerKind:
             type(record["version"]) is int
             and record["version"] == _MARKER_VERSION
             and record["migration"] == _MIGRATION_ID
+            and isinstance(record["config_id"], str)
+            and len(record["config_id"]) == 64
             and record["state"] == "completed"
             and isinstance(record["reason"], str)
             and record["reason"] in _COMPLETION_REASONS
             and _is_utc_timestamp(record["completed_at"])
         )
         return _MarkerKind.COMPLETE if valid else _MarkerKind.UNKNOWN
+
+    # Version 2 was validated but directory-wide. It can only be adopted when
+    # found at the legacy launch-local path, never mistaken for an identity-
+    # bound record at the new path.
+    if set(record) == {
+        "version",
+        "migration",
+        "state",
+        "reason",
+        "completed_at",
+    }:
+        valid = (
+            type(record["version"]) is int
+            and record["version"] == 2
+            and record["migration"] == _MIGRATION_ID
+            and record["state"] == "completed"
+            and isinstance(record["reason"], str)
+            and record["reason"] in _COMPLETION_REASONS
+            and _is_utc_timestamp(record["completed_at"])
+        )
+        return _MarkerKind.PREVERSIONED_COMPLETE if valid else _MarkerKind.UNKNOWN
 
     # Round 1 recorded in-memory reinterpretation without rewriting config.yml.
     if set(record) == {"migration", "legacy_value", "migrated_at"}:
@@ -253,19 +311,20 @@ def _atomic_write_marker(marker: Path, record: dict[str, object]) -> None:
             os.close(directory_fd)
 
 
-def _completion_record(reason: str) -> dict[str, object]:
+def _completion_record(reason: str, config_id: str) -> dict[str, object]:
     return {
         "version": _MARKER_VERSION,
         "migration": _MIGRATION_ID,
+        "config_id": config_id,
         "state": "completed",
         "reason": reason,
         "completed_at": datetime.now(UTC).isoformat(),
     }
 
 
-def _write_required(marker: Path, reason: str, purpose: str) -> None:
+def _write_required(marker: Path, reason: str, purpose: str, config_id: str) -> None:
     try:
-        _atomic_write_marker(marker, _completion_record(reason))
+        _atomic_write_marker(marker, _completion_record(reason, config_id))
     except OSError as exc:
         log.error("Could not %s at %s: %s", purpose, marker, exc)
         raise MigrationCompletionError(
@@ -273,9 +332,9 @@ def _write_required(marker: Path, reason: str, purpose: str) -> None:
         ) from exc
 
 
-def _record_after_rewrite(marker: Path) -> None:
+def _record_after_rewrite(marker: Path, config_id: str) -> None:
     try:
-        _atomic_write_marker(marker, _completion_record("migrated"))
+        _atomic_write_marker(marker, _completion_record("migrated", config_id))
     except OSError as exc:
         # The ambiguous value is already gone.  A later load takes the
         # non-legacy branch and safely retries this completion write.
@@ -285,6 +344,30 @@ def _record_after_rewrite(marker: Path) -> None:
             marker,
             exc,
         )
+
+
+def _read_identity_marker(marker: Path, config_id: str) -> _MarkerKind:
+    kind = _read_marker(marker)
+    if kind is not _MarkerKind.COMPLETE:
+        return kind
+    try:
+        record = json.loads(marker.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return _MarkerKind.UNREADABLE
+    return kind if record.get("config_id") == config_id else _MarkerKind.UNKNOWN
+
+
+def _write_completion_pair(
+    marker: Path,
+    shared_marker: Path,
+    reason: str,
+    purpose: str,
+    config_id: str,
+) -> None:
+    # Publish shared provenance first: once a launch-local marker says complete,
+    # every alias must already have a canonical rendezvous record to consult.
+    _write_required(shared_marker, reason, purpose, config_id)
+    _write_required(marker, reason, purpose, config_id)
 
 
 def _set_runtime_auto(data: dict) -> None:
@@ -297,33 +380,12 @@ def _set_runtime_auto(data: dict) -> None:
 
 
 def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original_raw: str) -> None:
-    """Apply the versioned one-time legacy-ceiling migration.
-
-    A vacuous completion write is mandatory.  If it is blocked, startup fails
-    rather than pretending the one-time gate closed; this prevents a later
-    intentional 750000 from being erased on a subsequent load.
-    """
+    """Apply the identity-bound one-time legacy-ceiling migration."""
+    config_id = _config_identity(config_path)
     marker = ceiling_marker_path(config_path)
-    marker_kind = _read_marker(marker)
-
-    if marker_kind is _MarkerKind.COMPLETE:
-        return
-
-    if marker_kind is _MarkerKind.ROUND1_OPERATOR:
-        _write_required(
-            marker,
-            "prior_operator_saved",
-            "upgrade the ceiling-migration completion record",
-        )
-        return
-
-    if marker_kind is _MarkerKind.PREVERSIONED_COMPLETE:
-        _write_required(
-            marker,
-            "upgraded_preversioned_completion",
-            "upgrade the ceiling-migration completion record",
-        )
-        return
+    shared_marker = _shared_ceiling_marker_path(config_path)
+    marker_kind = _read_identity_marker(marker, config_id)
+    shared_kind = _read_identity_marker(shared_marker, config_id)
 
     invalid = {
         _MarkerKind.EMPTY,
@@ -332,34 +394,117 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
         _MarkerKind.UNKNOWN,
         _MarkerKind.UNREADABLE,
     }
-    if marker_kind in invalid:
-        # Invalid prior state cannot safely distinguish an interrupted
-        # migration from a completed gate followed by an intentional 750000.
-        # Do not overwrite the only remaining provenance evidence.
-        log.error(
-            "Ceiling-migration record at %s is %s; refusing to guess at migration provenance.",
-            marker,
-            marker_kind.value,
-        )
-        raise MigrationCompletionError(
-            "ceiling-migration record is invalid or unreadable; inspect it before retrying"
-        )
+    for path, kind in ((marker, marker_kind), (shared_marker, shared_kind)):
+        if kind in invalid:
+            log.error(
+                "Ceiling-migration record at %s is %s; refusing to guess at migration provenance.",
+                path,
+                kind.value,
+            )
+            raise MigrationCompletionError(
+                "ceiling-migration record is invalid or unreadable; inspect it before retrying"
+            )
 
+    if marker_kind is _MarkerKind.COMPLETE and shared_kind is _MarkerKind.COMPLETE:
+        return
+    if shared_kind is _MarkerKind.COMPLETE:
+        # A different symlink alias already completed this config identity.
+        _write_required(
+            marker,
+            "upgraded_preversioned_completion",
+            "record alias-local ceiling-migration completion",
+            config_id,
+        )
+        return
+    if marker_kind is _MarkerKind.COMPLETE:
+        _write_required(
+            shared_marker,
+            "upgraded_preversioned_completion",
+            "repair shared ceiling-migration completion",
+            config_id,
+        )
+        return
+    if marker_kind in {
+        _MarkerKind.ROUND1_OPERATOR,
+        _MarkerKind.PREVERSIONED_COMPLETE,
+    }:
+        reason = (
+            "prior_operator_saved"
+            if marker_kind is _MarkerKind.ROUND1_OPERATOR
+            else "upgraded_preversioned_completion"
+        )
+        _write_completion_pair(
+            marker,
+            shared_marker,
+            reason,
+            "upgrade the ceiling-migration completion record",
+            config_id,
+        )
+        return
     if marker_kind is _MarkerKind.ROUND1_LEGACY:
         log.info("Upgrading round-1 legacy migration provenance at %s.", marker)
 
-    if not _is_shipped_legacy_literal(original_raw):
-        _write_required(
-            marker,
-            "not_applicable",
-            "record vacuous ceiling-migration completion",
+    # Upgrade the old launch-directory marker only when no identity-bound marker
+    # exists. Its provenance remains fail-closed, but it no longer suppresses a
+    # distinct config in the same directory once one identity has been bound.
+    # A legacy marker plus any new identity marker is an already-upgraded
+    # directory; sibling identities must not inspect or inherit the old record.
+    legacy_marker = _legacy_ceiling_marker_path(config_path)
+    identity_dir = marker.parent
+    identity_markers_exist = False
+    try:
+        identity_markers_exist = identity_dir.is_dir() and any(identity_dir.iterdir())
+    except OSError as exc:
+        raise MigrationCompletionError(
+            "could not inspect identity-bound ceiling-migration records"
+        ) from exc
+    legacy_kind = (
+        _MarkerKind.MISSING if identity_markers_exist else _read_marker(legacy_marker)
+    )
+    if legacy_kind is _MarkerKind.COMPLETE:
+        # A v3 legacy-path record is already bound. A different config in the
+        # same launch directory must ignore it rather than inherit completion.
+        try:
+            legacy_record = json.loads(legacy_marker.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            legacy_kind = _MarkerKind.UNREADABLE
+        else:
+            if legacy_record.get("config_id") != config_id:
+                legacy_kind = _MarkerKind.MISSING
+    if legacy_kind in invalid:
+        raise MigrationCompletionError(
+            "legacy ceiling-migration record is invalid or unreadable; inspect it before retrying"
         )
+    if legacy_kind in {
+        _MarkerKind.COMPLETE,
+        _MarkerKind.ROUND1_OPERATOR,
+        _MarkerKind.PREVERSIONED_COMPLETE,
+    }:
+        reason = (
+            "prior_operator_saved"
+            if legacy_kind is _MarkerKind.ROUND1_OPERATOR
+            else "upgraded_preversioned_completion"
+        )
+        _write_completion_pair(marker, shared_marker, reason,
+                               "upgrade the ceiling-migration completion record", config_id)
+        # Bind the previously directory-wide provenance to the one config that
+        # adopted it. Later sibling configs can no longer inherit it.
+        _write_required(
+            legacy_marker,
+            reason,
+            "bind legacy ceiling-migration completion to its config",
+            config_id,
+        )
+        return
+    if legacy_kind is _MarkerKind.ROUND1_LEGACY:
+        log.info("Upgrading round-1 legacy migration provenance at %s.", legacy_marker)
+
+    if not _is_shipped_legacy_literal(original_raw):
+        _write_completion_pair(marker, shared_marker, "not_applicable",
+                               "record vacuous ceiling-migration completion", config_id)
         return
 
     try:
-        # Resolve only the rewrite target.  Replacing the unresolved packaged
-        # config path would sever its /opt -> /etc symlink; the marker remains
-        # beside the unresolved path in the backed-up data directory.
         from .persistence import patch_config_paths
 
         patch_config_paths([(_CEILING_PATH, None)], path=Path(config_path).resolve())
@@ -367,8 +512,7 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
         _set_runtime_auto(data)
         log.warning(
             "Could not rewrite legacy max_context_chars to auto (%s); "
-            "interpreting as auto for this boot only — the migration retries "
-            "next boot.",
+            "interpreting as auto for this boot only — the migration retries next boot.",
             exc,
         )
         return
@@ -381,4 +525,7 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
         LEGACY_MAX_CONTEXT_CHARS,
         LEGACY_MAX_CONTEXT_CHARS,
     )
-    _record_after_rewrite(marker)
+    # Shared first, then launch-local. Failure after rewrite is self-healing:
+    # the unambiguous null takes the vacuous branch on the next boot.
+    _record_after_rewrite(shared_marker, config_id)
+    _record_after_rewrite(marker, config_id)

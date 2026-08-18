@@ -1504,3 +1504,99 @@ class TestLoopPolicyCensus:
         assert AUTONOMOUS_POLICY.durable_recovery_checkpointing is False
         assert AUTONOMOUS_POLICY.soft_compaction is True
         assert AUTONOMOUS_POLICY.latch_scope == "invocation"
+
+
+class TestLoopCancellationPins:
+    async def test_cancelled_loop_refuses_llm_attempt(self):
+        calls = []
+
+        async def script(n, messages):
+            calls.append((n, messages))
+            return SimpleNamespace(text="impossible", tool_calls=[], stop_reason="end_turn")
+
+        gw = _Gateway(script)
+        runner = _runner(gw)
+        st = SimpleNamespace(
+            messages=_history(2, 100) + [{"role": "user", "content": "goal"}],
+            system_prompt="sys",
+            tools=[],
+            _boundary=SurfaceBoundary(request_start=2),
+            _char_latch=None,
+            context_recoveries=[],
+            _iteration_index=0,
+        )
+        cancel = asyncio.Event()
+        cancel.set()
+        with pytest.raises(asyncio.CancelledError):
+            await runner._call_loop_llm(st, cancel_event=cancel)
+        assert calls == []
+
+    async def test_cancelled_autonomous_invocation_refuses_first_generation(self):
+        gateway = _Gateway(None)
+        gateway.active_client = object()
+        runner = _runner(gateway)
+        runner._prepare_loop_turn = lambda *_args: SimpleNamespace(loop_cap=1)
+        cancel = asyncio.Event()
+        cancel.set()
+        with pytest.raises(asyncio.CancelledError):
+            await runner.run_autonomous(
+                "goal", SimpleNamespace(id=1), None, "u", cancel_event=cancel
+            )
+
+    async def test_cancel_after_generation_blocks_tool_execution(self):
+        cancel = asyncio.Event()
+        tool_effects = []
+        response = SimpleNamespace(
+            text="",
+            tool_calls=[SimpleNamespace(id="1", name="effect", input={})],
+            stop_reason="tool_use",
+        )
+        gateway = _Gateway(None)
+        gateway.active_client = object()
+        runner = _runner(gateway)
+        state = SimpleNamespace(loop_cap=1, tool_calls_made=0, messages=[])
+        runner._prepare_loop_turn = lambda *_args: state
+        runner._get_config = lambda: SimpleNamespace()
+        runner._capture_budget_snapshot = lambda *_args: None
+        runner._maybe_compress_loop = lambda *_args, **_kwargs: None
+        runner._record_loop_iteration = lambda *_args: False
+
+        async def accepted(*_args, **_kwargs):
+            cancel.set()
+            return "ok", response
+
+        async def forbidden(*_args, **_kwargs):
+            tool_effects.append("ran")
+
+        runner._call_loop_llm = accepted
+        runner._execute_loop_tools = forbidden
+        with pytest.raises(asyncio.CancelledError):
+            await runner.run_autonomous(
+                "goal", SimpleNamespace(id=1), None, "u", cancel_event=cancel
+            )
+        assert tool_effects == []
+
+    async def test_cancel_after_accepted_response_prevents_post_acceptance_work(self):
+        cancel = asyncio.Event()
+
+        class _Client(SimpleNamespace):
+            async def chat_with_tools(self, **_kwargs):
+                cancel.set()
+                return SimpleNamespace(text="accepted", tool_calls=[], stop_reason="end_turn")
+
+        client = _Client(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gateway = _Gateway(None)
+        gateway.client = client
+        gateway.codex_client = client
+        runner = _runner(gateway)
+        st = SimpleNamespace(
+            messages=[{"role": "user", "content": "goal"}],
+            system_prompt="sys",
+            tools=[],
+            _boundary=SurfaceBoundary(request_start=0),
+            _char_latch=None,
+            context_recoveries=[],
+            _iteration_index=0,
+        )
+        with pytest.raises(asyncio.CancelledError):
+            await runner._call_loop_llm(st, cancel_event=cancel)

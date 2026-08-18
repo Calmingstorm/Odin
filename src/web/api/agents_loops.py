@@ -8,6 +8,7 @@ parity contract pins.
 
 from __future__ import annotations
 
+import asyncio
 import time
 
 from aiohttp import web
@@ -161,9 +162,11 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
         # Build iteration callback (same pattern as _handle_start_loop)
         async def _iteration_cb(
             prompt: str, ch: object, prev_context: str | None,
+            cancel_event: asyncio.Event,
         ) -> str:
             return await bot.tool_loop.run_autonomous(
                 prompt, ch, prev_context, requester_id,
+                cancel_event=cancel_event,
             )
 
         result = bot.loop_manager.start_loop(
@@ -184,7 +187,7 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
     @routes.delete("/api/loops/{loop_id}")
     async def stop_loop(request: web.Request) -> web.Response:
         lid = request.match_info["loop_id"]
-        result = bot.loop_manager.stop_loop(lid)
+        result = await bot.loop_manager.stop_loop(lid)
         is_error = "not found" in result.lower() or "not running" in result.lower()
         return web.json_response(
             {"result": result}, status=404 if is_error else 200
@@ -209,7 +212,7 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
 
         # Stop if running
         if info.status == "running":
-            bot.loop_manager.stop_loop(lid)
+            await bot.loop_manager.stop_loop(lid)
 
         # Find the channel
         try:

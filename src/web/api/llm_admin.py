@@ -962,7 +962,35 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         }
         utilization = getattr(codex_cfg, "context_utilization", 60)
         cc = getattr(codex_cfg, "context_compression", None)
-        ceiling = getattr(cc, "max_context_chars", None) if cc is not None else None
+        configured_ceiling = (
+            getattr(cc, "max_context_chars", None) if cc is not None else None
+        )
+        desired_compression = cc.model_dump() if cc is not None else {}
+        effective_compression, ceiling_pending_restart = _boot_codex_group_status(
+            bot, "context_compression", desired_compression
+        )
+        # The runtime compressor is boot-frozen. Prefer the shared boot snapshot
+        # used by /api/llm/status; a narrow embedding without it reports runtime
+        # truth directly from the compressor rather than pretending the saved
+        # restart-bound value is effective.
+        if effective_compression is not None:
+            runtime_ceiling = effective_compression.get("max_context_chars")
+        else:
+            compressor = getattr(bot, "context_compressor", None)
+            # Production stores the boot-frozen ContextCompressionConfig object
+            # directly; a few embedders wrap it as ``.config``.
+            runtime_cfg = getattr(compressor, "config", compressor)
+            runtime_available = runtime_cfg is not None and hasattr(
+                runtime_cfg, "max_context_chars"
+            )
+            runtime_ceiling = (
+                getattr(runtime_cfg, "max_context_chars", None)
+                if runtime_available
+                else configured_ceiling
+            )
+            ceiling_pending_restart = (
+                runtime_ceiling != configured_ceiling if runtime_available else None
+            )
         evidence: dict = observer.view() if observer is not None else {"version": 1, "accounts": {}}
         # Resolve eligibility once for one internally-consistent management
         # snapshot.  Re-reading a changing pool provider per model could pair a
@@ -988,13 +1016,13 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
                 model,
                 overrides=overrides,
                 utilization=utilization,
-                max_context_chars=ceiling,
+                max_context_chars=configured_ceiling,
             )
             effective = resolve_context_budget(
                 model,
                 overrides=overrides,
                 utilization=utilization,
-                max_context_chars=ceiling,
+                max_context_chars=runtime_ceiling,
                 observed_clamp=clamp,
             )
             out[model] = {
@@ -1019,7 +1047,9 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         return web.json_response(
             {
                 "utilization": utilization,
-                "max_context_chars": ceiling,
+                "max_context_chars": configured_ceiling,
+                "runtime_max_context_chars": runtime_ceiling,
+                "max_context_chars_pending_restart": ceiling_pending_restart,
                 "models": out,
                 "clamps": clamp_rows,
                 "evidence": evidence,

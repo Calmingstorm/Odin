@@ -470,7 +470,7 @@ class TestLoopManagerStamp:
 
         chan = _Chan()
 
-        async def callback(prompt, channel, prev_context):
+        async def callback(prompt, channel, prev_context, cancel_event):
             stamps.append(dict(get_turn() or {}))
             mgr._loops[holder["lid"]]._cancel_event.set()
             return "ok"
