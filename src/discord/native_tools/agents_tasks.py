@@ -165,6 +165,38 @@ def _spawn_pair_error(
     return effort_incompatibility_error(model_now, effort_now)
 
 
+def _make_budget_snapshot_provider(get_config, get_client, get_compressor, model_override):
+    """Per-generation context-budget snapshot for a spawned agent.
+
+    Resolves the EFFECTIVE agent model exactly like the iteration callback
+    (override fixed for life; None tracks live config at call time) and
+    derives the budget snapshot the manager compacts against. Overrides and
+    utilization are live reads; the explicit character ceiling comes from the
+    boot-frozen compression object so its restart-bound classification stays
+    truthful. Total: any resolution failure surfaces in the manager as the
+    documented fallback, never as an agent failure.
+    """
+
+    def provider():
+        from ...llm.context_budget import snapshot_for_codex_config
+
+        cfg = get_config()
+        client = get_client()
+        _, resolved_model = _agent_llm_policy(
+            cfg, client, model_override=model_override, effort_override=None
+        )
+        compressor = get_compressor()
+        return snapshot_for_codex_config(
+            resolved_model or getattr(client, "model", None),
+            getattr(cfg, "openai_codex", None),
+            max_context_chars=(
+                getattr(compressor, "max_context_chars", None) if compressor else None
+            ),
+        )
+
+    return provider
+
+
 def _provenance_stamp(resp: object, client: object) -> dict:
     """Execution-provenance fields for an iteration record, from the response.
 
@@ -736,6 +768,12 @@ class AgentTaskTools:
             keep_recent_iterations=self._get_context_compressor().keep_recent_iterations
             if self._get_context_compressor()
             else 30,
+            budget_snapshot_provider=_make_budget_snapshot_provider(
+                self._get_config,
+                lambda: self._llm_gateway.active_client,
+                self._get_context_compressor,
+                model_override,
+            ),
         )
 
         if agent_id.startswith("Error"):
@@ -1030,6 +1068,12 @@ class AgentTaskTools:
             context_compression_enabled=bool(cc),
             max_context_chars=cc.resolved_max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
+            budget_snapshot_provider_factory=lambda mo: _make_budget_snapshot_provider(
+                self._get_config,
+                lambda: self._llm_gateway.active_client,
+                self._get_context_compressor,
+                mo,
+            ),
         )
 
         # Format response

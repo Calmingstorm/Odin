@@ -16,9 +16,8 @@ import json
 import pytest
 
 from src.agents.manager import (
-    _EMERGENCY_TARGET_CHARS,
-    _EMERGENCY_TARGET_CHARS_AGGRESSIVE,
     AgentManager,
+    _fallback_budget_snapshot,
     _is_context_overflow,
 )
 from src.llm.context_compressor import (
@@ -26,6 +25,13 @@ from src.llm.context_compressor import (
     estimate_message_chars,
 )
 from src.llm.errors import LLMRequestError, LLMTransportError
+
+# The no-provider fallback ladder (unknown-model snapshot): what legacy and
+# non-codex spawn paths recover against. Rung names keep the old constants'
+# roles — first rescue target, then the rescue-ceiling rung.
+_FALLBACK_LADDER = _fallback_budget_snapshot().ladder
+_RUNG_PRIMARY = _FALLBACK_LADDER[0]
+_RUNG_AGGRESSIVE = _FALLBACK_LADDER[-1]
 
 
 def _overflow_error() -> LLMRequestError:
@@ -193,14 +199,14 @@ class TestOverflowRecovery:
         # and the SECOND saw a compressed payload under the primary target.
         assert len(h.calls) == 2
         retry_payload = h.calls[1]
-        assert estimate_message_chars(retry_payload) <= _EMERGENCY_TARGET_CHARS
+        assert estimate_message_chars(retry_payload) <= _RUNG_PRIMARY
         # Task preserved verbatim, newest iteration retained, pairing valid.
         assert retry_payload[0] == {"role": "user", "content": "TASK: research the thing"}
         assert "result-39" in json.dumps(retry_payload)
         assert _pairing_valid(retry_payload)
         # Latch set to the size that succeeded; recovery recorded.
         assert agent.context_char_ceiling is not None
-        assert agent.context_char_ceiling <= _EMERGENCY_TARGET_CHARS
+        assert agent.context_char_ceiling <= _RUNG_PRIMARY
         assert len(agent.context_recoveries) == 1
         r = agent.context_recoveries[0]
         assert r["trigger"] == "overflow" and r["attempt"] == 1 and r["fits"]
@@ -222,7 +228,7 @@ class TestOverflowRecovery:
         # Exactly two emergency passes, then the existing failure handling —
         # no loops.
         assert len(h.calls) == 3
-        assert estimate_message_chars(h.calls[2]) <= _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        assert estimate_message_chars(h.calls[2]) <= _RUNG_AGGRESSIVE
         assert agent.state.name == "FAILED"
         assert "context_length_exceeded" in (agent.error or "")
         assert [r["attempt"] for r in agent.context_recoveries] == [1, 2]
@@ -398,13 +404,11 @@ class TestAdversarialBlockers:
         """Odin's repro: the fixed summary reserve underestimates a large
         summary and the candidate misses target by a hair — the compressor
         must CONVERGE, never return the original oversized payload."""
-        from src.agents.manager import _EMERGENCY_TARGETS
-
         # Runtime-shaped: hundreds of small-but-real iterations whose
         # summaries alone exceed the old 2,000-char reserve.
         msgs = _messages(520, 1_400)
-        assert estimate_message_chars(msgs) > max(_EMERGENCY_TARGETS)
-        for target in _EMERGENCY_TARGETS:
+        assert estimate_message_chars(msgs) > max(_FALLBACK_LADDER)
+        for target in _FALLBACK_LADDER:
             out, report = emergency_compress_for_window(msgs, target_chars=target)
             assert report["fits"], (target, report)
             assert estimate_message_chars(out) <= target
@@ -644,11 +648,11 @@ class TestRoundThreeAdversarialPins:
         for i in range(300):
             msgs.extend(_iteration(i, 1_400))
         primary, first = emergency_compress_for_window(
-            msgs, target_chars=_EMERGENCY_TARGET_CHARS
+            msgs, target_chars=_RUNG_PRIMARY
         )
         assert first["fits"]
         first_size = estimate_message_chars(primary)
-        assert first_size > _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        assert first_size > _RUNG_AGGRESSIVE
         summaries = [
             m for m in primary
             if isinstance(m.get("content"), str)
@@ -661,10 +665,10 @@ class TestRoundThreeAdversarialPins:
         assert estimate_message_chars(prefix + summaries) > 400_000
 
         aggressive, second = emergency_compress_for_window(
-            primary, target_chars=_EMERGENCY_TARGET_CHARS_AGGRESSIVE
+            primary, target_chars=_RUNG_AGGRESSIVE
         )
         assert second["fits"], second
-        assert estimate_message_chars(aggressive) <= _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        assert estimate_message_chars(aggressive) <= _RUNG_AGGRESSIVE
         assert estimate_message_chars(aggressive) < first_size
         assert aggressive[0] == msgs[0]
         assert "tu_299" in json.dumps(aggressive)
@@ -688,7 +692,7 @@ class TestRoundThreeAdversarialPins:
             msgs.extend(_iteration(i, 1_400))
 
         out, report = emergency_compress_for_window(
-            msgs, target_chars=_EMERGENCY_TARGET_CHARS
+            msgs, target_chars=_RUNG_PRIMARY
         )
         assert report["fits"]
         assert out[:2] == [quoted, parent]
@@ -720,11 +724,11 @@ class TestRoundThreeAdversarialPins:
         assert estimate_message_chars(msgs) > 1_200_000
 
         out, report = emergency_compress_for_window(
-            msgs, target_chars=_EMERGENCY_TARGET_CHARS_AGGRESSIVE
+            msgs, target_chars=_RUNG_AGGRESSIVE
         )
         blob = json.dumps(out)
         assert report["fits"], report
-        assert estimate_message_chars(out) <= _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        assert estimate_message_chars(out) <= _RUNG_AGGRESSIVE
         assert report["iterations_kept"] >= 1
         assert all(f'"id": "bulk_{i}"' in blob for i in range(count))
         assert all(f'"tool_use_id": "bulk_{i}"' in blob for i in range(count))
@@ -735,7 +739,7 @@ class TestRoundThreeAdversarialPins:
         # characters at the 400K target.  The sole newest iteration is
         # compressible into that space, and no summary will exist.  Charging
         # the old hypothetical 2K reserve rejected this recoverable payload.
-        target = _EMERGENCY_TARGET_CHARS_AGGRESSIVE
+        target = _RUNG_AGGRESSIVE
         prefix_content = "P" * (398_500 - len("user"))
         prefix = [{"role": "user", "content": prefix_content}]
         assert estimate_message_chars(prefix) == 398_500

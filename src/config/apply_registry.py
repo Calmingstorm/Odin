@@ -1007,26 +1007,29 @@ FIELDS: dict[str, FieldSpec] = {
     "openai_codex.context_compression.max_context_chars": FieldSpec(
         apply_mode="restart",
         unit="characters",
-        description="Context size at which compression begins. Null means "
-        "auto: the per-model budget resolver derives the ceiling once wired "
-        "(context-budget campaign); until then auto equals the legacy "
-        "750,000. An explicit value only lowers the derived target.",
+        description="Explicit ceiling on the compaction target, in "
+        "characters. Null means auto: the per-model budget resolver derives "
+        "the target from the serving model's usable input budget. An "
+        "explicit value only lowers the derived target, never raises it.",
         restart_reason="The compressor holds the configuration object it was "
         "built with, which a save replaces rather than updates.",
     ),
     "openai_codex.context_budget_overrides": FieldSpec(
-        apply_mode="dormant",
+        apply_mode="live_for_new_work",
         unit="tokens",
-        description="Stored per-model usable-input-budget overrides; the "
-        "budget resolver that consumes them is not wired to any runtime "
-        "surface yet (context-budget campaign phase 3).",
+        description="Per-model usable-input-budget overrides, keyed by "
+        "canonical model. Read at each logical generation's budget "
+        "resolution: chat turns, agent iterations, and rescue ladders pick "
+        "up a save on their next generation; an in-flight generation keeps "
+        "its snapshot.",
     ),
     "openai_codex.context_utilization": FieldSpec(
-        apply_mode="dormant",
+        apply_mode="live_for_new_work",
         unit="percent",
-        description="Stored working-set utilization policy; the budget "
-        "resolver that consumes it is not wired to any runtime surface yet "
-        "(context-budget campaign phase 3).",
+        description="Working-set share of the effective budget that "
+        "compaction targets. Read at each logical generation's budget "
+        "resolution; never reduces budgets at or below 272K tokens, so a "
+        "change may have no effect on smaller models by design.",
     ),
     "openai_codex.context_compression.keep_recent_iterations": FieldSpec(
         apply_mode="restart",

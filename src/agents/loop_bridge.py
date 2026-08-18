@@ -99,6 +99,7 @@ class LoopAgentBridge:
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
+        budget_snapshot_provider_factory=None,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
@@ -202,6 +203,14 @@ class LoopAgentBridge:
                 context_compression_enabled=context_compression_enabled,
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,
+                # Per-task like the iteration callback: each agent's budget
+                # follows ITS OWN effective model, so a mixed-model fleet
+                # compacts each member against the right window.
+                budget_snapshot_provider=(
+                    budget_snapshot_provider_factory(model_override)
+                    if budget_snapshot_provider_factory is not None
+                    else None
+                ),
             )
 
             if not agent_id.startswith("Error"):

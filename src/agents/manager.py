@@ -42,24 +42,24 @@ TREE_MAX_AGENTS = 25             # hard ceiling on agents in one tree's lifetime
                                  # breadth x depth must never compound into a
                                  # geometric invoice, whatever config says
 
-# --- Agent context-overflow recovery (design settled with Odin, 2026-08-09) ---
-# Served context window on the Codex/ChatGPT path, probed 2026-08-09 from
-# /backend-api/codex/models: uniform 272K across sol/terra/luna/5.5 (luna
-# served 372K in July and was re-tiered since — treat as observation, not
-# spec). System prompt, response, and reasoning ride OUTSIDE agent.messages,
-# hence the reserve; the remainder converts at a deliberately DENSE
-# chars-per-token so a char measure can never overshoot real tokens on
-# scraped content. Private constants, never config: a raisable knob would
-# resurrect the overflow class this recovery exists to close.
-_SERVED_CONTEXT_WINDOW_TOKENS = 272_000
-_EMERGENCY_RESERVE_TOKENS = 42_000
-_EMERGENCY_CHARS_PER_TOKEN = 2.5
-_EMERGENCY_TARGET_CHARS = int(
-    (_SERVED_CONTEXT_WINDOW_TOKENS - _EMERGENCY_RESERVE_TOKENS)
-    * _EMERGENCY_CHARS_PER_TOKEN
-)
-_EMERGENCY_TARGET_CHARS_AGGRESSIVE = 400_000
-_EMERGENCY_TARGETS = (_EMERGENCY_TARGET_CHARS, _EMERGENCY_TARGET_CHARS_AGGRESSIVE)
+# --- Agent context-overflow recovery (design settled with Odin, 2026-08-09;
+# per-model budgets since the context-budget campaign, 2026-08-17) ---
+# Targets and rescue ladders come from the shared per-model resolver
+# (src/llm/context_budget.py): each logical generation resolves the
+# EFFECTIVE agent model's snapshot via the spawn-provided callback, so a
+# sol-class agent works a sol-class budget while gpt-5.5 keeps the proven
+# 272K-class math. When no provider is wired (legacy/direct construction,
+# non-codex paths) the unknown-model snapshot reproduces the pre-campaign
+# conservative behavior. The old private constants are gone: their
+# "never config" rationale was retired by this recovery machinery itself —
+# wrong-high is one rejected request plus an in-flight rescue, not a
+# terminal failure.
+
+
+def _fallback_budget_snapshot():
+    from ..llm.context_budget import resolve_context_budget
+
+    return resolve_context_budget(None)
 
 
 def _is_context_overflow(exc: BaseException) -> bool:
@@ -423,8 +423,16 @@ class AgentManager:
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
+        budget_snapshot_provider: Callable | None = None,
     ) -> str:
-        """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string."""
+        """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string.
+
+        ``budget_snapshot_provider`` resolves the effective agent model's
+        ContextBudgetSnapshot per logical generation (live config reaches the
+        NEXT iteration; the in-flight one keeps its snapshot). Absent, the
+        spawn-frozen ``max_context_chars`` and the unknown-model fallback
+        ladder preserve pre-campaign behavior.
+        """
         # Check the live per-channel admission limit. Existing agents are
         # never evicted when the setting falls; only subsequent spawns see it.
         configured_limit = (
@@ -575,6 +583,7 @@ class AgentManager:
                 context_compression_enabled=context_compression_enabled,
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,
+                budget_snapshot_provider=budget_snapshot_provider,
             )
         )
         agent._task = task
@@ -959,6 +968,7 @@ async def _run_agent(
     context_compression_enabled: bool = False,
     max_context_chars: int = 750000,
     keep_recent_iterations: int = 30,
+    budget_snapshot_provider: Callable | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -1035,6 +1045,27 @@ async def _run_agent(
                 except asyncio.QueueEmpty:
                     break
 
+            # Per-generation budget snapshot: the effective agent model's
+            # targets, resolved fresh each iteration (live config and a live
+            # model change reach the NEXT generation; retries and rescue
+            # rungs inside one generation reuse this snapshot). Provider
+            # failure or absence falls back to the spawn-frozen soft value
+            # and the unknown-model ladder — pre-campaign behavior.
+            budget_snapshot = None
+            if budget_snapshot_provider is not None:
+                try:
+                    budget_snapshot = budget_snapshot_provider()
+                except Exception:
+                    log.exception(
+                        "agent budget snapshot provider failed (non-fatal); "
+                        "using fallback targets"
+                    )
+            soft_target_chars = (
+                budget_snapshot.primary_chars
+                if budget_snapshot is not None
+                else max_context_chars
+            )
+
             # Context compression: summarize older tool iterations when context grows too large
             if context_compression_enabled and iteration > 0:
                 try:
@@ -1042,10 +1073,10 @@ async def _run_agent(
                         compress_tool_context,
                         estimate_message_chars,
                     )
-                    if estimate_message_chars(agent.messages) > max_context_chars:
+                    if estimate_message_chars(agent.messages) > soft_target_chars:
                         agent.messages, saved = compress_tool_context(
                             agent.messages,
-                            max_context_chars=max_context_chars,
+                            max_context_chars=soft_target_chars,
                             keep_recent=keep_recent_iterations,
                         )
                         log.info(
@@ -1092,13 +1123,17 @@ async def _run_agent(
                         emergency_compress_for_window,
                         estimate_message_chars,
                     )
+                    # The latch is capability evidence; the snapshot's primary
+                    # is policy. Compact to whichever is LOWER — a live budget
+                    # drop must not be out-waited by a stale larger latch.
+                    latch_target = min(agent.context_char_ceiling, soft_target_chars)
                     if (
                         estimate_message_chars(agent.messages)
-                        > agent.context_char_ceiling
+                        > latch_target
                     ):
                         agent.messages, latch_report = emergency_compress_for_window(
                             agent.messages,
-                            target_chars=agent.context_char_ceiling,
+                            target_chars=latch_target,
                         )
                         latch_report["attempt"] = 0
                         latch_report["trigger"] = "latch"
@@ -1116,6 +1151,9 @@ async def _run_agent(
             # Call LLM with recovery support
             response = await _call_llm_with_recovery(
                 agent, iteration_callback, system_prompt, tools,
+                rescue_ladder=(
+                    budget_snapshot.ladder if budget_snapshot is not None else None
+                ),
             )
             if response is None:
                 # Terminal state already set by recovery logic
@@ -1321,6 +1359,7 @@ async def _call_llm_with_recovery(
     iteration_callback: IterationCallback,
     system_prompt: str,
     tools: list[dict],
+    rescue_ladder: tuple[int, ...] | None = None,
 ) -> dict | None:
     """Call the LLM for one agent iteration.
 
@@ -1334,6 +1373,11 @@ async def _call_llm_with_recovery(
 
     Returns the LLM response dict, or None if agent reached terminal state.
     """
+    # The rescue ladder is part of the generation's frozen snapshot; None
+    # (legacy/direct callers) resolves the unknown-model fallback so recovery
+    # always has positive rungs to try.
+    if rescue_ladder is None:
+        rescue_ladder = _fallback_budget_snapshot().ladder
     emergency_passes = 0
     # ONE monotonic deadline bounds the whole logical iteration — the initial
     # attempt, any emergency compaction, and every retry share it (Odin's
@@ -1393,7 +1437,7 @@ async def _call_llm_with_recovery(
                 return None
             if (
                 _is_context_overflow(exc)
-                and emergency_passes < len(_EMERGENCY_TARGETS)
+                and emergency_passes < len(rescue_ladder)
             ):
                 # Window overflow: deterministic for THIS payload, so a plain
                 # retry is doomed — but a smaller payload is not. Bound the
@@ -1404,7 +1448,7 @@ async def _call_llm_with_recovery(
                 # breaker/rotation machinery engaged. Bounded passes, no loop.
                 from ..llm.context_compressor import emergency_compress_for_window
 
-                target = _EMERGENCY_TARGETS[emergency_passes]
+                target = rescue_ladder[emergency_passes]
                 emergency_passes += 1
                 compressed, report = emergency_compress_for_window(
                     agent.messages, target_chars=target

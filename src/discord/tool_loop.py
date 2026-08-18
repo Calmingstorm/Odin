@@ -880,16 +880,28 @@ class ToolLoopRunner:
         iterations intact."""
         if self._get_context_compressor() is not None and st.iteration > 0:
             try:
+                from ..llm.context_budget import snapshot_for_codex_config
                 from ..llm.context_compressor import (
                     compress_tool_context,
                     estimate_message_chars,
                 )
 
                 _cc = self._get_context_compressor()
-                if estimate_message_chars(st.messages) > _cc.resolved_max_context_chars:
+                # The threshold follows the model serving THIS turn: a
+                # sol-class chat works a sol-class budget, an unknown or
+                # non-codex model keeps the conservative 272K-class math.
+                # Overrides/utilization are live config reads; the explicit
+                # ceiling stays on the boot-frozen compression object so its
+                # restart-bound classification remains truthful.
+                snapshot = snapshot_for_codex_config(
+                    getattr(self._llm_gateway.active_client, "model", None),
+                    getattr(self._get_config(), "openai_codex", None),
+                    max_context_chars=_cc.max_context_chars,
+                )
+                if estimate_message_chars(st.messages) > snapshot.primary_chars:
                     st.messages, _saved = compress_tool_context(
                         st.messages,
-                        max_context_chars=_cc.resolved_max_context_chars,
+                        max_context_chars=snapshot.primary_chars,
                         keep_recent=_cc.keep_recent_iterations,
                         stats=self._get_compression_stats(),
                     )
