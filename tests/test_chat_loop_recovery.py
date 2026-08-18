@@ -12,6 +12,8 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
+import pytest
+
 from src.discord.response_guards import StuckLoopTracker
 from src.discord.tool_loop import ToolLoopRunner
 from src.llm.context_budget import resolve_context_budget
@@ -100,6 +102,22 @@ def _chat_state(messages, *, durability=None) -> SimpleNamespace:
         _char_latch=None,
         _rescue_passes=0,
         _gen_identity=None,
+        # Full persisted census so snapshot_chat_turn works on this stub.
+        continuation_count=0,
+        max_continuations=2,
+        fabrication_retried=False,
+        promise_retried=False,
+        unavail_retried=False,
+        hedging_retried=False,
+        code_hedging_retried=False,
+        premature_failure_retried=False,
+        pending_image_blocks=[],
+        _op_tool_details=[],
+        _pending_validations=[],
+        _validation_required=False,
+        _validation_retries=0,
+        _max_validation_retries=2,
+        _result_store_cap=10,
     )
 
 
@@ -299,3 +317,151 @@ class TestLoopRescue:
         assert [r["trigger"] for r in st.context_recoveries] == ["overflow"]
         # The current autonomous prompt survived verbatim.
         assert st.messages[-1] == prompt[0]
+
+class TestEvidenceSerialization:
+    def test_trajectory_serializes_recoveries_only_when_present(self):
+        turn = TrajectoryTurn()
+        assert "context_recoveries" not in turn.to_dict()
+        turn.context_recoveries.append({"trigger": "overflow", "attempt": 1})
+        assert turn.to_dict()["context_recoveries"] == [
+            {"trigger": "overflow", "attempt": 1}
+        ]
+
+    def test_codec_rejects_malformed_recovery_fields(self):
+        from src.turn_state.codec import (
+            CheckpointInvalidError,
+            snapshot_chat_turn,
+            validate_payload,
+        )
+
+        st = _chat_state([{"role": "user", "content": "hi"}])
+        payload = snapshot_chat_turn(st, store_blob=lambda b: "ref", generation_seq=1)
+        validate_payload(payload)  # well-formed baseline
+        for name, bad in (
+            ("_boundary_request_start", -1),
+            ("_boundary_elided_replay", True),
+            ("_rescue_passes", "2"),
+            ("_char_latch", -5),
+            ("_gen_identity", "not-a-dict"),
+        ):
+            broken = {**payload, "fields": {**payload["fields"], name: bad}}
+            with pytest.raises(CheckpointInvalidError):
+                validate_payload(broken)
+
+
+class TestLoopSoftCompaction:
+    def test_soft_pass_fires_past_model_threshold(self):
+        from src.config.schema import ContextCompressionConfig
+
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        runner._get_context_compressor = lambda: ContextCompressionConfig()
+        prompt = {"role": "user", "content": "GOAL"}
+        messages = [prompt]
+        for i in range(60):
+            messages.append({"role": "assistant", "content": [
+                {"type": "tool_use", "id": f"t{i}", "name": "x", "input": {}},
+            ]})
+            messages.append({"role": "user", "content": [
+                {"type": "tool_result", "tool_use_id": f"t{i}", "content": "r" * 40_000},
+            ]})
+        st = SimpleNamespace(
+            messages=messages, _iteration_index=3, _char_latch=None,
+            _boundary=SurfaceBoundary(request_start=0), context_recoveries=[],
+        )
+        before = estimate_message_chars(st.messages)
+        runner._maybe_compress_loop(st, gw.capture_serving_identity(), runner._get_config())
+        assert estimate_message_chars(st.messages) < before  # 2.4M > sol 1.277M
+
+    def test_latch_pass_compacts_and_records(self):
+        from src.config.schema import ContextCompressionConfig
+
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        runner._get_context_compressor = lambda: ContextCompressionConfig()
+        prev = [
+            {"role": "user", "content": "prev: " + "p" * 300_000},
+            {"role": "assistant", "content": "ack"},
+        ]
+        prompt = [{"role": "user", "content": "GOAL"}]
+        st = SimpleNamespace(
+            messages=prev + prompt, _iteration_index=0, _char_latch=50_000,
+            _boundary=SurfaceBoundary(request_start=2), context_recoveries=[],
+        )
+        runner._maybe_compress_loop(st, gw.capture_serving_identity(), runner._get_config())
+        assert estimate_message_chars(st.messages) <= 50_000
+        assert [r["trigger"] for r in st.context_recoveries] == ["latch"]
+
+
+class TestChatLadderExhaustion:
+    async def test_exhausted_ladder_finalizes_terminally(self):
+        big = _history(70, 20_000) + _ENVELOPE
+
+        async def script(n, messages):
+            raise _overflow()  # every attempt overflows
+
+        gw = _Gateway(script)
+        st = _chat_state(big)
+        kind, _val = await _runner(gw)._call_llm(st)
+        assert kind == "done"
+        # Both rungs were attempted, then honest terminal failure.
+        assert st._rescue_passes == 2
+        assert len(st._trajectory.context_recoveries) == 2
+        assert len(gw.calls) == 3  # initial + one retry per rung
+
+class TestNonFatalCompactionGuards:
+    def test_chat_compress_failure_is_non_fatal(self, monkeypatch):
+        """The soft pass's guard: a compressor exception never kills the turn."""
+        from src.config.schema import ContextCompressionConfig
+
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        runner._get_context_compressor = lambda: ContextCompressionConfig()
+
+        def exploding(*a, **k):
+            raise RuntimeError("compressor died")
+
+        monkeypatch.setattr(
+            "src.llm.context_compressor.compress_tool_context", exploding
+        )
+        st = SimpleNamespace(iteration=3, messages=_history(80, 20_000))
+        before = list(st.messages)
+        runner._maybe_compress(st, gw.client)  # must not raise
+        assert st.messages == before
+
+    def test_loop_compaction_failure_is_non_fatal(self, monkeypatch):
+        from src.config.schema import ContextCompressionConfig
+
+        gw = _Gateway(None)
+        runner = _runner(gw)
+        runner._get_context_compressor = lambda: ContextCompressionConfig()
+        monkeypatch.setattr(
+            "src.llm.context_compressor.emergency_compress_for_window",
+            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("boom")),
+        )
+        st = SimpleNamespace(
+            messages=_history(4, 100), _iteration_index=0, _char_latch=10,
+            _boundary=SurfaceBoundary(request_start=0), context_recoveries=[],
+        )
+        runner._maybe_compress_loop(st, gw.capture_serving_identity(), runner._get_config())
+        assert st.context_recoveries == []  # guard swallowed, nothing recorded
+
+    def test_v2_payload_normalizes_recovery_fields(self):
+        """Codec v3 backward defaults: a v2 payload without the five recovery
+        fields validates and restores with pre-campaign semantics."""
+        from src.turn_state.codec import snapshot_chat_turn, validate_payload
+
+        st = _chat_state([{"role": "user", "content": "hi"}])
+        payload = snapshot_chat_turn(st, store_blob=lambda b: "ref", generation_seq=1)
+        legacy = {**payload, "codec_version": 2}
+        legacy["fields"] = {
+            k: v for k, v in payload["fields"].items()
+            if k not in (
+                "_boundary_request_start", "_boundary_elided_replay",
+                "_char_latch", "_rescue_passes", "_gen_identity",
+            )
+        }
+        validate_payload(legacy)  # normalized, not rejected
+        assert legacy["fields"]["_boundary_request_start"] == 0
+        assert legacy["fields"]["_gen_identity"] is None
+

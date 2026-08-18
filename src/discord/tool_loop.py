@@ -66,6 +66,7 @@ if TYPE_CHECKING:
     from .response_guards import StuckLoopTracker
     from .tool_catalog import ToolCatalog
     from .turn_recorder import TurnRecorder
+from ..llm.context_compressor import SurfaceBoundary
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .llm_gateway import LLMServingIdentity
 from .response_guards import (
@@ -431,7 +432,7 @@ class _LoopTurn:
     # iteration starts fresh — cross-iteration protection is the global
     # clamp's job, not a stale local latch), recovery evidence for the
     # trajectory, and the loop-local iteration index the soft pass guards on.
-    _boundary: object = None
+    _boundary: SurfaceBoundary | None = None
     _char_latch: int | None = None
     context_recoveries: list = field(default_factory=list)
     _iteration_index: int = 0
@@ -1151,7 +1152,6 @@ class ToolLoopRunner:
                         ):
                             raise
                         from ..llm.context_compressor import (
-                            SurfaceBoundary,
                             emergency_compress_for_window,
                         )
 
@@ -2216,8 +2216,6 @@ class ToolLoopRunner:
         # Surface boundary: the prev-context exchange (two messages when
         # present) is replayable context; the current autonomous prompt and
         # everything after it is protected/iteration territory.
-        from ..llm.context_compressor import SurfaceBoundary
-
         loop_boundary = SurfaceBoundary(request_start=2 if prev_context else 0)
 
         # Build system prompt and tool definitions
@@ -2338,8 +2336,6 @@ class ToolLoopRunner:
                         boundary=st._boundary,
                     )
                     if latch_report.get("boundary_request_start") is not None:
-                        from ..llm.context_compressor import SurfaceBoundary
-
                         st._boundary = SurfaceBoundary(
                             request_start=latch_report["boundary_request_start"],
                             elided_replay=latch_report["boundary_elided_replay"],
