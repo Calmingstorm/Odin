@@ -20,6 +20,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from src.config.schema import ContextCompressionConfig
 from src.llm import window_observer as wo
 from src.llm.errors import LLMRequestError
 from src.llm.window_observer import WindowObserver, WindowObserverMutationError
@@ -780,7 +781,7 @@ class TestAgentSurfaceHooks:
 # ---------------------------------------------------------------------------
 
 
-def _api_app(observer):
+def _api_app(observer, *, max_context_chars: int | None = None):
     from src.web.api.llm_admin import register_context_windows
 
     bot = SimpleNamespace(
@@ -788,7 +789,9 @@ def _api_app(observer):
             openai_codex=SimpleNamespace(
                 context_budget_overrides={"gpt-5.5": 250_000},
                 context_utilization=60,
-                context_compression=SimpleNamespace(max_context_chars=None),
+                context_compression=ContextCompressionConfig(
+                    max_context_chars=max_context_chars
+                ),
             )
         ),
         context_compressor=SimpleNamespace(resolved_max_context_chars=750_000),
@@ -828,6 +831,14 @@ class TestContextWindowsApi:
             body = await (await c.get("/api/context/windows")).json()
         assert body["max_context_chars"] is None
         assert body["models"]["gpt-5.6-sol"]["configured"]["primary_chars"] == 1_277_400
+
+    async def test_get_preserves_explicit_legacy_ceiling_verbatim(self, tmp_path):
+        obs = _observer(tmp_path)
+        app = _api_app(obs, max_context_chars=750_000)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        assert body["max_context_chars"] == 750_000
+        assert body["models"]["gpt-5.6-sol"]["configured"]["primary_chars"] == 750_000
 
     async def test_failed_clear_returns_503_and_truthful_state(self, tmp_path, monkeypatch):
         obs = _observer(tmp_path)
