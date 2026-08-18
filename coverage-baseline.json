@@ -1272,10 +1272,10 @@
   "statements": 281
  },
  "src/web/api/llm_admin.py": {
-  "covered": 510,
+  "covered": 625,
   "missing": 3,
-  "percent": 99.42,
-  "statements": 513
+  "percent": 99.52,
+  "statements": 628
  },
  "src/web/api/observability.py": {
   "covered": 216,
@@ -1330,5 +1330,11 @@
   "missing": 27,
   "percent": 88.98,
   "statements": 245
+ },
+ "src/llm/window_observer.py": {
+  "covered": 308,
+  "missing": 39,
+  "percent": 88.76,
+  "statements": 347
  }
 }

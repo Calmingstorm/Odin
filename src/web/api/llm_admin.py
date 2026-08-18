@@ -273,6 +273,8 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
                 "context_compression": desired_compression,
                 "effective_context_compression": effective_compression,
                 "context_compression_pending_restart": compression_pending_restart,
+                "context_budget_overrides": dict(bot.config.openai_codex.context_budget_overrides),
+                "context_utilization": bot.config.openai_codex.context_utilization,
             },
             "ollama": {
                 "configured": ollama_configured,
@@ -462,6 +464,29 @@ def _parse_codex_advanced(body: dict, cfg) -> tuple[list, list, bool] | web.Resp
         ops.append((group, merged))
         persist.extend((("openai_codex", group, key), getattr(merged, key)) for key in submitted)
         wants_reload = wants_reload or live
+    try:
+        candidate_payload = cfg.model_dump()
+        if "context_budget_overrides" in body:
+            candidate_payload["context_budget_overrides"] = body["context_budget_overrides"]
+        if "context_utilization" in body:
+            candidate_payload["context_utilization"] = body["context_utilization"]
+        if "context_budget_overrides" in body or "context_utilization" in body:
+            from ...config.schema import OpenAICodexConfig
+
+            candidate = OpenAICodexConfig(**candidate_payload)
+            for field in ("context_budget_overrides", "context_utilization"):
+                if field not in body:
+                    continue
+                value = getattr(candidate, field)
+                persist.append((("openai_codex", field), value))
+                ops.append((field, value))
+    except ValidationError as exc:
+        first = exc.errors()[0]
+        loc = ".".join(str(part) for part in first.get("loc", ()))
+        return web.json_response(
+            {"error": f"{loc}: {first.get('msg', 'invalid value')}"},
+            status=400,
+        )
     return persist, ops, wants_reload
 
 
@@ -939,12 +964,26 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         cc = getattr(codex_cfg, "context_compression", None)
         ceiling = getattr(cc, "max_context_chars", None) if cc is not None else None
         evidence: dict = observer.view() if observer is not None else {"version": 1, "accounts": {}}
+        # Resolve eligibility once for one internally-consistent management
+        # snapshot.  Re-reading a changing pool provider per model could pair a
+        # clamp from one account set with expiry rows from another.
+        clamp_rows = observer.account_clamps() if observer is not None else []
+        active_clamp_rows: dict[str, dict] = {}
+        for row in clamp_rows:
+            prior = active_clamp_rows.get(row["model"])
+            if (
+                prior is None
+                or row["value"] < prior["value"]
+                or (row["value"] == prior["value"] and row["expires_at"] > prior["expires_at"])
+            ):
+                active_clamp_rows[row["model"]] = row
         models = set(CODEX_MODEL_INPUT_BUDGETS) | set(overrides)
         for account in evidence.get("accounts", {}).values():
             models |= set(account.get("models", {}))
         out = {}
         for model in sorted(models):
-            clamp = observer.active_clamp(model) if observer is not None else None
+            active_row = active_clamp_rows.get(model)
+            clamp = active_row["value"] if active_row is not None else None
             configured = resolve_context_budget(
                 model,
                 overrides=overrides,
@@ -962,14 +1001,27 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
                 "floor": CODEX_MODEL_INPUT_BUDGETS.get(model),
                 "override": overrides.get(model),
                 "active_clamp": clamp,
+                "provenance": (
+                    "temporary learned clamp"
+                    if effective.clamp_applied
+                    else "override"
+                    if configured.base_source == "override"
+                    else "built-in"
+                ),
                 "configured": _resolution(configured),
                 "effective": _resolution(effective),
+                "clamp_expires_at": (
+                    active_row["expires_at"]
+                    if effective.clamp_applied and active_row is not None
+                    else None
+                ),
             }
         return web.json_response(
             {
                 "utilization": utilization,
                 "max_context_chars": ceiling,
                 "models": out,
+                "clamps": clamp_rows,
                 "evidence": evidence,
             }
         )
@@ -983,6 +1035,8 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
             data = await request.json()
         except Exception:
             data = {}
+        if not isinstance(data, dict):
+            return web.json_response({"error": "JSON body must be an object"}, status=400)
         account_key = data.get("account_key")
         if not isinstance(account_key, str) or not account_key.strip():
             return web.json_response({"error": "account_key is required"}, status=400)

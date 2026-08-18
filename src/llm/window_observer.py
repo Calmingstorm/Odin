@@ -322,6 +322,34 @@ class WindowObserver:
 
     # ── hot-path read ─────────────────────────────────────────────────
 
+    def _eligible_keys(self) -> tuple[bool, frozenset[str]]:
+        """Return ``(scoped, keys)`` for the current pool snapshot.
+
+        Standalone construction has no pool provider and preserves legacy
+        all-account behavior (``scoped=False``). Once a provider is installed,
+        an unavailable snapshot fails open as an empty eligible set rather than
+        presenting stale evidence as active.
+        """
+        if self._eligible_account_keys is None:
+            return False, frozenset()
+        supplied = self._eligible_account_keys()
+        if supplied is None:
+            return True, frozenset()
+        return True, frozenset(key for key in supplied if _is_account_key(key))
+
+    @staticmethod
+    def _active_clamp_for_record(record: object, now: datetime) -> int | None:
+        if not isinstance(record, dict):
+            return None
+        clamp = record.get("clamp")
+        if not isinstance(clamp, dict):
+            return None
+        expires = _parse_iso(clamp.get("expires_at"))
+        value = clamp.get("value")
+        if expires is None or expires <= now or not _positive_int(value):
+            return None
+        return value
+
     def active_clamp(self, model: str | None) -> int | None:
         """Minimum non-expired clamp across currently eligible accounts.
 
@@ -333,31 +361,55 @@ class WindowObserver:
             canonical = canonical_codex_model(model)
             if not canonical:
                 return None
-            eligible: frozenset[str] | None = None
-            if self._eligible_account_keys is not None:
-                supplied = self._eligible_account_keys()
-                if supplied is None:
-                    return None
-                eligible = frozenset(key for key in supplied if _is_account_key(key))
+            scoped, eligible = self._eligible_keys()
             now = _utc_now()
             best: int | None = None
             for account_key, account in self._state.get("accounts", {}).items():
-                if eligible is not None and account_key not in eligible:
+                if scoped and account_key not in eligible:
                     continue
-                record = account.get("models", {}).get(canonical)
-                clamp = record.get("clamp") if isinstance(record, dict) else None
-                if not isinstance(clamp, dict):
-                    continue
-                expires = _parse_iso(clamp.get("expires_at"))
-                value = clamp.get("value")
-                if expires is None or expires <= now or not _positive_int(value):
-                    continue
-                if best is None or value < best:
+                value = self._active_clamp_for_record(account.get("models", {}).get(canonical), now)
+                if value is not None and (best is None or value < best):
                     best = value
             return best
         except Exception:
             log.exception("active_clamp failed; treating as unclamped")
             return None
+
+    def account_clamps(self) -> list[dict]:
+        """Management-safe active clamp rows for the WebUI.
+
+        The observer owns TTL and pool-eligibility semantics.  Exposing a
+        normalized view keeps the browser from reimplementing either, while
+        retaining the opaque account key needed for an account-scoped clear.
+        """
+        try:
+            scoped, eligible = self._eligible_keys()
+            now = _utc_now()
+            rows: list[dict] = []
+            for account_key, account in self._state.get("accounts", {}).items():
+                if scoped and account_key not in eligible:
+                    continue
+                for model, record in account.get("models", {}).items():
+                    value = self._active_clamp_for_record(record, now)
+                    if value is None:
+                        continue
+                    clamp = record["clamp"]
+                    rows.append(
+                        {
+                            "account_key": account_key,
+                            "model": model,
+                            "value": value,
+                            "set_at": clamp["set_at"],
+                            "expires_at": clamp["expires_at"],
+                            "source": clamp["source"],
+                        }
+                    )
+            return sorted(
+                rows, key=lambda row: (row["model"], row["expires_at"], row["account_key"])
+            )
+        except Exception:
+            log.exception("account_clamps failed; serving no management rows")
+            return []
 
     # ── evidence intake ───────────────────────────────────────────────
 
