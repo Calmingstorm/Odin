@@ -96,6 +96,18 @@ class TestAgentSnapshotProvider:
         assert snap.base_source == "unknown_default"
         assert snap.primary_chars == 575_000
 
+    def test_non_codex_collision_gets_unknown_math(self):
+        """Review blocker #2 pin (agents): an Ollama client named after a
+        Codex slug never inherits the Codex capability floor."""
+        config = SimpleNamespace(openai_codex=OpenAICodexConfig())
+        impostor = SimpleNamespace(model="gpt-5.6-sol")  # not codex-shaped
+        provider = _make_budget_snapshot_provider(
+            lambda: config, lambda: impostor, lambda: ContextCompressionConfig(), None
+        )
+        snap = provider()
+        assert snap.base_source == "unknown_default"
+        assert snap.primary_chars == 575_000
+
     def test_frozen_ceiling_comes_from_compressor_object(self):
         config = SimpleNamespace(openai_codex=OpenAICodexConfig())
         compressor = ContextCompressionConfig(max_context_chars=500_000)
@@ -110,12 +122,17 @@ class TestAgentSnapshotProvider:
 # ---------------------------------------------------------------------------
 # Chat soft threshold follows the serving model
 # ---------------------------------------------------------------------------
-def _chat_runner(model, compressor):
+def _chat_runner(model, compressor, *, codex_shaped=True):
     runner = ToolLoopRunner.__new__(ToolLoopRunner)
     runner._get_context_compressor = lambda: compressor
     runner._get_compression_stats = lambda: None
     runner._get_config = lambda: SimpleNamespace(openai_codex=OpenAICodexConfig())
-    runner._llm_gateway = SimpleNamespace(active_client=SimpleNamespace(model=model))
+    client = (
+        _CodexClient(model=model, reasoning_effort="xhigh")
+        if codex_shaped
+        else SimpleNamespace(model=model)
+    )
+    runner._llm_gateway = SimpleNamespace(active_client=client)
     return runner
 
 
@@ -168,6 +185,16 @@ class TestChatSoftThreshold:
             "gpt-5.6-sol", ContextCompressionConfig(max_context_chars=500_000)
         )._maybe_compress(st)
         assert estimate_message_chars(st.messages) < 600_000
+
+    def test_non_codex_client_named_like_codex_slug_gets_unknown_math(self):
+        """Review blocker #2 pin (chat): provider identity gates the registry.
+        A non-Codex client literally named gpt-5.6-sol compacts at the
+        conservative 575K unknown-model target, never sol's 1.277M floor."""
+        st = SimpleNamespace(iteration=3, messages=_bulk_messages(700_000))
+        _chat_runner(
+            "gpt-5.6-sol", ContextCompressionConfig(), codex_shaped=False
+        )._maybe_compress(st)
+        assert estimate_message_chars(st.messages) < 700_000
 
     def test_first_iteration_never_compresses(self):
         st = SimpleNamespace(iteration=0, messages=_bulk_messages(2_000_000))

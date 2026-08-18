@@ -312,7 +312,7 @@ class TestProcessWithToolsEndToEnd:
         bot.llm_gateway.codex_client = MagicMock()
 
         # Codex returns a single tool call on iter 1, then a text response on iter 2.
-        async def fake_chat_with_tools(messages, system, tools):
+        async def fake_chat_with_tools(messages, system, tools, **kwargs):
             # Distinguish first call (no tool_result yet) from second
             has_tool_result = any(
                 isinstance(m.get("content"), list) and any(

@@ -257,10 +257,10 @@ class AgentStateMachine:
 # Callback types
 # iteration_callback: (messages, system_prompt, tools) → LLMResponse-like dict
 #   dict with keys: "text" (str), "tool_calls" (list[dict]), "stop_reason" (str)
-IterationCallback = Callable[
-    [list[dict], str, list[dict]],
-    Awaitable[dict],
-]
+# (messages, system_prompt, tools, *, generation_state=...) -> response dict.
+# Callable[...] because the frozen-generation channel is keyword-only with a
+# default — a positional-only Callable spelling cannot express it.
+IterationCallback = Callable[..., Awaitable[dict]]
 
 # tool_executor_callback: (tool_name, tool_input) → result string
 ToolExecutorCallback = Callable[
@@ -1149,11 +1149,13 @@ async def _run_agent(
                     )
 
             # Call LLM with recovery support
+            generation_state: dict = {}
             response = await _call_llm_with_recovery(
                 agent, iteration_callback, system_prompt, tools,
                 rescue_ladder=(
                     budget_snapshot.ladder if budget_snapshot is not None else None
                 ),
+                generation_state=generation_state,
             )
             if response is None:
                 # Terminal state already set by recovery logic
@@ -1360,6 +1362,7 @@ async def _call_llm_with_recovery(
     system_prompt: str,
     tools: list[dict],
     rescue_ladder: tuple[int, ...] | None = None,
+    generation_state: dict | None = None,
 ) -> dict | None:
     """Call the LLM for one agent iteration.
 
@@ -1378,7 +1381,14 @@ async def _call_llm_with_recovery(
     # always has positive rungs to try.
     if rescue_ladder is None:
         rescue_ladder = _fallback_budget_snapshot().ladder
+    if generation_state is None:
+        generation_state = {}
     emergency_passes = 0
+    # Published only after a provider ACCEPTS the compacted payload: a local
+    # "fits" proves a character target was met, not that the server took it
+    # (R2: the latch comes from the size that actually received a successful
+    # response).
+    pending_ceiling: int | None = None
     # ONE monotonic deadline bounds the whole logical iteration — the initial
     # attempt, any emergency compaction, and every retry share it (Odin's
     # adversarial repro: per-attempt timeouts let one iteration consume ~3x
@@ -1411,10 +1421,19 @@ async def _call_llm_with_recovery(
             agent.ended_at = time.time()
             return None
         try:
-            return await asyncio.wait_for(
-                iteration_callback(agent.messages, system_prompt, tools),
+            response = await asyncio.wait_for(
+                iteration_callback(
+                    agent.messages,
+                    system_prompt,
+                    tools,
+                    generation_state=generation_state,
+                ),
                 timeout=attempt_budget,
             )
+            if pending_ceiling is not None:
+                # The rescue rung is now server-accepted evidence.
+                agent.context_char_ceiling = pending_ceiling
+            return response
         except TimeoutError:
             if _remaining_lifetime(agent) <= 0:
                 # The wait was lifetime-capped and the deadline has passed:
@@ -1435,10 +1454,7 @@ async def _call_llm_with_recovery(
                 # v3.59.0 rule: exhaustion is TIMEOUT, never FAILED).
                 _lifetime_timeout(agent)
                 return None
-            if (
-                _is_context_overflow(exc)
-                and emergency_passes < len(rescue_ladder)
-            ):
+            if _is_context_overflow(exc):
                 # Window overflow: deterministic for THIS payload, so a plain
                 # retry is doomed — but a smaller payload is not. Bound the
                 # entire message list (recent iterations by SIZE, single huge
@@ -1448,35 +1464,52 @@ async def _call_llm_with_recovery(
                 # breaker/rotation machinery engaged. Bounded passes, no loop.
                 from ..llm.context_compressor import emergency_compress_for_window
 
-                target = rescue_ladder[emergency_passes]
-                emergency_passes += 1
-                compressed, report = emergency_compress_for_window(
-                    agent.messages, target_chars=target
-                )
-                report["attempt"] = emergency_passes
-                report["trigger"] = "overflow"
-                agent.context_recoveries.append(report)
-                if report["fits"]:
-                    agent.messages = compressed
-                    # Latch: later iterations compact BEFORE sending once they
-                    # cross the size that just proved survivable.
-                    agent.context_char_ceiling = report["compressed_chars"]
-                    log.warning(
-                        "Agent %s context overflow: emergency pass %d "
-                        "compressed %d -> %d chars; retrying iteration",
+                plan = generation_state.get("plan")
+                plan_snapshot = plan.get("snapshot") if isinstance(plan, dict) else None
+                plan_ladder = getattr(plan_snapshot, "ladder", None)
+                # The ladder of the request that ACTUALLY overflowed: the
+                # generation plan captured by the callback at send time.
+                # Spawn-provider advisory only when no plan exists
+                # (legacy/direct callers).
+                active_ladder = plan_ladder if plan_ladder else rescue_ladder
+                if emergency_passes < len(active_ladder):
+                    target = active_ladder[emergency_passes]
+                    emergency_passes += 1
+                    compressed, report = emergency_compress_for_window(
+                        agent.messages, target_chars=target
+                    )
+                    report["attempt"] = emergency_passes
+                    report["trigger"] = "overflow"
+                    agent.context_recoveries.append(report)
+                    if report["fits"]:
+                        agent.messages = compressed
+                        # Latch candidate: held until the retry actually
+                        # succeeds (the provider is the authority on
+                        # survivable size).
+                        pending_ceiling = report["compressed_chars"]
+                        log.warning(
+                            "Agent %s context overflow: emergency pass %d "
+                            "compressed %d -> %d chars; retrying iteration",
+                            agent.id,
+                            emergency_passes,
+                            report["original_chars"],
+                            report["compressed_chars"],
+                        )
+                        continue
+                    log.error(
+                        "Agent %s context overflow: payload cannot be bounded "
+                        "under %d chars (prefix %d); failing",
+                        agent.id,
+                        target,
+                        report["prefix_chars"],
+                    )
+                else:
+                    log.error(
+                        "Agent %s context overflow: rescue ladder exhausted "
+                        "after %d passes; failing",
                         agent.id,
                         emergency_passes,
-                        report["original_chars"],
-                        report["compressed_chars"],
                     )
-                    continue
-                log.error(
-                    "Agent %s context overflow: payload cannot be bounded "
-                    "under %d chars (prefix %d); failing",
-                    agent.id,
-                    target,
-                    report["prefix_chars"],
-                )
             # Typed fast-fail (auth / malformed request / quota-exhausted
             # after rotation) or a programming defect: neither earns a
             # manager-level retry — transient classes were already retried

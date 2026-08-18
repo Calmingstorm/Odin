@@ -270,7 +270,7 @@ def _wire(runner, st, call_llm):
         return st
 
     runner._prepare_chat_turn = _prep
-    runner._maybe_compress = lambda st: None
+    runner._maybe_compress = lambda st, request_client=None: None
     runner._call_llm = call_llm
 
 
@@ -279,7 +279,7 @@ class TestRunEscapeGuard:
         runner, saved, cleared = _make_runner()
         st = _stub_state()
 
-        async def _boom(_st):
+        async def _boom(_st, _request_client=None):
             raise RuntimeError(CF_HTML)
 
         _wire(runner, st, _boom)
@@ -296,7 +296,7 @@ class TestRunEscapeGuard:
         runner, saved, cleared = _make_runner()
         st = _stub_state()
 
-        async def _cancel(_st):
+        async def _cancel(_st, _request_client=None):
             raise asyncio.CancelledError()
 
         _wire(runner, st, _cancel)
@@ -312,7 +312,7 @@ class TestRunEscapeGuard:
         runner, _saved, cleared = _make_runner(recorder_save=_bad_save)
         st = _stub_state()
 
-        async def _boom(_st):
+        async def _boom(_st, _request_client=None):
             raise RuntimeError("original failure")
 
         _wire(runner, st, _boom)
@@ -327,7 +327,7 @@ class TestRunEscapeGuard:
         st = _stub_state()
         done = ("all good", False, False, [], False)
 
-        async def _done(_st):
+        async def _done(_st, _request_client=None):
             return ("done", done)
 
         _wire(runner, st, _done)

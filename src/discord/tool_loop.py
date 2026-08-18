@@ -581,9 +581,14 @@ class ToolLoopRunner:
             if st._cancel.is_set():
                 return self._stopped(st, "iteration_start")
 
-            self._maybe_compress(st)
+            # ONE capture of this iteration's serving identity: the
+            # compaction threshold and the outgoing request describe the same
+            # client and model (a mid-iteration provider switch is the
+            # phase-4 chat-durability freeze; model identity is pinned here).
+            request_client = getattr(self._llm_gateway, "active_client", None)
+            self._maybe_compress(st, request_client)
 
-            kind, val = await self._call_llm(st)
+            kind, val = await self._call_llm(st, request_client)
             if kind == "done":
                 return val
             llm_resp = val
@@ -873,7 +878,7 @@ class ToolLoopRunner:
             False,
         )
 
-    def _maybe_compress(self, st: _ChatTurn) -> None:
+    def _maybe_compress(self, st: _ChatTurn, request_client: object = None) -> None:
         """Context auto-compression — when accumulated tool iterations push
         the message list over the configured budget, summarise older
         iterations into a single text message and keep the most recent N
@@ -887,14 +892,22 @@ class ToolLoopRunner:
                 )
 
                 _cc = self._get_context_compressor()
-                # The threshold follows the model serving THIS turn: a
-                # sol-class chat works a sol-class budget, an unknown or
-                # non-codex model keeps the conservative 272K-class math.
+                # The threshold follows the CAPTURED client serving this
+                # iteration (same capture the request uses): a sol-class chat
+                # works a sol-class budget. Provider identity gates the
+                # registry — a non-Codex client NAMED like a Codex slug gets
+                # conservative unknown-model math, never a Codex floor.
                 # Overrides/utilization are live config reads; the explicit
                 # ceiling stays on the boot-frozen compression object so its
                 # restart-bound classification remains truthful.
+                if request_client is None:
+                    request_client = self._llm_gateway.active_client
+                if hasattr(request_client, "reasoning_effort"):
+                    model_for_budget = getattr(request_client, "model", None)
+                else:
+                    model_for_budget = None
                 snapshot = snapshot_for_codex_config(
-                    getattr(self._llm_gateway.active_client, "model", None),
+                    model_for_budget,
                     getattr(self._get_config(), "openai_codex", None),
                     max_context_chars=_cc.max_context_chars,
                 )
@@ -911,7 +924,7 @@ class ToolLoopRunner:
                     "context_compressor failed (non-fatal); continuing with full context"
                 )
 
-    async def _call_llm(self, st: _ChatTurn):
+    async def _call_llm(self, st: _ChatTurn, request_client: object = None):
         """Guarded LLM call with typing indicator and deadline-based recovery.
 
         Returns ("ok", llm_resp) or ("done", <run() return tuple>).
@@ -938,11 +951,24 @@ class ToolLoopRunner:
                 type(error).__name__, wait, remaining,
             )
 
+        # Pin the captured identity's MODEL onto the request: even if the
+        # active client is swapped mid-iteration, a Codex client serves the
+        # model the compaction threshold was derived for (non-Codex clients
+        # accept-and-ignore; full client freezing is phase-4 durability).
+        pinned_model = (
+            getattr(request_client, "model", None)
+            if request_client is not None
+            and hasattr(request_client, "reasoning_effort")
+            else None
+        )
+        pin_kwargs = {"model": pinned_model} if pinned_model else {}
+
         async def _attempt():
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
                 tools=st.tools or [],
+                **pin_kwargs,
                 user_id=st.user_id,
                 channel_id=_channel_id,
                 tools_used=st.tools_used_in_loop,

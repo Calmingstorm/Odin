@@ -1109,3 +1109,56 @@ class TestAgentEffortSnapshot:
         # the mid-generation "max" (which would 400 against gpt-5.5)
         assert calls == ["xhigh", "xhigh"]
         assert resp.text == "ok"
+
+class TestFrozenGenerationIdentity:
+    """PR #273 round-1 blocker #1 pin: client/model/effort/budget come from
+    ONE capture and stay fixed across rescue retries of the same generation;
+    a live reload or client swap reaches only the NEXT generation."""
+
+    async def test_rescue_retry_reuses_the_first_attempt_plan(self):
+        from src.config.schema import OpenAICodexConfig
+
+        cfg = _cfg()
+        cfg.openai_codex = OpenAICodexConfig(
+            model="gpt-5.6-sol", agent_model=None, agent_reasoning_effort=None,
+        )
+        sol_client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gateway = SimpleNamespace(active_client=sol_client)
+        t = _tools(get_config=lambda: cfg, llm_gateway=gateway)
+        t._agent_manager.spawn = MagicMock(return_value="agent-1")
+        t._agent_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                text="ok", tool_calls=[], stop_reason="end_turn",
+                provenance_provider="codex", provenance_model="gpt-5.6-sol",
+                provenance_reasoning_effort="xhigh",
+            )
+        )
+        await t._handle_spawn_agent(_message(), {"label": "x", "goal": "g"})
+        cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+
+        generation_state: dict = {}
+        await cb([], "sys", [], generation_state=generation_state)
+        plan = generation_state["plan"]
+        assert plan["client"] is sol_client
+        assert plan["model"] == "gpt-5.6-sol"
+        assert plan["snapshot"].primary_chars == 1_277_400
+
+        # Mid-generation reload: live config and the active client both flip
+        # to 5.5. The rescue retry MUST still use the frozen sol identity.
+        cfg.openai_codex.model = "gpt-5.5"
+        gateway.active_client = SimpleNamespace(
+            model="gpt-5.5", reasoning_effort="xhigh"
+        )
+        await cb([], "sys", [], generation_state=generation_state)
+        first = t._agent_generate.await_args_list[0]
+        second = t._agent_generate.await_args_list[1]
+        assert second.args[0] is sol_client  # same client object
+        assert second.kwargs["resolved_model"] == first.kwargs["resolved_model"]
+        assert generation_state["plan"] is plan  # nothing re-resolved
+
+        # A FRESH generation state (the next iteration) sees the new world.
+        fresh: dict = {}
+        await cb([], "sys", [], generation_state=fresh)
+        assert fresh["plan"]["model"] == "gpt-5.5"
+        assert fresh["plan"]["snapshot"].primary_chars == 570_002
+

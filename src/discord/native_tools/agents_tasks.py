@@ -165,6 +165,25 @@ def _spawn_pair_error(
     return effort_incompatibility_error(model_now, effort_now)
 
 
+def _generation_budget_snapshot(cfg, client, resolved_model, compressor):
+    """The frozen generation's budget snapshot, from the SAME identity capture
+    as the request (collision-gated: non-Codex clients get unknown-model
+    math regardless of what their model is named)."""
+    from ...llm.context_budget import snapshot_for_codex_config
+
+    if hasattr(client, "reasoning_effort"):
+        model_for_budget = resolved_model or getattr(client, "model", None)
+    else:
+        model_for_budget = None
+    return snapshot_for_codex_config(
+        model_for_budget,
+        getattr(cfg, "openai_codex", None),
+        max_context_chars=(
+            getattr(compressor, "max_context_chars", None) if compressor else None
+        ),
+    )
+
+
 def _make_budget_snapshot_provider(get_config, get_client, get_compressor, model_override):
     """Per-generation context-budget snapshot for a spawned agent.
 
@@ -186,8 +205,16 @@ def _make_budget_snapshot_provider(get_config, get_client, get_compressor, model
             cfg, client, model_override=model_override, effort_override=None
         )
         compressor = get_compressor()
+        # Provider identity gates the registry: a non-Codex client whose
+        # model happens to be NAMED like a Codex slug (an Ollama model tagged
+        # "gpt-5.6-sol") must get conservative unknown-model math, never a
+        # Codex capability floor.
+        if hasattr(client, "reasoning_effort"):
+            model_for_budget = resolved_model or getattr(client, "model", None)
+        else:
+            model_for_budget = None
         return snapshot_for_codex_config(
-            resolved_model or getattr(client, "model", None),
+            model_for_budget,
             getattr(cfg, "openai_codex", None),
             max_context_chars=(
                 getattr(compressor, "max_context_chars", None) if compressor else None
@@ -654,23 +681,40 @@ class AgentTaskTools:
             messages: list[dict],
             sys_prompt: str,
             tool_defs: list[dict],
+            generation_state: dict | None = None,
         ) -> dict:
-            # Resolve the client ONCE per call so the provider/model/effort
-            # stamp describes the client this request actually went to, and
-            # read the agent policy from live config at call time (a WebUI
-            # change reaches in-flight agents on their next iteration).
-            client = self._llm_gateway.active_client
-            agent_effort, resolved_model = _agent_llm_policy(
-                self._get_config(), client,
-                model_override=model_override, effort_override=effort_override,
-            )
+            # ONE capture per logical generation: client, model, effort, and
+            # budget snapshot are resolved together on the FIRST attempt and
+            # reused verbatim by every rescue retry (R2 frozen-generation
+            # identity — a live reload between attempts must never split the
+            # budget from the request it governs). Live config reaches the
+            # NEXT generation, which starts with a fresh state dict.
+            plan = generation_state.get("plan") if generation_state is not None else None
+            if plan is None:
+                client = self._llm_gateway.active_client
+                agent_effort, resolved_model = _agent_llm_policy(
+                    self._get_config(), client,
+                    model_override=model_override, effort_override=effort_override,
+                )
+                plan = {
+                    "client": client,
+                    "effort": agent_effort,
+                    "model": resolved_model,
+                    "snapshot": _generation_budget_snapshot(
+                        self._get_config(), client, resolved_model,
+                        self._get_context_compressor(),
+                    ),
+                }
+                if generation_state is not None:
+                    generation_state["plan"] = plan
+            client = plan["client"]
             resp = await self._agent_generate(
                 client,
                 messages=messages,
                 sys_prompt=sys_prompt,
                 tool_defs=tool_defs,
-                agent_effort=agent_effort,
-                resolved_model=resolved_model,
+                agent_effort=plan["effort"],
+                resolved_model=plan["model"],
             )
             return {
                 "text": resp.text,
@@ -999,19 +1043,36 @@ class AgentTaskTools:
         # model/effort override, so a fleet can mix models. Overrides are fixed
         # for the agent's life; None fields track live config at call time.
         def _make_iteration_cb(model_override, effort_override):
-            async def _iteration_cb(messages, sys, tool_defs):
-                client = self._llm_gateway.active_client
-                agent_effort, resolved_model = _agent_llm_policy(
-                    self._get_config(), client,
-                    model_override=model_override, effort_override=effort_override,
+            async def _iteration_cb(messages, sys, tool_defs, generation_state=None):
+                # Same frozen-generation capture as the direct spawn path.
+                plan = (
+                    generation_state.get("plan") if generation_state is not None else None
                 )
+                if plan is None:
+                    client = self._llm_gateway.active_client
+                    agent_effort, resolved_model = _agent_llm_policy(
+                        self._get_config(), client,
+                        model_override=model_override, effort_override=effort_override,
+                    )
+                    plan = {
+                        "client": client,
+                        "effort": agent_effort,
+                        "model": resolved_model,
+                        "snapshot": _generation_budget_snapshot(
+                            self._get_config(), client, resolved_model,
+                            self._get_context_compressor(),
+                        ),
+                    }
+                    if generation_state is not None:
+                        generation_state["plan"] = plan
+                client = plan["client"]
                 resp = await self._agent_generate(
                     client,
                     messages=messages,
                     sys_prompt=sys,
                     tool_defs=tool_defs,
-                    agent_effort=agent_effort,
-                    resolved_model=resolved_model,
+                    agent_effort=plan["effort"],
+                    resolved_model=plan["model"],
                 )
                 return {
                     "text": resp.text or "",

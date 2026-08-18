@@ -1015,7 +1015,7 @@ FIELDS: dict[str, FieldSpec] = {
         "built with, which a save replaces rather than updates.",
     ),
     "openai_codex.context_budget_overrides": FieldSpec(
-        apply_mode="live_for_new_work",
+        apply_mode="live_read",
         unit="tokens",
         description="Per-model usable-input-budget overrides, keyed by "
         "canonical model. Read at each logical generation's budget "
@@ -1024,7 +1024,7 @@ FIELDS: dict[str, FieldSpec] = {
         "its snapshot.",
     ),
     "openai_codex.context_utilization": FieldSpec(
-        apply_mode="live_for_new_work",
+        apply_mode="live_read",
         unit="percent",
         description="Working-set share of the effective budget that "
         "compaction targets. Read at each logical generation's budget "

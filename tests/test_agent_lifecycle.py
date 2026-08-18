@@ -483,7 +483,7 @@ class TestAgentManagerWithStates:
         mgr = AgentManager()
         kill_reached = asyncio.Event()
 
-        async def slow_iter(msgs, sys, tools):
+        async def slow_iter(msgs, sys, tools, generation_state=None):
             kill_reached.set()
             await asyncio.sleep(10)
             return {"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
@@ -527,7 +527,7 @@ class TestAgentManagerWithStates:
         mgr = AgentManager()
         started = asyncio.Event()
 
-        async def slow_iter(msgs, sys, tools):
+        async def slow_iter(msgs, sys, tools, generation_state=None):
             started.set()
             await asyncio.sleep(10)
             return {"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
@@ -588,7 +588,7 @@ class TestRunAgentLifecycle:
         agent.messages = [{"role": "user", "content": "test"}]
 
         call_count = 0
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -654,7 +654,7 @@ class TestRunAgentLifecycle:
         )
         agent.messages = [{"role": "user", "content": "test"}]
 
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             return {
                 "text": "working",
                 "tool_calls": [{"name": "read_file", "input": {}}],
@@ -679,7 +679,7 @@ class TestRunAgentLifecycle:
         )
         agent.messages = [{"role": "user", "content": "test"}]
 
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             raise asyncio.CancelledError()
 
         tool_cb = AsyncMock()
@@ -695,7 +695,7 @@ class TestRunAgentLifecycle:
         )
         agent.messages = [{"role": "user", "content": "test"}]
 
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             raise RuntimeError("something broke")
 
         tool_cb = AsyncMock()
@@ -757,7 +757,7 @@ class TestLLMRecovery:
         agent.transition(AgentState.EXECUTING)
 
         call_count = 0
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1108,7 +1108,7 @@ class TestAgentToolExecution:
         agent.messages = [{"role": "user", "content": "test"}]
 
         call_count = 0
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1139,7 +1139,7 @@ class TestAgentToolExecution:
         agent.messages = [{"role": "user", "content": "test"}]
 
         call_count = 0
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1201,7 +1201,7 @@ class TestLoopBridgeCompat:
         bridge = LoopAgentBridge(mgr)
 
         call_count = 0
-        async def slow_iter(msgs, sys, tools):
+        async def slow_iter(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1343,7 +1343,7 @@ class TestEdgeCases:
         agent.messages = [{"role": "user", "content": "test"}]
 
         call_count = 0
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1618,7 +1618,7 @@ class TestLifetimeEnforcement:
 
         calls = 0
 
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal calls
             calls += 1
             if calls == 1:
@@ -1655,7 +1655,7 @@ class TestTrajectoryStamps:
 
         calls = 0
 
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal calls
             calls += 1
             if calls == 1:

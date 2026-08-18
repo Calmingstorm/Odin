@@ -701,7 +701,7 @@ class TestAgentPerIterationRecovery:
         iteration_count = 0
         recovery_values = []
 
-        async def mock_iteration_cb(messages, system_prompt, tools):
+        async def mock_iteration_cb(messages, system_prompt, tools, generation_state=None):
             nonlocal iteration_count
             iteration_count += 1
             recovery_values.append(agent.recovery_attempts)
@@ -738,7 +738,7 @@ class TestAgentPerIterationRecovery:
 
         call_count = 0
 
-        async def mock_iteration_cb(messages, system_prompt, tools):
+        async def mock_iteration_cb(messages, system_prompt, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

@@ -98,7 +98,7 @@ class _Harness:
         self.calls: list[list[dict]] = []
         self.script = script
 
-    async def iteration_callback(self, messages, system_prompt, tools):
+    async def iteration_callback(self, messages, system_prompt, tools, generation_state=None):
         self.calls.append(copy.deepcopy(messages))
         return await self.script(len(self.calls), messages)
 
@@ -457,7 +457,7 @@ class TestAdversarialBlockers:
                 raise _overflow_error()
             return {"text": "DONE", "tool_calls": [], "stop_reason": "end_turn"}
 
-        async def cb(messages, system_prompt, tools):
+        async def cb(messages, system_prompt, tools, generation_state=None):
             return {"text": "unused", "tool_calls": []}
 
         with patch("src.agents.manager.asyncio.wait_for", side_effect=fake_wait_for):
@@ -760,3 +760,97 @@ class TestRoundThreeAdversarialPins:
             and m["content"].startswith("[Emergency context compression")
             for m in out
         )
+
+class TestRound1BlockerPins:
+    """PR #273 review round-1 reproductions, pinned."""
+
+    async def test_latch_published_only_after_server_acceptance(self):
+        """Blocker #3: overflow → local fit → retry fails on a NON-overflow
+        error ⇒ the ceiling must NOT be published (a local fit is not
+        provider acceptance)."""
+        big = _messages(40, 30_000)
+
+        async def script(n, messages):
+            if n == 1:
+                messages.clear()
+                messages.extend(copy.deepcopy(big))
+                raise _overflow_error()
+            raise LLMTransportError("mid-retry transport death")
+
+        h = _Harness(script)
+        mgr = AgentManager()
+        agent_id = h.spawn(mgr)
+        await _run_to_terminal(mgr, agent_id)
+        agent = mgr._agents[agent_id]
+        assert agent.state.name == "FAILED"
+        assert agent.context_char_ceiling is None
+        assert [r["trigger"] for r in agent.context_recoveries] == ["overflow"]
+
+    async def test_latch_published_after_successful_retry(self):
+        big = _messages(40, 30_000)
+
+        async def script(n, messages):
+            if n == 1:
+                messages.clear()
+                messages.extend(copy.deepcopy(big))
+                raise _overflow_error()
+            return {"text": "DONE", "tool_calls": [], "stop_reason": "end_turn"}
+
+        h = _Harness(script)
+        mgr = AgentManager()
+        agent_id = h.spawn(mgr)
+        await _run_to_terminal(mgr, agent_id)
+        agent = mgr._agents[agent_id]
+        assert agent.context_char_ceiling is not None
+
+    async def test_rescue_ladder_comes_from_the_frozen_plan(self, monkeypatch):
+        """Blocker #1: the ladder of the request that ACTUALLY overflowed —
+        the generation plan's snapshot — governs rescue, not the spawn
+        provider's advisory (his repro: a sol advisory ladder attached to a
+        gpt-5.5 request)."""
+        from src.llm.context_budget import resolve_context_budget
+
+        plan_snapshot = resolve_context_budget("gpt-5.5")  # ladder (399001,)
+        targets: list[int] = []
+
+        import src.llm.context_compressor as cc_mod
+
+        real = cc_mod.emergency_compress_for_window
+
+        def recording(messages, *, target_chars, stats=None):
+            targets.append(target_chars)
+            return real(messages, target_chars=target_chars)
+
+        monkeypatch.setattr(
+            "src.llm.context_compressor.emergency_compress_for_window", recording
+        )
+
+        async def script_cb(messages, system_prompt, tools, generation_state=None):
+            if generation_state is not None and "plan" not in generation_state:
+                # The callback captures its frozen identity BEFORE sending —
+                # a 5.5 request whose overflow must rescue on 5.5's ladder.
+                generation_state["plan"] = {
+                    "client": object(),
+                    "effort": None,
+                    "model": "gpt-5.5",
+                    "snapshot": plan_snapshot,
+                }
+                raise _overflow_error()
+            return {"text": "DONE", "tool_calls": [], "stop_reason": "end_turn"}
+
+        from src.agents.manager import AgentInfo, _call_llm_with_recovery
+
+        agent = AgentInfo(
+            id="a-pin", label="t", goal="g", channel_id="c1",
+            requester_id="u1", requester_name="user",
+        )
+        agent.messages = _messages(40, 30_000)
+        agent.iteration_timeout = 50.0
+        sol_advisory = resolve_context_budget("gpt-5.6-sol").ladder  # (894180, 400000)
+        result = await _call_llm_with_recovery(
+            agent, script_cb, "sys", [], rescue_ladder=sol_advisory,
+            generation_state={},
+        )
+        assert result is not None
+        assert targets == [399_001]  # the PLAN's rung, not the sol advisory
+
