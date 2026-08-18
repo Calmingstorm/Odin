@@ -44,6 +44,16 @@ class LLMResponse:
     provenance_provider: str = ""
     provenance_model: str = ""
     provenance_reasoning_effort: str | None = None
+    # Server-authoritative accepted input, parsed strictly from the provider's
+    # usage echo (absent/malformed ⇒ None). NEVER derived from the client
+    # estimate above — the observer refuses estimates; ``input_tokens`` keeps
+    # its historical estimate meaning untouched.
+    server_input_tokens: int | None = None
+    # Opaque installation-local key of the account that served THIS attempt
+    # (HMAC over the stable non-secret account id — never a raw identifier).
+    # None when no stable account identity or key material exists; such
+    # attempts are disqualified from account-scoped evidence.
+    account_key: str | None = None
 
     @property
     def is_tool_use(self) -> bool:
