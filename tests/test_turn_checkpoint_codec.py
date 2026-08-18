@@ -126,6 +126,8 @@ def _full_turn():
         _cancel=SimpleNamespace(is_set=lambda: False),  # RECONSTRUCTED
         _ch_id="c1",
         _req_id="abcd1234",
+        _boundary_request_start=0,
+        _boundary_envelope_len=1,
         iteration=3,
         tools_used_in_loop=["run_command", "read_file"],
         continuation_count=2,

@@ -316,7 +316,9 @@ class TestRound2GenerationIdentityPins:
         runner._llm_gateway = gateway
         runner._judge_entry_stuck = AsyncMock(return_value=None)
         captures = []
-        runner._maybe_compress = lambda st, client, config: captures.append((client, config))
+        runner._maybe_compress = lambda st, client, config: (
+            captures.append((client, config)) or True
+        )
         done = ("done", False, False, [], False)
         runner._call_llm = AsyncMock(return_value=("done", done))
         assert await runner._run_chat_iterations(_stub_state()) == done

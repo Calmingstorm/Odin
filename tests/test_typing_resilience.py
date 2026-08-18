@@ -264,6 +264,12 @@ def _stub_state(channel=None):
         message=SimpleNamespace(channel=channel or FakeChannel(), content="hi"),
         messages=[],
         tools_used_in_loop=[],
+        _boundary_request_start=0,
+        _boundary_elided_replay=0,
+        _boundary_envelope_len=0,
+        _char_latch=None,
+        _rescue_passes=0,
+        _gen_identity=None,
         system_prompt="sys",
         tools=[],
         user_id="u1",
@@ -276,7 +282,7 @@ def _wire(runner, st, call_llm):
         return st
 
     runner._prepare_chat_turn = _prep
-    runner._maybe_compress = lambda st, request_client=None, request_config=None: None
+    runner._maybe_compress = lambda st, request_client=None, request_config=None: True
     runner._call_llm = call_llm
 
 

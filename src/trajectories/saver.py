@@ -116,6 +116,12 @@ class TrajectoryTurn:
     total_output_tokens: int = 0
     total_duration_ms: int = 0
 
+    # Context-overflow recovery evidence (campaign phase 4): one report per
+    # rescue/latch pass, same shape agents already persist. Optional and
+    # serialized only when non-empty — chat and pre-campaign records keep
+    # their exact on-disk schema.
+    context_recoveries: list[dict] = field(default_factory=list)
+
     def add_iteration(
         self,
         iteration: int,
@@ -181,6 +187,8 @@ class TrajectoryTurn:
         if self.user_content_truncated:
             d["user_content_truncated"] = True
             d["user_content_original_chars"] = self.user_content_original_chars
+        if self.context_recoveries:
+            d["context_recoveries"] = self.context_recoveries
         return d
 
 
