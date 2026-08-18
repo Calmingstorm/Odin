@@ -14,6 +14,8 @@ from __future__ import annotations
 import json
 import logging
 import os
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime
 
 import pytest
@@ -695,6 +697,130 @@ class TestRemainingMigrationBranches:
         assert closed
         assert not list(tmp_path.glob("*.tmp"))
 
+class TestLegacyMarkerClaim:
+    def test_invalid_and_unreadable_claims_fail_closed(self, tmp_path, monkeypatch):
+        import src.config.migrations as migrations
+
+        legacy = tmp_path / "context_ceiling_migration.json"
+        claim = migrations._legacy_claim_path(legacy)
+        claim.write_text("not-a-config-id\n")
+        with pytest.raises(MigrationCompletionError, match="claim is invalid"):
+            migrations._read_claim_owner(claim)
+
+        real_read = type(claim).read_text
+
+        def unreadable(self, *args, **kwargs):
+            if self == claim:
+                raise OSError("unreadable")
+            return real_read(self, *args, **kwargs)
+
+        monkeypatch.setattr(type(claim), "read_text", unreadable)
+        with pytest.raises(MigrationCompletionError, match="claim is invalid"):
+            migrations._read_claim_owner(claim)
+
+    def test_claim_fchmod_failure_closes_fd_and_removes_temp(self, tmp_path, monkeypatch):
+        import src.config.migrations as migrations
+
+        legacy = tmp_path / "context_ceiling_migration.json"
+        closed = []
+        real_close = os.close
+
+        def fail_fchmod(_fd, _mode):
+            raise OSError("fchmod failed")
+
+        def spy_close(fd):
+            closed.append(fd)
+            return real_close(fd)
+
+        monkeypatch.setattr(migrations.os, "fchmod", fail_fchmod)
+        monkeypatch.setattr(migrations.os, "close", spy_close)
+        with pytest.raises(MigrationCompletionError, match="could not claim"):
+            migrations._claim_legacy_marker(legacy, "a" * 64)
+        assert closed
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_claim_stream_failure_closes_stream_and_removes_temp(self, tmp_path, monkeypatch):
+        import src.config.migrations as migrations
+
+        legacy = tmp_path / "context_ceiling_migration.json"
+
+        class BrokenStream:
+            def __init__(self, fd):
+                self.fd = fd
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_args):
+                return None
+
+            def write(self, _value):
+                raise OSError("write failed")
+
+            def close(self):
+                if not self.closed:
+                    os.close(self.fd)
+                    self.closed = True
+
+        streams = []
+
+        def broken_fdopen(fd, *_args, **_kwargs):
+            stream = BrokenStream(fd)
+            streams.append(stream)
+            return stream
+
+        monkeypatch.setattr(migrations.os, "fdopen", broken_fdopen)
+        with pytest.raises(MigrationCompletionError, match="could not claim"):
+            migrations._claim_legacy_marker(legacy, "a" * 64)
+        assert streams[0].closed is True
+        assert not list(tmp_path.glob("*.tmp"))
+
+    def test_foreign_claim_does_not_launder_corrupt_legacy_marker(self, tmp_path):
+        import src.config.migrations as migrations
+
+        path = tmp_path / "config.yml"
+        path.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        legacy.write_text("{broken")
+        assert migrations._claim_legacy_marker(legacy, "f" * 64)
+
+        with pytest.raises(MigrationCompletionError, match="legacy ceiling-migration"):
+            _migrate(path)
+
+    def test_existing_foreign_claim_forces_own_literal_migration(self, tmp_path):
+        import src.config.migrations as migrations
+
+        first = tmp_path / "first.yml"
+        second = tmp_path / "second.yml"
+        first.write_text(_LEGACY_YAML)
+        second.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        legacy.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "state": "completed",
+                    "reason": "not_applicable",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        assert migrations._claim_legacy_marker(
+            legacy, migrations._config_identity(first)
+        )
+
+        second_data = _migrate(second)
+
+        assert second_data["openai_codex"]["context_compression"]["max_context_chars"] is None
+        assert yaml.safe_load(second.read_text())["openai_codex"]["context_compression"][
+            "max_context_chars"
+        ] is None
+
+
 class TestConfigIdentityBinding:
     def test_symlink_aliases_in_different_directories_share_completion(self, tmp_path):
         real_dir = tmp_path / "real"
@@ -750,6 +876,62 @@ class TestConfigIdentityBinding:
         first_record = json.loads(ceiling_marker_path(first).read_text())
         second_record = json.loads(ceiling_marker_path(second).read_text())
         assert first_record["config_id"] != second_record["config_id"]
+
+    def test_concurrent_siblings_cannot_both_adopt_one_legacy_marker(
+        self, tmp_path, monkeypatch
+    ):
+        """The exact integration race: both readers reach claim together."""
+        import src.config.migrations as migrations
+
+        first = tmp_path / "first.yml"
+        second = tmp_path / "second.yml"
+        first.write_text(_LEGACY_YAML)
+        second.write_text(_LEGACY_YAML)
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.parent.mkdir()
+        legacy.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "state": "completed",
+                    "reason": "not_applicable",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
+        barrier = threading.Barrier(2)
+        real_claim = migrations._claim_legacy_marker
+
+        def synchronized_claim(marker, config_id):
+            barrier.wait(timeout=2)
+            return real_claim(marker, config_id)
+
+        monkeypatch.setattr(migrations, "_claim_legacy_marker", synchronized_claim)
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            first_future = executor.submit(_migrate, first)
+            second_future = executor.submit(_migrate, second)
+            results = [first_future.result(timeout=3), second_future.result(timeout=3)]
+
+        values = sorted(
+            result["openai_codex"]["context_compression"]["max_context_chars"]
+            if result["openai_codex"]["context_compression"]["max_context_chars"] is not None
+            else -1
+            for result in results
+        )
+        assert values == [-1, 750_000]
+        disk_values = {
+            yaml.safe_load(path.read_text())["openai_codex"]["context_compression"][
+                "max_context_chars"
+            ]
+            for path in (first, second)
+        }
+        assert disk_values == {None, 750_000}
+        first_record = json.loads(ceiling_marker_path(first).read_text())
+        second_record = json.loads(ceiling_marker_path(second).read_text())
+        assert first_record["config_id"] != second_record["config_id"]
+        bound = json.loads(legacy.read_text())
+        assert bound["config_id"] in {first_record["config_id"], second_record["config_id"]}
 
     def test_preidentity_directory_marker_is_bound_not_shared(self, tmp_path):
         first = tmp_path / "first.yml"
@@ -822,21 +1004,28 @@ class TestIdentityMarkerAdversarialBranches:
         with pytest.raises(MigrationCompletionError):
             _migrate(path)
 
-    def test_identity_directory_inspection_failure_is_fail_closed(self, tmp_path, monkeypatch):
+    def test_unrelated_identity_directory_debris_does_not_change_adoption(self, tmp_path):
         path = tmp_path / "config.yml"
         path.write_text(_LEGACY_YAML)
         marker = ceiling_marker_path(path)
         marker.parent.mkdir(parents=True)
-        real_iterdir = type(marker).iterdir
+        (marker.parent / "unrelated.tmp").write_text("debris")
+        legacy = tmp_path / "data" / "context_ceiling_migration.json"
+        legacy.write_text(
+            json.dumps(
+                {
+                    "version": 2,
+                    "migration": "legacy_max_context_chars_to_auto",
+                    "state": "completed",
+                    "reason": "not_applicable",
+                    "completed_at": datetime.now(UTC).isoformat(),
+                }
+            )
+        )
 
-        def fail_iterdir(self):
-            if self == marker.parent:
-                raise OSError("cannot inspect")
-            return real_iterdir(self)
+        data = _migrate(path)
 
-        monkeypatch.setattr(type(marker), "iterdir", fail_iterdir)
-        with pytest.raises(MigrationCompletionError, match="inspect identity-bound"):
-            _migrate(path)
+        assert data["openai_codex"]["context_compression"]["max_context_chars"] == 750_000
 
     def test_corrupt_bound_legacy_marker_is_fail_closed(self, tmp_path):
         path = tmp_path / "config.yml"

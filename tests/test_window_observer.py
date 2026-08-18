@@ -931,6 +931,69 @@ class TestContextWindowsApi:
         assert body["runtime_max_context_chars"] == 500_000
         assert body["max_context_chars_pending_restart"] is False
 
+    async def test_disabled_at_boot_reports_model_derived_runtime_target(self, tmp_path):
+        """A saved ceiling is inert when boot disabled the compressor."""
+        from src.web.api.llm_admin import register_context_windows
+
+        observer = _observer(tmp_path)
+        saved = ContextCompressionConfig(enabled=False, max_context_chars=500_000)
+        bot = SimpleNamespace(
+            config=SimpleNamespace(
+                openai_codex=SimpleNamespace(
+                    context_budget_overrides={},
+                    context_utilization=60,
+                    context_compression=saved,
+                )
+            ),
+            context_compressor=None,
+            services=SimpleNamespace(window_observer=observer),
+        )
+        bot.boot_config_snapshot = {
+            "openai_codex": {"context_compression": saved.model_dump()}
+        }
+        routes = web.RouteTableDef()
+        register_context_windows(routes, bot)
+        app = web.Application()
+        app.router.add_routes(routes)
+        async with TestClient(TestServer(app)) as client:
+            body = await (await client.get("/api/context/windows")).json()
+
+        assert body["max_context_chars"] == 500_000
+        assert body["runtime_max_context_chars"] is None
+        assert body["max_context_chars_pending_restart"] is False
+        assert body["models"]["gpt-5.6-sol"]["configured"]["primary_chars"] == 500_000
+        assert body["models"]["gpt-5.6-sol"]["effective"]["primary_chars"] == 1_277_400
+
+    async def test_disabled_without_boot_snapshot_still_reports_runtime_truth(
+        self, tmp_path
+    ):
+        """No compressor means model-derived runtime math, never saved math."""
+        from src.web.api.llm_admin import register_context_windows
+
+        observer = _observer(tmp_path)
+        saved = ContextCompressionConfig(enabled=False, max_context_chars=500_000)
+        bot = SimpleNamespace(
+            config=SimpleNamespace(
+                openai_codex=SimpleNamespace(
+                    context_budget_overrides={},
+                    context_utilization=60,
+                    context_compression=saved,
+                )
+            ),
+            context_compressor=None,
+            services=SimpleNamespace(window_observer=observer),
+        )
+        routes = web.RouteTableDef()
+        register_context_windows(routes, bot)
+        app = web.Application()
+        app.router.add_routes(routes)
+        async with TestClient(TestServer(app)) as client:
+            body = await (await client.get("/api/context/windows")).json()
+
+        assert body["runtime_max_context_chars"] is None
+        assert body["max_context_chars_pending_restart"] is None
+        assert body["models"]["gpt-5.6-sol"]["effective"]["primary_chars"] == 1_277_400
+
     async def test_get_prefers_boot_snapshot_for_runtime_ceiling(self, tmp_path):
         from src.web.api.llm_admin import register_context_windows
 

@@ -41,6 +41,7 @@ LEGACY_CEILING_MARKER_NAME = "context_ceiling_migration.json"
 _CEILING_PATH = ("openai_codex", "context_compression", "max_context_chars")
 _MIGRATION_ID = "legacy_max_context_chars_to_auto"
 _MARKER_VERSION = 3
+_LEGACY_CLAIM_SUFFIX = ".claim"
 _COMPLETION_REASONS = frozenset(
     {
         "migrated",
@@ -311,6 +312,85 @@ def _atomic_write_marker(marker: Path, record: dict[str, object]) -> None:
             os.close(directory_fd)
 
 
+def _legacy_claim_path(legacy_marker: Path) -> Path:
+    """Exclusive ownership record for one directory-wide legacy marker."""
+    return legacy_marker.with_name(legacy_marker.name + _LEGACY_CLAIM_SUFFIX)
+
+
+def _read_claim_owner(claim: Path) -> str | None:
+    """Read one strict claim owner; malformed claims fail closed."""
+    try:
+        raw = claim.read_text(encoding="ascii")
+    except FileNotFoundError:
+        return None
+    except (OSError, UnicodeError) as exc:
+        raise MigrationCompletionError(
+            "legacy ceiling-migration claim is invalid or unreadable; inspect it before retrying"
+        ) from exc
+    owner = raw.rstrip("\n")
+    if len(owner) != 64 or any(ch not in "0123456789abcdef" for ch in owner):
+        raise MigrationCompletionError(
+            "legacy ceiling-migration claim is invalid or unreadable; inspect it before retrying"
+        )
+    return owner
+
+
+def _claim_legacy_marker(legacy_marker: Path, config_id: str) -> bool:
+    """Atomically claim ambiguous legacy provenance for one config identity.
+
+    A fully written, fsynced temporary file is hard-linked into place. The
+    link is fail-if-exists, so losers can only observe the winner's complete
+    owner value — never a partially written O_EXCL destination. A crash may
+    conservatively strand the claim with its owner, but can never grant one
+    legacy completion to a second config identity.
+    """
+    claim = _legacy_claim_path(legacy_marker)
+    temporary: Path | None = None
+    fd = -1
+    stream = None
+    try:
+        claim.parent.mkdir(parents=True, exist_ok=True)
+        fd, temporary_name = tempfile.mkstemp(
+            dir=claim.parent,
+            prefix=f".{claim.name}.",
+            suffix=".tmp",
+        )
+        temporary = Path(temporary_name)
+        os.fchmod(fd, 0o600)
+        stream = os.fdopen(fd, "w", encoding="ascii")
+        fd = -1
+        with stream:
+            stream.write(config_id + "\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        stream = None
+        try:
+            os.link(temporary, claim)
+        except FileExistsError:
+            return _read_claim_owner(claim) == config_id
+        with contextlib.suppress(OSError):
+            directory_fd = os.open(claim.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        return True
+    except OSError as exc:
+        raise MigrationCompletionError(
+            "could not claim legacy ceiling-migration provenance"
+        ) from exc
+    finally:
+        if stream is not None:
+            with contextlib.suppress(OSError):
+                stream.close()
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        if temporary is not None:
+            with contextlib.suppress(OSError):
+                temporary.unlink()
+
+
 def _completion_record(reason: str, config_id: str) -> dict[str, object]:
     return {
         "version": _MARKER_VERSION,
@@ -444,23 +524,12 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
     if marker_kind is _MarkerKind.ROUND1_LEGACY:
         log.info("Upgrading round-1 legacy migration provenance at %s.", marker)
 
-    # Upgrade the old launch-directory marker only when no identity-bound marker
-    # exists. Its provenance remains fail-closed, but it no longer suppresses a
-    # distinct config in the same directory once one identity has been bound.
-    # A legacy marker plus any new identity marker is an already-upgraded
-    # directory; sibling identities must not inspect or inherit the old record.
+    # Upgrade the old launch-directory marker through an exclusive claim.
+    # Directory scans are not arbitration: debris is irrelevant, and two sibling
+    # processes must not both inherit one ambiguous v1/v2 completion record.
     legacy_marker = _legacy_ceiling_marker_path(config_path)
-    identity_dir = marker.parent
-    identity_markers_exist = False
-    try:
-        identity_markers_exist = identity_dir.is_dir() and any(identity_dir.iterdir())
-    except OSError as exc:
-        raise MigrationCompletionError(
-            "could not inspect identity-bound ceiling-migration records"
-        ) from exc
-    legacy_kind = (
-        _MarkerKind.MISSING if identity_markers_exist else _read_marker(legacy_marker)
-    )
+    claim_owner = _read_claim_owner(_legacy_claim_path(legacy_marker))
+    legacy_kind = _read_marker(legacy_marker)
     if legacy_kind is _MarkerKind.COMPLETE:
         # A v3 legacy-path record is already bound. A different config in the
         # same launch directory must ignore it rather than inherit completion.
@@ -471,6 +540,21 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
         else:
             if legacy_record.get("config_id") != config_id:
                 legacy_kind = _MarkerKind.MISSING
+    elif (
+        claim_owner is not None
+        and claim_owner != config_id
+        and legacy_kind
+        in {
+            _MarkerKind.ROUND1_LEGACY,
+            _MarkerKind.ROUND1_OPERATOR,
+            _MarkerKind.PREVERSIONED_COMPLETE,
+        }
+    ):
+        # Another config won valid pre-versioned provenance. This identity must
+        # evaluate and migrate its own literal rather than inherit completion.
+        # Invalid legacy material remains fail-closed; a foreign claim cannot
+        # launder a corrupt or unknown marker into "missing".
+        legacy_kind = _MarkerKind.MISSING
     if legacy_kind in invalid:
         raise MigrationCompletionError(
             "legacy ceiling-migration record is invalid or unreadable; inspect it before retrying"
@@ -480,22 +564,35 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
         _MarkerKind.ROUND1_OPERATOR,
         _MarkerKind.PREVERSIONED_COMPLETE,
     }:
-        reason = (
-            "prior_operator_saved"
-            if legacy_kind is _MarkerKind.ROUND1_OPERATOR
-            else "upgraded_preversioned_completion"
-        )
-        _write_completion_pair(marker, shared_marker, reason,
-                               "upgrade the ceiling-migration completion record", config_id)
-        # Bind the previously directory-wide provenance to the one config that
-        # adopted it. Later sibling configs can no longer inherit it.
-        _write_required(
-            legacy_marker,
-            reason,
-            "bind legacy ceiling-migration completion to its config",
-            config_id,
-        )
-        return
+        if legacy_kind is not _MarkerKind.COMPLETE and not _claim_legacy_marker(
+            legacy_marker, config_id
+        ):
+            # A sibling won between our read and claim. Its value is irrelevant
+            # to this config; proceed through the ordinary lexical migration.
+            legacy_kind = _MarkerKind.MISSING
+        else:
+            reason = (
+                "prior_operator_saved"
+                if legacy_kind is _MarkerKind.ROUND1_OPERATOR
+                else "upgraded_preversioned_completion"
+            )
+            _write_completion_pair(
+                marker,
+                shared_marker,
+                reason,
+                "upgrade the ceiling-migration completion record",
+                config_id,
+            )
+            # Bind the old marker after the exclusive claim. The claim remains
+            # durable as the arbitration record; replacing the marker cannot
+            # grant another sibling the already-consumed provenance.
+            _write_required(
+                legacy_marker,
+                reason,
+                "bind legacy ceiling-migration completion to its config",
+                config_id,
+            )
+            return
     if legacy_kind is _MarkerKind.ROUND1_LEGACY:
         log.info("Upgrading round-1 legacy migration provenance at %s.", legacy_marker)
 

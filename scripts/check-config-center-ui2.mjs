@@ -364,6 +364,8 @@ assert.match(llm, /saveCodexAdvancedConfig\(\)[\s\S]*codexAdvancedPayload\(codex
 assert.match(llm, /<strong>Context budgets<\/strong>/, 'Codex Advanced panel lost the Context budgets table');
 assert.match(llm, /api\.get\('\/api\/context\/windows'\)/, 'Context budgets do not load backend derivation truth');
 assert.match(llm, /api\.post\('\/api\/context\/windows\/clear'/, 'Context budgets lost account-scoped clamp clearing');
+assert.match(llm, /formatContextCeiling\(llmStatus\.codex\.effective_context_compression\?\.max_context_chars\)/, 'Context-compression status lost truthful automatic-ceiling formatting');
+assert.doesNotMatch(llm, /effective_context_compression\?\.max_context_chars\s*\|\|\s*0/, 'Automatic context ceiling regressed to 0 characters');
 assert.match(llm, /details\.effective\?\.effective_budget/, 'effective budget is recomputed or not data-bound');
 assert.match(llm, /details\.effective\?\.primary_chars/, 'resulting target is recomputed or not data-bound');
 assert.doesNotMatch(llm, /921601|917506|270001|262146|124001/, 'browser duplicated the backend context-budget catalog');

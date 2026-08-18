@@ -34,6 +34,8 @@ const llmState = {
     retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
     connection_pool: { max_connections: 10, keepalive_timeout: 30 },
     context_compression: { enabled: true, max_context_chars: 750000, keep_recent_iterations: 30 },
+    effective_context_compression: { enabled: false, max_context_chars: null, keep_recent_iterations: 30 },
+    context_compression_pending_restart: true,
   },
   ollama: {
     configured: true,
@@ -172,9 +174,21 @@ console.warn = message => {
 };
 
 const { default: LLMConfigPage } = await import('../ui/js/pages/llm-config.js');
+assert.match(
+  LLMConfigPage.template,
+  /formatContextCeiling\(llmStatus\.codex\.effective_context_compression\?\.max_context_chars\)/,
+  'pending-restart template does not consume the truthful ceiling formatter',
+);
+assert.doesNotMatch(
+  LLMConfigPage.template,
+  /effective_context_compression\?\.max_context_chars\s*\|\|\s*0/,
+  'pending-restart template renders automatic context as zero characters',
+);
 const llm = LLMConfigPage.setup();
 await llm.fetchAll();
 assert.equal(llm.contextBudgetRows.value[0].primaryChars, 1277400, 'Context target did not come from GET /api/context/windows');
+assert.equal(llm.formatContextCeiling(null), 'automatic (model-derived)', 'automatic runtime ceiling rendered as a numeric zero');
+assert.equal(llm.formatContextCeiling(500000), '500,000 characters', 'explicit runtime ceiling lost its unit/value');
 const lateContextRefresh = defer('GET /api/context/windows');
 const contextRefresh = llm.fetchContextWindows();
 await Promise.resolve();
