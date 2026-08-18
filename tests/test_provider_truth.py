@@ -214,6 +214,12 @@ class TestPersistedKeyContract:
         assert len(seen) == 1
 
 
+def _fifo_worker(path_str, queue):
+    from src.llm.account_key import opaque_account_key as derive
+
+    queue.put(derive("acct-a", key_path=path_str))
+
+
 class TestKeyEdgeBranches:
     def test_directory_at_key_path_refused(self, tmp_path, caplog):
         key_path = tmp_path / "k.secret"
@@ -221,6 +227,208 @@ class TestKeyEdgeBranches:
         with caplog.at_level(logging.WARNING, logger="odin.llm"):
             assert opaque_account_key("acct-a", key_path=key_path) is None
         assert any("not a regular file" in r.getMessage() for r in caplog.records)
+
+    def test_fifo_refused_promptly_and_untouched(self, tmp_path):
+        """The open itself must not block before fstat can reject a FIFO."""
+        import multiprocessing as mp
+        import os
+
+        key_path = tmp_path / "k.secret"
+        os.mkfifo(key_path, 0o600)
+        ctx = mp.get_context("fork")
+        queue = ctx.Queue()
+        worker = ctx.Process(
+            target=_fifo_worker, args=(str(key_path), queue)
+        )
+        worker.start()
+        worker.join(timeout=2)
+        if worker.is_alive():
+            worker.terminate()
+            worker.join(timeout=5)
+            pytest.fail("account-key read blocked while opening a FIFO")
+        assert worker.exitcode == 0
+        assert queue.get(timeout=2) is None
+        assert stat.S_ISFIFO(key_path.lstat().st_mode)
+
+    def test_fchmod_failure_closes_owned_descriptor(
+        self, tmp_path, monkeypatch
+    ):
+        import errno
+        import os
+        import tempfile
+
+        captured: list[int] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, name = real_mkstemp(*args, **kwargs)
+            captured.append(fd)
+            return fd, name
+
+        def failing_fchmod(fd, mode):
+            raise OSError("simulated fchmod failure")
+
+        monkeypatch.setattr(
+            "src.llm.account_key.tempfile.mkstemp", recording_mkstemp
+        )
+        monkeypatch.setattr("src.llm.account_key.os.fchmod", failing_fchmod)
+        assert opaque_account_key(
+            "acct-a", key_path=tmp_path / "k.secret"
+        ) is None
+        assert len(captured) == 1
+        with pytest.raises(OSError) as excinfo:
+            os.fstat(captured[0])
+        assert excinfo.value.errno == errno.EBADF
+        assert list(tmp_path.glob(".k.secret.*")) == []
+
+    def test_fdopen_failure_closes_owned_descriptor(
+        self, tmp_path, monkeypatch
+    ):
+        import errno
+        import os
+        import tempfile
+
+        captured: list[int] = []
+        real_mkstemp = tempfile.mkstemp
+
+        def recording_mkstemp(*args, **kwargs):
+            fd, name = real_mkstemp(*args, **kwargs)
+            captured.append(fd)
+            return fd, name
+
+        def failing_fdopen(fd, mode):
+            raise OSError("simulated fdopen failure")
+
+        monkeypatch.setattr(
+            "src.llm.account_key.tempfile.mkstemp", recording_mkstemp
+        )
+        monkeypatch.setattr("src.llm.account_key.os.fdopen", failing_fdopen)
+        assert opaque_account_key(
+            "acct-a", key_path=tmp_path / "k.secret"
+        ) is None
+        assert len(captured) == 1
+        with pytest.raises(OSError) as excinfo:
+            os.fstat(captured[0])
+        assert excinfo.value.errno == errno.EBADF
+        assert list(tmp_path.glob(".k.secret.*")) == []
+
+    def test_oversized_file_refused_before_short_read(
+        self, tmp_path, monkeypatch
+    ):
+        key_path = tmp_path / "k.secret"
+        original = b"x" * 33
+        key_path.write_bytes(original)
+        key_path.chmod(0o600)
+        reads: list[tuple[int, int]] = []
+
+        def deceptive_short_read(fd, count):
+            reads.append((fd, count))
+            return b"x" * 32
+
+        monkeypatch.setattr(
+            "src.llm.account_key.os.read", deceptive_short_read
+        )
+        assert opaque_account_key("acct-a", key_path=key_path) is None
+        assert reads == []  # fstat size rejects it before any read
+        assert key_path.read_bytes() == original
+
+    def test_short_read_of_exact_size_file_is_refused(
+        self, tmp_path, monkeypatch
+    ):
+        key_path = tmp_path / "k.secret"
+        original = b"x" * 32
+        key_path.write_bytes(original)
+        key_path.chmod(0o600)
+
+        monkeypatch.setattr(
+            "src.llm.account_key.os.read", lambda fd, count: b"x" * 31
+        )
+        assert opaque_account_key("acct-a", key_path=key_path) is None
+        assert key_path.read_bytes() == original
+
+    def test_enoent_then_publish_race_adopts_winner(
+        self, tmp_path, monkeypatch
+    ):
+        """A witnessed miss goes straight to fail-if-exists publication.
+
+        A winner appearing between ENOENT and os.link must be adopted; no
+        exists() snapshot may suppress or redirect the protocol.
+        """
+        import hmac
+        import os
+        from hashlib import sha256
+
+        key_path = tmp_path / "k.secret"
+        winner_material = b"w" * 32
+        real_open = os.open
+        real_link = os.link
+        first_key_open = True
+        publication_attempts: list[tuple[object, object]] = []
+
+        def missing_then_winner(path, flags, *args, **kwargs):
+            nonlocal first_key_open
+            if first_key_open and path == key_path:
+                first_key_open = False
+                # Model another process publishing immediately after this
+                # open observed ENOENT, but before our caller can perform any
+                # non-atomic exists() recheck.
+                key_path.write_bytes(winner_material)
+                key_path.chmod(0o600)
+                raise FileNotFoundError(str(key_path))
+            return real_open(path, flags, *args, **kwargs)
+
+        def recording_link(src, dst):
+            publication_attempts.append((src, dst))
+            return real_link(src, dst)
+
+        monkeypatch.setattr(
+            "src.llm.account_key.os.open", missing_then_winner
+        )
+        monkeypatch.setattr("src.llm.account_key.os.link", recording_link)
+        result = opaque_account_key("acct-a", key_path=key_path)
+        expected = hmac.new(
+            winner_material, b"acct-a", sha256
+        ).hexdigest()[:32]
+        assert result == expected
+        assert len(publication_attempts) == 1
+        assert publication_attempts[0][1] == key_path
+        assert key_path.read_bytes() == winner_material
+
+    def test_enoent_race_invalid_winner_is_refused_untouched(
+        self, tmp_path, monkeypatch
+    ):
+        """EEXIST adoption applies the same strict shape validation."""
+        import os
+
+        key_path = tmp_path / "k.secret"
+        invalid_winner = b"invalid-race-winner"
+        real_open = os.open
+        real_link = os.link
+        first_key_open = True
+        publication_attempts: list[tuple[object, object]] = []
+
+        def missing_then_invalid_winner(path, flags, *args, **kwargs):
+            nonlocal first_key_open
+            if first_key_open and path == key_path:
+                first_key_open = False
+                key_path.write_bytes(invalid_winner)
+                key_path.chmod(0o600)
+                raise FileNotFoundError(str(key_path))
+            return real_open(path, flags, *args, **kwargs)
+
+        def recording_link(src, dst):
+            publication_attempts.append((src, dst))
+            return real_link(src, dst)
+
+        monkeypatch.setattr(
+            "src.llm.account_key.os.open", missing_then_invalid_winner
+        )
+        monkeypatch.setattr("src.llm.account_key.os.link", recording_link)
+        assert opaque_account_key("acct-a", key_path=key_path) is None
+        assert len(publication_attempts) == 1
+        assert publication_attempts[0][1] == key_path
+        assert key_path.read_bytes() == invalid_winner
+        assert list(tmp_path.glob(".k.secret.*")) == []
 
     def test_read_oserror_degrades(self, tmp_path, monkeypatch, caplog):
         key_path = tmp_path / "k.secret"

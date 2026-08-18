@@ -38,6 +38,7 @@ import os
 import secrets
 import stat as stat_module
 import tempfile
+from dataclasses import dataclass
 from hashlib import sha256
 from pathlib import Path
 
@@ -53,30 +54,48 @@ _KEY_HEX_LENGTH = 32
 _key_cache: dict[Path, bytes] = {}
 
 
-def _read_established_key(key_path: Path) -> bytes | None:
+@dataclass(frozen=True)
+class _KeyReadResult:
+    """Result of a strict key read, preserving missing vs refused.
+
+    A missing path is the only state that permits an exclusive publication
+    attempt.  Refused material must never be replaced.
+    """
+
+    material: bytes | None
+    missing: bool = False
+
+
+def _read_established_key(key_path: Path) -> _KeyReadResult:
     """Read existing material under the strict generated-shape contract.
 
-    Returns the 32 key bytes, or ``None`` for both "missing" and "present
-    but refused" (each refusal logs its specific reason). Never modifies
-    the file: questionable material is evidence about the installation and
-    replacing it would decorrelate all prior observations.
+    Returns a result that distinguishes "missing" from "present but
+    refused".  That distinction is security-sensitive: only a witnessed
+    missing path may enter the exclusive publication protocol.  Never
+    modifies questionable material.
     """
     try:
-        fd = os.open(key_path, os.O_RDONLY | os.O_NOFOLLOW)
+        # O_NONBLOCK is required before inspecting the descriptor.  Opening
+        # a hostile FIFO read-only would otherwise block forever before the
+        # regular-file check had a chance to reject it.
+        fd = os.open(
+            key_path,
+            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK,
+        )
     except FileNotFoundError:
-        return None
+        return _KeyReadResult(material=None, missing=True)
     except OSError as exc:
         # ELOOP here means the final component is a symlink — refused.
         log.warning("Refusing account key %s: %s", key_path, exc)
-        return None
+        return _KeyReadResult(material=None)
     try:
         info = os.fstat(fd)
         if not stat_module.S_ISREG(info.st_mode):
             log.warning("Refusing account key %s: not a regular file", key_path)
-            return None
+            return _KeyReadResult(material=None)
         if info.st_uid != os.getuid():
             log.warning("Refusing account key %s: not owned by this user", key_path)
-            return None
+            return _KeyReadResult(material=None)
         if stat_module.S_IMODE(info.st_mode) != 0o600:
             log.warning(
                 "Refusing account key %s: mode %o is not 0600 — fix the "
@@ -84,8 +103,20 @@ def _read_established_key(key_path: Path) -> bytes | None:
                 key_path,
                 stat_module.S_IMODE(info.st_mode),
             )
-            return None
-        material = os.read(fd, _KEY_BYTES + 1)
+            return _KeyReadResult(material=None)
+        # Validate the opened object size before reading.  Asking read() for
+        # one sentinel byte is not sufficient: a short read from an
+        # oversized file could otherwise masquerade as the exact shape.
+        if info.st_size != _KEY_BYTES:
+            log.warning(
+                "Refusing account key %s: %d bytes is not the generated "
+                "%d-byte shape.",
+                key_path,
+                info.st_size,
+                _KEY_BYTES,
+            )
+            return _KeyReadResult(material=None)
+        material = os.read(fd, _KEY_BYTES)
         if len(material) != _KEY_BYTES:
             log.warning(
                 "Refusing account key %s: %d bytes is not the generated "
@@ -94,11 +125,11 @@ def _read_established_key(key_path: Path) -> bytes | None:
                 len(material),
                 _KEY_BYTES,
             )
-            return None
-        return material
+            return _KeyReadResult(material=None)
+        return _KeyReadResult(material=material)
     except OSError as exc:
         log.warning("Could not read account key %s: %s", key_path, exc)
-        return None
+        return _KeyReadResult(material=None)
     finally:
         with contextlib.suppress(OSError):
             os.close(fd)
@@ -129,9 +160,16 @@ def _create_key(key_path: Path) -> bytes | None:
             dir=key_path.parent, prefix=f".{key_path.name}.", suffix=".tmp"
         )
         temporary = Path(temporary_name)
+        # mkstemp gives this function ownership.  Ownership transfers only
+        # after fdopen returns successfully; every earlier failure must close
+        # the raw descriptor explicitly.
+        owned_fd = fd
+        owns_fd = True
         try:
-            os.fchmod(fd, 0o600)
-            with os.fdopen(fd, "wb") as stream:
+            os.fchmod(owned_fd, 0o600)
+            stream = os.fdopen(owned_fd, "wb")
+            owns_fd = False
+            with stream:
                 stream.write(material)
                 stream.flush()
                 os.fsync(stream.fileno())
@@ -140,10 +178,13 @@ def _create_key(key_path: Path) -> bytes | None:
             except FileExistsError:
                 # Another process won the race: use ITS material so every
                 # process MACs with the one durable secret.
-                return _read_established_key(key_path)
+                return _read_established_key(key_path).material
             _fsync_parent(key_path)
             return material
         finally:
+            if owns_fd:
+                with contextlib.suppress(OSError):
+                    os.close(owned_fd)
             with contextlib.suppress(OSError):
                 temporary.unlink()
     except OSError as exc:
@@ -160,8 +201,13 @@ def _load_or_create_key(key_path: Path) -> bytes | None:
     cached = _key_cache.get(key_path)
     if cached is not None:
         return cached
-    material = _read_established_key(key_path)
-    if material is None and not key_path.exists() and not key_path.is_symlink():
+    read_result = _read_established_key(key_path)
+    material = read_result.material
+    if read_result.missing:
+        # Do not re-check with exists(): existence is only a snapshot and
+        # creates an ENOENT-to-publication race.  Always enter the atomic
+        # fail-if-exists protocol after a witnessed miss; EEXIST adopts the
+        # winner, while refused existing material never reaches this branch.
         material = _create_key(key_path)
     if material is not None:
         _key_cache[key_path] = material

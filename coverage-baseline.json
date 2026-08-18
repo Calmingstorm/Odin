@@ -420,10 +420,10 @@
   "statements": 12
  },
  "src/llm/account_key.py": {
-  "covered": 99,
+  "covered": 115,
   "missing": 0,
   "percent": 100.0,
-  "statements": 99
+  "statements": 115
  },
  "src/llm/auxiliary.py": {
   "covered": 65,
