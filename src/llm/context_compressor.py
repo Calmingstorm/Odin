@@ -493,11 +493,129 @@ def _emergency_summary_body(msg: dict) -> str:
     return content
 
 
+_REPLAY_MARKER_PREFIX = "[Context recovery: "
+_REPLAY_MARKER_SUFFIX = " older conversation messages elided]"
+
+
+@dataclass(frozen=True)
+class SurfaceBoundary:
+    """Explicit compressible/protected partition for a surface's message list.
+
+    ``request_start`` indexes the first message of the CURRENT request
+    envelope (chat: developer preamble + user message + pre-tool directives;
+    loops: the current autonomous prompt). Everything BEFORE it is replayed
+    context (chat session history / loop prev_context) — compressible by
+    oldest-first whole-message elision with an explicit count marker.
+    The envelope itself is protected verbatim; messages after it are tool
+    iterations under the existing newest-first emergency rules.
+
+    Supplied by the SURFACE at turn construction and carried as state:
+    compression returns the updated boundary in its report
+    (``boundary_request_start`` / ``boundary_elided_replay``) because
+    indices shift as replay elides. ``elided_replay`` regenerates the
+    position-0 marker each pass — recognition is by THIS state, never by
+    matching marker text (user content can imitate any string).
+
+    ``None`` boundary = agent semantics: the structural prefix (task and
+    parent messages) is protected, byte-identical to pre-campaign behavior.
+    """
+
+    request_start: int
+    elided_replay: int = 0
+
+
+def _replay_marker_message(elided: int) -> dict:
+    return {
+        "role": "user",
+        "content": f"{_REPLAY_MARKER_PREFIX}{elided}{_REPLAY_MARKER_SUFFIX}",
+    }
+
+
+def _compress_with_boundary(
+    messages: list[dict],
+    *,
+    target_chars: int,
+    boundary: SurfaceBoundary,
+    stats: CompressionStats | None,
+) -> tuple[list[dict], dict]:
+    """Replay-elision wrapper around the agent-semantics emergency core.
+
+    ``messages[boundary.request_start:]`` is exactly the shape the core
+    already handles — the request envelope becomes its protected prefix and
+    everything after it its tool iterations. This wrapper spends replayed
+    context (oldest first, whole messages, count marker regenerated from
+    boundary state — never a fabricated summary) only when iteration
+    compression alone cannot reach the target. A first-generation overflow
+    with zero iterations therefore recovers by replay elision alone.
+    """
+    request_start = max(0, min(boundary.request_start, len(messages)))
+    marker_present = boundary.elided_replay > 0 and request_start > 0
+    replay = list(messages[1 if marker_present else 0 : request_start])
+    rest = list(messages[request_start:])
+    elided_total = boundary.elided_replay
+    original_chars = estimate_message_chars(messages)
+
+    def _assemble(
+        kept_replay: list[dict], inner: list[dict], elided: int
+    ) -> tuple[list[dict], int]:
+        head: list[dict] = []
+        if elided > 0:
+            head.append(_replay_marker_message(elided))
+        return head + kept_replay + inner, len(head) + len(kept_replay)
+
+    best_inner, inner_report = emergency_compress_for_window(
+        rest, target_chars=max(0, target_chars - estimate_message_chars(
+            ([_replay_marker_message(elided_total)] if elided_total else []) + replay
+        )), stats=stats,
+    )
+    kept_replay = replay
+    while True:
+        assembled, new_request_start = _assemble(kept_replay, best_inner, elided_total)
+        assembled_chars = estimate_message_chars(assembled)
+        if assembled_chars <= target_chars or not kept_replay:
+            break
+        # Iterations alone were not enough: spend the OLDEST replay message
+        # and retry the core with the space it freed.
+        kept_replay = kept_replay[1:]
+        elided_total += 1
+        best_inner, inner_report = emergency_compress_for_window(
+            rest, target_chars=max(0, target_chars - estimate_message_chars(
+                ([_replay_marker_message(elided_total)] if elided_total else [])
+                + kept_replay
+            )), stats=stats,
+        )
+
+    fits = assembled_chars <= target_chars and inner_report.get("fits", False)
+    if not fits and not inner_report.get("fits", False) and not kept_replay:
+        # The protected envelope (+ newest iteration) alone exceeds the rung:
+        # honest failure, original list preserved (the core already refused).
+        report = dict(inner_report)
+        report["original_chars"] = original_chars
+        report["compressed_chars"] = original_chars
+        report["fits"] = False
+        report["replay_original"] = len(replay)
+        report["replay_elided"] = elided_total - boundary.elided_replay
+        report["boundary_request_start"] = boundary.request_start
+        report["boundary_elided_replay"] = boundary.elided_replay
+        return messages, report
+
+    report = dict(inner_report)
+    report["original_chars"] = original_chars
+    report["compressed_chars"] = assembled_chars
+    report["fits"] = fits
+    report["replay_original"] = len(replay)
+    report["replay_elided"] = elided_total - boundary.elided_replay
+    report["boundary_request_start"] = new_request_start
+    report["boundary_elided_replay"] = elided_total
+    return assembled, report
+
+
 def emergency_compress_for_window(
     messages: list[dict],
     *,
     target_chars: int,
     stats: CompressionStats | None = None,
+    boundary: SurfaceBoundary | None = None,
 ) -> tuple[list[dict], dict]:
     """Bound the ENTIRE payload under *target_chars* for overflow recovery.
 
@@ -521,6 +639,10 @@ def emergency_compress_for_window(
     returned with ``report["fits"] = False``.  That fallback still preserves
     the newest iteration; it is never summarized away merely to report fit.
     """
+    if boundary is not None:
+        return _compress_with_boundary(
+            messages, target_chars=target_chars, boundary=boundary, stats=stats
+        )
     original_chars = estimate_message_chars(messages)
     raw_prefix, iterations = split_prefix_and_iterations(messages)
 
