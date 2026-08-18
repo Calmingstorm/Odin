@@ -651,6 +651,17 @@ def build_components(bot, services: BotServices) -> BotComponents:
         recovery_policy_source=_live_recovery_policy_source(bot),
     )
 
+    # Dependency-inverted clamp scope: the observer sees only an opaque-key
+    # snapshot supplied by the LIVE Codex client, never the auth pool itself.
+    if services.window_observer is not None:
+        services.window_observer.set_eligible_account_keys_provider(
+            lambda: (
+                llm_gateway.codex_client.eligible_account_keys_snapshot()
+                if llm_gateway.codex_client is not None
+                else frozenset()
+            )
+        )
+
     # Wire LLM callbacks to whichever provider is active
     if llm_gateway.active_client is not None:
         llm_gateway.wire_callbacks()

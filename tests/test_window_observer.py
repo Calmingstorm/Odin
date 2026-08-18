@@ -12,15 +12,17 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import threading
 from datetime import timedelta
 from types import SimpleNamespace
 
+import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.llm import window_observer as wo
 from src.llm.errors import LLMRequestError
-from src.llm.window_observer import WindowObserver
+from src.llm.window_observer import WindowObserver, WindowObserverMutationError
 
 ACCT_A = "a" * 32
 ACCT_B = "b" * 32
@@ -209,6 +211,35 @@ class TestDownwardOnlyMergeAndTTL:
         )
         assert obs.active_clamp("gpt-5.6-sol") == 420_000
 
+    async def test_active_clamp_ignores_ineligible_accounts(self, tmp_path):
+        eligible = {ACCT_A}
+        obs = WindowObserver(
+            tmp_path / "context_windows.json",
+            eligible_account_keys=lambda: frozenset(eligible),
+        )
+        await obs.record_rescue(
+            overflow=_overflow(key=ACCT_A), response=_acceptance(key=ACCT_A, tokens=500_000)
+        )
+        await obs.record_rescue(
+            overflow=_overflow(key=ACCT_B), response=_acceptance(key=ACCT_B, tokens=420_000)
+        )
+        assert obs.active_clamp("gpt-5.6-sol") == 500_000
+        eligible.clear()
+        assert obs.active_clamp("gpt-5.6-sol") is None
+
+    async def test_eligible_provider_none_or_failure_fails_open_not_stale(self, tmp_path):
+        obs = WindowObserver(
+            tmp_path / "context_windows.json",
+            eligible_account_keys=lambda: None,
+        )
+        await obs.record_rescue(overflow=_overflow(), response=_acceptance())
+        assert obs.active_clamp("gpt-5.6-sol") is None
+
+        obs.set_eligible_account_keys_provider(
+            lambda: (_ for _ in ()).throw(RuntimeError("pool unavailable"))
+        )
+        assert obs.active_clamp("gpt-5.6-sol") is None
+
 
 class TestForfeitInvariant:
     async def test_write_failure_forfeits_durability_never_the_request(self, tmp_path, monkeypatch):
@@ -266,6 +297,46 @@ class TestPersistFdDiscipline:
         assert (tmp_path / "context_windows.json").read_bytes() == published
         assert not any(p.name.startswith(".context_windows") for p in tmp_path.iterdir())
 
+    async def test_cancelled_writer_drains_before_second_transaction(self, tmp_path, monkeypatch):
+        obs = _observer(tmp_path)
+        real_persist = obs._persist_locked
+        first_entered = threading.Event()
+        release_first = threading.Event()
+        calls = 0
+
+        def controlled_persist(state):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                first_entered.set()
+                assert release_first.wait(5)
+            real_persist(state)
+
+        monkeypatch.setattr(obs, "_persist_locked", controlled_persist)
+        writer_a = asyncio.create_task(
+            obs.record_rescue(
+                overflow=_overflow(key=ACCT_A),
+                response=_acceptance(key=ACCT_A, tokens=500_000),
+            )
+        )
+        assert await asyncio.to_thread(first_entered.wait, 5)
+        writer_a.cancel()
+        writer_b = asyncio.create_task(
+            obs.record_rescue(
+                overflow=_overflow(key=ACCT_B),
+                response=_acceptance(key=ACCT_B, tokens=420_000),
+            )
+        )
+        await asyncio.sleep(0.05)
+        assert calls == 1  # B cannot enter while A's worker still owns the transaction.
+        release_first.set()
+        with pytest.raises(asyncio.CancelledError):
+            await writer_a
+        await writer_b
+        on_disk = WindowObserver(tmp_path / "context_windows.json").view()
+        assert set(on_disk["accounts"]) == {ACCT_A, ACCT_B}
+        assert not any(p.name.startswith(".context_windows") for p in tmp_path.iterdir())
+
 
 class TestManualClear:
     async def test_clear_is_account_scoped_and_preserves_bounds(self, tmp_path):
@@ -280,6 +351,20 @@ class TestManualClear:
         record = obs.view()["accounts"][ACCT_A]["models"]["gpt-5.6-sol"]
         assert record["clamp"] is None
         assert record["lowest_rejection_bound"] == 930_001
+
+    async def test_failed_clear_is_truthful_and_retains_state(self, tmp_path, monkeypatch):
+        obs = _observer(tmp_path)
+        await obs.record_rescue(overflow=_overflow(), response=_acceptance())
+        published = (tmp_path / "context_windows.json").read_bytes()
+
+        def fail(_state=None):
+            raise OSError("disk full")
+
+        monkeypatch.setattr(obs, "_persist_locked", fail)
+        with pytest.raises(WindowObserverMutationError):
+            await obs.clear_account(ACCT_A)
+        assert obs.active_clamp("gpt-5.6-sol") == 408_004
+        assert (tmp_path / "context_windows.json").read_bytes() == published
 
     async def test_model_scoped_clear(self, tmp_path):
         obs = _observer(tmp_path)
@@ -703,9 +788,10 @@ def _api_app(observer):
             openai_codex=SimpleNamespace(
                 context_budget_overrides={"gpt-5.5": 250_000},
                 context_utilization=60,
+                context_compression=SimpleNamespace(max_context_chars=None),
             )
         ),
-        context_compressor=None,
+        context_compressor=SimpleNamespace(resolved_max_context_chars=750_000),
         services=SimpleNamespace(window_observer=observer),
     )
     routes = web.RouteTableDef()
@@ -734,6 +820,28 @@ class TestContextWindowsApi:
         assert five["configured"]["base_source"] == "override"
         # Raw evidence rides along, opaque keys only.
         assert ACCT_A in body["evidence"]["accounts"]
+
+    async def test_get_preserves_raw_auto_ceiling(self, tmp_path):
+        obs = _observer(tmp_path)
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        assert body["max_context_chars"] is None
+        assert body["models"]["gpt-5.6-sol"]["configured"]["primary_chars"] == 1_277_400
+
+    async def test_failed_clear_returns_503_and_truthful_state(self, tmp_path, monkeypatch):
+        obs = _observer(tmp_path)
+        await obs.record_rescue(overflow=_overflow(), response=_acceptance())
+        monkeypatch.setattr(
+            obs,
+            "_persist_locked",
+            lambda _state=None: (_ for _ in ()).throw(OSError("disk full")),
+        )
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.post("/api/context/windows/clear", json={"account_key": ACCT_A})
+            assert resp.status == 503
+        assert obs.active_clamp("gpt-5.6-sol") == 408_004
 
     async def test_clear_endpoint_is_account_scoped(self, tmp_path):
         obs = _observer(tmp_path)

@@ -26,11 +26,9 @@ Settled semantics (plan of record R2 §11):
   replaces it (value + fresh TTL); higher evidence never raises or clears
   a live clamp early. TTL is 24 hours; expiry is judged lazily at read.
   Manual clearing is account-scoped.
-- The active clamp for a model is the minimum non-expired clamp across all
-  accounts holding one. (The plan scopes this to currently ELIGIBLE pool
-  accounts; the observer deliberately takes the conservative superset —
-  the pool is sticky but failover can seat any account at any moment, and
-  a stale account's clamp dies with its TTL.)
+- The active clamp for a model is the minimum non-expired clamp across the
+  currently ELIGIBLE pool accounts. Pool knowledge is dependency-inverted:
+  the observer consumes opaque-key snapshots and never imports the pool.
 - An evidence-write failure logs and forfeits durability — it NEVER turns
   a successful user request into an error. The merged evidence still
   serves this process from memory; the next successful write persists it.
@@ -45,6 +43,8 @@ import copy
 import json
 import os
 import stat
+import tempfile
+from collections.abc import Callable, Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import TypeGuard
@@ -188,12 +188,24 @@ def _read_store_bytes(path: Path) -> bytes | None:
         os.close(fd)
 
 
-class WindowObserver:
-    """Evidence store + clamp authority. Every public entry point is total."""
+class WindowObserverMutationError(RuntimeError):
+    """An explicit operator mutation could not be durably committed."""
 
-    def __init__(self, path: str | Path = DEFAULT_STORE_PATH):
+
+class WindowObserver:
+    """Evidence store + clamp authority. Every passive entry point is total."""
+
+    def __init__(
+        self,
+        path: str | Path = DEFAULT_STORE_PATH,
+        *,
+        eligible_account_keys: Callable[[], Collection[str] | None] | None = None,
+    ):
         self._path = Path(path)
         self._lock = asyncio.Lock()
+        # None keeps standalone/test construction backward-compatible. The
+        # composition root installs the production pool-backed provider.
+        self._eligible_account_keys = eligible_account_keys
         self._state: dict = {"version": STORE_VERSION, "accounts": {}}
         try:
             self._load_initial()
@@ -232,15 +244,23 @@ class WindowObserver:
         except OSError:
             log.exception("Window-evidence quarantine failed; leaving file in place")
 
-    def _persist_locked(self) -> None:
-        """Atomic replacement: temp file in the same directory, fsync, rename,
-        parent-directory fsync. Failure is logged by the caller and forfeits
-        durability only — never the request."""
-        payload = json.dumps(self._state, indent=2, sort_keys=True)
+    def set_eligible_account_keys_provider(
+        self, provider: Callable[[], Collection[str] | None] | None
+    ) -> None:
+        """Install the pool-facing opaque-key snapshot provider.
+
+        This narrow callback is the dependency-inversion boundary: observer
+        code knows nothing about credential pools or raw account identities.
+        """
+        self._eligible_account_keys = provider
+
+    def _persist_locked(self, state: dict | None = None) -> None:
+        """Atomic replacement: unique temp, fsync, rename, parent fsync."""
+        payload = json.dumps(self._state if state is None else state, indent=2, sort_keys=True)
         directory = self._path.parent
         directory.mkdir(parents=True, exist_ok=True)
-        tmp_path = self._path.with_name(f".{self._path.name}.tmp-{os.getpid()}")
-        fd = os.open(tmp_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        fd, tmp_name = tempfile.mkstemp(prefix=f".{self._path.name}.tmp-", dir=directory)
+        tmp_path = Path(tmp_name)
         try:
             try:
                 handle = os.fdopen(fd, "w", encoding="utf-8")
@@ -266,10 +286,44 @@ class WindowObserver:
         finally:
             os.close(dir_fd)
 
+    async def _persist_owned(
+        self, state: dict
+    ) -> tuple[BaseException | None, asyncio.CancelledError | None]:
+        """Drain the persistence worker before the transaction lock releases.
+
+        Cancelling an await of ``to_thread`` does not stop the worker. Shield
+        it and remember cancellation so no second writer can enter while the
+        first still owns an unpublished candidate.
+        """
+        worker = asyncio.create_task(asyncio.to_thread(self._persist_locked, state))
+        cancelled: asyncio.CancelledError | None = None
+        while True:
+            try:
+                await asyncio.shield(worker)
+                break
+            except asyncio.CancelledError as exc:
+                # If the worker itself raised CancelledError, it is done and its
+                # outcome belongs to the persistence operation. Otherwise this
+                # task was cancelled; keep owning the transaction until the
+                # non-cooperative thread has actually stopped.
+                if worker.done():
+                    break
+                if cancelled is None:
+                    cancelled = exc
+            except BaseException:
+                # The worker outcome is collected below; the important thing
+                # here is that it is DONE before lock ownership can end.
+                break
+        try:
+            worker.result()
+        except BaseException as exc:
+            return exc, cancelled
+        return None, cancelled
+
     # ── hot-path read ─────────────────────────────────────────────────
 
     def active_clamp(self, model: str | None) -> int | None:
-        """Minimum non-expired clamp for ``model`` across all accounts.
+        """Minimum non-expired clamp across currently eligible accounts.
 
         Synchronous and disk-free — safe inside budget resolution. Total:
         any internal surprise returns ``None`` (no clamp) rather than ever
@@ -279,9 +333,17 @@ class WindowObserver:
             canonical = canonical_codex_model(model)
             if not canonical:
                 return None
+            eligible: frozenset[str] | None = None
+            if self._eligible_account_keys is not None:
+                supplied = self._eligible_account_keys()
+                if supplied is None:
+                    return None
+                eligible = frozenset(key for key in supplied if _is_account_key(key))
             now = _utc_now()
             best: int | None = None
-            for account in self._state.get("accounts", {}).values():
+            for account_key, account in self._state.get("accounts", {}).items():
+                if eligible is not None and account_key not in eligible:
+                    continue
                 record = account.get("models", {}).get(canonical)
                 clamp = record.get("clamp") if isinstance(record, dict) else None
                 if not isinstance(clamp, dict):
@@ -325,6 +387,7 @@ class WindowObserver:
                 accept_key = None
             now = _utc_now()
 
+            cancellation: asyncio.CancelledError | None = None
             async with self._lock:
                 state = copy.deepcopy(self._state)
                 if reject_key and reject_model:
@@ -352,13 +415,17 @@ class WindowObserver:
                     record = self._record_for(state, reject_key, reject_model)
                     record["clamp"] = self._merged_clamp(record.get("clamp"), accept_tokens, now)
                 self._state = state
-                try:
-                    await asyncio.to_thread(self._persist_locked)
-                except OSError:
-                    log.exception(
+                persist_error, cancellation = await self._persist_owned(state)
+                if persist_error is not None:
+                    log.error(
                         "Window-evidence write failed; observation forfeited "
-                        "(in-memory clamp still serves this process)"
+                        "(in-memory clamp still serves this process)",
+                        exc_info=(type(persist_error), persist_error, persist_error.__traceback__),
                     )
+            if cancellation is not None:
+                raise cancellation
+        except asyncio.CancelledError:
+            raise
         except Exception:
             log.exception("record_rescue failed; observation forfeited")
 
@@ -391,36 +458,41 @@ class WindowObserver:
     # ── management surface ────────────────────────────────────────────
 
     async def clear_account(self, account_key: str, model: str | None = None) -> int:
-        """Manually clear clamp(s) for one account (all models, or one).
+        """Durably clear clamp(s) for one account (all models, or one).
 
-        Returns the number of clamps cleared. Bounds history stays — clearing
-        is a clamp operation, not evidence destruction. Total."""
-        try:
-            if not _is_account_key(account_key):
-                return 0
-            target_model = canonical_codex_model(model) if model else None
-            cleared = 0
-            async with self._lock:
-                state = copy.deepcopy(self._state)
-                account = state.get("accounts", {}).get(account_key)
-                if not account:
-                    return 0
-                for name, record in account.get("models", {}).items():
-                    if target_model and name != target_model:
-                        continue
-                    if record.get("clamp") is not None:
-                        record["clamp"] = None
-                        cleared += 1
-                if cleared:
-                    self._state = state
-                    try:
-                        await asyncio.to_thread(self._persist_locked)
-                    except OSError:
-                        log.exception("Window-evidence write failed after clear")
-            return cleared
-        except Exception:
-            log.exception("clear_account failed")
+        Bounds history stays. Persistence failure raises
+        ``WindowObserverMutationError`` and leaves the published in-memory
+        state unchanged, so API truth matches restart truth.
+        """
+        if not _is_account_key(account_key):
             return 0
+        target_model = canonical_codex_model(model) if model else None
+        cancellation: asyncio.CancelledError | None = None
+        async with self._lock:
+            state = copy.deepcopy(self._state)
+            account = state.get("accounts", {}).get(account_key)
+            if not account:
+                return 0
+            cleared = 0
+            for name, record in account.get("models", {}).items():
+                if target_model and name != target_model:
+                    continue
+                if record.get("clamp") is not None:
+                    record["clamp"] = None
+                    cleared += 1
+            if not cleared:
+                return 0
+            persist_error, cancellation = await self._persist_owned(state)
+            if persist_error is not None:
+                raise WindowObserverMutationError(
+                    "window-evidence clear could not be persisted"
+                ) from persist_error
+            # Publish only after durable commit. A cancellation delivered while
+            # the worker ran still observes matching memory and disk state.
+            self._state = state
+        if cancellation is not None:
+            raise cancellation
+        return cleared
 
     def view(self) -> dict:
         """Deep-copied snapshot for the API: raw records plus, per clamp, a

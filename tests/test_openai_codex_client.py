@@ -42,6 +42,20 @@ def _client(auth=None):
     return CodexChatClient(auth=auth or _BareAuth(), model="gpt-5.5")
 
 
+class TestEligibleAccountKeys:
+    def test_bare_auth_key_snapshot(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.llm.account_key.opaque_account_key", lambda account_id: f"key-{account_id}"
+        )
+        assert _client().eligible_account_keys_snapshot() == frozenset({"key-acct"})
+
+    def test_key_derivation_failure_is_conservative(self, monkeypatch):
+        monkeypatch.setattr(
+            "src.llm.account_key.opaque_account_key", lambda _account_id: None
+        )
+        assert _client().eligible_account_keys_snapshot() == frozenset()
+
+
 class TestConvertMessages:
     def test_plain_string_roles(self):
         c = _client()

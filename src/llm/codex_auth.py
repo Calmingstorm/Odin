@@ -507,6 +507,17 @@ class CodexAuthPool:
     def account_count(self) -> int:
         return len(self._accounts)
 
+    def eligible_account_ids_snapshot(self) -> frozenset[str]:
+        """Stable non-secret IDs for accounts eligible to serve right now."""
+        result: set[str] = set()
+        for auth in self._accounts:
+            if auth.is_rate_limited() or not auth.is_configured():
+                continue
+            account_id = auth.get_account_id()
+            if isinstance(account_id, str) and account_id:
+                result.add(account_id)
+        return frozenset(result)
+
     @property
     def current(self) -> CodexAuth:
         if not self._accounts:

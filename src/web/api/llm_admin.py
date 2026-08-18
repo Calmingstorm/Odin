@@ -27,6 +27,7 @@ from ...config.schema import (
     allowed_efforts_for_model,
     effort_incompatibility_error,
 )
+from ...llm.window_observer import WindowObserverMutationError
 from ...odin_log import get_logger
 
 log = get_logger("web.api")
@@ -935,8 +936,8 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
             for k, v in (getattr(codex_cfg, "context_budget_overrides", None) or {}).items()
         }
         utilization = getattr(codex_cfg, "context_utilization", 60)
-        cc = getattr(bot, "context_compressor", None)
-        ceiling = getattr(cc, "resolved_max_context_chars", None) if cc else None
+        cc = getattr(codex_cfg, "context_compression", None)
+        ceiling = getattr(cc, "max_context_chars", None) if cc is not None else None
         evidence: dict = observer.view() if observer is not None else {"version": 1, "accounts": {}}
         models = set(CODEX_MODEL_INPUT_BUDGETS) | set(overrides)
         for account in evidence.get("accounts", {}).values():
@@ -986,10 +987,15 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
         if not isinstance(account_key, str) or not account_key.strip():
             return web.json_response({"error": "account_key is required"}, status=400)
         model = data.get("model")
-        cleared = await observer.clear_account(
-            account_key.strip(),
-            model=str(model).strip() if isinstance(model, str) and model.strip() else None,
-        )
+        try:
+            cleared = await observer.clear_account(
+                account_key.strip(),
+                model=str(model).strip() if isinstance(model, str) and model.strip() else None,
+            )
+        except WindowObserverMutationError:
+            return web.json_response(
+                {"error": "context-window clear could not be persisted"}, status=503
+            )
         return web.json_response({"cleared": cleared})
 
 
