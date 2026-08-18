@@ -38,7 +38,7 @@ import discord
 
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
-from ..llm.errors import LLMCapacityError
+from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
@@ -68,33 +68,6 @@ if TYPE_CHECKING:
     from .turn_recorder import TurnRecorder
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .llm_gateway import LLMServingIdentity
-
-
-def _serving_identity_for(gateway, config=None, fallback_client=None) -> LLMServingIdentity:
-    """Capture the serving identity, tolerating narrow test gateways.
-
-    Production gateways expose ``capture_serving_identity`` (one root read);
-    fixtures that fake only ``active_client`` get an equivalent identity
-    built from that client so the freeze semantics still hold in tests.
-    """
-    capture = getattr(gateway, "capture_serving_identity", None)
-    if capture is not None:
-        return capture(config) if config is not None else capture()
-    client = fallback_client or getattr(gateway, "active_client", None)
-    return LLMServingIdentity(
-        provider=(
-            "codex"
-            if client is None or hasattr(client, "reasoning_effort")
-            else getattr(client, "provider_name", "unknown")
-        ),
-        client=client,
-        model=getattr(client, "model", None) if client is not None else None,
-        reasoning_effort=(
-            getattr(client, "reasoning_effort", None)
-            if client is not None and hasattr(client, "reasoning_effort")
-            else None
-        ),
-    )
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
     _CONTINUATION_MSG,
@@ -124,6 +97,33 @@ from .tool_loop_helpers import (
 )
 
 log = get_logger("discord")
+
+
+def _serving_identity_for(gateway, config=None, fallback_client=None) -> LLMServingIdentity:
+    """Capture the serving identity, tolerating narrow test gateways.
+
+    Production gateways expose ``capture_serving_identity`` (one root read);
+    fixtures that fake only ``active_client`` get an equivalent identity
+    built from that client so the freeze semantics still hold in tests.
+    """
+    capture = getattr(gateway, "capture_serving_identity", None)
+    if capture is not None:
+        return capture(config) if config is not None else capture()
+    client = fallback_client or getattr(gateway, "active_client", None)
+    return LLMServingIdentity(
+        provider=(
+            "codex"
+            if client is None or hasattr(client, "reasoning_effort")
+            else getattr(client, "provider_name", "unknown")
+        ),
+        client=client,
+        model=getattr(client, "model", None) if client is not None else None,
+        reasoning_effort=(
+            getattr(client, "reasoning_effort", None)
+            if client is not None and hasattr(client, "reasoning_effort")
+            else None
+        ),
+    )
 
 _LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})
 
@@ -382,6 +382,19 @@ class _ChatTurn:
     _validation_required: bool = False
     _validation_retries: int = 0
     _max_validation_retries: int = 2
+    # Context-budget campaign (phase 4) — all PERSISTED (codec v3):
+    # the surface boundary as plain state (session history before
+    # request_start is elidable; the request envelope after it is
+    # protected), the durable-turn accepted-size latch, the rescue-ladder
+    # phase (a resumed generation continues at the NEXT rung, never
+    # re-arms rung 1), and the frozen generation identity FACTS
+    # (provider/model/effort/ladder — never process-local objects) so a
+    # suspend mid-recovery resumes the same logical generation.
+    _boundary_request_start: int = 0
+    _boundary_elided_replay: int = 0
+    _char_latch: int | None = None
+    _rescue_passes: int = 0
+    _gen_identity: dict | None = None
     # Process-local durability handle (write-invariant driver). Classified
     # RECONSTRUCTED in the checkpoint codec: a resumed turn gets a fresh
     # handle bound to the resume lease, never a deserialized one.
@@ -891,6 +904,10 @@ class ToolLoopRunner:
 
         return _ChatTurn(
             message=message,
+            # The request envelope is always the final two messages here
+            # (preamble + current user request); everything before them is
+            # replayed session history — the elidable side of the boundary.
+            _boundary_request_start=max(0, len(messages) - 2),
             policy=policy,
             trace=trace,
             system_prompt=system_prompt,
@@ -1065,18 +1082,125 @@ class ToolLoopRunner:
         # five minutes.
         await st.durability.on_generation_start(st, deadline_seconds)
 
+        # Rescue ladder for this logical generation. A turn resumed
+        # MID-RECOVERY reuses its persisted identity FACTS (provider/model/
+        # effort/ladder) so the continued generation stays the same
+        # generation — and continues at the NEXT rung via the persisted
+        # st._rescue_passes, never re-arming rung one.
+        from ..llm.context_budget import snapshot_for_codex_config
+
+        if st._gen_identity:
+            _ladder: tuple[int, ...] = tuple(st._gen_identity.get("ladder") or ())
+            _fact_model = st._gen_identity.get("model")
+            _fact_effort = st._gen_identity.get("effort")
+            if _fact_model:
+                pin_kwargs["model"] = _fact_model
+            if _fact_effort is not None:
+                pin_kwargs["reasoning_effort"] = _fact_effort
+        else:
+            _chat_compressor = self._get_context_compressor()
+            _ladder = snapshot_for_codex_config(
+                serving_identity.model if serving_identity.is_codex else None,
+                getattr(self._get_config(), "openai_codex", None),
+                max_context_chars=(
+                    _chat_compressor.max_context_chars
+                    if _chat_compressor is not None
+                    else None
+                ),
+            ).ladder
+        _generation_deadline = time.monotonic() + deadline_seconds
+        _pending_latch: int | None = None
+        _rescued_this_call = False
+
         # Typing is best-effort (shared helper): a typing failure — setup or
         # cleanup — must never fail the call or misclassify provider errors.
         async with _best_effort_typing(st.message.channel):
             try:
-                llm_resp = await generate_with_recovery(
-                    _attempt,
-                    policy=policy,
-                    breaker=breaker,
-                    deadline_seconds=deadline_seconds,
-                    cancel_event=st._cancel,
-                    on_wait=_on_wait,
-                )
+                while True:
+                    try:
+                        llm_resp = await generate_with_recovery(
+                            _attempt,
+                            policy=policy,
+                            breaker=breaker,
+                            deadline_seconds=(
+                                deadline_seconds
+                                if not _rescued_this_call
+                                else max(
+                                    0.5,
+                                    _generation_deadline - time.monotonic(),
+                                )
+                            ),
+                            cancel_event=st._cancel,
+                            on_wait=_on_wait,
+                        )
+                        if _pending_latch is not None:
+                            # Server-accepted evidence (the settled latch
+                            # rule); the generation is settled, so its frozen
+                            # facts and rung phase reset for the next one.
+                            st._char_latch = _pending_latch
+                        if st._gen_identity is not None or st._rescue_passes:
+                            st._gen_identity = None
+                            st._rescue_passes = 0
+                        break
+                    except LLMRequestError as overflow_exc:
+                        if (
+                            getattr(overflow_exc, "code", None)
+                            != "context_length_exceeded"
+                            or st._rescue_passes >= len(_ladder)
+                            or _generation_deadline - time.monotonic() <= 0
+                        ):
+                            raise
+                        from ..llm.context_compressor import (
+                            SurfaceBoundary,
+                            emergency_compress_for_window,
+                        )
+
+                        target = _ladder[st._rescue_passes]
+                        compressed, report = emergency_compress_for_window(
+                            st.messages,
+                            target_chars=target,
+                            boundary=SurfaceBoundary(
+                                request_start=st._boundary_request_start,
+                                elided_replay=st._boundary_elided_replay,
+                            ),
+                        )
+                        report["attempt"] = st._rescue_passes + 1
+                        report["trigger"] = "overflow"
+                        if st._trajectory is not None:
+                            st._trajectory.context_recoveries.append(report)
+                        if not report.get("fits"):
+                            raise
+                        st.messages = compressed
+                        st._rescue_passes += 1
+                        _rescued_this_call = True
+                        if report.get("boundary_request_start") is not None:
+                            st._boundary_request_start = report[
+                                "boundary_request_start"
+                            ]
+                            st._boundary_elided_replay = report[
+                                "boundary_elided_replay"
+                            ]
+                        if st._gen_identity is None:
+                            st._gen_identity = {
+                                "provider": serving_identity.provider,
+                                "model": serving_identity.model,
+                                "effort": serving_identity.reasoning_effort,
+                                "ladder": list(_ladder),
+                            }
+                        _pending_latch = report["compressed_chars"]
+                        # Durable BEFORE the resend (contract §7): mutated
+                        # transcript + boundary + rung phase checkpoint with
+                        # progressed=False and the stored deadline untouched.
+                        # A write failure PROPAGATES — the retry never runs
+                        # ahead of what resume can reconstruct.
+                        await st.durability.on_context_recovery(st)
+                        log.warning(
+                            "Chat context overflow: rescue pass %d compressed "
+                            "%d -> %d chars; retrying generation",
+                            st._rescue_passes,
+                            report["original_chars"],
+                            report["compressed_chars"],
+                        )
             except asyncio.CancelledError:
                 if st._cancel.is_set():
                     # /stop fired during a recovery wait — the graceful stop

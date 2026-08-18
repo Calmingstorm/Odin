@@ -1121,10 +1121,10 @@ class TestLegacyCheckpointCompatibility:
         assert result[0] == "resumed a legacy checkpoint"
         assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
 
-    async def test_new_writers_emit_v2(self, tmp_path):
+    async def test_new_writers_emit_current_version(self, tmp_path):
         h, _original = await suspend_turn(tmp_path)
         payload = json.loads(h.row()[1])
-        assert payload["codec_version"] == 2
+        assert payload["codec_version"] == 3
 
     async def test_v2_payload_missing_the_field_is_malformed(self, tmp_path):
         """Round-5 blocker #3: version scoping makes the two cases
@@ -1135,7 +1135,7 @@ class TestLegacyCheckpointCompatibility:
         make_breaker_probe_ready(h)
         (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
         payload = json.loads(payload_text)
-        assert payload["codec_version"] == 2
+        assert payload["codec_version"] == 3
         del payload["fields"]["wait_judgment_pending"]
         rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
         calls_before = len(h.fake.calls)

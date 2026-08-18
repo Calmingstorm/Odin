@@ -289,6 +289,22 @@ class TurnDurability:
             recovery_deadline_utc=time.time() + max(0.0, deadline_seconds),
         )
 
+    async def on_context_recovery(self, st) -> None:
+        """Persist the rescued transcript + ladder phase BEFORE the retry.
+
+        The settled six-step sequence (campaign phase 4, contract §7):
+        compression already succeeded locally and the recovery record is on
+        the trajectory; this checkpoint makes the mutated transcript, the
+        boundary state, and the rung phase durable with ``progressed=False``
+        — no ``generation_seq`` bump, no intents, no progress claim, and the
+        stored ``recovery_deadline_utc`` untouched. A durability write
+        failure PROPAGATES: the retry must never run ahead of what resume
+        can reconstruct.
+        """
+        if not self.enabled:
+            return
+        await asyncio.to_thread(self._checkpoint_sync, st, progressed=False)
+
     async def on_llm_response(self, st, tool_calls: list) -> None:
         """WI-1: response transcript + PREPARED intents, before any effect.
 

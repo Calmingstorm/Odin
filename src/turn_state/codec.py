@@ -30,7 +30,7 @@ from ..odin_log import get_logger
 
 log = get_logger("turn_state")
 
-CODEC_VERSION = 2
+CODEC_VERSION = 3
 
 # ── The classification (census-pinned) ───────────────────────────────
 
@@ -65,7 +65,26 @@ PERSISTED_FIELDS: frozenset[str] = frozenset({
     "_req_id",
     "stuck_tracker",         # exported as plain state, re-seeded on restore
     "_trajectory",           # full dict incl. iterations; rebuilt on restore
+    # Context-budget campaign (codec v3): recovery state that must survive
+    # suspend/resume so a rescued generation stays the SAME generation.
+    "_boundary_request_start",
+    "_boundary_elided_replay",
+    "_char_latch",
+    "_rescue_passes",
+    "_gen_identity",         # identity FACTS (provider/model/effort/ladder)
 })
+
+#: Added in codec v3. Version-scoped normalization (the wait_judgment
+#: precedent): payloads written before the campaign default these to the
+#: pre-campaign semantics — request_start=0 protects the whole structural
+#: prefix exactly as recovery-less chat always did.
+_V3_FIELD_DEFAULTS: dict[str, object] = {
+    "_boundary_request_start": 0,
+    "_boundary_elided_replay": 0,
+    "_char_latch": None,
+    "_rescue_passes": 0,
+    "_gen_identity": None,
+}
 
 #: Rebuilt by the resume flow from live state. Each entry documents why it
 #: is NOT persisted:
@@ -390,6 +409,11 @@ def snapshot_chat_turn(st, *, store_blob, generation_seq: int, extra: dict | Non
             "_req_id": st._req_id,
             "stuck_tracker": export_stuck_tracker(st.stuck_tracker),
             "_trajectory": _trajectory_to_payload(st._trajectory),
+            "_boundary_request_start": st._boundary_request_start,
+            "_boundary_elided_replay": st._boundary_elided_replay,
+            "_char_latch": st._char_latch,
+            "_rescue_passes": st._rescue_passes,
+            "_gen_identity": dict(st._gen_identity) if st._gen_identity else None,
         },
     }
     if extra:
@@ -476,6 +500,10 @@ def validate_payload(payload: Any) -> None:
     # normalization can never launder an edit.
     if version == 1 and "wait_judgment_pending" not in fields:
         fields["wait_judgment_pending"] = False
+    if version <= 2:
+        for name, default in _V3_FIELD_DEFAULTS.items():
+            if name not in fields:
+                fields[name] = default
     missing = PERSISTED_FIELDS - fields.keys()
     if missing:
         raise CheckpointInvalidError(f"missing persisted fields: {sorted(missing)}")
@@ -551,6 +579,16 @@ def validate_payload(payload: Any) -> None:
     # explode later in transcript repair, outside the rejection boundary).
     if not isinstance(fields["messages"], list):
         _fail("messages", "must be a list")
+    for name in ("_boundary_request_start", "_boundary_elided_replay", "_rescue_passes"):
+        value = fields[name]
+        if not _exact_int(value) or value < 0:
+            _fail(name, "must be a non-negative integer")
+    latch = fields["_char_latch"]
+    if latch is not None and (not _exact_int(latch) or latch < 0):
+        _fail("_char_latch", "must be null or a non-negative integer")
+    gen_identity = fields["_gen_identity"]
+    if gen_identity is not None and not isinstance(gen_identity, dict):
+        _fail("_gen_identity", "must be null or an object of identity facts")
     for i, msg in enumerate(fields["messages"]):
         if not isinstance(msg, dict) or not isinstance(msg.get("role"), str):
             raise CheckpointInvalidError(f"messages[{i}] is not a message object")
