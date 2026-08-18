@@ -102,6 +102,7 @@ class TestLoadBoundary:
             OpenAICodexConfig(
                 model="gpt-5.5",
                 reasoning_effort="xhigh",
+                agent_model=None,  # explicit inherit (default is now "auto")
                 agent_reasoning_effort="max",
             )
 
@@ -112,6 +113,7 @@ class TestLoadBoundary:
                 model="gpt-5.6-sol",
                 reasoning_effort="max",
                 agent_model="gpt-5.5",
+                agent_reasoning_effort=None,  # explicit inherit (default is now "auto")
             )
 
     def test_auto_model_axis_exempt(self):

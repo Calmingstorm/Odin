@@ -62,10 +62,10 @@ def _make_client(
 class TestAuxiliaryLLMConfig:
     def test_defaults(self):
         cfg = AuxiliaryLLMConfig()
-        assert cfg.enabled is False
-        # Default is Luna (v3.62.x): the Codex catalog's cheap extraction/
-        # classification tier; gpt-4o-mini is no longer in the catalog.
-        assert cfg.model == "gpt-5.6-luna"
+        # Enabled on Terra out of the box: defaults mirror the reference
+        # deployment (context-budget campaign defaults ruling).
+        assert cfg.enabled is True
+        assert cfg.model == "gpt-5.6-terra"
 
     def test_custom_values(self):
         cfg = AuxiliaryLLMConfig(enabled=True, model="gpt-3.5-turbo")
@@ -81,7 +81,7 @@ class TestAuxiliaryLLMConfig:
     def test_nested_in_openai_codex_config(self):
         cfg = OpenAICodexConfig()
         assert isinstance(cfg.auxiliary, AuxiliaryLLMConfig)
-        assert cfg.auxiliary.enabled is False
+        assert cfg.auxiliary.enabled is True
 
     def test_custom_nested(self):
         cfg = OpenAICodexConfig(

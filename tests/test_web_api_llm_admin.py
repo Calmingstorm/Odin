@@ -144,7 +144,7 @@ class TestLlmStatus:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["configured"] is True
             assert "max_tokens" not in body["codex"]
-            assert body["codex"]["reasoning_effort"] == "medium"
+            assert body["codex"]["reasoning_effort"] == "xhigh"
             assert body["codex"]["active_reasoning_effort"] is None  # object() has no attr
             assert body["ollama"]["configured"] is False
             assert body["active_model"] == "gpt-5.5"
@@ -156,8 +156,9 @@ class TestLlmStatus:
         bot.llm_gateway.ollama_client = None
         bot.llm_gateway.kimi_client = None
         bot.llm_gateway.active_client = None
+        bot.config.openai_codex.agent_reasoning_effort = None  # explicit inherit (default: "auto")
         async with TestClient(TestServer(app)) as c:
-            # inherit (default): effective mirrors the live client's effort
+            # inherit: effective mirrors the live client's effort
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["agent_reasoning_effort"] is None
             assert body["codex"]["effective_agent_reasoning_effort"] == "high"
@@ -231,6 +232,7 @@ class TestLlmStatus:
         bot.llm_gateway.ollama_client = None
         bot.llm_gateway.kimi_client = None
         bot.llm_gateway.active_client = None
+        bot.config.openai_codex.agent_model = None  # explicit inherit (default is "auto")
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["agent_model"] is None
@@ -477,7 +479,7 @@ class TestProviderConfig:
                 await c.put("/api/llm/codex/config", json={"reasoning_effort": "minimal"})
             ).status == 400
         # nothing mutated, nothing reloaded
-        assert bot.config.openai_codex.reasoning_effort == "medium"
+        assert bot.config.openai_codex.reasoning_effort == "xhigh"
         assert bot.config.openai_codex.model != "changed-model"
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
@@ -687,7 +689,7 @@ class TestProviderConfig:
             )
             assert r.status == 400
             assert "agent_reasoning_effort" in (await r.json())["error"]
-        assert bot.config.openai_codex.agent_reasoning_effort is None
+        assert bot.config.openai_codex.agent_reasoning_effort == "auto"
         assert bot.config.openai_codex.model != "changed-model"
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
@@ -1330,7 +1332,7 @@ class TestCodexMaxEffortPairValidation:
             assert "gpt-5.5" in data["error"] and "'max'" in data["error"]
             assert "max" not in data["allowed"] and "xhigh" in data["allowed"]
         # nothing mutated, nothing reloaded
-        assert bot.config.openai_codex.reasoning_effort == "medium"
+        assert bot.config.openai_codex.reasoning_effort == "xhigh"
         gw.reload_codex_inner.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1355,11 +1357,12 @@ class TestCodexMaxEffortPairValidation:
         _gw(bot)
         bot.config.openai_codex.model = "gpt-5.6-sol"
         bot.config.openai_codex.reasoning_effort = "max"
+        bot.config.openai_codex.agent_reasoning_effort = None  # explicit inherit (default: "auto")
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.5"})
             assert r.status == 400
             assert "agent settings" in (await r.json())["error"]
-        assert bot.config.openai_codex.agent_model is None
+        assert bot.config.openai_codex.agent_model == "auto"
 
     @pytest.mark.asyncio
     async def test_agent_effort_direction_rejected(self):
@@ -1369,7 +1372,7 @@ class TestCodexMaxEffortPairValidation:
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": "max"})
             assert r.status == 400
-        assert bot.config.openai_codex.agent_reasoning_effort is None
+        assert bot.config.openai_codex.agent_reasoning_effort == "auto"
 
     @pytest.mark.asyncio
     async def test_combined_valid_switch_in_one_put_accepted(self):
