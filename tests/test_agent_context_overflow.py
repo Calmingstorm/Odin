@@ -854,3 +854,80 @@ class TestRound1BlockerPins:
         assert result is not None
         assert targets == [399_001]  # the PLAN's rung, not the sol advisory
 
+
+class TestRound2AuthoritativePlanPins:
+    async def test_authoritative_empty_ladder_fails_without_legacy_fallback(self, monkeypatch):
+        """A zero-clamp plan has no positive rescue rung. That is an honest
+        terminal result, not permission to widen back to unknown-model math."""
+        from src.agents.manager import AgentInfo, _call_llm_with_recovery
+        from src.llm.context_budget import resolve_context_budget
+
+        calls = 0
+        targets: list[int] = []
+
+        async def callback(messages, system, tools, *, generation_state):
+            nonlocal calls
+            calls += 1
+            if "plan" not in generation_state:
+                generation_state["plan"] = {
+                    "client": object(),
+                    "effort": "xhigh",
+                    "model": "gpt-5.6-sol",
+                    "snapshot": resolve_context_budget("gpt-5.6-sol", observed_clamp=0),
+                }
+            raise _overflow_error()
+
+        def should_not_compact(messages, *, target_chars, stats=None):
+            targets.append(target_chars)
+            raise AssertionError("empty authoritative ladder used fallback")
+
+        monkeypatch.setattr(
+            "src.llm.context_compressor.emergency_compress_for_window",
+            should_not_compact,
+        )
+        agent = AgentInfo(
+            id="zero",
+            label="z",
+            goal="g",
+            channel_id="c",
+            requester_id="u",
+            requester_name="user",
+        )
+        agent.messages = _messages(2, 1_000)
+        agent.iteration_timeout = 10
+        result = await _call_llm_with_recovery(
+            agent,
+            callback,
+            "sys",
+            [],
+            rescue_ladder=_fallback_budget_snapshot().ladder,
+            generation_state={},
+        )
+        assert result is None
+        assert calls == 1
+        assert targets == []
+        assert agent.state.name == "FAILED"
+
+    async def test_three_argument_callback_is_explicitly_unsupported(self):
+        """The manager contract requires the frozen-generation channel; a
+        legacy three-argument callback fails loudly rather than half-working."""
+        from src.agents.manager import AgentInfo, _call_llm_with_recovery
+
+        async def legacy_callback(messages, system, tools):
+            return {"text": "wrong", "tool_calls": [], "stop_reason": "end_turn"}
+
+        agent = AgentInfo(
+            id="legacy",
+            label="l",
+            goal="g",
+            channel_id="c",
+            requester_id="u",
+            requester_name="user",
+        )
+        agent.iteration_timeout = 10
+        result = await _call_llm_with_recovery(
+            agent, legacy_callback, "sys", [], generation_state={}
+        )
+        assert result is None
+        assert agent.state.name == "FAILED"
+        assert "LLM error" in agent.error

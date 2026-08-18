@@ -9,10 +9,17 @@ no-provider fallback reproduces the pre-campaign conservative math.
 from __future__ import annotations
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
+
+import pytest
 
 from src.agents.manager import _fallback_budget_snapshot
 from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
-from src.discord.native_tools.agents_tasks import _make_budget_snapshot_provider
+from src.discord.llm_gateway import LLMGateway
+from src.discord.native_tools.agents_tasks import (
+    _capture_agent_generation_plan,
+    _make_budget_snapshot_provider,
+)
 from src.discord.tool_loop import ToolLoopRunner
 from src.llm.context_budget import snapshot_for_codex_config
 from src.llm.context_compressor import estimate_message_chars
@@ -201,3 +208,269 @@ class TestChatSoftThreshold:
         before = list(st.messages)
         _chat_runner("gpt-5.6-sol", ContextCompressionConfig())._maybe_compress(st)
         assert st.messages == before
+
+
+# ---------------------------------------------------------------------------
+# Round-2 blocker regression pins
+# ---------------------------------------------------------------------------
+class TestRound2GenerationIdentityPins:
+    async def test_agent_plan_freezes_effective_effort_before_in_place_mutation(self):
+        """The production live-reload shape mutates the SAME client object.
+        A frozen plan must contain xhigh, never the None inherit sentinel that
+        would re-read the now-max client during rescue."""
+        cfg = SimpleNamespace(
+            openai_codex=OpenAICodexConfig(
+                model="gpt-5.6-sol",
+                agent_model=None,
+                agent_reasoning_effort=None,
+            )
+        )
+        client = _codex_client("gpt-5.6-sol")
+        plan = _capture_agent_generation_plan(
+            lambda: cfg,
+            lambda _cfg: client,
+            lambda: ContextCompressionConfig(),
+            model_override=None,
+            effort_override=None,
+        )
+        assert plan["effort"] == "xhigh"
+        client.reasoning_effort = "max"
+        assert plan["client"] is client
+        assert plan["effort"] == "xhigh"
+
+    def test_agent_capture_reads_root_config_once(self):
+        configs = [
+            SimpleNamespace(
+                openai_codex=OpenAICodexConfig(
+                    model="gpt-5.6-sol",
+                    context_budget_overrides={"gpt-5.6-sol": 800_000},
+                )
+            ),
+            SimpleNamespace(
+                openai_codex=OpenAICodexConfig(
+                    model="gpt-5.5",
+                    context_budget_overrides={"gpt-5.6-sol": 270_001},
+                )
+            ),
+        ]
+        reads = 0
+
+        def get_config():
+            nonlocal reads
+            value = configs[min(reads, 1)]
+            reads += 1
+            return value
+
+        plan = _capture_agent_generation_plan(
+            get_config,
+            lambda _cfg: _codex_client("gpt-5.6-sol"),
+            lambda: ContextCompressionConfig(),
+            model_override=None,
+            effort_override=None,
+        )
+        assert reads == 1
+        assert plan["model"] == "gpt-5.6-sol"
+        assert plan["snapshot"].base_budget == 800_000
+
+    async def test_chat_capture_and_budget_share_one_root_config_read(self):
+        configs = [
+            SimpleNamespace(
+                llm_provider=SimpleNamespace(active_provider="codex"),
+                openai_codex=OpenAICodexConfig(
+                    model="gpt-5.6-sol",
+                    context_budget_overrides={"gpt-5.6-sol": 800_000},
+                ),
+            ),
+            SimpleNamespace(
+                llm_provider=SimpleNamespace(active_provider="codex"),
+                openai_codex=OpenAICodexConfig(
+                    model="gpt-5.5",
+                    context_budget_overrides={"gpt-5.6-sol": 270_001},
+                ),
+            ),
+        ]
+        reads = 0
+
+        def get_config():
+            nonlocal reads
+            value = configs[min(reads, 1)]
+            reads += 1
+            return value
+
+        client = _codex_client("gpt-5.6-sol")
+        gateway = LLMGateway(
+            get_config=get_config,
+            codex_client=client,
+            ollama_client=None,
+            kimi_client=None,
+            subsystem_guard=None,
+            auxiliary_llm_client=None,
+            cost_tracker=None,
+            sessions=SimpleNamespace(),
+            reflector=SimpleNamespace(),
+        )
+        from tests.test_typing_resilience import _make_runner, _stub_state
+
+        runner, _saved, _cleared = _make_runner()
+        runner._get_config = get_config
+        runner._llm_gateway = gateway
+        runner._judge_entry_stuck = AsyncMock(return_value=None)
+        captures = []
+        runner._maybe_compress = lambda st, client, config: captures.append((client, config))
+        done = ("done", False, False, [], False)
+        runner._call_llm = AsyncMock(return_value=("done", done))
+        assert await runner._run_chat_iterations(_stub_state()) == done
+        assert reads == 1
+        assert captures == [(client, configs[0])]
+        serving = runner._call_llm.await_args.kwargs["serving_identity"]
+        assert serving.model == "gpt-5.6-sol"
+
+    async def test_chat_physical_retries_keep_captured_identity(self):
+        from src.llm.errors import LLMTransportError
+        from src.llm.recovery import RecoveryPolicy
+        from tests.test_typing_resilience import FakeChannel, _make_runner, _stub_state
+
+        calls: list[tuple[object, str | None, str | None]] = []
+        configs = [SimpleNamespace(llm_provider=SimpleNamespace(active_provider="codex"))]
+
+        class Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, *, model=None, reasoning_effort=None, **_kwargs):
+                calls.append((self, model, reasoning_effort))
+                if len(calls) == 1:
+                    self.model = "gpt-5.5"
+                    self.reasoning_effort = "max"
+                    configs[0] = SimpleNamespace(
+                        llm_provider=SimpleNamespace(active_provider="kimi")
+                    )
+                    raise LLMTransportError("retry")
+                return SimpleNamespace(text="ok", tool_calls=[])
+
+        client = Client()
+        gateway = LLMGateway(
+            get_config=lambda: configs[0],
+            codex_client=client,
+            ollama_client=None,
+            kimi_client=None,
+            subsystem_guard=None,
+            auxiliary_llm_client=None,
+            cost_tracker=None,
+            sessions=SimpleNamespace(),
+            reflector=SimpleNamespace(),
+            recovery_policy_source=lambda: RecoveryPolicy(
+                deadline_seconds=1,
+                backoff_base=0,
+                backoff_cap=0,
+            ),
+        )
+        serving = gateway.capture_serving_identity()
+        breaker = gateway.capacity_breaker_for(serving.model, provider=serving.provider)
+        runner, _saved, _cleared = _make_runner()
+        runner._llm_gateway = gateway
+        st = _stub_state(channel=FakeChannel())
+        kind, response = await runner._call_llm(st, serving_identity=serving)
+        assert kind == "ok" and response.text == "ok"
+        assert calls == [
+            (client, "gpt-5.6-sol", "xhigh"),
+            (client, "gpt-5.6-sol", "xhigh"),
+        ]
+        assert gateway.capacity_breaker_for("gpt-5.6-sol", provider="codex") is breaker
+        assert gateway.capacity_breaker_for("gpt-5.5", provider="kimi") is not breaker
+
+    async def test_gateway_call_uses_captured_provider_for_guard_and_client(self):
+        guards = []
+
+        class Guard:
+            def check(self, key):
+                guards.append(("check", key))
+                return None
+
+            def record_success(self, key):
+                guards.append(("success", key))
+
+            def record_failure(self, key, error):
+                guards.append(("failure", key))
+
+        class Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, **_kwargs):
+                return SimpleNamespace(text="ok", input_tokens=0, output_tokens=0)
+
+        client = Client()
+        config = SimpleNamespace(llm_provider=SimpleNamespace(active_provider="codex"))
+        gateway = LLMGateway(
+            get_config=lambda: config,
+            codex_client=client,
+            ollama_client=None,
+            kimi_client=SimpleNamespace(model="kimi-live", reasoning_effort=None),
+            subsystem_guard=Guard(),
+            auxiliary_llm_client=None,
+            cost_tracker=None,
+            sessions=SimpleNamespace(),
+            reflector=SimpleNamespace(),
+        )
+        serving = gateway.capture_serving_identity()
+        config.llm_provider.active_provider = "kimi"
+        assert gateway.active_client is gateway.kimi_client
+        response = await gateway.call_with_tools(
+            messages=[], system="s", tools=[], serving_identity=serving
+        )
+        assert response.text == "ok"
+        assert guards == [("check", "llm_codex"), ("success", "llm_codex")]
+
+    async def test_chat_preflight_uses_captured_pair_before_open_breaker(self):
+        from src.llm.errors import LLMRequestError
+        from src.llm.recovery import RecoveryPolicy
+        from tests.test_typing_resilience import FakeChannel, _make_runner, _stub_state
+
+        calls = 0
+
+        class Client:
+            model = "gpt-5.5"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, **_kwargs):
+                nonlocal calls
+                calls += 1
+                return SimpleNamespace(text="wrong", tool_calls=[])
+
+        client = Client()
+        gateway = LLMGateway(
+            get_config=lambda: SimpleNamespace(
+                llm_provider=SimpleNamespace(active_provider="codex")
+            ),
+            codex_client=client,
+            ollama_client=None,
+            kimi_client=None,
+            subsystem_guard=None,
+            auxiliary_llm_client=None,
+            cost_tracker=None,
+            sessions=SimpleNamespace(),
+            reflector=SimpleNamespace(),
+            recovery_policy_source=lambda: RecoveryPolicy(deadline_seconds=0.1),
+        )
+        serving = gateway.capture_serving_identity()
+        breaker = gateway.capacity_breaker_for(serving.model, provider=serving.provider)
+        while breaker.snapshot()["state"] != "open":
+            breaker.record_generation_failure()
+        client.reasoning_effort = "max"  # live drift after capture
+        frozen = type(serving)(
+            provider=serving.provider,
+            client=serving.client,
+            model=serving.model,
+            reasoning_effort="max",
+        )
+        assert gateway.capacity_breaker_for(
+            frozen.model, provider=frozen.provider
+        ) is breaker
+        runner, _saved, _cleared = _make_runner()
+        runner._llm_gateway = gateway
+        st = _stub_state(channel=FakeChannel())
+        with pytest.raises(LLMRequestError):
+            await runner._call_llm(st, serving_identity=frozen)
+        assert calls == 0
+        assert breaker.snapshot()["state"] == "open"

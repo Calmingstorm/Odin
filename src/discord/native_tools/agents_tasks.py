@@ -184,6 +184,61 @@ def _generation_budget_snapshot(cfg, client, resolved_model, compressor):
     )
 
 
+def _gateway_client_for_config(gateway, config):
+    """Resolve a gateway client against an already-read root config.
+
+    Production gateways accept that object for an atomic identity capture;
+    narrow test doubles retain their historical ``active_client`` shape.
+    """
+    capture = getattr(gateway, "capture_serving_identity", None)
+    if capture is not None:
+        return capture(config).client
+    return gateway.active_client
+
+
+def _capture_agent_generation_plan(
+    get_config,
+    get_client,
+    get_compressor,
+    *,
+    model_override: str | None,
+    effort_override: str | None,
+) -> dict:
+    """Capture one immutable agent-generation identity and budget plan.
+
+    The root configuration is read exactly once. Request policy and the
+    context-budget snapshot are therefore derived from the same config object,
+    rather than straddling a live config replacement. ``effort`` is the
+    resolved effective value for Codex-shaped clients; the ``None`` inherit
+    sentinel never enters a frozen Codex plan, where a later in-place client
+    mutation could otherwise change a rescue retry.
+    """
+    cfg = get_config()
+    client = get_client(cfg)
+    requested_effort, resolved_model = _agent_llm_policy(
+        cfg,
+        client,
+        model_override=model_override,
+        effort_override=effort_override,
+    )
+    effective_effort = requested_effort
+    if effective_effort is None and hasattr(client, "reasoning_effort"):
+        effective_effort = getattr(client, "reasoning_effort", None)
+    if effective_effort is None and hasattr(client, "reasoning_effort"):
+        raise ValueError("Codex client has no resolved reasoning effort")
+    return {
+        "client": client,
+        "effort": effective_effort,
+        "model": resolved_model,
+        "snapshot": _generation_budget_snapshot(
+            cfg,
+            client,
+            resolved_model,
+            get_compressor(),
+        ),
+    }
+
+
 def _make_budget_snapshot_provider(get_config, get_client, get_compressor, model_override):
     """Per-generation context-budget snapshot for a spawned agent.
 
@@ -557,7 +612,7 @@ class AgentTaskTools:
         messages: list[dict],
         sys_prompt: str,
         tool_defs: list[dict],
-        agent_effort,
+        agent_effort: str,
         resolved_model,
     ):
         """One agent LLM generation through the shared recovery policy.
@@ -577,11 +632,12 @@ class AgentTaskTools:
         # xhigh→max — could turn an approved gpt-5.5@xhigh into a rejected
         # gpt-5.5@max at request build). Live config still reaches agents on
         # their NEXT iteration, the contract these callbacks document.
-        effective_effort = (
-            agent_effort
-            if agent_effort is not None
-            else getattr(client, "reasoning_effort", None)
-        )
+        effective_effort = agent_effort
+        # The production callback contract always supplies a concrete resolved
+        # effort for Codex-shaped clients; accepting the inherit sentinel here
+        # would reintroduce live client reads on later physical retries.
+        if effective_effort is None and hasattr(client, "reasoning_effort"):
+            raise ValueError("agent generation plan has unresolved reasoning effort")
         # Pre-admission: validate the exact pair this generation will request
         # before touching the breaker — never wait out an open breaker's
         # deadline (or count a capacity failure) for a request that could not
@@ -681,7 +737,8 @@ class AgentTaskTools:
             messages: list[dict],
             sys_prompt: str,
             tool_defs: list[dict],
-            generation_state: dict | None = None,
+            *,
+            generation_state: dict,
         ) -> dict:
             # ONE capture per logical generation: client, model, effort, and
             # budget snapshot are resolved together on the FIRST attempt and
@@ -689,24 +746,16 @@ class AgentTaskTools:
             # identity — a live reload between attempts must never split the
             # budget from the request it governs). Live config reaches the
             # NEXT generation, which starts with a fresh state dict.
-            plan = generation_state.get("plan") if generation_state is not None else None
+            plan = generation_state.get("plan")
             if plan is None:
-                client = self._llm_gateway.active_client
-                agent_effort, resolved_model = _agent_llm_policy(
-                    self._get_config(), client,
-                    model_override=model_override, effort_override=effort_override,
+                plan = _capture_agent_generation_plan(
+                    self._get_config,
+                    lambda config: _gateway_client_for_config(self._llm_gateway, config),
+                    self._get_context_compressor,
+                    model_override=model_override,
+                    effort_override=effort_override,
                 )
-                plan = {
-                    "client": client,
-                    "effort": agent_effort,
-                    "model": resolved_model,
-                    "snapshot": _generation_budget_snapshot(
-                        self._get_config(), client, resolved_model,
-                        self._get_context_compressor(),
-                    ),
-                }
-                if generation_state is not None:
-                    generation_state["plan"] = plan
+                generation_state["plan"] = plan
             client = plan["client"]
             resp = await self._agent_generate(
                 client,
@@ -1043,28 +1092,18 @@ class AgentTaskTools:
         # model/effort override, so a fleet can mix models. Overrides are fixed
         # for the agent's life; None fields track live config at call time.
         def _make_iteration_cb(model_override, effort_override):
-            async def _iteration_cb(messages, sys, tool_defs, generation_state=None):
+            async def _iteration_cb(messages, sys, tool_defs, *, generation_state: dict):
                 # Same frozen-generation capture as the direct spawn path.
-                plan = (
-                    generation_state.get("plan") if generation_state is not None else None
-                )
+                plan = generation_state.get("plan")
                 if plan is None:
-                    client = self._llm_gateway.active_client
-                    agent_effort, resolved_model = _agent_llm_policy(
-                        self._get_config(), client,
-                        model_override=model_override, effort_override=effort_override,
+                    plan = _capture_agent_generation_plan(
+                        self._get_config,
+                        lambda config: _gateway_client_for_config(self._llm_gateway, config),
+                        self._get_context_compressor,
+                        model_override=model_override,
+                        effort_override=effort_override,
                     )
-                    plan = {
-                        "client": client,
-                        "effort": agent_effort,
-                        "model": resolved_model,
-                        "snapshot": _generation_budget_snapshot(
-                            self._get_config(), client, resolved_model,
-                            self._get_context_compressor(),
-                        ),
-                    }
-                    if generation_state is not None:
-                        generation_state["plan"] = plan
+                    generation_state["plan"] = plan
                 client = plan["client"]
                 resp = await self._agent_generate(
                     client,

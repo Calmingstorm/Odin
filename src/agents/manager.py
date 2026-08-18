@@ -14,6 +14,7 @@ from collections import deque
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from typing import Protocol
 
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
@@ -50,7 +51,7 @@ TREE_MAX_AGENTS = 25             # hard ceiling on agents in one tree's lifetime
 # sol-class agent works a sol-class budget while gpt-5.5 keeps the proven
 # 272K-class math. When no provider is wired (legacy/direct construction,
 # non-codex paths) the unknown-model snapshot reproduces the pre-campaign
-# conservative behavior. The old private constants are gone: their
+# conservative budget behavior. The old private constants are gone: their
 # "never config" rationale was retired by this recovery machinery itself —
 # wrong-high is one rejected request plus an in-flight rescue, not a
 # terminal failure.
@@ -255,12 +256,24 @@ class AgentStateMachine:
 
 
 # Callback types
-# iteration_callback: (messages, system_prompt, tools) → LLMResponse-like dict
-#   dict with keys: "text" (str), "tool_calls" (list[dict]), "stop_reason" (str)
-# (messages, system_prompt, tools, *, generation_state=...) -> response dict.
-# Callable[...] because the frozen-generation channel is keyword-only with a
-# default — a positional-only Callable spelling cannot express it.
-IterationCallback = Callable[..., Awaitable[dict]]
+class IterationCallback(Protocol):
+    """Required callback contract for one logical agent generation.
+
+    ``generation_state`` is a manager-owned, per-generation channel reused by
+    every physical attempt and emergency rescue retry. Three-argument
+    callbacks are no longer supported: silently omitting this channel would
+    make request identity and context-budget snapshots impossible to freeze.
+    """
+
+    def __call__(
+        self,
+        messages: list[dict],
+        sys_prompt: str,
+        tool_defs: list[dict],
+        *,
+        generation_state: dict,
+    ) -> Awaitable[dict]: ...
+
 
 # tool_executor_callback: (tool_name, tool_input) → result string
 ToolExecutorCallback = Callable[
@@ -431,7 +444,8 @@ class AgentManager:
         ContextBudgetSnapshot per logical generation (live config reaches the
         NEXT iteration; the in-flight one keeps its snapshot). Absent, the
         spawn-frozen ``max_context_chars`` and the unknown-model fallback
-        ladder preserve pre-campaign behavior.
+        ladder preserve pre-campaign budget behavior. The iteration callback
+        must implement the required ``generation_state=`` channel.
         """
         # Check the live per-channel admission limit. Existing agents are
         # never evicted when the setting falls; only subsequent spawns see it.
@@ -1374,11 +1388,17 @@ async def _call_llm_with_recovery(
     the agent's snapshotted iteration_timeout capped at remaining lifetime
     hard-bounds the callback INCLUDING any recovery waits.
 
+    Production callbacks always receive the manager-created state channel.
+    ``generation_state=None`` remains only a helper-level convenience for
+    direct recovery tests; it creates the channel, it does not revive the
+    retired three-argument callback contract.
+
     Returns the LLM response dict, or None if agent reached terminal state.
     """
-    # The rescue ladder is part of the generation's frozen snapshot; None
-    # (legacy/direct callers) resolves the unknown-model fallback so recovery
-    # always has positive rungs to try.
+    # The advisory rescue ladder is optional; an absent advisory source uses
+    # unknown-model math. Once the callback publishes an authoritative plan,
+    # its snapshot wins even when its ladder is empty (for example a zero
+    # observed clamp): empty means honest terminal failure, never fallback.
     if rescue_ladder is None:
         rescue_ladder = _fallback_budget_snapshot().ladder
     if generation_state is None:
@@ -1466,12 +1486,17 @@ async def _call_llm_with_recovery(
 
                 plan = generation_state.get("plan")
                 plan_snapshot = plan.get("snapshot") if isinstance(plan, dict) else None
-                plan_ladder = getattr(plan_snapshot, "ladder", None)
                 # The ladder of the request that ACTUALLY overflowed: the
                 # generation plan captured by the callback at send time.
-                # Spawn-provider advisory only when no plan exists
-                # (legacy/direct callers).
-                active_ladder = plan_ladder if plan_ladder else rescue_ladder
+                # Spawn-provider advisory only when no authoritative plan
+                # snapshot exists. An authoritative EMPTY (or malformed-
+                # missing) ladder is a real terminal outcome and must not
+                # silently widen through the unknown-model fallback.
+                active_ladder = (
+                    tuple(getattr(plan_snapshot, "ladder", ()) or ())
+                    if plan_snapshot is not None
+                    else rescue_ladder
+                )
                 if emergency_passes < len(active_ladder):
                     target = active_ladder[emergency_passes]
                     emergency_passes += 1

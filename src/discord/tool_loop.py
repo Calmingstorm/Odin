@@ -67,6 +67,7 @@ if TYPE_CHECKING:
     from .tool_catalog import ToolCatalog
     from .turn_recorder import TurnRecorder
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
+from .llm_gateway import LLMServingIdentity
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
     _CONTINUATION_MSG,
@@ -581,14 +582,15 @@ class ToolLoopRunner:
             if st._cancel.is_set():
                 return self._stopped(st, "iteration_start")
 
-            # ONE capture of this iteration's serving identity: the
-            # compaction threshold and the outgoing request describe the same
-            # client and model (a mid-iteration provider switch is the
-            # phase-4 chat-durability freeze; model identity is pinned here).
-            request_client = getattr(self._llm_gateway, "active_client", None)
-            self._maybe_compress(st, request_client)
+            # ONE capture of this uninterrupted generation's serving
+            # identity: soft compaction, preflight, breaker admission, and
+            # every physical retry all describe this exact client/model/effort.
+            # Durable suspend/resume persistence remains phase 4.
+            config = self._get_config()
+            serving = self._llm_gateway.capture_serving_identity(config)
+            self._maybe_compress(st, serving.client, config)
 
-            kind, val = await self._call_llm(st, request_client)
+            kind, val = await self._call_llm(st, serving_identity=serving)
             if kind == "done":
                 return val
             llm_resp = val
@@ -878,7 +880,12 @@ class ToolLoopRunner:
             False,
         )
 
-    def _maybe_compress(self, st: _ChatTurn, request_client: object = None) -> None:
+    def _maybe_compress(
+        self,
+        st: _ChatTurn,
+        request_client: object = None,
+        request_config: object = None,
+    ) -> None:
         """Context auto-compression — when accumulated tool iterations push
         the message list over the configured budget, summarise older
         iterations into a single text message and keep the most recent N
@@ -900,7 +907,7 @@ class ToolLoopRunner:
                 # Overrides/utilization are live config reads; the explicit
                 # ceiling stays on the boot-frozen compression object so its
                 # restart-bound classification remains truthful.
-                if request_client is None:
+                if request_client is None and request_config is None:
                     request_client = self._llm_gateway.active_client
                 if hasattr(request_client, "reasoning_effort"):
                     model_for_budget = getattr(request_client, "model", None)
@@ -908,7 +915,11 @@ class ToolLoopRunner:
                     model_for_budget = None
                 snapshot = snapshot_for_codex_config(
                     model_for_budget,
-                    getattr(self._get_config(), "openai_codex", None),
+                    getattr(
+                        request_config if request_config is not None else self._get_config(),
+                        "openai_codex",
+                        None,
+                    ),
                     max_context_chars=_cc.max_context_chars,
                 )
                 if estimate_message_chars(st.messages) > snapshot.primary_chars:
@@ -924,7 +935,13 @@ class ToolLoopRunner:
                     "context_compressor failed (non-fatal); continuing with full context"
                 )
 
-    async def _call_llm(self, st: _ChatTurn, request_client: object = None):
+    async def _call_llm(
+        self,
+        st: _ChatTurn,
+        request_client: object = None,
+        *,
+        serving_identity=None,
+    ):
         """Guarded LLM call with typing indicator and deadline-based recovery.
 
         Returns ("ok", llm_resp) or ("done", <run() return tuple>).
@@ -938,11 +955,39 @@ class ToolLoopRunner:
         interrupts any recovery wait immediately.
         """
         _channel_id = str(st.message.channel.id)
-        # Pre-admission: a known-incompatible live pair fails fast — never
-        # deadline-wait on (or count against) a breaker for a request that
-        # could not legally be sent.
-        preflight_incompatible_effort(self._llm_gateway.active_client)
-        breaker = self._llm_gateway.capacity_breaker_for()
+        if serving_identity is None:
+            capture = getattr(self._llm_gateway, "capture_serving_identity", None)
+            if capture is not None:
+                serving_identity = capture()
+            else:
+                # Compatibility for narrow test gateways; production always
+                # supplies the explicit capture from _run_chat_iterations.
+                client = request_client or getattr(self._llm_gateway, "active_client", None)
+                serving_identity = LLMServingIdentity(
+                    provider=(
+                        "codex"
+                        if client is None or hasattr(client, "reasoning_effort")
+                        else getattr(client, "provider_name", "unknown")
+                    ),
+                    client=client,
+                    model=getattr(client, "model", None) if client is not None else None,
+                    reasoning_effort=(
+                        getattr(client, "reasoning_effort", None)
+                        if client is not None and hasattr(client, "reasoning_effort")
+                        else None
+                    ),
+                )
+        request_client = serving_identity.client
+        # Pre-admission and breaker identity are frozen beside the client that
+        # every physical attempt will invoke.
+        preflight_incompatible_effort(
+            request_client,
+            model=serving_identity.model,
+            effort=serving_identity.reasoning_effort,
+        )
+        breaker = self._llm_gateway.capacity_breaker_for(
+            serving_identity.model, provider=serving_identity.provider
+        )
         policy = self._llm_gateway.recovery_policy()
 
         def _on_wait(wait: float, remaining: float, error: BaseException) -> None:
@@ -951,17 +996,15 @@ class ToolLoopRunner:
                 type(error).__name__, wait, remaining,
             )
 
-        # Pin the captured identity's MODEL onto the request: even if the
-        # active client is swapped mid-iteration, a Codex client serves the
-        # model the compaction threshold was derived for (non-Codex clients
-        # accept-and-ignore; full client freezing is phase-4 durability).
-        pinned_model = (
-            getattr(request_client, "model", None)
-            if request_client is not None
-            and hasattr(request_client, "reasoning_effort")
-            else None
-        )
-        pin_kwargs = {"model": pinned_model} if pinned_model else {}
+        # Pin both Codex request axes. The client object's attributes are
+        # live-reloadable in place, so merely retaining the object is not an
+        # identity freeze.
+        pin_kwargs = {}
+        if serving_identity.is_codex:
+            if serving_identity.model:
+                pin_kwargs["model"] = serving_identity.model
+            if serving_identity.reasoning_effort is not None:
+                pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
         async def _attempt():
             return await self._llm_gateway.call_with_tools(
@@ -972,6 +1015,7 @@ class ToolLoopRunner:
                 user_id=st.user_id,
                 channel_id=_channel_id,
                 tools_used=st.tools_used_in_loop,
+                serving_identity=serving_identity,
             )
 
         # A resumed generation carries only its REMAINING budget (persisted
