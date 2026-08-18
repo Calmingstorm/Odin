@@ -252,7 +252,7 @@ def register_self_update(routes: web.RouteTableDef, bot) -> None:
 
     @routes.post("/api/loops/stop-all")
     async def stop_all_loops(_request: web.Request) -> web.Response:
-        result = bot.loop_manager.stop_loop("all")
+        result = await bot.loop_manager.stop_loop("all")
         return web.json_response({"result": result})
 
 

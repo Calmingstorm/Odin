@@ -59,7 +59,7 @@ async def test_error_iterations_back_off_and_do_not_skip_wait(monkeypatch):
 
     monkeypatch.setattr(manager, "_interruptible_wait", _record_wait)
 
-    async def _always_fail(_prompt, _channel, _prev):
+    async def _always_fail(_prompt, _channel, _prev, _cancel):
         raise RuntimeError("boom")
 
     await manager._run_loop(info, _SilentChannel(), _always_fail)
@@ -79,7 +79,7 @@ async def test_successful_iteration_waits_plain_interval(monkeypatch):
 
     monkeypatch.setattr(manager, "_interruptible_wait", _record_wait)
 
-    async def _ok(_prompt, _channel, _prev):
+    async def _ok(_prompt, _channel, _prev, _cancel):
         return "done"
 
     await manager._run_loop(info, _SilentChannel(), _ok)
@@ -94,7 +94,7 @@ async def test_shutdown_cancels_and_awaits_loop_tasks():
     manager = LoopManager()
     started = asyncio.Event()
 
-    async def _forever(_prompt, _channel, _prev):
+    async def _forever(_prompt, _channel, _prev, _cancel):
         started.set()
         await asyncio.sleep(3600)
 
@@ -356,3 +356,68 @@ def test_cleanup_removes_untriggered_loop_even_on_fresh_boot(monkeypatch):
 
     manager.cleanup_finished()
     assert info.id not in manager._loops
+
+async def test_stop_waits_until_inflight_iteration_is_cancelled_and_settled():
+    """Once stop_loop reports stopped, no recovery retry or tool effect may
+    begin. Cancellation must reach the in-flight callback, not merely set the
+    manager's status for the next scheduled iteration."""
+    manager = LoopManager()
+    started = asyncio.Event()
+    cancelled = asyncio.Event()
+    effects: list[str] = []
+
+    async def _recovering(_prompt, _channel, _prev, cancel_event):
+        started.set()
+        try:
+            await asyncio.sleep(3600)
+            effects.append("retry")
+            effects.append("tool")
+            return "impossible"
+        except asyncio.CancelledError:
+            assert cancel_event.is_set()
+            cancelled.set()
+            raise
+
+    loop_id = manager.start_loop(
+        goal="g",
+        channel=_SilentChannel(),
+        requester_id="u",
+        requester_name="U",
+        iteration_callback=_recovering,
+        interval_seconds=10,
+        mode="silent",
+        max_iterations=100,
+    )
+    await asyncio.wait_for(started.wait(), timeout=2)
+    result = await asyncio.wait_for(manager.stop_loop(loop_id), timeout=2)
+
+    assert result == f"Loop `{loop_id}` stopped."
+    assert cancelled.is_set()
+    assert manager._loops[loop_id]._task.done()
+    await asyncio.sleep(0)
+    assert effects == []
+
+async def test_self_stop_all_never_awaits_its_own_manager_task():
+    manager = LoopManager()
+    outcome: list[str] = []
+
+    async def _self_stop(_prompt, _channel, _prev, cancel_event):
+        assert not cancel_event.is_set()
+        outcome.append(await manager.stop_loop("all"))
+        return "settled"
+
+    loop_id = manager.start_loop(
+        goal="g",
+        channel=_SilentChannel(),
+        requester_id="u",
+        requester_name="U",
+        iteration_callback=_self_stop,
+        interval_seconds=10,
+        mode="silent",
+        max_iterations=2,
+    )
+    task = manager._loops[loop_id]._task
+    assert task is not None
+    await asyncio.wait_for(task, timeout=2)
+    assert outcome == [f"Stop requested for 1 loop(s): {loop_id}"]
+    assert manager._loops[loop_id].status == "stopped"

@@ -805,9 +805,20 @@ class TestAgentSurfaceHooks:
 # ---------------------------------------------------------------------------
 
 
-def _api_app(observer, *, max_context_chars: int | None = None):
+def _api_app(
+    observer,
+    *,
+    max_context_chars: int | None = None,
+    runtime_max_context_chars: int | None | object = Ellipsis,
+):
     from src.web.api.llm_admin import register_context_windows
 
+    runtime_value = (
+        max_context_chars
+        if runtime_max_context_chars is Ellipsis
+        else runtime_max_context_chars
+    )
+    runtime_config = ContextCompressionConfig(max_context_chars=runtime_value)
     bot = SimpleNamespace(
         config=SimpleNamespace(
             openai_codex=SimpleNamespace(
@@ -816,7 +827,14 @@ def _api_app(observer, *, max_context_chars: int | None = None):
                 context_compression=ContextCompressionConfig(max_context_chars=max_context_chars),
             )
         ),
-        context_compressor=SimpleNamespace(resolved_max_context_chars=750_000),
+        context_compressor=SimpleNamespace(
+            config=runtime_config,
+            resolved_max_context_chars=(
+                runtime_config.max_context_chars
+                if runtime_config.max_context_chars is not None
+                else 750_000
+            ),
+        ),
         services=SimpleNamespace(window_observer=observer),
     )
     routes = web.RouteTableDef()
@@ -904,6 +922,95 @@ class TestContextWindowsApi:
             body = await (await c.get("/api/context/windows")).json()
         assert body["max_context_chars"] == 750_000
         assert body["models"]["gpt-5.6-sol"]["configured"]["primary_chars"] == 750_000
+
+    async def test_get_without_boot_snapshot_uses_configured_runtime_truth(self, tmp_path):
+        obs = _observer(tmp_path)
+        app = _api_app(obs, max_context_chars=500_000)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        assert body["runtime_max_context_chars"] == 500_000
+        assert body["max_context_chars_pending_restart"] is False
+
+    async def test_get_prefers_boot_snapshot_for_runtime_ceiling(self, tmp_path):
+        from src.web.api.llm_admin import register_context_windows
+
+        observer = _observer(tmp_path)
+        saved = ContextCompressionConfig(max_context_chars=500_000)
+        bot = SimpleNamespace(
+            config=SimpleNamespace(
+                openai_codex=SimpleNamespace(
+                    context_budget_overrides={},
+                    context_utilization=60,
+                    context_compression=saved,
+                )
+            ),
+            context_compressor=saved,
+            services=SimpleNamespace(window_observer=observer),
+        )
+        bot.boot_config_snapshot = {
+            "openai_codex": {
+                "context_compression": ContextCompressionConfig(
+                    max_context_chars=750_000
+                ).model_dump()
+            }
+        }
+        routes = web.RouteTableDef()
+        register_context_windows(routes, bot)
+        app = web.Application()
+        app.router.add_routes(routes)
+        async with TestClient(TestServer(app)) as client:
+            body = await (await client.get("/api/context/windows")).json()
+
+        assert body["runtime_max_context_chars"] == 750_000
+        assert body["max_context_chars_pending_restart"] is True
+        assert body["models"]["gpt-5.6-sol"]["effective"]["primary_chars"] == 750_000
+
+    async def test_get_uses_production_direct_boot_compressor_shape(self, tmp_path):
+        from src.web.api.llm_admin import register_context_windows
+
+        observer = _observer(tmp_path)
+        saved = ContextCompressionConfig(max_context_chars=500_000)
+        boot = ContextCompressionConfig(max_context_chars=750_000)
+        bot = SimpleNamespace(
+            config=SimpleNamespace(
+                openai_codex=SimpleNamespace(
+                    context_budget_overrides={},
+                    context_utilization=60,
+                    context_compression=saved,
+                )
+            ),
+            # OdinClient stores this config object directly, not under .config.
+            context_compressor=boot,
+            services=SimpleNamespace(window_observer=observer),
+        )
+        routes = web.RouteTableDef()
+        register_context_windows(routes, bot)
+        app = web.Application()
+        app.router.add_routes(routes)
+        async with TestClient(TestServer(app)) as client:
+            body = await (await client.get("/api/context/windows")).json()
+
+        assert body["runtime_max_context_chars"] == 750_000
+        assert body["max_context_chars_pending_restart"] is True
+        assert body["models"]["gpt-5.6-sol"]["configured"]["primary_chars"] == 500_000
+        assert body["models"]["gpt-5.6-sol"]["effective"]["primary_chars"] == 750_000
+
+    async def test_get_distinguishes_saved_ceiling_from_boot_frozen_runtime(self, tmp_path):
+        obs = _observer(tmp_path)
+        app = _api_app(
+            obs,
+            max_context_chars=500_000,
+            runtime_max_context_chars=750_000,
+        )
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+
+        sol = body["models"]["gpt-5.6-sol"]
+        assert body["max_context_chars"] == 500_000
+        assert body["runtime_max_context_chars"] == 750_000
+        assert body["max_context_chars_pending_restart"] is True
+        assert sol["configured"]["primary_chars"] == 500_000
+        assert sol["effective"]["primary_chars"] == 750_000
 
     async def test_failed_clear_returns_503_and_truthful_state(self, tmp_path, monkeypatch):
         obs = _observer(tmp_path)

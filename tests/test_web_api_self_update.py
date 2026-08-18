@@ -11,7 +11,7 @@ from __future__ import annotations
 
 from subprocess import CompletedProcess
 from types import SimpleNamespace
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
@@ -295,7 +295,7 @@ class TestNonGitInstall:
 class TestStopAllLoops:
     async def test_stop_all(self):
         bot = MagicMock()
-        bot.loop_manager.stop_loop.return_value = "stopped 3 loops"
+        bot.loop_manager.stop_loop = AsyncMock(return_value="stopped 3 loops")
         async with TestClient(TestServer(_app(bot))) as c:
             body = await (await c.post("/api/loops/stop-all")).json()
             assert body["result"] == "stopped 3 loops"

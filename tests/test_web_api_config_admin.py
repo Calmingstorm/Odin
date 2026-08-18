@@ -334,6 +334,47 @@ class TestDiscordConfig:
         assert saved["grafana_alerts"]["cooldown_seconds"] == 612
 
     @pytest.mark.asyncio
+    async def test_context_budget_alias_persists_canonical_key_through_restart(
+        self, _active_config
+    ):
+        from pathlib import Path
+
+        from ruamel.yaml import YAML
+
+        from src.config.schema import Config as _Config
+        from src.config.schema import active_config_path, set_active_config_path
+
+        path = Path("config.yml")
+        path.write_text("discord:\n  token: fake\n")
+        previous = active_config_path()
+        set_active_config_path(path)
+        try:
+            app, bot = _app(register_discord_config)
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put(
+                    "/api/config",
+                    json={
+                        "openai_codex": {
+                            "context_budget_overrides": {
+                                "codex-auto-review": 600_000,
+                            }
+                        }
+                    },
+                )
+                assert r.status == 200
+                assert (await r.json())["openai_codex"][
+                    "context_budget_overrides"
+                ] == {"gpt-5.6-luna": 600_000}
+        finally:
+            set_active_config_path(previous)
+
+        expected = {"gpt-5.6-luna": 600_000}
+        assert bot.config.openai_codex.context_budget_overrides == expected
+        document = YAML().load(path.read_text())
+        assert document["openai_codex"]["context_budget_overrides"] == expected
+        assert _Config(**document).openai_codex.context_budget_overrides == expected
+
+    @pytest.mark.asyncio
     async def test_blanking_the_workspace_normalizes_everywhere(self):
         """PR #239 round-8 follow-up: the persisted-config path, for real.
 

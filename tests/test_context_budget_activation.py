@@ -615,3 +615,74 @@ class TestSingleSnapshotAcrossLoopGeneration:
         assert kind == "ok"
         assert observer.calls == 1
         assert st.context_recoveries[0]["target_chars"] == 451_500
+
+class TestIntegrationAgentGenerationSeams:
+    async def test_agent_soft_compaction_and_request_share_one_generation_snapshot(
+        self, monkeypatch
+    ):
+        from src.agents.manager import AgentManager
+        from src.llm.context_budget import resolve_context_budget
+
+        snapshots = [
+            resolve_context_budget("gpt-5.6-sol"),
+            resolve_context_budget("gpt-5.5", observed_clamp=200_000),
+        ]
+        reads = 0
+
+        def plan_provider():
+            nonlocal reads
+            snap = snapshots[min(reads, 1)]
+            reads += 1
+            return {
+                "provider": "codex",
+                "client": object(),
+                "model": snap.canonical_model,
+                "effort": "xhigh",
+                "snapshot": snap,
+            }
+
+        seen_targets = []
+
+        def fake_soft(messages, **kwargs):
+            seen_targets.append(kwargs["max_context_chars"])
+            return messages, 1
+
+        monkeypatch.setattr(
+            "src.llm.context_compressor.compress_tool_context", fake_soft
+        )
+        calls = []
+
+        async def iteration(messages, system_prompt, tools, *, generation_state):
+            calls.append(generation_state["plan"])
+            if len(calls) == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [{"id": "1", "name": "noop", "arguments": {}}],
+                }
+            return {"text": "done", "tool_calls": []}
+
+        async def tool_executor(*_args, **_kwargs):
+            return "x" * 500_000
+
+        manager = AgentManager()
+        agent_id = manager.spawn(
+            label="single-snapshot",
+            goal="g",
+            channel_id="c",
+            requester_id="u",
+            requester_name="user",
+            iteration_callback=iteration,
+            tool_executor_callback=tool_executor,
+            tools=[],
+            max_iterations=2,
+            context_compression_enabled=True,
+            generation_plan_provider=plan_provider,
+        )
+        task = manager._agents[agent_id]._task
+        assert task is not None
+        await task
+
+        assert reads == 2
+        assert calls[0]["snapshot"] is snapshots[0]
+        assert calls[1]["snapshot"] is snapshots[1]
+        assert seen_targets == [snapshots[1].primary_chars]

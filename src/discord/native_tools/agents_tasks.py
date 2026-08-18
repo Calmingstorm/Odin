@@ -202,21 +202,22 @@ def _generation_budget_snapshot(cfg, client, resolved_model, compressor, observe
     )
 
 
-def _gateway_client_for_config(gateway, config):
-    """Resolve a gateway client against an already-read root config.
+def _gateway_serving_for_config(gateway, config):
+    """Resolve one serving identity against an already-read root config.
 
-    Production gateways accept that object for an atomic identity capture;
-    narrow test doubles retain their historical ``active_client`` shape.
+    Production gateways return the immutable provider/client/model/effort
+    tuple. Narrow test doubles retain their historical ``active_client`` shape;
+    the generation-plan builder normalizes that legacy value conservatively.
     """
     capture = getattr(gateway, "capture_serving_identity", None)
     if capture is not None:
-        return capture(config).client
+        return capture(config)
     return gateway.active_client
 
 
 def _capture_agent_generation_plan(
     get_config,
-    get_client,
+    get_serving,
     get_compressor,
     *,
     model_override: str | None,
@@ -233,7 +234,17 @@ def _capture_agent_generation_plan(
     mutation could otherwise change a rescue retry.
     """
     cfg = get_config()
-    client = get_client(cfg)
+    serving = get_serving(cfg)
+    if hasattr(serving, "client") and hasattr(serving, "provider"):
+        provider = serving.provider
+        client = serving.client
+    else:
+        client = serving
+        provider = (
+            "codex"
+            if client is None or hasattr(client, "reasoning_effort")
+            else str(getattr(client, "provider_name", "unknown"))
+        )
     requested_effort, resolved_model = _agent_llm_policy(
         cfg,
         client,
@@ -246,6 +257,7 @@ def _capture_agent_generation_plan(
     if effective_effort is None and hasattr(client, "reasoning_effort"):
         raise ValueError("Codex client has no resolved reasoning effort")
     return {
+        "provider": provider,
         "client": client,
         "effort": effective_effort,
         "model": resolved_model,
@@ -588,12 +600,14 @@ class AgentTaskTools:
             prompt: str,
             channel: object,
             prev_context: str | None,
+            cancel_event: asyncio.Event,
         ) -> str:
             return await self._tool_loop.run_autonomous(
                 prompt,
                 channel,
                 prev_context,
                 str(message.author.id),
+                cancel_event=cancel_event,
             )
 
         result = self._loop_manager.start_loop(
@@ -632,12 +646,12 @@ class AgentTaskTools:
             f"(every {max(10, interval)}s, mode={mode}, max {max_iterations} iterations)"
         )
 
-    def _handle_stop_loop(self, inp: dict) -> str:
+    async def _handle_stop_loop(self, inp: dict) -> str:
         """Stop an autonomous loop."""
         loop_id = inp.get("loop_id", "")
         if not loop_id:
             return "A 'loop_id' is required."
-        result = self._loop_manager.stop_loop(loop_id)
+        result = await self._loop_manager.stop_loop(loop_id)
         # Lifecycle webhook: loop.stopped
         fire_and_forget(
             self._turn_recorder._emit_lifecycle_event(
@@ -666,6 +680,7 @@ class AgentTaskTools:
         tool_defs: list[dict],
         agent_effort: str,
         resolved_model,
+        provider: str = "codex",
     ):
         """One agent LLM generation through the shared recovery policy.
 
@@ -695,7 +710,9 @@ class AgentTaskTools:
         # deadline (or count a capacity failure) for a request that could not
         # legally be sent.
         preflight_incompatible_effort(client, model=resolved_model, effort=effective_effort)
-        breaker = self._llm_gateway.capacity_breaker_for(resolved_model)
+        breaker = self._llm_gateway.capacity_breaker_for(
+            resolved_model, provider=provider
+        )
         policy = self._llm_gateway.recovery_policy()
 
         async def _attempt():
@@ -798,7 +815,7 @@ class AgentTaskTools:
             if plan is None:
                 plan = _capture_agent_generation_plan(
                     self._get_config,
-                    lambda config: _gateway_client_for_config(self._llm_gateway, config),
+                    lambda config: _gateway_serving_for_config(self._llm_gateway, config),
                     self._get_context_compressor,
                     model_override=model_override,
                     effort_override=effort_override,
@@ -813,6 +830,7 @@ class AgentTaskTools:
                 tool_defs=tool_defs,
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
+                provider=plan["provider"],
             )
             return {
                 "text": resp.text,
@@ -912,11 +930,12 @@ class AgentTaskTools:
             keep_recent_iterations=self._get_context_compressor().keep_recent_iterations
             if self._get_context_compressor()
             else 30,
-            budget_snapshot_provider=_make_budget_snapshot_provider(
+            generation_plan_provider=lambda: _capture_agent_generation_plan(
                 self._get_config,
-                lambda: self._llm_gateway.active_client,
+                lambda config: _gateway_serving_for_config(self._llm_gateway, config),
                 self._get_context_compressor,
-                model_override,
+                model_override=model_override,
+                effort_override=effort_override,
                 observer=self._window_observer,
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
@@ -1151,7 +1170,7 @@ class AgentTaskTools:
                 if plan is None:
                     plan = _capture_agent_generation_plan(
                         self._get_config,
-                        lambda config: _gateway_client_for_config(self._llm_gateway, config),
+                        lambda config: _gateway_serving_for_config(self._llm_gateway, config),
                         self._get_context_compressor,
                         model_override=model_override,
                         effort_override=effort_override,
@@ -1166,6 +1185,7 @@ class AgentTaskTools:
                     tool_defs=tool_defs,
                     agent_effort=plan["effort"],
                     resolved_model=plan["model"],
+                    provider=plan["provider"],
                 )
                 return {
                     "text": resp.text or "",
@@ -1221,12 +1241,17 @@ class AgentTaskTools:
             context_compression_enabled=bool(cc),
             max_context_chars=cc.resolved_max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
-            budget_snapshot_provider_factory=lambda mo: _make_budget_snapshot_provider(
-                self._get_config,
-                lambda: self._llm_gateway.active_client,
-                self._get_context_compressor,
-                mo,
-                observer=self._window_observer,
+            generation_plan_provider_factory=lambda mo, eo: (
+                lambda: _capture_agent_generation_plan(
+                    self._get_config,
+                    lambda config: _gateway_serving_for_config(
+                        self._llm_gateway, config
+                    ),
+                    self._get_context_compressor,
+                    model_override=mo,
+                    effort_override=eo,
+                    observer=self._window_observer,
+                )
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
         )

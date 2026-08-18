@@ -17,11 +17,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.config.schema import ContextCompressionConfig
+from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
 from src.discord.background_task import MAX_STEPS
 from src.discord.native_tools.agents_tasks import (
     AgentTaskDeps,
     AgentTaskTools,
+    _capture_agent_generation_plan,
+    _gateway_serving_for_config,
     _parse_spawn_overrides,
 )
 from src.llm.model_breaker import ModelBreakerRegistry
@@ -37,8 +39,8 @@ def _fake_gateway(client):
     """
     registry = ModelBreakerRegistry()
     gw = SimpleNamespace(active_client=client)
-    gw.capacity_breaker_for = lambda model=None: registry.for_model(
-        "codex", str(model or getattr(client, "model", None) or "unknown")
+    gw.capacity_breaker_for = lambda model=None, *, provider=None: registry.for_model(
+        str(provider or "codex"), str(model or getattr(client, "model", None) or "unknown")
     )
     gw.recovery_policy = lambda: RecoveryPolicy(
         deadline_seconds=0.2, backoff_base=0.01, backoff_cap=0.02, retry_after_cap=0.05
@@ -232,9 +234,9 @@ class TestLoops:
 
     async def test_stop_loop(self):
         t = _tools()
-        assert "'loop_id' is required" in t._handle_stop_loop({})
-        t._loop_manager.stop_loop.return_value = "Loop stopped."
-        assert "stopped" in t._handle_stop_loop({"loop_id": "L1"})
+        assert "'loop_id' is required" in await t._handle_stop_loop({})
+        t._loop_manager.stop_loop = AsyncMock(return_value="Loop stopped.")
+        assert "stopped" in await t._handle_stop_loop({"loop_id": "L1"})
         await asyncio.sleep(0)
 
     def test_list_loops(self):
@@ -1235,3 +1237,85 @@ class TestFrozenGenerationIdentity:
         await cb([], "sys", [], generation_state=fresh)
         assert fresh["plan"]["model"] == "gpt-5.5"
         assert fresh["plan"]["snapshot"].primary_chars == 570_002
+
+class TestIntegrationFrozenProviderBreaker:
+    async def test_rescue_after_provider_switch_uses_frozen_provider_breaker(self):
+        registry = ModelBreakerRegistry()
+
+        class _Gateway:
+            def __init__(self):
+                self.live_provider = "codex"
+                self.active_client = SimpleNamespace(
+                    model="gpt-5.6-sol", reasoning_effort="xhigh"
+                )
+                self.recovery_policy = lambda: RecoveryPolicy(
+                    deadline_seconds=0.2,
+                    backoff_base=0.01,
+                    backoff_cap=0.02,
+                    retry_after_cap=0.05,
+                )
+
+            def capture_serving_identity(self, _config):
+                return SimpleNamespace(
+                    provider=self.live_provider,
+                    client=self.active_client,
+                    model=self.active_client.model,
+                    reasoning_effort=getattr(self.active_client, "reasoning_effort", None),
+                    is_codex=self.live_provider == "codex",
+                )
+
+            def capacity_breaker_for(self, model=None, *, provider=None):
+                return registry.for_model(provider or self.live_provider, model or "unknown")
+
+            def notify_generation_success(self, _response):
+                return None
+
+        calls = []
+
+        class _Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, **_kwargs):
+                calls.append("called")
+                return SimpleNamespace(
+                    text="ok", tool_calls=[], provenance_provider="codex"
+                )
+
+        gateway = _Gateway()
+        gateway.active_client = _Client()
+        cfg = SimpleNamespace(
+            openai_codex=OpenAICodexConfig(
+                model="gpt-5.6-sol", agent_reasoning_effort=None
+            )
+        )
+        plan = _capture_agent_generation_plan(
+            lambda: cfg,
+            lambda root: _gateway_serving_for_config(gateway, root),
+            lambda: ContextCompressionConfig(),
+            model_override=None,
+            effort_override=None,
+        )
+        assert plan["provider"] == "codex"
+
+        # Open only the newly-live Ollama breaker, then switch providers. A
+        # rescue governed by live identity would now fail before reaching the
+        # frozen Codex client.
+        live = registry.for_model("ollama", "gpt-5.6-sol")
+        while live.snapshot()["state"] != "open":
+            live.record_generation_failure()
+        gateway.live_provider = "ollama"
+
+        tools = _tools(llm_gateway=gateway)
+        response = await tools._agent_generate(
+            plan["client"],
+            messages=[],
+            sys_prompt="s",
+            tool_defs=[],
+            agent_effort=plan["effort"],
+            resolved_model=plan["model"],
+            provider=plan["provider"],
+        )
+        assert response.text == "ok"
+        assert calls == ["called"]
+        assert registry.for_model("codex", "gpt-5.6-sol").snapshot()["state"] == "closed"

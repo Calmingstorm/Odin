@@ -22,10 +22,10 @@ from ..odin_log import get_logger
 log = get_logger("autonomous_loop")
 
 # Type for the LLM iteration callback:
-# Takes (goal_prompt, channel, iteration_context) -> response text
+# Takes (goal_prompt, channel, iteration_context, cancel_event) -> response text
 # The callback should run the full Codex + tool loop internally.
 LoopIterationCallback = Callable[
-    [str, Any, str | None],  # (prompt, channel, previous_context)
+    [str, Any, str | None, asyncio.Event],
     Awaitable[str],
 ]
 
@@ -131,29 +131,60 @@ class LoopManager:
         )
         return loop_id
 
-    def stop_loop(self, loop_id: str) -> str:
-        """Stop a loop by ID. Use 'all' to stop all loops."""
-        if loop_id == "all":
-            stopped = []
-            for lid, info in list(self._loops.items()):
-                if info.status == "running":
-                    info._cancel_event.set()
-                    info.status = "stopped"
-                    stopped.append(lid)
-            if not stopped:
-                return "No active loops to stop."
-            return f"Stopped {len(stopped)} loop(s): {', '.join(stopped)}"
+    async def stop_loop(self, loop_id: str) -> str:
+        """Cancel loop work and report stopped only after it has settled.
 
-        # mypy binds `info` to the non-Optional loop var of the 'all'
-        # branch above (which always returns) — false conflict.
-        info = self._loops.get(loop_id)  # type: ignore[assignment]
+        The cooperative event reaches the tool loop and recovery layer; task
+        cancellation is the final authority that interrupts an admitted LLM
+        stream or an in-flight tool await. Awaiting the task closes the crucial
+        contract: once this method says ``stopped``, no retry or tool side
+        effect from that loop can begin afterward.
+        """
+        if loop_id == "all":
+            running = [info for info in self._loops.values() if info.status == "running"]
+            if not running:
+                return "No active loops to stop."
+            current = asyncio.current_task()
+            for running_info in running:
+                self._request_stop(running_info)
+            await asyncio.gather(
+                *(
+                    running_info._task
+                    for running_info in running
+                    if running_info._task is not None and running_info._task is not current
+                ),
+                return_exceptions=True,
+            )
+            ids = ", ".join(running_info.id for running_info in running)
+            if any(running_info._task is current for running_info in running):
+                for running_info in running:
+                    if running_info._task is current:
+                        running_info.status = "stopped"
+                return f"Stop requested for {len(running)} loop(s): {ids}"
+            return f"Stopped {len(running)} loop(s): {ids}"
+
+        info = self._loops.get(loop_id)
         if not info:
             return f"No loop found with ID `{loop_id}`."
         if info.status != "running":
             return f"Loop `{loop_id}` is not running (status: {info.status})."
-        info._cancel_event.set()
-        info.status = "stopped"
+        self._request_stop(info)
+        if info._task is asyncio.current_task():
+            info.status = "stopped"
+            # A loop may invoke stop_loop on itself. It cannot await/cancel its
+            # own manager task from inside that task; cooperative cancellation
+            # stops the pipeline immediately after this tool call returns.
+            return f"Loop `{loop_id}` stop requested."
+        if info._task is not None:
+            await asyncio.gather(info._task, return_exceptions=True)
         return f"Loop `{loop_id}` stopped."
+
+    @staticmethod
+    def _request_stop(info: LoopInfo) -> None:
+        info._cancel_event.set()
+        task = info._task
+        if task is not None and task is not asyncio.current_task() and not task.done():
+            task.cancel()
 
     def list_loops(self) -> str:
         """Return a formatted list of all loops."""
@@ -276,10 +307,14 @@ class LoopManager:
                         channel_id=info.channel_id,
                     )
                     try:
-                        response = await iteration_callback(prompt, channel, prev_context)
+                        response = await iteration_callback(
+                            prompt, channel, prev_context, info._cancel_event
+                        )
                     finally:
                         reset_turn(_turn_token)
                     response = scrub_output_secrets(response.strip()) if response else ""
+                    if info._cancel_event.is_set():
+                        break
                     consecutive_errors = 0  # Reset on success
                 except Exception as e:
                     consecutive_errors += 1

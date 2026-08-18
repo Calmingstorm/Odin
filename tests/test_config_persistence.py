@@ -318,6 +318,31 @@ class TestAliasAwareness:
             {"search": {"search_db_path": "/old", "enabled": True}},
         ) == []
 
+    def test_schema_owned_mapping_persists_canonicalized_keys_as_one_leaf(self):
+        from src.config.schema import Config
+
+        current = Config(discord={"token": "test"}).model_dump()
+        current["openai_codex"]["context_budget_overrides"] = {
+            "gpt-5.6-luna": 600_000,
+        }
+        leaves = submitted_leaves(
+            {
+                "openai_codex": {
+                    "context_budget_overrides": {
+                        "codex-auto-review": 600_000,
+                    }
+                }
+            },
+            current,
+            Config,
+        )
+        assert leaves == [
+            (
+                ("openai_codex", "context_budget_overrides"),
+                {"gpt-5.6-luna": 600_000},
+            )
+        ]
+
     def test_canonical_key_still_resolves_normally(self):
         from src.config.schema import Config
 

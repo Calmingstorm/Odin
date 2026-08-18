@@ -2313,6 +2313,8 @@ class ToolLoopRunner:
         prev_context: str | None,
         user_id: str,
         policy: LoopPolicy = AUTONOMOUS_POLICY,
+        *,
+        cancel_event: asyncio.Event | None = None,
     ) -> str:
         """Run a single loop iteration through Codex with full tool access.
 
@@ -2325,6 +2327,8 @@ class ToolLoopRunner:
         st = self._prepare_loop_turn(prompt, channel, prev_context, user_id, policy)
 
         for _iteration in range(st.loop_cap):
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError
             st._iteration_index = _iteration
             # ONE capture per uninterrupted loop generation (same contract as
             # chat): compaction thresholds, preflight, breaker admission, and
@@ -2338,6 +2342,7 @@ class ToolLoopRunner:
                 serving_identity=_serving,
                 request_config=_config,
                 budget_snapshot=_budget_snapshot,
+                cancel_event=cancel_event,
             )
             if kind == "done":
                 return val
@@ -2352,6 +2357,8 @@ class ToolLoopRunner:
             # pipeline's format)
             st.messages.append({"role": "assistant", "content": build_assistant_content(response)})
 
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError
             await self._execute_loop_tools(st, response)
 
         return await self._finalize_loop(st)
@@ -2562,6 +2569,7 @@ class ToolLoopRunner:
         serving_identity=None,
         request_config=None,
         budget_snapshot=None,
+        cancel_event: asyncio.Event | None = None,
     ):
         """LLM call for one loop iteration with deadline-based recovery.
 
@@ -2594,6 +2602,8 @@ class ToolLoopRunner:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
         async def _attempt():
+            if cancel_event is not None and cancel_event.is_set():
+                raise asyncio.CancelledError
             return await serving_identity.client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -2636,6 +2646,8 @@ class ToolLoopRunner:
                             None if rescue_passes == 0 else generation_deadline - time.monotonic()
                         ),
                     )
+                    if cancel_event is not None and cancel_event.is_set():
+                        raise asyncio.CancelledError
                     if pending_latch is not None:
                         # Server-accepted evidence, per the settled latch rule.
                         st._char_latch = pending_latch
