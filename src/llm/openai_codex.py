@@ -231,11 +231,15 @@ class CodexStreamError(RuntimeError):
         error_type: str | None = None,
         error_code: str | None = None,
         retry_after: float | None = None,
+        server_input_tokens: int | None = None,
     ) -> None:
         super().__init__(message)
         self.error_type = error_type
         self.error_code = error_code
         self.retry_after = retry_after
+        # Server-authoritative usage from the failure event, when the event
+        # carried one (strictly parsed; None otherwise — never an estimate).
+        self.server_input_tokens = server_input_tokens
 
     @property
     def is_capacity(self) -> bool:
@@ -243,6 +247,20 @@ class CodexStreamError(RuntimeError):
             self.error_type in _CAPACITY_ERROR_MARKERS
             or self.error_code in _CAPACITY_ERROR_MARKERS
         )
+
+
+def _server_input_tokens_from_usage(usage: object) -> int | None:
+    """Strictly parse the server's accepted-input count from a usage object.
+
+    Absent, malformed, boolean, negative, or non-integer ⇒ ``None``. The
+    observer never substitutes the client estimate for this value.
+    """
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get("input_tokens")
+    if type(value) is not int or value < 0:
+        return None
+    return value
 
 
 def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
@@ -265,6 +283,10 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
     error_type = err.get("type")
     error_code = err.get("code")
     retry_after = err.get("retry_after")
+    # Authoritative usage rides the failure event's response object when the
+    # server provides one; strictly parsed, never estimated.
+    resp_obj = event.get("response")
+    usage = resp_obj.get("usage") if isinstance(resp_obj, dict) else None
     fields = _sanitized_error_fields({"error": err})
     detail = "; ".join(fields)[:400] if fields else "unstructured stream error event"
     return CodexStreamError(
@@ -272,6 +294,7 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
         error_type=error_type if isinstance(error_type, str) else None,
         error_code=error_code if isinstance(error_code, str) else None,
         retry_after=float(retry_after) if isinstance(retry_after, (int, float)) else None,
+        server_input_tokens=_server_input_tokens_from_usage(usage),
     )
 
 
@@ -805,11 +828,19 @@ class CodexChatClient:
                                 # agent overflow recovery keys on ``code``.
                                 # The client breaker counts infrastructure
                                 # health, not payload validity: untouched.
+                                from .account_key import opaque_account_key
+
                                 raise LLMRequestError(
                                     f"Codex stream failed: {e}",
                                     provider="codex",
                                     model=str(body.get("model") or self.model),
                                     code=e.error_code or e.error_type,
+                                    # Provider truth for the observer: the
+                                    # failure event's own usage (None unless
+                                    # the server sent one) and the opaque key
+                                    # of the account that served THIS attempt.
+                                    server_input_tokens=e.server_input_tokens,
+                                    account_key=opaque_account_key(account_id),
                                 ) from e
                             # response.failed / error event: the "200" turned
                             # out to be a failure mid-stream — retryable.
@@ -834,6 +865,13 @@ class CodexChatClient:
                             ) from e
                         if not result_is_empty(result):
                             self.breaker.record_success()
+                            if isinstance(result, LLMResponse):
+                                # Per-attempt account provenance: the pool may
+                                # rotate between attempts, so the stamp is the
+                                # account that served THIS successful attempt.
+                                from .account_key import opaque_account_key
+
+                                result.account_key = opaque_account_key(account_id)
                             return result
                         log.warning(
                             "Codex returned 200 with empty response (attempt %d/%d)",
@@ -998,6 +1036,7 @@ class CodexChatClient:
         """
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
+        server_input_tokens: int | None = None
         incomplete = False
 
         # Track in-progress function calls by output_index
@@ -1121,6 +1160,12 @@ class CodexChatClient:
             # Final response object — fallback
             elif event_type == "response.completed":
                 response_obj = event.get("response", {})
+                # Server-authoritative accepted input from the usage echo —
+                # strictly parsed; the client estimate is a separate field
+                # and is never substituted for this one.
+                server_input_tokens = _server_input_tokens_from_usage(
+                    response_obj.get("usage")
+                )
                 output = response_obj.get("output", [])
                 for item in output:
                     item_type = item.get("type", "")
@@ -1159,7 +1204,12 @@ class CodexChatClient:
             stop_reason = "incomplete"
         else:
             stop_reason = "end_turn"
-        return LLMResponse(text=text, tool_calls=tool_calls, stop_reason=stop_reason)
+        return LLMResponse(
+            text=text,
+            tool_calls=tool_calls,
+            stop_reason=stop_reason,
+            server_input_tokens=server_input_tokens,
+        )
 
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> str:
         """Read SSE stream and extract text content."""
