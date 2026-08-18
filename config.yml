@@ -46,7 +46,9 @@ openai_codex:
     keepalive_timeout: 30
   context_compression:
     enabled: true
-    max_context_chars: 750000
+    # null = auto: the ceiling derives from the active model's input budget
+    # (a number only lowers the derived target, never raises it)
+    max_context_chars: null
     keep_recent_iterations: 30
   # Auxiliary model: when enabled, a cheaper Codex model runs the background
   # jobs (compaction, reflection, consolidation, background follow-up) with

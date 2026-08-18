@@ -730,7 +730,7 @@ class AgentTaskTools:
             model_override=model_override,
             reasoning_effort_override=effort_override,
             context_compression_enabled=bool(self._get_context_compressor()),
-            max_context_chars=self._get_context_compressor().max_context_chars
+            max_context_chars=self._get_context_compressor().resolved_max_context_chars
             if self._get_context_compressor()
             else 750000,
             keep_recent_iterations=self._get_context_compressor().keep_recent_iterations
@@ -1028,7 +1028,7 @@ class AgentTaskTools:
                 self._get_config().agents, "max_children_per_agent", None
             ),
             context_compression_enabled=bool(cc),
-            max_context_chars=cc.max_context_chars if cc else 750000,
+            max_context_chars=cc.resolved_max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
         )
 

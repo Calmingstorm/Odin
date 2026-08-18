@@ -82,12 +82,23 @@ openai_codex:
     max_delay: 30.0
   context_compression:
     enabled: true
-    max_context_chars: 48000
+    max_context_chars: null      # null = auto (model-derived ceiling); a number only lowers it
     keep_recent_iterations: 3
+  # Per-model usable-input-budget overrides (tokens, 50192-2000000). Empty =
+  # built-in known-safe floors. Consumed by the context-budget resolver.
+  context_budget_overrides: {}
+  # Working-set policy: percent of the effective budget compaction targets
+  # (30-100). Never reduces budgets at or below 272K tokens.
+  context_utilization: 60
   auxiliary:                     # cheaper model for background jobs
     enabled: false
     model: gpt-5.6-luna
 ```
+
+A persisted `max_context_chars: 750000` from the pre-campaign default is
+migrated to auto once (a provenance marker under `data/` records it, and one
+warning names the marker); saving the compression settings afterwards makes
+any explicit value — including 750000 — stick permanently.
 
 Reasoning effort `max` is served only by the gpt-5.6 family (sol/terra/luna);
 gpt-5.5 rejects it per-request. Odin refuses a known-incompatible model/effort

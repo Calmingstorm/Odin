@@ -712,7 +712,10 @@ class TestContextCompressionConfig:
         from src.config.schema import ContextCompressionConfig
         cfg = ContextCompressionConfig()
         assert cfg.enabled is True
-        assert cfg.max_context_chars == 750_000
+        # Auto (None) by default; consumers read the resolved accessor, which
+        # keeps the legacy ceiling until the per-model resolver is wired.
+        assert cfg.max_context_chars is None
+        assert cfg.resolved_max_context_chars == 750_000
         assert cfg.keep_recent_iterations == 30
 
     def test_custom_config(self):

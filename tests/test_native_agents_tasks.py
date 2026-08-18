@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+from src.config.schema import ContextCompressionConfig
 from src.discord.background_task import MAX_STEPS
 from src.discord.native_tools.agents_tasks import (
     AgentTaskDeps,
@@ -308,7 +309,7 @@ class TestSpawnAgent:
         assert {tool["name"] for tool in tools} == {"spawn_agent", "run_command"}
 
     async def test_nested_with_parent_and_compressor(self):
-        cc = SimpleNamespace(max_context_chars=500000, keep_recent_iterations=20)
+        cc = ContextCompressionConfig(max_context_chars=500000, keep_recent_iterations=20)
         t = _tools(get_context_compressor=lambda: cc)
         t._agent_manager.spawn.return_value = "child-1"
         t._agent_manager._agents = {"parent-1": SimpleNamespace(depth=0)}
