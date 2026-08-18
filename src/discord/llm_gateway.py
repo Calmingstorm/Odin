@@ -25,6 +25,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, NamedTuple
 
 from ..config.persistence import config_transaction
 from ..llm import CodexChatClient, KimiClient, OllamaClient
@@ -36,6 +37,25 @@ from ..llm.recovery import RecoveryPolicy
 from ..odin_log import get_logger
 
 log = get_logger("discord")
+
+
+class LLMServingIdentity(NamedTuple):
+    """Immutable identity for one uninterrupted logical generation.
+
+    Chat captures this once before soft compaction. Preflight, breaker
+    admission, and every physical transport attempt then describe the same
+    provider/client/model/effort even if live configuration reloads in place
+    while recovery is waiting.
+    """
+
+    provider: str
+    client: Any
+    model: str | None
+    reasoning_effort: str | None
+
+    @property
+    def is_codex(self) -> bool:
+        return self.provider == "codex" and self.client is not None
 
 
 @dataclass(frozen=True)
@@ -118,34 +138,64 @@ class LLMGateway:
 
     # ---------- provider resolution ----------------------------------------
 
+    def capture_serving_identity(self, config=None) -> LLMServingIdentity:
+        """Snapshot the client and request identity for one generation.
+
+        This is deliberately synchronous: one root-config read and no await
+        means a live provider switch cannot split provider selection from the
+        client/model/effort facts captured beside it. If a configured local
+        provider is absent, the established Codex fallback is named Codex too
+        so breaker and subsystem identities describe the client actually sent.
+        """
+        if config is None:
+            config = self.get_config()
+        provider_cfg = getattr(config, "llm_provider", None)
+        requested = provider_cfg.active_provider if provider_cfg else "codex"
+        provider: str
+        client: Any
+        if requested == "ollama" and self.ollama_client is not None:
+            provider, client = "ollama", self.ollama_client
+        elif requested == "kimi" and self.kimi_client is not None:
+            provider, client = "kimi", self.kimi_client
+        else:
+            provider, client = "codex", self.codex_client
+        return LLMServingIdentity(
+            provider=provider,
+            client=client,
+            model=getattr(client, "model", None) if client is not None else None,
+            reasoning_effort=(
+                getattr(client, "reasoning_effort", None)
+                if client is not None and hasattr(client, "reasoning_effort")
+                else None
+            ),
+        )
+
     @property
     def active_client(self):
         """Return whichever LLM provider is currently active."""
-        provider_cfg = getattr(self.get_config(), "llm_provider", None)
-        active = provider_cfg.active_provider if provider_cfg else "codex"
-        if active == "ollama" and self.ollama_client is not None:
-            return self.ollama_client
-        if active == "kimi" and self.kimi_client is not None:
-            return self.kimi_client
-        return self.codex_client
+        return self.capture_serving_identity().client
 
     def recovery_policy(self) -> RecoveryPolicy:
         """The live recovery policy (config-backed via wiring)."""
         return self._recovery_policy_source()
 
-    def capacity_breaker_for(self, model: str | None = None) -> ModelCapacityBreaker:
-        """Model-scoped capacity breaker for the active provider.
+    def capacity_breaker_for(
+        self,
+        model: str | None = None,
+        *,
+        provider: str | None = None,
+    ) -> ModelCapacityBreaker:
+        """Return the breaker for an effective request identity.
 
-        ``model`` must be the EFFECTIVE model of the request when the caller
-        overrides it (agents); defaults to the active client's model.
+        Chat supplies both values from its frozen serving identity. Callers
+        that omit either retain the legacy live-resolution behavior.
         """
-        provider_cfg = getattr(self.get_config(), "llm_provider", None)
-        active = provider_cfg.active_provider if provider_cfg else "codex"
-        effective = model
-        if not effective:
-            client = self.active_client
-            effective = getattr(client, "model", None) if client is not None else None
-        return self.model_breakers.for_model(active, str(effective or "unknown"))
+        if provider is None:
+            serving = self.capture_serving_identity()
+            provider = serving.provider
+            if not model:
+                model = serving.model
+        return self.model_breakers.for_model(str(provider or "codex"), str(model or "unknown"))
 
     def notify_generation_success(self, provider: str | None) -> None:
         """Success signal from a path that bypasses ``call_with_tools``
@@ -729,6 +779,7 @@ class LLMGateway:
         user_id: str = "",
         channel_id: str = "",
         tools_used: list[str] | None = None,
+        serving_identity: LLMServingIdentity | None = None,
         **kwargs,
     ):
         """Wrap chat_with_tools with cost / subsystem wiring.
@@ -740,14 +791,20 @@ class LLMGateway:
         async with self.provider_lock:
             if self.switching:
                 raise RuntimeError("LLM provider switch in progress — retry shortly")
-            client = self.active_client
+            # A supplied serving identity is authoritative even when its
+            # client is None; truthiness-based fallback would silently switch
+            # providers after capture.
+            serving = (
+                serving_identity
+                if serving_identity is not None
+                else self.capture_serving_identity()
+            )
+            client = serving.client
             if client is None:
                 raise RuntimeError("No LLM provider configured")
             self.inflight_requests += 1
-            provider_cfg = getattr(self.get_config(), "llm_provider", None)
-            active = provider_cfg.active_provider if provider_cfg else "codex"
 
-        guard_key = f"llm_{active}"
+        guard_key = f"llm_{serving.provider}"
         if self.subsystem_guard is not None:
             err = self.subsystem_guard.check(guard_key)
             if err:

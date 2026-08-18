@@ -222,7 +222,7 @@ class TestAgentPerToolTimeout:
         call_count = 0
         tool_timeouts_used = []
 
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -265,7 +265,7 @@ class TestAgentPerToolTimeout:
         call_count = 0
         tool_timeouts_used = []
 
-        async def iter_cb(msgs, sys, tools):
+        async def iter_cb(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

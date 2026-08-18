@@ -103,6 +103,29 @@ class ContextBudgetSnapshot:
     ladder: tuple[int, ...]
 
 
+def snapshot_for_codex_config(
+    model: str | None,
+    codex_config: object,
+    *,
+    max_context_chars: int | None,
+) -> ContextBudgetSnapshot:
+    """Resolve a snapshot from the live codex config section, getattr-safe.
+
+    ``overrides`` and ``utilization`` are read from ``codex_config`` at CALL
+    time — a live save reaches the next logical generation. The explicit
+    character ceiling is passed by the CALLER from wherever its truthful
+    lifetime lives (the boot-frozen compression object for chat, the
+    spawn-frozen value for agents) so the apply-registry classification of
+    ``max_context_chars`` stays honest: this helper never re-reads it live.
+    """
+    return resolve_context_budget(
+        model,
+        overrides=getattr(codex_config, "context_budget_overrides", None),
+        utilization=getattr(codex_config, "context_utilization", 60),
+        max_context_chars=max_context_chars,
+    )
+
+
 def resolve_context_budget(
     model: str | None,
     *,
