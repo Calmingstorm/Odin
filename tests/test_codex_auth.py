@@ -317,6 +317,17 @@ class TestPoolInit:
         p.write_text(json.dumps(["nope", {"no_token": 1}, _creds(account_id="ok")]))
         assert CodexAuthPool(str(p)).account_count == 1
 
+    def test_eligible_account_ids_excludes_rate_limited_and_invalid(self, tmp_path):
+        p = tmp_path / "c.json"
+        p.write_text(json.dumps([
+            _creds(account_id="a"),
+            _creds(account_id="b"),
+            _creds(account_id=""),
+        ]))
+        pool = CodexAuthPool(str(p))
+        pool._accounts[1].mark_rate_limited(60)
+        assert pool.eligible_account_ids_snapshot() == frozenset({"a"})
+
     def test_stale_shadow_files_removed(self, tmp_path):
         p = tmp_path / "c.json"
         p.write_text(json.dumps([_creds(account_id="0")]))

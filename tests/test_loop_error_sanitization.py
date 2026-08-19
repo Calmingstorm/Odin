@@ -32,7 +32,7 @@ class TestLoopManagerErrorTextSanitized:
         mgr = al.LoopManager()
         channel = _FakeChannel()
 
-        async def exploding_iteration(prompt, ch, prev_context):
+        async def exploding_iteration(prompt, ch, prev_context, cancel_event):
             raise RuntimeError("<html><body>@everyone edge page</body></html>")
 
         loop_id = mgr.start_loop(

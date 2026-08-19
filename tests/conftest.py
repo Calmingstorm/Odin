@@ -257,3 +257,16 @@ def _process_containment():
     os.environ.setdefault(JOB_TOKEN_ENV, DEFAULT_JOB_TOKEN)
     yield
     set_child_subreaper(previous)
+
+
+@pytest.fixture(autouse=True)
+def _isolated_account_key_path(tmp_path, monkeypatch):
+    """Keep the opaque-account-key material out of the working tree.
+
+    Provider stamping derives keys via ``DEFAULT_KEY_PATH`` (resolved at
+    call time); without this, any test whose auth fake returns a real
+    account id would materialize ``data/account_key.secret`` in the repo.
+    """
+    monkeypatch.setattr(
+        "src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "account_key.secret"
+    )

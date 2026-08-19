@@ -14,21 +14,21 @@ openai_codex:
   enabled: true
   # ChatGPT-account Codex backend only supports the GPT-5 family
   # (gpt-4o et al return "model not supported" via this auth path).
-  model: gpt-5.5
+  model: gpt-5.6-sol
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).
   # "max" is gpt-5.6-family only — config load rejects a known-incompatible
   # model/effort pair (e.g. gpt-5.5 + max) rather than 400 on every request.
-  reasoning_effort: medium
+  reasoning_effort: xhigh
   # Effort for spawned-agent iterations only. Unset/null = inherit
   # reasoning_effort ("none" is a real effort level, not inherit). Set to
   # "auto" to let the spawner choose the effort per spawn from the catalogue.
   # Read at call time — live changes reach in-flight agents next iteration.
-  agent_reasoning_effort: null
+  agent_reasoning_effort: auto
   # Model for spawned-agent iterations only. Unset/null = inherit model; a
   # specific model = fixed; "auto" = let the spawner choose per spawn.
   # Read at call time — live changes reach in-flight agents next iteration.
-  agent_model: null
+  agent_model: auto
   credentials_path: ./data/codex_auth.json
   # Streaming transport timeouts. request_timeout_seconds is a generous
   # whole-request backstop (long high-effort reasoning turns stream past
@@ -46,15 +46,17 @@ openai_codex:
     keepalive_timeout: 30
   context_compression:
     enabled: true
-    max_context_chars: 750000
+    # null = auto: the ceiling derives from the active model's input budget
+    # (a number only lowers the derived target, never raises it)
+    max_context_chars: null
     keep_recent_iterations: 30
   # Auxiliary model: when enabled, a cheaper Codex model runs the background
   # jobs (compaction, reflection, consolidation, background follow-up) with
   # automatic fallback to the primary model on error. It shares the main Codex
   # OAuth credentials; only the model differs. Editable live from the WebUI.
   auxiliary:
-    enabled: false
-    model: gpt-5.6-luna
+    enabled: true
+    model: gpt-5.6-terra
 
 ollama:
   enabled: false

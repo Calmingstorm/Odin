@@ -168,9 +168,10 @@ class TestLoadConfig:
 
 
 class TestCodexReasoningEffort:
-    def test_default_is_medium(self):
+    def test_default_is_xhigh(self):
+        # Defaults mirror the reference deployment (defaults ruling).
         from src.config.schema import OpenAICodexConfig
-        assert OpenAICodexConfig().reasoning_effort == "medium"
+        assert OpenAICodexConfig().reasoning_effort == "xhigh"
 
     def test_all_enum_values_accepted(self):
         from src.config.schema import CODEX_REASONING_EFFORTS, OpenAICodexConfig
@@ -253,9 +254,11 @@ class TestAgentsTimeoutConfig:
 
 
 class TestAgentReasoningEffortConfig:
-    def test_default_is_inherit(self):
+    def test_default_is_auto(self):
+        # Defaults mirror the reference deployment: per-spawn Auto/Dynamic.
         from src.config.schema import OpenAICodexConfig
-        assert OpenAICodexConfig().agent_reasoning_effort is None
+        assert OpenAICodexConfig().agent_reasoning_effort == "auto"
+        assert OpenAICodexConfig(agent_reasoning_effort=None).agent_reasoning_effort is None
 
     def test_valid_values_accepted(self):
         from src.config.schema import CODEX_REASONING_EFFORTS, OpenAICodexConfig
@@ -279,9 +282,11 @@ class TestAgentReasoningEffortConfig:
 
 
 class TestAgentModelConfig:
-    def test_default_is_inherit(self):
+    def test_default_is_auto(self):
+        # Defaults mirror the reference deployment: per-spawn Auto/Dynamic.
         from src.config.schema import OpenAICodexConfig
-        assert OpenAICodexConfig().agent_model is None
+        assert OpenAICodexConfig().agent_model == "auto"
+        assert OpenAICodexConfig(agent_model=None).agent_model is None
 
     def test_value_round_trips(self):
         from src.config.schema import OpenAICodexConfig

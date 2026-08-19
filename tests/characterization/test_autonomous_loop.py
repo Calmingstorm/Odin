@@ -5,6 +5,7 @@ Phase 8 unification must preserve — the rows that could silently drift.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock
 
 import pytest
@@ -64,6 +65,71 @@ class TestLoopFlow:
         result = await run_iteration(bot)
         assert result == "iteration complete"
         assert len(fake.calls) == 2
+
+    async def test_stop_loop_tool_self_stop_settles_without_cancellation_cycle(self):
+        """The REAL loop tool path runs stop_loop in a gather child task.
+
+        Logical loop ownership, not asyncio.current_task identity, must make
+        this cooperative self-stop. It must return from the native handler,
+        settle the manager task, and never start another model attempt.
+        """
+        bot = None
+
+        def stop_current_loop():
+            assert bot is not None
+            loop_id = next(iter(bot.loop_manager._loops))
+            return tool_call_response(("stop_loop", {"loop_id": loop_id}))
+
+        bot, fake = build([stop_current_loop])
+        stop_entered = asyncio.Event()
+        release_stop = asyncio.Event()
+        real_stop = bot.loop_manager.stop_loop
+
+        async def barrier_stop(loop_id):
+            stop_entered.set()
+            await release_stop.wait()
+            return await real_stop(loop_id)
+
+        # Keep the production native-dispatch path intact; this barrier only
+        # holds the real manager call long enough to expose parent/child task
+        # topology deterministically.
+        bot.loop_manager.stop_loop = barrier_stop
+        channel = FakeChannel(id=777)
+        message = type(
+            "LoopStartMessage",
+            (),
+            {
+                "channel": channel,
+                "author": type(
+                    "LoopStartAuthor",
+                    (),
+                    {"id": 4242, "__str__": lambda self: "tester"},
+                )(),
+            },
+        )()
+        started = bot.agent_task_tools._handle_start_loop(
+            message,
+            {
+                "goal": "stop yourself through the tool path",
+                "interval_seconds": 10,
+                "mode": "silent",
+                "max_iterations": 2,
+            },
+        )
+        assert started.startswith("Loop started")
+        loop_id = next(iter(bot.loop_manager._loops))
+        task = bot.loop_manager._loops[loop_id]._task
+        assert task is not None
+        await asyncio.wait_for(stop_entered.wait(), timeout=2)
+        assert not task.done()
+        release_stop.set()
+
+        await asyncio.wait_for(task, timeout=2)
+
+        assert task.done()
+        assert bot.loop_manager._loops[loop_id].status == "stopped"
+        assert bot.loop_manager._loops[loop_id]._cancel_event.is_set()
+        assert len(fake.calls) == 1
 
     async def test_prev_context_synthetic_exchange_shape(self):
         bot, fake = build([text_response("ok")])

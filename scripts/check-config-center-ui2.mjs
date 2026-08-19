@@ -332,11 +332,13 @@ const providerForm = {
   retry: { max_retries: 9, base_delay: 4, max_delay: 40 },
   connection_pool: { max_connections: 19, keepalive_timeout: 41 },
   context_compression: { enabled: false, max_context_chars: 123456, keep_recent_iterations: 11 },
+  context_budget_overrides: { 'gpt-5.6-sol': 800000 },
+  context_utilization: 72,
   timeout: 777,
 };
 const expectedPayloadKeys = new Map([
   [codexBasicPayload, ['agent_model', 'agent_reasoning_effort', 'enabled', 'model', 'reasoning_effort']],
-  [codexAdvancedPayload, ['connection_pool', 'context_compression', 'request_timeout_seconds', 'retry', 'stream_stall_timeout_seconds']],
+  [codexAdvancedPayload, ['connection_pool', 'context_budget_overrides', 'context_compression', 'context_utilization', 'request_timeout_seconds', 'retry', 'stream_stall_timeout_seconds']],
   [ollamaBasicPayload, ['base_url', 'enabled', 'max_tokens', 'model']],
   [ollamaAdvancedPayload, ['timeout']],
   [kimiBasicPayload, ['enabled', 'max_tokens', 'model']],
@@ -359,6 +361,15 @@ assert.match(llm, /saveCodexConfig\(\)[\s\S]*codexBasicPayload\(codexForm\.value
 assert.match(llm, /saveOllamaConfig\(\)[\s\S]*ollamaBasicPayload\(ollamaForm\.value/, 'Ollama basic auto-save does not use its field-only payload');
 assert.match(llm, /saveKimiConfig\(\)[\s\S]*kimiBasicPayload\(kimiForm\.value/, 'Kimi basic auto-save does not use its field-only payload');
 assert.match(llm, /saveCodexAdvancedConfig\(\)[\s\S]*codexAdvancedPayload\(codexForm\.value\)/, 'Codex explicit Advanced save does not use its field-only payload');
+assert.match(llm, /<strong>Context budgets<\/strong>/, 'Codex Advanced panel lost the Context budgets table');
+assert.match(llm, /api\.get\('\/api\/context\/windows'\)/, 'Context budgets do not load backend derivation truth');
+assert.match(llm, /api\.post\('\/api\/context\/windows\/clear'/, 'Context budgets lost account-scoped clamp clearing');
+assert.match(llm, /formatContextCeiling\(llmStatus\.codex\.effective_context_compression\?\.max_context_chars\)/, 'Context-compression status lost truthful automatic-ceiling formatting');
+assert.doesNotMatch(llm, /effective_context_compression\?\.max_context_chars\s*\|\|\s*0/, 'Automatic context ceiling regressed to 0 characters');
+assert.match(llm, /details\.effective\?\.effective_budget/, 'effective budget is recomputed or not data-bound');
+assert.match(llm, /details\.effective\?\.primary_chars/, 'resulting target is recomputed or not data-bound');
+assert.doesNotMatch(llm, /921601|917506|270001|262146|124001/, 'browser duplicated the backend context-budget catalog');
+assert.match(llm, /enabled: false, model: 'gpt-5\.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto', agent_model: 'auto'/, 'LLM owner-page fallback defaults drifted from the schema');
 assert.match(llm, /saveOllamaAdvancedConfig\(\)[\s\S]*ollamaAdvancedPayload\(ollamaForm\.value\)/, 'Ollama explicit Advanced save does not use its field-only payload');
 assert.match(llm, /saveKimiAdvancedConfig\(\)[\s\S]*kimiAdvancedPayload\(kimiForm\.value\)/, 'Kimi explicit Advanced save does not use its field-only payload');
 for (const provider of ['Codex', 'Ollama', 'Kimi']) {

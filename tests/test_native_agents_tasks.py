@@ -15,10 +15,15 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
+from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
 from src.discord.background_task import MAX_STEPS
 from src.discord.native_tools.agents_tasks import (
     AgentTaskDeps,
     AgentTaskTools,
+    _capture_agent_generation_plan,
+    _gateway_serving_for_config,
     _parse_spawn_overrides,
 )
 from src.llm.model_breaker import ModelBreakerRegistry
@@ -34,8 +39,8 @@ def _fake_gateway(client):
     """
     registry = ModelBreakerRegistry()
     gw = SimpleNamespace(active_client=client)
-    gw.capacity_breaker_for = lambda model=None: registry.for_model(
-        "codex", str(model or getattr(client, "model", None) or "unknown")
+    gw.capacity_breaker_for = lambda model=None, *, provider=None: registry.for_model(
+        str(provider or "codex"), str(model or getattr(client, "model", None) or "unknown")
     )
     gw.recovery_policy = lambda: RecoveryPolicy(
         deadline_seconds=0.2, backoff_base=0.01, backoff_cap=0.02, retry_after_cap=0.05
@@ -229,9 +234,9 @@ class TestLoops:
 
     async def test_stop_loop(self):
         t = _tools()
-        assert "'loop_id' is required" in t._handle_stop_loop({})
-        t._loop_manager.stop_loop.return_value = "Loop stopped."
-        assert "stopped" in t._handle_stop_loop({"loop_id": "L1"})
+        assert "'loop_id' is required" in await t._handle_stop_loop({})
+        t._loop_manager.stop_loop = AsyncMock(return_value="Loop stopped.")
+        assert "stopped" in await t._handle_stop_loop({"loop_id": "L1"})
         await asyncio.sleep(0)
 
     def test_list_loops(self):
@@ -308,7 +313,7 @@ class TestSpawnAgent:
         assert {tool["name"] for tool in tools} == {"spawn_agent", "run_command"}
 
     async def test_nested_with_parent_and_compressor(self):
-        cc = SimpleNamespace(max_context_chars=500000, keep_recent_iterations=20)
+        cc = ContextCompressionConfig(max_context_chars=500000, keep_recent_iterations=20)
         t = _tools(get_context_compressor=lambda: cc)
         t._agent_manager.spawn.return_value = "child-1"
         t._agent_manager._agents = {"parent-1": SimpleNamespace(depth=0)}
@@ -385,7 +390,7 @@ class TestAgentReasoningEffortCallback:
         t = self._spawned_callback("low", client)
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["reasoning_effort"] == "low"
         assert out["reasoning_effort"] == "low"
         assert out["provider"] == "codex"
@@ -396,7 +401,7 @@ class TestAgentReasoningEffortCallback:
         t = self._spawned_callback(None, client)
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         # Since the round-2 snapshot contract, the inherited effort is pinned
         # per generation and travels EXPLICITLY on the wire (preflight and the
         # outbound request must agree) — same effective request as the old
@@ -415,12 +420,12 @@ class TestAgentReasoningEffortCallback:
         t._agent_manager._agents = {}
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
-        await cb([{"role": "user", "content": "x"}], "sys", [])
+        await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         # inherit resolves to the client's own effort, snapshotted per
         # generation (round-2 contract) — explicit on the wire, not None
         assert client.captured["reasoning_effort"] == "high"
         cfg.openai_codex.agent_reasoning_effort = "xhigh"  # live WebUI change
-        await cb([{"role": "user", "content": "x"}], "sys", [])
+        await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["reasoning_effort"] == "xhigh"
 
     async def test_callback_stamps_none_for_effortless_provider(self):
@@ -446,7 +451,7 @@ class TestAgentReasoningEffortCallback:
         t = self._spawned_callback("low", client)
         await t._handle_spawn_agent(_message(), {"label": "w", "goal": "g"})
         cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert out["reasoning_effort"] is None
         assert out["provider"] == "ollama"
 
@@ -464,7 +469,7 @@ class TestAgentReasoningEffortCallback:
         await t._handle_spawn_loop_agents(
             _message(), {"loop_id": "L1", "tasks": [{"label": "x", "goal": "g"}]})
         cb = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["iteration_callback"]
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["reasoning_effort"] == "medium"
         assert out["reasoning_effort"] == "medium"
 
@@ -494,7 +499,7 @@ class TestAgentModelCallback:
                                           agent_model="gpt-5.6-luna",
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna"
         assert out["model"] == "gpt-5.6-luna"
 
@@ -508,7 +513,7 @@ class TestAgentModelCallback:
                                           agent_model=None,
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-sol"
         assert out["model"] == "gpt-5.6-sol"
 
@@ -518,7 +523,7 @@ class TestAgentModelCallback:
                                           agent_model="   ",
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-sol"
         assert out["model"] == "gpt-5.6-sol"
 
@@ -530,10 +535,10 @@ class TestAgentModelCallback:
                                     agent_model=None, model="gpt-5.6-sol")
         t = self._spawned(cfg_codex, client)
         cb = await self._callback(t)
-        out1 = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out1 = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-sol" == out1["model"]
         cfg_codex.agent_model = "gpt-5.6-luna"  # live WebUI change
-        out2 = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out2 = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna" == out2["model"]
 
     async def test_non_codex_provider_stamps_actual_model(self):
@@ -561,7 +566,7 @@ class TestAgentModelCallback:
                                           agent_model="gpt-5.6-luna",
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] is None  # override not forwarded
         assert out["model"] == "qwen3"
 
@@ -590,7 +595,7 @@ class TestAgentModelCallback:
                                           agent_model="gpt-5.6-luna",
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna"  # resolver → request
         assert out["model"] == "proof-from-response"       # response → stamp
         assert out["reasoning_effort"] == "low"
@@ -616,7 +621,7 @@ class TestAgentModelCallback:
                                           agent_model="gpt-5.6-luna",
                                           model="gpt-5.6-sol"), client)
         cb = await self._callback(t)
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert out["provider"] == ""
         assert out["model"] == ""
         assert out["reasoning_effort"] is None
@@ -636,7 +641,7 @@ class TestAgentModelCallback:
         await t._handle_spawn_loop_agents(
             _message(), {"loop_id": "L1", "tasks": [{"label": "x", "goal": "g"}]})
         cb = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["iteration_callback"]
-        out = await cb([{"role": "user", "content": "x"}], "sys", [])
+        out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna"
         assert out["model"] == "gpt-5.6-luna"
 
@@ -697,7 +702,7 @@ class TestPerSpawnModelEffort:
         assert kwargs["reasoning_effort_override"] == "low"
         # and the iteration callback ASKS the client for luna@low, not sol@medium
         cb = kwargs["iteration_callback"]
-        await cb([{"role": "user", "content": "x"}], "sys", [])
+        await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna"
         assert client.captured["reasoning_effort"] == "low"
 
@@ -714,8 +719,8 @@ class TestPerSpawnModelEffort:
         assert kwargs["model_override"] is None
         assert kwargs["reasoning_effort_override"] is None
         cb = kwargs["iteration_callback"]
-        await cb([{"role": "user", "content": "x"}], "sys", [])
-        assert client.captured["model"] == "gpt-5.6-terra"   # agent_model
+        await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
+        assert client.captured["model"] == "gpt-5.6-terra"  # agent_model
         assert client.captured["reasoning_effort"] == "high"
 
     async def test_invalid_effort_rejects_without_spawning(self):
@@ -754,7 +759,7 @@ class TestPerSpawnModelEffort:
         factory = t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs[
             "iteration_callback_factory"]
         cb = factory("gpt-5.6-luna", None)
-        await cb([{"role": "user", "content": "x"}], "sys", [])
+        await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["model"] == "gpt-5.6-luna"
         # one bad effort rejects the WHOLE batch — nothing spawns
         t._loop_agent_bridge.spawn_agents_for_loop.reset_mock()
@@ -1014,8 +1019,6 @@ class TestAgentGeneratePreflight:
     must not move the breaker's failure count."""
 
     async def test_bad_pair_fails_fast_with_open_breaker(self):
-        import pytest
-
         from src.llm.errors import LLMRequestError
 
         client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="medium")
@@ -1039,11 +1042,8 @@ class TestAgentGeneratePreflight:
         assert breaker.snapshot()["failed_generations"] == failures_before
         assert breaker.snapshot()["state"] == "open"
 
-    async def test_inherited_client_effort_pair_fails_fast(self):
-        """agent_effort None inherits the client's live effort at preflight —
-        the drift shape: fixed gpt-5.5 model override + live effort now max."""
-        import pytest
-
+    async def test_resolved_client_effort_pair_fails_fast(self):
+        """The plan's resolved effort is validated at preflight for its fixed model."""
         from src.llm.errors import LLMRequestError
 
         client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="max")
@@ -1051,7 +1051,7 @@ class TestAgentGeneratePreflight:
         with pytest.raises(LLMRequestError):
             await t._agent_generate(
                 client, messages=[], sys_prompt="s", tool_defs=[],
-                agent_effort=None, resolved_model="gpt-5.5",
+                agent_effort="max", resolved_model="gpt-5.5",
             )
 
 
@@ -1073,12 +1073,89 @@ class TestSpawnPairNonCodexCollision:
         assert "spawned" in out
 
 
+class TestResolvedAgentEffortBoundary:
+    async def test_codex_generation_rejects_unresolved_effort_sentinel(self):
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        t = _tools(llm_gateway=_fake_gateway(client))
+        with pytest.raises(ValueError, match="unresolved reasoning effort"):
+            await t._agent_generate(
+                client,
+                messages=[],
+                sys_prompt="s",
+                tool_defs=[],
+                agent_effort=None,
+                resolved_model="gpt-5.6-sol",
+            )
+
+    async def test_effortless_provider_may_carry_none(self):
+        client = SimpleNamespace(
+            model="local",
+            chat_with_tools=AsyncMock(
+                return_value=SimpleNamespace(
+                    text="ok", tool_calls=[], provenance_provider="ollama"
+                )
+            ),
+        )
+        t = _tools(llm_gateway=_fake_gateway(client))
+        response = await t._agent_generate(
+            client,
+            messages=[],
+            sys_prompt="s",
+            tool_defs=[],
+            agent_effort=None,
+            resolved_model=None,
+        )
+        assert response.text == "ok"
+        assert client.chat_with_tools.await_args.kwargs["reasoning_effort"] is None
+
+
 class TestAgentEffortSnapshot:
     """Review round 2 (High): the inherited agent effort is snapshotted ONCE
     per generation — preflight approves the SAME immutable value every
     attempt carries. A legal live effort change mid-generation (during an
     open-breaker or transport-retry wait) must not rewrite the outbound
     request; it reaches the agent on its next iteration."""
+
+    async def test_plan_capture_drives_attempt_after_in_place_client_mutation(self):
+        from src.config.schema import OpenAICodexConfig
+        from src.discord.native_tools.agents_tasks import _capture_agent_generation_plan
+
+        calls = []
+
+        class _Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, *, reasoning_effort=None, model=None, **_kw):
+                calls.append((reasoning_effort, model))
+                return SimpleNamespace(
+                    text="ok", tool_calls=[], provenance_provider="codex"
+                )
+
+        client = _Client()
+        cfg = SimpleNamespace(
+            openai_codex=OpenAICodexConfig(
+                model="gpt-5.6-sol", agent_reasoning_effort=None
+            )
+        )
+        plan = _capture_agent_generation_plan(
+            lambda: cfg,
+            lambda _cfg: client,
+            lambda: ContextCompressionConfig(),
+            model_override=None,
+            effort_override=None,
+        )
+        client.reasoning_effort = "max"
+        t = _tools(llm_gateway=_fake_gateway(client))
+        await t._agent_generate(
+            plan["client"],
+            messages=[],
+            sys_prompt="s",
+            tool_defs=[],
+            agent_effort=plan["effort"],
+            resolved_model=plan["model"],
+        )
+        assert calls == [("xhigh", "gpt-5.6-sol")]
 
     async def test_attempts_carry_the_snapshot_across_retries(self):
         from src.llm.errors import LLMTransportError
@@ -1102,9 +1179,143 @@ class TestAgentEffortSnapshot:
         t = _tools(llm_gateway=_fake_gateway(client))
         resp = await t._agent_generate(
             client, messages=[], sys_prompt="s", tool_defs=[],
-            agent_effort=None, resolved_model="gpt-5.5",
+            agent_effort="xhigh", resolved_model="gpt-5.5",
         )
         # both attempts carried the PRE-CHANGE snapshot, never None and never
         # the mid-generation "max" (which would 400 against gpt-5.5)
         assert calls == ["xhigh", "xhigh"]
         assert resp.text == "ok"
+
+class TestFrozenGenerationIdentity:
+    """PR #273 round-1 blocker #1 pin: client/model/effort/budget come from
+    ONE capture and stay fixed across rescue retries of the same generation;
+    a live reload or client swap reaches only the NEXT generation."""
+
+    async def test_rescue_retry_reuses_the_first_attempt_plan(self):
+        from src.config.schema import OpenAICodexConfig
+
+        cfg = _cfg()
+        cfg.openai_codex = OpenAICodexConfig(
+            model="gpt-5.6-sol", agent_model=None, agent_reasoning_effort=None,
+        )
+        sol_client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gateway = SimpleNamespace(active_client=sol_client)
+        t = _tools(get_config=lambda: cfg, llm_gateway=gateway)
+        t._agent_manager.spawn = MagicMock(return_value="agent-1")
+        t._agent_generate = AsyncMock(
+            return_value=SimpleNamespace(
+                text="ok", tool_calls=[], stop_reason="end_turn",
+                provenance_provider="codex", provenance_model="gpt-5.6-sol",
+                provenance_reasoning_effort="xhigh",
+            )
+        )
+        await t._handle_spawn_agent(_message(), {"label": "x", "goal": "g"})
+        cb = t._agent_manager.spawn.call_args.kwargs["iteration_callback"]
+
+        generation_state: dict = {}
+        await cb([], "sys", [], generation_state=generation_state)
+        plan = generation_state["plan"]
+        assert plan["client"] is sol_client
+        assert plan["model"] == "gpt-5.6-sol"
+        assert plan["snapshot"].primary_chars == 1_277_400
+
+        # Mid-generation reload: live config and the active client both flip
+        # to 5.5. The rescue retry MUST still use the frozen sol identity.
+        cfg.openai_codex.model = "gpt-5.5"
+        gateway.active_client = SimpleNamespace(
+            model="gpt-5.5", reasoning_effort="xhigh"
+        )
+        await cb([], "sys", [], generation_state=generation_state)
+        first = t._agent_generate.await_args_list[0]
+        second = t._agent_generate.await_args_list[1]
+        assert second.args[0] is sol_client  # same client object
+        assert second.kwargs["resolved_model"] == first.kwargs["resolved_model"]
+        assert generation_state["plan"] is plan  # nothing re-resolved
+
+        # A FRESH generation state (the next iteration) sees the new world.
+        fresh: dict = {}
+        await cb([], "sys", [], generation_state=fresh)
+        assert fresh["plan"]["model"] == "gpt-5.5"
+        assert fresh["plan"]["snapshot"].primary_chars == 570_002
+
+class TestIntegrationFrozenProviderBreaker:
+    async def test_rescue_after_provider_switch_uses_frozen_provider_breaker(self):
+        registry = ModelBreakerRegistry()
+
+        class _Gateway:
+            def __init__(self):
+                self.live_provider = "codex"
+                self.active_client = SimpleNamespace(
+                    model="gpt-5.6-sol", reasoning_effort="xhigh"
+                )
+                self.recovery_policy = lambda: RecoveryPolicy(
+                    deadline_seconds=0.2,
+                    backoff_base=0.01,
+                    backoff_cap=0.02,
+                    retry_after_cap=0.05,
+                )
+
+            def capture_serving_identity(self, _config):
+                return SimpleNamespace(
+                    provider=self.live_provider,
+                    client=self.active_client,
+                    model=self.active_client.model,
+                    reasoning_effort=getattr(self.active_client, "reasoning_effort", None),
+                    is_codex=self.live_provider == "codex",
+                )
+
+            def capacity_breaker_for(self, model=None, *, provider=None):
+                return registry.for_model(provider or self.live_provider, model or "unknown")
+
+            def notify_generation_success(self, _response):
+                return None
+
+        calls = []
+
+        class _Client:
+            model = "gpt-5.6-sol"
+            reasoning_effort = "xhigh"
+
+            async def chat_with_tools(self, **_kwargs):
+                calls.append("called")
+                return SimpleNamespace(
+                    text="ok", tool_calls=[], provenance_provider="codex"
+                )
+
+        gateway = _Gateway()
+        gateway.active_client = _Client()
+        cfg = SimpleNamespace(
+            openai_codex=OpenAICodexConfig(
+                model="gpt-5.6-sol", agent_reasoning_effort=None
+            )
+        )
+        plan = _capture_agent_generation_plan(
+            lambda: cfg,
+            lambda root: _gateway_serving_for_config(gateway, root),
+            lambda: ContextCompressionConfig(),
+            model_override=None,
+            effort_override=None,
+        )
+        assert plan["provider"] == "codex"
+
+        # Open only the newly-live Ollama breaker, then switch providers. A
+        # rescue governed by live identity would now fail before reaching the
+        # frozen Codex client.
+        live = registry.for_model("ollama", "gpt-5.6-sol")
+        while live.snapshot()["state"] != "open":
+            live.record_generation_failure()
+        gateway.live_provider = "ollama"
+
+        tools = _tools(llm_gateway=gateway)
+        response = await tools._agent_generate(
+            plan["client"],
+            messages=[],
+            sys_prompt="s",
+            tool_defs=[],
+            agent_effort=plan["effort"],
+            resolved_model=plan["model"],
+            provider=plan["provider"],
+        )
+        assert response.text == "ok"
+        assert calls == ["called"]
+        assert registry.for_model("codex", "gpt-5.6-sol").snapshot()["state"] == "closed"

@@ -10,6 +10,7 @@ The bridge:
 - Tracks which agents belong to which loop
 - Collects agent results back into loop iteration context
 """
+
 from __future__ import annotations
 
 import time
@@ -43,6 +44,7 @@ LOOP_AGENT_WAIT_TIMEOUT = 300  # 5 minutes
 @dataclass
 class LoopAgentRecord:
     """Tracks an agent spawned from a loop iteration."""
+
     agent_id: str
     loop_id: str
     iteration: int
@@ -99,6 +101,9 @@ class LoopAgentBridge:
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
+        budget_snapshot_provider_factory=None,
+        generation_plan_provider_factory=None,
+        evidence_recorder=None,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
@@ -165,10 +170,7 @@ class LoopAgentBridge:
                 _self_id: dict = _self_id,
                 _shared_cb=tool_executor_callback,
             ) -> str:
-                if (
-                    tool_name == "spawn_agent"
-                    and _self_id["id"]
-                ):
+                if tool_name == "spawn_agent" and _self_id["id"]:
                     # Invocation ancestry is authoritative. A nested model may
                     # not choose a sibling/root as parent and escape this
                     # agent's depth, child, or lifetime-tree limits.
@@ -202,6 +204,20 @@ class LoopAgentBridge:
                 context_compression_enabled=context_compression_enabled,
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,
+                # Per-task like the iteration callback: each agent's budget
+                # follows ITS OWN effective model, so a mixed-model fleet
+                # compacts each member against the right window.
+                budget_snapshot_provider=(
+                    budget_snapshot_provider_factory(model_override)
+                    if budget_snapshot_provider_factory is not None
+                    else None
+                ),
+                generation_plan_provider=(
+                    generation_plan_provider_factory(model_override, effort_override)
+                    if generation_plan_provider_factory is not None
+                    else None
+                ),
+                evidence_recorder=evidence_recorder,
             )
 
             if not agent_id.startswith("Error"):
@@ -218,7 +234,10 @@ class LoopAgentBridge:
                 )
                 log.info(
                     "Loop %s iter %d spawned agent %s (%s)",
-                    loop_id, iteration, agent_id, label,
+                    loop_id,
+                    iteration,
+                    agent_id,
+                    label,
                 )
             results.append(agent_id)
 
@@ -243,7 +262,8 @@ class LoopAgentBridge:
             return {}
 
         results = await self._agent_manager.wait_for_agents(
-            agent_ids, timeout=timeout,
+            agent_ids,
+            timeout=timeout,
         )
 
         # Mark collected
@@ -284,12 +304,14 @@ class LoopAgentBridge:
                 continue
             agent_results = self._agent_manager.get_results(r.agent_id)
             if agent_results:
-                active.append({
-                    "agent_id": r.agent_id,
-                    "label": r.label,
-                    "iteration": r.iteration,
-                    "status": agent_results.get("status", "unknown"),
-                })
+                active.append(
+                    {
+                        "agent_id": r.agent_id,
+                        "label": r.label,
+                        "iteration": r.iteration,
+                        "status": agent_results.get("status", "unknown"),
+                    }
+                )
         return active
 
     @property

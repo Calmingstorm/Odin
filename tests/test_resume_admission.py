@@ -601,6 +601,29 @@ class TestStructuralPayloadValidation:
                 validate_payload(broken)
 
 
+class TestRecoveryCodecPreLeaseRejection:
+    async def test_malformed_generation_identity_rejects_before_lease(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
+        payload = json.loads(payload_text)
+        payload["fields"]["_rescue_passes"] = 1
+        payload["fields"]["_gen_identity"] = {
+            "provider": "codex", "model": "gpt-5.5", "effort": "low",
+            "ladder": [400_000, "oops"],
+            "budget": {"primary_chars": 500_000}, "attempts": "bad",
+        }
+        rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
+        result = await h.manager.try_explicit_resume(resume_msg(original))
+        assert result is not None
+        assert "could not be restored" in result[0]
+        (status,) = h.store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_REJECTED
+        (active,) = h.store._conn.execute(
+            "SELECT COUNT(*) FROM turns WHERE status='ACTIVE'"
+        ).fetchone()
+        assert active == 0
+
+
 class TestExplicitResumeOrdering:
     async def test_resume_trigger_skips_history_compaction(self, tmp_path):
         """Round-3 deviation #6 (PR #242): the explicit-resume check runs
@@ -1121,10 +1144,10 @@ class TestLegacyCheckpointCompatibility:
         assert result[0] == "resumed a legacy checkpoint"
         assert h.row()[0] == TurnStatus.TERMINAL_COMPLETED
 
-    async def test_new_writers_emit_v2(self, tmp_path):
+    async def test_new_writers_emit_current_version(self, tmp_path):
         h, _original = await suspend_turn(tmp_path)
         payload = json.loads(h.row()[1])
-        assert payload["codec_version"] == 2
+        assert payload["codec_version"] == 4
 
     async def test_v2_payload_missing_the_field_is_malformed(self, tmp_path):
         """Round-5 blocker #3: version scoping makes the two cases
@@ -1135,7 +1158,7 @@ class TestLegacyCheckpointCompatibility:
         make_breaker_probe_ready(h)
         (payload_text,) = h.store._conn.execute("SELECT payload FROM turns").fetchone()
         payload = json.loads(payload_text)
-        assert payload["codec_version"] == 2
+        assert payload["codec_version"] == 4
         del payload["fields"]["wait_judgment_pending"]
         rewrite_payload_with_valid_digest(h.store, json.dumps(payload, sort_keys=True))
         calls_before = len(h.fake.calls)

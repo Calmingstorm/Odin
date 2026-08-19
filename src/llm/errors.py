@@ -49,12 +49,22 @@ class LLMError(RuntimeError):
         model: str | None = None,
         retry_after: float | None = None,
         code: str | None = None,
+        server_input_tokens: int | None = None,
+        account_key: str | None = None,
     ) -> None:
         super().__init__(message)
         self.provider = provider
         self.model = model
         self.retry_after = retry_after
         self.code = code
+        # Provider-truth evidence (context-budget campaign phase 2): the
+        # server-authoritative input count from an authoritative failure
+        # event when present (never a client estimate), and the opaque
+        # installation-local key of the account that served the failing
+        # attempt (never a raw identifier). A rejection without
+        # authoritative usage is an occurrence, not a numeric bound.
+        self.server_input_tokens = server_input_tokens
+        self.account_key = account_key
 
 
 class LLMCapacityError(LLMError):

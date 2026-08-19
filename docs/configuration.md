@@ -69,10 +69,10 @@ tools:
 ```yaml
 openai_codex:
   enabled: true
-  model: gpt-5.5                 # ChatGPT subscription path
-  reasoning_effort: medium       # none | low | medium | high | xhigh | max
-  agent_reasoning_effort: null   # spawned agents; null = inherit, "auto" = per-spawn choice
-  agent_model: null              # spawned agents; null = inherit, "auto" = per-spawn choice
+  model: gpt-5.6-sol             # ChatGPT subscription path
+  reasoning_effort: xhigh        # none | low | medium | high | xhigh | max
+  agent_reasoning_effort: auto   # spawned agents; "auto" = per-spawn choice, null = inherit
+  agent_model: auto              # spawned agents; "auto" = per-spawn choice, null = inherit
   credentials_path: ./data/codex_auth.json
   request_timeout_seconds: 3600  # whole-request backstop; long reasoning turns stream past 10 min
   stream_stall_timeout_seconds: 180  # fail fast when no stream bytes arrive for this long
@@ -82,12 +82,23 @@ openai_codex:
     max_delay: 30.0
   context_compression:
     enabled: true
-    max_context_chars: 48000
+    max_context_chars: null      # null = auto (model-derived ceiling); a number only lowers it
     keep_recent_iterations: 3
+  # Per-model usable-input-budget overrides (tokens, 50192-2000000). Empty =
+  # built-in known-safe floors. Consumed by the context-budget resolver.
+  context_budget_overrides: {}
+  # Working-set policy: percent of the effective budget compaction targets
+  # (30-100). Never reduces budgets at or below 272K tokens.
+  context_utilization: 60
   auxiliary:                     # cheaper model for background jobs
-    enabled: false
-    model: gpt-5.6-luna
+    enabled: true
+    model: gpt-5.6-terra
 ```
+
+A persisted `max_context_chars: 750000` from the pre-campaign default is
+migrated to auto once (a provenance marker under `data/` records it, and one
+warning names the marker); saving the compression settings afterwards makes
+any explicit value — including 750000 — stick permanently.
 
 Reasoning effort `max` is served only by the gpt-5.6 family (sol/terra/luna);
 gpt-5.5 rejects it per-request. Odin refuses a known-incompatible model/effort

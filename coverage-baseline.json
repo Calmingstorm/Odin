@@ -65,11 +65,17 @@
   "percent": 100.0,
   "statements": 30
  },
+ "src/config/migrations.py": {
+  "covered": 294,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 294
+ },
  "src/config/schema.py": {
-  "covered": 628,
+  "covered": 706,
   "missing": 1,
-  "percent": 99.84,
-  "statements": 629
+  "percent": 99.86,
+  "statements": 707
  },
  "src/constants.py": {
   "covered": 17,
@@ -413,6 +419,12 @@
   "percent": 100.0,
   "statements": 12
  },
+ "src/llm/account_key.py": {
+  "covered": 115,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 115
+ },
  "src/llm/auxiliary.py": {
   "covered": 65,
   "missing": 0,
@@ -436,6 +448,12 @@
   "missing": 27,
   "percent": 93.28,
   "statements": 402
+ },
+ "src/llm/context_budget.py": {
+  "covered": 45,
+  "missing": 0,
+  "percent": 100.0,
+  "statements": 45
  },
  "src/llm/context_compressor.py": {
   "covered": 165,
@@ -852,10 +870,10 @@
   "statements": 45
  },
  "src/tools/autonomous_loop.py": {
-  "covered": 155,
-  "missing": 83,
-  "percent": 65.13,
-  "statements": 238
+  "covered": 197,
+  "missing": 72,
+  "percent": 73.23,
+  "statements": 269
  },
  "src/tools/branch_freshness.py": {
   "covered": 99,
@@ -1254,10 +1272,10 @@
   "statements": 281
  },
  "src/web/api/llm_admin.py": {
-  "covered": 510,
+  "covered": 625,
   "missing": 3,
-  "percent": 99.42,
-  "statements": 513
+  "percent": 99.52,
+  "statements": 628
  },
  "src/web/api/observability.py": {
   "covered": 216,
@@ -1312,5 +1330,11 @@
   "missing": 27,
   "percent": 88.98,
   "statements": 245
+ },
+ "src/llm/window_observer.py": {
+  "covered": 308,
+  "missing": 39,
+  "percent": 88.76,
+  "statements": 347
  }
 }

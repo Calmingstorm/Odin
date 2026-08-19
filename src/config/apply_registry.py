@@ -1007,9 +1007,29 @@ FIELDS: dict[str, FieldSpec] = {
     "openai_codex.context_compression.max_context_chars": FieldSpec(
         apply_mode="restart",
         unit="characters",
-        description="Context size at which compression begins.",
+        description="Explicit ceiling on the compaction target, in "
+        "characters. Null means auto: the per-model budget resolver derives "
+        "the target from the serving model's usable input budget. An "
+        "explicit value only lowers the derived target, never raises it.",
         restart_reason="The compressor holds the configuration object it was "
         "built with, which a save replaces rather than updates.",
+    ),
+    "openai_codex.context_budget_overrides": FieldSpec(
+        apply_mode="live_read",
+        unit="tokens",
+        description="Per-model usable-input-budget overrides, keyed by "
+        "canonical model. Read at each logical generation's budget "
+        "resolution: chat turns, agent iterations, and rescue ladders pick "
+        "up a save on their next generation; an in-flight generation keeps "
+        "its snapshot.",
+    ),
+    "openai_codex.context_utilization": FieldSpec(
+        apply_mode="live_read",
+        unit="percent",
+        description="Working-set share of the effective budget that "
+        "compaction targets. Read at each logical generation's budget "
+        "resolution; never reduces budgets at or below 272K tokens, so a "
+        "change may have no effect on smaller models by design.",
     ),
     "openai_codex.context_compression.keep_recent_iterations": FieldSpec(
         apply_mode="restart",

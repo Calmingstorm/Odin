@@ -144,7 +144,7 @@ class TestLlmStatus:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["configured"] is True
             assert "max_tokens" not in body["codex"]
-            assert body["codex"]["reasoning_effort"] == "medium"
+            assert body["codex"]["reasoning_effort"] == "xhigh"
             assert body["codex"]["active_reasoning_effort"] is None  # object() has no attr
             assert body["ollama"]["configured"] is False
             assert body["active_model"] == "gpt-5.5"
@@ -156,8 +156,9 @@ class TestLlmStatus:
         bot.llm_gateway.ollama_client = None
         bot.llm_gateway.kimi_client = None
         bot.llm_gateway.active_client = None
+        bot.config.openai_codex.agent_reasoning_effort = None  # explicit inherit (default: "auto")
         async with TestClient(TestServer(app)) as c:
-            # inherit (default): effective mirrors the live client's effort
+            # inherit: effective mirrors the live client's effort
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["agent_reasoning_effort"] is None
             assert body["codex"]["effective_agent_reasoning_effort"] == "high"
@@ -231,6 +232,7 @@ class TestLlmStatus:
         bot.llm_gateway.ollama_client = None
         bot.llm_gateway.kimi_client = None
         bot.llm_gateway.active_client = None
+        bot.config.openai_codex.agent_model = None  # explicit inherit (default is "auto")
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/llm/status")).json()
             assert body["codex"]["agent_model"] is None
@@ -477,7 +479,7 @@ class TestProviderConfig:
                 await c.put("/api/llm/codex/config", json={"reasoning_effort": "minimal"})
             ).status == 400
         # nothing mutated, nothing reloaded
-        assert bot.config.openai_codex.reasoning_effort == "medium"
+        assert bot.config.openai_codex.reasoning_effort == "xhigh"
         assert bot.config.openai_codex.model != "changed-model"
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
@@ -687,7 +689,7 @@ class TestProviderConfig:
             )
             assert r.status == 400
             assert "agent_reasoning_effort" in (await r.json())["error"]
-        assert bot.config.openai_codex.agent_reasoning_effort is None
+        assert bot.config.openai_codex.agent_reasoning_effort == "auto"
         assert bot.config.openai_codex.model != "changed-model"
         bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
@@ -1330,7 +1332,7 @@ class TestCodexMaxEffortPairValidation:
             assert "gpt-5.5" in data["error"] and "'max'" in data["error"]
             assert "max" not in data["allowed"] and "xhigh" in data["allowed"]
         # nothing mutated, nothing reloaded
-        assert bot.config.openai_codex.reasoning_effort == "medium"
+        assert bot.config.openai_codex.reasoning_effort == "xhigh"
         gw.reload_codex_inner.assert_not_awaited()
 
     @pytest.mark.asyncio
@@ -1355,11 +1357,12 @@ class TestCodexMaxEffortPairValidation:
         _gw(bot)
         bot.config.openai_codex.model = "gpt-5.6-sol"
         bot.config.openai_codex.reasoning_effort = "max"
+        bot.config.openai_codex.agent_reasoning_effort = None  # explicit inherit (default: "auto")
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"agent_model": "gpt-5.5"})
             assert r.status == 400
             assert "agent settings" in (await r.json())["error"]
-        assert bot.config.openai_codex.agent_model is None
+        assert bot.config.openai_codex.agent_model == "auto"
 
     @pytest.mark.asyncio
     async def test_agent_effort_direction_rejected(self):
@@ -1369,7 +1372,7 @@ class TestCodexMaxEffortPairValidation:
         async with TestClient(TestServer(app)) as c:
             r = await c.put("/api/llm/codex/config", json={"agent_reasoning_effort": "max"})
             assert r.status == 400
-        assert bot.config.openai_codex.agent_reasoning_effort is None
+        assert bot.config.openai_codex.agent_reasoning_effort == "auto"
 
     @pytest.mark.asyncio
     async def test_combined_valid_switch_in_one_put_accepted(self):
@@ -1768,6 +1771,10 @@ class TestCodexAdvancedKnobs:
                         "max_context_chars": 500000,
                         "keep_recent_iterations": 12,
                     },
+                    "context_budget_overrides": {
+                        "codex-auto-review": 800000,
+                    },
+                    "context_utilization": 72,
                 })
         assert r.status == 200
         cfg = bot.config.openai_codex
@@ -1778,12 +1785,38 @@ class TestCodexAdvancedKnobs:
         assert cfg.context_compression.max_context_chars == 500000
         assert cfg.stream_stall_timeout_seconds == 240
         assert cfg.context_compression.keep_recent_iterations == 12
+        assert cfg.context_budget_overrides == {"gpt-5.6-luna": 800000}
+        assert cfg.context_utilization == 72
         persisted = {change[0] for change in persist.call_args[0][0]}
         assert ("openai_codex", "request_timeout_seconds") in persisted
         assert ("openai_codex", "retry", "max_retries") in persisted
         assert ("openai_codex", "connection_pool", "max_connections") in persisted
+        assert ("openai_codex", "context_budget_overrides") in persisted
+        assert ("openai_codex", "context_utilization") in persisted
         # Transport/retry reach the live client through the reload path.
         bot.llm_gateway.reload_codex_inner.assert_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        ("body", "expected_overrides", "expected_utilization"),
+        [
+            ({"context_budget_overrides": {"gpt-5.5": 300_000}}, {"gpt-5.5": 300_000}, 60),
+            ({"context_utilization": 75}, {}, 75),
+        ],
+    )
+    async def test_each_context_policy_leaf_saves_independently(
+        self, body, expected_overrides, expected_utilization
+    ):
+        app, bot = self._harness()
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(return_value=(None, False)),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                response = await c.put("/api/llm/codex/config", json=body)
+        assert response.status == 200
+        assert bot.config.openai_codex.context_budget_overrides == expected_overrides
+        assert bot.config.openai_codex.context_utilization == expected_utilization
 
     @pytest.mark.asyncio
     async def test_pool_and_compression_alone_do_not_reload(self):
@@ -1814,16 +1847,27 @@ class TestCodexAdvancedKnobs:
         ({"retry": {"bogus_knob": 1}}, "unknown retry field"),
         ({"request_timeout_seconds": True}, "must be an integer"),
         ({"stream_stall_timeout_seconds": 90.5}, "must be an integer"),
+        ({"context_utilization": 29}, "between 30 and 100"),
+        ({"context_budget_overrides": {"gpt-5.5": 50_191}}, "between 50192 and 2000000"),
+        (
+            {"context_budget_overrides": {"gpt-5.6-luna": 800000, "codex-auto-review": 700000}},
+            "duplicates",
+        ),
     ])
     async def test_bounds_are_enforced_before_any_mutation(self, body, fragment):
         app, bot = self._harness()
-        before = bot.config.openai_codex.request_timeout_seconds
-        async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/llm/codex/config", json=body)
-            payload = await r.json()
+        before = bot.config.openai_codex.model_dump()
+        with patch(
+            "src.web.api.llm_admin.persist_config_paths_locked",
+            new=AsyncMock(side_effect=AssertionError("invalid policy reached persistence")),
+        ):
+            async with TestClient(TestServer(app)) as c:
+                r = await c.put("/api/llm/codex/config", json=body)
+                payload = await r.json()
         assert r.status == 400
         assert fragment in payload["error"]
-        assert bot.config.openai_codex.request_timeout_seconds == before
+        assert bot.config.openai_codex.model_dump() == before
+        bot.llm_gateway.reload_codex_inner.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_top_level_timeouts_use_schema_lax_integer_coercion(self):
@@ -1945,6 +1989,8 @@ class TestCodexAdvancedKnobs:
         assert codex["context_compression"] != boot_compression
         assert codex["effective_context_compression"] == boot_compression
         assert codex["context_compression_pending_restart"] is True
+        assert codex["context_budget_overrides"] == {}
+        assert codex["context_utilization"] == 60
         assert body["kimi"]["timeout"] == 123
 
     @pytest.mark.asyncio

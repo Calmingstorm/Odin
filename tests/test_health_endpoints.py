@@ -11,10 +11,11 @@ Covers:
 
 from __future__ import annotations
 
+from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.config.schema import WebhookConfig
-from src.health.server import HealthServer
+from src.config.schema import ApiTokenIdentity, WebConfig, WebhookConfig
+from src.health.server import HealthServer, _is_admin_only_path
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -212,3 +213,36 @@ class TestComponentRegistration:
         results = server._check_components()
         assert results["good"]["healthy"] is True
         assert results["bad"]["healthy"] is False
+
+
+class TestContextWindowsAdminPolicy:
+    def test_context_surface_is_centrally_admin_only(self):
+        assert _is_admin_only_path("/api/context/windows")
+        assert _is_admin_only_path("/api/context/windows/clear")
+
+    async def test_get_and_post_reject_user_and_guest_but_allow_admin(self):
+        web_config = WebConfig(
+            api_tokens=[
+                ApiTokenIdentity(token="admin-token", user_id="a", tier="admin"),
+                ApiTokenIdentity(token="user-token", user_id="u", tier="user"),
+                ApiTokenIdentity(token="guest-token", user_id="g", tier="guest"),
+            ]
+        )
+        server = HealthServer(port=0, webhook_config=WebhookConfig(), web_config=web_config)
+        server._app.router.add_get(
+            "/api/context/windows", lambda _r: web.json_response({"ok": True})
+        )
+        server._app.router.add_post(
+            "/api/context/windows/clear",
+            lambda _r: web.json_response({"ok": True}),
+        )
+        async with TestClient(TestServer(server._app)) as client:
+            for token in ("user-token", "guest-token"):
+                headers = {"Authorization": f"Bearer {token}"}
+                assert (await client.get("/api/context/windows", headers=headers)).status == 403
+                assert (
+                    await client.post("/api/context/windows/clear", headers=headers)
+                ).status == 403
+            headers = {"Authorization": "Bearer admin-token"}
+            assert (await client.get("/api/context/windows", headers=headers)).status == 200
+            assert (await client.post("/api/context/windows/clear", headers=headers)).status == 200

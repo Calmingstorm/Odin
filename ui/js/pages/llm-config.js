@@ -171,6 +171,12 @@ export default {
               </select>
               </label>
             </div>
+            <div class="llm-context-summary">
+              <span>Effective context</span>
+              <strong>{{ formatCount(activeContextBudget?.effective?.effective_budget) }} <small>tokens</small></strong>
+              <span class="llm-budget-provenance" :class="provenanceClass(activeContextBudget?.provenance)">{{ activeContextBudget?.provenance || 'unavailable' }}</span>
+              <small v-if="activeContextBudget?.clamp_expires_at">Expires {{ formatExpiry(activeContextBudget.clamp_expires_at) }}</small>
+            </div>
           </div>
           <p class="text-xs text-gray-500 mt-3">
             The Auxiliary Model runs the background jobs (compaction, reflection, consolidation,
@@ -185,7 +191,7 @@ export default {
           <details class="llm-advanced" :open="advancedOpen.codex" @toggle="advancedOpen.codex = $event.target.open">
             <summary>
               <span>Advanced Settings</span>
-              <small>Transport, retries, connection pool, and context compression</small>
+              <small>Transport, retries, and model-aware context policy</small>
             </summary>
             <div class="llm-advanced-body">
               <section class="llm-advanced-group">
@@ -228,7 +234,7 @@ export default {
               <section class="llm-advanced-group">
                 <header><strong>Context compression</strong><span>Long-conversation compaction</span></header>
                 <p v-if="llmStatus?.codex?.context_compression_pending_restart === true" class="llm-advanced-state pending" role="status">
-                  Saved values need a restart. This process still uses compression {{ llmStatus.codex.effective_context_compression?.enabled ? 'on' : 'off' }}, {{ Number(llmStatus.codex.effective_context_compression?.max_context_chars || 0).toLocaleString() }} characters, and {{ llmStatus.codex.effective_context_compression?.keep_recent_iterations }} recent iterations.
+                  Saved values need a restart. This process still uses compression {{ llmStatus.codex.effective_context_compression?.enabled ? 'on' : 'off' }}, {{ formatContextCeiling(llmStatus.codex.effective_context_compression?.max_context_chars) }}, and {{ llmStatus.codex.effective_context_compression?.keep_recent_iterations }} recent iterations.
                 </p>
                 <p v-else-if="llmStatus?.codex?.context_compression_pending_restart === false" class="llm-advanced-state">
                   Saved values match this process. Future changes take effect after restart.
@@ -244,8 +250,90 @@ export default {
                   <input v-model.number="codexForm.context_compression.keep_recent_iterations" type="number" min="1" class="hm-input" />
                 </label>
               </section>
+              <section class="llm-context-budget-panel">
+                <div class="llm-context-budget-heading">
+                  <div>
+                    <strong>Context budgets</strong>
+                    <span>Capability, working-set policy, and temporary evidence</span>
+                  </div>
+                  <label class="llm-utilization-field">
+                    <span>Context utilization</span>
+                    <span class="llm-utilization-input"><input :value="codexForm.context_utilization" @input="setContextUtilization($event)" type="number" min="30" max="100" class="hm-input" /><small>%</small></span>
+                  </label>
+                </div>
+                <p class="llm-context-budget-copy">
+                  Overrides describe usable input capability. Utilization is the working-set policy applied to larger models; budgets at or below 272,000 tokens keep legacy behavior. Learned clamps are temporary evidence from successful overflow recovery, not operator policy.
+                </p>
+                <div v-if="contextWindowsLoading && !contextWindows" class="llm-context-budget-loading" role="status">
+                  <span class="spinner" aria-hidden="true"></span><span>Loading context budgets…</span>
+                </div>
+                <div v-else-if="contextWindowsError" class="llm-context-budget-error" role="alert">
+                  <span>{{ contextWindowsError }}</span>
+                  <button type="button" class="btn btn-ghost text-xs" @click="fetchContextWindows">Retry</button>
+                </div>
+                <template v-else>
+                  <div class="llm-context-budget-table-wrap">
+                    <table class="hm-table llm-context-budget-table">
+                      <thead>
+                        <tr>
+                          <th>Canonical model</th>
+                          <th>Built-in floor</th>
+                          <th>Configured override</th>
+                          <th>Effective budget</th>
+                          <th>Configured target</th>
+                          <th>Runtime target</th>
+                          <th>Provenance</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        <tr v-for="row in contextBudgetRows" :key="row.model" :class="{ 'has-clamp': row.provenance === 'temporary learned clamp' }">
+                          <td data-label="Canonical model"><code>{{ row.model }}</code></td>
+                          <td data-label="Built-in floor"><span class="llm-budget-value">{{ formatCount(row.floor) }}</span><small>tokens</small></td>
+                          <td data-label="Configured override">
+                            <div class="llm-budget-override">
+                              <input :value="codexForm.context_budget_overrides[row.model] ?? ''" @input="setContextOverride(row.model, $event)"
+                                     type="number" min="50192" max="2000000" step="1"
+                                     :placeholder="'No override'" class="hm-input"
+                                     :aria-label="'Configured context budget override for ' + row.model" />
+                              <button v-if="row.override != null || codexForm.context_budget_overrides[row.model] != null" type="button"
+                                      class="llm-budget-reset" @click="resetContextOverride(row.model)" :aria-label="'Reset ' + row.model + ' to its built-in budget'">Reset</button>
+                            </div>
+                            <small v-if="overrideAboveFloor(row)" class="llm-budget-warning">Above the known-safe floor</small>
+                          </td>
+                          <td data-label="Effective budget"><span class="llm-budget-value llm-budget-effective">{{ formatCount(row.effectiveBudget) }}</span><small>tokens</small></td>
+                          <td data-label="Configured target"><span class="llm-budget-value">{{ formatCount(row.configuredPrimaryChars) }}</span><small>characters · saved policy</small></td>
+                          <td data-label="Runtime target">
+                            <span class="llm-budget-value llm-budget-effective">{{ formatCount(row.primaryChars) }}</span><small>characters · active process</small>
+                            <span v-if="contextWindows.max_context_chars_pending_restart === true && row.configuredPrimaryChars !== row.primaryChars" class="llm-budget-pending">Restart pending</span>
+                          </td>
+                          <td data-label="Provenance">
+                            <span class="llm-budget-provenance" :class="provenanceClass(row.provenance)">{{ row.provenance }}</span>
+                            <small v-if="row.clampExpiresAt">Expires {{ formatExpiry(row.clampExpiresAt) }}</small>
+                          </td>
+                        </tr>
+                      </tbody>
+                    </table>
+                  </div>
+                  <div v-if="activeClampRows.length" class="llm-clamp-list">
+                    <div class="llm-clamp-list-heading">
+                      <div><strong>Temporary learned clamps</strong><span>Account-scoped recovery evidence. Clearing never changes the configured override.</span></div>
+                      <span class="badge badge-warning">{{ activeClampRows.length }} active</span>
+                    </div>
+                    <div class="llm-clamp-grid">
+                      <article v-for="clamp in activeClampRows" :key="clamp.account_key + ':' + clamp.model" class="llm-clamp-card">
+                        <div><code>{{ clamp.model }}</code><span>{{ formatCount(clamp.value) }} tokens</span></div>
+                        <p>Account {{ shortAccountKey(clamp.account_key) }} · expires {{ formatExpiry(clamp.expires_at) }}</p>
+                        <button type="button" class="btn btn-ghost text-xs" @click="clearContextClamp(clamp)"
+                                :disabled="clearingClamp === clamp.account_key + ':' + clamp.model">
+                          {{ clearingClamp === clamp.account_key + ':' + clamp.model ? 'Clearing…' : 'Clear clamp' }}
+                        </button>
+                      </article>
+                    </div>
+                  </div>
+                </template>
+              </section>
               <div class="llm-advanced-footer">
-                <p>Transport and retry changes apply to the primary client now. An existing auxiliary client keeps the transport and retry settings captured when it was built until it is rebuilt. The primary client’s connection pool and context compression are saved for the next restart.</p>
+                <p>Transport and retry changes apply to the primary client now. Context budgets and utilization apply to the next logical generation. An existing auxiliary client keeps the transport and retry settings captured when it was built until it is rebuilt. Connection-pool and context-compression changes are saved for the next restart.</p>
                 <button type="button" class="btn btn-primary text-xs" @click="saveCodexAdvancedConfigNow" :disabled="savingCodex">{{ savingCodex ? 'Saving…' : 'Save advanced settings' }}</button>
               </div>
             </div>
@@ -507,11 +595,12 @@ export default {
     // (the server normalizes ''/null to inherit; distinct from the literal
     // effort "none")
     const codexForm = ref({
-      enabled: false, model: 'gpt-5.5', reasoning_effort: 'medium', agent_reasoning_effort: '', agent_model: '',
+      enabled: false, model: 'gpt-5.6-sol', reasoning_effort: 'xhigh', agent_reasoning_effort: 'auto', agent_model: 'auto',
       request_timeout_seconds: 3600, stream_stall_timeout_seconds: 180,
       retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
       connection_pool: { max_connections: 10, keepalive_timeout: 30 },
-      context_compression: { enabled: true, max_context_chars: 750000, keep_recent_iterations: 30 },
+      context_compression: { enabled: true, max_context_chars: null, keep_recent_iterations: 30 },
+      context_budget_overrides: {}, context_utilization: 60,
     });
 
     // Codex model catalog — ONE ordered list renders the Model, Agent Model,
@@ -586,6 +675,24 @@ export default {
     }
     const savingAux = ref(false);
     const advancedOpen = ref({ codex: false, ollama: false, kimi: false });
+    const contextWindows = ref(null);
+    const contextWindowsLoading = ref(false);
+    const contextWindowsError = ref('');
+    const clearingClamp = ref(null);
+    const contextPolicyDirty = ref(false);
+    let contextWindowsRequestSeq = 0;
+    const contextBudgetRows = computed(() => Object.entries(contextWindows.value?.models || {}).map(([model, details]) => ({
+      model,
+      floor: details.floor,
+      override: details.override,
+      effectiveBudget: details.effective?.effective_budget,
+      configuredPrimaryChars: details.configured?.primary_chars,
+      primaryChars: details.effective?.primary_chars,
+      provenance: details.provenance,
+      clampExpiresAt: details.clamp_expires_at,
+    })));
+    const activeClampRows = computed(() => contextWindows.value?.clamps || []);
+    const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
     const ollamaForm = ref({ enabled: false, base_url: '', model: '', api_key: '', max_tokens: 4096, timeout: 300 });
     const kimiForm = ref({ enabled: false, api_key: '', model: '', max_tokens: 4096 , timeout: 300 });
     const ollamaKeyDirty = ref(false);
@@ -635,10 +742,60 @@ export default {
       return (bytes / (1024 * 1024)).toFixed(0) + ' MB';
     }
 
+    function formatCount(value) {
+      return Number.isFinite(Number(value)) ? Number(value).toLocaleString() : '—';
+    }
+
+    function formatContextCeiling(value) {
+      return value == null
+        ? 'automatic (model-derived)'
+        : Number(value).toLocaleString() + ' characters';
+    }
+
+    function formatExpiry(value) {
+      const date = new Date(value);
+      return Number.isNaN(date.getTime()) ? 'unknown' : date.toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' });
+    }
+
+    function shortAccountKey(value) {
+      return typeof value === 'string' && value.length > 12 ? value.slice(0, 8) + '…' + value.slice(-4) : value;
+    }
+
+    function provenanceClass(value) {
+      if (value === 'temporary learned clamp') return 'is-clamp';
+      if (value === 'override') return 'is-override';
+      return 'is-built-in';
+    }
+
+    function overrideAboveFloor(row) {
+      const value = codexForm.value.context_budget_overrides[row.model];
+      return row.floor != null && Number.isFinite(Number(value)) && Number(value) > row.floor;
+    }
+
+    function setContextOverride(model, event) {
+      const next = { ...codexForm.value.context_budget_overrides };
+      if (event.target.value === '') delete next[model];
+      else next[model] = Number(event.target.value);
+      codexForm.value.context_budget_overrides = next;
+      contextPolicyDirty.value = true;
+    }
+
+    function setContextUtilization(event) {
+      codexForm.value.context_utilization = event.target.value === '' ? '' : Number(event.target.value);
+      contextPolicyDirty.value = true;
+    }
+
+    function resetContextOverride(model) {
+      const next = { ...codexForm.value.context_budget_overrides };
+      delete next[model];
+      codexForm.value.context_budget_overrides = next;
+      contextPolicyDirty.value = true;
+    }
+
     // --- Fetch all ---
     async function fetchAll() {
       loading.value = true;
-      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchKimiStatus(), fetchCodexStatus()]);
+      await Promise.all([fetchLLMStatus(), fetchOllamaStatus(), fetchKimiStatus(), fetchCodexStatus(), fetchContextWindows()]);
       loading.value = false;
     }
 
@@ -652,7 +809,7 @@ export default {
         if (data.codex && !saveCodexConfigDebounced.pending()) {
           if (!preserveBasic) {
             codexForm.value.enabled = data.codex.enabled;
-            codexForm.value.model = data.codex.model || 'gpt-5.5';
+            codexForm.value.model = data.codex.model || 'gpt-5.6-sol';
             codexForm.value.reasoning_effort = data.codex.reasoning_effort || 'medium';
             // null (inherit) maps to the '' select option
             codexForm.value.agent_reasoning_effort = data.codex.agent_reasoning_effort || '';
@@ -664,6 +821,10 @@ export default {
             codexForm.value.retry = { ...codexForm.value.retry, ...(data.codex.retry || {}) };
             codexForm.value.connection_pool = { ...codexForm.value.connection_pool, ...(data.codex.connection_pool || {}) };
             codexForm.value.context_compression = { ...codexForm.value.context_compression, ...(data.codex.context_compression || {}) };
+            if (!contextPolicyDirty.value && !savingCodex.value) {
+              codexForm.value.context_budget_overrides = { ...(data.codex.context_budget_overrides || {}) };
+              codexForm.value.context_utilization = data.codex.context_utilization ?? codexForm.value.context_utilization;
+            }
           }
         }
         if (data.ollama && !saveOllamaConfigDebounced.pending()) {
@@ -693,6 +854,32 @@ export default {
         }
       } catch (e) {
         llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false }, kimi: { configured: false } };
+      }
+    }
+
+    async function fetchContextWindows() {
+      const requestSeq = ++contextWindowsRequestSeq;
+      contextWindowsLoading.value = true;
+      contextWindowsError.value = '';
+      try {
+        const data = await api.get('/api/context/windows');
+        if (requestSeq !== contextWindowsRequestSeq) return;
+        contextWindows.value = data;
+        // GET is the derivation authority. Hydrate the editable Advanced
+        // fields only when no provider save is in flight; rows always render
+        // server truth and never recompute targets in the browser.
+        if (!savingCodex.value && !contextPolicyDirty.value) {
+          codexForm.value.context_budget_overrides = Object.fromEntries(
+            Object.entries(data.models || {}).filter(([, details]) => details.override != null).map(([model, details]) => [model, details.override])
+          );
+          codexForm.value.context_utilization = data.utilization ?? codexForm.value.context_utilization;
+        }
+      } catch (e) {
+        if (requestSeq === contextWindowsRequestSeq) {
+          contextWindowsError.value = e.message || 'Failed to load context budgets';
+        }
+      } finally {
+        if (requestSeq === contextWindowsRequestSeq) contextWindowsLoading.value = false;
       }
     }
 
@@ -848,12 +1035,20 @@ export default {
       const submitted = codexAdvancedPayload(codexForm.value);
       try {
         await api.put('/api/llm/codex/config', submitted);
+        const policyUnchanged = JSON.stringify({
+          context_budget_overrides: codexForm.value.context_budget_overrides,
+          context_utilization: codexForm.value.context_utilization,
+        }) === JSON.stringify({
+          context_budget_overrides: submitted.context_budget_overrides,
+          context_utilization: submitted.context_utilization,
+        });
+        if (policyUnchanged) contextPolicyDirty.value = false;
         showToast('Codex advanced settings saved');
-        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCodexStatus()]);
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: true }), fetchCodexStatus(), fetchContextWindows()]);
       } catch (e) {
         showToast(e.message || 'Failed', 'error');
         const changedWhileSaving = JSON.stringify(codexAdvancedPayload(codexForm.value)) !== JSON.stringify(submitted);
-        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: changedWhileSaving }), fetchCodexStatus()]);
+        await Promise.all([fetchLLMStatus({ preserveBasic: true, preserveAdvanced: changedWhileSaving }), fetchCodexStatus(), fetchContextWindows()]);
       }
       finally { savingCodex.value = false; }
     }
@@ -944,6 +1139,21 @@ export default {
     const saveCodexAdvancedConfigNow = () => saveCodexAdvancedConfig();
     const saveOllamaAdvancedConfigNow = () => saveOllamaAdvancedConfig();
     const saveKimiAdvancedConfigNow = () => saveKimiAdvancedConfig();
+
+    async function clearContextClamp(clamp) {
+      const key = clamp.account_key + ':' + clamp.model;
+      clearingClamp.value = key;
+      try {
+        const result = await api.post('/api/context/windows/clear', { account_key: clamp.account_key, model: clamp.model });
+        showToast(result.cleared ? 'Temporary clamp cleared' : 'Clamp was already inactive');
+        await fetchContextWindows();
+      } catch (e) {
+        showToast(e.message || 'Failed to clear clamp', 'error');
+        await fetchContextWindows();
+      } finally {
+        clearingClamp.value = null;
+      }
+    }
 
     // --- Codex account management ---
     async function activateAccount(index) {
@@ -1048,6 +1258,7 @@ export default {
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
+      contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
       fetchAll, switchProvider, reloadOllama, setOllamaModel,
       reloadKimi, setKimiModel, probeOllamaModels,
@@ -1058,6 +1269,8 @@ export default {
       saveCodexAdvancedConfigNow, saveOllamaAdvancedConfigNow, saveKimiAdvancedConfigNow,
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
+      fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
+      formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass,
     };
   },
 };

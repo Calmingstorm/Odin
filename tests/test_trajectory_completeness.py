@@ -317,7 +317,9 @@ class _LoopIterClient:
         _registry = ModelBreakerRegistry()
         self._fake_gateway = SimpleNamespace(
             active_client=self.llm_client,
-            capacity_breaker_for=lambda model=None: _registry.for_model("codex", "m"),
+            capacity_breaker_for=lambda model=None, provider=None: _registry.for_model(
+                "codex", "m"
+            ),
             recovery_policy=RecoveryPolicy,
             notify_generation_success=lambda provider: None,
         )
@@ -468,7 +470,7 @@ class TestLoopManagerStamp:
 
         chan = _Chan()
 
-        async def callback(prompt, channel, prev_context):
+        async def callback(prompt, channel, prev_context, cancel_event):
             stamps.append(dict(get_turn() or {}))
             mgr._loops[holder["lid"]]._cancel_event.set()
             return "ok"
@@ -524,5 +526,7 @@ class TestAgentSaverWiring:
         # P5c: body moved to native_tools/agents_tasks.py (host-based)
         from src.discord.native_tools.agents_tasks import AgentTaskTools
 
-        src = inspect.getsource(AgentTaskTools._handle_spawn_agent)
-        assert "trajectory_saver=self._agent_trajectory_saver" in src
+        assert (
+            "trajectory_saver=self._agent_trajectory_saver"
+            in inspect.getsource(AgentTaskTools._handle_spawn_agent)
+        )

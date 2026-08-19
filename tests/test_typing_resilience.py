@@ -238,7 +238,13 @@ def _make_runner(recorder_save=None):
         loop_manager=SimpleNamespace(),
         stuck_loop_tracker_cls=object,
     )
-    return ToolLoopRunner(deps), saved, cleared
+    runner = ToolLoopRunner(deps)
+    from src.discord.llm_gateway import LLMServingIdentity
+
+    runner._llm_gateway.capture_serving_identity = lambda config=None: LLMServingIdentity(
+        provider="codex", client=None, model=None, reasoning_effort=None
+    )
+    return runner, saved, cleared
 
 
 def _stub_state(channel=None):
@@ -258,6 +264,12 @@ def _stub_state(channel=None):
         message=SimpleNamespace(channel=channel or FakeChannel(), content="hi"),
         messages=[],
         tools_used_in_loop=[],
+        _boundary_request_start=0,
+        _boundary_elided_replay=0,
+        _boundary_envelope_len=0,
+        _char_latch=None,
+        _rescue_passes=0,
+        _gen_identity=None,
         system_prompt="sys",
         tools=[],
         user_id="u1",
@@ -270,7 +282,7 @@ def _wire(runner, st, call_llm):
         return st
 
     runner._prepare_chat_turn = _prep
-    runner._maybe_compress = lambda st: None
+    runner._maybe_compress = lambda st, request_client=None, request_config=None: True
     runner._call_llm = call_llm
 
 
@@ -279,7 +291,7 @@ class TestRunEscapeGuard:
         runner, saved, cleared = _make_runner()
         st = _stub_state()
 
-        async def _boom(_st):
+        async def _boom(_st, _request_client=None, **_kwargs):
             raise RuntimeError(CF_HTML)
 
         _wire(runner, st, _boom)
@@ -296,7 +308,7 @@ class TestRunEscapeGuard:
         runner, saved, cleared = _make_runner()
         st = _stub_state()
 
-        async def _cancel(_st):
+        async def _cancel(_st, _request_client=None, **_kwargs):
             raise asyncio.CancelledError()
 
         _wire(runner, st, _cancel)
@@ -312,7 +324,7 @@ class TestRunEscapeGuard:
         runner, _saved, cleared = _make_runner(recorder_save=_bad_save)
         st = _stub_state()
 
-        async def _boom(_st):
+        async def _boom(_st, _request_client=None, **_kwargs):
             raise RuntimeError("original failure")
 
         _wire(runner, st, _boom)
@@ -327,7 +339,7 @@ class TestRunEscapeGuard:
         st = _stub_state()
         done = ("all good", False, False, [], False)
 
-        async def _done(_st):
+        async def _done(_st, _request_client=None, **_kwargs):
             return ("done", done)
 
         _wire(runner, st, _done)
@@ -374,7 +386,7 @@ class TestCallSitesSurviveTypingFailure:
         registry = ModelBreakerRegistry()
         runner._llm_gateway = SimpleNamespace(
             call_with_tools=_cwt,
-            capacity_breaker_for=lambda model=None: registry.for_model("codex", "m"),
+            capacity_breaker_for=lambda model=None, provider=None: registry.for_model("codex", "m"),
             recovery_policy=RecoveryPolicy,
             # consumed by the pre-admission effort preflight (no-op for None)
             active_client=None,

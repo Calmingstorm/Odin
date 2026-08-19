@@ -476,7 +476,7 @@ class TestRunAgentTrajectory:
         )
         call_count = 0
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -523,7 +523,7 @@ class TestRunAgentTrajectory:
         )
         call_count = 0
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -554,7 +554,7 @@ class TestRunAgentTrajectory:
             channel_id="ch1", requester_id="u1", requester_name="D",
         )
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             raise RuntimeError("LLM down")
 
         await _run_agent(
@@ -711,7 +711,7 @@ class TestRunAgentTrajectory:
         )
         call_count = 0
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -739,7 +739,7 @@ class TestRunAgentTrajectory:
         )
         call_count = 0
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
@@ -1079,7 +1079,7 @@ class TestEdgeCases:
             channel_id="ch1", requester_id="u1", requester_name="Max",
         )
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             return {
                 "text": "more work",
                 "tool_calls": [{"name": "run_command", "input": {"cmd": "echo hi"}}],
@@ -1108,7 +1108,7 @@ class TestEdgeCases:
             channel_id="ch1", requester_id="u1", requester_name="Cancel",
         )
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             raise asyncio.CancelledError()
 
         await _run_agent(
@@ -1130,7 +1130,7 @@ class TestEdgeCases:
         )
         call_count = 0
 
-        async def iter_cb(messages, prompt, tools):
+        async def iter_cb(messages, prompt, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:

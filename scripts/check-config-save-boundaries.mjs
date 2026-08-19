@@ -34,6 +34,8 @@ const llmState = {
     retry: { max_retries: 3, base_delay: 1, max_delay: 30 },
     connection_pool: { max_connections: 10, keepalive_timeout: 30 },
     context_compression: { enabled: true, max_context_chars: 750000, keep_recent_iterations: 30 },
+    effective_context_compression: { enabled: false, max_context_chars: null, keep_recent_iterations: 30 },
+    context_compression_pending_restart: true,
   },
   ollama: {
     configured: true,
@@ -53,6 +55,18 @@ const llmState = {
     has_api_key: true,
   },
   auxiliary: { enabled: false, model: 'gpt-5.6-luna' },
+};
+const contextWindowsState = {
+  utilization: 60,
+  max_context_chars: null,
+  models: {
+    'gpt-5.6-sol': {
+      floor: 921601, override: null, active_clamp: null, provenance: 'built-in', clamp_expires_at: null,
+      configured: { effective_budget: 921601, primary_chars: 1277400 },
+      effective: { effective_budget: 921601, primary_chars: 1277400 },
+    },
+  },
+  clamps: [{ account_key: 'a'.repeat(32), model: 'gpt-5.6-sol', value: 300000, expires_at: '2026-08-19T12:00:00Z' }], evidence: { version: 1, accounts: {} },
 };
 const globalConfig = {
   discord: {
@@ -107,7 +121,9 @@ globalThis.fetch = async (path, options = {}) => {
     return response({ error: 'injected save failure' }, failureStatus);
   }
 
+  if (method === 'POST' && path === '/api/context/windows/clear') return response({ cleared: 1 });
   if (path === '/api/llm/status') return response(llmState);
+  if (path === '/api/context/windows') return response(contextWindowsState);
   if (path === '/api/codex/status') return response({ configured: true, accounts: [] });
   if (path === '/api/ollama/status') return response({ configured: true, model: llmState.ollama.model, health: { healthy: true } });
   if (path === '/api/ollama/models') return response({ active_model: llmState.ollama.model, models: [{ name: 'llama3', size: 10 }, { name: 'qwen', size: 20 }] });
@@ -115,6 +131,12 @@ globalThis.fetch = async (path, options = {}) => {
   if (path === '/api/kimi/models') return response({ models: ['kimi-k2', 'kimi-next'] });
   if (method === 'PUT' && /^\/api\/llm\/(codex|ollama|kimi)\/config$/.test(path)) {
     Object.assign(providerConfig(path), body);
+    if (path.includes('/codex/')) {
+      if ('context_budget_overrides' in body) {
+        contextWindowsState.models['gpt-5.6-sol'].override = body.context_budget_overrides['gpt-5.6-sol'] ?? null;
+      }
+      if ('context_utilization' in body) contextWindowsState.utilization = body.context_utilization;
+    }
     return response({ status: 'updated' });
   }
   if (path === '/api/discord/guilds') {
@@ -152,8 +174,49 @@ console.warn = message => {
 };
 
 const { default: LLMConfigPage } = await import('../ui/js/pages/llm-config.js');
+assert.match(
+  LLMConfigPage.template,
+  /formatContextCeiling\(llmStatus\.codex\.effective_context_compression\?\.max_context_chars\)/,
+  'pending-restart template does not consume the truthful ceiling formatter',
+);
+assert.doesNotMatch(
+  LLMConfigPage.template,
+  /effective_context_compression\?\.max_context_chars\s*\|\|\s*0/,
+  'pending-restart template renders automatic context as zero characters',
+);
 const llm = LLMConfigPage.setup();
 await llm.fetchAll();
+assert.equal(llm.contextBudgetRows.value[0].primaryChars, 1277400, 'Context target did not come from GET /api/context/windows');
+assert.equal(llm.formatContextCeiling(null), 'automatic (model-derived)', 'automatic runtime ceiling rendered as a numeric zero');
+assert.equal(llm.formatContextCeiling(500000), '500,000 characters', 'explicit runtime ceiling lost its unit/value');
+const lateContextRefresh = defer('GET /api/context/windows');
+const contextRefresh = llm.fetchContextWindows();
+await Promise.resolve();
+llm.setContextOverride('gpt-5.6-sol', { target: { value: '800000' } });
+llm.setContextUtilization({ target: { value: '72' } });
+lateContextRefresh.resolve();
+await contextRefresh;
+assert.equal(llm.codexForm.value.context_budget_overrides['gpt-5.6-sol'], 800000, 'late context-window GET erased an unsaved override');
+assert.equal(llm.codexForm.value.context_utilization, 72, 'late context-window GET erased unsaved utilization');
+contextWindowsState.models['gpt-5.6-sol'].effective.primary_chars = 111111;
+const olderWindows = defer('GET /api/context/windows');
+const olderWindowsRequest = llm.fetchContextWindows();
+await Promise.resolve();
+const newerWindowsRequest = llm.fetchContextWindows();
+await newerWindowsRequest;
+assert.equal(llm.contextBudgetRows.value[0].primaryChars, 111111, 'newest context-window response did not render');
+contextWindowsState.models['gpt-5.6-sol'].effective.primary_chars = 222222;
+olderWindows.resolve();
+await olderWindowsRequest;
+assert.equal(llm.contextBudgetRows.value[0].primaryChars, 111111, 'older context-window response overwrote newer derivation truth');
+contextWindowsState.models['gpt-5.6-sol'].effective.primary_chars = 1277400;
+const clearBefore = requests.length;
+await llm.clearContextClamp(contextWindowsState.clamps[0]);
+const clearRequest = requests.slice(clearBefore).find(request => request.method === 'POST' && request.path === '/api/context/windows/clear');
+assert.deepEqual(clearRequest?.body, { account_key: 'a'.repeat(32), model: 'gpt-5.6-sol' }, 'clamp clear lost account/model scope');
+assert.equal(requests.slice(clearBefore).some(request => request.method === 'GET' && request.path === '/api/context/windows'), true, 'clamp clear did not refresh derivation truth');
+assert.equal(llm.codexForm.value.context_budget_overrides['gpt-5.6-sol'], 800000, 'clamp clear erased an unsaved override');
+assert.equal(llm.codexForm.value.context_utilization, 72, 'clamp clear erased unsaved utilization');
 
 const providerCases = [
   {
@@ -162,7 +225,7 @@ const providerCases = [
     changeBasic: () => { llm.codexForm.value.model = 'gpt-5.6-sol'; },
     save: llm.saveCodexConfig,
     saveAdvanced: llm.saveCodexAdvancedConfig,
-    advancedKeys: ['request_timeout_seconds', 'stream_stall_timeout_seconds', 'retry', 'connection_pool', 'context_compression'],
+    advancedKeys: ['request_timeout_seconds', 'stream_stall_timeout_seconds', 'retry', 'connection_pool', 'context_compression', 'context_budget_overrides', 'context_utilization'],
     serverAdvanced: () => llmState.codex.request_timeout_seconds,
     draftAdvanced: () => llm.codexForm.value.request_timeout_seconds,
     oldValue: 3600,
@@ -222,6 +285,18 @@ for (const testCase of providerCases) {
   );
   assert.equal(testCase.serverAdvanced(), testCase.draftValue, `${testCase.name} explicit Advanced save did not update server state`);
 }
+assert.equal(llmState.codex.context_budget_overrides['gpt-5.6-sol'], 800000, 'Context override was not persisted by the Advanced save');
+assert.equal(llmState.codex.context_utilization, 72, 'Context utilization was not persisted by the Advanced save');
+assert.equal(llm.contextPolicyDirty.value, false, 'successful unchanged Advanced save did not clear context-policy dirty state');
+const postSaveRefresh = defer('GET /api/context/windows');
+const postSaveRequest = llm.fetchContextWindows();
+await Promise.resolve();
+llm.setContextOverride('gpt-5.6-sol', { target: { value: '810000' } });
+llm.setContextUtilization({ target: { value: '73' } });
+postSaveRefresh.resolve();
+await postSaveRequest;
+assert.equal(llm.codexForm.value.context_budget_overrides['gpt-5.6-sol'], 810000, 'late post-save GET erased a newer override');
+assert.equal(llm.codexForm.value.context_utilization, 73, 'late post-save GET erased newer utilization');
 
 
 // A response that finishes after a newer edit must not repopulate either axis

@@ -39,6 +39,7 @@ from ..llm.codex_auth import CodexAuthPool
 from ..llm.cost_tracker import CostTracker
 from ..llm.model_breaker import ModelBreakerRegistry
 from ..llm.recovery import RecoveryPolicy
+from ..llm.window_observer import WindowObserver
 from ..odin_log import get_logger
 from ..permissions import PermissionManager
 from ..permissions.host_access import HostAccessManager
@@ -130,6 +131,7 @@ class BotServices:
     turn_store: TurnStateStore | None = None
     model_breakers: ModelBreakerRegistry | None = None
     recovery_policy_source: Callable[[], RecoveryPolicy] | None = None
+    window_observer: WindowObserver | None = None
 
 
 def build_services(
@@ -150,9 +152,7 @@ def build_services(
     # root rather than the boot object; config updates replace bot.config.
     agent_manager = AgentManager(
         max_concurrent_agents_provider=(
-            (lambda: get_config().agents.max_concurrent_agents)
-            if get_config is not None
-            else None
+            (lambda: get_config().agents.max_concurrent_agents) if get_config is not None else None
         )
     )
     # Autonomous loop manager (agent-aware)
@@ -443,6 +443,10 @@ def build_services(
         if not turn_store.available:
             turn_store = None  # init failed — feature off, logged loudly
 
+    # Passive context-window observer (phase 5): evidence + downward clamps.
+    # Construction is total — a broken store loads empty, never blocks boot.
+    window_observer = WindowObserver()
+
     # Action diff tracker — records before→after diffs. Always on.
     diff_tracker = DiffTracker()
 
@@ -574,6 +578,7 @@ def build_services(
         turn_store=turn_store,
         model_breakers=model_breakers,
         recovery_policy_source=recovery_policy_source,
+        window_observer=window_observer,
     )
 
 
@@ -645,6 +650,17 @@ def build_components(bot, services: BotServices) -> BotComponents:
         model_breakers=services.model_breakers,
         recovery_policy_source=_live_recovery_policy_source(bot),
     )
+
+    # Dependency-inverted clamp scope: the observer sees only an opaque-key
+    # snapshot supplied by the LIVE Codex client, never the auth pool itself.
+    if services.window_observer is not None:
+        services.window_observer.set_eligible_account_keys_provider(
+            lambda: (
+                llm_gateway.codex_client.eligible_account_keys_snapshot()
+                if llm_gateway.codex_client is not None
+                else frozenset()
+            )
+        )
 
     # Wire LLM callbacks to whichever provider is active
     if llm_gateway.active_client is not None:
@@ -773,6 +789,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             loop_manager=services.loop_manager,
             stuck_loop_tracker_cls=services.stuck_loop_tracker_cls,
             turn_store=services.turn_store,
+            window_observer=services.window_observer,
         )
     )
     agent_task_tools = AgentTaskTools(
@@ -783,7 +800,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             tool_executor=services.tool_executor,
             skill_manager=services.skill_manager,
             # live: swappable at runtime via the bot's `knowledge` property
-        get_knowledge_store=lambda: bot.knowledge,
+            get_knowledge_store=lambda: bot.knowledge,
             embedder=services.embedder,
             audit=services.audit,
             agent_manager=services.agent_manager,
@@ -797,6 +814,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             turn_recorder=turn_recorder,
             prompt_builder=prompt_builder,
             tool_catalog=tool_catalog,
+            window_observer=services.window_observer,
         )
     )
     # Second phase of the P5 owner wiring: the agents domain exists now.

@@ -102,6 +102,7 @@ class TestLoadBoundary:
             OpenAICodexConfig(
                 model="gpt-5.5",
                 reasoning_effort="xhigh",
+                agent_model=None,  # explicit inherit (default is now "auto")
                 agent_reasoning_effort="max",
             )
 
@@ -112,6 +113,7 @@ class TestLoadBoundary:
                 model="gpt-5.6-sol",
                 reasoning_effort="max",
                 agent_model="gpt-5.5",
+                agent_reasoning_effort=None,  # explicit inherit (default is now "auto")
             )
 
     def test_auto_model_axis_exempt(self):
@@ -253,7 +255,7 @@ class TestPreflightBeforeAdmission:
 
         runner._llm_gateway = SimpleNamespace(
             call_with_tools=_cwt,
-            capacity_breaker_for=lambda model=None: breaker,
+            capacity_breaker_for=lambda model=None, provider=None: breaker,
             recovery_policy=lambda: RecoveryPolicy(
                 deadline_seconds=0.3, backoff_base=0.01,
                 backoff_cap=0.02, retry_after_cap=0.05),
@@ -282,7 +284,7 @@ class TestAutonomousPreflightCompletion:
         runner, _saved, _cleared = _make_runner()
         registry = ModelBreakerRegistry()
         runner._llm_gateway = SimpleNamespace(
-            capacity_breaker_for=lambda model=None: registry.for_model("codex", "m"),
+            capacity_breaker_for=lambda model=None, provider=None: registry.for_model("codex", "m"),
             recovery_policy=lambda: RecoveryPolicy(
                 deadline_seconds=0.3, backoff_base=0.01,
                 backoff_cap=0.02, retry_after_cap=0.05),

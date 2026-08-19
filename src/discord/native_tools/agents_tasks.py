@@ -115,14 +115,22 @@ def _parse_spawn_overrides(
     from ...config.schema import CODEX_REASONING_EFFORTS
 
     if "model" in inp and model_mode != "auto":
-        return None, None, (
-            "model is not accepted because Agent Model is not set to Auto — select "
-            "'Auto — choose per spawn' in the WebUI to allow per-spawn model selection"
+        return (
+            None,
+            None,
+            (
+                "model is not accepted because Agent Model is not set to Auto — select "
+                "'Auto — choose per spawn' in the WebUI to allow per-spawn model selection"
+            ),
         )
     if "reasoning_effort" in inp and effort_mode != "auto":
-        return None, None, (
-            "reasoning_effort is not accepted because Agent Reasoning is not set to Auto — "
-            "select 'Auto — choose per spawn' in the WebUI to allow per-spawn effort selection"
+        return (
+            None,
+            None,
+            (
+                "reasoning_effort is not accepted because Agent Reasoning is not set to Auto — "
+                "select 'Auto — choose per spawn' in the WebUI to allow per-spawn effort selection"
+            ),
         )
 
     raw_model = inp.get("model")
@@ -163,6 +171,172 @@ def _spawn_pair_error(
     )
     model_now = resolved_model if resolved_model else getattr(client, "model", None)
     return effort_incompatibility_error(model_now, effort_now)
+
+
+def _observer_clamp(observer, model) -> int | None:
+    """Total clamp lookup — a broken observer never breaks a spawn."""
+    if observer is None:
+        return None
+    try:
+        return observer.active_clamp(model)
+    except Exception:
+        log.exception("active_clamp failed (non-fatal); treating as unclamped")
+        return None
+
+
+def _generation_budget_snapshot(cfg, client, resolved_model, compressor, observer=None):
+    """The frozen generation's budget snapshot, from the SAME identity capture
+    as the request (collision-gated: non-Codex clients get unknown-model
+    math regardless of what their model is named)."""
+    from ...llm.context_budget import snapshot_for_codex_config
+
+    if hasattr(client, "reasoning_effort"):
+        model_for_budget = resolved_model or getattr(client, "model", None)
+    else:
+        model_for_budget = None
+    return snapshot_for_codex_config(
+        model_for_budget,
+        getattr(cfg, "openai_codex", None),
+        max_context_chars=(getattr(compressor, "max_context_chars", None) if compressor else None),
+        observed_clamp=_observer_clamp(observer, model_for_budget),
+    )
+
+
+def _gateway_serving_for_config(gateway, config):
+    """Resolve one serving identity against an already-read root config.
+
+    Production gateways return the immutable provider/client/model/effort
+    tuple. Narrow test doubles retain their historical ``active_client`` shape;
+    the generation-plan builder normalizes that legacy value conservatively.
+    """
+    capture = getattr(gateway, "capture_serving_identity", None)
+    if capture is not None:
+        return capture(config)
+    return gateway.active_client
+
+
+def _capture_agent_generation_plan(
+    get_config,
+    get_serving,
+    get_compressor,
+    *,
+    model_override: str | None,
+    effort_override: str | None,
+    observer=None,
+) -> dict:
+    """Capture one immutable agent-generation identity and budget plan.
+
+    The root configuration is read exactly once. Request policy and the
+    context-budget snapshot are therefore derived from the same config object,
+    rather than straddling a live config replacement. ``effort`` is the
+    resolved effective value for Codex-shaped clients; the ``None`` inherit
+    sentinel never enters a frozen Codex plan, where a later in-place client
+    mutation could otherwise change a rescue retry.
+    """
+    cfg = get_config()
+    serving = get_serving(cfg)
+    if hasattr(serving, "client") and hasattr(serving, "provider"):
+        provider = serving.provider
+        client = serving.client
+    else:
+        client = serving
+        provider = (
+            "codex"
+            if client is None or hasattr(client, "reasoning_effort")
+            else str(getattr(client, "provider_name", "unknown"))
+        )
+    requested_effort, resolved_model = _agent_llm_policy(
+        cfg,
+        client,
+        model_override=model_override,
+        effort_override=effort_override,
+    )
+    effective_effort = requested_effort
+    if effective_effort is None and hasattr(client, "reasoning_effort"):
+        effective_effort = getattr(client, "reasoning_effort", None)
+    if effective_effort is None and hasattr(client, "reasoning_effort"):
+        raise ValueError("Codex client has no resolved reasoning effort")
+    return {
+        "provider": provider,
+        "client": client,
+        "effort": effective_effort,
+        "model": resolved_model,
+        "snapshot": _generation_budget_snapshot(
+            cfg,
+            client,
+            resolved_model,
+            get_compressor(),
+            observer=observer,
+        ),
+    }
+
+
+def _make_budget_snapshot_provider(
+    get_config, get_client, get_compressor, model_override, observer=None
+):
+    """Per-generation context-budget snapshot for a spawned agent.
+
+    Resolves the EFFECTIVE agent model exactly like the iteration callback
+    (override fixed for life; None tracks live config at call time) and
+    derives the budget snapshot the manager compacts against. Overrides and
+    utilization are live reads; the explicit character ceiling comes from the
+    boot-frozen compression object so its restart-bound classification stays
+    truthful. Total: any resolution failure surfaces in the manager as the
+    documented fallback, never as an agent failure.
+    """
+
+    def provider():
+        from ...llm.context_budget import snapshot_for_codex_config
+
+        cfg = get_config()
+        client = get_client()
+        _, resolved_model = _agent_llm_policy(
+            cfg, client, model_override=model_override, effort_override=None
+        )
+        compressor = get_compressor()
+        # Provider identity gates the registry: a non-Codex client whose
+        # model happens to be NAMED like a Codex slug (an Ollama model tagged
+        # "gpt-5.6-sol") must get conservative unknown-model math, never a
+        # Codex capability floor.
+        if hasattr(client, "reasoning_effort"):
+            model_for_budget = resolved_model or getattr(client, "model", None)
+        else:
+            model_for_budget = None
+        return snapshot_for_codex_config(
+            model_for_budget,
+            getattr(cfg, "openai_codex", None),
+            max_context_chars=(
+                getattr(compressor, "max_context_chars", None) if compressor else None
+            ),
+            observed_clamp=_observer_clamp(observer, model_for_budget),
+        )
+
+    return provider
+
+
+def _make_evidence_recorder(observer):
+    """Adapter feeding an agent rescue's (overflow, response-dict) pair to
+    the observer. The agent callback returns a plain dict, so the acceptance
+    facts are lifted into the attribute shape ``record_rescue`` reads.
+    Total — evidence never fails the iteration that just succeeded."""
+    if observer is None:
+        return None
+
+    async def recorder(overflow, response):
+        try:
+            if isinstance(response, dict):
+                from types import SimpleNamespace
+
+                response = SimpleNamespace(
+                    account_key=response.get("account_key"),
+                    server_input_tokens=response.get("server_input_tokens"),
+                    provenance_model=response.get("model"),
+                )
+            await observer.record_rescue(overflow=overflow, response=response)
+        except Exception:
+            log.exception("agent window-evidence recording failed (non-fatal)")
+
+    return recorder
 
 
 def _provenance_stamp(resp: object, client: object) -> dict:
@@ -208,11 +382,15 @@ class AgentTaskDeps:
     turn_recorder: TurnRecorder  # lifecycle webhook emission
     prompt_builder: PromptBuilder
     tool_catalog: ToolCatalog
+    # Passive window observer (phase 5): clamp source for agent budget
+    # snapshots + evidence sink for agent rescues. None = feature-inert.
+    window_observer: object | None = None
 
 
 class AgentTaskTools:
     def __init__(self, deps: AgentTaskDeps) -> None:
         self._get_config = deps.get_config
+        self._window_observer = deps.window_observer
         self._llm_gateway = deps.llm_gateway
         self._channel_state = deps.channel_state
         self._tool_executor = deps.tool_executor
@@ -422,12 +600,14 @@ class AgentTaskTools:
             prompt: str,
             channel: object,
             prev_context: str | None,
+            cancel_event: asyncio.Event,
         ) -> str:
             return await self._tool_loop.run_autonomous(
                 prompt,
                 channel,
                 prev_context,
                 str(message.author.id),
+                cancel_event=cancel_event,
             )
 
         result = self._loop_manager.start_loop(
@@ -466,12 +646,12 @@ class AgentTaskTools:
             f"(every {max(10, interval)}s, mode={mode}, max {max_iterations} iterations)"
         )
 
-    def _handle_stop_loop(self, inp: dict) -> str:
+    async def _handle_stop_loop(self, inp: dict) -> str:
         """Stop an autonomous loop."""
         loop_id = inp.get("loop_id", "")
         if not loop_id:
             return "A 'loop_id' is required."
-        result = self._loop_manager.stop_loop(loop_id)
+        result = await self._loop_manager.stop_loop(loop_id)
         # Lifecycle webhook: loop.stopped
         fire_and_forget(
             self._turn_recorder._emit_lifecycle_event(
@@ -498,8 +678,9 @@ class AgentTaskTools:
         messages: list[dict],
         sys_prompt: str,
         tool_defs: list[dict],
-        agent_effort,
+        agent_effort: str,
         resolved_model,
+        provider: str = "codex",
     ):
         """One agent LLM generation through the shared recovery policy.
 
@@ -518,17 +699,20 @@ class AgentTaskTools:
         # xhigh→max — could turn an approved gpt-5.5@xhigh into a rejected
         # gpt-5.5@max at request build). Live config still reaches agents on
         # their NEXT iteration, the contract these callbacks document.
-        effective_effort = (
-            agent_effort
-            if agent_effort is not None
-            else getattr(client, "reasoning_effort", None)
-        )
+        effective_effort = agent_effort
+        # The production callback contract always supplies a concrete resolved
+        # effort for Codex-shaped clients; accepting the inherit sentinel here
+        # would reintroduce live client reads on later physical retries.
+        if effective_effort is None and hasattr(client, "reasoning_effort"):
+            raise ValueError("agent generation plan has unresolved reasoning effort")
         # Pre-admission: validate the exact pair this generation will request
         # before touching the breaker — never wait out an open breaker's
         # deadline (or count a capacity failure) for a request that could not
         # legally be sent.
         preflight_incompatible_effort(client, model=resolved_model, effort=effective_effort)
-        breaker = self._llm_gateway.capacity_breaker_for(resolved_model)
+        breaker = self._llm_gateway.capacity_breaker_for(
+            resolved_model, provider=provider
+        )
         policy = self._llm_gateway.recovery_policy()
 
         async def _attempt():
@@ -543,9 +727,7 @@ class AgentTaskTools:
         resp = await generate_with_recovery(_attempt, policy=policy, breaker=breaker)
         # Bypass-path success clears a latched llm_* guard key — provenance
         # only, never the post-await active provider.
-        self._llm_gateway.notify_generation_success(
-            getattr(resp, "provenance_provider", None)
-        )
+        self._llm_gateway.notify_generation_success(getattr(resp, "provenance_provider", None))
         return resp
 
     async def _handle_spawn_agent(self, message: object, inp: dict) -> str:
@@ -613,37 +795,51 @@ class AgentTaskTools:
             if parent is not None
             else configured_max_depth
         )
-        tools = filter_agent_tools(
-            all_tools, depth=parent_depth, max_depth=effective_max_depth
-        )
+        tools = filter_agent_tools(all_tools, depth=parent_depth, max_depth=effective_max_depth)
 
         # Iteration callback — wraps Codex chat_with_tools, returns dict
         async def _iteration_cb(
             messages: list[dict],
             sys_prompt: str,
             tool_defs: list[dict],
+            *,
+            generation_state: dict,
         ) -> dict:
-            # Resolve the client ONCE per call so the provider/model/effort
-            # stamp describes the client this request actually went to, and
-            # read the agent policy from live config at call time (a WebUI
-            # change reaches in-flight agents on their next iteration).
-            client = self._llm_gateway.active_client
-            agent_effort, resolved_model = _agent_llm_policy(
-                self._get_config(), client,
-                model_override=model_override, effort_override=effort_override,
-            )
+            # ONE capture per logical generation: client, model, effort, and
+            # budget snapshot are resolved together on the FIRST attempt and
+            # reused verbatim by every rescue retry (R2 frozen-generation
+            # identity — a live reload between attempts must never split the
+            # budget from the request it governs). Live config reaches the
+            # NEXT generation, which starts with a fresh state dict.
+            plan = generation_state.get("plan")
+            if plan is None:
+                plan = _capture_agent_generation_plan(
+                    self._get_config,
+                    lambda config: _gateway_serving_for_config(self._llm_gateway, config),
+                    self._get_context_compressor,
+                    model_override=model_override,
+                    effort_override=effort_override,
+                    observer=self._window_observer,
+                )
+                generation_state["plan"] = plan
+            client = plan["client"]
             resp = await self._agent_generate(
                 client,
                 messages=messages,
                 sys_prompt=sys_prompt,
                 tool_defs=tool_defs,
-                agent_effort=agent_effort,
-                resolved_model=resolved_model,
+                agent_effort=plan["effort"],
+                resolved_model=plan["model"],
+                provider=plan["provider"],
             )
             return {
                 "text": resp.text,
                 "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
                 "stop_reason": resp.stop_reason,
+                # Phase 5: server acceptance evidence rides the callback dict
+                # so a rescued iteration can qualify a window clamp.
+                "server_input_tokens": getattr(resp, "server_input_tokens", None),
+                "account_key": getattr(resp, "account_key", None),
                 **_provenance_stamp(resp, client),
             }
 
@@ -699,9 +895,7 @@ class AgentTaskTools:
         iteration_timeout = (
             getattr(agents_cfg, "iteration_timeout_seconds", 900) if agents_cfg else 900
         )
-        max_lifetime = (
-            getattr(agents_cfg, "max_lifetime_seconds", 14400) if agents_cfg else 14400
-        )
+        max_lifetime = getattr(agents_cfg, "max_lifetime_seconds", 14400) if agents_cfg else 14400
 
         agent_id = self._agent_manager.spawn(
             label=label,
@@ -730,12 +924,21 @@ class AgentTaskTools:
             model_override=model_override,
             reasoning_effort_override=effort_override,
             context_compression_enabled=bool(self._get_context_compressor()),
-            max_context_chars=self._get_context_compressor().max_context_chars
+            max_context_chars=self._get_context_compressor().resolved_max_context_chars
             if self._get_context_compressor()
             else 750000,
             keep_recent_iterations=self._get_context_compressor().keep_recent_iterations
             if self._get_context_compressor()
             else 30,
+            generation_plan_provider=lambda: _capture_agent_generation_plan(
+                self._get_config,
+                lambda config: _gateway_serving_for_config(self._llm_gateway, config),
+                self._get_context_compressor,
+                model_override=model_override,
+                effort_override=effort_override,
+                observer=self._window_observer,
+            ),
+            evidence_recorder=_make_evidence_recorder(self._window_observer),
         )
 
         if agent_id.startswith("Error"):
@@ -888,9 +1091,7 @@ class AgentTaskTools:
             # stays excluded — hashing elapsed time would make a hung
             # agent immortal.
             iters = r.get("iteration_count", 0)
-            lines.append(
-                f"**{label}** (`{aid}`): {status} [iterations={iters}]\n{content}"
-            )
+            lines.append(f"**{label}** (`{aid}`): {status} [iterations={iters}]\n{content}")
 
         return "\n\n".join(lines) if lines else "No results."
 
@@ -948,12 +1149,14 @@ class AgentTaskTools:
             )
             if pair_err:
                 return f"Error: task '{t.get('label', '?')}': {pair_err}"
-            validated_tasks.append({
-                "label": t.get("label", ""),
-                "goal": t.get("goal", ""),
-                "model_override": mo,
-                "reasoning_effort_override": eo,
-            })
+            validated_tasks.append(
+                {
+                    "label": t.get("label", ""),
+                    "goal": t.get("goal", ""),
+                    "model_override": mo,
+                    "reasoning_effort_override": eo,
+                }
+            )
         tasks = validated_tasks
 
         # Per-task iteration callback FACTORY (same pattern as
@@ -961,19 +1164,28 @@ class AgentTaskTools:
         # model/effort override, so a fleet can mix models. Overrides are fixed
         # for the agent's life; None fields track live config at call time.
         def _make_iteration_cb(model_override, effort_override):
-            async def _iteration_cb(messages, sys, tool_defs):
-                client = self._llm_gateway.active_client
-                agent_effort, resolved_model = _agent_llm_policy(
-                    self._get_config(), client,
-                    model_override=model_override, effort_override=effort_override,
-                )
+            async def _iteration_cb(messages, sys, tool_defs, *, generation_state: dict):
+                # Same frozen-generation capture as the direct spawn path.
+                plan = generation_state.get("plan")
+                if plan is None:
+                    plan = _capture_agent_generation_plan(
+                        self._get_config,
+                        lambda config: _gateway_serving_for_config(self._llm_gateway, config),
+                        self._get_context_compressor,
+                        model_override=model_override,
+                        effort_override=effort_override,
+                        observer=self._window_observer,
+                    )
+                    generation_state["plan"] = plan
+                client = plan["client"]
                 resp = await self._agent_generate(
                     client,
                     messages=messages,
                     sys_prompt=sys,
                     tool_defs=tool_defs,
-                    agent_effort=agent_effort,
-                    resolved_model=resolved_model,
+                    agent_effort=plan["effort"],
+                    resolved_model=plan["model"],
+                    provider=plan["provider"],
                 )
                 return {
                     "text": resp.text or "",
@@ -981,8 +1193,11 @@ class AgentTaskTools:
                         {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
                     ],
                     "stop_reason": resp.stop_reason or "end_turn",
+                    "server_input_tokens": getattr(resp, "server_input_tokens", None),
+                    "account_key": getattr(resp, "account_key", None),
                     **_provenance_stamp(resp, client),
                 }
+
             return _iteration_cb
 
         async def _tool_cb(tool_name, tool_input):
@@ -1021,15 +1236,24 @@ class AgentTaskTools:
             max_lifetime=self._get_config().agents.max_lifetime_seconds,
             # Close the loop-path gap: depth and child limits now reach
             # loop-spawned agents too, instead of silently using built-ins.
-            max_depth=getattr(
-                self._get_config().agents, "max_nesting_depth", None
-            ),
-            max_children=getattr(
-                self._get_config().agents, "max_children_per_agent", None
-            ),
+            max_depth=getattr(self._get_config().agents, "max_nesting_depth", None),
+            max_children=getattr(self._get_config().agents, "max_children_per_agent", None),
             context_compression_enabled=bool(cc),
-            max_context_chars=cc.max_context_chars if cc else 750000,
+            max_context_chars=cc.resolved_max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
+            generation_plan_provider_factory=lambda mo, eo: (
+                lambda: _capture_agent_generation_plan(
+                    self._get_config,
+                    lambda config: _gateway_serving_for_config(
+                        self._llm_gateway, config
+                    ),
+                    self._get_context_compressor,
+                    model_override=mo,
+                    effort_override=eo,
+                    observer=self._window_observer,
+                )
+            ),
+            evidence_recorder=_make_evidence_recorder(self._window_observer),
         )
 
         # Format response

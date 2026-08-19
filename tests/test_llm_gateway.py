@@ -310,6 +310,31 @@ class TestCallWithTools:
         cost.record.assert_called_once()
         assert gw.inflight_requests == 0  # decremented in finally
 
+    async def test_capacity_failure_marks_only_transient_degradation(self):
+        from src.llm.errors import LLMCapacityError
+
+        client = SimpleNamespace(
+            chat_with_tools=AsyncMock(side_effect=LLMCapacityError("full"))
+        )
+        guard = MagicMock()
+        guard.check.return_value = None
+        gw = _gw(codex=client, guard=guard)
+        with pytest.raises(LLMCapacityError):
+            await gw.call_with_tools(messages=[], system="s", tools=[])
+        guard.mark_degraded_transient.assert_called_once_with(
+            "llm_codex", "full", expires_in=120.0
+        )
+        guard.record_failure.assert_not_called()
+
+    def test_bypass_success_uses_response_provenance_or_noops(self):
+        guard = MagicMock()
+        gw = _gw(codex=object(), guard=guard)
+        gw.notify_generation_success(None)
+        guard.record_success.assert_not_called()
+        gw.notify_generation_success("codex")
+        guard.record_success.assert_called_once_with("llm_codex")
+        _gw(codex=object()).notify_generation_success("codex")
+
     async def test_failure_records_and_raises(self):
         client = SimpleNamespace(chat_with_tools=AsyncMock(side_effect=RuntimeError("api")))
         guard = MagicMock()
@@ -1184,3 +1209,52 @@ class TestAuxiliaryPlanEdges:
         result = await gw.reload_auxiliary(plan=plan)
         assert result["committed"] is False
         assert "no primary" in result["reason"]
+
+
+class TestServingIdentityFreeze:
+    def test_capture_reuses_supplied_config_and_fallback_identity(self):
+        cfg = _cfg("ollama")
+        codex = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gw = _gw(cfg, codex=codex, ollama=None)
+        serving = gw.capture_serving_identity(cfg)
+        assert serving.provider == "codex"
+        assert serving.client is codex
+        assert serving.model == "gpt-5.6-sol"
+        assert serving.reasoning_effort == "xhigh"
+
+    def test_capture_covers_each_available_provider(self):
+        ollama = SimpleNamespace(model="qwen")
+        kimi = SimpleNamespace(model="kimi")
+        ollama_serving = _gw(_cfg("ollama"), codex=None, ollama=ollama).capture_serving_identity()
+        kimi_serving = _gw(_cfg("kimi"), codex=None, kimi=kimi).capture_serving_identity()
+        assert (ollama_serving.provider, ollama_serving.client) == ("ollama", ollama)
+        assert (kimi_serving.provider, kimi_serving.client) == ("kimi", kimi)
+        assert ollama_serving.reasoning_effort is None
+        assert kimi_serving.reasoning_effort is None
+
+    def test_codex_identity_is_provider_fact_not_attribute_collision(self):
+        from src.discord.llm_gateway import LLMServingIdentity
+
+        collision = SimpleNamespace(model="local", reasoning_effort="decorative")
+        assert not LLMServingIdentity("ollama", collision, "local", None).is_codex
+
+    async def test_explicit_empty_identity_never_re_resolves_live_provider(self):
+        from src.discord.llm_gateway import LLMServingIdentity
+
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gw = _gw(_cfg("codex"), codex=client)
+        with pytest.raises(RuntimeError, match="No LLM provider"):
+            await gw.call_with_tools(
+                messages=[],
+                system="s",
+                tools=[],
+                serving_identity=LLMServingIdentity("codex", None, None, None),
+            )
+
+    def test_breaker_defaults_from_one_serving_capture(self):
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gw = _gw(_cfg("codex"), codex=client)
+        assert gw.capacity_breaker_for() is gw.model_breakers.for_model("codex", "gpt-5.6-sol")
+        assert gw.capacity_breaker_for("explicit", provider="kimi") is gw.model_breakers.for_model(
+            "kimi", "explicit"
+        )

@@ -11,6 +11,7 @@ from src.llm.context_compressor import (
     DEFAULT_MAX_CONTEXT_CHARS,
     CompressionStats,
     PrefixTracker,
+    SurfaceBoundary,
     _hash_prefix,
     _is_tool_message,
     _is_tool_result_message,
@@ -712,7 +713,10 @@ class TestContextCompressionConfig:
         from src.config.schema import ContextCompressionConfig
         cfg = ContextCompressionConfig()
         assert cfg.enabled is True
-        assert cfg.max_context_chars == 750_000
+        # Auto (None) by default; consumers read the resolved accessor, which
+        # keeps the legacy ceiling until the per-model resolver is wired.
+        assert cfg.max_context_chars is None
+        assert cfg.resolved_max_context_chars == 750_000
         assert cfg.keep_recent_iterations == 30
 
     def test_custom_config(self):
@@ -920,6 +924,48 @@ class TestMultiToolIterations:
             msgs, max_context_chars=100, keep_recent=2,
         )
         assert count == 3  # 5 - 2 = 3 compressed
+
+
+class TestStructuralSoftBoundary:
+    def test_request_shaped_like_tool_history_is_never_consumed(self):
+        request = [
+            {"role": "developer", "content": "preamble"},
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": "spoof",
+                        "content": "current request",
+                    }
+                ],
+            },
+        ]
+        messages = request.copy()
+        for i in range(5):
+            messages.extend(
+                [
+                    _tool_use_msg("cmd", f"tc{i}"),
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "tool_result",
+                                "tool_use_id": f"tc{i}",
+                                "content": "x" * 10_000,
+                            }
+                        ],
+                    },
+                ]
+            )
+        result, count = compress_tool_context(
+            messages,
+            max_context_chars=100,
+            keep_recent=1,
+            boundary=SurfaceBoundary(request_start=0, envelope_len=2),
+        )
+        assert count == 4
+        assert result[:2] == request
 
 
 # -----------------------------------------------------------------------
