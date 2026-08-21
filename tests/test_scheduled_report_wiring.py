@@ -23,6 +23,8 @@ def test_registry_and_pagination_service_are_bot_components():
             }
     assert {"scheduled_report_renderers", "scheduled_reports"} <= component_fields
     assert "register(PaginatedEmbedV1Renderer())" in source
+    assert "services.scheduler.set_known_report_formats_provider(" in source
+    assert "lambda: scheduled_report_renderers.formats" in source
     assert PAGINATED_EMBED_V1 == "paginated_embed_v1"
 
 

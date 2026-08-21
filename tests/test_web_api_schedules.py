@@ -247,10 +247,19 @@ class TestCronTimezoneApiParity:
 
 
 class TestReportFormatApiParity:
-    async def test_create_update_and_readback(self, tmp_path):
+    @staticmethod
+    def _real_bot(tmp_path):
         from src.scheduler.scheduler import Scheduler
+
         bot = MagicMock()
         bot.scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        bot.scheduler.set_known_report_formats_provider(
+            lambda: ("paginated_embed_v1",)
+        )
+        return bot
+
+    async def test_create_update_and_readback(self, tmp_path):
+        bot = self._real_bot(tmp_path)
         async with TestClient(TestServer(_app(bot))) as c:
             created = await c.post("/api/schedules", json={
                 "description": "structured", "action": "check", "channel_id": "1",
@@ -269,9 +278,7 @@ class TestReportFormatApiParity:
             assert "report_format" not in await cleared.json()
 
     async def test_invalid_type_and_non_check_use_return_400(self, tmp_path):
-        from src.scheduler.scheduler import Scheduler
-        bot = MagicMock()
-        bot.scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        bot = self._real_bot(tmp_path)
         async with TestClient(TestServer(_app(bot))) as c:
             invalid_type = await c.post("/api/schedules", json={
                 "description": "structured", "action": "check", "channel_id": "1",
@@ -284,3 +291,33 @@ class TestReportFormatApiParity:
                 "cron": "0 * * * *", "report_format": "paginated_embed_v1",
             })
             assert invalid_action.status == 400
+
+    async def test_unknown_format_is_400_on_create_and_update(self, tmp_path):
+        bot = self._real_bot(tmp_path)
+        async with TestClient(TestServer(_app(bot))) as c:
+            unknown_create = await c.post("/api/schedules", json={
+                "description": "structured", "action": "check", "channel_id": "1",
+                "cron": "0 * * * *", "tool_name": "run_command",
+                "tool_input": {"command": "status"},
+                "report_format": "paginated_embed_v2",
+            })
+            assert unknown_create.status == 400
+            assert "Unsupported scheduled report format" in (
+                await unknown_create.json()
+            )["error"]
+
+            created = await c.post("/api/schedules", json={
+                "description": "plain", "action": "check", "channel_id": "1",
+                "cron": "0 * * * *", "tool_name": "run_command",
+                "tool_input": {"command": "status"},
+            })
+            schedule_id = (await created.json())["id"]
+            unknown_update = await c.put(
+                f"/api/schedules/{schedule_id}",
+                json={"report_format": "paginated_embed_v2"},
+            )
+            assert unknown_update.status == 400
+            assert "Unsupported scheduled report format" in (
+                await unknown_update.json()
+            )["error"]
+            assert "report_format" not in bot.scheduler.list_all()[0]

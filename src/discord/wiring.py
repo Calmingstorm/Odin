@@ -830,6 +830,9 @@ def build_components(bot, services: BotServices) -> BotComponents:
 
     scheduled_report_renderers = ScheduledReportRendererRegistry()
     scheduled_report_renderers.register(PaginatedEmbedV1Renderer())
+    services.scheduler.set_known_report_formats_provider(
+        lambda: scheduled_report_renderers.formats
+    )
     scheduled_reports = ScheduledReportPaginationService(
         registry=scheduled_report_renderers,
         # The scheduler's configured persistence directory is the shared data

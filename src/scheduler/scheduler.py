@@ -7,7 +7,7 @@ import os
 import re
 import time
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, cast
@@ -124,6 +124,7 @@ class Scheduler:
         self._task: asyncio.Task | None = None
         self._callback: Callable[[dict], Awaitable[None]] | None = None
         self._failure_callback: Callable[[dict, int], Awaitable[None]] | None = None
+        self._known_report_formats_provider: Callable[[], Collection[str]] | None = None
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
         # Schedule ids currently executing — prevents the same schedule from
@@ -192,6 +193,32 @@ class Scheduler:
             os.fsync(f.fileno())
         os.replace(tmp, self.data_path)
 
+    def set_known_report_formats_provider(
+        self, provider: Callable[[], Collection[str]]
+    ) -> None:
+        """Install the composition-owned source of supported report formats."""
+        if not callable(provider):
+            raise TypeError("known report formats provider must be callable")
+        self._known_report_formats_provider = provider
+
+    def _validate_report_format(self, report_format: str | None, action: str) -> None:
+        if report_format is not None and not isinstance(report_format, str):
+            raise ValueError("report_format must be a string")
+        if report_format and action != "check":
+            raise ValueError("report_format is only valid for 'check' actions")
+        if not report_format:
+            return
+
+        provider = self._known_report_formats_provider
+        if provider is None:
+            raise ValueError("No scheduled report formats are registered")
+        try:
+            known_formats = frozenset(provider())
+        except Exception as exc:
+            raise ValueError("Scheduled report formats are unavailable") from exc
+        if report_format not in known_formats:
+            raise ValueError(f"Unsupported scheduled report format: {report_format}")
+
     async def add(
         self,
         description: str,
@@ -211,10 +238,7 @@ class Scheduler:
         cron_timezone: str | None = None,
         report_format: str | None = None,
     ) -> dict:
-        if report_format is not None and not isinstance(report_format, str):
-            raise ValueError("report_format must be a string")
-        if report_format and action != "check":
-            raise ValueError("report_format is only valid for 'check' actions")
+        self._validate_report_format(report_format, action)
         if action == "digest":
             # Digest is a predefined action, no tool validation needed
             pass
@@ -697,10 +721,7 @@ class Scheduler:
             if tool_input is not None:
                 target["tool_input"] = tool_input
             if report_format is not None:
-                if not isinstance(report_format, str):
-                    raise ValueError("report_format must be a string")
-                if target.get("action") != "check":
-                    raise ValueError("report_format is only valid for 'check' actions")
+                self._validate_report_format(report_format, target.get("action", ""))
                 if report_format:
                     target["report_format"] = report_format
                 else:

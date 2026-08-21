@@ -120,21 +120,49 @@ class TestTriggerMatches:
 
 
 class TestReportFormatPersistence:
-    async def test_check_format_round_trip_and_clear(self, tmp_path):
+    @staticmethod
+    def _install_formats(scheduler: Scheduler) -> None:
+        scheduler.set_known_report_formats_provider(lambda: ("paginated_embed_v1",))
+
+    async def test_update_format_and_clear_survive_real_reload_round_trips(self, tmp_path):
         path = tmp_path / "schedules.json"
         scheduler = Scheduler(data_path=str(path))
         created = await scheduler.add(
             description="structured check", action="check", channel_id="1",
             cron="0 * * * *", tool_name="run_command",
-            tool_input={"command": "status"}, report_format="paginated_embed_v1")
-        assert created["report_format"] == "paginated_embed_v1"
+            tool_input={"command": "status"})
+
+        self._install_formats(scheduler)
+        updated = await scheduler.update(
+            created["id"], report_format="paginated_embed_v1")
+        assert updated is not None
+        assert updated["report_format"] == "paginated_embed_v1"
+
         reloaded = Scheduler(data_path=str(path))
         assert reloaded.list_all()[0]["report_format"] == "paginated_embed_v1"
-        updated = await reloaded.update(created["id"], report_format="")
-        assert updated is not None and "report_format" not in updated
+        self._install_formats(reloaded)
+        cleared = await reloaded.update(created["id"], report_format="")
+        assert cleared is not None and "report_format" not in cleared
+
+        cleared_reload = Scheduler(data_path=str(path))
+        assert "report_format" not in cleared_reload.list_all()[0]
+
+    async def test_unknown_format_and_absent_provider_fail_closed(self, tmp_path):
+        scheduler = Scheduler(data_path=str(tmp_path / "schedules.json"))
+        check = {
+            "description": "check", "action": "check", "channel_id": "1",
+            "cron": "0 * * * *", "tool_name": "run_command",
+        }
+        with pytest.raises(ValueError, match="No scheduled report formats are registered"):
+            await scheduler.add(**check, report_format="paginated_embed_v1")
+
+        self._install_formats(scheduler)
+        with pytest.raises(ValueError, match="Unsupported scheduled report format"):
+            await scheduler.add(**check, report_format="paginated_embed_v2")
 
     async def test_format_is_only_valid_for_checks_and_strings(self, tmp_path):
         scheduler = Scheduler(data_path=str(tmp_path / "schedules.json"))
+        self._install_formats(scheduler)
         with pytest.raises(ValueError, match="only valid for 'check'"):
             await scheduler.add(
                 description="reminder", action="reminder", channel_id="1",

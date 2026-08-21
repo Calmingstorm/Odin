@@ -188,3 +188,36 @@ class TestReportFormatNativeParity:
             {"schedule_id": "S1", "report_format": ""})
         assert result == "Updated schedule S1."
         scheduler.update.assert_awaited_once_with("S1", report_format="")
+
+
+class TestUnknownReportFormatNativeRejection:
+    @staticmethod
+    def _scheduler(tmp_path):
+        from src.scheduler.scheduler import Scheduler
+
+        scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        scheduler.set_known_report_formats_provider(lambda: ("paginated_embed_v1",))
+        return scheduler
+
+    async def test_native_add_rejects_unknown_format(self, tmp_path):
+        scheduler = self._scheduler(tmp_path)
+        result = await _tools(scheduler)._handle_schedule_task(
+            _message(), {
+                "description": "structured", "action": "check", "cron": "0 * * * *",
+                "tool_name": "run_command", "tool_input": {"command": "status"},
+                "report_format": "paginated_embed_v2",
+            })
+        assert "Unsupported scheduled report format: paginated_embed_v2" in result
+        assert scheduler.list_all() == []
+
+    async def test_native_update_rejects_unknown_format(self, tmp_path):
+        scheduler = self._scheduler(tmp_path)
+        created = await scheduler.add(
+            description="plain", action="check", channel_id="42", cron="0 * * * *",
+            tool_name="run_command", tool_input={"command": "status"})
+        result = await _tools(scheduler)._handle_update_schedule({
+            "schedule_id": created["id"],
+            "report_format": "paginated_embed_v2",
+        })
+        assert "Unsupported scheduled report format: paginated_embed_v2" in result
+        assert "report_format" not in scheduler.list_all()[0]

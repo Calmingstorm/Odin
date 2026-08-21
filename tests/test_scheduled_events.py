@@ -448,12 +448,16 @@ class TestStructuredCheckReports:
                 "report_format": "paginated_embed_v1",
             })
 
-    async def test_legacy_check_output_is_byte_identical(self):
+    async def test_legacy_check_output_is_byte_identical_at_truncation_boundary(self):
         channel = _channel()
-        handler = _handlers(get_channel=lambda _cid: channel)
+        raw = "x" * 1801
+        handler = _handlers(
+            get_channel=lambda _cid: channel,
+            tool_loop=MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=raw)),
+        )
         await handler._on_scheduled_task({
             "id": "S1", "channel_id": "1", "action": "check",
             "tool_name": "t", "description": "d",
         })
         channel.send.assert_awaited_once_with(
-            "**Scheduled: d**\n```\ndispatched\n```")
+            "**Scheduled: d**\n```\n" + ("x" * 1800) + "\n```")
