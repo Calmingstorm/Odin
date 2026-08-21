@@ -408,6 +408,19 @@ class TestStructuredCheckReports:
         reports.post.assert_awaited_once_with(channel, "paginated_embed_v1", raw)
         channel.send.assert_not_awaited()
 
+    async def test_report_service_unavailable_uses_failure_path(self):
+        channel = _channel()
+        handler = _handlers(
+            get_channel=lambda _cid: channel,
+            scheduled_reports=None,
+        )
+        with pytest.raises(RuntimeError, match="service is unavailable"):
+            await handler._on_scheduled_task({
+                "id": "S1", "description": "structured", "channel_id": "1",
+                "action": "check", "tool_name": "run_command",
+                "report_format": "paginated_embed_v1",
+            })
+
     async def test_renderer_failure_uses_existing_check_failure_path(self):
         channel = _channel()
         reports = MagicMock(post=AsyncMock(side_effect=ValueError("bad payload")))
@@ -419,6 +432,21 @@ class TestStructuredCheckReports:
                 "tool_input": {"command": "status"}, "report_format": "unknown_v1",
             })
         assert "Scheduled report failed" in channel.send.await_args.args[0]
+
+    async def test_renderer_failure_notice_failure_is_swallowed(self):
+        channel = _channel()
+        channel.send = AsyncMock(side_effect=RuntimeError("discord down"))
+        reports = MagicMock(post=AsyncMock(side_effect=ValueError("bad payload")))
+        handler = _handlers(
+            get_channel=lambda _cid: channel,
+            scheduled_reports=reports,
+        )
+        with pytest.raises(RuntimeError, match="Failed to render scheduled report"):
+            await handler._on_scheduled_task({
+                "id": "S1", "description": "structured", "channel_id": "1",
+                "action": "check", "tool_name": "run_command",
+                "report_format": "paginated_embed_v1",
+            })
 
     async def test_legacy_check_output_is_byte_identical(self):
         channel = _channel()
