@@ -170,3 +170,77 @@ class TestCronPreviewClock:
         # Both anchor on "now", so allow a small window for clock movement
         # between the calls; the offset bug produced hours of skew.
         assert abs((preview_first - scheduler_next).total_seconds()) < 120
+
+
+class TestCronTimezoneApiParity:
+    @staticmethod
+    def _real_app(tmp_path):
+        from src.scheduler.scheduler import Scheduler
+
+        bot = MagicMock()
+        bot.scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        return _app(bot), bot.scheduler
+
+    async def test_create_update_and_readback(self, tmp_path):
+        app, scheduler = self._real_app(tmp_path)
+        async with TestClient(TestServer(app)) as c:
+            created = await c.post(
+                "/api/schedules",
+                json={
+                    "description": "local morning",
+                    "action": "reminder",
+                    "channel_id": "1",
+                    "cron": "0 9 * * *",
+                    "cron_timezone": "America/New_York",
+                    "message": "hello",
+                },
+            )
+            assert created.status == 201
+            schedule = await created.json()
+            assert schedule["timezone"] == "America/New_York"
+
+            listed = await (await c.get("/api/schedules")).json()
+            assert listed[0]["timezone"] == "America/New_York"
+
+            updated = await c.put(
+                f"/api/schedules/{schedule['id']}",
+                json={"cron_timezone": "Europe/London"},
+            )
+            assert updated.status == 200
+            assert (await updated.json())["timezone"] == "Europe/London"
+
+            reread = await (await c.get("/api/schedules")).json()
+            assert reread[0]["timezone"] == "Europe/London"
+            assert scheduler.list_all()[0]["timezone"] == "Europe/London"
+
+    async def test_invalid_timezone_is_a_400_on_create_and_update(self, tmp_path):
+        app, _scheduler = self._real_app(tmp_path)
+        async with TestClient(TestServer(app)) as c:
+            invalid_create = await c.post(
+                "/api/schedules",
+                json={
+                    "description": "bad zone",
+                    "action": "reminder",
+                    "channel_id": "1",
+                    "cron": "0 9 * * *",
+                    "cron_timezone": "Not/A_Timezone",
+                },
+            )
+            assert invalid_create.status == 400
+
+            created = await c.post(
+                "/api/schedules",
+                json={
+                    "description": "valid zone",
+                    "action": "reminder",
+                    "channel_id": "1",
+                    "cron": "0 9 * * *",
+                    "cron_timezone": "UTC",
+                },
+            )
+            schedule_id = (await created.json())["id"]
+            invalid_update = await c.put(
+                f"/api/schedules/{schedule_id}",
+                json={"cron_timezone": "Still/Not_A_Timezone"},
+            )
+            assert invalid_update.status == 400
