@@ -14,7 +14,7 @@ Examples:
 from __future__ import annotations
 
 import logging
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from discord.ext import commands
 
@@ -144,4 +144,7 @@ class ReactionTriggers(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Standard discord.py cog setup (no-op scheduler/config — wired later)."""
-    await bot.add_cog(ReactionTriggers(bot, pagination=bot.components.scheduled_reports))
+    components: Any = bot
+    await bot.add_cog(
+        ReactionTriggers(bot, pagination=components.components.scheduled_reports)
+    )

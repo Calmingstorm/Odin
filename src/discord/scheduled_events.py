@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from ..tools.executor import ToolExecutor
     from .llm_gateway import LLMGateway
     from .native_tools.agents_tasks import AgentTaskTools
+    from .scheduled_report import ScheduledReportPaginationService
     from .tool_loop import ToolLoopRunner
 
 log = get_logger("discord")
@@ -48,7 +49,7 @@ class ScheduledEventsDeps:
     llm_gateway: LLMGateway  # owns the swappable provider clients
     tool_loop: ToolLoopRunner  # shared dispatch path
     agent_task_tools: AgentTaskTools  # agent result collection in workflows
-    scheduled_reports: object | None = None  # injected pagination service
+    scheduled_reports: ScheduledReportPaginationService | None = None
 
 
 class ScheduledEventHandlers:
