@@ -420,6 +420,19 @@ class TestPaginationState:
         )
         assert not service.handles(99, "➡️")
 
+    async def test_stale_in_memory_state_is_pruned_and_persisted_on_reaction(self, tmp_path):
+        channel = _Channel()
+        path = (tmp_path / "state.json").resolve()
+        service = ScheduledReportPaginationService(
+            registry=_registry(), data_path=path, get_channel=lambda _cid: channel
+        )
+        await service.post(channel, PAGINATED_EMBED_V1, json.dumps(_payload()))
+        service._reports[99]["created_at"] = datetime.now(UTC) - timedelta(hours=27)
+        assert service.handles(99, "➡️")
+        assert not await service.handle_reaction(_reaction())
+        assert not service.handles(99, "➡️")
+        assert json.loads(path.read_text()) == []
+
 
 class TestRegistryAndPersistenceFailureEdges:
     def test_duplicate_registration_and_formats(self):

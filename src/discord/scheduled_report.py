@@ -506,10 +506,10 @@ class ScheduledReportPaginationService:
         return bool(stale) or trimmed
 
     def handles(self, message_id: int, emoji: Any) -> bool:
-        state = self._reports.get(message_id)
-        if state is None or str(emoji) not in CONTROL_REACTIONS:
-            return False
-        return (datetime.now(UTC) - state["created_at"]).total_seconds() <= MAX_REPORT_AGE_SECONDS
+        # Let handle_reaction perform age pruning under the service lock. A
+        # stale managed message is still ours for this one event; returning
+        # false here would bypass cleanup and leave it persisted indefinitely.
+        return message_id in self._reports and str(emoji) in CONTROL_REACTIONS
 
     async def post(
         self,
