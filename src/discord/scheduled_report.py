@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 from collections.abc import Callable, Mapping
 from datetime import UTC, datetime
 from pathlib import Path
@@ -142,9 +143,7 @@ def _rendered_text(
     # Discord Markdown still recognizes URL syntax after escape_markdown;
     # neutralize delimiters so only the structured links array can create
     # clickable links.
-    rendered = rendered.replace("[", r"\[").replace("]", r"\]")
-    rendered = rendered.replace("(", r"\(").replace(")", r"\)")
-    rendered = rendered.replace("<", r"\<").replace(">", r"\>")
+    rendered = re.sub(r"(?<!\\)([\[\]()<>])", r"\\\1", rendered)
     if len(rendered) > limit:
         raise ValueError(f"{context} exceeds {limit} characters after rendering")
     if required and not rendered:

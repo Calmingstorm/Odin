@@ -252,8 +252,9 @@ class TestPaginatedEmbedV1Contract:
             json.dumps(_payload(description="[click](https://example.com) <https://example.com>")),
         )
         description = projection["pages"][0]["description"]
-        assert r"\[click\]\(https://example.com\)" in description
-        assert r"\<https://example.com\>" in description
+        assert description == (
+            r"\[click\]\(https://example.com\) \<https://example.com\>"
+        )
 
     def test_link_urls_are_scrubbed_after_parse_before_validation(self):
         raw = json.dumps(
