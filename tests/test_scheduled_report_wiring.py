@@ -28,7 +28,8 @@ def test_registry_and_pagination_service_are_bot_components():
 
 def test_pagination_is_injected_directly_into_reaction_cog():
     source = (ROOT / "src/discord/cogs/reaction_triggers.py").read_text()
-    assert "pagination=bot.components.scheduled_reports" in source
+    assert "components = cast(Any, bot).components" in source
+    assert "pagination=components.scheduled_reports" in source
     assert "bot.__dict__" not in source
     assert "getattr(bot" not in source
 

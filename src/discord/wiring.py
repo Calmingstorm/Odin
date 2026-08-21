@@ -362,8 +362,7 @@ def build_services(
     elif kimi_cfg and kimi_cfg.enabled and not kimi_cfg.api_key:
         log.warning("Kimi enabled in config but no api_key set")
 
-    persistence_root = Path("./data").resolve()
-    scheduler = Scheduler(data_path=str(persistence_root / "schedules.json"))
+    scheduler = Scheduler(data_path="./data/schedules.json")
 
     # Audit logger — HMAC chain signing is on iff config.audit.hmac_key is set
     _audit_key = config.audit.hmac_key if getattr(config, "audit", None) else ""
