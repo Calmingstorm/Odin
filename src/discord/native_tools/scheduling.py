@@ -114,6 +114,7 @@ class SchedulingTools:
                 trigger=inp.get("trigger"),
                 cron_timezone=inp.get("cron_timezone"),
                 requester_id=str(message.author.id),
+                report_format=inp.get("report_format"),
             )
             if schedule.get("trigger"):
                 trigger_desc = ", ".join(f"{k}={v}" for k, v in schedule["trigger"].items())
@@ -171,6 +172,7 @@ class SchedulingTools:
             "steps",
             "channel_id",
             "cron_timezone",
+            "report_format",
         ):
             if key in inp:
                 kwargs[key] = inp[key]

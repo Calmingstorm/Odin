@@ -151,6 +151,8 @@ class OdinBot(commands.Bot):
         self.tool_loop = components.tool_loop
         self.turn_recorder = components.turn_recorder
         self.scheduled_events = components.scheduled_events
+        self.scheduled_report_renderers = components.scheduled_report_renderers
+        self.scheduled_reports = components.scheduled_reports
         self.agent_task_tools = components.agent_task_tools
         self.intake = components.intake
         self.pipeline = components.pipeline

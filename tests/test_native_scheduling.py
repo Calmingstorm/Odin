@@ -163,3 +163,61 @@ class TestDeleteAndParse:
             assert "→ 2026-07-07T14:00" in t._handle_parse_time({"expression": "in 2 hours"})
         with patch("src.tools.time_parser.parse_time", side_effect=ValueError("nope")):
             assert "Error: nope" in t._handle_parse_time({"expression": "gibberish"})
+
+
+class TestReportFormatNativeParity:
+    async def test_create_passes_generic_format(self):
+        scheduler = MagicMock()
+        scheduler.add = AsyncMock(return_value={
+            "id": "S1", "description": "structured", "cron": "0 * * * *",
+            "next_run": "soon", "report_format": "paginated_embed_v1",
+        })
+        result = await _tools(scheduler)._handle_schedule_task(
+            _message(), {
+                "description": "structured", "action": "check", "cron": "0 * * * *",
+                "tool_name": "run_command", "tool_input": {"command": "status"},
+                "report_format": "paginated_embed_v1",
+            })
+        assert "Scheduled recurring" in result
+        assert scheduler.add.await_args.kwargs["report_format"] == "paginated_embed_v1"
+
+    async def test_update_passes_and_can_clear_format(self):
+        scheduler = MagicMock()
+        scheduler.update = AsyncMock(return_value={"id": "S1"})
+        result = await _tools(scheduler)._handle_update_schedule(
+            {"schedule_id": "S1", "report_format": ""})
+        assert result == "Updated schedule S1."
+        scheduler.update.assert_awaited_once_with("S1", report_format="")
+
+
+class TestUnknownReportFormatNativeRejection:
+    @staticmethod
+    def _scheduler(tmp_path):
+        from src.scheduler.scheduler import Scheduler
+
+        scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        scheduler.set_known_report_formats_provider(lambda: ("paginated_embed_v1",))
+        return scheduler
+
+    async def test_native_add_rejects_unknown_format(self, tmp_path):
+        scheduler = self._scheduler(tmp_path)
+        result = await _tools(scheduler)._handle_schedule_task(
+            _message(), {
+                "description": "structured", "action": "check", "cron": "0 * * * *",
+                "tool_name": "run_command", "tool_input": {"command": "status"},
+                "report_format": "paginated_embed_v2",
+            })
+        assert "Unsupported scheduled report format: paginated_embed_v2" in result
+        assert scheduler.list_all() == []
+
+    async def test_native_update_rejects_unknown_format(self, tmp_path):
+        scheduler = self._scheduler(tmp_path)
+        created = await scheduler.add(
+            description="plain", action="check", channel_id="42", cron="0 * * * *",
+            tool_name="run_command", tool_input={"command": "status"})
+        result = await _tools(scheduler)._handle_update_schedule({
+            "schedule_id": created["id"],
+            "report_format": "paginated_embed_v2",
+        })
+        assert "Unsupported scheduled report format: paginated_embed_v2" in result
+        assert "report_format" not in scheduler.list_all()[0]

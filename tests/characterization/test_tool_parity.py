@@ -61,12 +61,11 @@ EXPECTED_TOOL_HASHES = {
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
-    # Updated 2026-08-04: run_at now requires an explicit offset at the
-    # scheduler boundary, so the tool must not advertise an invalid naive ISO.
-    "schedule_task": "f06f1865a4ec7e95",
+    # Updated 2026-08-21: generic paginated scheduled-report format added.
+    "schedule_task": "17746160fd0b2d3f",
     "list_schedules": "6f72cb95cee9eb6c",
-    # Updated with schedule_task: scheduler updates reject naive run_at too.
-    "update_schedule": "35c886de5f87cb5d",
+    # Updated with schedule_task: report_format may be changed or cleared.
+    "update_schedule": "4635df8029e5e548",
     "delete_schedule": "01e54d37b70471a8",
     "parse_time": "6ae3f4c04138a2cd",
     "search_history": "d3d173bfe5262866",

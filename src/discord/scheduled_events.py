@@ -31,6 +31,7 @@ if TYPE_CHECKING:
     from ..tools.executor import ToolExecutor
     from .llm_gateway import LLMGateway
     from .native_tools.agents_tasks import AgentTaskTools
+    from .scheduled_report import ScheduledReportPaginationService
     from .tool_loop import ToolLoopRunner
 
 log = get_logger("discord")
@@ -48,6 +49,7 @@ class ScheduledEventsDeps:
     llm_gateway: LLMGateway  # owns the swappable provider clients
     tool_loop: ToolLoopRunner  # shared dispatch path
     agent_task_tools: AgentTaskTools  # agent result collection in workflows
+    scheduled_reports: ScheduledReportPaginationService | None = None
 
 
 class ScheduledEventHandlers:
@@ -60,6 +62,7 @@ class ScheduledEventHandlers:
         self._llm_gateway = deps.llm_gateway
         self._tool_loop = deps.tool_loop
         self._agent_task_tools = deps.agent_task_tools
+        self._scheduled_reports = deps.scheduled_reports
 
     async def _on_scheduled_digest(self, schedule: dict) -> None:
         """Run the daily infrastructure digest and post results."""
@@ -415,10 +418,32 @@ class ScheduledEventHandlers:
                         pass
                     raise RuntimeError(f"Scheduled check failed: {str(result)[:200]}")
                 else:
-                    text = (
-                        f"**Scheduled: {schedule['description']}**\n```\n{str(result)[:1800]}\n```"
-                    )
-                    await channel.send(scrub_response_secrets(text))
+                    report_format = schedule.get("report_format")
+                    if report_format:
+                        if self._scheduled_reports is None:
+                            raise RuntimeError("Scheduled report service is unavailable")
+                        try:
+                            # The pagination service parses JSON first and scrubs
+                            # only validated strings that can reach Discord.
+                            await self._scheduled_reports.post(channel, report_format, str(result))
+                        except Exception as e:
+                            text = (
+                                f"**Scheduled report failed:** {schedule['description']}\n"
+                                f"Error: {e}"
+                            )
+                            try:
+                                await channel.send(scrub_response_secrets(text))
+                            except Exception:
+                                pass
+                            raise RuntimeError(
+                                f"Failed to render scheduled report {report_format}: {e}"
+                            ) from e
+                    else:
+                        text = (
+                            f"**Scheduled: {schedule['description']}**\n```\n"
+                            f"{str(result)[:1800]}\n```"
+                        )
+                        await channel.send(scrub_response_secrets(text))
             except RuntimeError:
                 raise
             except Exception as e:

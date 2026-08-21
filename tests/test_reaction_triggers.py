@@ -655,3 +655,53 @@ class TestFireTriggersIntegration:
 
         assert count == 1
         assert fired_schedules[0]["description"] == "Reaction trigger"
+
+
+class TestScheduledReportPaginationInjection:
+    async def test_pagination_runs_when_generic_triggers_are_disabled(self):
+        pagination = MagicMock()
+        pagination.handles.return_value = True
+        pagination.handle_reaction = AsyncMock(return_value=True)
+        scheduler = _make_scheduler()
+        cog = ReactionTriggers(
+            _make_bot(), config=_make_config(enabled=False),
+            scheduler=scheduler, pagination=pagination)
+        payload = _make_payload(emoji_name="➡️")
+        await cog.on_raw_reaction_add(payload)
+        pagination.handle_reaction.assert_awaited_once_with(payload)
+        scheduler.fire_triggers.assert_not_awaited()
+
+    async def test_pagination_precedes_generic_allowlists(self):
+        pagination = MagicMock()
+        pagination.handles.return_value = True
+        pagination.handle_reaction = AsyncMock(return_value=True)
+        scheduler = _make_scheduler()
+        cog = ReactionTriggers(
+            _make_bot(),
+            config=_make_config(enabled=True, channel_ids=["999"], allowed_user_ids=["999"]),
+            scheduler=scheduler, pagination=pagination)
+        payload = _make_payload(emoji_name="🔄")
+        await cog.on_raw_reaction_add(payload)
+        pagination.handle_reaction.assert_awaited_once_with(payload)
+        scheduler.fire_triggers.assert_not_awaited()
+
+    async def test_non_report_reaction_falls_through_to_scheduler(self):
+        pagination = MagicMock()
+        pagination.handles.return_value = False
+        pagination.handle_reaction = AsyncMock()
+        scheduler = _make_scheduler(fired=1)
+        cog = ReactionTriggers(
+            _make_bot(), config=_make_config(enabled=True),
+            scheduler=scheduler, pagination=pagination)
+        await cog.on_raw_reaction_add(_make_payload())
+        pagination.handle_reaction.assert_not_awaited()
+        scheduler.fire_triggers.assert_awaited_once()
+
+    async def test_bot_reaction_is_ignored_before_pagination(self):
+        pagination = MagicMock()
+        pagination.handles.return_value = True
+        pagination.handle_reaction = AsyncMock()
+        cog = ReactionTriggers(_make_bot(), pagination=pagination)
+        await cog.on_raw_reaction_add(_make_payload(user_id=123456789))
+        pagination.handles.assert_not_called()
+        pagination.handle_reaction.assert_not_awaited()

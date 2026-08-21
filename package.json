@@ -11,13 +11,14 @@
     "check:templates": "node scripts/check-vue-templates.mjs",
     "check:template-bindings": "node scripts/check-template-bindings.mjs",
     "check:modal-race": "node scripts/check-modal-race.mjs",
-    "check": "npm run check:templates && npm run check:template-bindings && npm run check:modal-race && npm run check:host-access-races && npm run check:socket-identity && npm run check:schedule-time && npm run check:config-health && npm run check:config-center-ui2 && npm run check:config-save-boundaries && npm run build",
+    "check": "npm run check:templates && npm run check:template-bindings && npm run check:modal-race && npm run check:host-access-races && npm run check:socket-identity && npm run check:schedule-time && npm run check:schedule-report-format && npm run check:config-health && npm run check:config-center-ui2 && npm run check:config-save-boundaries && npm run build",
     "check:host-access-races": "node scripts/check-host-access-races.mjs",
     "check:socket-identity": "node scripts/check-socket-identity.mjs",
     "check:schedule-time": "node scripts/check-schedule-time.mjs",
     "check:config-health": "node scripts/check-config-health.mjs",
     "check:config-center-ui2": "node scripts/check-config-center-ui2.mjs",
-    "check:config-save-boundaries": "node scripts/check-config-save-boundaries.mjs"
+    "check:config-save-boundaries": "node scripts/check-config-save-boundaries.mjs",
+    "check:schedule-report-format": "node scripts/check-schedule-report-format.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.0",

@@ -174,6 +174,14 @@ TOOLS_SECTION: list[dict] = [
                         "'command' and 'host' shortcuts below for run_command."
                     ),
                 },
+                "report_format": {
+                    "type": "string",
+                    "enum": ["paginated_embed_v1"],
+                    "description": (
+                        "Optional generic paginated Discord embed renderer for a check result. "
+                        "The command must emit the paginated_embed_v1 JSON contract."
+                    ),
+                },
                 "command": {
                     "type": "string",
                     "description": (
@@ -241,7 +249,7 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Updates an existing schedule by ID. Only provided fields are changed. "
             "Can change description, cron, run_at, trigger, message, tool_name, tool_input, steps, "
-            "channel_id, or paused. "
+            "channel_id, report_format, or paused. "
             "Changing timing (cron/run_at/trigger) replaces the previous timing mode. "
             "Set paused=true to suspend a schedule without deleting it; paused=false to resume."
         ),
@@ -289,6 +297,14 @@ TOOLS_SECTION: list[dict] = [
                 "tool_input": {
                     "type": "object",
                     "description": "New tool input parameters",
+                },
+                "report_format": {
+                    "type": "string",
+                    "enum": ["paginated_embed_v1", ""],
+                    "description": (
+                        "Generic paginated Discord embed renderer for check output; empty string "
+                        "disables structured rendering."
+                    ),
                 },
                 "steps": {
                     "type": "array",
