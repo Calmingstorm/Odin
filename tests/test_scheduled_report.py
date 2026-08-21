@@ -419,3 +419,108 @@ class TestPaginationState:
             registry=_registry(), data_path=path, get_channel=lambda _cid: None
         )
         assert not service.handles(99, "➡️")
+
+
+class TestRegistryAndPersistenceFailureEdges:
+    def test_duplicate_registration_and_formats(self):
+        registry = _registry()
+        assert registry.formats == (PAGINATED_EMBED_V1,)
+        with pytest.raises(ValueError, match="already registered"):
+            registry.register(PaginatedEmbedV1Renderer())
+
+    def test_malformed_json_has_stable_error(self):
+        with pytest.raises(ValueError, match="did not return valid JSON"):
+            _registry().project(PAGINATED_EMBED_V1, "{")
+
+    def test_malformed_persisted_state_fails_closed(self, tmp_path):
+        path = (tmp_path / "state.json").resolve()
+        path.write_text("not-json")
+        service = ScheduledReportPaginationService(
+            registry=_registry(), data_path=path, get_channel=lambda _cid: None
+        )
+        assert not service.handles(1, "➡️")
+
+    async def test_reaction_unknown_emoji_or_message_is_ignored(self, tmp_path):
+        service = ScheduledReportPaginationService(
+            registry=_registry(),
+            data_path=(tmp_path / "state.json").resolve(),
+            get_channel=lambda _cid: None,
+        )
+        assert not await service.handle_reaction(_reaction(emoji="not-a-control"))
+        assert not await service.handle_reaction(_reaction(message_id=1234))
+
+    async def test_missing_channel_keeps_state_without_editing(self, tmp_path):
+        channel = _Channel()
+        service = ScheduledReportPaginationService(
+            registry=_registry(),
+            data_path=(tmp_path / "state.json").resolve(),
+            get_channel=lambda _cid: None,
+        )
+        await service.post(channel, PAGINATED_EMBED_V1, json.dumps(_payload()))
+        assert not await service.handle_reaction(_reaction())
+        assert service.handles(99, "➡️")
+
+    async def test_discord_edit_error_keeps_state(self, tmp_path):
+        import discord
+
+        channel = _Channel()
+        response = MagicMock(status=403, reason="forbidden")
+        channel.message.edit = AsyncMock(
+            side_effect=discord.Forbidden(response, "forbidden")
+        )
+        service = ScheduledReportPaginationService(
+            registry=_registry(),
+            data_path=(tmp_path / "state.json").resolve(),
+            get_channel=lambda _cid: channel,
+        )
+        await service.post(channel, PAGINATED_EMBED_V1, json.dumps(_payload()))
+        assert not await service.handle_reaction(_reaction())
+        assert service.handles(99, "➡️")
+
+    async def test_reaction_add_failures_do_not_fail_delivery(self, tmp_path):
+        import discord
+
+        channel = _Channel()
+        response = MagicMock(status=403, reason="forbidden")
+        channel.message.add_reaction = AsyncMock(
+            side_effect=discord.Forbidden(response, "forbidden")
+        )
+        service = ScheduledReportPaginationService(
+            registry=_registry(),
+            data_path=(tmp_path / "state.json").resolve(),
+            get_channel=lambda _cid: channel,
+        )
+        posted = await service.post(
+            channel, PAGINATED_EMBED_V1, json.dumps(_payload())
+        )
+        assert posted is channel.message
+        assert channel.message.add_reaction.await_count == 3
+
+    async def test_reaction_removal_failure_does_not_fail_redraw(self, tmp_path):
+        import discord
+
+        channel = _Channel()
+        response = MagicMock(status=403, reason="forbidden")
+        channel.message.remove_reaction = AsyncMock(
+            side_effect=discord.Forbidden(response, "forbidden")
+        )
+        service = ScheduledReportPaginationService(
+            registry=_registry(),
+            data_path=(tmp_path / "state.json").resolve(),
+            get_channel=lambda _cid: channel,
+        )
+        await service.post(channel, PAGINATED_EMBED_V1, json.dumps(_payload()))
+        assert await service.handle_reaction(_reaction())
+
+    async def test_persistence_failure_after_post_is_best_effort(self, tmp_path):
+        channel = _Channel()
+        service = ScheduledReportPaginationService(
+            registry=_registry(),
+            data_path=(tmp_path / "state.json").resolve(),
+            get_channel=lambda _cid: channel,
+        )
+        with patch.object(service, "_save", side_effect=OSError("disk full")):
+            posted = await service.post(
+                channel, PAGINATED_EMBED_V1, json.dumps(_payload())
+            )
+        assert posted is channel.message
