@@ -22,6 +22,7 @@ import discord
 
 if TYPE_CHECKING:
     from src.config.schema import ReactionTriggerConfig
+    from src.discord.scheduled_report import ScheduledReportPaginationService
     from src.scheduler.scheduler import Scheduler
 
 logger = logging.getLogger("odin.reaction_triggers")
@@ -36,10 +37,12 @@ class ReactionTriggers(commands.Cog):
         *,
         config: ReactionTriggerConfig | None = None,
         scheduler: Scheduler | None = None,
+        pagination: ScheduledReportPaginationService | None = None,
     ) -> None:
         self.bot = bot
         self._config = config
         self._scheduler = scheduler
+        self._pagination = pagination
 
     @property
     def enabled(self) -> bool:
@@ -82,11 +85,19 @@ class ReactionTriggers(commands.Cog):
     @commands.Cog.listener()
     async def on_raw_reaction_add(self, payload: discord.RawReactionActionEvent) -> None:
         """Handle a reaction being added to a message."""
-        if not self.enabled:
+        # Ignore the bot's own control reactions before either subsystem.
+        if self.bot.user and payload.user_id == self.bot.user.id:
             return
 
-        # Ignore bot's own reactions
-        if payload.user_id == self.bot.user.id:  # type: ignore[union-attr]  # raw events fire post-READY
+        # Pagination is message-local and independent of the optional generic
+        # reaction-trigger feature and its channel/user allowlists.
+        if self._pagination and self._pagination.handles(
+            payload.message_id, payload.emoji
+        ):
+            await self._pagination.handle_reaction(payload)
+            return
+
+        if not self.enabled:
             return
 
         # Check channel allowlist
@@ -133,4 +144,4 @@ class ReactionTriggers(commands.Cog):
 
 async def setup(bot: commands.Bot) -> None:
     """Standard discord.py cog setup (no-op scheduler/config — wired later)."""
-    await bot.add_cog(ReactionTriggers(bot))
+    await bot.add_cog(ReactionTriggers(bot, pagination=bot.components.scheduled_reports))

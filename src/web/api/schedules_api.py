@@ -70,6 +70,7 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
                 max_retries=data.get("max_retries"),
                 retry_backoff_seconds=data.get("retry_backoff_seconds"),
                 cron_timezone=data.get("cron_timezone"),
+                report_format=data.get("report_format"),
             )
             return web.json_response(schedule, status=201)
         except (ValueError, TypeError) as e:
@@ -110,6 +111,7 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
                 retry_backoff_seconds=data.get("retry_backoff_seconds"),
                 paused=paused,
                 cron_timezone=data.get("cron_timezone"),
+                report_format=data.get("report_format"),
             )
         except (ValueError, TypeError) as e:
             return web.json_response({"error": _sanitize_error(e)}, status=400)

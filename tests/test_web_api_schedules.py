@@ -244,3 +244,43 @@ class TestCronTimezoneApiParity:
                 json={"cron_timezone": "Still/Not_A_Timezone"},
             )
             assert invalid_update.status == 400
+
+
+class TestReportFormatApiParity:
+    async def test_create_update_and_readback(self, tmp_path):
+        from src.scheduler.scheduler import Scheduler
+        bot = MagicMock()
+        bot.scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        async with TestClient(TestServer(_app(bot))) as c:
+            created = await c.post("/api/schedules", json={
+                "description": "structured", "action": "check", "channel_id": "1",
+                "cron": "0 * * * *", "tool_name": "run_command",
+                "tool_input": {"command": "status"},
+                "report_format": "paginated_embed_v1",
+            })
+            assert created.status == 201
+            schedule = await created.json()
+            assert schedule["report_format"] == "paginated_embed_v1"
+            listed = await (await c.get("/api/schedules")).json()
+            assert listed[0]["report_format"] == "paginated_embed_v1"
+            cleared = await c.put(
+                f"/api/schedules/{schedule['id']}", json={"report_format": ""})
+            assert cleared.status == 200
+            assert "report_format" not in await cleared.json()
+
+    async def test_invalid_type_and_non_check_use_return_400(self, tmp_path):
+        from src.scheduler.scheduler import Scheduler
+        bot = MagicMock()
+        bot.scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        async with TestClient(TestServer(_app(bot))) as c:
+            invalid_type = await c.post("/api/schedules", json={
+                "description": "structured", "action": "check", "channel_id": "1",
+                "cron": "0 * * * *", "tool_name": "run_command",
+                "report_format": {"junk": True},
+            })
+            assert invalid_type.status == 400
+            invalid_action = await c.post("/api/schedules", json={
+                "description": "reminder", "action": "reminder", "channel_id": "1",
+                "cron": "0 * * * *", "report_format": "paginated_embed_v1",
+            })
+            assert invalid_action.status == 400

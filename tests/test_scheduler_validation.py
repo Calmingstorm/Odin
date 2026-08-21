@@ -6,6 +6,9 @@ sandboxed round). The Scheduler is built against a tmp data file.
 """
 from __future__ import annotations
 
+import hashlib
+import inspect
+
 import pytest
 
 from src.scheduler.scheduler import (
@@ -114,3 +117,55 @@ class TestTriggerMatches:
         assert m({"equals": "exact"}, "discord_message", {"content": "not exact"}) is False
         # empty trigger with any source → matches (no conditions)
         assert m({}, "generic", {}) is True
+
+
+class TestReportFormatPersistence:
+    async def test_check_format_round_trip_and_clear(self, tmp_path):
+        path = tmp_path / "schedules.json"
+        scheduler = Scheduler(data_path=str(path))
+        created = await scheduler.add(
+            description="structured check", action="check", channel_id="1",
+            cron="0 * * * *", tool_name="run_command",
+            tool_input={"command": "status"}, report_format="paginated_embed_v1")
+        assert created["report_format"] == "paginated_embed_v1"
+        reloaded = Scheduler(data_path=str(path))
+        assert reloaded.list_all()[0]["report_format"] == "paginated_embed_v1"
+        updated = await reloaded.update(created["id"], report_format="")
+        assert updated is not None and "report_format" not in updated
+
+    async def test_format_is_only_valid_for_checks_and_strings(self, tmp_path):
+        scheduler = Scheduler(data_path=str(tmp_path / "schedules.json"))
+        with pytest.raises(ValueError, match="only valid for 'check'"):
+            await scheduler.add(
+                description="reminder", action="reminder", channel_id="1",
+                cron="0 * * * *", report_format="paginated_embed_v1")
+        with pytest.raises(ValueError, match="must be a string"):
+            await scheduler.add(
+                description="check", action="check", channel_id="1",
+                cron="0 * * * *", tool_name="run_command",
+                report_format=123)  # type: ignore[arg-type]
+
+
+class TestOldCodeRollbackTolerance:
+    def test_v376_loader_and_saver_preserve_unknown_report_field(self, tmp_path):
+        expected = {
+            "_load": "3a68719075a2c6dfea5451b7f68cbb52c41455ecbf942260103fad385146871c",
+            "_save": "b6286b474494df9d27d24ba0f66c7e36707faaa4f49c61d877f15446d73842dc",
+        }
+        for method, digest in expected.items():
+            source = inspect.getsource(getattr(Scheduler, method)).encode()
+            assert hashlib.sha256(source).hexdigest() == digest
+        import json
+        path = tmp_path / "schedules.json"
+        original = {
+            "id": "rollback", "description": "structured check", "action": "check",
+            "channel_id": "1", "cron": "0 * * * *", "one_time": False,
+            "next_run": "2999-01-01T00:00:00+00:00", "tool_name": "run_command",
+            "tool_input": {"command": "status"},
+            "report_format": "paginated_embed_v1",
+        }
+        path.write_text(json.dumps([original]))
+        old_code_compatible = Scheduler(data_path=str(path))
+        assert old_code_compatible.list_all()[0] == original
+        old_code_compatible._save()
+        assert json.loads(path.read_text())[0] == original

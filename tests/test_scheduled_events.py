@@ -45,6 +45,7 @@ def _deps(**ov):
             active_client=SimpleNamespace(chat=AsyncMock(return_value="LLM summary"))),
         tool_loop=MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value="dispatched")),
         agent_task_tools=MagicMock(),
+        scheduled_reports=MagicMock(post=AsyncMock()),
     )
     d.update(ov)
     return ScheduledEventsDeps(**d)
@@ -386,3 +387,45 @@ class TestScheduleFailureAndTask:
             await h2._on_scheduled_task(
                 {"id": "S1", "channel_id": "1", "action": "mystery"}
             )
+
+
+class TestStructuredCheckReports:
+    async def test_report_format_dispatches_raw_result_to_pagination_service(self):
+        channel = _channel()
+        reports = MagicMock(post=AsyncMock())
+        raw = '{"format":"paginated_embed_v1","pages":[]}'
+        handler = _handlers(
+            get_channel=lambda _cid: channel,
+            tool_loop=MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=raw)),
+            scheduled_reports=reports,
+        )
+        await handler._on_scheduled_task({
+            "id": "S1", "description": "structured", "channel_id": "1",
+            "action": "check", "tool_name": "run_command",
+            "tool_input": {"command": "status"},
+            "report_format": "paginated_embed_v1",
+        })
+        reports.post.assert_awaited_once_with(channel, "paginated_embed_v1", raw)
+        channel.send.assert_not_awaited()
+
+    async def test_renderer_failure_uses_existing_check_failure_path(self):
+        channel = _channel()
+        reports = MagicMock(post=AsyncMock(side_effect=ValueError("bad payload")))
+        handler = _handlers(get_channel=lambda _cid: channel, scheduled_reports=reports)
+        with pytest.raises(RuntimeError, match="Failed to render scheduled report"):
+            await handler._on_scheduled_task({
+                "id": "S1", "description": "structured", "channel_id": "1",
+                "action": "check", "tool_name": "run_command",
+                "tool_input": {"command": "status"}, "report_format": "unknown_v1",
+            })
+        assert "Scheduled report failed" in channel.send.await_args.args[0]
+
+    async def test_legacy_check_output_is_byte_identical(self):
+        channel = _channel()
+        handler = _handlers(get_channel=lambda _cid: channel)
+        await handler._on_scheduled_task({
+            "id": "S1", "channel_id": "1", "action": "check",
+            "tool_name": "t", "description": "d",
+        })
+        channel.send.assert_awaited_once_with(
+            "**Scheduled: d**\n```\ndispatched\n```")

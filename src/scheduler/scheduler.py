@@ -209,7 +209,12 @@ class Scheduler:
         webhook_config: dict | None = None,
         requester_id: str = "",
         cron_timezone: str | None = None,
+        report_format: str | None = None,
     ) -> dict:
+        if report_format is not None and not isinstance(report_format, str):
+            raise ValueError("report_format must be a string")
+        if report_format and action != "check":
+            raise ValueError("report_format is only valid for 'check' actions")
         if action == "digest":
             # Digest is a predefined action, no tool validation needed
             pass
@@ -279,6 +284,8 @@ class Scheduler:
         elif action == "check":
             schedule["tool_name"] = tool_name
             schedule["tool_input"] = tool_input or {}
+            if report_format:
+                schedule["report_format"] = report_format
         elif action == "webhook":
             # action == "webhook" already raised unless webhook_config is a dict.
             schedule["webhook_config"] = self._normalize_webhook_config(
@@ -635,6 +642,7 @@ class Scheduler:
         webhook_config: dict | None = None,
         paused: bool | None = None,
         cron_timezone: str | None = None,
+        report_format: str | None = None,
     ) -> dict | None:
         """Update mutable fields on an existing schedule.
 
@@ -688,6 +696,15 @@ class Scheduler:
                 target["tool_name"] = tool_name
             if tool_input is not None:
                 target["tool_input"] = tool_input
+            if report_format is not None:
+                if not isinstance(report_format, str):
+                    raise ValueError("report_format must be a string")
+                if target.get("action") != "check":
+                    raise ValueError("report_format is only valid for 'check' actions")
+                if report_format:
+                    target["report_format"] = report_format
+                else:
+                    target.pop("report_format", None)
             if steps is not None:
                 target["steps"] = steps
             if webhook_config is not None:

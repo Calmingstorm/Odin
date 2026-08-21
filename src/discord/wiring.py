@@ -74,6 +74,11 @@ from .native_tools.media import MediaTools
 from .native_tools.scheduling import SchedulingTools
 from .prompts import PromptBuilder
 from .scheduled_events import ScheduledEventHandlers, ScheduledEventsDeps
+from .scheduled_report import (
+    PaginatedEmbedV1Renderer,
+    ScheduledReportPaginationService,
+    ScheduledReportRendererRegistry,
+)
 from .tool_catalog import ToolCatalog
 from .tool_loop import ToolLoopDeps, ToolLoopRunner
 from .turn_recorder import TurnRecorder
@@ -357,7 +362,8 @@ def build_services(
     elif kimi_cfg and kimi_cfg.enabled and not kimi_cfg.api_key:
         log.warning("Kimi enabled in config but no api_key set")
 
-    scheduler = Scheduler(data_path="./data/schedules.json")
+    persistence_root = Path("./data").resolve()
+    scheduler = Scheduler(data_path=str(persistence_root / "schedules.json"))
 
     # Audit logger — HMAC chain signing is on iff config.audit.hmac_key is set
     _audit_key = config.audit.hmac_key if getattr(config, "audit", None) else ""
@@ -599,6 +605,8 @@ class BotComponents:
     turn_recorder: TurnRecorder
     tool_loop: ToolLoopRunner
     scheduled_events: ScheduledEventHandlers
+    scheduled_report_renderers: ScheduledReportRendererRegistry
+    scheduled_reports: ScheduledReportPaginationService
     agent_task_tools: AgentTaskTools
     housekeeping: Housekeeping
     pipeline: MessagePipeline
@@ -821,6 +829,16 @@ def build_components(bot, services: BotServices) -> BotComponents:
     native_tools.owners["agents"] = agent_task_tools
     register_native_handlers(native_tools)
 
+    scheduled_report_renderers = ScheduledReportRendererRegistry()
+    scheduled_report_renderers.register(PaginatedEmbedV1Renderer())
+    scheduled_reports = ScheduledReportPaginationService(
+        registry=scheduled_report_renderers,
+        # The scheduler's configured persistence directory is the shared data
+        # root. Resolve it once so report state never depends on process cwd.
+        data_path=(services.scheduler.data_path.parent.resolve() / "scheduled_reports.json"),
+        get_channel=lambda cid: bot.get_channel(cid),
+    )
+
     scheduled_events = ScheduledEventHandlers(
         ScheduledEventsDeps(
             get_config=lambda: bot.config,
@@ -834,6 +852,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             llm_gateway=llm_gateway,
             tool_loop=tool_loop,
             agent_task_tools=agent_task_tools,
+            scheduled_reports=scheduled_reports,
         )
     )
     housekeeping = Housekeeping(
@@ -922,6 +941,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
         turn_recorder=turn_recorder,
         tool_loop=tool_loop,
         scheduled_events=scheduled_events,
+        scheduled_report_renderers=scheduled_report_renderers,
+        scheduled_reports=scheduled_reports,
         agent_task_tools=agent_task_tools,
         housekeeping=housekeeping,
         pipeline=pipeline,

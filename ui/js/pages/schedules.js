@@ -136,6 +136,17 @@ export default {
                    placeholder='e.g. {"host":"server1"}' />
             </label>
           </div>
+          <div>
+            <label class="text-gray-400 text-xs block mb-1">Report Format
+            <select v-model="form.report_format" class="hm-input">
+              <option value="">Plain text</option>
+              <option value="paginated_embed_v1">Paginated embeds (paginated_embed_v1)</option>
+            </select>
+            </label>
+            <p class="text-xs text-gray-500 mt-1">
+              Requires the command to emit the generic paginated JSON contract.
+            </p>
+          </div>
         </div>
 
         <div v-if="createError" class="mb-3 text-red-400 text-sm">{{ createError }}</div>
@@ -281,6 +292,18 @@ export default {
                   <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-xs">
                     <div><span class="text-gray-500">ID:</span> <span class="font-mono">{{ s.id }}</span></div>
                     <div><span class="text-gray-500">Action:</span> {{ s.action }}</div>
+                    <div v-if="s.action === 'check'">
+                      <label class="text-gray-500">Report:
+                      <select :value="s.report_format || ''"
+                              @change="doUpdateReportFormat(s, $event.target.value)"
+                              class="hm-input text-xs mt-1"
+                              :disabled="reportUpdatingId === s.id">
+                        <option value="">Plain text</option>
+                        <option value="paginated_embed_v1">Paginated embeds</option>
+                      </select>
+                      </label>
+                    </div>
+                    <div v-else><span class="text-gray-500">Report:</span> plain text</div>
                     <div><span class="text-gray-500">Next run:</span>
                       <span v-if="s.next_run">{{ formatFuture(s.next_run) }}</span>
                       <span v-else>on trigger</span>
@@ -343,6 +366,7 @@ export default {
       message: '',
       tool_name: '',
       tool_input_str: '',
+      report_format: '',
     });
     const creating = ref(false);
     const createError = ref(null);
@@ -387,6 +411,7 @@ export default {
     const deletingId = ref(null);
     const togglingId = ref(null);
     const resettingId = ref(null);
+    const reportUpdatingId = ref(null);
 
     // Expanded row
     const expandedId = ref(null);
@@ -537,6 +562,7 @@ export default {
       if (f.action === 'reminder' && f.message.trim()) payload.message = f.message.trim();
       if (f.action === 'check') {
         if (f.tool_name.trim()) payload.tool_name = f.tool_name.trim();
+        if (f.report_format) payload.report_format = f.report_format;
         if (f.tool_input_str.trim()) {
           try {
             payload.tool_input = JSON.parse(f.tool_input_str.trim());
@@ -554,6 +580,7 @@ export default {
         form.value = {
           description: '', action: 'reminder', channel_id: '',
           cron: '', run_at: '', message: '', tool_name: '', tool_input_str: '',
+          report_format: '',
         };
         cronResult.value = null;
         showCreate.value = false;
@@ -592,6 +619,21 @@ export default {
         toast.error(e.message || 'Failed to update schedule');
       }
       togglingId.value = null;
+    }
+
+    async function doUpdateReportFormat(schedule, reportFormat) {
+      reportUpdatingId.value = schedule.id;
+      try {
+        await api.put(`/api/schedules/${encodeURIComponent(schedule.id)}`, {
+          report_format: reportFormat,
+        });
+        toast.success(reportFormat ? 'Structured report enabled' : 'Plain-text report enabled');
+      } catch (e) {
+        toast.error(`Update failed: ${e.message}`);
+      } finally {
+        await fetchSchedules();
+        reportUpdatingId.value = null;
+      }
     }
 
     async function doResetFailures(scheduleId) {
@@ -633,12 +675,12 @@ export default {
       showCreate, form, creating, createError, runAtUtcPreview,
       runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
-      runningId, deletingId, togglingId, resettingId,
+      runningId, deletingId, togglingId, resettingId, reportUpdatingId,
       expandedId, history, historyLoading, historyError,
       cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,
       onCronInput, onRunAtInput, validateCron, toggleExpand,
-      fetchSchedules, doCreate, doRunNow, doTogglePause, doResetFailures, doDelete,
+      fetchSchedules, doCreate, doRunNow, doTogglePause, doUpdateReportFormat, doResetFailures, doDelete,
     };
   },
 };
