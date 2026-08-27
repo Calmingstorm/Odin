@@ -4895,9 +4895,13 @@ var Gm=Object.defineProperty;var Km=(e,t,s)=>t in e?Gm(e,t,{enumerable:!0,config
             </div>
             <div class="llm-context-summary">
               <span>Effective context</span>
-              <strong>{{ formatCount(activeContextBudget?.effective?.effective_budget) }} <small>tokens</small></strong>
-              <span class="llm-budget-provenance" :class="provenanceClass(activeContextBudget?.provenance)">{{ activeContextBudget?.provenance || 'unavailable' }}</span>
-              <small v-if="activeContextBudget?.clamp_expires_at">Expires {{ formatExpiry(activeContextBudget.clamp_expires_at) }}</small>
+              <div class="llm-context-summary-value">
+                <span class="llm-context-summary-pair">
+                  <strong>{{ formatCount(activeContextBudget?.effective?.effective_budget) }} <small>tokens</small></strong>
+                  <span class="llm-budget-provenance" :class="provenanceClass(activeContextBudget?.provenance)">{{ activeContextBudget?.provenance || 'unavailable' }}</span>
+                </span>
+                <small v-if="activeContextBudget?.clamp_expires_at">Expires {{ formatExpiry(activeContextBudget.clamp_expires_at) }}</small>
+              </div>
             </div>
           </div>
           <p class="text-xs text-gray-500 mt-3">
@@ -4918,22 +4922,22 @@ var Gm=Object.defineProperty;var Km=(e,t,s)=>t in e?Gm(e,t,{enumerable:!0,config
             <div class="llm-advanced-body">
               <section class="llm-advanced-group">
                 <header><strong>Transport</strong><span>Request lifecycle limits</span></header>
-                <label>Request timeout <small>seconds</small>
+                <label><span class="llm-field-label">Request timeout <small>seconds</small></span>
                   <input v-model.number="codexForm.request_timeout_seconds" type="number" min="60" max="86400" class="hm-input" />
                 </label>
-                <label>Stream stall timeout <small>seconds</small>
+                <label><span class="llm-field-label">Stream stall timeout <small>seconds</small></span>
                   <input v-model.number="codexForm.stream_stall_timeout_seconds" type="number" min="10" max="3600" class="hm-input" />
                 </label>
               </section>
               <section class="llm-advanced-group">
                 <header><strong>Retry policy</strong><span>Transient request failures</span></header>
-                <label>Maximum retries
+                <label><span class="llm-field-label">Maximum retries</span>
                   <input v-model.number="codexForm.retry.max_retries" type="number" min="0" class="hm-input" />
                 </label>
-                <label>Base delay <small>seconds</small>
+                <label><span class="llm-field-label">Base delay <small>seconds</small></span>
                   <input v-model.number="codexForm.retry.base_delay" type="number" min="0" step="any" class="hm-input" />
                 </label>
-                <label>Maximum delay <small>seconds</small>
+                <label><span class="llm-field-label">Maximum delay <small>seconds</small></span>
                   <input v-model.number="codexForm.retry.max_delay" type="number" min="0" step="any" class="hm-input" />
                 </label>
               </section>
@@ -4946,10 +4950,10 @@ var Gm=Object.defineProperty;var Km=(e,t,s)=>t in e?Gm(e,t,{enumerable:!0,config
                   Saved values match this process. Future changes take effect after restart.
                 </p>
                 <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
-                <label>Maximum connections
+                <label><span class="llm-field-label">Maximum connections</span>
                   <input v-model.number="codexForm.connection_pool.max_connections" type="number" min="1" class="hm-input" />
                 </label>
-                <label>Keepalive timeout <small>seconds</small>
+                <label><span class="llm-field-label">Keepalive timeout <small>seconds</small></span>
                   <input v-model.number="codexForm.connection_pool.keepalive_timeout" type="number" min="0" class="hm-input" />
                 </label>
               </section>
@@ -4962,13 +4966,13 @@ var Gm=Object.defineProperty;var Km=(e,t,s)=>t in e?Gm(e,t,{enumerable:!0,config
                   Saved values match this process. Future changes take effect after restart.
                 </p>
                 <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
-                <label class="llm-advanced-toggle">Enabled
-                  <span class="toggle-switch"><input v-model="codexForm.context_compression.enabled" type="checkbox" /><span class="toggle-slider"></span></span>
+                <label class="llm-advanced-toggle"><span class="llm-field-label">Enabled</span>
+                  <span class="llm-toggle-control"><span class="toggle-switch"><input v-model="codexForm.context_compression.enabled" type="checkbox" /><span class="toggle-slider"></span></span></span>
                 </label>
-                <label>Maximum context characters
+                <label><span class="llm-field-label">Maximum context characters</span>
                   <input v-model.number="codexForm.context_compression.max_context_chars" type="number" min="1" class="hm-input" />
                 </label>
-                <label>Recent iterations to keep
+                <label><span class="llm-field-label">Recent iterations to keep</span>
                   <input v-model.number="codexForm.context_compression.keep_recent_iterations" type="number" min="1" class="hm-input" />
                 </label>
               </section>
@@ -5227,7 +5231,7 @@ var Gm=Object.defineProperty;var Km=(e,t,s)=>t in e?Gm(e,t,{enumerable:!0,config
             <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
             <div class="llm-advanced-body">
               <section class="llm-advanced-group single">
-                <label>Request timeout <small>seconds</small>
+                <label><span class="llm-field-label">Request timeout <small>seconds</small></span>
                   <input v-model.number="kimiForm.timeout" type="number" min="10" max="3600" class="hm-input" />
                 </label>
               </section>
@@ -5288,7 +5292,7 @@ var Gm=Object.defineProperty;var Km=(e,t,s)=>t in e?Gm(e,t,{enumerable:!0,config
             <summary><span>Advanced Settings</span><small>Provider request timeout</small></summary>
             <div class="llm-advanced-body">
               <section class="llm-advanced-group single">
-                <label>Request timeout <small>seconds</small>
+                <label><span class="llm-field-label">Request timeout <small>seconds</small></span>
                   <input v-model.number="ollamaForm.timeout" type="number" min="10" max="3600" class="hm-input" />
                 </label>
               </section>
