@@ -4271,6 +4271,7 @@ a:focus-visible {
 }
 .llm-context-summary > span:first-child { color: var(--hm-text-dim); font-size: var(--hm-text-xs); }
 .llm-context-summary-value { min-width: 0; display: flex; flex-wrap: wrap; align-items: center; gap: 0.2rem var(--hm-space-2); }
+.llm-context-summary-pair { display: inline-flex; flex-wrap: nowrap; align-items: center; gap: var(--hm-space-2); }
 .llm-context-summary strong { color: #e7d39d; font-size: var(--hm-text-sm); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .llm-context-summary strong small { color: var(--hm-text-dim); font-size: 0.58rem; font-weight: 500; }
 .llm-context-summary .llm-budget-provenance { flex: none; }
