@@ -3467,6 +3467,7 @@ a:focus-visible {
 .llm-advanced-group > label { min-width: 0; display: grid; align-content: start; gap: 0.3rem; color: var(--hm-text-muted); font-size: var(--hm-text-xs); }
 .llm-advanced-group > label small { color: var(--hm-text-dim); }
 .llm-advanced-group.single { grid-template-columns: minmax(0, 360px); }
+.llm-advanced-toggle { grid-column: 1 / -1; }
 .llm-toggle-control { min-height: 38px; display: flex; align-items: center; }
 .llm-advanced-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-4); }
 .llm-advanced-footer p { max-width: 680px; color: var(--hm-text-dim); font-size: var(--hm-text-xs); line-height: 1.5; }

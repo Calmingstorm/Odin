@@ -244,7 +244,7 @@ export default {
                   Saved values match this process. Future changes take effect after restart.
                 </p>
                 <p v-else class="llm-advanced-state">Future changes take effect after restart; current process values are unavailable.</p>
-                <label><span class="llm-field-label">Enabled</span>
+                <label class="llm-advanced-toggle"><span class="llm-field-label">Enabled</span>
                   <span class="llm-toggle-control"><span class="toggle-switch"><input v-model="codexForm.context_compression.enabled" type="checkbox" /><span class="toggle-slider"></span></span></span>
                 </label>
                 <label><span class="llm-field-label">Maximum context characters</span>
