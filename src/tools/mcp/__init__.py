@@ -17,7 +17,7 @@ from .errors import (
     MCPProtocolError,
     MCPTimeoutError,
 )
-from .manager import MCPManager
+from .manager import MCPManager, validate_server_config
 from .outcomes import MCPToolOutcome
 
 __all__ = [
@@ -27,5 +27,6 @@ __all__ = [
     "MCPManager",
     "MCPProtocolError",
     "MCPTimeoutError",
+    "validate_server_config",
     "MCPToolOutcome",
 ]

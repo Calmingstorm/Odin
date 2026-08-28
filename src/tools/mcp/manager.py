@@ -30,6 +30,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any
 
+from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from . import protocol as proto
 from .client import DiscoveryResult, MCPServerConnection, ToolRecord
@@ -96,7 +97,7 @@ class _ServerRuntime:
         return bool(self.config.get("enabled", True))
 
 
-def _validate_server_config(name: str, config: dict[str, Any]) -> None:
+def validate_server_config(name: str, config: dict[str, Any]) -> None:
     if len(name) > proto.MAX_AUDIT_IDENTIFIER_CHARS:
         raise MCPConfigError(
             f"invalid server name: exceeds {proto.MAX_AUDIT_IDENTIFIER_CHARS} characters"
@@ -127,6 +128,48 @@ def _validate_server_config(name: str, config: dict[str, Any]) -> None:
     timeout = config.get("timeout_seconds", 120)
     if not isinstance(timeout, (int, float)) or not (1 <= float(timeout) <= 3600):
         raise MCPConfigError(f"{name}: timeout_seconds must be within 1–3600")
+    cwd = config.get("cwd", "")
+    if cwd and ("\0" in str(cwd) or not str(cwd).startswith("/")):
+        raise MCPConfigError(f"{name}: cwd must be an absolute path without NUL bytes")
+
+
+def _configured_secret_values(config: dict[str, Any]) -> list[str]:
+    values: set[str] = set()
+    for config_field in ("headers", "env"):
+        mapping = config.get(config_field) or {}
+        if isinstance(mapping, dict):
+            values.update(str(value) for value in mapping.values() if str(value))
+    return sorted(values, key=len, reverse=True)
+
+
+def _scrub_operator_text(config: dict[str, Any], value: Any, *, limit: int) -> str:
+    """Bound and scrub server-authored text before status or logs see it."""
+    text = str(value or "")
+    for secret in _configured_secret_values(config):
+        text = text.replace(secret, "[REDACTED]")
+    text = scrub_output_secrets(text)
+    text = "".join(
+        char for char in text if char in "\n\t" or not (ord(char) < 32 or 127 <= ord(char) <= 159)
+    )
+    return text[:limit]
+
+
+def _scrub_operator_value(config: dict[str, Any], value: Any, *, depth: int = 0) -> Any:
+    """Recursively scrub the small server identity object exposed in status."""
+    if depth >= 8:
+        return "[TRUNCATED]"
+    if isinstance(value, str):
+        return _scrub_operator_text(config, value, limit=1024)
+    if isinstance(value, dict):
+        return {
+            _scrub_operator_text(config, key, limit=128): _scrub_operator_value(
+                config, item, depth=depth + 1
+            )
+            for key, item in list(value.items())[:64]
+        }
+    if isinstance(value, list):
+        return [_scrub_operator_value(config, item, depth=depth + 1) for item in value[:64]]
+    return value if isinstance(value, (bool, int, float)) or value is None else ""
 
 
 class MCPManager:
@@ -206,17 +249,35 @@ class MCPManager:
                     "state": runtime.state,
                     "era": conn_status.get("era"),
                     "negotiated_version": conn_status.get("negotiated_version"),
-                    "server_info": conn_status.get("server_info", {}),
-                    "instructions": conn_status.get("instructions", ""),
+                    "server_info": _scrub_operator_value(
+                        runtime.config, conn_status.get("server_info", {})
+                    ),
+                    "instructions": _scrub_operator_text(
+                        runtime.config, conn_status.get("instructions", ""), limit=4096
+                    ),
                     "discovered_count": len(runtime.discovered),
                     "published_count": len(runtime.published),
                     "excluded_count": sum(1 for t in runtime.discovered if t.excluded),
-                    "published_tools": sorted(runtime.published),
-                    "original_tools": [t.name for t in runtime.discovered],
-                    "last_error": runtime.last_error,
-                    "blocked_reason": runtime.blocked_reason,
+                    "published_tools": [
+                        _scrub_operator_text(runtime.config, tool, limit=64)
+                        for tool in sorted(runtime.published)
+                    ],
+                    "original_tools": [
+                        _scrub_operator_text(
+                            runtime.config, tool.name, limit=proto.MAX_AUDIT_IDENTIFIER_CHARS
+                        )
+                        for tool in runtime.discovered
+                    ],
+                    "last_error": _scrub_operator_text(
+                        runtime.config, runtime.last_error, limit=500
+                    ),
+                    "blocked_reason": _scrub_operator_text(
+                        runtime.config, runtime.blocked_reason, limit=500
+                    ),
                     "last_refresh_age_seconds": age,
-                    "stderr_tail": conn_status.get("stderr_tail", ""),
+                    "stderr_tail": _scrub_operator_text(
+                        runtime.config, conn_status.get("stderr_tail", ""), limit=4000
+                    ),
                     "generation": runtime.generation,
                     # Secret KEY NAMES only — values never leave the manager.
                     "header_keys": sorted((runtime.config.get("headers") or {}).keys()),
@@ -342,12 +403,22 @@ class MCPManager:
         for record in runtime.discovered:
             rows.append(
                 {
-                    "original_name": record.name,
-                    "published_name": published_by_record.get(id(record)),
+                    "original_name": _scrub_operator_text(
+                        runtime.config, record.name, limit=proto.MAX_AUDIT_IDENTIFIER_CHARS
+                    ),
+                    "published_name": _scrub_operator_text(
+                        runtime.config, published_by_record.get(id(record)), limit=64
+                    )
+                    if published_by_record.get(id(record))
+                    else None,
                     "published": id(record) in published_by_record,
                     "excluded": record.excluded,
-                    "exclusion_reason": record.exclusion_reason,
-                    "description": record.description,
+                    "exclusion_reason": _scrub_operator_text(
+                        runtime.config, record.exclusion_reason, limit=500
+                    ),
+                    "description": _scrub_operator_text(
+                        runtime.config, record.description, limit=proto.MAX_DESCRIPTION_CHARS
+                    ),
                 }
             )
         return rows
@@ -396,7 +467,7 @@ class MCPManager:
                         continue
                     runtime = _ServerRuntime(config=config, generation=self._next_gen())
                     try:
-                        _validate_server_config(name, runtime.config)
+                        validate_server_config(name, runtime.config)
                     except MCPConfigError as e:
                         runtime.state = STATE_ERROR
                         runtime.last_error = str(e)
@@ -429,7 +500,7 @@ class MCPManager:
     ) -> dict[str, Any]:
         async with self._lifecycle_lock:
             self._ensure_open()
-            _validate_server_config(name, config)
+            validate_server_config(name, config)
             async with self._lock:
                 committed.set()
                 if name in self._servers:
@@ -444,7 +515,7 @@ class MCPManager:
     ) -> dict[str, Any]:
         async with self._lifecycle_lock:
             self._ensure_open()
-            _validate_server_config(name, config)
+            validate_server_config(name, config)
             async with self._lock:
                 committed.set()
                 old = self._servers.get(name)
@@ -812,7 +883,7 @@ class MCPManager:
                 return await self._record_connect_failure(name, generation, str(e))
             except Exception as e:
                 await connection.disconnect()
-                log.exception("MCP %s: unexpected connect failure", name)
+                log.error("MCP %s: unexpected connect failure (%s)", name, type(e).__name__)
                 return await self._record_connect_failure(
                     name, generation, f"unexpected: {e.__class__.__name__}"
                 )
@@ -833,11 +904,12 @@ class MCPManager:
                 or not runtime.enabled
             ):
                 return False
+            clean_reason = _scrub_operator_text(runtime.config, reason, limit=500)
             runtime.state = STATE_ERROR
-            runtime.last_error = reason[:500]
+            runtime.last_error = clean_reason
             runtime.connection = None
             self._rebuild_published_index_locked()
-        log.warning("MCP %s: connect failed: %s", name, reason)
+        log.warning("MCP %s: connect failed: %s", name, clean_reason)
         return False
 
     async def _publish(
@@ -961,7 +1033,9 @@ class MCPManager:
                 # Detach before teardown so no model request can observe tools
                 # from a failed refresh. Cancellation remains control flow.
                 if not isinstance(e, (MCPError, TimeoutError)):
-                    log.exception("MCP %s: unexpected tools refresh failure", name)
+                    log.error(
+                        "MCP %s: unexpected tools refresh failure (%s)", name, type(e).__name__
+                    )
                 async with self._lock:
                     runtime = self._servers.get(name)
                     if (
@@ -972,7 +1046,9 @@ class MCPManager:
                         return
                     runtime.state = STATE_STALE
                     runtime.connection = None
-                    runtime.last_error = f"tools refresh failed: {e}"[:500]
+                    runtime.last_error = _scrub_operator_text(
+                        runtime.config, f"tools refresh failed: {e}", limit=500
+                    )
                     self._unpublish_locked(name, runtime, reason="refresh failed")
                 try:
                     await connection.disconnect()
@@ -1011,10 +1087,11 @@ class MCPManager:
             or runtime.connection is not connection
         ):
             return
+        clean_reason = _scrub_operator_text(runtime.config, reason, limit=500)
         runtime.state = STATE_ERROR
-        runtime.last_error = reason[:500]
+        runtime.last_error = clean_reason
         runtime.connection = None
-        self._unpublish_locked(name, runtime, reason=f"connection lost: {reason}")
+        self._unpublish_locked(name, runtime, reason=f"connection lost: {clean_reason}")
         runtime.wake.set()
         asyncio.get_running_loop().create_task(
             self._disconnect_lost_connection(connection),

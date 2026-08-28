@@ -34,9 +34,9 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
     ops, and redaction-mask values are rejected outright.
     """
     from ...config import persistence as config_persistence
-    from ...config.persistence import config_transaction
+    from ...config.persistence import DELETE_CONFIG_PATH, config_transaction
     from ...config.schema import MCPServerConfig
-    from ...tools.mcp import MCPConfigError
+    from ...tools.mcp import MCPConfigError, validate_server_config
     from ..api_common import contains_redaction_mask
 
     def _manager(bot=bot):
@@ -53,15 +53,37 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
                 return row
         return None
 
-    async def _persist_desired(servers: dict[str, dict], enabled: bool | None = None) -> None:
-        """Write the machine-managed mcp subtree; rebind the live config.
+    def _live_servers() -> dict[str, dict]:
+        return {
+            name: config.model_dump() if hasattr(config, "model_dump") else dict(config)
+            for name, config in (bot.config.mcp.servers or {}).items()
+        }
 
-        The leaf writer has no delete operation, so the whole ``mcp.servers``
-        mapping is written as one value — comments inside that subtree do not
-        survive, which is acceptable for a route-managed section.
+    def _leaf_changes(
+        path: tuple[str, ...], before: object, after: object
+    ) -> list[tuple[tuple[str, ...], object]]:
+        """Name only changed leaves so untouched placeholders remain opaque."""
+        if isinstance(before, dict) and isinstance(after, dict):
+            changes: list[tuple[tuple[str, ...], object]] = []
+            for key in before.keys() - after.keys():
+                changes.append(((*path, str(key)), DELETE_CONFIG_PATH))
+            for key in after.keys() - before.keys():
+                changes.append(((*path, str(key)), after[key]))
+            for key in before.keys() & after.keys():
+                changes.extend(_leaf_changes((*path, str(key)), before[key], after[key]))
+            return changes
+        return [] if before == after else [(path, after)]
+
+    async def _persist_desired(servers: dict[str, dict], enabled: bool | None = None) -> None:
+        """Persist only changed MCP leaves, then rebind the live config.
+
+        A replacement of the whole server map would flatten untouched
+        ``${ENV}`` credentials into resolved plaintext.  Diffing from the
+        transaction-current live config lets the shared writer preserve those
+        leaves exactly and gives deletions an explicit path.
         """
-        changes: list = [((("mcp", "servers")), servers)]
-        if enabled is not None:
+        changes: list = _leaf_changes(("mcp", "servers"), _live_servers(), servers)
+        if enabled is not None and bot.config.mcp.enabled != bool(enabled):
             changes.append((("mcp", "enabled"), bool(enabled)))
         exc, cancelled = await config_persistence.persist_config_paths_locked(changes)
         if cancelled:
@@ -77,8 +99,10 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
 
     def _apply_secret_patches(base: dict, body: dict, field: str) -> dict | web.Response:
         mapping = dict(base.get(field) or {})
-        set_ops = body.get(f"{field}_set") or {}
-        remove_ops = body.get(f"{field}_remove") or []
+        set_key = f"{field}_set"
+        remove_key = f"{field}_remove"
+        set_ops = body[set_key] if set_key in body else {}
+        remove_ops = body[remove_key] if remove_key in body else []
         if not isinstance(set_ops, dict) or not isinstance(remove_ops, list):
             return web.json_response(
                 {"error": f"{field}_set must be an object and {field}_remove a list"},
@@ -120,7 +144,6 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         config["headers"] = headers
         config["env"] = env
         try:
-            # Schema-level validation; the manager re-validates structurally.
             config = MCPServerConfig(**config).model_dump()
         except Exception as exc:
             return web.json_response({"error": _sanitized(str(exc))}, status=400)
@@ -167,6 +190,10 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         composed = _compose_config({}, body)
         if isinstance(composed, web.Response):
             return composed
+        try:
+            validate_server_config(name, composed)
+        except MCPConfigError as exc:
+            return web.json_response({"error": _sanitized(str(exc))}, status=400)
         async with config_transaction():
             servers = manager.desired_servers()
             if name in servers or name in (bot.config.mcp.servers or {}):
@@ -220,6 +247,10 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
             composed = _compose_config(base, body)
             if isinstance(composed, web.Response):
                 return composed
+            try:
+                validate_server_config(name, composed)
+            except MCPConfigError as exc:
+                return web.json_response({"error": _sanitized(str(exc))}, status=400)
             servers[name] = composed
             await _persist_desired(servers)
         try:

@@ -70,10 +70,21 @@ ConfigPath = Sequence[str]
 # third element carries a field's legacy aliases so the writer can update the
 # key the file already uses instead of adding a canonical sibling that pydantic
 # would then ignore.
-ConfigChange = (
-    tuple[tuple[str, ...], Any] | tuple[tuple[str, ...], Any, tuple[str, ...]]
-)
+ConfigChange = tuple[tuple[str, ...], Any] | tuple[tuple[str, ...], Any, tuple[str, ...]]
 PersistOutcome = tuple[BaseException | None, bool]
+
+
+class _DeleteConfigPath:
+    """Sentinel for deleting one explicitly named config path.
+
+    The persistence contract is leaf-scoped: callers must name every value
+    they intend to change, including removals.  A sentinel avoids overloading
+    ``None`` (which is a valid YAML scalar) and lets the round-trip writer
+    preserve every untouched sibling and ``${ENV}`` placeholder.
+    """
+
+
+DELETE_CONFIG_PATH = _DeleteConfigPath()
 
 
 def _field_lookup(model_cls: Any) -> dict[str, tuple[str, Any, tuple[str, ...]]]:
@@ -312,9 +323,7 @@ def _resolve_path(path: Path | str | None) -> Path:
     return resolved
 
 
-def patch_config_paths(
-    changes: Iterable[ConfigChange], *, path: Path | str | None = None
-) -> None:
+def patch_config_paths(changes: Iterable[ConfigChange], *, path: Path | str | None = None) -> None:
     """Apply leaf *changes* to the active config file, touching nothing else.
 
     Each change is a ``(path_segments, value)`` pair. Missing intermediate
@@ -352,6 +361,10 @@ def patch_config_paths(
         # validation_alias wins on reload — so the change would silently revert.
         # When the file has none of them, create the canonical key.
         present = [k for k in (leaf, *aliases) if hasattr(node, "get") and k in node]
+        if value is DELETE_CONFIG_PATH:
+            for target in present:
+                del node[target]
+            continue
         for target in present or [leaf]:
             if _placeholder_still_accurate(
                 node.get(target) if hasattr(node, "get") else None, value
@@ -445,9 +458,7 @@ async def persist_config_paths(
     if not changes:
         return
     async with config_transaction():
-        exc, was_cancelled = await _run_settled(
-            lambda: patch_config_paths(changes, path=path)
-        )
+        exc, was_cancelled = await _run_settled(lambda: patch_config_paths(changes, path=path))
         if was_cancelled:
             raise asyncio.CancelledError
         if exc is not None:
