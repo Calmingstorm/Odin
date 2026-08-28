@@ -351,17 +351,27 @@ message_triggers:
 #   rate_limit_seconds: 0.5
 #   targets: []
 
-# # MCP (Model Context Protocol) servers
+# # MCP (Model Context Protocol) servers. Prefer Manage > MCP Servers in the
+# # WebUI: it preserves write-only credentials and applies changes live.
 # mcp:
 #   enabled: false
-#   servers: {}
-#   # Example stdio server:
-#   #   my-server:
-#   #     transport: stdio
-#   #     command: /usr/local/bin/my-mcp-server
-#   #     args: ["--flag"]
-#   #     env: { "API_KEY": "..." }
-#   #     timeout_seconds: 120
+#   servers:
+#     local_tools:
+#       enabled: true
+#       transport: stdio
+#       command: /usr/local/bin/my-mcp-server
+#       args: ["--flag"]
+#       cwd: /srv/my-mcp-server
+#       env: { "API_KEY": "${MCP_API_KEY}" }
+#       tool_allowlist: []       # Empty = all validated discovered tools
+#       timeout_seconds: 120
+#     remote_tools:
+#       enabled: true
+#       transport: http
+#       url: https://mcp.example.com/mcp
+#       headers: { "Authorization": "Bearer ${MCP_HTTP_TOKEN}" }
+#       tool_allowlist: []
+#       timeout_seconds: 120
 
 # # Graceful degradation thresholds
 # graceful_degradation:         # request guarding is always on
