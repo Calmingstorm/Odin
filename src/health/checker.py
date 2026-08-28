@@ -524,12 +524,14 @@ def check_mcp(bot: OdinBot) -> ComponentStatus:
             status="down",
             detail="Manager returned an unexpected status shape",
         )
-    servers = status.get("server_count", 0)
+    configured = status.get("server_count", 0)
+    enabled_servers = status.get("enabled_server_count", configured)
     connected = status.get("connected_count", 0)
     published = status.get("published_tool_count", 0)
     metadata = {
         "enabled": status.get("enabled", False),
-        "servers": servers,
+        "servers": configured,
+        "enabled_servers": enabled_servers,
         "connected": connected,
         "published_tools": published,
     }
@@ -541,7 +543,7 @@ def check_mcp(bot: OdinBot) -> ComponentStatus:
             detail="MCP disabled",
             metadata=metadata,
         )
-    if servers == 0:
+    if configured == 0:
         return ComponentStatus(
             name="mcp",
             healthy=True,
@@ -549,19 +551,22 @@ def check_mcp(bot: OdinBot) -> ComponentStatus:
             detail="Enabled, no servers configured",
             metadata=metadata,
         )
-    if connected == servers:
+    detail = (
+        f"{connected}/{enabled_servers} enabled server(s) connected, {published} tool(s) published"
+    )
+    if connected == enabled_servers:
         return ComponentStatus(
             name="mcp",
             healthy=True,
             status="ok",
-            detail=f"{connected}/{servers} server(s) connected, {published} tool(s) published",
+            detail=detail,
             metadata=metadata,
         )
     return ComponentStatus(
         name="mcp",
         healthy=True,
         status="degraded",
-        detail=f"{connected}/{servers} server(s) connected, {published} tool(s) published",
+        detail=detail,
         metadata=metadata,
     )
 
