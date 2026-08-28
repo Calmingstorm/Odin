@@ -26,7 +26,7 @@ from ..odin_log import get_logger
 from ..tools import get_tool_definitions
 from .slash_commands import register_commands
 from .tool_loop_helpers import init_allowed_webhook_ids as _init_allowed_webhook_ids_impl
-from .wiring import build_components, build_services, shutdown_services
+from .wiring import build_components, build_services, shutdown_services, start_mcp
 
 if TYPE_CHECKING:  # health.server imports this module at runtime — cycle-free typing only
     from ..health.server import HealthServer
@@ -97,6 +97,7 @@ class OdinBot(commands.Bot):
         self.tool_executor = services.tool_executor
         self.skill_manager = services.skill_manager
         self.scheduler = services.scheduler
+        self.mcp_manager = services.mcp_manager
         self.audit = services.audit
         self.api_token_manager = services.api_token_manager
         self.agent_manager = services.agent_manager
@@ -191,16 +192,20 @@ class OdinBot(commands.Bot):
         """Log configuration summary at startup to help users verify setup."""
         cfg = self.config
         if not cfg.tools.hosts:
-            log.warning("No hosts configured — SSH tools will not work until hosts are added to "
-                        "config.yml")
+            log.warning(
+                "No hosts configured — SSH tools will not work until hosts are added to config.yml"
+            )
         else:
             log.info("Configured hosts: %s", ", ".join(cfg.tools.hosts.keys()))
         if not cfg.tools.claude_code_host:
-            log.info("claude_code_host not set — claude -p code generation requires a configured "
-                     "host")
+            log.info(
+                "claude_code_host not set — claude -p code generation requires a configured host"
+            )
         if cfg.openai_codex.enabled and not self.llm_gateway.codex_client:
-            log.warning("Codex enabled but not configured — session compaction and learning "
-                        "reflection disabled")
+            log.warning(
+                "Codex enabled but not configured — session compaction and learning "
+                "reflection disabled"
+            )
         if cfg.discord.respond_to_bots:
             log.info("Bot interaction enabled — will respond to other bots")
         if cfg.discord.require_mention:
@@ -210,9 +215,7 @@ class OdinBot(commands.Bot):
     # commands.Bot lifecycle hooks (cog loading + prefix)
     # ------------------------------------------------------------------
 
-    async def _resolve_prefix(
-        self, bot: commands.Bot, message: discord.Message
-    ) -> list[str]:
+    async def _resolve_prefix(self, bot: commands.Bot, message: discord.Message) -> list[str]:
         """Return applicable prefixes; mention also accepted."""
         base = ["!"]  # OdinBot's default prefix; can be made config-driven later
         return commands.when_mentioned_or(*base)(bot, message)
@@ -239,7 +242,8 @@ class OdinBot(commands.Bot):
             if failed:
                 log.warning(
                     "%d/%d startup diagnostic(s) failed — see preceding lines",
-                    failed, len(report.results),
+                    failed,
+                    len(report.results),
                 )
         except Exception:
             log.exception("Startup diagnostics failed unexpectedly (non-fatal)")
@@ -257,6 +261,11 @@ class OdinBot(commands.Bot):
                 log.info("Loaded extension %s", ext)
             except commands.ExtensionError:
                 log.exception("Failed to load extension %s", ext)
+
+        # MCP: adopt configured desired state and reconcile enabled servers.
+        # Bounded per server; a dead or misconfigured server never blocks
+        # the gateway connection (wiring.start_mcp is exception-guarded).
+        await start_mcp(self)
 
     async def close(self) -> None:
         """Graceful shutdown: stop services, persist state, then disconnect.

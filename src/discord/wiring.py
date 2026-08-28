@@ -49,6 +49,7 @@ from ..search import LocalEmbedder, SessionVectorStore
 from ..sessions import SessionManager
 from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
+from ..tools.mcp import MCPManager
 from ..tools.process_manager import ProcessCleanupError
 from ..tools.workspace import DEFAULT_MEMORY_PATH
 from ..trajectories.saver import TrajectorySaver
@@ -123,6 +124,7 @@ class BotServices:
     diff_tracker: DiffTracker
     context_compressor: object | None
     compression_stats: object | None
+    mcp_manager: MCPManager
     prefix_tracker: object | None
     auxiliary_llm_client: object | None
     outbound_webhook_dispatcher: object | None
@@ -539,6 +541,12 @@ def build_services(
             }
         )
 
+    # MCP control plane — ALWAYS constructed (zero I/O): status/CRUD surfaces
+    # must work even while globally disabled, and the first server must be
+    # addable through a live control plane. Transports exist only after the
+    # async start path reconciles enabled configurations (start_mcp).
+    mcp_manager = MCPManager()
+
     return BotServices(
         channel_state=channel_state,
         context_loader=context_loader,
@@ -573,6 +581,7 @@ def build_services(
         diff_tracker=diff_tracker,
         context_compressor=context_compressor,
         compression_stats=compression_stats,
+        mcp_manager=mcp_manager,
         prefix_tracker=prefix_tracker,
         auxiliary_llm_client=auxiliary_llm_client,
         outbound_webhook_dispatcher=outbound_webhook_dispatcher,
@@ -693,6 +702,11 @@ def build_components(bot, services: BotServices) -> BotComponents:
     # A live provider switch must rebuild the tool registry so provider-gated
     # tools (native image gen is Codex-only) reappear/disappear immediately.
     llm_gateway.on_provider_switch = tool_catalog.invalidate
+
+    # MCP publication transitions invalidate the same catalog. Harmless until
+    # P3 merges published MCP defs; wired now so the control plane's
+    # synchronous-invalidation contract holds from the first integrated head.
+    services.mcp_manager.set_on_catalog_changed(tool_catalog.invalidate)
 
     # Domain handler bundles (P5b) — built BEFORE the dispatcher so they can
     # be its owners (RFC-002 P5).
@@ -830,9 +844,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
 
     scheduled_report_renderers = ScheduledReportRendererRegistry()
     scheduled_report_renderers.register(PaginatedEmbedV1Renderer())
-    services.scheduler.set_known_report_formats_provider(
-        lambda: scheduled_report_renderers.formats
-    )
+    services.scheduler.set_known_report_formats_provider(lambda: scheduled_report_renderers.formats)
     scheduled_reports = ScheduledReportPaginationService(
         registry=scheduled_report_renderers,
         # The scheduler's configured persistence directory is the shared data
@@ -952,6 +964,26 @@ def build_components(bot, services: BotServices) -> BotComponents:
     )
 
 
+async def start_mcp(bot) -> None:
+    """Adopt the configured MCP desired state and reconcile enabled servers.
+
+    Called from the async lifecycle (setup_hook) — never from synchronous
+    build_services. Bounded: each enabled server gets one bounded connect
+    attempt before this returns; retries continue under supervision. A
+    broken MCP config records per-server errors and NEVER blocks boot.
+    """
+    manager = bot.mcp_manager
+    mcp_config = getattr(bot.config, "mcp", None)
+    if mcp_config is None:
+        return
+    try:
+        servers = {name: server.model_dump() for name, server in (mcp_config.servers or {}).items()}
+        await manager.load_desired_state(enabled=bool(mcp_config.enabled), servers=servers)
+        await manager.start()
+    except Exception:
+        log.exception("MCP startup failed (non-fatal; control plane remains up)")
+
+
 async def shutdown_services(bot) -> None:
     """Stop services and persist state — moved verbatim from OdinBot.close().
 
@@ -976,6 +1008,14 @@ async def shutdown_services(bot) -> None:
             await scheduler.stop()
         except Exception:
             log.exception("Error stopping scheduler")
+
+    mcp_manager = getattr(bot, "mcp_manager", None)
+    if mcp_manager is not None:
+        try:
+            # Concurrent + bounded per server inside; unpublishes everything.
+            await mcp_manager.shutdown()
+        except Exception:
+            log.exception("Error stopping mcp_manager")
 
     health_server = getattr(bot, "health_server", None)
     if health_server is not None:

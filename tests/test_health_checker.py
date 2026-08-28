@@ -1,4 +1,5 @@
 """Tests for src.health.checker — component health dashboard."""
+
 from __future__ import annotations
 
 from unittest.mock import MagicMock, PropertyMock
@@ -24,6 +25,7 @@ from src.health.checker import (
 # ComponentStatus dataclass
 # ---------------------------------------------------------------------------
 
+
 class TestComponentStatus:
     def test_basic_to_dict(self):
         cs = ComponentStatus(name="test", healthy=True, status="ok", detail="fine")
@@ -32,7 +34,10 @@ class TestComponentStatus:
 
     def test_to_dict_with_metadata(self):
         cs = ComponentStatus(
-            name="codex", healthy=True, status="ok", detail="good",
+            name="codex",
+            healthy=True,
+            status="ok",
+            detail="good",
             metadata={"model": "gpt-4o", "requests": 42},
         )
         d = cs.to_dict()
@@ -49,7 +54,11 @@ class TestComponentStatus:
 
     def test_all_fields(self):
         cs = ComponentStatus(
-            name="n", healthy=False, status="degraded", detail="d", metadata={"k": "v"},
+            name="n",
+            healthy=False,
+            status="degraded",
+            detail="d",
+            metadata={"k": "v"},
         )
         assert cs.name == "n"
         assert cs.healthy is False
@@ -61,6 +70,7 @@ class TestComponentStatus:
 # ---------------------------------------------------------------------------
 # check_discord
 # ---------------------------------------------------------------------------
+
 
 class TestCheckDiscord:
     def test_online(self):
@@ -107,6 +117,7 @@ class TestCheckDiscord:
 # ---------------------------------------------------------------------------
 # check_codex
 # ---------------------------------------------------------------------------
+
 
 class TestCheckCodex:
     def _make_bot(self, breaker_state="closed", session_ok=True, total_requests=42):
@@ -186,6 +197,7 @@ class TestCheckCodex:
 # check_sessions
 # ---------------------------------------------------------------------------
 
+
 class TestCheckSessions:
     def test_healthy(self):
         bot = MagicMock()
@@ -242,6 +254,7 @@ class TestCheckSessions:
 # check_knowledge
 # ---------------------------------------------------------------------------
 
+
 class TestCheckKnowledge:
     def test_healthy_with_vec(self):
         bot = MagicMock()
@@ -287,6 +300,7 @@ class TestCheckKnowledge:
 # ---------------------------------------------------------------------------
 # check_ssh_hosts
 # ---------------------------------------------------------------------------
+
 
 class TestCheckSSHHosts:
     def test_with_hosts_and_pool(self):
@@ -378,6 +392,7 @@ class TestCheckSSHHosts:
 # check_browser
 # ---------------------------------------------------------------------------
 
+
 class TestCheckBrowser:
     def test_connected(self):
         bot = MagicMock()
@@ -414,6 +429,7 @@ class TestCheckBrowser:
 # check_scheduler
 # ---------------------------------------------------------------------------
 
+
 class TestCheckScheduler:
     def test_with_tasks(self):
         bot = MagicMock()
@@ -445,6 +461,7 @@ class TestCheckScheduler:
 # check_loops
 # ---------------------------------------------------------------------------
 
+
 class TestCheckLoops:
     def test_active(self):
         bot = MagicMock()
@@ -468,6 +485,7 @@ class TestCheckLoops:
 # ---------------------------------------------------------------------------
 # check_agents
 # ---------------------------------------------------------------------------
+
 
 class TestCheckAgents:
     def test_with_agents(self):
@@ -499,9 +517,11 @@ class TestCheckAgents:
 # check_all aggregate
 # ---------------------------------------------------------------------------
 
+
 class TestCheckAll:
     def _make_healthy_bot(self):
         bot = MagicMock()
+        bot.mcp_manager = None  # health treats an absent control plane as unconfigured
         bot.is_ready.return_value = True
         guild = MagicMock()
         guild.member_count = 10
@@ -543,7 +563,7 @@ class TestCheckAll:
         bot = self._make_healthy_bot()
         result = check_all(bot)
         assert result["overall"] == "healthy"
-        assert result["total"] == 11
+        assert result["total"] == 12
         assert "checked_at" in result
         assert isinstance(result["components"], list)
 
@@ -552,15 +572,26 @@ class TestCheckAll:
         result = check_all(bot)
         names = {c["name"] for c in result["components"]}
         expected = {
-            "discord", "codex", "ollama", "kimi", "sessions", "knowledge", "ssh_hosts",
-            "browser", "scheduler", "loops", "agents",
+            "discord",
+            "codex",
+            "ollama",
+            "kimi",
+            "sessions",
+            "knowledge",
+            "ssh_hosts",
+            "browser",
+            "scheduler",
+            "loops",
+            "agents",
+            "mcp",
         }
         assert names == expected
 
     def test_degraded_overall(self):
         bot = self._make_healthy_bot()
         bot.sessions.get_token_metrics.return_value = {
-            "total_tokens": 999999, "over_budget_count": 3,
+            "total_tokens": 999999,
+            "over_budget_count": 3,
         }
         result = check_all(bot)
         assert result["overall"] == "degraded"
@@ -588,8 +619,10 @@ class TestCheckAll:
         bot = self._make_healthy_bot()
         result = check_all(bot)
         total = (
-            result["healthy_count"] + result["degraded_count"]
-            + result["down_count"] + result["unconfigured_count"]
+            result["healthy_count"]
+            + result["degraded_count"]
+            + result["down_count"]
+            + result["unconfigured_count"]
         )
         assert total == result["total"]
 
@@ -597,6 +630,7 @@ class TestCheckAll:
         bot = self._make_healthy_bot()
         result = check_all(bot)
         from datetime import datetime
+
         dt = datetime.fromisoformat(result["checked_at"])
         assert dt is not None
 
@@ -605,9 +639,10 @@ class TestCheckAll:
 # _ALL_CHECKERS list
 # ---------------------------------------------------------------------------
 
+
 class TestCheckerList:
     def test_count(self):
-        assert len(_ALL_CHECKERS) == 11
+        assert len(_ALL_CHECKERS) == 12
 
     def test_all_callable(self):
         for checker in _ALL_CHECKERS:
@@ -630,15 +665,18 @@ class TestCheckerList:
 # Module exports
 # ---------------------------------------------------------------------------
 
+
 class TestExports:
     def test_health_init_exports(self):
         from src.health import ComponentStatus, HealthServer, check_all
+
         assert ComponentStatus is not None
         assert check_all is not None
         assert HealthServer is not None
 
     def test_checker_module_imports(self):
         from src.health.checker import ComponentStatus, check_all
+
         assert ComponentStatus is not None
         assert callable(check_all)
 
@@ -646,6 +684,7 @@ class TestExports:
 # ---------------------------------------------------------------------------
 # REST API endpoint
 # ---------------------------------------------------------------------------
+
 
 class TestHealthAPI:
     @pytest.fixture
@@ -702,7 +741,7 @@ class TestHealthAPI:
             assert "overall" in data
             assert "components" in data
             assert isinstance(data["components"], list)
-            assert data["total"] == 11
+            assert data["total"] == 12
 
     @pytest.mark.asyncio
     async def test_health_components_has_all_names(self, mock_bot):
@@ -727,6 +766,7 @@ class TestHealthAPI:
 # ---------------------------------------------------------------------------
 # Edge cases
 # ---------------------------------------------------------------------------
+
 
 class TestEdgeCases:
     def test_knowledge_none_member_count(self):
@@ -778,4 +818,4 @@ class TestEdgeCases:
         bot = MagicMock(spec=["llm_gateway"])
         result = check_all(bot)
         assert "T" in result["checked_at"]
-        assert result["total"] == 11
+        assert result["total"] == 12

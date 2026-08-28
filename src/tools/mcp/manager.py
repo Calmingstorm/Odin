@@ -144,6 +144,11 @@ class MCPManager:
     # Introspection
     # ------------------------------------------------------------------
 
+    def set_on_catalog_changed(self, callback: Any | None) -> None:
+        """Late-bind the catalog invalidation hook (the manager is built in
+        build_services, the tool catalog in build_components)."""
+        self._on_catalog_changed = callback
+
     @property
     def global_enabled(self) -> bool:
         return self._global_enabled
