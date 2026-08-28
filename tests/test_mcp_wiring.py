@@ -506,15 +506,33 @@ class TestBootLifecycleRaces:
         disable = asyncio.create_task(manager.set_global_enabled(False))
         await asyncio.wait_for(entered.wait(), timeout=1)
         enable = asyncio.create_task(manager.set_global_enabled(True))
-        await asyncio.sleep(0)
-        assert not enable.done(), "enable must serialize behind disable retirement"
+        # One event-loop turn cannot distinguish lock serialization from a task
+        # that simply has not run yet. Give an unserialized enable ample time to
+        # finish while disable retirement remains deliberately parked.
+        for _ in range(200):
+            if enable.done():
+                break
+            await asyncio.sleep(0)
+        enable_finished_while_retirement_parked = enable.done()
+
         release.set()
         await asyncio.gather(disable, enable)
         current = manager._servers["fake"]  # noqa: SLF001
-        assert manager.global_enabled is True
-        assert current.supervisor is not None and not current.supervisor.done()
-        assert current.state == STATE_CONNECTED
-        await manager.shutdown()
+        try:
+            defect_end_state = manager.global_enabled and (
+                current.supervisor is None or current.supervisor.done()
+            )
+            assert not defect_end_state, (
+                "overlap must not leave MCP globally enabled without supervision"
+            )
+            assert not enable_finished_while_retirement_parked, (
+                "enable must remain serialized until disable retirement completes"
+            )
+            assert manager.global_enabled is True
+            assert current.supervisor is not None and not current.supervisor.done()
+            assert current.state == STATE_CONNECTED
+        finally:
+            await manager.shutdown()
 
 
 class TestManagerLockGuardMutations:
