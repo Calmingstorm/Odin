@@ -247,9 +247,7 @@ class MCPManager:
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
-                if task.done():
-                    break
-                if not committed.is_set():
+                if not task.done() and not committed.is_set():
                     task.cancel()
                     try:
                         await task
@@ -261,6 +259,8 @@ class MCPManager:
                 if current is not None:
                     while current.cancelling():
                         current.uncancel()
+                if task.done():
+                    break
         result = await task
         if cancelled:
             raise asyncio.CancelledError
