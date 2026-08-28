@@ -14,6 +14,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.discord.scheduled_events import ScheduledEventHandlers, ScheduledEventsDeps
+from src.scheduler.scheduler import NonRetryableScheduleError
 from src.tools import ToolResult
 
 
@@ -146,6 +147,46 @@ class TestExecuteScheduledTool:
         r = await h._execute_scheduled_tool("t", {}, _channel(), None)
         assert r.ok and r.output == "done"
 
+
+    async def test_mcp_audit_metadata_survives_scheduled_dispatch(self):
+        metadata = {
+            "mcp_server": "srv",
+            "mcp_tool": "read",
+            "config_generation": 4,
+            "negotiated_version": "2025-06-18",
+            "outcome": "ok",
+        }
+        tl = MagicMock(
+            dispatch_loop_tool_inner=AsyncMock(
+                return_value=ToolResult(
+                    output="done", ok=True, tool_name="mcp_srv_read", audit_metadata=metadata
+                )
+            )
+        )
+        audit = MagicMock(log_execution=AsyncMock(), log_event=AsyncMock())
+        h = _handlers(tool_loop=tl, audit=audit)
+        result = await h._execute_scheduled_tool(
+            "mcp_srv_read", {}, _channel(), "user1", "Alice"
+        )
+        assert result.ok
+        assert audit.log_event.await_args.kwargs["metadata"] == metadata
+
+
+    async def test_mcp_audit_failure_is_nonfatal(self):
+        result = ToolResult(
+            output="done",
+            ok=True,
+            tool_name="mcp_srv_read",
+            audit_metadata={"mcp_server": "srv", "mcp_tool": "read", "outcome": "ok"},
+        )
+        tl = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=result))
+        audit = MagicMock(
+            log_execution=AsyncMock(), log_event=AsyncMock(side_effect=OSError("disk"))
+        )
+        h = _handlers(tool_loop=tl, audit=audit)
+        returned = await h._execute_scheduled_tool("mcp_srv_read", {}, _channel(), "user1")
+        assert returned is result
+
     async def test_dispatch_plain_result_wrapped(self):
         h = _handlers()  # dispatch returns "dispatched" (str) → wrapped ok=True
         r = await h._execute_scheduled_tool("t", {}, _channel(), None)
@@ -159,6 +200,30 @@ class TestExecuteScheduledTool:
 
 
 class TestWorkflow:
+
+    async def test_uncertain_mcp_workflow_requires_manual_resolution(self):
+        ch = _channel()
+        uncertain = ToolResult(
+            output="effect unknown",
+            ok=False,
+            error="effect unknown",
+            tool_name="mcp_srv_write",
+            audit_metadata={
+                "mcp_server": "srv",
+                "mcp_tool": "write",
+                "config_generation": 1,
+                "negotiated_version": "2025-06-18",
+                "outcome": "uncertain",
+            },
+        )
+        tl = MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=uncertain))
+        h = _handlers(tool_loop=tl)
+        with pytest.raises(NonRetryableScheduleError, match="manual resolution"):
+            await h._run_scheduled_workflow(
+                ch,
+                {"description": "wf", "steps": [{"tool_name": "mcp_srv_write"}]},
+            )
+
     async def test_all_steps_ok(self):
         ch = _channel()
         h = _handlers()
@@ -260,6 +325,35 @@ class TestWorkflow:
 
 
 class TestScheduleFailureAndTask:
+
+    @pytest.mark.parametrize("send_error", [None, RuntimeError("discord down")])
+    async def test_uncertain_mcp_check_never_becomes_retryable(self, send_error):
+        ch = _channel()
+        if send_error is not None:
+            ch.send.side_effect = send_error
+        uncertain = ToolResult(
+            output="effect unknown",
+            ok=False,
+            error="effect unknown",
+            tool_name="mcp_srv_write",
+            audit_metadata={"mcp_server": "srv", "mcp_tool": "write", "outcome": "uncertain"},
+        )
+        h = _handlers(
+            get_channel=lambda cid: ch,
+            tool_loop=MagicMock(dispatch_loop_tool_inner=AsyncMock(return_value=uncertain)),
+        )
+        with pytest.raises(NonRetryableScheduleError, match="manual resolution"):
+            await h._on_scheduled_task(
+                {
+                    "id": "S-unknown",
+                    "description": "write",
+                    "channel_id": "1",
+                    "action": "check",
+                    "tool_name": "mcp_srv_write",
+                }
+            )
+        assert ch.send.await_count == 1
+
     async def test_schedule_failure_alert(self):
         ch = _channel()
         h = _handlers(get_channel=lambda cid: ch)

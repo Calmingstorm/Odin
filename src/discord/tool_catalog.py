@@ -22,13 +22,20 @@ log = get_logger("tools")
 
 
 class ToolCatalog:
-    def __init__(self, *, get_config: Callable, skill_manager) -> None:
+    def __init__(
+        self, *, get_config: Callable, skill_manager, get_mcp_definitions: Callable | None = None
+    ) -> None:
         self.get_config = get_config
         self.skill_manager = skill_manager
+        # Published MCP tool definitions (MCP campaign P3). None keeps the
+        # catalog MCP-free; the provider returns ONLY tools satisfying the
+        # publication predicate, and every publication transition invalidates
+        # this cache synchronously via the manager's catalog hook.
+        self.get_mcp_definitions = get_mcp_definitions
         # Cached merged tool definitions — invalidated on skill create/edit/delete
         self.cached: list[dict] | None = None
 
-    def merged_definitions(self) -> list[dict]:
+    def merged_definitions(self, *, cache_result: bool = True) -> list[dict]:
         """Merge built-in and skill tool definitions, deduplicating by name.
 
         Built-in tools take priority over skills with the same name.
@@ -82,8 +89,18 @@ class ToolCatalog:
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions() if t["name"] not in builtin_names
         ]
-        self.cached = builtin + skill_defs
-        return self.cached
+        merged = builtin + skill_defs
+        # Published MCP tools (P3): appended AFTER builtins+skills, which win
+        # name conflicts — a server cannot shadow a native tool. Only tools
+        # passing the manager's publication predicate ever appear here.
+        if self.get_mcp_definitions is not None:
+            taken = {t["name"] for t in merged}
+            for mcp_def in self.get_mcp_definitions():
+                if mcp_def["name"] not in taken:
+                    merged.append(mcp_def)
+        if cache_result:
+            self.cached = merged
+        return merged
 
     def invalidate(self) -> None:
         self.cached = None

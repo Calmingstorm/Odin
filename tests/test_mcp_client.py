@@ -1354,9 +1354,17 @@ class TestBackgroundTaskMCPIntegration:
         mock_skill_mgr = MagicMock()
         mock_skill_mgr.has_skill = MagicMock(return_value=False)
 
+        # The P3 seam consumes the control plane's typed outcome and returns
+        # a structured ToolResult (callers consume .ok).
+        from src.tools.mcp.outcomes import MCPToolOutcome
+
         mock_mcp_mgr = MagicMock()
         mock_mcp_mgr.has_tool = MagicMock(return_value=True)
-        mock_mcp_mgr.execute = AsyncMock(return_value="mcp result")
+        mock_mcp_mgr.execute = AsyncMock(
+            return_value=MCPToolOutcome(
+                status="ok", text="mcp result", server="srv", tool="greet"
+            )
+        )
 
         result = await _execute_tool(
             "mcp_srv_greet",
@@ -1368,7 +1376,8 @@ class TestBackgroundTaskMCPIntegration:
             mcp_manager=mock_mcp_mgr,
         )
 
-        assert result == "mcp result"
+        assert str(result) == "mcp result"
+        assert result.ok
         mock_mcp_mgr.execute.assert_called_once_with("mcp_srv_greet", {"name": "Odin"})
 
     async def test_execute_tool_mcp_none_falls_through(self):

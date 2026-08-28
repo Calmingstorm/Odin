@@ -17,9 +17,11 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
+from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from ..tools.result_validator import ToolResult
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 
 log = get_logger("agents")
@@ -303,10 +305,10 @@ class IterationCallback(Protocol):
     ) -> Awaitable[dict]: ...
 
 
-# tool_executor_callback: (tool_name, tool_input) → result string
+# tool_executor_callback preserves ToolResult structured failure/audit state.
 ToolExecutorCallback = Callable[
     [str, dict],
-    Awaitable[str],
+    Awaitable[str | ToolResult],
 ]
 
 # announce_callback: DEPRECATED — agents no longer post directly to Discord.
@@ -1289,26 +1291,47 @@ async def _run_agent(
                     agent.tools_used.append(tool_name)
 
                 agent.last_activity = time.time()
-                iter_tool_calls.append({"name": tool_name, "input": tool_input})
+                iter_tool_calls.append(
+                    {
+                        "name": tool_name,
+                        "input": _scrub_tool_input_for_storage(tool_name, tool_input),
+                    }
+                )
 
                 tool_timeout: float = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
                 # Cap at the POSITIVE remainder so the deadline holds inside
                 # a long tool call — never floored to a bonus second.
                 tool_timeout = min(tool_timeout, lifetime_left)
                 try:
-                    result = await asyncio.wait_for(
+                    raw_result = await asyncio.wait_for(
                         tool_executor_callback(tool_name, tool_input),
                         timeout=tool_timeout,
                     )
-                    result = scrub_output_secrets(str(result))
+                    structured = raw_result if isinstance(raw_result, ToolResult) else None
+                    result = scrub_output_secrets(str(raw_result))
+                    if (
+                        structured is not None
+                        and not structured.ok
+                        and not result.lstrip().startswith(
+                            ("Error", "Command failed", "Script failed", "Denied")
+                        )
+                    ):
+                        result = f"Error (tool reported failure):\n{result}"
                 except TimeoutError:
+                    structured = None
                     result = f"Error: Tool '{tool_name}' timed out after {tool_timeout}s"
                     log.warning("Agent %s tool %s timed out", agent.id, tool_name)
                 except Exception as e:
+                    structured = None
                     result = f"Error: {e}"
                     log.warning("Agent %s tool %s failed: %s", agent.id, tool_name, e)
 
-                iter_tool_results.append({"name": tool_name, "result": result})
+                stored_result: dict = {"name": tool_name, "result": result}
+                if structured is not None:
+                    stored_result["ok"] = structured.ok
+                    if structured.audit_metadata:
+                        stored_result["audit_metadata"] = structured.audit_metadata
+                iter_tool_results.append(stored_result)
 
                 # Append tool result to messages
                 agent.messages.append(

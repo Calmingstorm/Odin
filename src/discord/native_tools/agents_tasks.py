@@ -24,6 +24,7 @@ from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
 from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ...odin_log import get_logger
+from ...tools.result_validator import ToolResult
 from ..background_task import (
     MAX_STEPS,
     BackgroundTask,
@@ -41,6 +42,7 @@ if TYPE_CHECKING:
     from ...search.embedder import LocalEmbedder
     from ...tools.autonomous_loop import LoopManager
     from ...tools.executor import ToolExecutor
+    from ...tools.mcp import MCPManager
     from ...tools.skill_manager import SkillManager
     from ..channel_state import ChannelStateRegistry
     from ..llm_gateway import LLMGateway
@@ -385,12 +387,16 @@ class AgentTaskDeps:
     # Passive window observer (phase 5): clamp source for agent budget
     # snapshots + evidence sink for agent rescues. None = feature-inert.
     window_observer: object | None = None
+    # MCP control plane (P3) — background tasks dispatch published MCP tools
+    # through the shared seam. None keeps the branch inert (tests).
+    mcp_manager: MCPManager | None = None
 
 
 class AgentTaskTools:
     def __init__(self, deps: AgentTaskDeps) -> None:
         self._get_config = deps.get_config
         self._window_observer = deps.window_observer
+        self._mcp_manager = deps.mcp_manager
         self._llm_gateway = deps.llm_gateway
         self._channel_state = deps.channel_state
         self._tool_executor = deps.tool_executor
@@ -495,6 +501,7 @@ class AgentTaskTools:
                     embedder=self._embedder,
                     audit_logger=self._audit,
                     codex_callback=codex_cb,
+                    mcp_manager=self._mcp_manager,
                 )
             except asyncio.CancelledError:
                 # cancel_task interrupted a step mid-run: request_cancel already
@@ -710,9 +717,7 @@ class AgentTaskTools:
         # deadline (or count a capacity failure) for a request that could not
         # legally be sent.
         preflight_incompatible_effort(client, model=resolved_model, effort=effective_effort)
-        breaker = self._llm_gateway.capacity_breaker_for(
-            resolved_model, provider=provider
-        )
+        breaker = self._llm_gateway.capacity_breaker_for(resolved_model, provider=provider)
         policy = self._llm_gateway.recovery_policy()
 
         async def _attempt():
@@ -797,6 +802,19 @@ class AgentTaskTools:
         )
         tools = filter_agent_tools(all_tools, depth=parent_depth, max_depth=effective_max_depth)
 
+        def _live_agent_tools() -> list[dict]:
+            # Freshness at request assembly (MCP P3): dynamic tools (MCP) can
+            # publish/unpublish mid-flight, so every newly assembled request
+            # re-pulls the live catalog instead of the spawn-time snapshot.
+            # The depth filter is identity-stable for the agent's life.
+            if not self._get_config().tools.enabled:
+                return []
+            return filter_agent_tools(
+                self._tool_catalog.merged_definitions(),
+                depth=parent_depth,
+                max_depth=effective_max_depth,
+            )
+
         # Iteration callback — wraps Codex chat_with_tools, returns dict
         async def _iteration_cb(
             messages: list[dict],
@@ -827,7 +845,7 @@ class AgentTaskTools:
                 client,
                 messages=messages,
                 sys_prompt=sys_prompt,
-                tool_defs=tool_defs,
+                tool_defs=_live_agent_tools(),
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
                 provider=plan["provider"],
@@ -850,7 +868,7 @@ class AgentTaskTools:
         # this agent itself calls spawn_agent.
         _self_id: dict[str, str | None] = {"id": None}
 
-        async def _tool_exec_cb(tool_name: str, tool_input: dict) -> str:
+        async def _tool_exec_cb(tool_name: str, tool_input: dict) -> str | ToolResult:
             if tool_name == "spawn_agent":
                 # Nested spawn — forward this agent's id so AgentManager.spawn
                 # enforces max_nesting_depth and children linkage.
@@ -871,6 +889,8 @@ class AgentTaskTools:
                 msg_proxy,
                 user_id,
             )
+            if isinstance(result, ToolResult):
+                return result
             return str(result) if result is not None else ""
 
         # Determine iteration cap from config — scheduled spawns get a higher budget
@@ -1129,6 +1149,12 @@ class AgentTaskTools:
         )
         tools = filter_agent_tools(all_tools)
 
+        def _live_loop_agent_tools() -> list[dict]:
+            # Freshness at request assembly (MCP P3) — see _live_agent_tools.
+            if not self._get_config().tools.enabled:
+                return []
+            return filter_agent_tools(self._tool_catalog.merged_definitions())
+
         # Validate + normalize each task's optional per-agent model/effort
         # override — a single bad or non-eligible override rejects the WHOLE
         # batch (nothing spawns) rather than silently running the wrong policy.
@@ -1182,7 +1208,7 @@ class AgentTaskTools:
                     client,
                     messages=messages,
                     sys_prompt=sys,
-                    tool_defs=tool_defs,
+                    tool_defs=_live_loop_agent_tools(),
                     agent_effort=plan["effort"],
                     resolved_model=plan["model"],
                     provider=plan["provider"],
@@ -1244,9 +1270,7 @@ class AgentTaskTools:
             generation_plan_provider_factory=lambda mo, eo: (
                 lambda: _capture_agent_generation_plan(
                     self._get_config,
-                    lambda config: _gateway_serving_for_config(
-                        self._llm_gateway, config
-                    ),
+                    lambda config: _gateway_serving_for_config(self._llm_gateway, config),
                     self._get_context_compressor,
                     model_override=mo,
                     effort_override=eo,

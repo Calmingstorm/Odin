@@ -196,6 +196,43 @@ class TestStructuredFailureVisibility:
         assert kwargs.get("error"), "audit entry must carry the error field for a failed step"
 
 
+
+    async def test_mcp_audit_metadata_survives_background_path(self):
+        metadata = {
+            "mcp_server": "srv",
+            "mcp_tool": "write",
+            "config_generation": 3,
+            "negotiated_version": "2025-06-18",
+            "outcome": "failed",
+        }
+        executor = _FakeExecutor(
+            [
+                ToolResult(
+                    output="rejected",
+                    ok=False,
+                    tool_name="mcp_srv_write",
+                    audit_metadata=metadata,
+                )
+            ]
+        )
+        audit = AsyncMock()
+        task = make_task(
+            [
+                {
+                    "tool_name": "mcp_srv_write",
+                    "tool_input": {"password": "opaque-background-secret"},
+                    "on_failure": "continue",
+                }
+            ]
+        )
+        await run_background_task(task, executor, _FakeSkillManager(), audit_logger=audit)
+        assert task.results[0].audit_metadata == metadata
+        kwargs = audit.log_execution.await_args.kwargs
+        assert kwargs["audit_metadata"] == metadata
+        assert "opaque-background-secret" not in str(kwargs["tool_input"])
+        assert kwargs["tool_input"]["password"] == "[redacted:sensitive-key]"
+
+
 class TestStringHeuristic:
     def test_canonical_executor_prefixes_detected(self):
         assert _is_error_output("Unknown or disallowed host: playground") is True

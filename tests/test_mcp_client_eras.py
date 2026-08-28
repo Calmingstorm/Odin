@@ -648,3 +648,12 @@ class TestErrorCorrelationAndPrewrite:
             assert (await conn.discover_tools()).tools
         finally:
             await conn.disconnect()
+
+
+class TestAuditIdentifierBounds:
+    def test_oversized_original_tool_name_is_rejected(self):
+        conn = _stdio("legacy")
+        with pytest.raises(MCPProtocolError, match="tool name exceeds 128"):
+            conn._validate_tool(  # noqa: SLF001 - authority-level validation pin
+                {"name": "t" * 129, "description": "", "inputSchema": {"type": "object"}}
+            )

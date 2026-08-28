@@ -43,8 +43,36 @@ def init_allowed_webhook_ids(raw: str) -> None:
 _EMAIL_BODY_TOOLS = frozenset({"email_send"})
 
 
+def _deep_scrub_strings(value):
+    """Recursively scrub patterns and opaque values under sensitive keys."""
+    from ..config.sensitivity import is_storage_sensitive_key
+    from ..llm.secret_scrubber import scrub_output_secrets
+
+    if isinstance(value, str):
+        return scrub_output_secrets(value)
+    if isinstance(value, dict):
+        return {
+            key: (
+                "[redacted:sensitive-key]"
+                if is_storage_sensitive_key(key)
+                else _deep_scrub_strings(item)
+            )
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_deep_scrub_strings(item) for item in value]
+    return value
+
+
 def _scrub_tool_input_for_storage(tool_name: str, tool_input: dict) -> dict:
     """Redact privacy-sensitive fields from tool input before any storage path."""
+    if tool_name.startswith("mcp_") and isinstance(tool_input, dict):
+        # MCP argument shapes are arbitrary third-party contracts and may
+        # carry credentials — deep-scrub every string value with the shared
+        # secret scrubber before trajectory/durability storage. (Published
+        # MCP names always carry the mcp_ prefix; builtins win conflicts, so
+        # the prefix cannot capture a native tool.)
+        return _deep_scrub_strings(tool_input)
     if tool_name not in _EMAIL_BODY_TOOLS or not isinstance(tool_input, dict):
         return tool_input
     cleaned = dict(tool_input)

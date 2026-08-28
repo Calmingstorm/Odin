@@ -698,6 +698,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
     tool_catalog = ToolCatalog(
         get_config=lambda: bot.config,
         skill_manager=services.skill_manager,
+        get_mcp_definitions=services.mcp_manager.get_tool_definitions,
     )
     # A live provider switch must rebuild the tool registry so provider-gated
     # tools (native image gen is Codex-only) reappear/disappear immediately.
@@ -811,6 +812,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             stuck_loop_tracker_cls=services.stuck_loop_tracker_cls,
             turn_store=services.turn_store,
             window_observer=services.window_observer,
+            mcp_manager=services.mcp_manager,
         )
     )
     agent_task_tools = AgentTaskTools(
@@ -836,6 +838,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             prompt_builder=prompt_builder,
             tool_catalog=tool_catalog,
             window_observer=services.window_observer,
+            mcp_manager=services.mcp_manager,
         )
     )
     # Second phase of the P5 owner wiring: the agents domain exists now.

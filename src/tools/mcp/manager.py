@@ -97,6 +97,10 @@ class _ServerRuntime:
 
 
 def _validate_server_config(name: str, config: dict[str, Any]) -> None:
+    if len(name) > proto.MAX_AUDIT_IDENTIFIER_CHARS:
+        raise MCPConfigError(
+            f"invalid server name: exceeds {proto.MAX_AUDIT_IDENTIFIER_CHARS} characters"
+        )
     if not _NAME_RE.match(name or ""):
         raise MCPConfigError(
             f"invalid server name {name!r}: letters, digits, underscores, no leading digit"

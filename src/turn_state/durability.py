@@ -40,7 +40,7 @@ import time
 from typing import Any
 
 from ..odin_log import get_logger
-from .codec import compute_content_digest, snapshot_chat_turn
+from .codec import compute_content_digest, scrub_stored_tool_input, snapshot_chat_turn
 from .store import (
     OpState,
     StaleTurnError,
@@ -321,7 +321,11 @@ class TurnDurability:
         if not executable:
             return
         intents = [
-            {"tool_call_id": tc.id, "tool_name": tc.name, "tool_input": tc.input}
+            {
+                "tool_call_id": tc.id,
+                "tool_name": tc.name,
+                "tool_input": scrub_stored_tool_input(tc.name, tc.input),
+            }
             for tc in executable
         ]
         assert self._store is not None and self._lease is not None
