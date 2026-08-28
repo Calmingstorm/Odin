@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from ..permissions.manager import PermissionManager
     from ..tools.autonomous_loop import LoopManager
     from ..tools.executor import ToolExecutor
+    from ..tools.mcp import MCPManager
     from ..tools.skill_manager import SkillManager
     from ..trajectories.saver import TrajectoryTurn
     from .channel_config import ChannelConfigManager
@@ -70,6 +71,8 @@ if TYPE_CHECKING:
     from .turn_recorder import TurnRecorder
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .llm_gateway import LLMServingIdentity
+from .mcp_dispatch import dispatch_mcp_tool, is_mcp_tool
+from .mcp_dispatch import uncertain_outcome as _mcp_uncertain
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
     _CONTINUATION_MSG,
@@ -480,6 +483,9 @@ class ToolLoopDeps:
     # Passive window observer (phase 5): downward clamp source + rescue
     # evidence sink. None = feature-inert (tests, minimal constructions).
     window_observer: object | None = None
+    # MCP control plane (mcp_dispatch seam). None keeps MCP branches inert
+    # for direct test constructions; wiring always passes the real manager.
+    mcp_manager: MCPManager | None = None
 
 
 class ToolLoopRunner:
@@ -497,6 +503,7 @@ class ToolLoopRunner:
         self._turn_recorder = deps.turn_recorder
         self._completion_classifier = deps.completion_classifier
         self._native_tools = deps.native_tools
+        self._mcp_manager = deps.mcp_manager
         self._tool_executor = deps.tool_executor
         self._permissions = deps.permissions
         self._skill_manager = deps.skill_manager
@@ -1951,6 +1958,17 @@ class ToolLoopRunner:
                 # carries non-model-facing audit_metadata) — unwrap it so the
                 # audit record picks up the metadata like the executor path.
                 tool_result, result = _unwrap_native_result(result)
+            elif is_mcp_tool(self._mcp_manager, tool_name):
+                # MCP seam (P3): typed outcome → ToolResult. Uncertain
+                # outcomes (request written, effect unknowable) flow into the
+                # same OUTCOME_UNKNOWN ledger path as timeouts — never
+                # confidently failed, never replayed.
+                tool_result = await dispatch_mcp_tool(self._mcp_manager, tool_name, tool_input)
+                result = str(tool_result)
+                if not tool_result.ok:
+                    error = tool_result.error or f"MCP tool {tool_name} failed"
+                if _mcp_uncertain(tool_result):
+                    uncertain_outcome = True
             else:
                 # Bind this invocation's identity so streamed output can be
                 # attributed to ONE call rather than merged by tool name.
@@ -3032,5 +3050,9 @@ class ToolLoopRunner:
                 skill_file_delivery="stage",
             )
             return result
+        # MCP seam (P3): same live-publication predicate as the chat path;
+        # returns the structured ToolResult (callers consume .ok).
+        if is_mcp_tool(self._mcp_manager, tool_name):
+            return await dispatch_mcp_tool(self._mcp_manager, tool_name, tool_input)
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
         return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)

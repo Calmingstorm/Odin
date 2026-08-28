@@ -3,6 +3,7 @@
 The LLM constructs a list of steps upfront, the user approves once, and the task
 runs in the background with progress updates via an editable Discord message.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -34,6 +35,7 @@ def _scrub_email_input(tool_name: str, tool_input: dict) -> dict:
     cleaned["body"] = f"[redacted email body: {len(body)} chars]"
     if "attachments" in cleaned and cleaned["attachments"]:
         from pathlib import Path
+
         cleaned["attachments"] = [Path(p).name for p in cleaned["attachments"]]
     return cleaned
 
@@ -43,7 +45,7 @@ if TYPE_CHECKING:
     from ..knowledge.store import KnowledgeStore
     from ..search.embedder import LocalEmbedder
     from ..tools.executor import ToolExecutor
-    from ..tools.mcp_client import MCPManager
+    from ..tools.mcp import MCPManager
     from ..tools.skill_manager import SkillManager
 
 # Type for background chat callback: takes (messages, system, output_budget) -> response text
@@ -53,13 +55,25 @@ log = get_logger("background_task")
 
 # Tools that cannot run in background tasks (need Discord/interactive context)
 BLOCKED_TOOLS = {
-    "purge_messages", "browser_screenshot", "generate_file", "post_file",
-    "browser_click", "browser_fill", "browser_evaluate",
+    "purge_messages",
+    "browser_screenshot",
+    "generate_file",
+    "post_file",
+    "browser_click",
+    "browser_fill",
+    "browser_evaluate",
     "delegate_task",  # no nesting
-    "schedule_task", "update_schedule", "delete_schedule",
-    "create_skill", "edit_skill", "delete_skill",
-    "start_loop", "stop_loop",  # need LoopManager from client
-    "spawn_agent", "send_to_agent", "kill_agent",  # no agent nesting
+    "schedule_task",
+    "update_schedule",
+    "delete_schedule",
+    "create_skill",
+    "edit_skill",
+    "delete_skill",
+    "start_loop",
+    "stop_loop",  # need LoopManager from client
+    "spawn_agent",
+    "send_to_agent",
+    "kill_agent",  # no agent nesting
 }
 
 MAX_STEPS = 200
@@ -134,6 +148,7 @@ async def run_background_task(
     embedder: LocalEmbedder | None = None,
     audit_logger: AuditLogger | None = None,
     codex_callback: CodexCallback | None = None,
+    mcp_manager: MCPManager | None = None,
 ) -> None:
     """Execute a background task's steps sequentially with progress updates."""
 
@@ -149,10 +164,14 @@ async def run_background_task(
         # Check cancellation
         if task._cancel_event.is_set():
             task.status = "cancelled"
-            task.results.append(StepResult(
-                index=i, tool_name=step.get("tool_name", ""),
-                description=step.get("description", ""), status="cancelled",
-            ))
+            task.results.append(
+                StepResult(
+                    index=i,
+                    tool_name=step.get("tool_name", ""),
+                    description=step.get("description", ""),
+                    status="cancelled",
+                )
+            )
             break
 
         task.current_step = i
@@ -169,11 +188,15 @@ async def run_background_task(
         # Evaluate condition
         if condition and prev_output:
             if not _check_condition(condition, prev_output):
-                task.results.append(StepResult(
-                    index=i, tool_name=tool_name,
-                    description=step_desc, status="skipped",
-                    output=f"Condition not met: {condition}",
-                ))
+                task.results.append(
+                    StepResult(
+                        index=i,
+                        tool_name=tool_name,
+                        description=step_desc,
+                        status="skipped",
+                        output=f"Condition not met: {condition}",
+                    )
+                )
                 # Update progress periodically
                 now = time.monotonic()
                 if now - last_update >= PROGRESS_UPDATE_INTERVAL:
@@ -183,11 +206,15 @@ async def run_background_task(
 
         # Check blocked tools
         if tool_name in BLOCKED_TOOLS:
-            task.results.append(StepResult(
-                index=i, tool_name=tool_name,
-                description=step_desc, status="error",
-                output=f"Tool '{tool_name}' cannot run in background tasks.",
-            ))
+            task.results.append(
+                StepResult(
+                    index=i,
+                    tool_name=tool_name,
+                    description=step_desc,
+                    status="error",
+                    output=f"Tool '{tool_name}' cannot run in background tasks.",
+                )
+            )
             if on_failure == "abort":
                 task.status = "failed"
                 break
@@ -205,9 +232,15 @@ async def run_background_task(
         t0 = time.monotonic()
         try:
             output = await _execute_tool(
-                tool_name, tool_input, executor, skill_manager,
-                knowledge_store, embedder, task.requester,
+                tool_name,
+                tool_input,
+                executor,
+                skill_manager,
+                knowledge_store,
+                embedder,
+                task.requester,
                 step_desc=step_desc,
+                mcp_manager=mcp_manager,
                 requester_id=task.requester_id,
             )
             elapsed_ms = int((time.monotonic() - t0) * 1000)
@@ -238,11 +271,16 @@ async def run_background_task(
                 is_error = not structured_ok
             else:
                 is_error = _is_error_output(output)
-            task.results.append(StepResult(
-                index=i, tool_name=tool_name,
-                description=step_desc, status="error" if is_error else "ok",
-                output=output[:500], elapsed_ms=elapsed_ms,
-            ))
+            task.results.append(
+                StepResult(
+                    index=i,
+                    tool_name=tool_name,
+                    description=step_desc,
+                    status="error" if is_error else "ok",
+                    output=output[:500],
+                    elapsed_ms=elapsed_ms,
+                )
+            )
 
             # Classify risk level for observability
             risk_assessment = classify_tool(tool_name, tool_input)
@@ -250,7 +288,8 @@ async def run_background_task(
             if audit_logger:
                 try:
                     log_kwargs: dict = dict(
-                        user_id=task.requester_id, user_name=task.requester,
+                        user_id=task.requester_id,
+                        user_name=task.requester,
                         channel_id=str(getattr(task.channel, "id", "")),
                         tool_name=tool_name,
                         tool_input=_scrub_email_input(tool_name, tool_input),
@@ -283,23 +322,30 @@ async def run_background_task(
                 break
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             error_msg = str(e)
-            task.results.append(StepResult(
-                index=i, tool_name=tool_name,
-                description=step_desc, status="error",
-                output=error_msg[:500], elapsed_ms=elapsed_ms,
-            ))
+            task.results.append(
+                StepResult(
+                    index=i,
+                    tool_name=tool_name,
+                    description=step_desc,
+                    status="error",
+                    output=error_msg[:500],
+                    elapsed_ms=elapsed_ms,
+                )
+            )
 
             err_risk = classify_tool(tool_name, tool_input)
             if audit_logger:
                 try:
                     await audit_logger.log_execution(
-                        user_id=task.requester_id, user_name=task.requester,
+                        user_id=task.requester_id,
+                        user_name=task.requester,
                         channel_id=str(getattr(task.channel, "id", "")),
                         tool_name=tool_name,
                         tool_input=_scrub_email_input(tool_name, tool_input),
                         approved=True,
                         result_summary=error_msg,
-                        execution_time_ms=elapsed_ms, error=error_msg[:500],
+                        execution_time_ms=elapsed_ms,
+                        error=error_msg[:500],
                         risk_level=err_risk.level.value,
                         risk_reason=err_risk.reason,
                     )
@@ -339,7 +385,10 @@ async def run_background_task(
 
     log.info(
         "Background task %s finished: %s (%d/%d steps)",
-        task.task_id, task.status, len(task.results), len(task.steps),
+        task.task_id,
+        task.status,
+        len(task.results),
+        len(task.steps),
     )
 
 
@@ -409,7 +458,9 @@ async def _execute_tool(
         if not source or not content:
             return "Both 'source' and 'content' are required."
         count = await knowledge_store.ingest(
-            content=content, source=source, embedder=embedder,
+            content=content,
+            source=source,
+            embedder=embedder,
             uploader=requester,
         )
         return f"Ingested '{source}' ({count} chunks)."
@@ -434,10 +485,13 @@ async def _execute_tool(
         if not items or not isinstance(items, list):
             return "items (array) is required."
         from ..knowledge.importer import BulkImporter
+
         importer = BulkImporter(knowledge_store, embedder)
         batch = await importer.import_batch(items, uploader=requester)
-        lines = [f"Bulk import: {batch.succeeded} succeeded, {batch.failed} failed, "
-                 f"{batch.skipped} skipped"]
+        lines = [
+            f"Bulk import: {batch.succeeded} succeeded, {batch.failed} failed, "
+            f"{batch.skipped} skipped"
+        ]
         for r in batch.results:
             tag = r["status"].upper()
             detail = f" ({r['chunks']} chunks)" if r["chunks"] else ""
@@ -461,7 +515,11 @@ async def _execute_tool(
 
     # MCP tools (namespaced as mcp_<server>_<tool>)
     if mcp_manager is not None and mcp_manager.has_tool(tool_name):
-        return await mcp_manager.execute(tool_name, tool_input)
+        from .mcp_dispatch import dispatch_mcp_tool
+
+        # Shared seam (P3): typed outcome → structured ToolResult; callers
+        # consume .ok so a failed/uncertain MCP step aborts per on_failure.
+        return await dispatch_mcp_tool(mcp_manager, tool_name, tool_input)
 
     # Built-in tools via executor — default missing required fields
     if "host" not in tool_input:
@@ -475,7 +533,9 @@ async def _execute_tool(
 
 
 def _substitute_vars(
-    tool_input: dict, variables: dict[str, str], prev_output: str,
+    tool_input: dict,
+    variables: dict[str, str],
+    prev_output: str,
 ) -> dict:
     """Replace {prev_output} and {var.name} in string values."""
     result = {}
@@ -565,6 +625,7 @@ async def _send_progress(
             # Too long for Discord — post a short summary in the message,
             # attach the full report as a file
             import io
+
             short = "\n".join(lines[:3])  # header + progress bar + counts
             short += f"\n\nFull report attached ({len(task.results)} steps)."
             file_bytes = text.encode("utf-8")
@@ -604,8 +665,10 @@ async def _send_summary(task: BackgroundTask, status_override: str | None = None
     elif status == "completed" and errors:
         lines.append(f"{len(ok)} succeeded, {len(errors)} failed.")
     elif status == "failed":
-        lines.append(f"Task aborted after {len(task.results)} of {len(task.steps)} steps "
-                     f"({len(errors)} error(s)).")
+        lines.append(
+            f"Task aborted after {len(task.results)} of {len(task.steps)} steps "
+            f"({len(errors)} error(s))."
+        )
     elif status == "cancelled":
         lines.append(f"Task was cancelled after {len(task.results)} of {len(task.steps)} steps.")
 
@@ -626,6 +689,7 @@ async def _send_summary(task: BackgroundTask, status_override: str | None = None
     try:
         if len(text) > 1900:
             import io
+
             short_lines = lines[:3]  # header + status line
             short = "\n".join(short_lines) + "\n\nFull summary attached."
             file_bytes = text.encode("utf-8")

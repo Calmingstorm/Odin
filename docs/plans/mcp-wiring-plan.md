@@ -1,9 +1,13 @@
 # MCP Wiring Campaign — Plan of Record
 
-Status: campaign in progress on `feat/mcp-wiring`. **No MCP tool is exposed
-to any model until protocol (P1), lifecycle (P2), catalog/dispatch (P3), and
-persistence (P4) are all integrated** — publication stays impossible by
-construction until the final integration wiring lands.
+Status: campaign in progress on `feat/mcp-wiring`. Catalog exposure is P3's
+content: from the P3 head onward, a configured + enabled + connected server's
+validated tools merge into the model catalog under the publication predicate
+(before P3 the merge did not exist, so exposure was impossible by
+construction). The operative campaign gate is deployment: **nothing reaches
+master or any live install until every phase is integrated and the
+five-server soak passes under explicit authorization.** Management routes
+stay inert until P4; configured servers are restart-bound until then.
 
 ## Goal
 
