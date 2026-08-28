@@ -1,5 +1,23 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+
+// Import the actual Vue page setup in Node. Runtime-dom only needs a document
+// creation stub at import time; the navigation fixture below supplies the
+// modal DOM queried by the action itself.
+class MemoryStorage {
+  getItem() { return null; }
+  setItem() {}
+  removeItem() {}
+}
+globalThis.localStorage = new MemoryStorage();
+globalThis.sessionStorage = new MemoryStorage();
+globalThis.document = { createElement() { return {}; } };
+globalThis.window = {
+  matchMedia() { return { matches: false }; },
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  location: { hash: '#capabilities?tab=mcp-servers' },
+};
+
 import {
   MCPFormError,
   buildMCPServerPayload,
@@ -8,6 +26,7 @@ import {
   normalizeMCPState,
 } from '../ui/js/mcp-config-policy.js';
 import { MCP_EDITOR_GROUPS, scrollMCPFormSection } from '../ui/js/mcp-editor-navigation.js';
+const { default: mcpServersPage } = await import('../ui/js/pages/mcp-servers.js');
 
 const page = readFileSync('ui/js/pages/mcp-servers.js', 'utf8');
 const navigation = readFileSync('ui/js/mcp-editor-navigation.js', 'utf8');
@@ -114,8 +133,6 @@ assert.match(page, /<button v-for="group in editorGroups"[^>]*type="button"[^>]*
 assert.doesNotMatch(page, /mcp-editor-nav[\s\S]{0,300}<a\b/);
 assert.match(page, /:aria-controls="'mcp-form-' \+ group\.id"/);
 assert.match(navigation, /prefers-reduced-motion: reduce/);
-const route = { value: '#capabilities?tab=mcp-servers' };
-const modal = { open: true };
 const navigationCalls = [];
 let focused = 0;
 const heading = { focus(options) { focused++; assert.deepEqual(options, { preventScroll: true }); } };
@@ -125,10 +142,16 @@ const targets = Object.fromEntries(MCP_EDITOR_GROUPS.map(group => [group.id, {
 }]));
 const scroller = { querySelector(selector) { return targets[selector.replace('#mcp-form-', '')] || null; } };
 const root = { querySelector(selector) { assert.equal(selector, '.mcp-editor-groups'); return scroller; } };
+globalThis.document.querySelector = selector => root.querySelector(selector);
+const savedWarn = console.warn;
+console.warn = () => {}; // setup() outside a mounted component is intentional here.
+const pageState = mcpServersPage.setup();
+console.warn = savedWarn;
+pageState.openAdd();
 for (const group of MCP_EDITOR_GROUPS) {
-  assert.equal(scrollMCPFormSection(group.id, { root, reducedMotion: false }), true);
-  assert.equal(route.value, '#capabilities?tab=mcp-servers');
-  assert.equal(modal.open, true);
+  pageState.jumpToEditorGroup(group.id);
+  assert.equal(window.location.hash, '#capabilities?tab=mcp-servers');
+  assert.equal(pageState.editorOpen.value, true);
 }
 assert.equal(navigationCalls.length, 4);
 assert.equal(focused, 4);
