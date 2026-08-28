@@ -18,7 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 import src.config.persistence as persistence_mod
 from src.config.schema import MCPConfig
 from src.tools.mcp import MCPManager
-from src.web.api.integrations import register_mcp_servers
+from src.web.api.integrations import _drain_mcp_management, register_mcp_servers
 
 FAKE = str(Path(__file__).parent / "fakes" / "mcp_stdio_server.py")
 
@@ -341,6 +341,54 @@ class TestOperatorTextScrubbing:
         assert "[REDACTED]" in caplog.text
 
 
+class TestManagementCancellationDrain:
+    async def test_precommit_cancellation_aborts_queued_operation(self):
+        commit_started = asyncio.Event()
+        entered = asyncio.Event()
+        operation_cancelled = asyncio.Event()
+
+        async def operation():
+            entered.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                operation_cancelled.set()
+
+        task = asyncio.create_task(
+            _drain_mcp_management(operation(), commit_started=commit_started)
+        )
+        await entered.wait()
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert operation_cancelled.is_set()
+
+    async def test_postcommit_cancellation_drains_then_restores(self):
+        commit_started = asyncio.Event()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        settled = asyncio.Event()
+
+        async def operation():
+            commit_started.set()
+            entered.set()
+            await release.wait()
+            settled.set()
+            return "coherent"
+
+        task = asyncio.create_task(
+            _drain_mcp_management(operation(), commit_started=commit_started)
+        )
+        await entered.wait()
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert settled.is_set()
+
+
 class TestMutationSerialization:
     async def _park_first_finish(self, bot, monkeypatch):
         real = bot.mcp_manager.finish_desired_state
@@ -576,6 +624,11 @@ class TestErrorArms:
         for patch in ({"headers_set": []}, {"env_remove": {}}):
             response = await client.put("/api/mcp/servers/fake", json=patch)
             assert response.status == 400
+
+        # Schema accepts this string shape; canonical security validation
+        # rejects it before persistence on the update route too.
+        response = await client.put("/api/mcp/servers/fake", json={"cwd": "relative/path"})
+        assert response.status == 400
 
     async def test_delete_config_only_server_succeeds(self, harness):
         # Config drift: the file knows a server the runtime never adopted.

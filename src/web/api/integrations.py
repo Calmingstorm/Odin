@@ -21,6 +21,32 @@ from ..api_common import (
 log = get_logger("web.api")
 
 
+async def _drain_mcp_management(operation, *, commit_started: asyncio.Event):
+    """Abort a management operation while queued; drain it after commit starts."""
+    task = asyncio.create_task(operation, name="mcp-management-mutation")
+    cancelled = False
+    while not task.done():
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            if not commit_started.is_set():
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+                raise
+            cancelled = True
+            current = asyncio.current_task()
+            if current is not None:
+                while current.cancelling():
+                    current.uncancel()
+    result = await task
+    if cancelled:
+        raise asyncio.CancelledError
+    return result
+
+
 def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
     """MCP server management (MCP campaign P4).
 
@@ -101,31 +127,6 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
     # config lock so slow transport teardown/connect never blocks unrelated
     # configuration writers.
     management_lock = asyncio.Lock()
-
-    async def _drain_management(operation, *, commit_started: asyncio.Event):
-        """Abort while queued; after persistence starts, drain to coherence."""
-        task = asyncio.create_task(operation, name="mcp-management-mutation")
-        cancelled = False
-        while not task.done():
-            try:
-                await asyncio.shield(task)
-            except asyncio.CancelledError:
-                if not commit_started.is_set():
-                    task.cancel()
-                    try:
-                        await task
-                    except asyncio.CancelledError:
-                        pass
-                    raise
-                cancelled = True
-                current = asyncio.current_task()
-                if current is not None:
-                    while current.cancelling():
-                        current.uncancel()
-        result = await task
-        if cancelled:
-            raise asyncio.CancelledError
-        return result
 
     async def _commit_desired(
         servers: dict[str, dict],
@@ -258,7 +259,7 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
                 await _manager().finish_desired_state(transition)
                 return _mutation_response(name, saved=True), writer_cancelled
 
-        response, writer_cancelled = await _drain_management(
+        response, writer_cancelled = await _drain_mcp_management(
             mutate(), commit_started=commit_started
         )
         if writer_cancelled:
@@ -285,7 +286,7 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
                 await _manager().finish_desired_state(transition)
                 return web.json_response({"saved": True, "removed": name}), writer_cancelled
 
-        response, writer_cancelled = await _drain_management(
+        response, writer_cancelled = await _drain_mcp_management(
             mutate(), commit_started=commit_started
         )
         if writer_cancelled:
@@ -331,7 +332,7 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
                 await _manager().finish_desired_state(transition)
                 return _mutation_response(name, saved=True), writer_cancelled
 
-        response, writer_cancelled = await _drain_management(
+        response, writer_cancelled = await _drain_mcp_management(
             mutate(), commit_started=commit_started
         )
         if writer_cancelled:
@@ -390,7 +391,7 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
                     writer_cancelled,
                 )
 
-        response, writer_cancelled = await _drain_management(
+        response, writer_cancelled = await _drain_mcp_management(
             mutate(), commit_started=commit_started
         )
         if writer_cancelled:
