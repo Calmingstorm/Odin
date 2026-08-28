@@ -781,6 +781,41 @@ class TestModelPublicationIntegration:
             await manager_shutdown(bot.mcp_manager)
 
 
+    async def test_loop_dispatch_audit_event_carries_mcp_metadata(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        bot = make_bot(
+            fake_llm=FakeLLM([text_response("unused")]),
+            config_overrides={
+                "mcp": {
+                    "enabled": True,
+                    "servers": {"fake": _fake_server_config().model_dump()},
+                }
+            },
+        )
+        bot.audit.log_event = AsyncMock()
+        try:
+            await start_mcp(bot)
+            await _wait_until(lambda: bot.mcp_manager.has_tool("mcp_fake_echo"))
+            result = await bot.tool_loop.dispatch_loop_tool(
+                "mcp_fake_echo",
+                {"text": "audit me"},
+                FakeMessage("loop dispatch"),
+                "1",
+            )
+            assert result.ok is True
+            loop_events = [
+                call.kwargs
+                for call in bot.audit.log_event.await_args_list
+                if call.kwargs.get("event_type") == "loop_tool"
+            ]
+            assert len(loop_events) == 1
+            metadata = loop_events[0]["metadata"]
+            assert metadata["mcp_server"] == "fake"
+            assert metadata["mcp_tool"] == "echo"
+            assert metadata["outcome"] == "ok"
+        finally:
+            await manager_shutdown(bot.mcp_manager)
+
     async def test_chat_and_loop_storage_and_logs_scrub_mcp_arguments(
         self, tmp_path, monkeypatch, caplog
     ):
