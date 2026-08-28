@@ -8,6 +8,8 @@ parity contract pins.
 
 from __future__ import annotations
 
+import asyncio
+
 from aiohttp import web
 
 from ...odin_log import get_logger
@@ -18,43 +20,260 @@ from ..api_common import (
 
 log = get_logger("web.api")
 
+
 def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
-    """MCP server routes — honestly inert until the management phase.
+    """MCP server management (MCP campaign P4).
 
-    The always-present control plane (wired at boot since the MCP campaign's
-    lifecycle phase) made the legacy route bodies actively wrong: they were
-    written against the retired ``mcp_client`` manager API, so with a live
-    manager they would return mis-shaped payloads and a broken add path.
-    Until the dedicated management routes land (persistence + secrets
-    handling + status contract), every endpoint states exactly that. Route
-    registration order is unchanged — the parity contract pins paths, and
-    the replacement phase swaps bodies, not routes.
+    The activation contract for ``mcp.*``: CRUD persists desired state to the
+    live config file through the shared transactional writer, then reconciles
+    the always-present control plane — validate → persist → adopt → reconcile,
+    with ``saved`` and ``connected`` reported as separate truths. Network work
+    never happens inside the config transaction. Secrets (header/env VALUES)
+    never leave the server: reads expose key names only; writes use explicit
+    ``headers_set``/``headers_remove`` and ``env_set``/``env_remove`` patch
+    ops, and redaction-mask values are rejected outright.
     """
+    from ...config import persistence as config_persistence
+    from ...config.persistence import config_transaction
+    from ...config.schema import MCPServerConfig
+    from ...tools.mcp import MCPConfigError
+    from ..api_common import contains_redaction_mask
 
-    detail = (
-        "MCP server management routes are not wired yet; the control plane "
-        "runs from config.yml (applied at restart) until the management "
-        "phase of the MCP campaign lands."
+    def _manager(bot=bot):
+        return bot.mcp_manager
+
+    def _sanitized(text: str) -> str:
+        from ...error_presentation import sanitize_error_text
+
+        return sanitize_error_text(str(text))[:500]
+
+    def _server_row(name: str) -> dict | None:
+        for row in _manager().get_status()["servers"]:
+            if row["name"] == name:
+                return row
+        return None
+
+    async def _persist_desired(servers: dict[str, dict], enabled: bool | None = None) -> None:
+        """Write the machine-managed mcp subtree; rebind the live config.
+
+        The leaf writer has no delete operation, so the whole ``mcp.servers``
+        mapping is written as one value — comments inside that subtree do not
+        survive, which is acceptable for a route-managed section.
+        """
+        changes: list = [((("mcp", "servers")), servers)]
+        if enabled is not None:
+            changes.append((("mcp", "enabled"), bool(enabled)))
+        exc, cancelled = await config_persistence.persist_config_paths_locked(changes)
+        if cancelled:
+            raise asyncio.CancelledError
+        if exc is not None:
+            raise exc
+        # Rebind runtime config so restarts and readers agree with disk.
+        bot.config.mcp.servers = {
+            name: MCPServerConfig(**config) for name, config in servers.items()
+        }
+        if enabled is not None:
+            bot.config.mcp.enabled = bool(enabled)
+
+    def _apply_secret_patches(base: dict, body: dict, field: str) -> dict | web.Response:
+        mapping = dict(base.get(field) or {})
+        set_ops = body.get(f"{field}_set") or {}
+        remove_ops = body.get(f"{field}_remove") or []
+        if not isinstance(set_ops, dict) or not isinstance(remove_ops, list):
+            return web.json_response(
+                {"error": f"{field}_set must be an object and {field}_remove a list"},
+                status=400,
+            )
+        if contains_redaction_mask(set_ops):
+            return web.json_response(
+                {"error": f"{field}_set contains a redaction mask; secrets must be re-entered"},
+                status=400,
+            )
+        for key, value in set_ops.items():
+            mapping[str(key)] = str(value)
+        for key in remove_ops:
+            mapping.pop(str(key), None)
+        return mapping
+
+    _plain_fields = (
+        "transport",
+        "command",
+        "args",
+        "url",
+        "cwd",
+        "timeout_seconds",
+        "enabled",
+        "tool_allowlist",
     )
 
-    def _not_wired() -> web.Response:
-        return web.json_response({"error": detail}, status=503)
+    def _compose_config(base: dict, body: dict) -> dict | web.Response:
+        config = dict(base)
+        for field in _plain_fields:
+            if field in body:
+                config[field] = body[field]
+        headers = _apply_secret_patches(config, body, "headers")
+        if isinstance(headers, web.Response):
+            return headers
+        env = _apply_secret_patches(config, body, "env")
+        if isinstance(env, web.Response):
+            return env
+        config["headers"] = headers
+        config["env"] = env
+        try:
+            # Schema-level validation; the manager re-validates structurally.
+            config = MCPServerConfig(**config).model_dump()
+        except Exception as exc:
+            return web.json_response({"error": _sanitized(str(exc))}, status=400)
+        return config
+
+    def _mutation_response(name: str, *, saved: bool) -> web.Response:
+        row = _server_row(name)
+        return web.json_response(
+            {
+                "saved": saved,
+                "connected": bool(row and row["state"] == "connected"),
+                "state": row["state"] if row else "unknown",
+                "last_error": _sanitized(row["last_error"]) if row else "",
+            },
+            status=201 if saved else 500,
+        )
+
+    # ------------------------------------------------------------------
+    # The four original paths keep their registration positions (parity).
+    # ------------------------------------------------------------------
 
     @routes.get("/api/mcp/servers")
     async def list_mcp_servers(_request: web.Request) -> web.Response:
-        return _not_wired()
+        return web.json_response({"servers": _manager().get_status()["servers"]})
 
     @routes.get("/api/mcp/servers/{name}/tools")
-    async def list_mcp_server_tools(_request: web.Request) -> web.Response:
-        return _not_wired()
+    async def list_mcp_server_tools(request: web.Request) -> web.Response:
+        try:
+            tools = _manager().server_tools(request.match_info["name"])
+        except MCPConfigError as exc:
+            return web.json_response({"error": _sanitized(str(exc))}, status=404)
+        return web.json_response({"server": request.match_info["name"], "tools": tools})
 
     @routes.post("/api/mcp/servers")
-    async def add_mcp_server(_request: web.Request) -> web.Response:
-        return _not_wired()
+    async def add_mcp_server(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        name = str(body.get("name", "")).strip()
+        if not name:
+            return web.json_response({"error": "name is required"}, status=400)
+        manager = _manager()
+        composed = _compose_config({}, body)
+        if isinstance(composed, web.Response):
+            return composed
+        async with config_transaction():
+            servers = manager.desired_servers()
+            if name in servers or name in (bot.config.mcp.servers or {}):
+                return web.json_response({"error": f"server '{name}' already exists"}, status=409)
+            servers[name] = composed
+            await _persist_desired(servers)
+        try:
+            await manager.add_server(name, composed)
+        except MCPConfigError as exc:
+            # Durable config stands; runtime adoption failed — honest split.
+            return web.json_response(
+                {"saved": True, "connected": False, "error": _sanitized(str(exc))},
+                status=500,
+            )
+        return _mutation_response(name, saved=True)
 
     @routes.delete("/api/mcp/servers/{name}")
-    async def remove_mcp_server(_request: web.Request) -> web.Response:
-        return _not_wired()
+    async def remove_mcp_server(request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        manager = _manager()
+        async with config_transaction():
+            servers = manager.desired_servers()
+            known = name in servers or name in (bot.config.mcp.servers or {})
+            if not known:
+                return web.json_response({"error": "server not found"}, status=404)
+            servers.pop(name, None)
+            await _persist_desired(servers)
+        try:
+            await manager.remove_server(name)
+        except MCPConfigError:
+            pass  # already absent from runtime; disk truth is what matters
+        return web.json_response({"saved": True, "removed": name})
+
+    # ------------------------------------------------------------------
+    # P4 additions (appended after the original four paths).
+    # ------------------------------------------------------------------
+
+    @routes.put("/api/mcp/servers/{name}")
+    async def update_mcp_server(request: web.Request) -> web.Response:
+        name = request.match_info["name"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        manager = _manager()
+        async with config_transaction():
+            servers = manager.desired_servers()
+            base = servers.get(name)
+            if base is None:
+                return web.json_response({"error": "server not found"}, status=404)
+            composed = _compose_config(base, body)
+            if isinstance(composed, web.Response):
+                return composed
+            servers[name] = composed
+            await _persist_desired(servers)
+        try:
+            await manager.update_server(name, composed)
+        except MCPConfigError as exc:
+            return web.json_response(
+                {"saved": True, "connected": False, "error": _sanitized(str(exc))},
+                status=500,
+            )
+        return _mutation_response(name, saved=True)
+
+    @routes.post("/api/mcp/servers/{name}/reconnect")
+    async def reconnect_mcp_server(request: web.Request) -> web.Response:
+        try:
+            await _manager().reconnect_server(request.match_info["name"])
+        except MCPConfigError as exc:
+            return web.json_response({"error": _sanitized(str(exc))}, status=404)
+        return _mutation_response(request.match_info["name"], saved=True)
+
+    @routes.post("/api/mcp/servers/{name}/refresh-tools")
+    async def refresh_mcp_server_tools(request: web.Request) -> web.Response:
+        try:
+            await _manager().refresh_server_tools(request.match_info["name"])
+        except MCPConfigError as exc:
+            return web.json_response({"error": _sanitized(str(exc))}, status=404)
+        return _mutation_response(request.match_info["name"], saved=True)
+
+    @routes.get("/api/mcp/status")
+    async def mcp_status(_request: web.Request) -> web.Response:
+        # ALWAYS works — including globally disabled (the control plane is
+        # always present; disabled is a truthful state, not an error).
+        return web.json_response(_manager().get_status())
+
+    @routes.post("/api/mcp/enabled")
+    async def set_mcp_enabled(request: web.Request) -> web.Response:
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(body.get("enabled"), bool):
+            return web.json_response({"error": "enabled must be a boolean"}, status=400)
+        manager = _manager()
+        enabled = body["enabled"]
+        async with config_transaction():
+            await _persist_desired(manager.desired_servers(), enabled=enabled)
+        await manager.set_global_enabled(enabled)
+        status = manager.get_status()
+        return web.json_response(
+            {
+                "saved": True,
+                "enabled": status["enabled"],
+                "connected_count": status["connected_count"],
+            }
+        )
 
 
 def register_slack(routes: web.RouteTableDef, bot) -> None:
@@ -141,6 +360,7 @@ def register_issue_tracker(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "action is required"}, status=400)
         try:
             from ...notifications.issue_tracker import IssueTrackerError
+
             result = await client.execute(action, data)
             return web.json_response({"ok": True, "result": result})
         except (ValueError, IssueTrackerError) as exc:
@@ -160,6 +380,7 @@ def register_issue_tracker(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "title is required"}, status=400)
         try:
             from ...notifications.issue_tracker import IssueTrackerError
+
             result = await client.execute("create_issue", data)
             return web.json_response({"ok": True, "issue": result}, status=201)
         except (ValueError, IssueTrackerError) as exc:
@@ -214,6 +435,7 @@ def register_grafana_alerts(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "id and name_pattern are required"}, status=400)
         try:
             from ...health.grafana_alerts import RemediationRule
+
             rule = RemediationRule(
                 id=rule_id,
                 name_pattern=name_pattern,
@@ -346,5 +568,3 @@ def register_outbound_webhooks(routes: web.RouteTableDef, bot) -> None:
         if dispatcher is None:
             return web.json_response({"error": "outbound webhooks not available"}, status=503)
         return web.json_response(dispatcher.stats.as_dict())
-
-

@@ -218,6 +218,9 @@ class MCPManager:
                     "last_refresh_age_seconds": age,
                     "stderr_tail": conn_status.get("stderr_tail", ""),
                     "generation": runtime.generation,
+                    # Secret KEY NAMES only — values never leave the manager.
+                    "header_keys": sorted((runtime.config.get("headers") or {}).keys()),
+                    "env_keys": sorted((runtime.config.get("env") or {}).keys()),
                 }
             )
         return {
@@ -327,6 +330,31 @@ class MCPManager:
             committed=committed,
             name=f"reconnect-{name}",
         )
+
+    def server_tools(self, name: str) -> list[dict[str, Any]]:
+        """Discovered tools for one server: original + published names,
+        publication/exclusion truth. Raises for unknown servers."""
+        runtime = self._servers.get(name)
+        if runtime is None:
+            raise MCPConfigError(f"server '{name}' not found")
+        published_by_record = {id(rec): pub for pub, rec in runtime.published.items()}
+        rows: list[dict[str, Any]] = []
+        for record in runtime.discovered:
+            rows.append(
+                {
+                    "original_name": record.name,
+                    "published_name": published_by_record.get(id(record)),
+                    "published": id(record) in published_by_record,
+                    "excluded": record.excluded,
+                    "exclusion_reason": record.exclusion_reason,
+                    "description": record.description,
+                }
+            )
+        return rows
+
+    def desired_servers(self) -> dict[str, dict[str, Any]]:
+        """Deep copy of the desired per-server configs (persistence source)."""
+        return {name: copy.deepcopy(r.config) for name, r in self._servers.items()}
 
     # ------------------------------------------------------------------
     # Desired-state mutation (persistence is the caller's concern)
