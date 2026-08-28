@@ -1,5 +1,23 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+
+// Import the actual Vue page setup in Node. Runtime-dom only needs a document
+// creation stub at import time; the navigation fixture below supplies the
+// modal DOM queried by the action itself.
+class MemoryStorage {
+  getItem() { return null; }
+  setItem() {}
+  removeItem() {}
+}
+globalThis.localStorage = new MemoryStorage();
+globalThis.sessionStorage = new MemoryStorage();
+globalThis.document = { createElement() { return {}; } };
+globalThis.window = {
+  matchMedia() { return { matches: false }; },
+  setInterval, clearInterval, setTimeout, clearTimeout,
+  location: { hash: '#capabilities?tab=mcp-servers' },
+};
+
 import {
   MCPFormError,
   buildMCPServerPayload,
@@ -7,8 +25,11 @@ import {
   mcpToolMatches,
   normalizeMCPState,
 } from '../ui/js/mcp-config-policy.js';
+import { MCP_EDITOR_GROUPS, scrollMCPFormSection } from '../ui/js/mcp-editor-navigation.js';
+const { default: mcpServersPage } = await import('../ui/js/pages/mcp-servers.js');
 
 const page = readFileSync('ui/js/pages/mcp-servers.js', 'utf8');
+const navigation = readFileSync('ui/js/mcp-editor-navigation.js', 'utf8');
 const config = readFileSync('ui/js/pages/config.js', 'utf8');
 const capabilities = readFileSync('ui/js/pages/capabilities.js', 'utf8');
 const template = readFileSync('config.yml', 'utf8');
@@ -50,6 +71,22 @@ assert.deepEqual(edit, {
 assert.equal(mcpConnectionEditNeedsConfirmation(form({ command: '' }), 'stdio'), false);
 assert.equal(mcpConnectionEditNeedsConfirmation(form({ command: '/new/path' }), 'stdio'), true);
 assert.equal(mcpConnectionEditNeedsConfirmation(form({ transport: 'http', command: '', url: 'https://mcp.example/mcp' }), 'stdio'), true);
+assert.equal(mcpConnectionEditNeedsConfirmation(form({ transport: 'http', command: '', url: 'https://replacement.example/mcp' }), 'http'), true);
+
+// HTTP edit fields are honest: blank preserves an existing endpoint, while
+// create and stdio-to-HTTP transitions require a replacement URL.
+const preserveEndpoint = buildMCPServerPayload(form({
+  name: 'saved_http', transport: 'http', command: '', url: '',
+}), { mode: 'edit', originalTransport: 'http' });
+assert.equal(Object.hasOwn(preserveEndpoint, 'url'), false);
+assert.throws(
+  () => buildMCPServerPayload(form({ name: 'saved_stdio', transport: 'http', command: '', url: '' }), { mode: 'edit', originalTransport: 'stdio' }),
+  error => error instanceof MCPFormError && error.field === 'url',
+);
+assert.throws(
+  () => buildMCPServerPayload(form({ transport: 'http', command: '', url: '' }), { mode: 'add' }),
+  error => error instanceof MCPFormError && error.field === 'url',
+);
 
 // Replacement controls intentionally allow clearing lists and cwd.
 const clear = buildMCPServerPayload(form({
@@ -89,6 +126,41 @@ for (const route of [
 assert.match(page, /confirmDialog\([\s\S]*Disable MCP tool publication/);
 assert.match(page, /confirmDialog\([\s\S]*Remove server/);
 assert.match(page, /mcpConnectionEditNeedsConfirmation[\s\S]*Save and reconnect/);
+
+// Section shortcuts are buttons, not hash routes. Exercise all four actions
+// against a modal fixture and prove route/modal state survives each click.
+assert.match(page, /<button v-for="group in editorGroups"[^>]*type="button"[^>]*@click="jumpToEditorGroup\(group\.id\)"/);
+assert.doesNotMatch(page, /mcp-editor-nav[\s\S]{0,300}<a\b/);
+assert.match(page, /:aria-controls="'mcp-form-' \+ group\.id"/);
+assert.match(navigation, /prefers-reduced-motion: reduce/);
+const navigationCalls = [];
+let focused = 0;
+const heading = { focus(options) { focused++; assert.deepEqual(options, { preventScroll: true }); } };
+const targets = Object.fromEntries(MCP_EDITOR_GROUPS.map(group => [group.id, {
+  scrollIntoView(options) { navigationCalls.push({ id: group.id, options }); },
+  querySelector(selector) { assert.equal(selector, '[data-mcp-form-heading]'); return heading; },
+}]));
+const scroller = { querySelector(selector) { return targets[selector.replace('#mcp-form-', '')] || null; } };
+const root = { querySelector(selector) { assert.equal(selector, '.mcp-editor-groups'); return scroller; } };
+globalThis.document.querySelector = selector => root.querySelector(selector);
+const savedWarn = console.warn;
+console.warn = () => {}; // setup() outside a mounted component is intentional here.
+const pageState = mcpServersPage.setup();
+console.warn = savedWarn;
+pageState.openAdd();
+for (const group of MCP_EDITOR_GROUPS) {
+  pageState.jumpToEditorGroup(group.id);
+  assert.equal(window.location.hash, '#capabilities?tab=mcp-servers');
+  assert.equal(pageState.editorOpen.value, true);
+}
+assert.equal(navigationCalls.length, 4);
+assert.equal(focused, 4);
+for (const call of navigationCalls) {
+  assert.deepEqual(call.options, { behavior: 'smooth', block: 'start', inline: 'nearest' });
+}
+assert.equal(scrollMCPFormSection('limits', { root, reducedMotion: true }), true);
+assert.equal(navigationCalls.at(-1).options.behavior, 'auto');
+
 assert.match(page, /header_keys/);
 assert.match(page, /env_keys/);
 assert.doesNotMatch(page, /server\.headers|server\.env/);
@@ -102,6 +174,12 @@ assert.match(page, /mcpToolMatches/);
 assert.match(page, /ws\.subscribe\('events', onRuntimeEvent\)/);
 assert.match(page, /ws\.unsubscribe\('events', onRuntimeEvent\)/);
 assert.match(page, /POLL_MS = 10000/);
+assert.match(page, /Replace endpoint URL/);
+assert.match(page, /Leave blank to keep the saved endpoint/);
+assert.match(page, /The current endpoint remains unchanged unless a replacement is entered\./);
+assert.match(page, /A new endpoint is required when switching to HTTP\./);
+assert.match(page, /:required="endpointRequired"/);
+assert.doesNotMatch(page, /server\.(url|endpoint)/);
 
 // One owner per truth: dedicated Capabilities tab, read-only Config summary + link.
 assert.match(capabilities, /id: 'mcp-servers'.*MCP Servers/);
@@ -120,4 +198,4 @@ assert.match(docs, /Interactive OAuth[\s\S]*not supported/i);
 assert.match(docs, /2026-07-28/);
 assert.match(docs, /blocked[\s\S]*not partially[\s\S]*published/i);
 
-console.log('mcp-webui: payload honesty, owner routing, state vocabulary, routes, confirmations, and docs pinned');
+console.log('mcp-webui: modal navigation, endpoint honesty, payloads, routes, confirmations, and docs pinned');
