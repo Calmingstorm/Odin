@@ -43,50 +43,32 @@ def _bot(**attrs):
 # MCP servers
 # --------------------------------------------------------------------------- #
 class TestMcpServers:
-    async def test_disabled_503(self):
+    """The four MCP routes are honestly inert until the management phase:
+    every verb answers 503 with the not-wired detail, manager or not. The
+    replacement phase swaps these pins for the real management contract."""
+
+    async def test_all_routes_answer_not_wired_without_a_manager(self):
         async with TestClient(TestServer(_app(register_mcp_servers, bot=_bot()))) as c:
+            for response in (
+                await c.get("/api/mcp/servers"),
+                await c.get("/api/mcp/servers/x/tools"),
+                await c.post("/api/mcp/servers", json={"name": "x"}),
+                await c.delete("/api/mcp/servers/x"),
+            ):
+                assert response.status == 503
+                body = await response.json()
+                assert "not wired" in body["error"]
+
+    async def test_routes_stay_inert_even_with_a_live_manager(self):
+        # A constructed control plane must NOT resurrect the legacy route
+        # bodies — they were written against the retired manager API.
+        bot = _bot()
+        bot.mcp_manager = object()
+        async with TestClient(TestServer(_app(register_mcp_servers, bot=bot))) as c:
             assert (await c.get("/api/mcp/servers")).status == 503
-            assert (await c.get("/api/mcp/servers/x/tools")).status == 503
             assert (await c.post("/api/mcp/servers", json={"name": "x"})).status == 503
-            assert (await c.delete("/api/mcp/servers/x")).status == 503
-
-    async def test_list_and_tools(self):
-        conn = SimpleNamespace(tools=[{"name": "ping", "description": "d"}])
-        mgr = MagicMock()
-        mgr.get_status.return_value = [{"name": "srv", "connected": True}]
-        mgr.get_server.side_effect = lambda n: conn if n == "srv" else None
-        bot = _bot(mcp_manager=mgr)
-        async with TestClient(TestServer(_app(register_mcp_servers, bot=bot))) as c:
-            assert (await (await c.get("/api/mcp/servers")).json())["servers"][0]["name"] == "srv"
-            body = await (await c.get("/api/mcp/servers/srv/tools")).json()
-            assert body["tools"][0]["original_name"] == "ping"
-            assert (await c.get("/api/mcp/servers/ghost/tools")).status == 404
-
-    async def test_add_success_and_validation_and_error(self):
-        mgr = MagicMock()
-        mgr.add_server = AsyncMock(return_value={"name": "srv", "tools": 3})
-        bot = _bot(mcp_manager=mgr, tool_catalog=MagicMock())
-        async with TestClient(TestServer(_app(register_mcp_servers, bot=bot))) as c:
-            r = await c.post("/api/mcp/servers", json={"name": "srv", "command": "run"})
-            assert r.status == 201
-            bot.tool_catalog.invalidate.assert_called_once()
-            assert (await c.post("/api/mcp/servers", json={})).status == 400  # no name
-            mgr.add_server.side_effect = RuntimeError("boom")
-            assert (await c.post("/api/mcp/servers", json={"name": "y"})).status == 400
-
-    async def test_remove_success_and_error(self):
-        mgr = MagicMock()
-        mgr.remove_server = AsyncMock()
-        bot = _bot(mcp_manager=mgr, tool_catalog=MagicMock())
-        async with TestClient(TestServer(_app(register_mcp_servers, bot=bot))) as c:
-            assert (await c.delete("/api/mcp/servers/srv")).status == 200
-            mgr.remove_server.side_effect = RuntimeError("nope")
-            assert (await c.delete("/api/mcp/servers/srv")).status == 404
 
 
-# --------------------------------------------------------------------------- #
-# Slack
-# --------------------------------------------------------------------------- #
 class TestSlack:
     def _notifier(self):
         n = MagicMock()

@@ -1031,12 +1031,15 @@ class GrafanaAlertConfig(BaseModel):
 
 
 class MCPServerConfig(BaseModel):
+    enabled: bool = True
     transport: str = "stdio"  # "stdio" or "http"
     command: str = ""  # for stdio: executable path
     args: list[str] = Field(default_factory=list)  # for stdio: command arguments
     url: str = ""  # for http: endpoint URL
     headers: dict[str, str] = Field(default_factory=dict)  # for http: extra headers
     env: dict[str, str] = Field(default_factory=dict)  # extra env vars for stdio
+    cwd: str = ""  # optional working directory for stdio
+    tool_allowlist: list[str] = Field(default_factory=list)
     timeout_seconds: int = 120
 
     @field_validator("transport")

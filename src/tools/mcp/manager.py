@@ -134,15 +134,26 @@ class MCPManager:
         self._servers: dict[str, _ServerRuntime] = {}
         self._global_enabled = False
         self._generation = 0
+        # _lock guards short, await-free desired/publication mutations. The
+        # separate lifecycle lock serializes transitions whose teardown or
+        # first-connect work necessarily awaits.
         self._lock = asyncio.Lock()
+        self._lifecycle_lock = asyncio.Lock()
         self._on_catalog_changed = on_catalog_changed
         self._published_index: dict[str, tuple[str, ToolRecord]] = {}
         self._started = False
         self._stopping = False
+        self._closed = False
+        self._shutdown_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Introspection
     # ------------------------------------------------------------------
+
+    def set_on_catalog_changed(self, callback: Any | None) -> None:
+        """Late-bind the catalog invalidation hook (the manager is built in
+        build_services, the tool catalog in build_components)."""
+        self._on_catalog_changed = callback
 
     @property
     def global_enabled(self) -> bool:
@@ -208,159 +219,360 @@ class MCPManager:
         return {
             "enabled": self._global_enabled,
             "server_count": len(self._servers),
+            "enabled_server_count": sum(1 for r in self._servers.values() if r.enabled),
             "connected_count": sum(1 for r in self._servers.values() if r.state == STATE_CONNECTED),
             "published_tool_count": len(self._published_index),
             "servers": servers,
         }
 
-    # ------------------------------------------------------------------
-    # Desired-state mutation (persistence is the caller's concern)
-    # ------------------------------------------------------------------
+    async def _drain_transition(
+        self,
+        operation: Any,
+        *,
+        committed: asyncio.Event,
+        name: str,
+    ) -> Any:
+        """Give cancellation transactional lifecycle semantics.
+
+        A transition cancelled while merely queued behind ``_lifecycle_lock``
+        is cancelled and never mutates desired state. Once the inner operation
+        marks ``committed`` immediately before its first mutation, cancellation
+        cannot abandon retirement/reconciliation halfway through: the task is
+        shielded and drained to a coherent state before cancellation is restored
+        to the caller.
+        """
+        task = asyncio.create_task(operation, name=f"mcp-transition-{name}")
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not task.done() and not committed.is_set():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    raise
+                cancelled = True
+                current = asyncio.current_task()
+                if current is not None:
+                    while current.cancelling():
+                        current.uncancel()
+                if task.done():
+                    break
+        result = await task
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
 
     async def load_desired_state(
         self, *, enabled: bool, servers: dict[str, dict[str, Any]]
     ) -> None:
-        """Adopt the full desired state (boot / config reload). Validates
-        every server; invalid entries are recorded in error state rather
-        than discarded silently."""
-        desired_configs = {name: copy.deepcopy(config) for name, config in servers.items()}
-        retire: list[_ServerRuntime] = []
-        async with self._lock:
-            previous_enabled = self._global_enabled
-            previous = self._servers
-            replacements: dict[str, _ServerRuntime] = {}
-            catalog_changed = False
-            for name, config in desired_configs.items():
-                old = previous.get(name)
-                reuse = (
-                    old is not None and old.config == config and previous_enabled == bool(enabled)
-                )
-                if reuse:
-                    assert old is not None
-                    replacements[name] = old
-                    continue
-                runtime = _ServerRuntime(config=config, generation=self._next_gen())
-                try:
-                    _validate_server_config(name, runtime.config)
-                except MCPConfigError as e:
-                    runtime.state = STATE_ERROR
-                    runtime.last_error = str(e)
-                    runtime.config_invalid = True
-                replacements[name] = runtime
-            for name, old in previous.items():
-                if replacements.get(name) is old:
-                    continue
-                old.generation = self._next_gen()
-                catalog_changed = catalog_changed or bool(old.published)
-                old.published = {}
-                retire.append(old)
-            self._global_enabled = bool(enabled)
-            self._servers = replacements
-            self._rebuild_published_index_locked()
-            if catalog_changed:
-                self._notify_catalog_changed()
-        await asyncio.gather(*(self._retire_runtime(runtime) for runtime in retire))
-        if self._started and self._global_enabled:
-            await asyncio.gather(
-                *(self._reconcile_server(name) for name in list(self._servers)),
-                return_exceptions=True,
-            )
+        committed = asyncio.Event()
+        await self._drain_transition(
+            self._load_desired_state_inner(enabled=enabled, servers=servers, committed=committed),
+            committed=committed,
+            name="load-desired-state",
+        )
 
     async def add_server(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
-        _validate_server_config(name, config)
-        async with self._lock:
-            if name in self._servers:
-                raise MCPConfigError(f"server '{name}' already exists")
-            runtime = _ServerRuntime(config=copy.deepcopy(config), generation=self._next_gen())
-            self._servers[name] = runtime
-        await self._reconcile_server(name)
-        return self.get_status()
+        committed = asyncio.Event()
+        return await self._drain_transition(
+            self._add_server_inner(name, config, committed=committed),
+            committed=committed,
+            name=f"add-{name}",
+        )
 
     async def update_server(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
-        _validate_server_config(name, config)
-        async with self._lock:
-            old = self._servers.get(name)
-            if old is None:
-                raise MCPConfigError(f"server '{name}' not found")
-            old.generation = self._next_gen()
-            self._unpublish_locked(name, old, reason="configuration changed")
-            runtime = _ServerRuntime(config=copy.deepcopy(config), generation=self._next_gen())
-            self._servers[name] = runtime
-        await self._retire_runtime(old)
-        await self._reconcile_server(name)
-        return self.get_status()
+        committed = asyncio.Event()
+        return await self._drain_transition(
+            self._update_server_inner(name, config, committed=committed),
+            committed=committed,
+            name=f"update-{name}",
+        )
 
     async def remove_server(self, name: str) -> None:
-        async with self._lock:
-            runtime = self._servers.pop(name, None)
-            if runtime is None:
-                raise MCPConfigError(f"server '{name}' not found")
-            runtime.generation = self._next_gen()  # fences in-flight tasks
-            self._unpublish_locked(name, runtime, reason="removed")
-        await self._retire_runtime(runtime)
+        committed = asyncio.Event()
+        await self._drain_transition(
+            self._remove_server_inner(name, committed=committed),
+            committed=committed,
+            name=f"remove-{name}",
+        )
 
     async def set_global_enabled(self, enabled: bool) -> None:
-        """Off: synchronous unpublish, then teardown. On: async reconcile."""
-        runtimes: list[_ServerRuntime] = []
-        async with self._lock:
-            self._global_enabled = bool(enabled)
-            if not enabled:
-                runtimes = list(self._servers.values())
-                for sname, runtime in self._servers.items():
-                    runtime.generation = self._next_gen()
-                    self._unpublish_locked(sname, runtime, reason="MCP globally disabled")
-                    runtime.state = STATE_DISABLED
-        if not enabled:
+        committed = asyncio.Event()
+        await self._drain_transition(
+            self._set_global_enabled_inner(enabled, committed=committed),
+            committed=committed,
+            name="global-enabled",
+        )
+
+    async def start(self, *, wait_for_first_attempt: bool = True) -> None:
+        committed = asyncio.Event()
+        await self._drain_transition(
+            self._start_inner(wait_for_first_attempt=wait_for_first_attempt, committed=committed),
+            committed=committed,
+            name="start",
+        )
+
+    async def reconnect_server(self, name: str) -> dict[str, Any]:
+        committed = asyncio.Event()
+        return await self._drain_transition(
+            self._reconnect_server_inner(name, committed=committed),
+            committed=committed,
+            name=f"reconnect-{name}",
+        )
+
+    # ------------------------------------------------------------------
+    # Desired-state mutation (persistence is the caller's concern)
+    # ------------------------------------------------------------------
+
+    async def _load_desired_state_inner(
+        self,
+        *,
+        enabled: bool,
+        servers: dict[str, dict[str, Any]],
+        committed: asyncio.Event,
+    ) -> None:
+        """Adopt the full desired state (boot / config reload).
+
+        Lifecycle transitions are serialized through retirement so a reload
+        cannot race a disable/enable and orphan a supervisor. Invalid entries
+        remain inspectable in error state rather than disappearing silently.
+        """
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            desired_configs = {name: copy.deepcopy(config) for name, config in servers.items()}
+            retire: list[_ServerRuntime] = []
+            async with self._lock:
+                committed.set()
+                previous_enabled = self._global_enabled
+                previous = self._servers
+                replacements: dict[str, _ServerRuntime] = {}
+                catalog_changed = False
+                for name, config in desired_configs.items():
+                    old = previous.get(name)
+                    reuse = (
+                        old is not None
+                        and old.config == config
+                        and previous_enabled == bool(enabled)
+                    )
+                    if reuse:
+                        assert old is not None
+                        replacements[name] = old
+                        continue
+                    runtime = _ServerRuntime(config=config, generation=self._next_gen())
+                    try:
+                        _validate_server_config(name, runtime.config)
+                    except MCPConfigError as e:
+                        runtime.state = STATE_ERROR
+                        runtime.last_error = str(e)
+                        runtime.config_invalid = True
+                    replacements[name] = runtime
+                for name, old in previous.items():
+                    if replacements.get(name) is old:
+                        continue
+                    old.generation = self._next_gen()
+                    catalog_changed = catalog_changed or bool(old.published)
+                    old.published = {}
+                    retire.append(old)
+                self._global_enabled = bool(enabled)
+                self._servers = replacements
+                self._rebuild_published_index_locked()
+                if catalog_changed:
+                    self._notify_catalog_changed()
             await asyncio.gather(
-                *(self._retire_runtime(runtime) for runtime in runtimes),
+                *(self._retire_runtime(runtime) for runtime in retire),
                 return_exceptions=True,
             )
-        else:
-            await self.start()
+            if self._started and self._global_enabled:
+                await asyncio.gather(
+                    *(self._reconcile_server(name) for name in list(self._servers)),
+                    return_exceptions=True,
+                )
+
+    async def _add_server_inner(
+        self, name: str, config: dict[str, Any], *, committed: asyncio.Event
+    ) -> dict[str, Any]:
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            _validate_server_config(name, config)
+            async with self._lock:
+                committed.set()
+                if name in self._servers:
+                    raise MCPConfigError(f"server '{name}' already exists")
+                runtime = _ServerRuntime(config=copy.deepcopy(config), generation=self._next_gen())
+                self._servers[name] = runtime
+            await self._reconcile_server(name)
+            return self.get_status()
+
+    async def _update_server_inner(
+        self, name: str, config: dict[str, Any], *, committed: asyncio.Event
+    ) -> dict[str, Any]:
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            _validate_server_config(name, config)
+            async with self._lock:
+                committed.set()
+                old = self._servers.get(name)
+                if old is None:
+                    raise MCPConfigError(f"server '{name}' not found")
+                old.generation = self._next_gen()
+                self._unpublish_locked(name, old, reason="configuration changed")
+                runtime = _ServerRuntime(config=copy.deepcopy(config), generation=self._next_gen())
+                self._servers[name] = runtime
+            await self._retire_runtime(old)
+            await self._reconcile_server(name)
+            return self.get_status()
+
+    async def _remove_server_inner(self, name: str, *, committed: asyncio.Event) -> None:
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            async with self._lock:
+                committed.set()
+                runtime = self._servers.pop(name, None)
+                if runtime is None:
+                    raise MCPConfigError(f"server '{name}' not found")
+                runtime.generation = self._next_gen()
+                self._unpublish_locked(name, runtime, reason="removed")
+            await self._retire_runtime(runtime)
+
+    async def _set_global_enabled_inner(self, enabled: bool, *, committed: asyncio.Event) -> None:
+        """Serialize disable teardown and enable supervision as one transition."""
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            runtimes: list[_ServerRuntime] = []
+            async with self._lock:
+                committed.set()
+                self._global_enabled = bool(enabled)
+                if not enabled:
+                    runtimes = list(self._servers.values())
+                    for sname, runtime in self._servers.items():
+                        runtime.generation = self._next_gen()
+                        self._unpublish_locked(sname, runtime, reason="MCP globally disabled")
+                        runtime.state = STATE_DISABLED
+            if not enabled:
+                await asyncio.gather(
+                    *(self._retire_runtime(runtime) for runtime in runtimes),
+                    return_exceptions=True,
+                )
+            else:
+                await self._start_locked(wait_for_first_attempt=True)
 
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
 
-    async def start(self) -> None:
-        """Reconcile every enabled server (async supervisors; bounded
-        connects). Safe to call repeatedly."""
+    def _ensure_open(self) -> None:
+        if self._closed:
+            raise MCPConfigError("MCP manager has shut down")
+
+    async def _start_inner(
+        self,
+        *,
+        wait_for_first_attempt: bool = True,
+        committed: asyncio.Event,
+    ) -> None:
+        """Start supervisors for all enabled servers.
+
+        Normal control-plane mutations may await each first bounded attempt.
+        Boot passes ``wait_for_first_attempt=False`` so gateway setup is never
+        held behind network/process probes; those attempts remain owned by the
+        supervisors and continue under their ordinary budgets.
+        """
+        async with self._lifecycle_lock:
+            if self._closed:
+                return
+            committed.set()
+            await self._start_locked(wait_for_first_attempt=wait_for_first_attempt)
+
+    async def _start_locked(self, *, wait_for_first_attempt: bool) -> None:
+        if self._closed:
+            return
         self._started = True
         self._stopping = False
         if not self._global_enabled:
             return
         await asyncio.gather(
-            *(self._reconcile_server(name) for name in list(self._servers)),
+            *(
+                self._reconcile_server(name, wait_for_first_attempt=wait_for_first_attempt)
+                for name in list(self._servers)
+            ),
             return_exceptions=True,
         )
 
     async def shutdown(self) -> None:
-        """Concurrent, bounded teardown of everything."""
-        self._stopping = True
+        """Terminal, cancellation-safe teardown of every owned runtime.
+
+        Closing is fenced before any await, so stale startup/reload work can
+        never publish or create a supervisor afterward. The teardown task is
+        shielded and drained even if its caller is cancelled.
+        """
+        task = self._shutdown_task
+        if task is None:
+            # This block is await-free and therefore atomic on the event loop.
+            # Fence first; a currently-running transition may finish its own
+            # await, but every later reconciliation observes _closed.
+            self._closed = True
+            self._stopping = True
+            self._started = False
+            task = asyncio.create_task(self._shutdown_serialized(), name="mcp-shutdown")
+            self._shutdown_task = task
+        cancelled = False
+        while not task.done():
+            current = asyncio.current_task()
+            if current is not None:
+                while current.cancelling():
+                    current.uncancel()
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        await task
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _shutdown_serialized(self) -> None:
+        async with self._lifecycle_lock:
+            await self._shutdown_inner()
+
+    async def _shutdown_inner(self) -> None:
         async with self._lock:
             runtimes = list(self._servers.values())
             for sname, runtime in self._servers.items():
                 runtime.generation = self._next_gen()
                 runtime.state = STATE_DISABLED
                 self._unpublish_locked(sname, runtime, reason="shutdown")
-        await asyncio.gather(*(self._retire_runtime(r) for r in runtimes), return_exceptions=True)
+        await asyncio.gather(
+            *(self._retire_runtime(runtime) for runtime in runtimes),
+            return_exceptions=True,
+        )
 
-    async def reconnect_server(self, name: str) -> dict[str, Any]:
+    async def _reconnect_server_inner(
+        self, name: str, *, committed: asyncio.Event
+    ) -> dict[str, Any]:
         """Manual reconnect: teardown + fresh connect now."""
-        async with self._lock:
-            old = self._servers.get(name)
-            if old is None:
-                raise MCPConfigError(f"server '{name}' not found")
-            old.generation = self._next_gen()
-            self._unpublish_locked(name, old, reason="reconnecting")
-            runtime = _ServerRuntime(config=copy.deepcopy(old.config), generation=self._next_gen())
-            self._servers[name] = runtime
-        await self._retire_runtime(old)
-        await self._reconcile_server(name)
-        return self.get_status()
+        async with self._lifecycle_lock:
+            self._ensure_open()
+            async with self._lock:
+                committed.set()
+                old = self._servers.get(name)
+                if old is None:
+                    raise MCPConfigError(f"server '{name}' not found")
+                old.generation = self._next_gen()
+                self._unpublish_locked(name, old, reason="reconnecting")
+                runtime = _ServerRuntime(
+                    config=copy.deepcopy(old.config), generation=self._next_gen()
+                )
+                self._servers[name] = runtime
+            await self._retire_runtime(old)
+            await self._reconcile_server(name)
+            return self.get_status()
 
     async def refresh_server_tools(self, name: str) -> dict[str, Any]:
         """Manual tools refresh, bypassing the poll interval."""
+        self._ensure_open()
         runtime = self._servers.get(name)
         if runtime is None:
             raise MCPConfigError(f"server '{name}' not found")
@@ -421,12 +633,12 @@ class MCPManager:
             except (asyncio.CancelledError, Exception):
                 pass
 
-    async def _reconcile_server(self, name: str) -> None:
+    async def _reconcile_server(self, name: str, *, wait_for_first_attempt: bool = True) -> None:
         """Ensure the server's runtime matches desired state: spawn (or
         leave running) a supervisor for enabled servers under global enable;
         mark others disabled."""
         runtime = self._servers.get(name)
-        if runtime is None:
+        if runtime is None or self._closed:
             return
         if not self._global_enabled or not runtime.enabled:
             async with self._lock:
@@ -444,15 +656,16 @@ class MCPManager:
                 self._supervise(name, runtime.generation, first_attempt=first_attempt),
                 name=f"mcp-supervise-{name}",
             )
-            # Boot/mutation contract: wait out the FIRST bounded connect
-            # attempt (so callers can report connected: true|false), never
-            # the retries — the supervisor keeps working in the background.
-            try:
-                await asyncio.wait_for(
-                    asyncio.shield(first_attempt), timeout=_CONNECT_BUDGET_S + 15
-                )
-            except TimeoutError:
-                pass
+            # Mutations may wait out the first bounded attempt for truthful
+            # immediate status. Boot deliberately does not: gateway readiness
+            # is not collateral for a stalled optional integration.
+            if wait_for_first_attempt:
+                try:
+                    await asyncio.wait_for(
+                        asyncio.shield(first_attempt), timeout=_CONNECT_BUDGET_S + 15
+                    )
+                except TimeoutError:
+                    pass
         else:
             runtime.wake.set()
 
@@ -474,9 +687,9 @@ class MCPManager:
                 first_attempt.set_result(value)
 
         try:
-            while not self._stopping:
+            while not self._stopping and not self._closed:
                 runtime = self._servers.get(name)
-                if runtime is None or runtime.generation != generation:
+                if runtime is None or runtime.generation != generation or self._closed:
                     return
                 if not self._global_enabled or not runtime.enabled:
                     return
@@ -579,7 +792,14 @@ class MCPManager:
     async def _record_connect_failure(self, name: str, generation: int, reason: str) -> bool:
         async with self._lock:
             runtime = self._servers.get(name)
-            if runtime is None or runtime.generation != generation:
+            if (
+                runtime is None
+                or runtime.generation != generation
+                or self._closed
+                or self._stopping
+                or not self._global_enabled
+                or not runtime.enabled
+            ):
                 return False
             runtime.state = STATE_ERROR
             runtime.last_error = reason[:500]
@@ -600,8 +820,15 @@ class MCPManager:
         admin narrows the allowlist; the first N are never silently chosen."""
         async with self._lock:
             runtime = self._servers.get(name)
-            if runtime is None or runtime.generation != generation:
-                return False  # stale task: never republish
+            if (
+                runtime is None
+                or runtime.generation != generation
+                or self._closed
+                or self._stopping
+                or not self._global_enabled
+                or not runtime.enabled
+            ):
+                return False  # stale/disabled/closing task: never republish
             allowlist = set(runtime.config.get("tool_allowlist") or [])
             candidates = [
                 t
@@ -694,15 +921,37 @@ class MCPManager:
                 return
             try:
                 discovery = await connection.discover_tools()
-            except MCPError as e:
+            except asyncio.CancelledError:
+                raise
+            except Exception as e:
+                # A failed listing invalidates the complete snapshot for every
+                # ordinary failure shape, including unexpected adapter defects.
+                # Detach before teardown so no model request can observe tools
+                # from a failed refresh. Cancellation remains control flow.
+                if not isinstance(e, (MCPError, TimeoutError)):
+                    log.exception("MCP %s: unexpected tools refresh failure", name)
                 async with self._lock:
                     runtime = self._servers.get(name)
-                    if runtime is None or runtime.generation != generation:
+                    if (
+                        runtime is None
+                        or runtime.generation != generation
+                        or runtime.connection is not connection
+                    ):
                         return
                     runtime.state = STATE_STALE
+                    runtime.connection = None
                     runtime.last_error = f"tools refresh failed: {e}"[:500]
                     self._unpublish_locked(name, runtime, reason="refresh failed")
-                runtime.wake.set()
+                try:
+                    await connection.disconnect()
+                except asyncio.CancelledError:
+                    raise
+                except Exception:
+                    log.exception("MCP %s: failed-refresh teardown error", name)
+                finally:
+                    # Manual-refresh cancellation may be restored only after
+                    # disconnect drains; always wake supervision afterward.
+                    runtime.wake.set()
                 return
             await self._publish(name, generation, connection, discovery)
 

@@ -19,75 +19,42 @@ from ..api_common import (
 log = get_logger("web.api")
 
 def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
-    """MCP servers (verbatim from the monolith)."""
-    # ------------------------------------------------------------------
-    # MCP servers
-    # ------------------------------------------------------------------
+    """MCP server routes — honestly inert until the management phase.
+
+    The always-present control plane (wired at boot since the MCP campaign's
+    lifecycle phase) made the legacy route bodies actively wrong: they were
+    written against the retired ``mcp_client`` manager API, so with a live
+    manager they would return mis-shaped payloads and a broken add path.
+    Until the dedicated management routes land (persistence + secrets
+    handling + status contract), every endpoint states exactly that. Route
+    registration order is unchanged — the parity contract pins paths, and
+    the replacement phase swaps bodies, not routes.
+    """
+
+    detail = (
+        "MCP server management routes are not wired yet; the control plane "
+        "runs from config.yml (applied at restart) until the management "
+        "phase of the MCP campaign lands."
+    )
+
+    def _not_wired() -> web.Response:
+        return web.json_response({"error": detail}, status=503)
 
     @routes.get("/api/mcp/servers")
     async def list_mcp_servers(_request: web.Request) -> web.Response:
-        mgr = getattr(bot, "mcp_manager", None)
-        if mgr is None:
-            return web.json_response({"error": "MCP not enabled"}, status=503)
-        return web.json_response({"servers": mgr.get_status()})
+        return _not_wired()
 
     @routes.get("/api/mcp/servers/{name}/tools")
-    async def list_mcp_server_tools(request: web.Request) -> web.Response:
-        mgr = getattr(bot, "mcp_manager", None)
-        if mgr is None:
-            return web.json_response({"error": "MCP not enabled"}, status=503)
-        name = request.match_info["name"]
-        conn = mgr.get_server(name)
-        if conn is None:
-            return web.json_response({"error": "server not found"}, status=404)
-        from ...tools.mcp_client import make_tool_name
-        tools = [
-            {
-                "name": make_tool_name(name, t["name"]),
-                "original_name": t["name"],
-                "description": t.get("description", ""),
-            }
-            for t in conn.tools
-        ]
-        return web.json_response({"server": name, "tools": tools})
+    async def list_mcp_server_tools(_request: web.Request) -> web.Response:
+        return _not_wired()
 
     @routes.post("/api/mcp/servers")
-    async def add_mcp_server(request: web.Request) -> web.Response:
-        mgr = getattr(bot, "mcp_manager", None)
-        if mgr is None:
-            return web.json_response({"error": "MCP not enabled"}, status=503)
-        data = await request.json()
-        name = data.get("name", "").strip()
-        transport = data.get("transport", "stdio")
-        if not name:
-            return web.json_response({"error": "name is required"}, status=400)
-        try:
-            info = await mgr.add_server(
-                name, transport,
-                command=data.get("command", ""),
-                args=data.get("args", []),
-                url=data.get("url", ""),
-                headers=data.get("headers", {}),
-                env=data.get("env", {}),
-                timeout=data.get("timeout"),
-            )
-            bot.tool_catalog.invalidate()
-            return web.json_response(info, status=201)
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=400)
+    async def add_mcp_server(_request: web.Request) -> web.Response:
+        return _not_wired()
 
     @routes.delete("/api/mcp/servers/{name}")
-    async def remove_mcp_server(request: web.Request) -> web.Response:
-        mgr = getattr(bot, "mcp_manager", None)
-        if mgr is None:
-            return web.json_response({"error": "MCP not enabled"}, status=503)
-        name = request.match_info["name"]
-        try:
-            await mgr.remove_server(name)
-            bot.tool_catalog.invalidate()
-            return web.json_response({"status": "removed", "server": name})
-        except Exception as e:
-            return web.json_response({"error": str(e)}, status=404)
+    async def remove_mcp_server(_request: web.Request) -> web.Response:
+        return _not_wired()
 
 
 def register_slack(routes: web.RouteTableDef, bot) -> None:
