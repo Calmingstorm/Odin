@@ -968,9 +968,10 @@ async def start_mcp(bot) -> None:
     """Adopt the configured MCP desired state and reconcile enabled servers.
 
     Called from the async lifecycle (setup_hook) — never from synchronous
-    build_services. Bounded: each enabled server gets one bounded connect
-    attempt before this returns; retries continue under supervision. A
-    broken MCP config records per-server errors and NEVER blocks boot.
+    build_services. Desired state is adopted synchronously, then supervisors
+    own all network/process probes in the background: no probe sits between
+    setup_hook and Discord gateway readiness. Broken servers record errors
+    under supervision and never block boot.
     """
     manager = bot.mcp_manager
     mcp_config = getattr(bot.config, "mcp", None)
@@ -979,7 +980,7 @@ async def start_mcp(bot) -> None:
     try:
         servers = {name: server.model_dump() for name, server in (mcp_config.servers or {}).items()}
         await manager.load_desired_state(enabled=bool(mcp_config.enabled), servers=servers)
-        await manager.start()
+        await manager.start(wait_for_first_attempt=False)
     except Exception:
         log.exception("MCP startup failed (non-fatal; control plane remains up)")
 

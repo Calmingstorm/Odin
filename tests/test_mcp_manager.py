@@ -14,7 +14,7 @@ from aiohttp.test_utils import TestServer
 
 from src.tools.mcp import manager as manager_mod
 from src.tools.mcp.client import DiscoveryResult, MCPServerConnection, ToolRecord
-from src.tools.mcp.errors import MCPConfigError, MCPError
+from src.tools.mcp.errors import MCPConfigError, MCPError, MCPProtocolError
 from src.tools.mcp.manager import (
     STATE_BLOCKED,
     STATE_CONNECTED,
@@ -186,6 +186,46 @@ class TestEndToEndPublication:
             await manager.shutdown()
 
 
+class TestRefreshFailureRetirement:
+    @pytest.mark.parametrize(
+        "failure",
+        [MCPProtocolError("invalid listing"), TimeoutError("listing stalled")],
+        ids=["protocol", "timeout"],
+    )
+    async def test_failed_refresh_unpublishes_closes_and_reconnects(self, monkeypatch, failure):
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"fake": _stdio_config()})
+        await manager.start()
+        runtime = manager._servers["fake"]  # noqa: SLF001
+        original = runtime.connection
+        assert original is not None and manager.has_tool("mcp_fake_echo")
+        original_discover = original.discover_tools
+        failed = False
+
+        async def fail_once():
+            nonlocal failed
+            if not failed:
+                failed = True
+                raise failure
+            return await original_discover()
+
+        monkeypatch.setattr(original, "discover_tools", fail_once)
+        try:
+            await manager.refresh_server_tools("fake")
+            assert runtime.connection is None
+            assert runtime.state == STATE_STALE
+            assert not original.connected
+            assert original._stdio is None  # noqa: SLF001
+            assert manager.get_tool_definitions() == []
+            async with asyncio.timeout(5):
+                while runtime.connection is None or runtime.connection is original:
+                    await asyncio.sleep(0.01)
+            assert runtime.state == STATE_CONNECTED
+            assert manager.has_tool("mcp_fake_echo")
+        finally:
+            await manager.shutdown()
+
+
 class TestPublicationLimits:
     async def _manager_with_connection(self) -> tuple[MCPManager, object, int]:
         manager = MCPManager()
@@ -307,6 +347,39 @@ class TestShutdownBounds:
         start = asyncio.get_running_loop().time()
         await manager.shutdown()
         assert asyncio.get_running_loop().time() - start < 15
+        assert manager.get_tool_definitions() == []
+
+
+class TestShutdownCancellationSafety:
+    async def test_cancelling_shutdown_still_drains_owned_runtime(self, monkeypatch):
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"fake": _stdio_config()})
+        await manager.start()
+        runtime = manager._servers["fake"]  # noqa: SLF001
+        connection = runtime.connection
+        assert connection is not None
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_disconnect = connection.disconnect
+
+        async def delayed_disconnect():
+            entered.set()
+            await release.wait()
+            await original_disconnect()
+
+        monkeypatch.setattr(connection, "disconnect", delayed_disconnect)
+        shutdown = asyncio.create_task(manager.shutdown())
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        shutdown.cancel()
+        await asyncio.sleep(0)
+        assert not shutdown.done(), "shutdown must drain teardown after cancellation"
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await shutdown
+        assert runtime.supervisor is None
+        assert runtime.connection is None
+        assert not connection.connected
+        assert connection._stdio is None  # noqa: SLF001
         assert manager.get_tool_definitions() == []
 
 

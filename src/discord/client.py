@@ -262,9 +262,9 @@ class OdinBot(commands.Bot):
             except commands.ExtensionError:
                 log.exception("Failed to load extension %s", ext)
 
-        # MCP: adopt configured desired state and reconcile enabled servers.
-        # Bounded per server; a dead or misconfigured server never blocks
-        # the gateway connection (wiring.start_mcp is exception-guarded).
+        # MCP: adopt desired state and launch supervised reconciliation.
+        # Network/process probes remain in background supervisors; optional
+        # integration readiness never delays the Discord gateway.
         await start_mcp(self)
 
     async def close(self) -> None:
