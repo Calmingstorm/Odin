@@ -189,8 +189,12 @@ class TestEndToEndPublication:
 class TestRefreshFailureRetirement:
     @pytest.mark.parametrize(
         "failure",
-        [MCPProtocolError("invalid listing"), TimeoutError("listing stalled")],
-        ids=["protocol", "timeout"],
+        [
+            MCPProtocolError("invalid listing"),
+            TimeoutError("listing stalled"),
+            RuntimeError("adapter defect"),
+        ],
+        ids=["protocol", "timeout", "unexpected"],
     )
     async def test_failed_refresh_unpublishes_closes_and_reconnects(self, monkeypatch, failure):
         manager = MCPManager()

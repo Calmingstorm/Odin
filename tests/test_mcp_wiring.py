@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.config.schema import MCPConfig, MCPServerConfig
+from src.config.schema import Config, MCPConfig, MCPServerConfig
 from src.discord.wiring import shutdown_services, start_mcp
 from src.health.checker import check_mcp
 from src.tools.mcp.client import MCPServerConnection
@@ -22,7 +22,7 @@ from src.tools.mcp.manager import (
     STATE_ERROR,
     MCPManager,
 )
-from tests.fakes import make_bot
+from tests.fakes import FakeLLM, FakeMessage, make_bot, text_response
 
 FAKE = str(Path(__file__).parent / "fakes" / "mcp_stdio_server.py")
 
@@ -79,6 +79,35 @@ class TestStartMcp:
         assert status["servers"][0]["era"] is None  # no connection object at all
         assert manager.get_tool_definitions() == []
         await manager.shutdown()
+
+    async def test_per_server_controls_reach_manager_unchanged(self):
+        manager = MCPManager()
+        bot = _bot(
+            MCPConfig(
+                enabled=True,
+                servers={
+                    "off": MCPServerConfig(
+                        enabled=False,
+                        transport="stdio",
+                        command=sys.executable,
+                        args=[FAKE, "legacy"],
+                        cwd="/tmp",
+                        tool_allowlist=["echo"],
+                    )
+                },
+            ),
+            manager,
+        )
+        try:
+            await start_mcp(bot)
+            runtime = manager._servers["off"]  # noqa: SLF001
+            assert runtime.state == STATE_DISABLED
+            assert runtime.connection is None
+            assert runtime.config["enabled"] is False
+            assert runtime.config["cwd"] == "/tmp"
+            assert runtime.config["tool_allowlist"] == ["echo"]
+        finally:
+            await manager.shutdown()
 
     async def test_missing_mcp_config_is_noop(self):
         manager = MCPManager()
@@ -188,6 +217,35 @@ class TestCheckMcp:
             assert status.status == "ok"
             assert status.metadata["connected"] == 1
             assert status.metadata["published_tools"] > 0
+        finally:
+            await manager.shutdown()
+
+    async def test_disabled_server_is_not_in_health_denominator(self):
+        manager = MCPManager()
+        bot = _bot(
+            MCPConfig(
+                enabled=True,
+                servers={
+                    "on": _fake_server_config(),
+                    "off": MCPServerConfig(
+                        enabled=False,
+                        transport="stdio",
+                        command=sys.executable,
+                        args=[FAKE, "legacy"],
+                    ),
+                },
+            ),
+            manager,
+        )
+        try:
+            await start_mcp(bot)
+            await _wait_until(lambda: manager.get_status()["connected_count"] == 1)
+            status = check_mcp(bot)
+            assert status.status == "ok"
+            assert status.metadata["servers"] == 2
+            assert status.metadata["enabled_servers"] == 1
+            assert status.metadata["connected"] == 1
+            assert "1/1 enabled" in status.detail
         finally:
             await manager.shutdown()
 
@@ -393,6 +451,40 @@ class TestBootLifecycleRaces:
         assert {tool["name"] for tool in manager.get_tool_definitions()} == {"mcp_fake_echo"}
         await manager.shutdown()
 
+    async def test_cancelled_queued_enable_never_commits(self, monkeypatch):
+        manager = MCPManager()
+        await manager.load_desired_state(
+            enabled=True, servers={"fake": _fake_server_config().model_dump()}
+        )
+        await manager.start()
+        runtime = manager._servers["fake"]  # noqa: SLF001
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original_retire = manager._retire_runtime  # noqa: SLF001
+
+        async def delayed_retire(target):
+            if target is runtime:
+                entered.set()
+                await release.wait()
+            await original_retire(target)
+
+        monkeypatch.setattr(manager, "_retire_runtime", delayed_retire)
+        disable = asyncio.create_task(manager.set_global_enabled(False))
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        enable = asyncio.create_task(manager.set_global_enabled(True))
+        await asyncio.sleep(0)
+        enable.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await enable
+        release.set()
+        await disable
+        assert manager.global_enabled is False
+        assert runtime.state == STATE_DISABLED
+        assert runtime.supervisor is None
+        assert runtime.connection is None
+        assert manager.get_tool_definitions() == []
+        await manager.shutdown()
+
     async def test_overlapping_disable_enable_finishes_supervised(self, monkeypatch):
         manager = MCPManager()
         await manager.load_desired_state(
@@ -425,20 +517,155 @@ class TestBootLifecycleRaces:
         await manager.shutdown()
 
 
-class TestManagerLockAtomicity:
-    def test_locked_critical_sections_are_await_free(self):
-        source = Path("src/tools/mcp/manager.py").read_text(encoding="utf-8")
+class TestManagerLockGuardMutations:
+    @staticmethod
+    def _violations(source: str) -> list[str]:
         tree = ast.parse(source)
+        parents: dict[ast.AST, ast.AST] = {
+            child: parent for parent in ast.walk(tree) for child in ast.iter_child_nodes(parent)
+        }
         violations: list[str] = []
+        lock_refs = [
+            node
+            for node in ast.walk(tree)
+            if isinstance(node, ast.Attribute)
+            and isinstance(node.value, ast.Name)
+            and node.value.id == "self"
+            and node.attr == "_lock"
+        ]
+        for ref in lock_refs:
+            parent = parents.get(ref)
+            if isinstance(parent, ast.Assign) and ref in parent.targets:
+                # Only construction in ``__init__`` is permitted. Reassigning
+                # elsewhere would invalidate the single-lock proof.
+                owner = parent
+                while owner is not None and not isinstance(
+                    owner, (ast.FunctionDef, ast.AsyncFunctionDef)
+                ):
+                    owner = parents.get(owner)
+                if (
+                    isinstance(owner, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and owner.name == "__init__"
+                    and isinstance(parent.value, ast.Call)
+                    and isinstance(parent.value.func, ast.Attribute)
+                    and isinstance(parent.value.func.value, ast.Name)
+                    and parent.value.func.value.id == "asyncio"
+                    and parent.value.func.attr == "Lock"
+                ):
+                    continue
+                violations.append(f"line {ref.lineno}: self._lock reassignment")
+                continue
+            if not (
+                isinstance(parent, ast.withitem)
+                and parent.context_expr is ref
+                and parent.optional_vars is None
+                and isinstance(parents.get(parent), ast.AsyncWith)
+            ):
+                violations.append(f"line {ref.lineno}: non-direct self._lock use")
+                continue
+            with_node = parents[parent]
+            assert isinstance(with_node, ast.AsyncWith)
+            if len(with_node.items) != 1:
+                violations.append(f"line {ref.lineno}: compound self._lock context")
+            for stmt in with_node.body:
+                for sub in ast.walk(stmt):
+                    if isinstance(
+                        sub,
+                        (ast.Await, ast.AsyncFor, ast.AsyncWith, ast.Yield, ast.YieldFrom),
+                    ):
+                        violations.append(f"line {sub.lineno}: {ast.unparse(sub)[:80]}")
+        return violations
 
-        class Checker(ast.NodeVisitor):
-            def visit_AsyncWith(self, node: ast.AsyncWith) -> None:
-                if any("self._lock" in ast.unparse(item.context_expr) for item in node.items):
-                    for stmt in node.body:
-                        for sub in ast.walk(stmt):
-                            if isinstance(sub, (ast.Await, ast.AsyncFor, ast.AsyncWith)):
-                                violations.append(f"line {sub.lineno}: {ast.unparse(sub)[:80]}")
-                self.generic_visit(node)
+    def test_guard_rejects_bypass_forms(self):
+        samples = (
+            "lock = self._lock",
+            "self._lock = other",
+            "await self._lock.acquire()",
+            "self._lock.release()",
+            "async with self._lock:\n    await work()",
+            "async with self._lock as lock:\n    pass",
+            "async with self._lock, other_context:\n    pass",
+            "async with self._lock:\n    yield value",
+        )
+        for sample in samples:
+            source = f"async def bad(self):\n    {sample.replace(chr(10), chr(10) + '    ')}"
+            assert self._violations(source), sample
 
-        Checker().visit(tree)
-        assert not violations
+
+class TestMcpBootSchema:
+    def test_legacy_server_config_loads_clean_with_safe_defaults(self):
+        config = Config(
+            discord={"token": "test"},
+            mcp={
+                "enabled": True,
+                "servers": {
+                    "old": {"transport": "stdio", "command": "old-mcp"},
+                },
+            },
+        )
+        server = config.mcp.servers["old"]
+        assert server.enabled is True
+        assert server.cwd == ""
+        assert server.tool_allowlist == []
+
+    def test_new_per_server_controls_survive_model_dump(self):
+        server = MCPServerConfig(
+            enabled=False,
+            transport="stdio",
+            command="mcp",
+            cwd="/srv/mcp",
+            tool_allowlist=["read", "search"],
+        )
+        dumped = server.model_dump()
+        assert dumped["enabled"] is False
+        assert dumped["cwd"] == "/srv/mcp"
+        assert dumped["tool_allowlist"] == ["read", "search"]
+
+
+class TestNoModelPublicationBeforeP4:
+    async def test_connected_mcp_tools_stay_out_of_catalog_and_assembled_request(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        fake = FakeLLM([text_response("ok")])
+        bot = make_bot(
+            fake_llm=fake,
+            config_overrides={
+                "mcp": {
+                    "enabled": True,
+                    "servers": {
+                        "fake": _fake_server_config().model_dump(),
+                    },
+                }
+            },
+        )
+        try:
+            await start_mcp(bot)
+            await _wait_until(lambda: bot.mcp_manager.has_tool("mcp_fake_echo"))
+            catalog_names = {tool["name"] for tool in bot.tool_catalog.merged_definitions()}
+            assert "mcp_fake_echo" not in catalog_names
+            await bot.tool_loop.run(
+                FakeMessage("say ok"),
+                [{"role": "user", "content": "say ok"}],
+            )
+            request_names = {tool["name"] for tool in fake.calls[0]["tools"]}
+            assert "mcp_fake_echo" not in request_names
+        finally:
+            await manager_shutdown(bot.mcp_manager)
+
+
+async def manager_shutdown(manager: MCPManager) -> None:
+    """Keep cancellation-safe manager cleanup explicit in real-bot pins."""
+    await manager.shutdown()
+
+
+class TestManagerLockAtomicity:
+    def test_locked_critical_sections_use_only_direct_await_free_form(self):
+        """Synchronous loss fencing relies on one strict lock discipline:
+        ``self._lock`` may only be constructed or used directly in an
+        await-free ``async with self._lock``. Aliasing it, calling
+        acquire/release manually, or awaiting under it invalidates the proof.
+        """
+        manager_path = Path(__file__).resolve().parents[1] / "src" / "tools" / "mcp" / "manager.py"
+        source = manager_path.read_text(encoding="utf-8")
+        assert not TestManagerLockGuardMutations._violations(source)

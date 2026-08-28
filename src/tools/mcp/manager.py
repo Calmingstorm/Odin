@@ -225,26 +225,42 @@ class MCPManager:
             "servers": servers,
         }
 
-    async def _drain_transition(self, operation: Any, *, name: str) -> Any:
-        """Run one lifecycle transition to completion despite caller cancellation.
+    async def _drain_transition(
+        self,
+        operation: Any,
+        *,
+        committed: asyncio.Event,
+        name: str,
+    ) -> Any:
+        """Give cancellation transactional lifecycle semantics.
 
-        Mutations commit desired state before retirement/reconciliation awaits.
-        Letting cancellation escape midway could leave an enabled runtime with
-        no supervisor, so a task owns the complete serialized transition. The
-        caller's cancellation is restored only after that task reaches a
-        coherent terminal state.
+        A transition cancelled while merely queued behind ``_lifecycle_lock``
+        is cancelled and never mutates desired state. Once the inner operation
+        marks ``committed`` immediately before its first mutation, cancellation
+        cannot abandon retirement/reconciliation halfway through: the task is
+        shielded and drained to a coherent state before cancellation is restored
+        to the caller.
         """
         task = asyncio.create_task(operation, name=f"mcp-transition-{name}")
         cancelled = False
         while not task.done():
-            current = asyncio.current_task()
-            if current is not None:
-                while current.cancelling():
-                    current.uncancel()
             try:
                 await asyncio.shield(task)
             except asyncio.CancelledError:
+                if task.done():
+                    break
+                if not committed.is_set():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    raise
                 cancelled = True
+                current = asyncio.current_task()
+                if current is not None:
+                    while current.cancelling():
+                        current.uncancel()
         result = await task
         if cancelled:
             raise asyncio.CancelledError
@@ -253,36 +269,59 @@ class MCPManager:
     async def load_desired_state(
         self, *, enabled: bool, servers: dict[str, dict[str, Any]]
     ) -> None:
+        committed = asyncio.Event()
         await self._drain_transition(
-            self._load_desired_state_inner(enabled=enabled, servers=servers),
+            self._load_desired_state_inner(enabled=enabled, servers=servers, committed=committed),
+            committed=committed,
             name="load-desired-state",
         )
 
     async def add_server(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
+        committed = asyncio.Event()
         return await self._drain_transition(
-            self._add_server_inner(name, config), name=f"add-{name}"
+            self._add_server_inner(name, config, committed=committed),
+            committed=committed,
+            name=f"add-{name}",
         )
 
     async def update_server(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
+        committed = asyncio.Event()
         return await self._drain_transition(
-            self._update_server_inner(name, config), name=f"update-{name}"
+            self._update_server_inner(name, config, committed=committed),
+            committed=committed,
+            name=f"update-{name}",
         )
 
     async def remove_server(self, name: str) -> None:
-        await self._drain_transition(self._remove_server_inner(name), name=f"remove-{name}")
+        committed = asyncio.Event()
+        await self._drain_transition(
+            self._remove_server_inner(name, committed=committed),
+            committed=committed,
+            name=f"remove-{name}",
+        )
 
     async def set_global_enabled(self, enabled: bool) -> None:
-        await self._drain_transition(self._set_global_enabled_inner(enabled), name="global-enabled")
+        committed = asyncio.Event()
+        await self._drain_transition(
+            self._set_global_enabled_inner(enabled, committed=committed),
+            committed=committed,
+            name="global-enabled",
+        )
 
     async def start(self, *, wait_for_first_attempt: bool = True) -> None:
+        committed = asyncio.Event()
         await self._drain_transition(
-            self._start_inner(wait_for_first_attempt=wait_for_first_attempt),
+            self._start_inner(wait_for_first_attempt=wait_for_first_attempt, committed=committed),
+            committed=committed,
             name="start",
         )
 
     async def reconnect_server(self, name: str) -> dict[str, Any]:
+        committed = asyncio.Event()
         return await self._drain_transition(
-            self._reconnect_server_inner(name), name=f"reconnect-{name}"
+            self._reconnect_server_inner(name, committed=committed),
+            committed=committed,
+            name=f"reconnect-{name}",
         )
 
     # ------------------------------------------------------------------
@@ -290,7 +329,11 @@ class MCPManager:
     # ------------------------------------------------------------------
 
     async def _load_desired_state_inner(
-        self, *, enabled: bool, servers: dict[str, dict[str, Any]]
+        self,
+        *,
+        enabled: bool,
+        servers: dict[str, dict[str, Any]],
+        committed: asyncio.Event,
     ) -> None:
         """Adopt the full desired state (boot / config reload).
 
@@ -303,6 +346,7 @@ class MCPManager:
             desired_configs = {name: copy.deepcopy(config) for name, config in servers.items()}
             retire: list[_ServerRuntime] = []
             async with self._lock:
+                committed.set()
                 previous_enabled = self._global_enabled
                 previous = self._servers
                 replacements: dict[str, _ServerRuntime] = {}
@@ -348,11 +392,14 @@ class MCPManager:
                     return_exceptions=True,
                 )
 
-    async def _add_server_inner(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
+    async def _add_server_inner(
+        self, name: str, config: dict[str, Any], *, committed: asyncio.Event
+    ) -> dict[str, Any]:
         async with self._lifecycle_lock:
             self._ensure_open()
             _validate_server_config(name, config)
             async with self._lock:
+                committed.set()
                 if name in self._servers:
                     raise MCPConfigError(f"server '{name}' already exists")
                 runtime = _ServerRuntime(config=copy.deepcopy(config), generation=self._next_gen())
@@ -360,11 +407,14 @@ class MCPManager:
             await self._reconcile_server(name)
             return self.get_status()
 
-    async def _update_server_inner(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
+    async def _update_server_inner(
+        self, name: str, config: dict[str, Any], *, committed: asyncio.Event
+    ) -> dict[str, Any]:
         async with self._lifecycle_lock:
             self._ensure_open()
             _validate_server_config(name, config)
             async with self._lock:
+                committed.set()
                 old = self._servers.get(name)
                 if old is None:
                     raise MCPConfigError(f"server '{name}' not found")
@@ -376,10 +426,11 @@ class MCPManager:
             await self._reconcile_server(name)
             return self.get_status()
 
-    async def _remove_server_inner(self, name: str) -> None:
+    async def _remove_server_inner(self, name: str, *, committed: asyncio.Event) -> None:
         async with self._lifecycle_lock:
             self._ensure_open()
             async with self._lock:
+                committed.set()
                 runtime = self._servers.pop(name, None)
                 if runtime is None:
                     raise MCPConfigError(f"server '{name}' not found")
@@ -387,12 +438,13 @@ class MCPManager:
                 self._unpublish_locked(name, runtime, reason="removed")
             await self._retire_runtime(runtime)
 
-    async def _set_global_enabled_inner(self, enabled: bool) -> None:
+    async def _set_global_enabled_inner(self, enabled: bool, *, committed: asyncio.Event) -> None:
         """Serialize disable teardown and enable supervision as one transition."""
         async with self._lifecycle_lock:
             self._ensure_open()
             runtimes: list[_ServerRuntime] = []
             async with self._lock:
+                committed.set()
                 self._global_enabled = bool(enabled)
                 if not enabled:
                     runtimes = list(self._servers.values())
@@ -416,7 +468,12 @@ class MCPManager:
         if self._closed:
             raise MCPConfigError("MCP manager has shut down")
 
-    async def _start_inner(self, *, wait_for_first_attempt: bool = True) -> None:
+    async def _start_inner(
+        self,
+        *,
+        wait_for_first_attempt: bool = True,
+        committed: asyncio.Event,
+    ) -> None:
         """Start supervisors for all enabled servers.
 
         Normal control-plane mutations may await each first bounded attempt.
@@ -427,6 +484,7 @@ class MCPManager:
         async with self._lifecycle_lock:
             if self._closed:
                 return
+            committed.set()
             await self._start_locked(wait_for_first_attempt=wait_for_first_attempt)
 
     async def _start_locked(self, *, wait_for_first_attempt: bool) -> None:
@@ -491,11 +549,14 @@ class MCPManager:
             return_exceptions=True,
         )
 
-    async def _reconnect_server_inner(self, name: str) -> dict[str, Any]:
+    async def _reconnect_server_inner(
+        self, name: str, *, committed: asyncio.Event
+    ) -> dict[str, Any]:
         """Manual reconnect: teardown + fresh connect now."""
         async with self._lifecycle_lock:
             self._ensure_open()
             async with self._lock:
+                committed.set()
                 old = self._servers.get(name)
                 if old is None:
                     raise MCPConfigError(f"server '{name}' not found")
@@ -862,11 +923,13 @@ class MCPManager:
                 discovery = await connection.discover_tools()
             except asyncio.CancelledError:
                 raise
-            except (MCPError, TimeoutError) as e:
+            except Exception as e:
                 # A failed listing invalidates the complete snapshot for every
-                # bounded failure shape (typed protocol/timeout or an ordinary
-                # TimeoutError from an adapter). Detach before teardown so no
-                # model request can observe tools from a failed refresh.
+                # ordinary failure shape, including unexpected adapter defects.
+                # Detach before teardown so no model request can observe tools
+                # from a failed refresh. Cancellation remains control flow.
+                if not isinstance(e, (MCPError, TimeoutError)):
+                    log.exception("MCP %s: unexpected tools refresh failure", name)
                 async with self._lock:
                     runtime = self._servers.get(name)
                     if (
@@ -885,7 +948,10 @@ class MCPManager:
                     raise
                 except Exception:
                     log.exception("MCP %s: failed-refresh teardown error", name)
-                runtime.wake.set()
+                finally:
+                    # Manual-refresh cancellation may be restored only after
+                    # disconnect drains; always wake supervision afterward.
+                    runtime.wake.set()
                 return
             await self._publish(name, generation, connection, discovery)
 
