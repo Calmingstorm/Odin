@@ -23,6 +23,10 @@ class MCPConnectError(MCPError):
     negotiation, or the initialize handshake. Retryable by reconnect."""
 
 
+class MCPPreWriteError(MCPConnectError):
+    """A tool request was rejected locally before any bytes could be written."""
+
+
 class MCPProtocolError(MCPError):
     """The server violated the negotiated protocol (malformed frame,
     oversized message, missing required fields, batch outside 2025-03-26,

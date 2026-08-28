@@ -22,6 +22,7 @@ origin). One reused ClientSession per server, cookie-isolated.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -41,6 +42,7 @@ log = get_logger("mcp.http")
 
 _SOCK_CONNECT_TIMEOUT = 15
 _DEFAULT_STALL_TIMEOUT = 120
+_SESSION_DELETE_TIMEOUT = 5.0
 
 # Headers the transport owns. Configured per-server headers and mirrored
 # Mcp-Param-* values must never override these (case-insensitive).
@@ -116,6 +118,10 @@ class HttpTransport:
         self.stall_timeout = stall_timeout
         self.session_id: str | None = None
         self._session: aiohttp.ClientSession | None = None
+
+    @property
+    def started(self) -> bool:
+        return self._session is not None and not self._session.closed
 
     async def start(self) -> None:
         if self._session is not None:
@@ -310,37 +316,53 @@ class HttpTransport:
                     except Exception:
                         log.exception("MCP %s: SSE message handler failed", self.server_name)
 
+        def pop_line(*, eof: bool = False) -> bytes | None:
+            nonlocal buffer
+            positions = [idx for marker in (b"\r", b"\n") if (idx := buffer.find(marker)) >= 0]
+            if not positions:
+                if eof and buffer:
+                    line, buffer = buffer, b""
+                    return line
+                return None
+            idx = min(positions)
+            if buffer[idx : idx + 1] == b"\r":
+                if idx + 1 == len(buffer) and not eof:
+                    return None  # CRLF may be split across chunks
+                width = 2 if buffer[idx + 1 : idx + 2] == b"\n" else 1
+            else:
+                width = 1
+            line, buffer = buffer[:idx], buffer[idx + width :]
+            return line
+
+        def consume_line(line: bytes) -> None:
+            nonlocal data_bytes
+            text = line.decode("utf-8", errors="replace")
+            if not text:
+                dispatch_event()
+                return
+            if text.startswith(":"):
+                return
+            field_name, _, value = text.partition(":")
+            if value.startswith(" "):
+                value = value[1:]
+            if field_name == "data":
+                data_bytes += len(value.encode("utf-8"))
+                if data_bytes > MAX_SSE_EVENT_BYTES:
+                    raise MCPProtocolError(
+                        f"{self.server_name}: SSE data exceeds {MAX_SSE_EVENT_BYTES} bytes"
+                    )
+                data_lines.append(value)
+
         async for chunk in resp.content.iter_chunked(16384):
             buffer += chunk
             if len(buffer) > MAX_SSE_EVENT_BYTES:
                 raise MCPProtocolError(
                     f"{self.server_name}: SSE event exceeds {MAX_SSE_EVENT_BYTES} bytes"
                 )
-            while True:
-                for sep in (b"\r\n", b"\n", b"\r"):
-                    idx = buffer.find(sep)
-                    if idx != -1:
-                        line, buffer = buffer[:idx], buffer[idx + len(sep) :]
-                        break
-                else:
-                    break
-                text = line.decode("utf-8", errors="replace")
-                if not text:
-                    dispatch_event()
-                    continue
-                if text.startswith(":"):
-                    continue  # SSE comment / keep-alive
-                field_name, _, value = text.partition(":")
-                if value.startswith(" "):
-                    value = value[1:]
-                if field_name == "data":
-                    data_bytes += len(value)
-                    if data_bytes > MAX_SSE_EVENT_BYTES:
-                        raise MCPProtocolError(
-                            f"{self.server_name}: SSE data exceeds {MAX_SSE_EVENT_BYTES} bytes"
-                        )
-                    data_lines.append(value)
-                # event/id/retry fields carry no data we act on.
+            while (line := pop_line()) is not None:
+                consume_line(line)
+        while (line := pop_line(eof=True)) is not None:
+            consume_line(line)
         dispatch_event()
 
     # ------------------------------------------------------------------
@@ -358,11 +380,12 @@ class HttpTransport:
         if protocol_version:
             headers["MCP-Protocol-Version"] = protocol_version
         try:
-            async with self._session.delete(
-                self.url, headers=headers, allow_redirects=False
-            ) as resp:
-                await resp.read()
-        except aiohttp.ClientError:
+            async with asyncio.timeout(_SESSION_DELETE_TIMEOUT):
+                async with self._session.delete(
+                    self.url, headers=headers, allow_redirects=False
+                ) as resp:
+                    await self._read_bounded(resp)
+        except (TimeoutError, aiohttp.ClientError, MCPProtocolError):
             pass
         finally:
             self.session_id = None

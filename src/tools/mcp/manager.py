@@ -22,6 +22,7 @@ its generation under the lock before touching published state.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import random
 import re
@@ -222,25 +223,55 @@ class MCPManager:
         """Adopt the full desired state (boot / config reload). Validates
         every server; invalid entries are recorded in error state rather
         than discarded silently."""
+        desired_configs = {name: copy.deepcopy(config) for name, config in servers.items()}
+        retire: list[_ServerRuntime] = []
         async with self._lock:
-            self._global_enabled = bool(enabled)
-            for name, config in servers.items():
-                runtime = _ServerRuntime(config=dict(config), generation=self._next_gen())
+            previous_enabled = self._global_enabled
+            previous = self._servers
+            replacements: dict[str, _ServerRuntime] = {}
+            catalog_changed = False
+            for name, config in desired_configs.items():
+                old = previous.get(name)
+                reuse = (
+                    old is not None and old.config == config and previous_enabled == bool(enabled)
+                )
+                if reuse:
+                    assert old is not None
+                    replacements[name] = old
+                    continue
+                runtime = _ServerRuntime(config=config, generation=self._next_gen())
                 try:
                     _validate_server_config(name, runtime.config)
                 except MCPConfigError as e:
                     runtime.state = STATE_ERROR
                     runtime.last_error = str(e)
                     runtime.config_invalid = True
-                self._servers[name] = runtime
+                replacements[name] = runtime
+            for name, old in previous.items():
+                if replacements.get(name) is old:
+                    continue
+                old.generation = self._next_gen()
+                catalog_changed = catalog_changed or bool(old.published)
+                old.published = {}
+                retire.append(old)
+            self._global_enabled = bool(enabled)
+            self._servers = replacements
             self._rebuild_published_index_locked()
+            if catalog_changed:
+                self._notify_catalog_changed()
+        await asyncio.gather(*(self._retire_runtime(runtime) for runtime in retire))
+        if self._started and self._global_enabled:
+            await asyncio.gather(
+                *(self._reconcile_server(name) for name in list(self._servers)),
+                return_exceptions=True,
+            )
 
     async def add_server(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
         _validate_server_config(name, config)
         async with self._lock:
             if name in self._servers:
                 raise MCPConfigError(f"server '{name}' already exists")
-            runtime = _ServerRuntime(config=dict(config), generation=self._next_gen())
+            runtime = _ServerRuntime(config=copy.deepcopy(config), generation=self._next_gen())
             self._servers[name] = runtime
         await self._reconcile_server(name)
         return self.get_status()
@@ -248,13 +279,14 @@ class MCPManager:
     async def update_server(self, name: str, config: dict[str, Any]) -> dict[str, Any]:
         _validate_server_config(name, config)
         async with self._lock:
-            runtime = self._servers.get(name)
-            if runtime is None:
+            old = self._servers.get(name)
+            if old is None:
                 raise MCPConfigError(f"server '{name}' not found")
-            runtime.config = dict(config)
-            runtime.generation = self._next_gen()
-            self._unpublish_locked(name, runtime, reason="configuration changed")
-        await self._teardown_connection(name)
+            old.generation = self._next_gen()
+            self._unpublish_locked(name, old, reason="configuration changed")
+            runtime = _ServerRuntime(config=copy.deepcopy(config), generation=self._next_gen())
+            self._servers[name] = runtime
+        await self._retire_runtime(old)
         await self._reconcile_server(name)
         return self.get_status()
 
@@ -265,22 +297,22 @@ class MCPManager:
                 raise MCPConfigError(f"server '{name}' not found")
             runtime.generation = self._next_gen()  # fences in-flight tasks
             self._unpublish_locked(name, runtime, reason="removed")
-        await self._stop_supervisor(runtime)
-        if runtime.connection is not None:
-            await runtime.connection.disconnect()
+        await self._retire_runtime(runtime)
 
     async def set_global_enabled(self, enabled: bool) -> None:
         """Off: synchronous unpublish, then teardown. On: async reconcile."""
+        runtimes: list[_ServerRuntime] = []
         async with self._lock:
             self._global_enabled = bool(enabled)
             if not enabled:
+                runtimes = list(self._servers.values())
                 for sname, runtime in self._servers.items():
                     runtime.generation = self._next_gen()
                     self._unpublish_locked(sname, runtime, reason="MCP globally disabled")
                     runtime.state = STATE_DISABLED
         if not enabled:
             await asyncio.gather(
-                *(self._teardown_connection(name) for name in list(self._servers)),
+                *(self._retire_runtime(runtime) for runtime in runtimes),
                 return_exceptions=True,
             )
         else:
@@ -305,28 +337,25 @@ class MCPManager:
     async def shutdown(self) -> None:
         """Concurrent, bounded teardown of everything."""
         self._stopping = True
-        runtimes = list(self._servers.values())
-        for runtime in runtimes:
-            runtime.generation = self._next_gen()
-        await asyncio.gather(*(self._stop_supervisor(r) for r in runtimes), return_exceptions=True)
-        await asyncio.gather(
-            *(r.connection.disconnect() for r in runtimes if r.connection is not None),
-            return_exceptions=True,
-        )
         async with self._lock:
+            runtimes = list(self._servers.values())
             for sname, runtime in self._servers.items():
+                runtime.generation = self._next_gen()
+                runtime.state = STATE_DISABLED
                 self._unpublish_locked(sname, runtime, reason="shutdown")
+        await asyncio.gather(*(self._retire_runtime(r) for r in runtimes), return_exceptions=True)
 
     async def reconnect_server(self, name: str) -> dict[str, Any]:
         """Manual reconnect: teardown + fresh connect now."""
         async with self._lock:
-            runtime = self._servers.get(name)
-            if runtime is None:
+            old = self._servers.get(name)
+            if old is None:
                 raise MCPConfigError(f"server '{name}' not found")
-            runtime.generation = self._next_gen()
-            runtime.backoff_idx = 0
-            self._unpublish_locked(name, runtime, reason="reconnecting")
-        await self._teardown_connection(name)
+            old.generation = self._next_gen()
+            self._unpublish_locked(name, old, reason="reconnecting")
+            runtime = _ServerRuntime(config=copy.deepcopy(old.config), generation=self._next_gen())
+            self._servers[name] = runtime
+        await self._retire_runtime(old)
         await self._reconcile_server(name)
         return self.get_status()
 
@@ -373,17 +402,15 @@ class MCPManager:
                 index[published_name] = (name, record)
         self._published_index = index
 
-    async def _teardown_connection(self, name: str) -> None:
-        runtime = self._servers.get(name)
-        if runtime is None:
-            return
+    async def _retire_runtime(self, runtime: _ServerRuntime) -> None:
+        """Stop one captured runtime by identity, never by a reused name."""
         await self._stop_supervisor(runtime)
         connection, runtime.connection = runtime.connection, None
         if connection is not None:
             try:
                 await connection.disconnect()
             except Exception:
-                log.exception("MCP %s: teardown error", name)
+                log.exception("MCP: retired runtime teardown error")
 
     async def _stop_supervisor(self, runtime: _ServerRuntime) -> None:
         task, runtime.supervisor = runtime.supervisor, None
@@ -407,7 +434,7 @@ class MCPManager:
                 if current is runtime:
                     self._unpublish_locked(name, runtime, reason="disabled")
                     runtime.state = STATE_DISABLED
-            await self._teardown_connection(name)
+            await self._retire_runtime(runtime)
             return
         if runtime.config_invalid:
             return  # structurally invalid config cannot be supervised
@@ -521,12 +548,17 @@ class MCPManager:
                 env=dict(config.get("env", {}) or {}),
                 cwd=config.get("cwd", ""),
                 timeout=float(config.get("timeout_seconds", 120)),
-                on_tools_list_changed=lambda: self._on_list_changed(name, generation),
-                on_connection_lost=lambda reason: self._on_lost(name, generation, reason),
+                on_tools_list_changed=lambda: self._on_list_changed(name, generation, connection),
+                on_connection_lost=lambda reason: self._on_lost(
+                    name, generation, connection, reason
+                ),
             )
             try:
                 await asyncio.wait_for(connection.connect(), timeout=_CONNECT_BUDGET_S)
                 discovery = await connection.discover_tools()
+            except asyncio.CancelledError:
+                await connection.disconnect()
+                raise
             except TimeoutError:
                 await connection.disconnect()
                 return await self._record_connect_failure(name, generation, "connect timed out")
@@ -674,26 +706,46 @@ class MCPManager:
                 return
             await self._publish(name, generation, connection, discovery)
 
-    def _on_list_changed(self, name: str, generation: int) -> None:
+    def _on_list_changed(self, name: str, generation: int, connection: MCPServerConnection) -> None:
         runtime = self._servers.get(name)
-        if runtime is not None and runtime.generation == generation:
+        if (
+            runtime is not None
+            and runtime.generation == generation
+            and runtime.connection is connection
+        ):
             runtime.wake.set()
 
-    def _on_lost(self, name: str, generation: int, reason: str) -> None:
+    def _on_lost(
+        self,
+        name: str,
+        generation: int,
+        connection: MCPServerConnection,
+        reason: str,
+    ) -> None:
+        """Fence loss synchronously before returning to the transport callback."""
         runtime = self._servers.get(name)
-        if runtime is None or runtime.generation != generation:
+        if (
+            runtime is None
+            or runtime.generation != generation
+            or runtime.connection is not connection
+        ):
             return
-        asyncio.get_running_loop().create_task(self._handle_lost(name, generation, reason))
-
-    async def _handle_lost(self, name: str, generation: int, reason: str) -> None:
-        async with self._lock:
-            runtime = self._servers.get(name)
-            if runtime is None or runtime.generation != generation:
-                return
-            runtime.state = STATE_ERROR
-            runtime.last_error = reason[:500]
-            self._unpublish_locked(name, runtime, reason=f"connection lost: {reason}")
+        runtime.state = STATE_ERROR
+        runtime.last_error = reason[:500]
+        runtime.connection = None
+        self._unpublish_locked(name, runtime, reason=f"connection lost: {reason}")
         runtime.wake.set()
+        asyncio.get_running_loop().create_task(
+            self._disconnect_lost_connection(connection),
+            name=f"mcp-retire-lost-{name}",
+        )
+
+    @staticmethod
+    async def _disconnect_lost_connection(connection: MCPServerConnection) -> None:
+        try:
+            await connection.disconnect()
+        except Exception:
+            log.exception("MCP: lost connection teardown failed")
 
     # ------------------------------------------------------------------
     # Execution

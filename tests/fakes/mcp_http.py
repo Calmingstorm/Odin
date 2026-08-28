@@ -17,6 +17,14 @@ Modes (``make_app(mode)``):
   legacy-sse        legacy-stateless whose tools/call replies stream over
                     SSE and include a server-initiated request BEFORE the
                     final response (the client must answer -32601 via POST).
+  legacy-batch      2025-03-26 legacy; tools/list arrives as a receive-side batch.
+  modern-500-call    tools/call returns a bare HTTP 500 after accepting the POST.
+  modern-stall-call  tools/call stalls until the client request budget expires.
+  modern-missing-discover-result-type
+                    DiscoverResult omits mandatory modern resultType.
+  probe-200-internal probe returns HTTP 200 JSON-RPC -32603 (no era evidence).
+  probe-404-empty    probe returns an empty HTTP 404 (no era evidence).
+  probe-400-wrong-id probe returns HTTP 400 with a wrong-id modern marker.
   auth-401          every request → 401 (era must stay undetermined).
 
 ``state`` (returned alongside the app) records per-method call counts —
@@ -26,6 +34,7 @@ reply POSTed by the client for server-initiated requests.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from typing import Any
 
@@ -33,10 +42,9 @@ from aiohttp import web
 
 MODERN_VERSION = "2026-07-28"
 LEGACY_VERSION = "2025-06-18"
-SESSION_ID = "fake-session-0001"
 
 
-def _tool_defs(*, with_header_param: bool) -> list[dict]:
+def _tool_defs(*, with_header_param: bool, header_name: str = "Region") -> list[dict]:
     tools = [
         {
             "name": "echo",
@@ -60,7 +68,7 @@ def _tool_defs(*, with_header_param: bool) -> list[dict]:
                 "inputSchema": {
                     "type": "object",
                     "properties": {
-                        "region": {"type": "string", "x-mcp-header": "Region"},
+                        "region": {"type": "string", "x-mcp-header": header_name},
                         "query": {"type": "string"},
                     },
                 },
@@ -101,6 +109,17 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         "session_deleted": False,
         "client_replies": [],
         "pushed": False,
+        "expire_once": False,
+        "header_name": "Region",
+        "discover_result_type": "complete",
+        "session_generation": 0,
+        "current_session_id": None,
+        "session_headers": [],
+        "cancelled": [],
+        "tool_effects": 0,
+        "reject_status": 400,
+        "reject_wrong_id": False,
+        "delete_mode": "normal",
     }
 
     def count(method: str) -> None:
@@ -121,6 +140,14 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
 
         count(str(method))
 
+        if method == "server/discover" and mode == "probe-200-internal":
+            return web.json_response(_rpc_error(msg_id, -32603, "Internal error"))
+        if method == "server/discover" and mode == "probe-404-empty":
+            return web.Response(status=404)
+        if method == "server/discover" and mode == "probe-400-wrong-id":
+            return web.json_response(
+                _rpc_error(msg_id + 1000, -32022, "Unsupported protocol version"), status=400
+            )
         if mode.startswith("modern"):
             return await _modern(request, body, method, msg_id, params)
         return await _legacy(request, body, method, msg_id, params)
@@ -129,6 +156,8 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         request: web.Request, body: dict, method: str, msg_id: Any, params: dict
     ) -> web.StreamResponse:
         if message_is_notification(body):
+            if method == "notifications/cancelled":
+                state["cancelled"].append(params)
             return web.Response(status=202)
         header_version = request.headers.get("MCP-Protocol-Version")
         meta = params.get("_meta") or {}
@@ -153,32 +182,46 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
                 _rpc_error(msg_id, -32020, "Header mismatch: Mcp-Method"), status=400
             )
         if method == "server/discover":
-            return web.json_response(
-                _rpc_response(
-                    msg_id,
-                    {
-                        "resultType": "complete",
-                        "supportedVersions": [MODERN_VERSION],
-                        "capabilities": {"tools": {}},
-                        "_meta": {
-                            "io.modelcontextprotocol/serverInfo": {
-                                "name": "fake-modern-http",
-                                "version": "1.0",
-                            }
-                        },
-                    },
-                )
-            )
+            result = {
+                "supportedVersions": [MODERN_VERSION],
+                "capabilities": {"tools": {}},
+                "_meta": {
+                    "io.modelcontextprotocol/serverInfo": {
+                        "name": "fake-modern-http",
+                        "version": "1.0",
+                    }
+                },
+            }
+            if mode != "modern-missing-discover-result-type":
+                result["resultType"] = state["discover_result_type"]
+            return web.json_response(_rpc_response(msg_id, result))
         if method == "tools/list":
-            result = _result(mode, {"tools": _tool_defs(with_header_param=True), "ttlMs": 90000})
+            result = _result(
+                mode,
+                {
+                    "tools": _tool_defs(with_header_param=True, header_name=state["header_name"]),
+                    "ttlMs": 90000,
+                },
+            )
             return _reply(request, msg_id, result)
         if method == "tools/call":
             name = params.get("name", "")
+            if mode == "modern-500-call":
+                state["tool_effects"] += 1
+                return web.Response(status=500)
+            if mode == "modern-stall-call":
+                state["tool_effects"] += 1
+                await asyncio.sleep(60)
+                return web.Response(status=500)
             if state.get("reject_calls", 0) > 0:
                 state["reject_calls"] -= 1
                 return web.json_response(
-                    _rpc_error(msg_id, -32020, "Header mismatch: transient"),
-                    status=400,
+                    _rpc_error(
+                        msg_id + 1000 if state["reject_wrong_id"] else msg_id,
+                        -32020,
+                        "Header mismatch: transient",
+                    ),
+                    status=state["reject_status"],
                 )
             if request.headers.get("Mcp-Name") != name:
                 return web.json_response(
@@ -187,7 +230,7 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
             arguments = params.get("arguments") or {}
             if name == "region_tool":
                 region = arguments.get("region")
-                header = request.headers.get("Mcp-Param-Region")
+                header = request.headers.get(f"Mcp-Param-{state['header_name']}")
                 if region is not None and header != str(region):
                     return web.json_response(
                         _rpc_error(msg_id, -32020, "Header mismatch: Mcp-Param-Region"),
@@ -208,7 +251,7 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
     ) -> web.StreamResponse:
         session_mode = mode == "legacy-session"
         if method == "server/discover":
-            if mode == "legacy-stateless" or mode == "legacy-sse":
+            if mode in {"legacy-stateless", "legacy-sse"}:
                 return web.json_response(_rpc_error(msg_id, -32601, "Method not found"))
             return web.Response(status=400, text="")  # bare 400, empty body
         if method == "initialize":
@@ -216,28 +259,53 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
                 _rpc_response(
                     msg_id,
                     {
-                        "protocolVersion": LEGACY_VERSION,
+                        "protocolVersion": (
+                            "2025-03-26" if mode == "legacy-batch" else LEGACY_VERSION
+                        ),
                         "capabilities": {"tools": {"listChanged": True}},
                         "serverInfo": {"name": f"fake-{mode}", "version": "1.0"},
                     },
                 )
             )
             if session_mode:
-                response.headers["Mcp-Session-Id"] = SESSION_ID
+                state["session_generation"] += 1
+                minted = f"fake-session-{state['session_generation']:04d}"
+                state["current_session_id"] = minted
+                response.headers["Mcp-Session-Id"] = minted
             return response
         if session_mode:
             got = request.headers.get("Mcp-Session-Id")
-            if state["expired"]:
+            state["session_headers"].append((method, got))
+            if state["expired"] or state["expire_once"]:
+                state["expire_once"] = False
                 return web.json_response(_rpc_error(msg_id, -32000, "Session expired"), status=404)
-            if got != SESSION_ID:
+            if got != state["current_session_id"]:
                 return web.json_response(_rpc_error(msg_id, -32000, "Missing session"), status=400)
         if message_is_notification(body):
+            if method == "notifications/cancelled":
+                state["cancelled"].append(params)
             return web.Response(status=202)
         if method == "tools/list":
-            return _reply(request, msg_id, {"tools": _tool_defs(with_header_param=False)})
+            result = {"tools": _tool_defs(with_header_param=False)}
+            if mode == "legacy-batch":
+                return web.json_response(
+                    [
+                        _rpc_response(msg_id, result),
+                        {
+                            "jsonrpc": "2.0",
+                            "method": "notifications/message",
+                            "params": {"level": "info", "data": "batched hello"},
+                        },
+                    ]
+                )
+            return _reply(request, msg_id, result)
         if method == "tools/call":
             name = params.get("name", "")
             arguments = params.get("arguments") or {}
+            if mode == "legacy-stall-call":
+                state["tool_effects"] += 1
+                await asyncio.sleep(60)
+                return web.Response(status=500)
             if mode == "legacy-sse" and not state["pushed"]:
                 state["pushed"] = True
                 messages = [
@@ -287,8 +355,12 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         )
 
     async def delete_endpoint(request: web.Request) -> web.Response:
-        if request.headers.get("Mcp-Session-Id") == SESSION_ID:
+        if request.headers.get("Mcp-Session-Id") == state["current_session_id"]:
             state["session_deleted"] = True
+            if state["delete_mode"] == "oversized":
+                return web.Response(body=b"x" * (2 * 1024 * 1024 + 1))
+            if state["delete_mode"] == "stall":
+                await asyncio.sleep(60)
             return web.Response(status=200)
         return web.Response(status=405)
 

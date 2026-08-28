@@ -15,12 +15,15 @@ Modes:
                     (exposed via the `pushy_reply` tool).
   legacy-unknown-version  counteroffers a version no client supports.
   modern-legacy-list      modern-era server advertising ONLY legacy versions.
-  modern-missing-result-type  modern server that omits resultType.
+  modern-missing-discover-result-type  modern server whose DiscoverResult omits resultType.
+  modern-missing-call-result-type  modern server whose tools/call result omits resultType.
   silent            never answers anything (probe/initialize time out).
   garbage           emits non-JSON noise, then behaves like `legacy`.
   dies-mid-call     exits abruptly during tools/call.
+  oversized-response emits a response line beyond the transport ceiling.
   stderr-flood      floods stderr forever while serving like `legacy`.
   hang-shutdown     ignores stdin EOF and SIGTERM (forces SIGKILL).
+  blocked-write     never reads stdin after startup (real pipe backpressure pin).
   grandchild        like `legacy`, but spawns a sleeping grandchild whose
                     pid is returned by the `child_pid` tool (process-group
                     teardown pin).
@@ -48,16 +51,29 @@ LEGACY_COUNTEROFFERS = {
     "legacy-oldest": "2024-11-05",
     "legacy-batch": "2025-03-26",
     "legacy-pushy": "2025-06-18",
+    "legacy-cancel": "2025-06-18",
     "legacy-unknown-version": "1999-01-01",
     "garbage": "2025-06-18",
     "dies-mid-call": "2025-06-18",
+    "oversized-response": "2025-06-18",
     "stderr-flood": "2025-06-18",
     "hang-shutdown": "2025-06-18",
     "grandchild": "2025-06-18",
+    "missing-schema": "2025-06-18",
 }
 
-STATE = {"initialized": False, "pushy_reply": None, "grandchild_pid": 0}
-_MODERN_MODES = {"modern", "modern-legacy-list", "modern-missing-result-type"}
+STATE = {
+    "initialized": False,
+    "pushy_reply": None,
+    "grandchild_pid": 0,
+    "cancelled_request_id": None,
+}
+_MODERN_MODES = {
+    "modern",
+    "modern-legacy-list",
+    "modern-missing-discover-result-type",
+    "modern-missing-call-result-type",
+}
 
 
 def send(obj) -> None:
@@ -66,7 +82,7 @@ def send(obj) -> None:
 
 
 def tool_defs() -> list[dict]:
-    return [
+    tools = [
         {
             "name": "echo",
             "description": "Echo text back",
@@ -108,12 +124,20 @@ def tool_defs() -> list[dict]:
             "description": "JSON of the reply the client sent to the pushed request",
             "inputSchema": {"type": "object", "properties": {}},
         },
+        {
+            "name": "cancelled_request_id",
+            "description": "Request id received in notifications/cancelled",
+            "inputSchema": {"type": "object", "properties": {}},
+        },
     ]
+    if MODE == "missing-schema":
+        tools.append({"name": "missing_schema", "description": "omits inputSchema"})
+    return tools
 
 
 def text_result(text: str, *, is_error: bool = False) -> dict:
     result = {"content": [{"type": "text", "text": text}], "isError": is_error}
-    if MODE in _MODERN_MODES and MODE != "modern-missing-result-type":
+    if MODE in _MODERN_MODES and MODE != "modern-missing-call-result-type":
         result["resultType"] = "complete"
     return result
 
@@ -137,6 +161,8 @@ def run_tool(name: str, arguments: dict) -> dict:
         return text_result(str(STATE["grandchild_pid"]))
     if name == "pushy_reply":
         return text_result(json.dumps(STATE["pushy_reply"]))
+    if name == "cancelled_request_id":
+        return text_result(json.dumps(STATE["cancelled_request_id"]))
     return text_result(f"unknown tool {name}", is_error=True)
 
 
@@ -153,7 +179,7 @@ def handle(msg: dict) -> None:
         return
 
     if method == "server/discover":
-        if MODE == "modern":
+        if MODE in {"modern", "modern-missing-call-result-type"}:
             send(
                 {
                     "jsonrpc": "2.0",
@@ -184,7 +210,7 @@ def handle(msg: dict) -> None:
                     },
                 }
             )
-        elif MODE == "modern-missing-result-type":
+        elif MODE == "modern-missing-discover-result-type":
             send(
                 {
                     "jsonrpc": "2.0",
@@ -248,6 +274,7 @@ def handle(msg: dict) -> None:
         return
 
     if method == "notifications/cancelled":
+        STATE["cancelled_request_id"] = (msg.get("params") or {}).get("requestId")
         return
 
     if method == "tools/list":
@@ -276,6 +303,30 @@ def handle(msg: dict) -> None:
         name = params.get("name", "")
         if MODE == "dies-mid-call":
             os._exit(9)
+        if MODE == "legacy-cancel" and name == "sleepy":
+            seconds = float((params.get("arguments") or {}).get("seconds", 1))
+
+            def answer_later() -> None:
+                time.sleep(seconds)
+                send({"jsonrpc": "2.0", "id": msg_id, "result": text_result("awake")})
+
+            threading.Thread(target=answer_later, daemon=True).start()
+            return
+        if MODE == "oversized-response":
+            sys.stdout.write(
+                json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": msg_id,
+                        "result": {
+                            "content": [{"type": "text", "text": "x" * (4 * 1024 * 1024 + 65536)}]
+                        },
+                    }
+                )
+                + "\n"
+            )
+            sys.stdout.flush()
+            return
         result = run_tool(name, params.get("arguments") or {})
         send({"jsonrpc": "2.0", "id": msg_id, "result": result})
         return
@@ -291,6 +342,10 @@ def handle(msg: dict) -> None:
 
 
 def main() -> None:
+    if MODE == "blocked-write":
+        print("READY", flush=True)
+        while True:
+            time.sleep(60)
     if MODE == "hang-shutdown":
         signal.signal(signal.SIGTERM, signal.SIG_IGN)
     if MODE == "grandchild":

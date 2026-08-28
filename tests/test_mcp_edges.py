@@ -342,3 +342,40 @@ class TestSpawnEdgeCases:
         )
         with pytest.raises(MCPConnectError, match="requires 'command'"):
             await transport.start()
+
+    async def test_header_mismatch_relists_and_uses_changed_annotation(self):
+        server, url, state = await _http_server("modern")
+        conn = MCPServerConnection("metadata-refresh", "http", url=url)
+        try:
+            await conn.connect()
+            discovery = await conn.discover_tools()
+            region_tool = next(t for t in discovery.tools if t.name == "region_tool")
+            state["header_name"] = "Geo"
+            state["reject_calls"] = 1
+            before_list = state["calls"].get("tools/list", 0)
+            outcome = await conn.call_tool(region_tool, {"region": "eu-north1"})
+            assert outcome.ok
+            assert state["calls"]["tools/list"] == before_list + 1
+            assert state["calls"]["tools/call"] == 2
+        finally:
+            await conn.disconnect()
+            await server.close()
+
+    async def test_header_mismatch_http_200_also_relists_and_retries(self):
+        server, url, state = await _http_server("modern")
+        conn = MCPServerConnection("metadata-refresh-200", "http", url=url)
+        try:
+            await conn.connect()
+            discovery = await conn.discover_tools()
+            region_tool = next(t for t in discovery.tools if t.name == "region_tool")
+            state["header_name"] = "Geo"
+            state["reject_calls"] = 1
+            state["reject_status"] = 200
+            before_list = state["calls"].get("tools/list", 0)
+            outcome = await conn.call_tool(region_tool, {"region": "eu-north1"})
+            assert outcome.ok
+            assert state["calls"]["tools/list"] == before_list + 1
+            assert state["calls"]["tools/call"] == 2
+        finally:
+            await conn.disconnect()
+            await server.close()

@@ -28,7 +28,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ...odin_log import get_logger
-from .errors import MCPConnectError, MCPProtocolError
+from .errors import MCPConnectError, MCPPreWriteError, MCPProtocolError
 from .protocol import (
     MAX_STDERR_STORE_BYTES,
     MAX_STDOUT_LINE_BYTES,
@@ -44,6 +44,7 @@ _ENV_ALLOWLIST = ("PATH", "HOME", "LANG", "LC_ALL", "LC_CTYPE", "TERM", "TMPDIR"
 _STDIN_CLOSE_GRACE = 3.0
 _TERM_GRACE = 4.0
 _KILL_GRACE = 3.0
+MAX_STDIN_FRAME_BYTES = 4 * 1024 * 1024
 
 
 def build_child_env(configured: dict[str, str] | None) -> dict[str, str]:
@@ -93,6 +94,7 @@ class StdioTransport:
         self._write_lock = asyncio.Lock()
         self._closed_fired = False
         self._closing = False
+        self._shutdown_task: asyncio.Task[None] | None = None
 
     @property
     def running(self) -> bool:
@@ -139,14 +141,30 @@ class StdioTransport:
         self._reader_task = asyncio.create_task(self._pump_stdout())
         self._stderr_task = asyncio.create_task(self._pump_stderr())
 
-    async def send(self, message: dict[str, Any]) -> None:
+    async def send(self, message: dict[str, Any], *, timeout: float | None = None) -> None:
+        """Write one bounded frame. When ``timeout`` is supplied it covers
+        waiting for the write lock and draining the child pipe."""
         proc = self._process
         if proc is None or proc.stdin is None or proc.returncode is not None:
             raise MCPConnectError(f"{self.server_name}: server process not running")
-        line = json.dumps(message, separators=(",", ":")) + "\n"
-        async with self._write_lock:
-            proc.stdin.write(line.encode("utf-8"))
-            await proc.stdin.drain()
+        frame = (json.dumps(message, separators=(",", ":")) + "\n").encode("utf-8")
+        if len(frame) > MAX_STDIN_FRAME_BYTES:
+            raise MCPProtocolError(
+                f"{self.server_name}: outbound frame exceeds {MAX_STDIN_FRAME_BYTES} bytes"
+            )
+
+        async def write() -> None:
+            async with self._write_lock:
+                current = self._process
+                if current is not proc or proc.stdin is None or proc.returncode is not None:
+                    raise MCPPreWriteError(f"{self.server_name}: server process not running")
+                proc.stdin.write(frame)
+                await proc.stdin.drain()
+
+        if timeout is None:
+            await write()
+        else:
+            await asyncio.wait_for(write(), timeout=timeout)
 
     # ------------------------------------------------------------------
     # Pumps
@@ -209,12 +227,10 @@ class StdioTransport:
         data = b"".join(self._stderr_ring)
         return data.decode("utf-8", errors="replace")[-max_chars:]
 
-    def _fire_closed(self, reason: str) -> None:
-        if self._closed_fired:
+    def _fire_closed(self, reason: str, *, final: bool = False) -> None:
+        if self._closed_fired or (self._closing and not final):
             return
         self._closed_fired = True
-        if self._closing:
-            reason = "transport shut down"
         try:
             self._on_closed(reason)
         except Exception:
@@ -247,16 +263,41 @@ class StdioTransport:
             pass
 
     async def shutdown(self) -> None:
-        """stdin close → bounded wait → TERM group → bounded wait → KILL
-        group — then a final group SWEEP even when the leader exited
-        gracefully: a leader that honors EOF can still orphan descendants in
-        its group, and an unswept group leaks them (the v3.59.1 lesson).
-        Idempotent; never raises."""
+        """Run teardown to completion even when the caller is cancelled.
+
+        The first caller owns one inner cleanup task. Every caller shields
+        that task; cancellation is re-raised only after the process group has
+        been terminated, descendants swept, pumps reaped, and the closed
+        callback fired.
+        """
         self._closing = True
+        task = self._shutdown_task
+        if task is None:
+            task = asyncio.create_task(
+                self._shutdown_inner(), name=f"mcp-stdio-shutdown-{self.server_name}"
+            )
+            self._shutdown_task = task
+        cancelled = False
+        while not task.done():
+            current = asyncio.current_task()
+            if current is not None:
+                while current.cancelling():
+                    current.uncancel()
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        await task
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _shutdown_inner(self) -> None:
+        """stdin close → TERM → KILL → descendant sweep; never raises."""
         proc = self._process
         if proc is None:
-            self._fire_closed("transport shut down")
+            self._fire_closed("transport shut down", final=True)
             return
+        final_reason = "transport shut down"
         try:
             if proc.returncode is None and proc.stdin is not None:
                 try:
@@ -278,17 +319,28 @@ class StdioTransport:
                 try:
                     await asyncio.wait_for(proc.wait(), timeout=_KILL_GRACE)
                 except TimeoutError:
+                    final_reason = "process survived SIGKILL grace"
                     log.warning(
                         "MCP %s: process %s survived SIGKILL grace",
                         self.server_name,
                         proc.pid,
                     )
-            # Descendant sweep: the leader is gone (or wedged past KILL);
-            # TERM then KILL whatever remains of the owned group. ESRCH
-            # means the group is already empty — the common, silent case.
             self._signal_group(signal.SIGTERM)
             await asyncio.sleep(min(0.2, _TERM_GRACE))
             self._signal_group(signal.SIGKILL)
+            deadline = asyncio.get_running_loop().time() + _KILL_GRACE
+            while True:
+                try:
+                    os.killpg(proc.pid, 0)
+                except (ProcessLookupError, PermissionError, OSError):
+                    break
+                if asyncio.get_running_loop().time() >= deadline:
+                    final_reason = "process group survived SIGKILL grace"
+                    log.warning("MCP %s: process group survived SIGKILL grace", self.server_name)
+                    break
+                await asyncio.sleep(0.02)
+        except Exception:
+            log.exception("MCP %s: shutdown cleanup failed", self.server_name)
         finally:
             for task in (self._reader_task, self._stderr_task):
                 if task is not None and not task.done():
@@ -299,4 +351,4 @@ class StdioTransport:
                         pass
             self._reader_task = None
             self._stderr_task = None
-            self._fire_closed("transport shut down")
+            self._fire_closed(final_reason, final=True)

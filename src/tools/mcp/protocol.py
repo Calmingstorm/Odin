@@ -18,9 +18,13 @@ from __future__ import annotations
 
 import base64
 import json
+import math
 import re
 from dataclasses import dataclass
 from typing import Any
+
+from jsonschema import Draft202012Validator
+from jsonschema.exceptions import SchemaError
 
 ERA_MODERN = "modern"
 ERA_LEGACY = "legacy"
@@ -289,12 +293,19 @@ class SchemaCheck:
 
 
 def validate_tool_schema(schema: Any) -> SchemaCheck:
+    """Validate a bounded Draft 2020-12 schema that establishes object input.
+
+    Bounds are checked before metaschema validation so adversarial listings
+    cannot make the validator traverse unbounded input. Object semantics may
+    be established through local ``$ref`` or composition; a literal root
+    ``type: object`` is deliberately not required.
+    """
     if not isinstance(schema, dict):
         return SchemaCheck(False, "inputSchema is not a JSON Schema object")
     try:
-        encoded = json.dumps(schema)
+        encoded = json.dumps(schema, allow_nan=False)
     except (TypeError, ValueError):
-        return SchemaCheck(False, "inputSchema is not JSON-serializable")
+        return SchemaCheck(False, "inputSchema is not valid JSON")
     size = len(encoded.encode("utf-8"))
     if size > MAX_SCHEMA_BYTES_PER_TOOL:
         return SchemaCheck(
@@ -312,12 +323,75 @@ def validate_tool_schema(schema: Any) -> SchemaCheck:
         if nodes > MAX_SCHEMA_NODES:
             return SchemaCheck(False, f"inputSchema has more than {MAX_SCHEMA_NODES} nodes", size)
         if isinstance(value, dict):
-            for child in value.values():
-                stack.append((child, depth + 1))
+            if any(not isinstance(key, str) for key in value):
+                return SchemaCheck(False, "inputSchema object keys must be strings", size)
+            stack.extend((child, depth + 1) for child in value.values())
         elif isinstance(value, list):
-            for child in value:
-                stack.append((child, depth + 1))
+            stack.extend((child, depth + 1) for child in value)
+        elif isinstance(value, float) and not math.isfinite(value):
+            return SchemaCheck(False, "inputSchema contains a non-finite number", size)
+    try:
+        Draft202012Validator.check_schema(schema)
+    except SchemaError as exc:
+        detail = exc.message[:200] if exc.message else "invalid JSON Schema"
+        return SchemaCheck(False, f"inputSchema is invalid: {detail}", size)
+    if not _schema_establishes_object(schema, schema, set()):
+        return SchemaCheck(False, "inputSchema does not establish object input semantics", size)
     return SchemaCheck(True, "", size)
+
+
+def _schema_establishes_object(node: Any, root: dict, seen_refs: set[str]) -> bool:
+    """Conservative proof that every accepted instance is an object.
+
+    This intentionally does not attempt full satisfiability. It recognizes
+    the ordinary JSON Schema ways MCP tool schemas establish their object
+    input contract while rejecting ambiguous schemas that also accept scalar
+    or array arguments.
+    """
+    if not isinstance(node, dict):
+        return False
+    declared = node.get("type")
+    if declared == "object" or declared == ["object"]:
+        return True
+    const = node.get("const", object())
+    if isinstance(const, dict):
+        return True
+    enum = node.get("enum")
+    if isinstance(enum, list) and enum and all(isinstance(item, dict) for item in enum):
+        return True
+    ref = node.get("$ref")
+    if isinstance(ref, str) and ref.startswith("#") and ref not in seen_refs:
+        target = _resolve_local_ref(root, ref)
+        if target is not None:
+            return _schema_establishes_object(target, root, seen_refs | {ref})
+    all_of = node.get("allOf")
+    if isinstance(all_of, list) and any(
+        _schema_establishes_object(branch, root, seen_refs) for branch in all_of
+    ):
+        return True
+    for keyword in ("anyOf", "oneOf"):
+        branches = node.get(keyword)
+        if (
+            isinstance(branches, list)
+            and branches
+            and all(_schema_establishes_object(branch, root, seen_refs) for branch in branches)
+        ):
+            return True
+    return False
+
+
+def _resolve_local_ref(root: dict, ref: str) -> Any | None:
+    if ref == "#":
+        return root
+    if not ref.startswith("#/"):
+        return None
+    current: Any = root
+    for raw_part in ref[2:].split("/"):
+        part = raw_part.replace("~1", "/").replace("~0", "~")
+        if not isinstance(current, dict) or part not in current:
+            return None
+        current = current[part]
+    return current
 
 
 # ---------------------------------------------------------------------------
@@ -358,6 +432,8 @@ def extract_header_params(schema: dict) -> HeaderParamsCheck:
     ``$ref`` in the chain). ANY violation invalidates the WHOLE tool — the
     caller excludes it from publication.
     """
+    if "x-mcp-header" in schema:
+        return HeaderParamsCheck(False, "x-mcp-header is invalid at the schema root")
     found: list[HeaderParam] = []
     seen_lower: set[str] = set()
 

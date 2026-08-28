@@ -33,7 +33,7 @@ from typing import Any
 
 from ...odin_log import get_logger
 from . import protocol as proto
-from .errors import MCPConnectError, MCPProtocolError, MCPTimeoutError
+from .errors import MCPConnectError, MCPError, MCPPreWriteError, MCPProtocolError, MCPTimeoutError
 from .outcomes import (
     OUTCOME_FAILED,
     OUTCOME_OK,
@@ -61,6 +61,21 @@ _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
 def _clean_text(text: str, cap: int) -> str:
     return _CONTROL_CHARS_RE.sub("", str(text))[:cap]
+
+
+async def _finish_cancellation(send: Callable[[], Any]) -> None:
+    """Complete a bounded cancellation signal despite repeated cancellation."""
+    task = asyncio.create_task(send())
+    while not task.done():
+        current = asyncio.current_task()
+        if current is not None:
+            while current.cancelling():
+                current.uncancel()
+        try:
+            await asyncio.shield(task)
+        except asyncio.CancelledError:
+            pass
+    await task
 
 
 @dataclass(frozen=True)
@@ -124,6 +139,7 @@ class MCPServerConnection:
         self._ids = itertools.count(1)
         self._pending: dict[Any, asyncio.Future[dict]] = {}
         self._lost_reason: str | None = None
+        self._disconnect_task: asyncio.Task[None] | None = None
 
     # ------------------------------------------------------------------
     # Connect
@@ -132,6 +148,10 @@ class MCPServerConnection:
     async def connect(self) -> None:
         if self.connected:
             return
+        if self._disconnect_task is not None:
+            if not self._disconnect_task.done():
+                raise MCPConnectError(f"{self.name}: disconnect is still in progress")
+            self._disconnect_task = None
         self.era = None
         self.negotiated_version = None
         self._lost_reason = None
@@ -144,18 +164,40 @@ class MCPServerConnection:
         self.connected = True
 
     async def disconnect(self) -> None:
+        """Teardown to completion even when the caller is cancelled."""
+        task = self._disconnect_task
+        if task is None:
+            task = asyncio.create_task(self._disconnect_inner(), name=f"mcp-disconnect-{self.name}")
+            self._disconnect_task = task
+        cancelled = False
+        while not task.done():
+            current = asyncio.current_task()
+            if current is not None:
+                while current.cancelling():
+                    current.uncancel()
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                cancelled = True
+        await task
+        if cancelled:
+            raise asyncio.CancelledError
+
+    async def _disconnect_inner(self) -> None:
         self.connected = False
         self._fail_pending(MCPConnectError(f"{self.name}: disconnected"))
         stdio, self._stdio = self._stdio, None
         http, self._http = self._http, None
-        if stdio is not None:
-            await stdio.shutdown()
-        if http is not None:
-            if self.era == proto.ERA_LEGACY and http.session_id:
+        try:
+            if stdio is not None:
+                await stdio.shutdown()
+            if http is not None and self.era == proto.ERA_LEGACY and http.session_id:
                 await http.delete_session(protocol_version=self.negotiated_version)
-            await http.close()
-        self.era = None
-        self.negotiated_version = None
+        finally:
+            if http is not None:
+                await http.close()
+            self.era = None
+            self.negotiated_version = None
 
     # -------------------------- stdio ---------------------------------
 
@@ -242,10 +284,15 @@ class MCPServerConnection:
         assert self._stdio is not None
         future: asyncio.Future[dict] = asyncio.get_running_loop().create_future()
         self._pending[req_id] = future
-        try:
+
+        async def exchange() -> dict:
+            assert self._stdio is not None
             await self._stdio.send(request)
+            return await future
+
+        try:
             try:
-                return await asyncio.wait_for(future, timeout=timeout)
+                return await asyncio.wait_for(exchange(), timeout=timeout)
             except TimeoutError:
                 raise MCPTimeoutError(
                     f"{self.name}: no reply to {request.get('method')} within {timeout}s"
@@ -325,9 +372,23 @@ class MCPServerConnection:
                 self.era = proto.ERA_MODERN
                 self.negotiated_version = selection.version
                 return True
-            return False  # plain JSON-RPC error for the probe ⇒ legacy
+            if err is not None and err.get("code") == proto.ERROR_METHOD_NOT_FOUND:
+                return False
+            raise MCPConnectError(f"{self.name}: probe returned an error that is not era evidence")
         if outcome.kind == RESULT_HTTP_ERROR:
-            err = self._first_error(outcome.messages)
+            matched = self._match_response(outcome.messages, probe_id)
+            err = proto.rpc_error(matched) if matched is not None else None
+            if (
+                outcome.status in (404, 405)
+                and err is not None
+                and err.get("code") == proto.ERROR_METHOD_NOT_FOUND
+            ):
+                return False
+            if outcome.status != 400:
+                raise MCPConnectError(
+                    f"{self.name}: probe failed with HTTP {outcome.status} — "
+                    "not era evidence (check authentication/endpoint)"
+                )
             if proto.is_recognized_modern_error(err):
                 assert err is not None
                 selection = proto.select_modern_version(proto.supported_versions_from_error(err))
@@ -336,18 +397,7 @@ class MCPServerConnection:
                 self.era = proto.ERA_MODERN
                 self.negotiated_version = selection.version
                 return True
-            if outcome.status == 400:
-                return False  # 400 with empty/unrecognized body ⇒ legacy
-            if outcome.status in (404, 405) and (
-                err is None or err.get("code") in (proto.ERROR_METHOD_NOT_FOUND, -32602)
-            ):
-                # server/discover is mandatory on modern servers — a plain
-                # method-not-found for the probe identifies a legacy server.
-                return False
-            raise MCPConnectError(
-                f"{self.name}: probe failed with HTTP {outcome.status} — "
-                "not era evidence (check authentication/endpoint)"
-            )
+            return False  # 400 with empty/unrecognized body is legacy evidence
         # 202/stream for a request-probe is out-of-contract.
         raise MCPConnectError(f"{self.name}: probe produced no usable reply")
 
@@ -411,14 +461,6 @@ class MCPServerConnection:
                 return msg
         return None
 
-    @staticmethod
-    def _first_error(messages: list[dict]) -> dict | None:
-        for msg in messages:
-            err = proto.rpc_error(msg)
-            if err is not None:
-                return err
-        return None
-
     # ------------------------------------------------------------------
     # Shared identity adoption
     # ------------------------------------------------------------------
@@ -426,6 +468,9 @@ class MCPServerConnection:
     def _adopt_modern(self, discover_result: Any) -> None:
         if not isinstance(discover_result, dict):
             raise MCPConnectError(f"{self.name}: malformed DiscoverResult")
+        result_type = proto.check_result_type(discover_result, era=proto.ERA_MODERN)
+        if not result_type.ok:
+            raise MCPConnectError(f"{self.name}: server/discover: {result_type.reason}")
         selection = proto.select_modern_version(discover_result.get("supportedVersions"))
         if selection.version is None:
             raise MCPConnectError(f"{self.name}: {selection.reason}")
@@ -517,9 +562,33 @@ class MCPServerConnection:
     # ------------------------------------------------------------------
 
     async def discover_tools(self) -> DiscoveryResult:
-        """Full paginated tools/list with validation. Raises on any protocol
-        violation — a partial or malformed listing is a FAILED listing;
-        callers never publish half a server."""
+        """Discover atomically, recovering a rejected legacy HTTP session once.
+
+        Discovery is retry-safe; tool calls are deliberately not. A session
+        rejection restarts the full paginated listing after a lifecycle-only
+        re-initialization, so no partial snapshot can escape.
+        """
+        try:
+            return await self._discover_tools_once()
+        except _SessionLostError:
+            if self.transport_kind != "http" or self.era != proto.ERA_LEGACY:
+                raise
+            await self._recover_legacy_http_session()
+            try:
+                return await self._discover_tools_once()
+            except _SessionLostError as exc:
+                self._on_transport_closed("server session repeatedly rejected during discovery")
+                raise MCPProtocolError(
+                    f"{self.name}: legacy HTTP session was rejected again during discovery"
+                ) from exc
+
+    async def _recover_legacy_http_session(self) -> None:
+        assert self._http is not None
+        self._http.session_id = None
+        await self._initialize_legacy_http()
+
+    async def _discover_tools_once(self) -> DiscoveryResult:
+        """One complete paginated listing; partial listings never return."""
         if not self.connected or self.era is None or self.negotiated_version is None:
             raise MCPConnectError(f"{self.name}: not connected")
         records: list[ToolRecord] = []
@@ -577,9 +646,9 @@ class MCPServerConnection:
             raise MCPProtocolError(f"{self.name}: tool entry without a name")
         name = raw["name"]
         description = _clean_text(str(raw.get("description", "")), proto.MAX_DESCRIPTION_CHARS)
-        schema = raw.get("inputSchema", {"type": "object", "properties": {}})
+        schema = raw.get("inputSchema")
         check = proto.validate_tool_schema(schema)
-        if not check.ok:
+        if not check.ok or not isinstance(schema, dict):
             return ToolRecord(
                 name=name,
                 description=description,
@@ -648,7 +717,8 @@ class MCPServerConnection:
         err = proto.rpc_error(reply)
         if err is not None:
             raise MCPProtocolError(
-                f"{self.name}: {method} failed: {_clean_text(str(err.get('message', err)), 200)}"
+                f"{self.name}: {method} failed: {_clean_text(str(err.get('message', err)), 200)}",
+                rpc_code=err.get("code"),
             )
         result = reply.get("result")
         if not isinstance(result, dict):
@@ -668,7 +738,9 @@ class MCPServerConnection:
         mcp_name: str | None,
         param_headers: dict[str, str] | None = None,
     ) -> dict:
-        assert self._http is not None and self.negotiated_version is not None
+        if self._http is None or not self._http.started:
+            raise MCPPreWriteError(f"{self.name}: HTTP transport is not available")
+        assert self.negotiated_version is not None
         collected: dict[str, dict | None] = {"response": None}
 
         def on_message(msg: dict) -> None:
@@ -703,7 +775,8 @@ class MCPServerConnection:
         if collected["response"] is not None:
             return collected["response"]
         if outcome.kind == RESULT_HTTP_ERROR:
-            err = self._first_error(outcome.messages)
+            matched = self._match_response(outcome.messages, req_id)
+            err = proto.rpc_error(matched) if matched is not None else None
             if outcome.status == 404 and self._http.session_id:
                 raise _SessionLostError(self.name)
             detail = (
@@ -754,13 +827,10 @@ class MCPServerConnection:
             if value is not None:
                 param_headers[hp.name] = value
         params = {"name": tool.name, "arguments": arguments}
-        wrote = False
         try:
             if self.transport_kind == "stdio":
-                wrote = True  # conservatively: the write may reach the wire
                 result = await self._call_stdio(params, budget)
             else:
-                wrote = True
                 result = await self._call_http(
                     params, budget, tool_name=tool.name, param_headers=param_headers
                 )
@@ -776,7 +846,7 @@ class MCPServerConnection:
                 "not executed. The server is reconnecting — retry explicitly "
                 "if still needed.",
             )
-        except _DefiniteCallError as e:
+        except (_DefiniteCallError, MCPPreWriteError) as e:
             return outcome(OUTCOME_FAILED, str(e))
         except TimeoutError:
             await self._cancel_in_flight()
@@ -796,15 +866,13 @@ class MCPServerConnection:
                 detail="timeout",
             )
         except (MCPConnectError, MCPProtocolError) as e:
-            if wrote:
-                return outcome(
-                    OUTCOME_UNCERTAIN,
-                    f"MCP tool '{tool.name}' on '{self.name}' failed after the "
-                    f"request was sent ({_clean_text(str(e), 200)}); whether it "
-                    "executed is UNKNOWN. It was not retried automatically.",
-                    detail="transport-loss",
-                )
-            return outcome(OUTCOME_FAILED, _clean_text(str(e), 400))
+            return outcome(
+                OUTCOME_UNCERTAIN,
+                f"MCP tool '{tool.name}' on '{self.name}' failed after the "
+                f"request may have been sent ({_clean_text(str(e), 200)}); whether it "
+                "executed is UNKNOWN. It was not retried automatically.",
+                detail="transport-loss",
+            )
         rt = proto.check_result_type(result, era=self.era)
         if rt.input_required:
             return outcome(
@@ -825,17 +893,45 @@ class MCPServerConnection:
         request = proto.build_request(
             req_id, "tools/call", params, era=self.era, version=self.negotiated_version
         )
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + budget
+        future: asyncio.Future[dict] = loop.create_future()
+        self._pending[req_id] = future
+        written = False
         try:
-            reply = await self._stdio_roundtrip(req_id, request, budget)
+            if self._stdio is None:
+                raise MCPPreWriteError(f"{self.name}: stdio transport is not available")
+            await self._stdio.send(request, timeout=budget)
+            written = True
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise MCPTimeoutError(
+                    f"{self.name}: tools/call exhausted its {budget}s request budget"
+                )
+            try:
+                reply = await asyncio.wait_for(future, timeout=remaining)
+            except TimeoutError:
+                raise MCPTimeoutError(
+                    f"{self.name}: no reply to tools/call within {budget}s"
+                ) from None
         except MCPTimeoutError:
-            await self._send_cancelled(req_id)
+            if written:
+                await self._send_cancelled(req_id)
             raise
+        except asyncio.CancelledError:
+            if written:
+                await _finish_cancellation(lambda: self._send_cancelled(req_id))
+            raise
+        except MCPProtocolError as exc:
+            raise _DefiniteCallError(_clean_text(str(exc), 300)) from exc
+        finally:
+            self._pending.pop(req_id, None)
         err = proto.rpc_error(reply)
         if err is not None:
             raise _DefiniteCallError(f"MCP error: {_clean_text(str(err.get('message', err)), 300)}")
         result = reply.get("result")
         if not isinstance(result, dict):
-            raise MCPProtocolError(f"{self.name}: tools/call returned no result")
+            raise _DefiniteCallError(f"{self.name}: tools/call returned no result")
         return result
 
     async def _call_http(
@@ -848,9 +944,8 @@ class MCPServerConnection:
     ) -> dict:
         assert self.era is not None and self.negotiated_version is not None
         modern = self.era == proto.ERA_MODERN
-        attempts = 0
-        while True:
-            attempts += 1
+        current_headers = dict(param_headers)
+        for attempt in range(2):
             req_id = next(self._ids)
             request = proto.build_request(
                 req_id, "tools/call", params, era=self.era, version=self.negotiated_version
@@ -862,12 +957,9 @@ class MCPServerConnection:
                     budget,
                     mcp_method="tools/call",
                     mcp_name=proto.encode_header_value(tool_name) if modern else None,
-                    param_headers=param_headers,
+                    param_headers=current_headers,
                 )
             except TimeoutError:
-                # Aborting the POST/stream IS the modern cancel; legacy
-                # additionally requires an explicit cancellation
-                # notification (closing legacy SSE is NOT cancel).
                 if not modern:
                     await self._send_cancelled(req_id)
                 raise MCPTimeoutError(
@@ -875,24 +967,66 @@ class MCPServerConnection:
                     f"{budget:.0f}s; whether it executed is UNKNOWN. It was "
                     "not retried automatically."
                 ) from None
-            except MCPProtocolError as e:
-                header_mismatch = e.rpc_code == proto.ERROR_HEADER_MISMATCH
-                if modern and header_mismatch and attempts == 1:
-                    # Spec recovery: the rejection happened at validation —
-                    # the call did NOT execute. Re-listing is the caller's
-                    # concern; one immediate retry with the same headers
-                    # after re-encoding is permitted.
+            except asyncio.CancelledError:
+                if not modern:
+                    await _finish_cancellation(lambda: self._send_cancelled(req_id))
+                raise
+            except MCPProtocolError as exc:
+                header_mismatch = exc.rpc_code == proto.ERROR_HEADER_MISMATCH
+                if modern and header_mismatch and attempt == 0:
+                    try:
+                        current_headers = await self._refresh_call_headers(
+                            tool_name, params.get("arguments") or {}
+                        )
+                    except (MCPError, TimeoutError) as refresh_error:
+                        raise _DefiniteCallError(
+                            f"{self.name}: header metadata refresh failed: "
+                            f"{_clean_text(str(refresh_error), 240)}"
+                        ) from refresh_error
                     continue
-                raise _DefiniteCallError(_clean_text(str(e), 300)) from e
+                if exc.rpc_code is not None:
+                    raise _DefiniteCallError(_clean_text(str(exc), 300)) from exc
+                raise
             err = proto.rpc_error(reply)
             if err is not None:
+                if modern and err.get("code") == proto.ERROR_HEADER_MISMATCH and attempt == 0:
+                    try:
+                        current_headers = await self._refresh_call_headers(
+                            tool_name, params.get("arguments") or {}
+                        )
+                    except (MCPError, TimeoutError) as refresh_error:
+                        raise _DefiniteCallError(
+                            f"{self.name}: header metadata refresh failed: "
+                            f"{_clean_text(str(refresh_error), 240)}"
+                        ) from refresh_error
+                    continue
                 raise _DefiniteCallError(
                     f"MCP error: {_clean_text(str(err.get('message', err)), 300)}"
                 )
             result = reply.get("result")
             if not isinstance(result, dict):
-                raise MCPProtocolError(f"{self.name}: tools/call returned no result")
+                raise _DefiniteCallError(f"{self.name}: tools/call returned no result")
             return result
+        raise _DefiniteCallError(f"{self.name}: header mismatch recovery exhausted")
+
+    async def _refresh_call_headers(self, tool_name: str, arguments: dict) -> dict[str, str]:
+        """Re-list and derive mirrored headers from the current annotation set."""
+        discovery = await self.discover_tools()
+        refreshed = next((tool for tool in discovery.tools if tool.name == tool_name), None)
+        if refreshed is None:
+            raise _DefiniteCallError(
+                f"MCP tool '{tool_name}' disappeared while refreshing header metadata"
+            )
+        if refreshed.excluded:
+            raise _DefiniteCallError(
+                f"MCP tool '{tool_name}' became invalid: {refreshed.exclusion_reason}"
+            )
+        headers: dict[str, str] = {}
+        for param in refreshed.header_params:
+            value = proto.header_param_value(arguments, param)
+            if value is not None:
+                headers[param.name] = value
+        return headers
 
     async def _send_cancelled(self, req_id: Any) -> None:
         """notifications/cancelled — required for stdio (both eras) and for
@@ -902,12 +1036,15 @@ class MCPServerConnection:
         )
         try:
             if self.transport_kind == "stdio" and self._stdio is not None:
-                await self._stdio.send(note)
+                await self._stdio.send(note, timeout=1.0)
             elif self._http is not None and self.era == proto.ERA_LEGACY:
-                await self._http.post(
-                    note,
-                    protocol_version=self.negotiated_version,
-                    negotiated_version=self.negotiated_version,
+                await asyncio.wait_for(
+                    self._http.post(
+                        note,
+                        protocol_version=self.negotiated_version,
+                        negotiated_version=self.negotiated_version,
+                    ),
+                    timeout=1.0,
                 )
         except Exception:
             log.debug("MCP %s: failed to send cancellation", self.name, exc_info=True)
@@ -939,7 +1076,7 @@ class _DefiniteCallError(Exception):
     lost (JSON-RPC error, validation rejection, isError result)."""
 
 
-class _SessionLostError(Exception):
+class _SessionLostError(MCPProtocolError):
     """Internal: HTTP 404 on a session-bearing request — the server
     rejected the session; the request was not executed."""
 

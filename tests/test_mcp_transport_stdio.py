@@ -127,15 +127,14 @@ class TestBoundedLines:
         # Shrink the ceiling so the fake's echo of a large payload overflows
         # the reader limit; the pump must close and the call classify
         # UNCERTAIN (the request was written; the reply was unreadable).
-        conn = _conn("legacy")
+        conn = _conn("oversized-response")
         await conn.connect()
         try:
             discovery = await conn.discover_tools()
             echo = next(t for t in discovery.tools if t.name == "echo")
             lost: list[str] = []
             conn._on_connection_lost = lost.append  # noqa: SLF001
-            big = "x" * (transport_stdio.MAX_STDOUT_LINE_BYTES + 4096)
-            outcome = await conn.call_tool(echo, {"text": big}, timeout=30)
+            outcome = await conn.call_tool(echo, {"text": "small request"}, timeout=30)
             assert outcome.uncertain
             assert lost and "exceeded" in lost[0]
         finally:
@@ -220,3 +219,150 @@ class TestCwdIsolation:
             assert outcome.text.replace("echo: ", "").strip() == str(tmp_path)
         finally:
             await conn.disconnect()
+
+
+class TestCancellationSafeShutdown:
+    async def test_cancellation_waits_for_full_teardown(self, monkeypatch):
+        monkeypatch.setattr(transport_stdio, "_STDIN_CLOSE_GRACE", 0.2)
+        monkeypatch.setattr(transport_stdio, "_TERM_GRACE", 0.2)
+        monkeypatch.setattr(transport_stdio, "_KILL_GRACE", 2.0)
+        closed: list[str] = []
+        transport = StdioTransport(
+            "cancel-shutdown",
+            sys.executable,
+            [FAKE, "hang-shutdown"],
+            on_message=lambda _m: None,
+            on_closed=closed.append,
+            negotiated_version=lambda: None,
+        )
+        await transport.start()
+        pid = transport.pid
+        assert pid is not None
+        task = asyncio.create_task(transport.shutdown())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+        assert closed == ["transport shut down"]
+
+
+class TestBoundedWrites:
+    async def test_request_budget_covers_write_and_response(self, monkeypatch):
+        conn = _conn("legacy")
+        await conn.connect()
+        try:
+            discovery = await conn.discover_tools()
+            echo = next(t for t in discovery.tools if t.name == "echo")
+            assert conn._stdio is not None  # noqa: SLF001
+            original_send = conn._stdio.send  # noqa: SLF001
+
+            async def stalled_send(message, *, timeout=None):
+                if message.get("method") == "tools/call":
+                    await asyncio.sleep(timeout or 60)
+                    raise TimeoutError
+                await original_send(message, timeout=timeout)
+
+            monkeypatch.setattr(conn._stdio, "send", stalled_send)  # noqa: SLF001
+            started = time.monotonic()
+            outcome = await conn.call_tool(echo, {"text": "blocked"}, timeout=0.1)
+            assert outcome.uncertain
+            assert time.monotonic() - started < 2
+        finally:
+            await conn.disconnect()
+
+    async def test_oversized_outbound_frame_rejected_before_write(self):
+        transport = StdioTransport(
+            "bounded-send",
+            sys.executable,
+            [FAKE, "legacy"],
+            on_message=lambda _m: None,
+            on_closed=lambda _r: None,
+            negotiated_version=lambda: None,
+        )
+        await transport.start()
+        try:
+            from src.tools.mcp.errors import MCPProtocolError
+
+            with pytest.raises(MCPProtocolError, match="outbound frame exceeds"):
+                await transport.send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {"value": "x" * transport_stdio.MAX_STDIN_FRAME_BYTES},
+                    }
+                )
+        finally:
+            await transport.shutdown()
+
+    async def test_repeated_cancellation_cannot_abort_teardown(self, monkeypatch):
+        monkeypatch.setattr(transport_stdio, "_STDIN_CLOSE_GRACE", 0.2)
+        monkeypatch.setattr(transport_stdio, "_TERM_GRACE", 0.2)
+        monkeypatch.setattr(transport_stdio, "_KILL_GRACE", 2.0)
+        transport = StdioTransport(
+            "repeat-cancel-shutdown",
+            sys.executable,
+            [FAKE, "hang-shutdown"],
+            on_message=lambda _m: None,
+            on_closed=lambda _r: None,
+            negotiated_version=lambda: None,
+        )
+        await transport.start()
+        pid = transport.pid
+        assert pid is not None
+        task = asyncio.create_task(transport.shutdown())
+        await asyncio.sleep(0.03)
+        task.cancel()
+        await asyncio.sleep(0.03)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        with pytest.raises(ProcessLookupError):
+            os.kill(pid, 0)
+
+    async def test_real_blocked_pipe_write_is_bounded(self):
+        transport = StdioTransport(
+            "real-blocked-write",
+            sys.executable,
+            [FAKE, "blocked-write"],
+            on_message=lambda _m: None,
+            on_closed=lambda _r: None,
+            negotiated_version=lambda: None,
+        )
+        await transport.start()
+        assert transport._process is not None  # noqa: SLF001
+        ready = await asyncio.wait_for(transport._process.stdout.readline(), timeout=2)  # noqa: SLF001
+        assert ready == b"READY\n"
+        payload = {
+            "jsonrpc": "2.0",
+            "method": "notice",
+            "params": {"x": "x" * (1024 * 1024)},
+        }
+        try:
+            with pytest.raises(TimeoutError):
+                await transport.send(payload, timeout=0.05)
+        finally:
+            await transport.shutdown()
+
+    async def test_cancelled_shutdown_waits_for_grandchild_group(self, monkeypatch):
+        monkeypatch.setattr(transport_stdio, "_STDIN_CLOSE_GRACE", 0.2)
+        monkeypatch.setattr(transport_stdio, "_TERM_GRACE", 0.2)
+        monkeypatch.setattr(transport_stdio, "_KILL_GRACE", 2.0)
+        conn = _conn("grandchild")
+        await conn.connect()
+        discovery = await conn.discover_tools()
+        tool = next(t for t in discovery.tools if t.name == "child_pid")
+        grandchild = int((await conn.call_tool(tool, {})).text)
+        task = asyncio.create_task(conn.disconnect())
+        await asyncio.sleep(0.03)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        try:
+            os.kill(grandchild, 0)
+            with open(f"/proc/{grandchild}/stat") as fh:
+                assert fh.read().split()[2] == "Z"
+        except ProcessLookupError:
+            pass

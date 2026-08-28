@@ -10,9 +10,10 @@ import sys
 from pathlib import Path
 
 import pytest
+from aiohttp.test_utils import TestServer
 
 from src.tools.mcp import manager as manager_mod
-from src.tools.mcp.client import DiscoveryResult, ToolRecord
+from src.tools.mcp.client import DiscoveryResult, MCPServerConnection, ToolRecord
 from src.tools.mcp.errors import MCPConfigError, MCPError
 from src.tools.mcp.manager import (
     STATE_BLOCKED,
@@ -21,6 +22,7 @@ from src.tools.mcp.manager import (
     STATE_STALE,
     MCPManager,
 )
+from tests.fakes.mcp_http import make_app
 
 FAKE = str(Path(__file__).parent / "fakes" / "mcp_stdio_server.py")
 
@@ -306,3 +308,166 @@ class TestShutdownBounds:
         await manager.shutdown()
         assert asyncio.get_running_loop().time() - start < 15
         assert manager.get_tool_definitions() == []
+
+
+class TestDesiredStateReloadRetirement:
+    async def test_reload_retires_removed_and_replaced_runtimes(self):
+        manager = MCPManager()
+        await manager.load_desired_state(
+            enabled=True,
+            servers={"a": _stdio_config(), "b": _stdio_config()},
+        )
+        await manager.start()
+        old_a = manager._servers["a"]  # noqa: SLF001
+        old_b = manager._servers["b"]  # noqa: SLF001
+        old_a_conn = old_a.connection
+        old_b_conn = old_b.connection
+        assert old_a_conn is not None and old_b_conn is not None
+        await manager.load_desired_state(
+            enabled=True,
+            servers={"a": _stdio_config(tool_allowlist=["echo"])},
+        )
+        try:
+            assert manager.server_names == ["a"]
+            assert manager._servers["a"] is not old_a  # noqa: SLF001
+            assert not old_a_conn.connected and not old_b_conn.connected
+            assert old_a.supervisor is None and old_b.supervisor is None
+            assert {d["name"] for d in manager.get_tool_definitions()} == {"mcp_a_echo"}
+        finally:
+            await manager.shutdown()
+
+    async def test_unchanged_reload_reuses_live_runtime(self):
+        config = _stdio_config()
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"a": config})
+        await manager.start()
+        runtime = manager._servers["a"]  # noqa: SLF001
+        connection = runtime.connection
+        try:
+            await manager.load_desired_state(enabled=True, servers={"a": config})
+            assert manager._servers["a"] is runtime  # noqa: SLF001
+            assert manager._servers["a"].connection is connection  # noqa: SLF001
+        finally:
+            await manager.shutdown()
+
+
+class TestSynchronousLossFence:
+    async def test_loss_callback_unpublishes_before_return(self):
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"fake": _stdio_config()})
+        await manager.start()
+        runtime = manager._servers["fake"]  # noqa: SLF001
+        connection = runtime.connection
+        assert connection is not None and manager.has_tool("mcp_fake_echo")
+        manager._on_lost(  # noqa: SLF001
+            "fake", runtime.generation, connection, "synthetic transport loss"
+        )
+        try:
+            assert not manager.has_tool("mcp_fake_echo")
+            assert manager.get_tool_definitions() == []
+            assert runtime.state == "error"
+            assert runtime.connection is None
+        finally:
+            await connection.disconnect()
+            await manager.shutdown()
+
+
+class TestManagerSessionRefreshRecovery:
+    async def test_manual_refresh_recovers_expired_legacy_session(self):
+        app, state = make_app("legacy-session")
+        server = TestServer(app)
+        await server.start_server()
+        manager = MCPManager()
+        await manager.load_desired_state(
+            enabled=True,
+            servers={
+                "http": {
+                    "transport": "http",
+                    "url": str(server.make_url("/mcp")),
+                    "timeout_seconds": 30,
+                }
+            },
+        )
+        await manager.start()
+        try:
+            assert manager.has_tool("mcp_http_echo")
+            before_initialize = state["calls"]["initialize"]
+            state["expire_once"] = True
+            await manager.refresh_server_tools("http")
+            status = manager.get_status()["servers"][0]
+            assert status["state"] == STATE_CONNECTED
+            assert manager.has_tool("mcp_http_echo")
+            assert state["calls"]["initialize"] == before_initialize + 1
+        finally:
+            await manager.shutdown()
+            await server.close()
+
+    async def test_reload_global_disable_retires_unchanged_runtime(self):
+        config = _stdio_config()
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"a": config})
+        await manager.start()
+        runtime = manager._servers["a"]  # noqa: SLF001
+        connection = runtime.connection
+        assert connection is not None
+        await manager.load_desired_state(enabled=False, servers={"a": config})
+        try:
+            replacement = manager._servers["a"]  # noqa: SLF001
+            assert replacement is not runtime
+            assert replacement.state == STATE_DISABLED
+            assert runtime.connection is None
+            assert not connection.connected
+            assert manager.get_tool_definitions() == []
+        finally:
+            await manager.shutdown()
+
+
+class TestConfigSnapshotIsolation:
+    async def test_nested_caller_mutation_cannot_bypass_reload_fence(self):
+        config = _stdio_config(tool_allowlist=["echo"])
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"a": config})
+        await manager.start()
+        old = manager._servers["a"]  # noqa: SLF001
+        config["tool_allowlist"].append("fail")
+        assert old.config["tool_allowlist"] == ["echo"]
+        try:
+            await manager.load_desired_state(enabled=True, servers={"a": config})
+            assert manager._servers["a"] is not old  # noqa: SLF001
+            assert set(manager._servers["a"].config["tool_allowlist"]) == {  # noqa: SLF001
+                "echo",
+                "fail",
+            }
+        finally:
+            await manager.shutdown()
+
+
+class TestInFlightRetirementCleanup:
+    async def test_reload_cancels_inflight_discovery_and_closes_local_connection(self, monkeypatch):
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        created = []
+        original_connect = MCPServerConnection.connect
+
+        async def connect(self):
+            await original_connect(self)
+            created.append(self)
+
+        async def blocked_discover(self):
+            entered.set()
+            await release.wait()
+            raise AssertionError("retired discovery resumed")
+
+        monkeypatch.setattr(MCPServerConnection, "connect", connect)
+        monkeypatch.setattr(MCPServerConnection, "discover_tools", blocked_discover)
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"a": _stdio_config()})
+        manager._started = True  # noqa: SLF001
+        start = asyncio.create_task(manager._reconcile_server("a"))  # noqa: SLF001
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        await manager.load_desired_state(enabled=True, servers={})
+        await start
+        assert len(created) == 1
+        assert not created[0].connected
+        assert created[0]._stdio is None  # noqa: SLF001
+        await manager.shutdown()

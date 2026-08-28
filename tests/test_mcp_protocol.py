@@ -347,17 +347,48 @@ class TestHeaderParamsStrayPlacements:
         schema = {
             "type": "object",
             "properties": {"a": {"type": "string"}},
-            "definitions": {
-                "aux": {"properties": {"b": {"type": "string", "x-mcp-header": "B"}}}
-            },
+            "definitions": {"aux": {"properties": {"b": {"type": "string", "x-mcp-header": "B"}}}},
         }
         assert not proto.extract_header_params(schema).ok
 
     def test_annotation_under_pattern_properties_invalidates(self):
         schema = {
             "type": "object",
-            "patternProperties": {
-                "^x": {"type": "string", "x-mcp-header": "X"}
-            },
+            "patternProperties": {"^x": {"type": "string", "x-mcp-header": "X"}},
         }
+        assert not proto.extract_header_params(schema).ok
+
+
+class TestStrictSchemaValidation:
+    @pytest.mark.parametrize(
+        "schema",
+        [
+            {"type": "string"},
+            {"type": "object", "properties": []},
+            {"type": "definitely-not-a-type"},
+            {"$ref": 42},
+            {"type": ["object", "string"]},
+            {},
+        ],
+    )
+    def test_invalid_or_non_object_schemas_rejected(self, schema):
+        assert not proto.validate_tool_schema(schema).ok
+
+    def test_local_ref_can_establish_object_semantics(self):
+        schema = {
+            "$ref": "#/$defs/args",
+            "$defs": {"args": {"type": "object", "properties": {"q": {"type": "string"}}}},
+        }
+        assert proto.validate_tool_schema(schema).ok
+
+    def test_all_union_branches_must_be_objects(self):
+        assert proto.validate_tool_schema(
+            {"oneOf": [{"type": "object"}, {"type": "object", "properties": {}}]}
+        ).ok
+        assert not proto.validate_tool_schema(
+            {"oneOf": [{"type": "object"}, {"type": "string"}]}
+        ).ok
+
+    def test_root_header_annotation_rejected(self):
+        schema = {"type": "object", "x-mcp-header": "Root", "properties": {}}
         assert not proto.extract_header_params(schema).ok
