@@ -200,6 +200,10 @@ class MCPManager:
         self._stopping = False
         self._closed = False
         self._shutdown_task: asyncio.Task[None] | None = None
+        # Lost-connection teardown detaches the connection from its runtime
+        # synchronously, so the resulting disconnect tasks need separate
+        # manager ownership until they settle.
+        self._loss_retirements: set[asyncio.Task[None]] = set()
 
     # ------------------------------------------------------------------
     # Introspection
@@ -725,12 +729,20 @@ class MCPManager:
         task = self._shutdown_task
         if task is None:
             # This block is await-free and therefore atomic on the event loop.
-            # Fence first; a currently-running transition may finish its own
-            # await, but every later reconciliation observes _closed.
+            # Fence and revoke publication before the first await: shutdown may
+            # be parked behind a lifecycle transition, but no assembled request
+            # or defensive execute() call may observe the old tools meanwhile.
             self._closed = True
             self._stopping = True
             self._started = False
-            task = asyncio.create_task(self._shutdown_serialized(), name="mcp-shutdown")
+            runtimes = list(self._servers.values())
+            for sname, runtime in self._servers.items():
+                runtime.generation = self._next_gen()
+                runtime.state = STATE_DISABLED
+                self._unpublish_locked(sname, runtime, reason="shutdown")
+            task = asyncio.create_task(
+                self._shutdown_serialized(runtimes), name="mcp-shutdown"
+            )
             self._shutdown_task = task
         cancelled = False
         while not task.done():
@@ -746,21 +758,20 @@ class MCPManager:
         if cancelled:
             raise asyncio.CancelledError
 
-    async def _shutdown_serialized(self) -> None:
+    async def _shutdown_serialized(self, runtimes: list[_ServerRuntime]) -> None:
         async with self._lifecycle_lock:
-            await self._shutdown_inner()
+            await self._shutdown_inner(runtimes)
 
-    async def _shutdown_inner(self) -> None:
-        async with self._lock:
-            runtimes = list(self._servers.values())
-            for sname, runtime in self._servers.items():
-                runtime.generation = self._next_gen()
-                runtime.state = STATE_DISABLED
-                self._unpublish_locked(sname, runtime, reason="shutdown")
+    async def _shutdown_inner(self, runtimes: list[_ServerRuntime]) -> None:
         await asyncio.gather(
             *(self._retire_runtime(runtime) for runtime in runtimes),
             return_exceptions=True,
         )
+        # A connection-lost callback removes its connection from the runtime
+        # before scheduling teardown. Drain those separately owned tasks too,
+        # including tasks added while runtime retirement was in progress.
+        while self._loss_retirements:
+            await asyncio.gather(*tuple(self._loss_retirements), return_exceptions=True)
 
     async def _reconnect_server_inner(
         self, name: str, *, committed: asyncio.Event
@@ -1203,10 +1214,12 @@ class MCPManager:
         runtime.connection = None
         self._unpublish_locked(name, runtime, reason=f"connection lost: {clean_reason}")
         runtime.wake.set()
-        asyncio.get_running_loop().create_task(
+        task = asyncio.get_running_loop().create_task(
             self._disconnect_lost_connection(connection),
             name=f"mcp-retire-lost-{name}",
         )
+        self._loss_retirements.add(task)
+        task.add_done_callback(self._loss_retirements.discard)
 
     @staticmethod
     async def _disconnect_lost_connection(connection: MCPServerConnection) -> None:
@@ -1222,6 +1235,16 @@ class MCPManager:
     async def execute(self, published_name: str, tool_input: dict) -> MCPToolOutcome:
         """Dispatch one published tool. A stale call against a tool that is
         no longer published fails here — typed, never a silent pass."""
+        if self._closed or self._stopping:
+            return MCPToolOutcome(
+                status=OUTCOME_FAILED,
+                text=(
+                    f"MCP tool '{published_name}' is unavailable because "
+                    "the manager is shutting down"
+                ),
+                server="",
+                tool=published_name,
+            )
         entry = self._published_index.get(published_name)
         if entry is None:
             return MCPToolOutcome(

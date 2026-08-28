@@ -55,6 +55,8 @@ _PROBE_TIMEOUT = 15.0
 _INIT_TIMEOUT = 15.0
 _LIST_TIMEOUT = 30.0
 _DEFAULT_CALL_TIMEOUT = 120.0
+_MAX_SERVER_REPLY_TASKS = 32
+_SERVER_REPLY_DRAIN_TIMEOUT = 5.0
 
 _CONTROL_CHARS_RE = re.compile(r"[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f]")
 
@@ -140,6 +142,8 @@ class MCPServerConnection:
         self._pending: dict[Any, asyncio.Future[dict]] = {}
         self._lost_reason: str | None = None
         self._disconnect_task: asyncio.Task[None] | None = None
+        self._server_reply_tasks: set[asyncio.Task[None]] = set()
+        self._accept_server_requests = False
 
     # ------------------------------------------------------------------
     # Connect
@@ -155,12 +159,19 @@ class MCPServerConnection:
         self.era = None
         self.negotiated_version = None
         self._lost_reason = None
-        if self.transport_kind == "stdio":
-            await self._connect_stdio()
-        elif self.transport_kind == "http":
-            await self._connect_http()
-        else:
-            raise MCPConnectError(f"{self.name}: unsupported transport {self.transport_kind!r}")
+        self._accept_server_requests = True
+        try:
+            if self.transport_kind == "stdio":
+                await self._connect_stdio()
+            elif self.transport_kind == "http":
+                await self._connect_http()
+            else:
+                raise MCPConnectError(
+                    f"{self.name}: unsupported transport {self.transport_kind!r}"
+                )
+        except BaseException:
+            self._accept_server_requests = False
+            raise
         self.connected = True
 
     async def disconnect(self) -> None:
@@ -185,7 +196,9 @@ class MCPServerConnection:
 
     async def _disconnect_inner(self) -> None:
         self.connected = False
+        self._accept_server_requests = False
         self._fail_pending(MCPConnectError(f"{self.name}: disconnected"))
+        await self._drain_server_reply_tasks()
         stdio, self._stdio = self._stdio, None
         http, self._http = self._http, None
         try:
@@ -556,6 +569,9 @@ class MCPServerConnection:
         We support none of those capabilities: answer -32601 on the correct
         channel instead of silently dropping (a dropped request hangs the
         server). Modern servers cannot initiate requests — log and ignore."""
+        if not self._accept_server_requests:
+            log.debug("MCP %s: dropping server request during disconnect", self.name)
+            return
         if self.era == proto.ERA_MODERN:
             log.warning(
                 "MCP %s: modern server sent a request (%s) — ignored",
@@ -568,7 +584,34 @@ class MCPServerConnection:
             proto.ERROR_METHOD_NOT_FOUND,
             f"client does not support {msg.get('method', 'this method')}",
         )
-        asyncio.get_running_loop().create_task(self._send_reply(reply, channel))
+        if len(self._server_reply_tasks) >= _MAX_SERVER_REPLY_TASKS:
+            log.warning(
+                "MCP %s: dropping server request reply; %d replies already active",
+                self.name,
+                _MAX_SERVER_REPLY_TASKS,
+            )
+            return
+        task = asyncio.get_running_loop().create_task(
+            self._send_reply(reply, channel),
+            name=f"mcp-server-reply-{self.name}",
+        )
+        self._server_reply_tasks.add(task)
+        task.add_done_callback(self._server_reply_tasks.discard)
+
+    async def _drain_server_reply_tasks(self) -> None:
+        tasks = tuple(self._server_reply_tasks)
+        if not tasks:
+            return
+        done, pending = await asyncio.wait(tasks, timeout=_SERVER_REPLY_DRAIN_TIMEOUT)
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in done:
+            try:
+                task.result()
+            except (asyncio.CancelledError, Exception):
+                pass
 
     async def _send_reply(self, reply: dict, channel: str) -> None:
         try:

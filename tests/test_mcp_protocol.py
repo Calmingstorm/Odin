@@ -93,6 +93,17 @@ class TestMessageKind:
         assert proto.message_kind({"jsonrpc": "2.0", "id": None, "result": {}}) == "invalid"
         assert proto.message_kind("nope") == "invalid"
 
+    @pytest.mark.parametrize("value", [True, False])
+    def test_boolean_ids_are_invalid_not_numbers(self, value):
+        assert proto.message_kind(
+            {"jsonrpc": "2.0", "id": value, "result": {"ok": True}}
+        ) == "invalid"
+        with pytest.raises(MCPProtocolError, match="invalid JSON-RPC message"):
+            proto.parse_wire_payload(
+                f'{{"jsonrpc":"2.0","id":{str(value).lower()},"result":{{}}}}',
+                negotiated_version=None,
+            )
+
 
 class TestWirePayloadParsing:
     def test_single_object(self):

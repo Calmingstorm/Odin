@@ -68,10 +68,31 @@ assert.deepEqual(edit, {
   enabled: true, transport: 'stdio',
   headers_remove: ['OLD_HEADER'], env_remove: ['OLD_ENV'],
 });
-assert.equal(mcpConnectionEditNeedsConfirmation(form({ command: '' }), 'stdio'), false);
-assert.equal(mcpConnectionEditNeedsConfirmation(form({ command: '/new/path' }), 'stdio'), true);
-assert.equal(mcpConnectionEditNeedsConfirmation(form({ transport: 'http', command: '', url: 'https://mcp.example/mcp' }), 'stdio'), true);
-assert.equal(mcpConnectionEditNeedsConfirmation(form({ transport: 'http', command: '', url: 'https://replacement.example/mcp' }), 'http'), true);
+const savedStdio = { enabled: true, transport: 'stdio' };
+const savedHttp = { enabled: true, transport: 'http' };
+function editNeedsConfirmation(overrides = {}, original = savedStdio) {
+  const payload = buildMCPServerPayload(form({
+    name: 'saved', command: '', argsText: '', cwd: '', allowlistText: '',
+    ...overrides,
+  }), { mode: 'edit', originalTransport: original.transport });
+  return mcpConnectionEditNeedsConfirmation(payload, original);
+}
+assert.equal(editNeedsConfirmation(), false);
+// Every effective edit class replaces the runtime and therefore confirms.
+for (const [label, overrides, original] of [
+  ['enabled', { enabled: false }, savedStdio],
+  ['transport', { transport: 'http', url: 'https://mcp.example/mcp' }, savedStdio],
+  ['command', { command: '/new/path' }, savedStdio],
+  ['url', { transport: 'http', url: 'https://replacement.example/mcp' }, savedHttp],
+  ['args', { replaceArgs: true, argsText: '--new' }, savedStdio],
+  ['cwd', { replaceCwd: true, cwd: '/new/cwd' }, savedStdio],
+  ['timeout', { replaceTimeout: true, timeoutSeconds: 30 }, savedStdio],
+  ['allowlist', { replaceAllowlist: true, allowlistText: 'echo' }, savedStdio],
+  ['header set', { headerRows: [{ key: 'Authorization', value: 'new' }] }, savedStdio],
+  ['header remove', { headersRemove: ['Authorization'] }, savedStdio],
+  ['environment set', { envRows: [{ key: 'API_KEY', value: 'new' }] }, savedStdio],
+  ['environment remove', { envRemove: ['API_KEY'] }, savedStdio],
+]) assert.equal(editNeedsConfirmation(overrides, original), true, `${label} must confirm`);
 
 // HTTP edit fields are honest: blank preserves an existing endpoint, while
 // create and stdio-to-HTTP transitions require a replacement URL.
@@ -125,7 +146,9 @@ for (const route of [
 ]) assert.ok(page.includes(route), `MCP page lost route ${route}`);
 assert.match(page, /confirmDialog\([\s\S]*Disable MCP tool publication/);
 assert.match(page, /confirmDialog\([\s\S]*Remove server/);
-assert.match(page, /mcpConnectionEditNeedsConfirmation[\s\S]*Save and reconnect/);
+assert.match(page, /mcpConnectionEditNeedsConfirmation\(payload, editingServer\.value\)[\s\S]*Save and reconnect/);
+assert.match(page, /Saving this configuration replaces the server runtime\./);
+assert.match(page, /Any current connection will be retired and its tools unpublished; enabled servers reconnect/);
 
 // Section shortcuts are buttons, not hash routes. Exercise all four actions
 // against a modal fixture and prove route/modal state survives each click.
