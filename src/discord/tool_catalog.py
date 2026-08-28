@@ -35,7 +35,7 @@ class ToolCatalog:
         # Cached merged tool definitions — invalidated on skill create/edit/delete
         self.cached: list[dict] | None = None
 
-    def merged_definitions(self) -> list[dict]:
+    def merged_definitions(self, *, cache_result: bool = True) -> list[dict]:
         """Merge built-in and skill tool definitions, deduplicating by name.
 
         Built-in tools take priority over skills with the same name.
@@ -98,8 +98,9 @@ class ToolCatalog:
             for mcp_def in self.get_mcp_definitions():
                 if mcp_def["name"] not in taken:
                     merged.append(mcp_def)
-        self.cached = merged
-        return self.cached
+        if cache_result:
+            self.cached = merged
+        return merged
 
     def invalidate(self) -> None:
         self.cached = None

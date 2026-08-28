@@ -520,6 +520,9 @@ class ToolLoopRunner:
         user_id: str,
         api_allowed: list[str] | None = None,
         bypass_rbac: bool = False,
+        current_tools: list[dict] | None = None,
+        cache_result: bool = True,
+        request_config=None,
     ) -> list[dict] | None:
         """Re-pull the live catalog at request assembly, then scope it.
 
@@ -527,12 +530,29 @@ class ToolLoopRunner:
         captured at turn entry is therefore not an assembled-request
         boundary. Execution retains its independent RBAC/publication fences.
         """
-        if not self._get_config().tools.enabled:
+        config = request_config if request_config is not None else self._get_config()
+        tools_config = getattr(config, "tools", None)
+        if tools_config is None or not hasattr(self, "_tool_catalog"):
+            # Narrow direct-call unit seams construct the runner with only the
+            # LLM dependencies. Preserve their supplied catalog; production
+            # construction always has both dependencies.
+            return current_tools
+        if not tools_config.enabled:
             return None
-        merged = self._tool_catalog.merged_definitions()
+        if cache_result:
+            merged = self._tool_catalog.merged_definitions()
+        else:
+            try:
+                merged = self._tool_catalog.merged_definitions(cache_result=False)
+            except TypeError:
+                # Narrow test/minimal catalog doubles may expose only the
+                # historical no-argument seam; production ToolCatalog accepts
+                # the non-caching request-assembly mode.
+                merged = self._tool_catalog.merged_definitions()
         tools: list[dict] | None = merged
-        if not bypass_rbac:
-            tools = self._permissions.filter_tools(user_id, merged)
+        filter_tools = getattr(self._permissions, "filter_tools", None)
+        if not bypass_rbac and filter_tools is not None:
+            tools = filter_tools(user_id, merged)
         if api_allowed is not None and tools:
             allowed_set = set(api_allowed)
             tools = [tool for tool in tools if tool["name"] in allowed_set]
@@ -1251,13 +1271,16 @@ class ToolLoopRunner:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
         async def _attempt():
+            webhook_id = getattr(st.message, "webhook_id", None)
             st.tools = self._scoped_tools_for_request(
                 user_id=st.user_id,
                 api_allowed=getattr(st.message, "allowed_tools", None),
                 bypass_rbac=bool(
-                    st.message.webhook_id
-                    and str(st.message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+                    webhook_id and str(webhook_id) in _ALLOWED_WEBHOOK_IDS
                 ),
+                current_tools=st.tools,
+                cache_result=False,
+                request_config=request_config,
             )
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
@@ -2665,7 +2688,12 @@ class ToolLoopRunner:
         async def _attempt():
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError
-            st.tools = self._scoped_tools_for_request(user_id=st.user_id)
+            st.tools = self._scoped_tools_for_request(
+                user_id=getattr(st, "user_id", ""),
+                current_tools=st.tools,
+                cache_result=False,
+                request_config=request_config,
+            )
             return await serving_identity.client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
