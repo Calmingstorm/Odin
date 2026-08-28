@@ -276,6 +276,84 @@ class TestHttpEraDetection:
             await server.close()
 
 
+class TestHttpSseShapedDirectReplies:
+    """The DeepWiki shape: a Streamable HTTP server may answer ANY request-
+    POST — probe, initialize, discovery, calls — as an SSE stream instead
+    of a JSON body. Live-found 2026-08-28 (mcp.deepwiki.com): the handshake
+    sites dropped the streamed reply and died 'initialize failed: no
+    response'."""
+
+    async def test_legacy_handshake_over_sse_connects_discovers_calls(self):
+        server, url, state = await _http_server("legacy-stateless")
+        state["respond_in_sse"] = True
+        conn = MCPServerConnection("dw", "http", url=url)
+        try:
+            await conn.connect()
+            assert conn.era == "legacy"
+            assert conn.negotiated_version == "2025-06-18"
+            assert state["calls"]["server/discover"] == 1
+            discovery = await conn.discover_tools()
+            echo = next(t for t in discovery.tools if t.name == "echo")
+            outcome = await conn.call_tool(echo, {"text": "hi"})
+            assert outcome.ok and "echo: hi" in outcome.text
+        finally:
+            await conn.disconnect()
+            await server.close()
+
+    async def test_modern_probe_result_over_sse_adopts_modern(self):
+        server, url, state = await _http_server("modern")
+        state["respond_in_sse"] = True
+        conn = MCPServerConnection("m-sse-probe", "http", url=url)
+        try:
+            await conn.connect()
+            assert conn.era == "modern"
+            assert conn.negotiated_version == "2026-07-28"
+            assert "initialize" not in state["calls"]
+            discovery = await conn.discover_tools()
+            assert any(t.name == "echo" for t in discovery.tools)
+        finally:
+            await conn.disconnect()
+            await server.close()
+
+    async def test_wrong_id_streamed_probe_reply_is_not_accepted(self):
+        server, url, state = await _http_server("legacy-stateless")
+        state["respond_in_sse"] = True
+        state["sse_wrong_id_methods"] = {"server/discover"}
+        conn = MCPServerConnection("dw-badprobe", "http", url=url)
+        try:
+            with pytest.raises(MCPConnectError, match="no usable reply"):
+                await conn.connect()
+            # A mismatched probe reply is not era evidence — never initialize.
+            assert "initialize" not in state["calls"]
+        finally:
+            await conn.disconnect()
+            await server.close()
+
+    async def test_wrong_id_streamed_initialize_reply_fails_honestly(self):
+        server, url, state = await _http_server("legacy-stateless")
+        state["respond_in_sse"] = True
+        state["sse_wrong_id_methods"] = {"initialize"}
+        conn = MCPServerConnection("dw-badinit", "http", url=url)
+        try:
+            with pytest.raises(MCPConnectError, match="initialize failed: no response"):
+                await conn.connect()
+        finally:
+            await conn.disconnect()
+            await server.close()
+
+    async def test_duplicate_streamed_responses_are_protocol_failure(self):
+        server, url, state = await _http_server("legacy-stateless")
+        state["respond_in_sse"] = True
+        state["sse_duplicate_methods"] = {"initialize"}
+        conn = MCPServerConnection("dw-dupinit", "http", url=url)
+        try:
+            with pytest.raises(MCPProtocolError, match="duplicate responses"):
+                await conn.connect()
+        finally:
+            await conn.disconnect()
+            await server.close()
+
+
 class TestHttpSessions:
     async def test_session_captured_echoed_and_deleted(self):
         server, url, state = await _http_server("legacy-session")
@@ -503,7 +581,7 @@ class TestHttpErrorStatusEraEvidence:
             ],
         )
         with pytest.raises(MCPConnectError, match="not era evidence"):
-            conn._classify_http_probe(outcome, 1)  # noqa: SLF001
+            conn._classify_http_probe(outcome, outcome.messages[0])  # noqa: SLF001
 
     async def test_repeated_session_rejection_marks_connection_lost(self):
         server, url, state = await _http_server("legacy-session")
@@ -584,7 +662,7 @@ class TestCallerCancellationMatrix:
                 }
             ],
         )
-        assert conn._classify_http_probe(outcome, 1) is False  # noqa: SLF001
+        assert conn._classify_http_probe(outcome, outcome.messages[0]) is False  # noqa: SLF001
 
 
 class TestErrorCorrelationAndPrewrite:

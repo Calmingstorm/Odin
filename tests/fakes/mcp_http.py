@@ -30,6 +30,11 @@ Modes (``make_app(mode)``):
 ``state`` (returned alongside the app) records per-method call counts —
 ``state["calls"]["tools/call"]`` pins never-reissued behavior — plus every
 reply POSTed by the client for server-initiated requests.
+
+``state["respond_in_sse"] = True`` makes EVERY direct reply — probe,
+initialize, discovery, and calls — arrive as an SSE stream (the DeepWiki
+shape); ``sse_wrong_id_methods`` / ``sse_duplicate_methods`` corrupt the
+streamed reply for the named methods only.
 """
 
 from __future__ import annotations
@@ -120,10 +125,28 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         "reject_status": 400,
         "reject_wrong_id": False,
         "delete_mode": "normal",
+        # DeepWiki shape: ANY request may be answered in the SSE stream
+        # shape (probe, initialize, discovery, calls alike).
+        "respond_in_sse": False,
+        # Per-method fault knobs for streamed direct replies.
+        "sse_wrong_id_methods": set(),
+        "sse_duplicate_methods": set(),
     }
 
     def count(method: str) -> None:
         state["calls"][method] = state["calls"].get(method, 0) + 1
+
+    def _direct(msg: dict, *, method: str = "") -> web.StreamResponse:
+        """One direct JSON-RPC reply, honoring ``state["respond_in_sse"]``
+        (the DeepWiki shape: any request may be answered as an SSE stream).
+        The per-method fault knobs corrupt the streamed reply only."""
+        if not state["respond_in_sse"]:
+            return web.json_response(msg)
+        if method and method in state["sse_wrong_id_methods"]:
+            msg = dict(msg)
+            msg["id"] = f"wrong-{msg.get('id')}"
+        messages = [msg, msg] if method and method in state["sse_duplicate_methods"] else [msg]
+        return web.Response(text=_sse_body(messages), content_type="text/event-stream")
 
     async def endpoint(request: web.Request) -> web.StreamResponse:
         if mode == "auth-401":
@@ -194,7 +217,7 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
             }
             if mode != "modern-missing-discover-result-type":
                 result["resultType"] = state["discover_result_type"]
-            return web.json_response(_rpc_response(msg_id, result))
+            return _direct(_rpc_response(msg_id, result), method="server/discover")
         if method == "tools/list":
             result = _result(
                 mode,
@@ -252,10 +275,12 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         session_mode = mode == "legacy-session"
         if method == "server/discover":
             if mode in {"legacy-stateless", "legacy-sse"}:
-                return web.json_response(_rpc_error(msg_id, -32601, "Method not found"))
+                return _direct(
+                    _rpc_error(msg_id, -32601, "Method not found"), method="server/discover"
+                )
             return web.Response(status=400, text="")  # bare 400, empty body
         if method == "initialize":
-            response = web.json_response(
+            response = _direct(
                 _rpc_response(
                     msg_id,
                     {
@@ -265,7 +290,8 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
                         "capabilities": {"tools": {"listChanged": True}},
                         "serverInfo": {"name": f"fake-{mode}", "version": "1.0"},
                     },
-                )
+                ),
+                method="initialize",
             )
             if session_mode:
                 state["session_generation"] += 1
@@ -323,7 +349,7 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
 
     def _reply(request: web.Request, msg_id: Any, result: dict) -> web.StreamResponse:
         response_msg = _rpc_response(msg_id, result)
-        if mode.endswith("-sse"):
+        if mode.endswith("-sse") or state["respond_in_sse"]:
             progress = {
                 "jsonrpc": "2.0",
                 "method": "notifications/progress",

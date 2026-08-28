@@ -41,9 +41,9 @@ from .outcomes import (
     MCPToolOutcome,
 )
 from .transport_http import (
-    RESULT_ACCEPTED,
     RESULT_HTTP_ERROR,
     RESULT_JSON,
+    RESULT_STREAM_ENDED,
     HttpTransport,
     PostOutcome,
 )
@@ -334,16 +334,15 @@ class MCPServerConnection:
                 era=proto.ERA_MODERN,
                 version=proto.MODERN_VERSIONS[0],
             )
-            outcome = await asyncio.wait_for(
-                transport.post(
-                    probe,
-                    protocol_version=proto.MODERN_VERSIONS[0],
-                    mcp_method="server/discover",
-                    include_session=False,
-                ),
+            outcome, response = await self._post_handshake(
+                probe,
+                probe_id,
+                protocol_version=proto.MODERN_VERSIONS[0],
+                mcp_method="server/discover",
+                include_session=False,
                 timeout=_PROBE_TIMEOUT,
             )
-            if self._classify_http_probe(outcome, probe_id):
+            if self._classify_http_probe(outcome, response):
                 return  # modern adopted
             await self._initialize_legacy_http()
         except TimeoutError:
@@ -355,11 +354,62 @@ class MCPServerConnection:
             await transport.close()
             raise
 
-    def _classify_http_probe(self, outcome: PostOutcome, probe_id: Any) -> bool:
+    async def _post_handshake(
+        self,
+        request: dict,
+        req_id: Any,
+        *,
+        protocol_version: str | None,
+        mcp_method: str | None = None,
+        include_session: bool = True,
+        capture_session: bool = False,
+        timeout: float,
+    ) -> tuple[PostOutcome, dict | None]:
+        """POST a handshake-era request (era probe / legacy initialize) and
+        return the outcome plus its direct response, collected from EITHER
+        reply shape — a JSON body or an SSE stream (a Streamable HTTP server
+        may answer any request in the stream shape; DeepWiki does). Only the
+        exact-id response counts, error responses included; other stream
+        messages are debug-logged — no notification/server-request handlers
+        run before the handshake settles. Duplicate matching responses are a
+        protocol failure, never last-one-wins.
+        """
+        assert self._http is not None
+        streamed: list[dict] = []
+
+        def on_message(msg: dict) -> None:
+            if proto.message_kind(msg) == proto.KIND_RESPONSE and msg.get("id") == req_id:
+                streamed.append(msg)
+            else:
+                log.debug("MCP %s: ignoring pre-handshake stream message", self.name)
+
+        outcome = await asyncio.wait_for(
+            self._http.post(
+                request,
+                protocol_version=protocol_version,
+                mcp_method=mcp_method,
+                include_session=include_session,
+                capture_session=capture_session,
+                on_message=on_message,
+            ),
+            timeout=timeout,
+        )
+        matches = [
+            msg
+            for msg in outcome.messages
+            if proto.message_kind(msg) == proto.KIND_RESPONSE and msg.get("id") == req_id
+        ]
+        matches.extend(streamed)
+        if len(matches) > 1:
+            raise MCPProtocolError(f"{self.name}: duplicate responses for handshake request")
+        return outcome, (matches[0] if matches else None)
+
+    def _classify_http_probe(self, outcome: PostOutcome, response: dict | None) -> bool:
         """True ⇒ modern era adopted. False ⇒ legacy fallback. Raises for
-        non-era-evidence failures (auth/capacity/transport)."""
-        response = self._match_response(outcome.messages, probe_id)
-        if outcome.kind == RESULT_JSON and response is not None:
+        non-era-evidence failures (auth/capacity/transport). ``response`` is
+        the probe's direct response, collected from either reply shape —
+        SSE framing itself is never era evidence, only the response is."""
+        if outcome.kind in (RESULT_JSON, RESULT_STREAM_ENDED) and response is not None:
             if "result" in response:
                 self._adopt_modern(response["result"])
                 return True
@@ -376,8 +426,7 @@ class MCPServerConnection:
                 return False
             raise MCPConnectError(f"{self.name}: probe returned an error that is not era evidence")
         if outcome.kind == RESULT_HTTP_ERROR:
-            matched = self._match_response(outcome.messages, probe_id)
-            err = proto.rpc_error(matched) if matched is not None else None
+            err = proto.rpc_error(response) if response is not None else None
             if (
                 outcome.status in (404, 405)
                 and err is not None
@@ -398,7 +447,8 @@ class MCPServerConnection:
                 self.negotiated_version = selection.version
                 return True
             return False  # 400 with empty/unrecognized body is legacy evidence
-        # 202/stream for a request-probe is out-of-contract.
+        # A 202, or a reply (JSON body or stream) carrying no matching
+        # response, is out-of-contract for a request-probe.
         raise MCPConnectError(f"{self.name}: probe produced no usable reply")
 
     async def _initialize_legacy_http(self) -> None:
@@ -416,16 +466,14 @@ class MCPServerConnection:
             era=proto.ERA_LEGACY,
             version=best,
         )
-        outcome = await asyncio.wait_for(
-            self._http.post(
-                request,
-                protocol_version=None,  # header only AFTER negotiation
-                include_session=False,
-                capture_session=True,
-            ),
+        _outcome, response = await self._post_handshake(
+            request,
+            req_id,
+            protocol_version=None,  # header only AFTER negotiation
+            include_session=False,
+            capture_session=True,
             timeout=_INIT_TIMEOUT,
         )
-        response = self._collect_http_response(outcome, req_id)
         err = proto.rpc_error(response) if response else None
         if response is None or err is not None:
             detail = _clean_text(str((err or {}).get("message", "no response")), 200)
@@ -448,11 +496,6 @@ class MCPServerConnection:
             protocol_version=version,
             negotiated_version=version,
         )
-
-    def _collect_http_response(self, outcome: PostOutcome, req_id: Any) -> dict | None:
-        if outcome.kind not in (RESULT_JSON, RESULT_ACCEPTED):
-            return None
-        return self._match_response(outcome.messages, req_id)
 
     @staticmethod
     def _match_response(messages: list[dict], req_id: Any) -> dict | None:
