@@ -7,6 +7,7 @@ import {
   mcpToolMatches,
   normalizeMCPState,
 } from '../mcp-config-policy.js';
+import { MCP_EDITOR_GROUPS, scrollMCPFormSection } from '../mcp-editor-navigation.js';
 import { toast } from '../toast.js';
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
@@ -214,12 +215,12 @@ export default {
           <div v-if="formError" class="mcp-form-error" role="alert"><odin-icon name="warning" :size="15" /> {{ formError }}</div>
 
           <nav class="mcp-editor-nav" aria-label="MCP server form sections">
-            <a v-for="group in editorGroups" :key="group.id" :href="'#mcp-form-' + group.id">{{ group.label }}</a>
+            <button v-for="group in editorGroups" :key="group.id" type="button" :aria-controls="'mcp-form-' + group.id" @click="jumpToEditorGroup(group.id)">{{ group.label }}</button>
           </nav>
 
           <div class="mcp-editor-groups">
             <section id="mcp-form-identity" class="mcp-form-group">
-              <header><span>01</span><div><h3>Identity</h3><p>Name the connection and control its own activation.</p></div></header>
+              <header><span>01</span><div><h3 tabindex="-1" data-mcp-form-heading>Identity</h3><p>Name the connection and control its own activation.</p></div></header>
               <div class="mcp-form-grid two">
                 <label class="mcp-field"><span>Name</span><input v-model="form.name" class="hm-input font-mono" type="text" autocomplete="off" maxlength="128" :disabled="editorMode === 'edit'" placeholder="github_tools" /><small>Letters, digits, and underscores. Cannot be renamed.</small></label>
                 <label class="mcp-switch-field"><span>Server enabled</span><span class="mcp-switch-line"><span>{{ form.enabled ? 'Enabled' : 'Disabled' }}</span><span class="toggle-switch"><input v-model="form.enabled" type="checkbox" /><span class="toggle-slider"></span></span></span><small>The global master switch must also be on.</small></label>
@@ -227,7 +228,7 @@ export default {
             </section>
 
             <section id="mcp-form-transport" class="mcp-form-group">
-              <header><span>02</span><div><h3>Transport</h3><p>Choose how Odin reaches this MCP server.</p></div></header>
+              <header><span>02</span><div><h3 tabindex="-1" data-mcp-form-heading>Transport</h3><p>Choose how Odin reaches this MCP server.</p></div></header>
               <div class="mcp-transport-choice" role="radiogroup" aria-label="Transport">
                 <label :class="{ selected: form.transport === 'stdio' }"><input v-model="form.transport" type="radio" value="stdio" /><odin-icon name="terminal" :size="18" /><span><strong>stdio</strong><small>Run an isolated local process</small></span></label>
                 <label :class="{ selected: form.transport === 'http' }"><input v-model="form.transport" type="radio" value="http" /><odin-icon name="globe" :size="18" /><span><strong>Streamable HTTP</strong><small>Connect to an HTTP(S) endpoint</small></span></label>
@@ -241,13 +242,18 @@ export default {
                 <button v-else type="button" class="mcp-replace-field" @click="form.replaceCwd = true"><odin-icon name="folder" :size="14" /><span><strong>Replace working directory</strong><small>Leave unchanged unless you explicitly replace it.</small></span></button>
               </div>
               <div v-else class="mcp-form-grid">
-                <label class="mcp-field"><span>Endpoint URL <small v-if="editorMode === 'edit'">leave blank to keep current</small></span><input v-model="form.url" class="hm-input font-mono" type="url" autocomplete="off" placeholder="https://mcp.example.com/mcp" /></label>
+                <label class="mcp-field">
+                  <span>{{ endpointFieldLabel }} <small v-if="savedHttpEndpoint" class="mcp-configured-indicator">Endpoint configured</small><small v-else-if="endpointRequired">required</small></span>
+                  <input v-model="form.url" class="hm-input font-mono" type="url" autocomplete="off" :placeholder="endpointPlaceholder" :required="endpointRequired" />
+                  <small v-if="savedHttpEndpoint">The current endpoint remains unchanged unless a replacement is entered.</small>
+                  <small v-else-if="editorMode === 'edit'">A new endpoint is required when switching to HTTP.</small>
+                </label>
                 <div class="mcp-static-auth-note"><odin-icon name="info" :size="15" /><span>Streamable HTTP with static headers is supported. Interactive OAuth and the deprecated HTTP+SSE transport are not part of v1.</span></div>
               </div>
             </section>
 
             <section id="mcp-form-authentication" class="mcp-form-group">
-              <header><span>03</span><div><h3>Authentication</h3><p>Rotate static headers or child-process environment values without exposing configured secrets.</p></div></header>
+              <header><span>03</span><div><h3 tabindex="-1" data-mcp-form-heading>Authentication</h3><p>Rotate static headers or child-process environment values without exposing configured secrets.</p></div></header>
               <div class="mcp-secret-columns">
                 <div class="mcp-secret-editor">
                   <div class="mcp-secret-heading"><div><strong>HTTP headers</strong><small v-if="form.transport !== 'http'">Stored, but used only by HTTP</small></div><button type="button" class="btn btn-ghost text-xs" @click="addSecretRow('headers')"><odin-icon name="plus" :size="13" /> Add</button></div>
@@ -269,7 +275,7 @@ export default {
             </section>
 
             <section id="mcp-form-limits" class="mcp-form-group">
-              <header><span>04</span><div><h3>Limits</h3><p>Bound calls and optionally narrow discovery to named tools.</p></div></header>
+              <header><span>04</span><div><h3 tabindex="-1" data-mcp-form-heading>Limits</h3><p>Bound calls and optionally narrow discovery to named tools.</p></div></header>
               <div class="mcp-form-grid two">
                 <label v-if="editorMode === 'add' || form.replaceTimeout" class="mcp-field"><span>Call timeout <small>seconds</small></span><input v-model="form.timeoutSeconds" class="hm-input font-mono" type="number" min="1" max="3600" step="1" /></label>
                 <button v-else type="button" class="mcp-replace-field" @click="form.replaceTimeout = true"><odin-icon name="clock" :size="14" /><span><strong>Replace call timeout</strong><small>Current value remains unchanged until replaced.</small></span></button>
@@ -312,12 +318,7 @@ export default {
     let active = false;
     let subscribedToEvents = false;
 
-    const editorGroups = Object.freeze([
-      { id: 'identity', label: 'Identity' },
-      { id: 'transport', label: 'Transport' },
-      { id: 'authentication', label: 'Authentication' },
-      { id: 'limits', label: 'Limits' },
-    ]);
+    const editorGroups = MCP_EDITOR_GROUPS;
     const servers = computed(() => status.value?.servers || []);
     const masterEnabled = computed(() => Boolean(status.value?.enabled));
     const aggregate = computed(() => ({
@@ -328,6 +329,12 @@ export default {
     }));
     const configuredHeaderKeys = computed(() => editingServer.value?.header_keys || []);
     const configuredEnvKeys = computed(() => editingServer.value?.env_keys || []);
+    const savedHttpEndpoint = computed(() => editorMode.value === 'edit' && editingServer.value?.transport === 'http');
+    const endpointRequired = computed(() => editorMode.value === 'add' || !savedHttpEndpoint.value);
+    const endpointFieldLabel = computed(() => savedHttpEndpoint.value ? 'Replace endpoint URL' : 'Endpoint URL');
+    const endpointPlaceholder = computed(() => savedHttpEndpoint.value
+      ? 'Leave blank to keep the saved endpoint'
+      : 'https://mcp.example.com/mcp');
 
     function startPolling() {
       stopPolling();
@@ -460,6 +467,10 @@ export default {
       formError.value = ''; editorOpen.value = true;
     }
     function closeEditor() { if (!saving.value) editorOpen.value = false; }
+    function jumpToEditorGroup(groupId) {
+      if (!editorOpen.value) return;
+      scrollMCPFormSection(groupId);
+    }
     function addSecretRow(kind) {
       const field = kind === 'headers' ? 'headerRows' : 'envRows';
       form.value[field].push({ key: '', value: '' });
@@ -536,10 +547,12 @@ export default {
       status, loading, mutating, pageError, servers, masterEnabled, aggregate,
       expandedServers, toolQueries, toolErrors, toolsLoading,
       editorOpen, editorMode, editingName, form, formError, saving, editorGroups,
-      configuredHeaderKeys, configuredEnvKeys,
+      configuredHeaderKeys, configuredEnvKeys, savedHttpEndpoint, endpointRequired,
+      endpointFieldLabel, endpointPlaceholder,
       refreshAll, busy, serverState, stateLabel, transportLabel, protocolLabel, toolSummary, formatAge,
       setMasterEnabled, reconnect, refreshTools, removeServer, toggleTools, filteredTools, setToolQuery,
-      openAdd, openEdit, closeEditor, addSecretRow, removeSecretRow, toggleSecretRemoval, saveServer,
+      openAdd, openEdit, closeEditor, jumpToEditorGroup,
+      addSecretRow, removeSecretRow, toggleSecretRemoval, saveServer,
     };
   },
 };
