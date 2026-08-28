@@ -1,6 +1,7 @@
 import TabbedPage from './tabbed-page.js';
 import ToolsPage from './tools.js';
 import SkillsPage from './skills.js';
+import MCPServersPage from './mcp-servers.js';
 import KnowledgePage from './knowledge.js';
 import MemoryPage from './memory.js';
 import LearnedPage from './learned.js';
@@ -12,6 +13,7 @@ import LearnedPage from './learned.js';
 export const TABS = [
     { id: 'tools', label: 'Tools', component: ToolsPage },
     { id: 'skills', label: 'Skills', component: SkillsPage },
+    { id: 'mcp-servers', label: 'MCP Servers', component: MCPServersPage },
     { id: 'knowledge', label: 'Knowledge', component: KnowledgePage },
     { id: 'memory', label: 'Memory', component: MemoryPage },
     { id: 'learned', label: 'Learned', component: LearnedPage },
