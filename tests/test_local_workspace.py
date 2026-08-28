@@ -1943,7 +1943,6 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     # --- deliberately does not ----------------------------------------------
     "src/discord/native_tools/media.py": "argv-form ssh to a REMOTE host; local cwd is irrelevant",
     "src/tools/ssh_pool.py": "argv-form ssh control-socket management, no user command text",
-    "src/tools/mcp_client.py": "operator-configured MCP server process, not a user command",
     "src/tools/mcp/transport_stdio.py": (
         "operator-configured MCP server process, not a user command; spawns "
         "with an allowlisted env, an owned process group, and an explicit "

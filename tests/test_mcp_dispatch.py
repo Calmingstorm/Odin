@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from unittest.mock import AsyncMock, MagicMock
 
 from src.discord.mcp_dispatch import (
     MODEL_RESULT_CAP,
@@ -95,7 +96,6 @@ class TestSeamMapping:
             assert "truncated" in result.output
         finally:
             await manager.shutdown()
-
 
     async def test_audit_identifiers_are_defensively_bounded(self):
         class OversizedManager:
@@ -204,3 +204,126 @@ class TestArgumentScrubbing:
     def test_non_mcp_tools_keep_existing_behavior(self):
         untouched = {"body": "hello", "x": 1}
         assert _scrub_tool_input_for_storage("run_command", untouched) == untouched
+
+
+# --- Survivors from the retired tests/test_mcp_client.py (P4):
+# background-task MCP integration, modernized to the typed-outcome
+# contract in P3. ---
+
+
+class TestBackgroundTaskMCPIntegration:
+    async def test_execute_tool_routes_to_mcp(self):
+        from src.discord.background_task import _execute_tool
+
+        mock_executor = MagicMock()
+        mock_executor.config = MagicMock()
+        mock_executor.config.hosts = {}
+
+        mock_skill_mgr = MagicMock()
+        mock_skill_mgr.has_skill = MagicMock(return_value=False)
+
+        # The P3 seam consumes the control plane's typed outcome and returns
+        # a structured ToolResult (callers consume .ok).
+        from src.tools.mcp.outcomes import MCPToolOutcome
+
+        mock_mcp_mgr = MagicMock()
+        mock_mcp_mgr.has_tool = MagicMock(return_value=True)
+        mock_mcp_mgr.execute = AsyncMock(
+            return_value=MCPToolOutcome(status="ok", text="mcp result", server="srv", tool="greet")
+        )
+
+        result = await _execute_tool(
+            "mcp_srv_greet",
+            {"name": "Odin"},
+            mock_executor,
+            mock_skill_mgr,
+            None,
+            None,
+            requester="test",
+            mcp_manager=mock_mcp_mgr,
+        )
+
+        assert str(result) == "mcp result"
+        assert result.ok
+        mock_mcp_mgr.execute.assert_called_once_with("mcp_srv_greet", {"name": "Odin"})
+
+    async def test_execute_tool_mcp_none_falls_through(self):
+        from src.discord.background_task import _execute_tool
+
+        mock_executor = MagicMock()
+        mock_executor.config = MagicMock()
+        mock_executor.config.hosts = {}
+        mock_executor.execute = AsyncMock(return_value="executor result")
+
+        mock_skill_mgr = MagicMock()
+        mock_skill_mgr.has_skill = MagicMock(return_value=False)
+
+        result = await _execute_tool(
+            "run_command",
+            {"command": "echo hi", "host": "local"},
+            mock_executor,
+            mock_skill_mgr,
+            None,
+            None,
+            requester="test",
+            mcp_manager=None,
+        )
+
+        assert result == "executor result"
+
+    async def test_execute_tool_skill_takes_priority_over_mcp(self):
+        from src.discord.background_task import _execute_tool
+
+        mock_executor = MagicMock()
+        mock_executor.config = MagicMock()
+        mock_executor.config.hosts = {}
+
+        mock_skill_mgr = MagicMock()
+        mock_skill_mgr.has_skill = MagicMock(return_value=True)
+        mock_skill_mgr.execute = AsyncMock(return_value="skill result")
+
+        mock_mcp_mgr = MagicMock()
+        mock_mcp_mgr.has_tool = MagicMock(return_value=True)
+        mock_mcp_mgr.execute = AsyncMock(return_value="mcp result")
+
+        result = await _execute_tool(
+            "some_tool",
+            {},
+            mock_executor,
+            mock_skill_mgr,
+            None,
+            None,
+            requester="test",
+            mcp_manager=mock_mcp_mgr,
+        )
+
+        assert result == "skill result"
+        mock_mcp_mgr.execute.assert_not_called()
+
+    async def test_execute_tool_mcp_false_falls_to_executor(self):
+        from src.discord.background_task import _execute_tool
+
+        mock_executor = MagicMock()
+        mock_executor.config = MagicMock()
+        mock_executor.config.hosts = {}
+        mock_executor.execute = AsyncMock(return_value="executor result")
+
+        mock_skill_mgr = MagicMock()
+        mock_skill_mgr.has_skill = MagicMock(return_value=False)
+
+        mock_mcp_mgr = MagicMock()
+        mock_mcp_mgr.has_tool = MagicMock(return_value=False)
+
+        result = await _execute_tool(
+            "run_command",
+            {"command": "echo hi", "host": "local"},
+            mock_executor,
+            mock_skill_mgr,
+            None,
+            None,
+            requester="test",
+            mcp_manager=mock_mcp_mgr,
+        )
+
+        assert result == "executor result"
+        mock_mcp_mgr.execute.assert_not_called()

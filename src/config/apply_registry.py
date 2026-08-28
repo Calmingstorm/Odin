@@ -265,12 +265,14 @@ SECTIONS: dict[str, SectionSpec] = {
         "activation action yet.",
     ),
     "mcp": SectionSpec(
-        "restart",
+        "live_apply",
         "Model Context Protocol servers and tool publication.",
         owner="mcp",
-        restart_reason="The MCP control plane adopts this desired state at "
-        "startup. Dedicated live management routes arrive in a later phase; "
-        "until then, changes here apply on restart.",
+        apply_handler="POST/PUT/DELETE /api/mcp/servers*, POST /api/mcp/enabled",
+        activation_policy="Managed live through the dedicated /api/mcp routes: "
+        "server CRUD, the global switch, reconnect, and tools refresh persist "
+        "desired state to this file and reconcile the running control plane "
+        "in the same operation. Direct file edits apply on restart.",
     ),
     "slack": SectionSpec(
         "restart",

@@ -708,7 +708,6 @@ class TestModelPublicationIntegration:
         finally:
             await manager_shutdown(bot.mcp_manager)
 
-
     async def test_same_chat_turn_reassembles_after_unpublish(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         fake = FakeLLM(
@@ -744,9 +743,7 @@ class TestModelPublicationIntegration:
         finally:
             await manager_shutdown(bot.mcp_manager)
 
-    async def test_same_autonomous_turn_reassembles_after_unpublish(
-        self, tmp_path, monkeypatch
-    ):
+    async def test_same_autonomous_turn_reassembles_after_unpublish(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         fake = FakeLLM(
             [tool_call_response(("parse_time", {"expression": "now"})), text_response("done")]
@@ -779,7 +776,6 @@ class TestModelPublicationIntegration:
             assert "mcp_fake_echo" not in {t["name"] for t in fake.calls[1]["tools"]}
         finally:
             await manager_shutdown(bot.mcp_manager)
-
 
     async def test_loop_dispatch_audit_event_carries_mcp_metadata(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
@@ -848,9 +844,7 @@ class TestModelPublicationIntegration:
         try:
             await start_mcp(bot)
             await _wait_until(lambda: bot.mcp_manager.has_tool("mcp_fake_echo"))
-            await bot.tool_loop.run(
-                FakeMessage("chat"), [{"role": "user", "content": "chat"}]
-            )
+            await bot.tool_loop.run(FakeMessage("chat"), [{"role": "user", "content": "chat"}])
             await bot.tool_loop.run_autonomous("loop", FakeMessage().channel, None, "1")
             assert len(saved) == 2
             stored = str([turn.to_dict() for turn in saved])
@@ -893,3 +887,70 @@ class TestManagerLockAtomicity:
         manager_path = Path(__file__).resolve().parents[1] / "src" / "tools" / "mcp" / "manager.py"
         source = manager_path.read_text(encoding="utf-8")
         assert not TestManagerLockGuardMutations._violations(source)
+
+
+# --- Survivors from the retired tests/test_mcp_client.py (P4): the
+# config-schema pins are behavior of src/config/schema.py, not the old
+# client, and remain authoritative. ---
+
+
+class TestMCPConfig:
+    def test_defaults(self):
+        cfg = MCPConfig()
+        assert cfg.enabled is False
+        assert cfg.servers == {}
+
+    def test_with_servers(self):
+        cfg = MCPConfig(
+            enabled=True,
+            servers={
+                "test": MCPServerConfig(
+                    transport="stdio",
+                    command="/usr/bin/mcp-server",
+                    args=["--verbose"],
+                )
+            },
+        )
+        assert cfg.enabled is True
+        assert "test" in cfg.servers
+        assert cfg.servers["test"].command == "/usr/bin/mcp-server"
+        assert cfg.servers["test"].args == ["--verbose"]
+
+    def test_http_transport(self):
+        cfg = MCPServerConfig(
+            transport="http",
+            url="http://localhost:8080/mcp",
+            headers={"Authorization": "Bearer tok"},
+        )
+        assert cfg.transport == "http"
+        assert cfg.url == "http://localhost:8080/mcp"
+        assert cfg.headers["Authorization"] == "Bearer tok"
+
+    def test_invalid_transport(self):
+        with pytest.raises(ValueError, match="Invalid transport"):
+            MCPServerConfig(transport="grpc")
+
+    def test_default_timeout(self):
+        cfg = MCPServerConfig()
+        assert cfg.timeout_seconds == 120
+
+    def test_env_dict(self):
+        cfg = MCPServerConfig(env={"FOO": "bar"})
+        assert cfg.env["FOO"] == "bar"
+
+    def test_config_includes_mcp(self):
+        cfg = Config(discord={"token": "test"})
+        assert hasattr(cfg, "mcp")
+        assert isinstance(cfg.mcp, MCPConfig)
+        assert cfg.mcp.enabled is False
+
+    def test_stdio_defaults(self):
+        cfg = MCPServerConfig(transport="stdio")
+        assert cfg.command == ""
+        assert cfg.args == []
+        assert cfg.env == {}
+
+    def test_http_defaults(self):
+        cfg = MCPServerConfig(transport="http")
+        assert cfg.url == ""
+        assert cfg.headers == {}

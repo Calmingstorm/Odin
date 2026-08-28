@@ -205,7 +205,8 @@ class TestPhase3Imports:
 
 class TestPhase4Imports:
     def test_mcp_client(self):
-        from src.tools.mcp_client import MCPServerConnection
+        from src.tools.mcp.client import MCPServerConnection
+
         assert MCPServerConnection is not None
 
     def test_slack_notifier(self):
@@ -494,7 +495,7 @@ class TestImportSweep:
         "src.tools.result_validator",
         "src.tools.comfyui",
         "src.tools.browser",
-        "src.tools.mcp_client",
+        "src.tools.mcp.client",
         "src.search.fts",
         "src.search.hybrid",
         "src.search.sqlite_vec",

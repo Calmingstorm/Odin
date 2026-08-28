@@ -22,6 +22,7 @@ Modes:
   dies-mid-call     exits abruptly during tools/call.
   oversized-response emits a response line beyond the transport ceiling.
   stderr-flood      floods stderr forever while serving like `legacy`.
+  stderr-secret     emits configured API_TOKEN in stderr and server identity.
   hang-shutdown     ignores stdin EOF and SIGTERM (forces SIGKILL).
   blocked-write     never reads stdin after startup (real pipe backpressure pin).
   grandchild        like `legacy`, but spawns a sleeping grandchild whose
@@ -57,6 +58,7 @@ LEGACY_COUNTEROFFERS = {
     "dies-mid-call": "2025-06-18",
     "oversized-response": "2025-06-18",
     "stderr-flood": "2025-06-18",
+    "stderr-secret": "2025-06-18",
     "hang-shutdown": "2025-06-18",
     "grandchild": "2025-06-18",
     "missing-schema": "2025-06-18",
@@ -253,8 +255,18 @@ def handle(msg: dict) -> None:
                 "result": {
                     "protocolVersion": version,
                     "capabilities": {"tools": {"listChanged": True}},
-                    "serverInfo": {"name": f"fake-{MODE}", "version": "1.0"},
-                    "instructions": "fake legacy server",
+                    "serverInfo": {
+                        "name": f"fake-{MODE}",
+                        "version": "1.0",
+                        "diagnostic": os.environ.get("API_TOKEN", "")
+                        if MODE == "stderr-secret"
+                        else "",
+                    },
+                    "instructions": (
+                        f"configured credential {os.environ.get('API_TOKEN', '')}"
+                        if MODE == "stderr-secret"
+                        else "fake legacy server"
+                    ),
                 },
             }
         )
@@ -353,6 +365,9 @@ def main() -> None:
             [sys.executable, "-c", "import time; time.sleep(600)"],
         )
         STATE["grandchild_pid"] = child.pid
+    if MODE == "stderr-secret":
+        sys.stderr.write(f"startup credential={os.environ.get('API_TOKEN', '')}\n")
+        sys.stderr.flush()
     if MODE == "stderr-flood":
 
         def flood() -> None:
