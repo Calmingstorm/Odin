@@ -97,6 +97,14 @@ class _ServerRuntime:
         return bool(self.config.get("enabled", True))
 
 
+@dataclass(frozen=True)
+class _DesiredStateTransition:
+    """Captured identities retired/reconciled after a durable desired commit."""
+
+    retire: tuple[_ServerRuntime, ...]
+    reconcile_names: tuple[str, ...]
+
+
 def validate_server_config(name: str, config: dict[str, Any]) -> None:
     if len(name) > proto.MAX_AUDIT_IDENTIFIER_CHARS:
         raise MCPConfigError(
@@ -430,6 +438,108 @@ class MCPManager:
     # ------------------------------------------------------------------
     # Desired-state mutation (persistence is the caller's concern)
     # ------------------------------------------------------------------
+
+    def stage_desired_state(
+        self, *, enabled: bool, servers: dict[str, dict[str, Any]]
+    ) -> _DesiredStateTransition:
+        """Adopt durable desired state and unpublish superseded tools only.
+
+        This is the post-persist half of the management transaction.  It is
+        deliberately free of transport I/O, so callers may invoke it before
+        releasing ``config_transaction()``: disk, ``bot.config``, generation,
+        and catalog absence then become one observable commit.  Retirement and
+        reconnect happen later through :meth:`finish_desired_state`.
+        """
+        self._ensure_open()
+        desired = {name: copy.deepcopy(config) for name, config in servers.items()}
+        retire: list[_ServerRuntime] = []
+        changed_names: list[str] = []
+        # No await and no transport work: this function is one event-loop
+        # atomic section.  That is the assembled-request boundary — after the
+        # disk writer settles, no other task can assemble a catalog between
+        # generation advancement and superseded unpublication.
+        previous_enabled = self._global_enabled
+        previous = self._servers
+        replacements: dict[str, _ServerRuntime] = {}
+        catalog_changed = False
+
+        for name, config in desired.items():
+            old = previous.get(name)
+            if old is not None and old.config == config:
+                replacements[name] = old
+                continue
+            runtime = _ServerRuntime(config=config, generation=self._next_gen())
+            try:
+                validate_server_config(name, runtime.config)
+            except MCPConfigError as exc:
+                runtime.state = STATE_ERROR
+                runtime.last_error = _scrub_operator_text(runtime.config, exc, limit=500)
+                runtime.config_invalid = True
+            replacements[name] = runtime
+            changed_names.append(name)
+
+        for name, old in previous.items():
+            if replacements.get(name) is old:
+                continue
+            old.generation = self._next_gen()
+            catalog_changed = catalog_changed or bool(old.published)
+            old.published = {}
+            retire.append(old)
+
+        # Global disable fences every reused runtime now.  A supervisor
+        # from the prior generation cannot publish after this block.
+        if previous_enabled and not enabled:
+            retired_ids = {id(runtime) for runtime in retire}
+            for name, runtime in replacements.items():
+                if id(runtime) in retired_ids:
+                    continue
+                runtime.generation = self._next_gen()
+                catalog_changed = catalog_changed or bool(runtime.published)
+                runtime.published = {}
+                runtime.state = STATE_DISABLED
+                retire.append(runtime)
+        elif not previous_enabled and enabled:
+            changed_names = list(replacements)
+
+        self._global_enabled = bool(enabled)
+        self._servers = replacements
+        self._rebuild_published_index_locked()
+        if catalog_changed:
+            self._notify_catalog_changed()
+        # Preserve order while deduplicating identities/names.
+        unique_retire = tuple(dict.fromkeys(map(id, retire)))
+        retire_by_id = {id(runtime): runtime for runtime in retire}
+        captured_retire = tuple(retire_by_id[identity] for identity in unique_retire)
+        return _DesiredStateTransition(
+            retire=captured_retire,
+            reconcile_names=tuple(dict.fromkeys(changed_names)),
+        )
+
+    async def finish_desired_state(self, transition: _DesiredStateTransition) -> None:
+        """Cancellation-safe retirement/reconcile after a staged commit."""
+        committed = asyncio.Event()
+        committed.set()  # desired state already committed; finishing is mandatory
+        await self._drain_transition(
+            self._finish_desired_state_inner(transition),
+            committed=committed,
+            name="finish-desired-state",
+        )
+
+    async def _finish_desired_state_inner(self, transition: _DesiredStateTransition) -> None:
+        async with self._lifecycle_lock:
+            await asyncio.gather(
+                *(self._retire_runtime(runtime) for runtime in transition.retire),
+                return_exceptions=True,
+            )
+            if self._started and self._global_enabled:
+                await asyncio.gather(
+                    *(
+                        self._reconcile_server(name)
+                        for name in transition.reconcile_names
+                        if name in self._servers
+                    ),
+                    return_exceptions=True,
+                )
 
     async def _load_desired_state_inner(
         self,

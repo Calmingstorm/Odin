@@ -74,7 +74,7 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
             return changes
         return [] if before == after else [(path, after)]
 
-    async def _persist_desired(servers: dict[str, dict], enabled: bool | None = None) -> None:
+    async def _persist_desired(servers: dict[str, dict], enabled: bool | None = None) -> bool:
         """Persist only changed MCP leaves, then rebind the live config.
 
         A replacement of the whole server map would flatten untouched
@@ -86,8 +86,6 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         if enabled is not None and bot.config.mcp.enabled != bool(enabled):
             changes.append((("mcp", "enabled"), bool(enabled)))
         exc, cancelled = await config_persistence.persist_config_paths_locked(changes)
-        if cancelled:
-            raise asyncio.CancelledError
         if exc is not None:
             raise exc
         # Rebind runtime config so restarts and readers agree with disk.
@@ -96,6 +94,50 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         }
         if enabled is not None:
             bot.config.mcp.enabled = bool(enabled)
+        return cancelled
+
+    # One route-level state machine orders every MCP read → durable write →
+    # manager adoption → reconcile.  This lock is separate from the shared
+    # config lock so slow transport teardown/connect never blocks unrelated
+    # configuration writers.
+    management_lock = asyncio.Lock()
+
+    async def _drain_management(operation, *, commit_started: asyncio.Event):
+        """Abort while queued; after persistence starts, drain to coherence."""
+        task = asyncio.create_task(operation, name="mcp-management-mutation")
+        cancelled = False
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                if not commit_started.is_set():
+                    task.cancel()
+                    try:
+                        await task
+                    except asyncio.CancelledError:
+                        pass
+                    raise
+                cancelled = True
+                current = asyncio.current_task()
+                if current is not None:
+                    while current.cancelling():
+                        current.uncancel()
+        result = await task
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _commit_desired(
+        servers: dict[str, dict],
+        *,
+        enabled: bool,
+        commit_started: asyncio.Event,
+    ):
+        """Commit all live truths, then do transport work outside config lock."""
+        commit_started.set()
+        writer_cancelled = await _persist_desired(servers, enabled=enabled)
+        transition = _manager().stage_desired_state(enabled=enabled, servers=servers)
+        return transition, writer_cancelled
 
     def _apply_secret_patches(base: dict, body: dict, field: str) -> dict | web.Response:
         mapping = dict(base.get(field) or {})
@@ -186,7 +228,6 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
         name = str(body.get("name", "")).strip()
         if not name:
             return web.json_response({"error": "name is required"}, status=400)
-        manager = _manager()
         composed = _compose_config({}, body)
         if isinstance(composed, web.Response):
             return composed
@@ -194,38 +235,62 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
             validate_server_config(name, composed)
         except MCPConfigError as exc:
             return web.json_response({"error": _sanitized(str(exc))}, status=400)
-        async with config_transaction():
-            servers = manager.desired_servers()
-            if name in servers or name in (bot.config.mcp.servers or {}):
-                return web.json_response({"error": f"server '{name}' already exists"}, status=409)
-            servers[name] = composed
-            await _persist_desired(servers)
-        try:
-            await manager.add_server(name, composed)
-        except MCPConfigError as exc:
-            # Durable config stands; runtime adoption failed — honest split.
-            return web.json_response(
-                {"saved": True, "connected": False, "error": _sanitized(str(exc))},
-                status=500,
-            )
-        return _mutation_response(name, saved=True)
+
+        commit_started = asyncio.Event()
+
+        async def mutate():
+            async with management_lock:
+                async with config_transaction():
+                    servers = _live_servers()
+                    if name in servers or name in _manager().desired_servers():
+                        return (
+                            web.json_response(
+                                {"error": f"server '{name}' already exists"}, status=409
+                            ),
+                            False,
+                        )
+                    servers[name] = composed
+                    transition, writer_cancelled = await _commit_desired(
+                        servers,
+                        enabled=bool(bot.config.mcp.enabled),
+                        commit_started=commit_started,
+                    )
+                await _manager().finish_desired_state(transition)
+                return _mutation_response(name, saved=True), writer_cancelled
+
+        response, writer_cancelled = await _drain_management(
+            mutate(), commit_started=commit_started
+        )
+        if writer_cancelled:
+            raise asyncio.CancelledError
+        return response
 
     @routes.delete("/api/mcp/servers/{name}")
     async def remove_mcp_server(request: web.Request) -> web.Response:
         name = request.match_info["name"]
-        manager = _manager()
-        async with config_transaction():
-            servers = manager.desired_servers()
-            known = name in servers or name in (bot.config.mcp.servers or {})
-            if not known:
-                return web.json_response({"error": "server not found"}, status=404)
-            servers.pop(name, None)
-            await _persist_desired(servers)
-        try:
-            await manager.remove_server(name)
-        except MCPConfigError:
-            pass  # already absent from runtime; disk truth is what matters
-        return web.json_response({"saved": True, "removed": name})
+        commit_started = asyncio.Event()
+
+        async def mutate():
+            async with management_lock:
+                async with config_transaction():
+                    servers = _live_servers()
+                    if name not in servers:
+                        return web.json_response({"error": "server not found"}, status=404), False
+                    servers.pop(name)
+                    transition, writer_cancelled = await _commit_desired(
+                        servers,
+                        enabled=bool(bot.config.mcp.enabled),
+                        commit_started=commit_started,
+                    )
+                await _manager().finish_desired_state(transition)
+                return web.json_response({"saved": True, "removed": name}), writer_cancelled
+
+        response, writer_cancelled = await _drain_management(
+            mutate(), commit_started=commit_started
+        )
+        if writer_cancelled:
+            raise asyncio.CancelledError
+        return response
 
     # ------------------------------------------------------------------
     # P4 additions (appended after the original four paths).
@@ -238,29 +303,40 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
             body = await request.json()
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
-        manager = _manager()
-        async with config_transaction():
-            servers = manager.desired_servers()
-            base = servers.get(name)
-            if base is None:
-                return web.json_response({"error": "server not found"}, status=404)
-            composed = _compose_config(base, body)
-            if isinstance(composed, web.Response):
-                return composed
-            try:
-                validate_server_config(name, composed)
-            except MCPConfigError as exc:
-                return web.json_response({"error": _sanitized(str(exc))}, status=400)
-            servers[name] = composed
-            await _persist_desired(servers)
-        try:
-            await manager.update_server(name, composed)
-        except MCPConfigError as exc:
-            return web.json_response(
-                {"saved": True, "connected": False, "error": _sanitized(str(exc))},
-                status=500,
-            )
-        return _mutation_response(name, saved=True)
+        commit_started = asyncio.Event()
+
+        async def mutate():
+            async with management_lock:
+                async with config_transaction():
+                    servers = _live_servers()
+                    base = servers.get(name)
+                    if base is None:
+                        return web.json_response({"error": "server not found"}, status=404), False
+                    composed = _compose_config(base, body)
+                    if isinstance(composed, web.Response):
+                        return composed, False
+                    try:
+                        validate_server_config(name, composed)
+                    except MCPConfigError as exc:
+                        return (
+                            web.json_response({"error": _sanitized(str(exc))}, status=400),
+                            False,
+                        )
+                    servers[name] = composed
+                    transition, writer_cancelled = await _commit_desired(
+                        servers,
+                        enabled=bool(bot.config.mcp.enabled),
+                        commit_started=commit_started,
+                    )
+                await _manager().finish_desired_state(transition)
+                return _mutation_response(name, saved=True), writer_cancelled
+
+        response, writer_cancelled = await _drain_management(
+            mutate(), commit_started=commit_started
+        )
+        if writer_cancelled:
+            raise asyncio.CancelledError
+        return response
 
     @routes.post("/api/mcp/servers/{name}/reconnect")
     async def reconnect_mcp_server(request: web.Request) -> web.Response:
@@ -292,19 +368,34 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "invalid JSON"}, status=400)
         if not isinstance(body.get("enabled"), bool):
             return web.json_response({"error": "enabled must be a boolean"}, status=400)
-        manager = _manager()
         enabled = body["enabled"]
-        async with config_transaction():
-            await _persist_desired(manager.desired_servers(), enabled=enabled)
-        await manager.set_global_enabled(enabled)
-        status = manager.get_status()
-        return web.json_response(
-            {
-                "saved": True,
-                "enabled": status["enabled"],
-                "connected_count": status["connected_count"],
-            }
+        commit_started = asyncio.Event()
+
+        async def mutate():
+            async with management_lock:
+                async with config_transaction():
+                    transition, writer_cancelled = await _commit_desired(
+                        _live_servers(), enabled=enabled, commit_started=commit_started
+                    )
+                await _manager().finish_desired_state(transition)
+                status = _manager().get_status()
+                return (
+                    web.json_response(
+                        {
+                            "saved": True,
+                            "enabled": status["enabled"],
+                            "connected_count": status["connected_count"],
+                        }
+                    ),
+                    writer_cancelled,
+                )
+
+        response, writer_cancelled = await _drain_management(
+            mutate(), commit_started=commit_started
         )
+        if writer_cancelled:
+            raise asyncio.CancelledError
+        return response
 
 
 def register_slack(routes: web.RouteTableDef, bot) -> None:

@@ -341,6 +341,215 @@ class TestOperatorTextScrubbing:
         assert "[REDACTED]" in caplog.text
 
 
+class TestMutationSerialization:
+    async def _park_first_finish(self, bot, monkeypatch):
+        real = bot.mcp_manager.finish_desired_state
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        calls = 0
+
+        async def parked(transition):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                entered.set()
+                await release.wait()
+            await real(transition)
+
+        monkeypatch.setattr(bot.mcp_manager, "finish_desired_state", parked)
+        return entered, release
+
+    async def test_overlapping_add_add_keeps_every_truth(self, harness, monkeypatch):
+        client, bot, config_path = harness
+        entered, release = await self._park_first_finish(bot, monkeypatch)
+        one = asyncio.create_task(client.post("/api/mcp/servers", json=_server_body(name="one")))
+        await entered.wait()
+        two = asyncio.create_task(client.post("/api/mcp/servers", json=_server_body(name="two")))
+        await asyncio.sleep(0.05)
+        assert not two.done(), "second mutation must wait for first reconcile"
+        assert set(_disk(config_path)["mcp"]["servers"]) == {"one"}
+        assert set(bot.config.mcp.servers) == {"one"}
+        assert set(bot.mcp_manager.desired_servers()) == {"one"}
+        release.set()
+        responses = await asyncio.gather(one, two)
+        assert [response.status for response in responses] == [201, 201]
+        expected = {"one", "two"}
+        assert set(_disk(config_path)["mcp"]["servers"]) == expected
+        assert set(bot.config.mcp.servers) == expected
+        assert set(bot.mcp_manager.desired_servers()) == expected
+
+    async def test_overlapping_update_update_merges_transaction_current_state(
+        self, harness, monkeypatch
+    ):
+        client, bot, config_path = harness
+        assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+        entered, release = await self._park_first_finish(bot, monkeypatch)
+        first = asyncio.create_task(
+            client.put("/api/mcp/servers/fake", json={"timeout_seconds": 31})
+        )
+        await entered.wait()
+        second = asyncio.create_task(
+            client.put("/api/mcp/servers/fake", json={"tool_allowlist": ["echo"]})
+        )
+        await asyncio.sleep(0.05)
+        assert not second.done()
+        assert _disk(config_path)["mcp"]["servers"]["fake"]["timeout_seconds"] == 31
+        assert _disk(config_path)["mcp"]["servers"]["fake"]["tool_allowlist"] == []
+        release.set()
+        responses = await asyncio.gather(first, second)
+        assert [response.status for response in responses] == [201, 201]
+        disk = _disk(config_path)["mcp"]["servers"]["fake"]
+        live = bot.config.mcp.servers["fake"]
+        desired = bot.mcp_manager.desired_servers()["fake"]
+        assert disk["timeout_seconds"] == live.timeout_seconds == desired["timeout_seconds"] == 31
+        assert (
+            disk["tool_allowlist"] == live.tool_allowlist == desired["tool_allowlist"] == ["echo"]
+        )
+
+    async def test_overlapping_delete_update_cannot_resurrect(self, harness, monkeypatch):
+        client, bot, config_path = harness
+        assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+        entered, release = await self._park_first_finish(bot, monkeypatch)
+        delete = asyncio.create_task(client.delete("/api/mcp/servers/fake"))
+        await entered.wait()
+        update = asyncio.create_task(
+            client.put("/api/mcp/servers/fake", json={"timeout_seconds": 31})
+        )
+        await asyncio.sleep(0.05)
+        assert not update.done()
+        assert _disk(config_path)["mcp"]["servers"] == {}
+        release.set()
+        delete_response, update_response = await asyncio.gather(delete, update)
+        assert delete_response.status == 200
+        assert update_response.status == 404
+        assert _disk(config_path)["mcp"]["servers"] == {}
+        assert bot.config.mcp.servers == {}
+        assert bot.mcp_manager.desired_servers() == {}
+
+    async def test_global_switch_and_crud_share_one_management_order(self, harness, monkeypatch):
+        client, bot, config_path = harness
+        entered, release = await self._park_first_finish(bot, monkeypatch)
+        disable = asyncio.create_task(client.post("/api/mcp/enabled", json={"enabled": False}))
+        await entered.wait()
+        add = asyncio.create_task(
+            client.post("/api/mcp/servers", json=_server_body(name="after_off"))
+        )
+        await asyncio.sleep(0.05)
+        assert not add.done()
+        assert _disk(config_path)["mcp"]["servers"] == {}
+        assert _disk(config_path)["mcp"]["enabled"] is False
+        release.set()
+        disable_response, add_response = await asyncio.gather(disable, add)
+        assert disable_response.status == 200
+        assert add_response.status == 201
+        assert _disk(config_path)["mcp"]["enabled"] is False
+        assert bot.config.mcp.enabled is False
+        assert bot.mcp_manager.global_enabled is False
+        assert not bot.mcp_manager.has_tool("mcp_after_off_echo")
+
+
+class TestPostCommitCancellation:
+    @pytest.mark.parametrize("operation", ["add", "update", "delete", "global"])
+    async def test_real_committed_write_rebinds_every_truth_before_cancellation(
+        self, harness, monkeypatch, operation
+    ):
+        import aiohttp
+
+        client, bot, config_path = harness
+        if operation in {"update", "delete"}:
+            assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+
+        real = persistence_mod.persist_config_paths_locked
+
+        async def committed_then_cancelled(changes, **kwargs):
+            exc, _cancelled = await real(changes, **kwargs)
+            return exc, True
+
+        monkeypatch.setattr(
+            persistence_mod, "persist_config_paths_locked", committed_then_cancelled
+        )
+        request = {
+            "add": lambda: client.post("/api/mcp/servers", json=_server_body(name="cancelled_add")),
+            "update": lambda: client.put("/api/mcp/servers/fake", json={"timeout_seconds": 77}),
+            "delete": lambda: client.delete("/api/mcp/servers/fake"),
+            "global": lambda: client.post("/api/mcp/enabled", json={"enabled": False}),
+        }[operation]
+        try:
+            response = await request()
+            assert response.status >= 500
+        except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError):
+            pass
+
+        disk = _disk(config_path)
+        if operation == "add":
+            assert "cancelled_add" in disk["mcp"]["servers"]
+            assert "cancelled_add" in bot.config.mcp.servers
+            assert "cancelled_add" in bot.mcp_manager.desired_servers()
+        elif operation == "update":
+            assert disk["mcp"]["servers"]["fake"]["timeout_seconds"] == 77
+            assert bot.config.mcp.servers["fake"].timeout_seconds == 77
+            assert bot.mcp_manager.desired_servers()["fake"]["timeout_seconds"] == 77
+        elif operation == "delete":
+            assert "fake" not in disk["mcp"]["servers"]
+            assert "fake" not in bot.config.mcp.servers
+            assert "fake" not in bot.mcp_manager.desired_servers()
+            assert not bot.mcp_manager.has_tool("mcp_fake_echo")
+        else:
+            assert disk["mcp"]["enabled"] is False
+            assert bot.config.mcp.enabled is False
+            assert bot.mcp_manager.global_enabled is False
+
+
+class TestPostCommitPublicationFence:
+    @pytest.mark.parametrize("operation", ["update", "disable", "remove", "global_off"])
+    async def test_superseded_tools_are_absent_before_reconcile(
+        self, harness, monkeypatch, operation
+    ):
+        client, bot, config_path = harness
+        assert (
+            await client.post("/api/mcp/servers", json=_server_body(tool_allowlist=["echo"]))
+        ).status == 201
+        assert bot.mcp_manager.has_tool("mcp_fake_echo")
+
+        entered_finish = asyncio.Event()
+        release_finish = asyncio.Event()
+        real_finish = bot.mcp_manager.finish_desired_state
+
+        async def parked_finish(transition):
+            entered_finish.set()
+            await release_finish.wait()
+            await real_finish(transition)
+
+        monkeypatch.setattr(bot.mcp_manager, "finish_desired_state", parked_finish)
+        request = {
+            "update": lambda: client.put(
+                "/api/mcp/servers/fake", json={"tool_allowlist": ["fail"]}
+            ),
+            "disable": lambda: client.put("/api/mcp/servers/fake", json={"enabled": False}),
+            "remove": lambda: client.delete("/api/mcp/servers/fake"),
+            "global_off": lambda: client.post("/api/mcp/enabled", json={"enabled": False}),
+        }[operation]
+        task = asyncio.create_task(request())
+        await entered_finish.wait()
+
+        # Disk has committed, but network retirement/reconcile is parked.
+        # The old catalog entry must already be gone at this exact boundary.
+        assert not bot.mcp_manager.has_tool("mcp_fake_echo")
+        if operation == "remove":
+            assert "fake" not in _disk(config_path)["mcp"]["servers"]
+        elif operation == "global_off":
+            assert _disk(config_path)["mcp"]["enabled"] is False
+        else:
+            disk = _disk(config_path)["mcp"]["servers"]["fake"]
+            expected = ["fail"] if operation == "update" else False
+            field = "tool_allowlist" if operation == "update" else "enabled"
+            assert disk[field] == expected
+
+        release_finish.set()
+        response = await task
+        assert response.status < 300, await response.text()
+
+
 class TestErrorArms:
     async def test_invalid_json_rejected_on_all_mutation_routes(self, harness):
         client, bot, config_path = harness
@@ -368,41 +577,6 @@ class TestErrorArms:
             response = await client.put("/api/mcp/servers/fake", json=patch)
             assert response.status == 400
 
-    async def test_add_adoption_failure_reports_saved_true_connected_false(
-        self, harness, monkeypatch
-    ):
-        from src.tools.mcp import MCPConfigError
-
-        client, bot, config_path = harness
-
-        async def refuse(name, config):
-            raise MCPConfigError("runtime refused adoption")
-
-        monkeypatch.setattr(bot.mcp_manager, "add_server", refuse)
-        response = await client.post("/api/mcp/servers", json=_server_body())
-        body = await response.json()
-        assert response.status == 500
-        assert body["saved"] is True and body["connected"] is False
-        # Durable truth stands on disk despite the runtime refusal.
-        assert "fake" in _disk(config_path)["mcp"]["servers"]
-
-    async def test_update_adoption_failure_reports_saved_true_connected_false(
-        self, harness, monkeypatch
-    ):
-        from src.tools.mcp import MCPConfigError
-
-        client, bot, config_path = harness
-        await client.post("/api/mcp/servers", json=_server_body())
-
-        async def refuse(name, config):
-            raise MCPConfigError("runtime refused update")
-
-        monkeypatch.setattr(bot.mcp_manager, "update_server", refuse)
-        response = await client.put("/api/mcp/servers/fake", json={"timeout_seconds": 60})
-        body = await response.json()
-        assert response.status == 500
-        assert body["saved"] is True and body["connected"] is False
-
     async def test_delete_config_only_server_succeeds(self, harness):
         # Config drift: the file knows a server the runtime never adopted.
         from src.config.schema import MCPServerConfig
@@ -414,24 +588,6 @@ class TestErrorArms:
         response = await client.delete("/api/mcp/servers/ghostly")
         assert response.status == 200
         assert _disk(config_path)["mcp"]["servers"] == {}
-
-    async def test_cancelled_persist_propagates_cancellation(self, harness, monkeypatch):
-        import aiohttp
-
-        client, bot, config_path = harness
-
-        async def cancelled(*args, **kwargs):
-            return None, True
-
-        monkeypatch.setattr(persistence_mod, "persist_config_paths_locked", cancelled)
-        try:
-            response = await client.post("/api/mcp/servers", json=_server_body())
-            # A cancelled handler surfaces as a 500-class server error.
-            assert response.status >= 500
-        except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError):
-            pass  # the cancellation tore the connection down — equally honest
-        assert not bot.mcp_manager.has_tool("mcp_fake_echo")
-        assert "fake" not in _disk(config_path)["mcp"]["servers"]
 
     async def test_mutation_response_survives_row_vanishing_race(self, harness, monkeypatch):
         client, bot, config_path = harness
