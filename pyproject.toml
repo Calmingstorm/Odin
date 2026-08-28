@@ -15,6 +15,7 @@ dependencies = [
     "pyyaml>=6.0",
     "ruamel.yaml>=0.18",
     "pydantic>=2.0",
+    "jsonschema>=4.23,<5",
     "croniter>=2.0.0",
     "fastembed>=0.8.0",
     "sqlite-vec>=0.1.0",
@@ -39,6 +40,7 @@ dev = [
     "types-aiofiles==25.1.0.20260518",
     "types-PyYAML==6.0.12.20260518",
     "types-croniter==6.2.3.20260704",
+    "types-jsonschema==4.26.0.20260518",
 ]
 
 [project.scripts]
