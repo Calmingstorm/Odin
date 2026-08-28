@@ -22,12 +22,14 @@ from ..odin_log import get_logger
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..tools.result_validator import ToolResult
 from ..tools.risk_classifier import classify_tool
-from .tool_loop_helpers import ensure_failure_visible
+from .tool_loop_helpers import _scrub_tool_input_for_storage, ensure_failure_visible
 
 _EMAIL_BODY_TOOLS = frozenset({"email_send"})
 
 
 def _scrub_email_input(tool_name: str, tool_input: dict) -> dict:
+    if tool_name.startswith("mcp_"):
+        return _scrub_tool_input_for_storage(tool_name, tool_input)
     if tool_name not in _EMAIL_BODY_TOOLS or not isinstance(tool_input, dict):
         return tool_input
     cleaned = dict(tool_input)

@@ -44,15 +44,23 @@ _EMAIL_BODY_TOOLS = frozenset({"email_send"})
 
 
 def _deep_scrub_strings(value):
-    """Secret-scrub every string leaf of an arbitrary JSON-shaped value."""
+    """Recursively scrub patterns and opaque values under sensitive keys."""
+    from ..config.sensitivity import is_storage_sensitive_key
     from ..llm.secret_scrubber import scrub_output_secrets
 
     if isinstance(value, str):
         return scrub_output_secrets(value)
     if isinstance(value, dict):
-        return {k: _deep_scrub_strings(v) for k, v in value.items()}
+        return {
+            key: (
+                "[redacted:sensitive-key]"
+                if is_storage_sensitive_key(key)
+                else _deep_scrub_strings(item)
+            )
+            for key, item in value.items()
+        }
     if isinstance(value, list):
-        return [_deep_scrub_strings(v) for v in value]
+        return [_deep_scrub_strings(item) for item in value]
     return value
 
 

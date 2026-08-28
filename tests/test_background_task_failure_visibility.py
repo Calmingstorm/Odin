@@ -217,11 +217,20 @@ class TestStructuredFailureVisibility:
         )
         audit = AsyncMock()
         task = make_task(
-            [{"tool_name": "mcp_srv_write", "tool_input": {}, "on_failure": "continue"}]
+            [
+                {
+                    "tool_name": "mcp_srv_write",
+                    "tool_input": {"password": "opaque-background-secret"},
+                    "on_failure": "continue",
+                }
+            ]
         )
         await run_background_task(task, executor, _FakeSkillManager(), audit_logger=audit)
         assert task.results[0].audit_metadata == metadata
-        assert audit.log_execution.await_args.kwargs["audit_metadata"] == metadata
+        kwargs = audit.log_execution.await_args.kwargs
+        assert kwargs["audit_metadata"] == metadata
+        assert "opaque-background-secret" not in str(kwargs["tool_input"])
+        assert kwargs["tool_input"]["password"] == "[redacted:sensitive-key]"
 
 
 class TestStringHeuristic:

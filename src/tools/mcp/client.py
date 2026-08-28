@@ -645,6 +645,10 @@ class MCPServerConnection:
         if not isinstance(raw, dict) or not isinstance(raw.get("name"), str) or not raw["name"]:
             raise MCPProtocolError(f"{self.name}: tool entry without a name")
         name = raw["name"]
+        if len(name) > proto.MAX_AUDIT_IDENTIFIER_CHARS:
+            raise MCPProtocolError(
+                f"{self.name}: tool name exceeds {proto.MAX_AUDIT_IDENTIFIER_CHARS} characters"
+            )
         description = _clean_text(str(raw.get("description", "")), proto.MAX_DESCRIPTION_CHARS)
         schema = raw.get("inputSchema")
         check = proto.validate_tool_schema(schema)

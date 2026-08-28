@@ -488,7 +488,12 @@ class TestRunAgentTrajectory:
             if calls == 1:
                 return {
                     "text": "calling",
-                    "tool_calls": [{"name": "mcp_srv_write", "input": {"value": 1}}],
+                    "tool_calls": [
+                        {
+                            "name": "mcp_srv_write",
+                            "input": {"value": 1, "password": "opaque-agent-secret"},
+                        }
+                    ],
                 }
             assert "Error (tool reported failure)" in messages[-1]["content"]
             return {"text": "stopped", "tool_calls": []}
@@ -518,7 +523,12 @@ class TestRunAgentTrajectory:
             trajectory_saver=saver,
         )
         entry = await saver.find_by_agent_id("mcp-structured")
-        stored = entry["iterations"][0]["tool_results"][0]
+        first_iteration = entry["iterations"][0]
+        assert "opaque-agent-secret" not in str(first_iteration["tool_calls"])
+        assert first_iteration["tool_calls"][0]["input"]["password"] == (
+            "[redacted:sensitive-key]"
+        )
+        stored = first_iteration["tool_results"][0]
         assert stored["ok"] is False
         assert stored["audit_metadata"] == metadata
 

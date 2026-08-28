@@ -210,13 +210,16 @@ class ScheduledEventHandlers:
                 requester_id or "",
             )
             if isinstance(result, ToolResult) and result.audit_metadata:
-                await self._audit.log_event(
-                    event_type="scheduled_tool",
-                    action=tool_name,
-                    actor=requester_id or "scheduler",
-                    channel_id=str(getattr(channel, "id", "")),
-                    metadata=dict(result.audit_metadata),
-                )
+                try:
+                    await self._audit.log_event(
+                        event_type="scheduled_tool",
+                        action=tool_name,
+                        actor=requester_id or "scheduler",
+                        channel_id=str(getattr(channel, "id", "")),
+                        metadata=dict(result.audit_metadata),
+                    )
+                except Exception:
+                    log.warning("Failed to audit scheduled MCP tool %s", tool_name)
         except Exception as e:
             return ToolResult(
                 output=f"Error executing {tool_name}: {e}",

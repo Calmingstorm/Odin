@@ -109,7 +109,8 @@ control-character-stripped.
 ## Bounds
 
 40 published tools per server and globally (over-limit ⇒ blocked, resolved
-via per-server `tool_allowlist`); 1,024-char model-facing descriptions;
+via per-server `tool_allowlist`); 128-char server/original-tool audit identifiers;
+1,024-char model-facing descriptions;
 32 KiB schema per tool / 256 KiB per server / depth 20 / 2,048 nodes;
 32 list pages / 128 discovered tools; 4 MiB wire-result ceiling before the
 standard 12 K model-facing result cap. Tool-list freshness: TTL-clamped

@@ -14,6 +14,7 @@ from src.discord.mcp_dispatch import (
 )
 from src.discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from src.tools.mcp.manager import MCPManager
+from src.tools.mcp.outcomes import MCPToolOutcome
 from src.tools.result_validator import ToolResult
 
 FAKE = str(Path(__file__).parent / "fakes" / "mcp_stdio_server.py")
@@ -95,6 +96,26 @@ class TestSeamMapping:
         finally:
             await manager.shutdown()
 
+
+    async def test_audit_identifiers_are_defensively_bounded(self):
+        class OversizedManager:
+            async def execute(self, tool_name, tool_input):
+                return MCPToolOutcome(
+                    status="ok",
+                    text="done",
+                    server="s" * 5000,
+                    tool="t" * 5000,
+                    generation=1,
+                    negotiated_version="2025-06-18",
+                )
+
+        result = await dispatch_mcp_tool(OversizedManager(), "mcp_x", {})
+        assert len(result.audit_metadata["mcp_server"]) <= 128
+        assert len(result.audit_metadata["mcp_tool"]) <= 128
+        assert result.audit_metadata["mcp_server"].endswith(
+            result.audit_metadata["mcp_server"].split("~")[-1]
+        )
+
     def test_is_mcp_tool_predicate(self):
         manager = MCPManager()
         assert not is_mcp_tool(manager, "mcp_fake_echo")
@@ -158,6 +179,26 @@ class TestArgumentScrubbing:
         )
         flattened = str(scrubbed)
         assert token not in flattened
+        assert "hello" in flattened
+
+    def test_sensitive_keys_redact_opaque_values_at_any_depth(self):
+        scrubbed = _scrub_tool_input_for_storage(
+            "mcp_srv_tool",
+            {
+                "password": "hunter2",
+                "nested": {
+                    "api_key": "plain-secret",
+                    "authorization": "Basic opaque",
+                    "safe": "hello",
+                },
+                "items": [{"credential": {"opaque": "value"}}],
+            },
+        )
+        flattened = str(scrubbed)
+        assert "hunter2" not in flattened
+        assert "plain-secret" not in flattened
+        assert "Basic opaque" not in flattened
+        assert "'opaque': 'value'" not in flattened
         assert "hello" in flattened
 
     def test_non_mcp_tools_keep_existing_behavior(self):

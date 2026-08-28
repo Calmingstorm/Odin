@@ -297,6 +297,7 @@ class TestConfigValidation:
         "name,config,match",
         [
             ("bad name", {"transport": "stdio", "command": "x"}, "invalid server name"),
+            ("s" * 129, {"transport": "stdio", "command": "x"}, "invalid server name"),
             ("ok", {"transport": "carrier-pigeon"}, "transport"),
             ("ok", {"transport": "stdio"}, "command"),
             ("ok", {"transport": "http", "url": "ftp://x"}, "http"),

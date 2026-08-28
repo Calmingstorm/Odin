@@ -1517,12 +1517,20 @@ class ToolLoopRunner:
         from ..trajectories.saver import ToolIteration
 
         iter_tool_calls = [
-            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in (llm_resp.tool_calls or [])
+            {"id": tc.id, "name": tc.name, "input": tc.input}
+            for tc in (llm_resp.tool_calls or [])
+        ]
+        stored_tool_calls = [
+            {
+                **call,
+                "input": _scrub_tool_input_for_storage(call["name"], call["input"]),
+            }
+            for call in iter_tool_calls
         ]
         st._trajectory.iterations.append(
             ToolIteration(
                 iteration=st.iteration,
-                tool_calls=iter_tool_calls,
+                tool_calls=stored_tool_calls,
                 llm_text=llm_resp.text or "",
                 input_tokens=llm_resp.input_tokens,
                 output_tokens=llm_resp.output_tokens,
@@ -1675,7 +1683,9 @@ class ToolLoopRunner:
 
         Returns True iff this was a wait-class iteration.
         """
-        iter_tool_calls = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls]
+        iter_tool_calls = [
+            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls
+        ]
         if not is_wait_iteration(iter_tool_calls):
             return False
         tc = tool_calls[0]
@@ -1912,7 +1922,11 @@ class ToolLoopRunner:
         bookkeeping. (The old `_run_tool` closure.)"""
         tool_name = block.name
         tool_input = block.input
-        log.info("Tool call: %s(%s)", tool_name, tool_input)
+        log.info(
+            "Tool call: %s(%s)",
+            tool_name,
+            _scrub_tool_input_for_storage(tool_name, tool_input),
+        )
         # The provider could not parse the model's arguments — do NOT
         # run the tool with a silently-empty input; bounce the error
         # back so the model retries with valid arguments.
@@ -2788,7 +2802,11 @@ class ToolLoopRunner:
                 ToolIteration(
                     iteration=_iteration,
                     tool_calls=[
-                        {"id": tc.id, "name": tc.name, "input": tc.input}
+                        {
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": _scrub_tool_input_for_storage(tc.name, tc.input),
+                        }
                         for tc in (response.tool_calls or [])
                     ],
                     llm_text=response.text or "",
@@ -2816,7 +2834,11 @@ class ToolLoopRunner:
         with failure visibility and audit. (The old `_run_loop_tool` closure.)"""
         tool_name = block.name
         tool_input = block.input
-        log.info("Loop tool call: %s(%s)", tool_name, tool_input)
+        log.info(
+            "Loop tool call: %s(%s)",
+            tool_name,
+            _scrub_tool_input_for_storage(tool_name, tool_input),
+        )
         # Provider couldn't parse the model's arguments — don't run
         # the tool on a silently-empty input (see _run_one_tool).
         if getattr(block, "parse_error", None):

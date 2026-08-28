@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
 
+from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
@@ -1290,7 +1291,12 @@ async def _run_agent(
                     agent.tools_used.append(tool_name)
 
                 agent.last_activity = time.time()
-                iter_tool_calls.append({"name": tool_name, "input": tool_input})
+                iter_tool_calls.append(
+                    {
+                        "name": tool_name,
+                        "input": _scrub_tool_input_for_storage(tool_name, tool_input),
+                    }
+                )
 
                 tool_timeout: float = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
                 # Cap at the POSITIVE remainder so the deadline holds inside

@@ -780,6 +780,54 @@ class TestModelPublicationIntegration:
         finally:
             await manager_shutdown(bot.mcp_manager)
 
+
+    async def test_chat_and_loop_storage_and_logs_scrub_mcp_arguments(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        monkeypatch.chdir(tmp_path)
+        caplog.set_level("INFO")
+        secret = "opaque-chat-secret"
+        fake = FakeLLM(
+            [
+                tool_call_response(("mcp_fake_echo", {"text": "ok", "password": secret})),
+                text_response("chat done"),
+                tool_call_response(("mcp_fake_echo", {"text": "ok", "api_key": secret})),
+                text_response("loop done"),
+            ]
+        )
+        bot = make_bot(
+            fake_llm=fake,
+            config_overrides={
+                "mcp": {
+                    "enabled": True,
+                    "servers": {"fake": _fake_server_config().model_dump()},
+                }
+            },
+        )
+        saved = []
+
+        async def save(turn):
+            saved.append(turn)
+
+        bot.trajectory_saver.save = save
+        try:
+            await start_mcp(bot)
+            await _wait_until(lambda: bot.mcp_manager.has_tool("mcp_fake_echo"))
+            await bot.tool_loop.run(
+                FakeMessage("chat"), [{"role": "user", "content": "chat"}]
+            )
+            await bot.tool_loop.run_autonomous("loop", FakeMessage().channel, None, "1")
+            assert len(saved) == 2
+            stored = str([turn.to_dict() for turn in saved])
+            assert secret not in stored
+            assert stored.count("[redacted:sensitive-key]") >= 2
+            assert "Tool call: mcp_fake_echo" in caplog.text
+            assert "Loop tool call: mcp_fake_echo" in caplog.text
+            assert "[redacted:sensitive-key]" in caplog.text
+            assert secret not in caplog.text
+        finally:
+            await manager_shutdown(bot.mcp_manager)
+
     async def test_builtin_names_win_catalog_conflicts(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         bot = make_bot(fake_llm=FakeLLM([text_response("ok")]))

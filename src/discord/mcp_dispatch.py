@@ -27,6 +27,7 @@ credentials.
 
 from __future__ import annotations
 
+import hashlib
 import time
 from typing import TYPE_CHECKING, TypeGuard
 
@@ -40,6 +41,16 @@ if TYPE_CHECKING:
 MODEL_RESULT_CAP = 12_000
 
 OUTCOME_KEY = "outcome"
+AUDIT_IDENTIFIER_CAP = 128
+
+
+def _bounded_audit_identifier(value: object) -> str:
+    """Keep defensive/fallback identifiers bounded without conflating them."""
+    text = str(value or "")
+    if len(text) <= AUDIT_IDENTIFIER_CAP:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+    return f"{text[: AUDIT_IDENTIFIER_CAP - len(digest) - 1]}~{digest}"
 
 
 def is_mcp_tool(manager: MCPManager | None, tool_name: str) -> TypeGuard[MCPManager]:
@@ -70,8 +81,8 @@ async def dispatch_mcp_tool(
     if truncated:
         text = text[:MODEL_RESULT_CAP] + "\n… [truncated at 12000 chars]"
     metadata = {
-        "mcp_server": outcome.server,
-        "mcp_tool": outcome.tool,
+        "mcp_server": _bounded_audit_identifier(outcome.server),
+        "mcp_tool": _bounded_audit_identifier(outcome.tool),
         "config_generation": outcome.generation,
         "negotiated_version": outcome.negotiated_version,
         OUTCOME_KEY: outcome.status,
