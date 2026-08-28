@@ -514,6 +514,30 @@ class ToolLoopRunner:
         self._window_observer = deps.window_observer
         self._on_turn_suspended = deps.on_turn_suspended
 
+    def _scoped_tools_for_request(
+        self,
+        *,
+        user_id: str,
+        api_allowed: list[str] | None = None,
+        bypass_rbac: bool = False,
+    ) -> list[dict] | None:
+        """Re-pull the live catalog at request assembly, then scope it.
+
+        Publication can change between generations in one turn. A list
+        captured at turn entry is therefore not an assembled-request
+        boundary. Execution retains its independent RBAC/publication fences.
+        """
+        if not self._get_config().tools.enabled:
+            return None
+        merged = self._tool_catalog.merged_definitions()
+        tools: list[dict] | None = merged
+        if not bypass_rbac:
+            tools = self._permissions.filter_tools(user_id, merged)
+        if api_allowed is not None and tools:
+            allowed_set = set(api_allowed)
+            tools = [tool for tool in tools if tool["name"] in allowed_set]
+        return tools
+
     # ------------------------------------------------------------------
     # Chat pipeline (old _process_with_tools) — orchestrator + phases
     # ------------------------------------------------------------------
@@ -774,9 +798,6 @@ class ToolLoopRunner:
         filtering, trajectory + correlation init, cancellation wiring."""
 
         system_prompt = system_prompt_override or self._get_default_system_prompt()
-        tools = (
-            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else None
-        )
         messages = list(history)
 
         # Insert context separator between history and the current user request
@@ -841,15 +862,17 @@ class ToolLoopRunner:
 
         user_id = str(message.author.id)
 
-        # Filter tools based on user permission tier (skip for test webhooks)
-        is_test_wh = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
-        if tools is not None and not is_test_wh:
-            tools = self._permissions.filter_tools(user_id, tools)
-            # Apply API token allowed_tools scope if present
-            api_allowed = getattr(message, "allowed_tools", None)
-            if api_allowed is not None and tools:
-                allowed_set = set(api_allowed)
-                tools = [t for t in tools if t["name"] in allowed_set]
+        # Snapshot only the caller scope; the catalog itself is re-pulled at
+        # each physical request assembly so same-turn publication changes land.
+        is_test_wh = bool(
+            message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+        )
+        api_allowed = getattr(message, "allowed_tools", None)
+        tools = self._scoped_tools_for_request(
+            user_id=user_id,
+            api_allowed=api_allowed,
+            bypass_rbac=is_test_wh,
+        )
 
         chat_cap = self._get_config().tools.max_tool_iterations_chat
         log.info(
@@ -1228,6 +1251,14 @@ class ToolLoopRunner:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
         async def _attempt():
+            st.tools = self._scoped_tools_for_request(
+                user_id=st.user_id,
+                api_allowed=getattr(st.message, "allowed_tools", None),
+                bypass_rbac=bool(
+                    st.message.webhook_id
+                    and str(st.message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+                ),
+            )
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -2462,9 +2493,7 @@ class ToolLoopRunner:
                 _trace.section("loop_prev_context", tokens=len(prev_context) // 4)
         else:
             system_prompt = self._prompt_builder.build_full_prompt(channel=channel, user_id=user_id)
-        tools = (
-            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else None
-        )
+        tools = self._scoped_tools_for_request(user_id=user_id)
 
         tool_timeout = self._get_config().tools.tool_timeout_seconds
         channel_id_str = str(getattr(channel, "id", ""))
@@ -2622,6 +2651,7 @@ class ToolLoopRunner:
         async def _attempt():
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError
+            st.tools = self._scoped_tools_for_request(user_id=st.user_id)
             return await serving_identity.client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -3012,16 +3042,19 @@ class ToolLoopRunner:
         result = await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         try:
+            metadata = {
+                "tool_input_keys": list((tool_input or {}).keys()),
+                "elapsed_ms": elapsed_ms,
+            }
+            if isinstance(result, ToolResult) and result.audit_metadata:
+                metadata.update(result.audit_metadata)
             await self._audit.log_event(
                 event_type="loop_tool",
                 action=tool_name,
                 actor=user_id,
                 detail=str(result)[:200] if isinstance(result, str) else "",
                 channel_id=str(getattr(msg_proxy.channel, "id", "")),
-                metadata={
-                    "tool_input_keys": list((tool_input or {}).keys()),
-                    "elapsed_ms": elapsed_ms,
-                },
+                metadata=metadata,
             )
         except Exception:
             pass

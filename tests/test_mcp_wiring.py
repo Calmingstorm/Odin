@@ -708,6 +708,78 @@ class TestModelPublicationIntegration:
         finally:
             await manager_shutdown(bot.mcp_manager)
 
+
+    async def test_same_chat_turn_reassembles_after_unpublish(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        fake = FakeLLM(
+            [tool_call_response(("parse_time", {"expression": "now"})), text_response("done")]
+        )
+        bot = make_bot(
+            fake_llm=fake,
+            config_overrides={
+                "mcp": {
+                    "enabled": True,
+                    "servers": {"fake": _fake_server_config().model_dump()},
+                }
+            },
+        )
+        original_chat = fake.chat_with_tools
+
+        async def unpublish_after_first_request(*args, **kwargs):
+            response = await original_chat(*args, **kwargs)
+            if len(fake.calls) == 1:
+                await bot.mcp_manager.set_global_enabled(False)
+            return response
+
+        fake.chat_with_tools = unpublish_after_first_request
+        try:
+            await start_mcp(bot)
+            await _wait_until(lambda: bot.mcp_manager.has_tool("mcp_fake_echo"))
+            await bot.tool_loop.run(
+                FakeMessage("two generations"),
+                [{"role": "user", "content": "two generations"}],
+            )
+            assert "mcp_fake_echo" in {t["name"] for t in fake.calls[0]["tools"]}
+            assert "mcp_fake_echo" not in {t["name"] for t in fake.calls[1]["tools"]}
+        finally:
+            await manager_shutdown(bot.mcp_manager)
+
+    async def test_same_autonomous_turn_reassembles_after_unpublish(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        fake = FakeLLM(
+            [tool_call_response(("parse_time", {"expression": "now"})), text_response("done")]
+        )
+        bot = make_bot(
+            fake_llm=fake,
+            config_overrides={
+                "mcp": {
+                    "enabled": True,
+                    "servers": {"fake": _fake_server_config().model_dump()},
+                }
+            },
+        )
+        original_chat = fake.chat_with_tools
+
+        async def unpublish_after_first_request(*args, **kwargs):
+            response = await original_chat(*args, **kwargs)
+            if len(fake.calls) == 1:
+                await bot.mcp_manager.set_global_enabled(False)
+            return response
+
+        fake.chat_with_tools = unpublish_after_first_request
+        try:
+            await start_mcp(bot)
+            await _wait_until(lambda: bot.mcp_manager.has_tool("mcp_fake_echo"))
+            await bot.tool_loop.run_autonomous(
+                "two generations", bot.get_channel(0) or FakeMessage().channel, None, "1"
+            )
+            assert "mcp_fake_echo" in {t["name"] for t in fake.calls[0]["tools"]}
+            assert "mcp_fake_echo" not in {t["name"] for t in fake.calls[1]["tools"]}
+        finally:
+            await manager_shutdown(bot.mcp_manager)
+
     async def test_builtin_names_win_catalog_conflicts(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         bot = make_bot(fake_llm=FakeLLM([text_response("ok")]))

@@ -22,6 +22,7 @@ from src.agents.trajectory import (
     AgentTrajectorySaver,
     AgentTrajectoryTurn,
 )
+from src.tools.result_validator import ToolResult
 from src.trajectories.saver import ToolIteration
 
 # ---------------------------------------------------------------------------
@@ -467,6 +468,59 @@ class TestRunAgentTrajectory:
         assert entry["final_state"] == "completed"
         assert entry["result"] == "Done"
         assert entry["source"] == "agent"
+
+
+    async def test_structured_tool_failure_and_audit_metadata_survive(self, tmp_path):
+        saver = AgentTrajectorySaver(directory=str(tmp_path))
+        agent = AgentInfo(
+            id="mcp-structured",
+            label="mcp",
+            goal="write",
+            channel_id="ch1",
+            requester_id="u1",
+            requester_name="Alice",
+        )
+        calls = 0
+
+        async def iter_cb(messages, prompt, tools, generation_state=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "text": "calling",
+                    "tool_calls": [{"name": "mcp_srv_write", "input": {"value": 1}}],
+                }
+            assert "Error (tool reported failure)" in messages[-1]["content"]
+            return {"text": "stopped", "tool_calls": []}
+
+        metadata = {
+            "mcp_server": "srv",
+            "mcp_tool": "write",
+            "config_generation": 2,
+            "negotiated_version": "2025-06-18",
+            "outcome": "failed",
+        }
+        tool_cb = AsyncMock(
+            return_value=ToolResult(
+                output="rejected without a canonical prefix",
+                ok=False,
+                error="rejected",
+                tool_name="mcp_srv_write",
+                audit_metadata=metadata,
+            )
+        )
+        await _run_agent(
+            agent=agent,
+            system_prompt="sys",
+            tools=[],
+            iteration_callback=iter_cb,
+            tool_executor_callback=tool_cb,
+            trajectory_saver=saver,
+        )
+        entry = await saver.find_by_agent_id("mcp-structured")
+        stored = entry["iterations"][0]["tool_results"][0]
+        assert stored["ok"] is False
+        assert stored["audit_metadata"] == metadata
 
     async def test_trajectory_captures_iterations(self, tmp_path):
         saver = AgentTrajectorySaver(directory=str(tmp_path))

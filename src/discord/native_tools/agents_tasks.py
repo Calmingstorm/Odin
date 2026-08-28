@@ -24,6 +24,7 @@ from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
 from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ...odin_log import get_logger
+from ...tools.result_validator import ToolResult
 from ..background_task import (
     MAX_STEPS,
     BackgroundTask,
@@ -867,7 +868,7 @@ class AgentTaskTools:
         # this agent itself calls spawn_agent.
         _self_id: dict[str, str | None] = {"id": None}
 
-        async def _tool_exec_cb(tool_name: str, tool_input: dict) -> str:
+        async def _tool_exec_cb(tool_name: str, tool_input: dict) -> str | ToolResult:
             if tool_name == "spawn_agent":
                 # Nested spawn — forward this agent's id so AgentManager.spawn
                 # enforces max_nesting_depth and children linkage.
@@ -888,6 +889,8 @@ class AgentTaskTools:
                 msg_proxy,
                 user_id,
             )
+            if isinstance(result, ToolResult):
+                return result
             return str(result) if result is not None else ""
 
         # Determine iteration cap from config — scheduled spawns get a higher budget

@@ -60,6 +60,11 @@ DEFAULT_RETRY_BACKOFF_SECONDS = 60
 MAX_BACKOFF_SECONDS = 3600  # cap at 1 hour
 DEFAULT_FAILURE_ALERT_THRESHOLD = 3  # alert after N consecutive failures
 
+
+class NonRetryableScheduleError(RuntimeError):
+    """A failed scheduled effect that automation must never replay."""
+
+
 # Webhook action defaults
 WEBHOOK_VALID_METHODS = {"GET", "POST", "PUT", "PATCH", "DELETE", "HEAD"}
 WEBHOOK_DEFAULT_METHOD = "POST"
@@ -989,7 +994,11 @@ class Scheduler:
             )
         except Exception as e:
             duration_ms = int((time.monotonic() - start) * 1000)
-            retry_attempt = schedule.get("retry_count", 0) + 1
+            retry_attempt = (
+                0
+                if isinstance(e, NonRetryableScheduleError)
+                else schedule.get("retry_count", 0) + 1
+            )
             await self._handle_failure(schedule, e)
             await self.history.record(
                 schedule_id=schedule["id"],
@@ -998,7 +1007,9 @@ class Scheduler:
                 status="failure",
                 duration_ms=duration_ms,
                 error=str(e),
-                retry_attempt=retry_attempt if schedule.get("max_retries", 0) > 0 else 0,
+                retry_attempt=(
+                    retry_attempt if retry_attempt and schedule.get("max_retries", 0) > 0 else 0
+                ),
             )
 
     async def _execute_and_record_webhook(self, schedule: dict) -> None:
@@ -1053,7 +1064,16 @@ class Scheduler:
         max_retries = schedule.get("max_retries", DEFAULT_MAX_RETRIES)
         retry_count = schedule.get("retry_count", 0)
 
-        if max_retries > 0 and retry_count < max_retries:
+        if isinstance(error, NonRetryableScheduleError):
+            schedule.pop("retry_at", None)
+            if schedule.get("one_time"):
+                schedule.pop("next_run", None)
+            log.error(
+                "Schedule %s requires manual resolution and will not be retried: %s",
+                schedule["id"],
+                error,
+            )
+        elif max_retries > 0 and retry_count < max_retries:
             schedule["retry_count"] = retry_count + 1
             schedule["retry_at"] = self._compute_retry_at(schedule)
             log.warning(

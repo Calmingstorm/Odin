@@ -88,6 +88,7 @@ class StepResult:
     status: str  # "ok", "error", "skipped", "cancelled"
     output: str = ""
     elapsed_ms: int = 0
+    audit_metadata: dict | None = None
 
 
 @dataclass
@@ -245,8 +246,10 @@ async def run_background_task(
             )
             elapsed_ms = int((time.monotonic() - t0) * 1000)
             structured_ok: bool | None = None
+            structured_metadata: dict | None = None
             if isinstance(output, ToolResult):
                 structured_ok = output.ok
+                structured_metadata = output.audit_metadata
                 # Same canonical marking the chat/loop pipelines apply: a
                 # structurally-failed result gets an explicit Error prefix so
                 # the posted step output cannot read as success.
@@ -279,6 +282,7 @@ async def run_background_task(
                     status="error" if is_error else "ok",
                     output=output[:500],
                     elapsed_ms=elapsed_ms,
+                    audit_metadata=structured_metadata,
                 )
             )
 
@@ -298,6 +302,7 @@ async def run_background_task(
                         execution_time_ms=elapsed_ms,
                         risk_level=risk_assessment.level.value,
                         risk_reason=risk_assessment.reason,
+                        audit_metadata=structured_metadata,
                     )
                     if is_error:
                         log_kwargs["error"] = output[:500]
