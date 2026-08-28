@@ -549,3 +549,66 @@ class TestInFlightRetirementCleanup:
         assert not created[0].connected
         assert created[0]._stdio is None  # noqa: SLF001
         await manager.shutdown()
+
+
+class TestTerminalShutdownPublicationFence:
+    async def test_shutdown_unpublishes_and_rejects_execute_before_parked_lock(self):
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"fake": _stdio_config()})
+        await manager.start()
+        assert manager.has_tool("mcp_fake_echo")
+
+        await manager._lifecycle_lock.acquire()  # noqa: SLF001
+        shutdown = asyncio.create_task(manager.shutdown())
+        try:
+            for _ in range(100):
+                if manager._closed:  # noqa: SLF001
+                    break
+                await asyncio.sleep(0)
+            assert manager._closed is True  # noqa: SLF001
+            assert manager.get_tool_definitions() == []
+            assert not manager.has_tool("mcp_fake_echo")
+            outcome = await manager.execute("mcp_fake_echo", {"text": "must not run"})
+            assert outcome.status == "failed"
+            assert "shutting down" in outcome.text
+            assert not shutdown.done()
+        finally:
+            manager._lifecycle_lock.release()  # noqa: SLF001
+            await shutdown
+
+
+class TestOwnedLostConnectionRetirement:
+    async def test_shutdown_drains_parked_lost_connection_teardown(self, monkeypatch):
+        manager = MCPManager()
+        await manager.load_desired_state(enabled=True, servers={"fake": _stdio_config()})
+        await manager.start()
+        runtime = manager._servers["fake"]  # noqa: SLF001
+        connection = runtime.connection
+        assert connection is not None and manager.has_tool("mcp_fake_echo")
+
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        original = manager._disconnect_lost_connection  # noqa: SLF001
+
+        async def parked(target):
+            entered.set()
+            await release.wait()
+            await original(target)
+
+        monkeypatch.setattr(manager, "_disconnect_lost_connection", parked)
+        manager._on_lost(  # noqa: SLF001
+            "fake", runtime.generation, connection, "synthetic loss"
+        )
+        await asyncio.wait_for(entered.wait(), timeout=1)
+        assert manager._loss_retirements  # noqa: SLF001
+        shutdown = asyncio.create_task(manager.shutdown())
+        for _ in range(100):
+            if manager._closed:  # noqa: SLF001
+                break
+            await asyncio.sleep(0)
+        assert manager._closed is True  # noqa: SLF001
+        assert not shutdown.done()
+        release.set()
+        await shutdown
+        assert not manager._loss_retirements  # noqa: SLF001
+        assert not connection.connected

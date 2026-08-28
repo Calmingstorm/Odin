@@ -735,3 +735,74 @@ class TestAuditIdentifierBounds:
             conn._validate_tool(  # noqa: SLF001 - authority-level validation pin
                 {"name": "t" * 129, "description": "", "inputSchema": {"type": "object"}}
             )
+
+
+class TestBooleanResponseIds:
+    @pytest.mark.parametrize("streamed", [False, True])
+    async def test_http_handshake_rejects_boolean_id_alias(self, streamed):
+        server, url, state = await _http_server("modern")
+        state["respond_in_sse"] = streamed
+        state["boolean_id_methods"] = {"server/discover"}
+        conn = MCPServerConnection("bool-http", "http", url=url)
+        try:
+            expected = MCPConnectError if streamed else MCPProtocolError
+            with pytest.raises(expected):
+                await conn.connect()
+            assert conn.era is None
+        finally:
+            await conn.disconnect()
+            await server.close()
+
+    async def test_stdio_handshake_rejects_boolean_id_alias(self, monkeypatch):
+        conn = _stdio("modern")
+        original = conn._on_stdio_message  # noqa: SLF001
+
+        def inject_bool(msg):
+            if msg.get("id") == 1 and "result" in msg:
+                msg = dict(msg)
+                msg["id"] = True
+            original(msg)
+
+        monkeypatch.setattr(conn, "_on_stdio_message", inject_bool)
+        with pytest.raises(MCPConnectError):
+            await conn.connect()
+        assert conn.era is None
+
+
+class TestBoundedServerRequestReplies:
+    async def test_flood_is_bounded_and_disconnect_drains_tasks(self, monkeypatch):
+        monkeypatch.setattr(client_mod, "_MAX_SERVER_REPLY_TASKS", 4)
+        monkeypatch.setattr(client_mod, "_SERVER_REPLY_DRAIN_TIMEOUT", 0.05)
+        conn = _stdio("legacy-pushy-flood")
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        peak = 0
+
+        async def parked_reply(_reply, _channel):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            entered.set()
+            try:
+                await release.wait()
+            finally:
+                active -= 1
+
+        monkeypatch.setattr(conn, "_send_reply", parked_reply)
+        await conn.connect()
+        try:
+            await asyncio.wait_for(entered.wait(), timeout=1)
+            for _ in range(100):
+                if len(conn._server_reply_tasks) == 4:  # noqa: SLF001
+                    break
+                await asyncio.sleep(0)
+            assert len(conn._server_reply_tasks) <= 4  # noqa: SLF001
+            disconnect = asyncio.create_task(conn.disconnect())
+            await disconnect
+            assert peak <= 4
+            assert active == 0
+            assert conn._server_reply_tasks == set()  # noqa: SLF001
+        finally:
+            release.set()
+            await conn.disconnect()

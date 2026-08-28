@@ -382,6 +382,20 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         if not isinstance(updates, dict):
             return web.json_response({"error": "expected JSON object"}, status=400)
 
+        # MCP has a dedicated transactional owner (/api/mcp/*) that keeps
+        # disk, bot.config, manager generations, and catalog publication in
+        # one commit. Config Center is deliberately read-only for this section;
+        # accepting it here would persist desired state without reconciling the
+        # live manager.
+        if "mcp" in updates:
+            return web.json_response(
+                {
+                    "error": "MCP settings are read-only on this route",
+                    "detail": "Use the MCP Servers management API and panel.",
+                },
+                status=409,
+            )
+
         # Block sensitive field updates
         if _contains_blocked_fields(updates, _SENSITIVE_FIELDS):
             return web.json_response(

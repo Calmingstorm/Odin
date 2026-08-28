@@ -34,6 +34,7 @@ from ...odin_log import get_logger
 from .errors import MCPConnectError, MCPProtocolError
 from .protocol import (
     MAX_SSE_EVENT_BYTES,
+    MAX_SSE_EVENT_LINES,
     WIRE_RESULT_CEILING,
     parse_wire_payload,
 )
@@ -295,15 +296,19 @@ class HttpTransport:
         and ignored; event ``data:`` accumulation is bounded."""
         data_lines: list[str] = []
         data_bytes = 0
+        event_lines = 0
+        event_framing_bytes = 0
         buffer = b""
 
         def dispatch_event() -> None:
-            nonlocal data_lines, data_bytes
-            if not data_lines:
-                return
-            payload = "\n".join(data_lines)
-            data_lines = []
+            nonlocal data_lines, data_bytes, event_lines, event_framing_bytes
+            completed_lines, data_lines = data_lines, []
             data_bytes = 0
+            event_lines = 0
+            event_framing_bytes = 0
+            if not completed_lines:
+                return
+            payload = "\n".join(completed_lines)
             try:
                 messages = parse_wire_payload(payload, negotiated_version=negotiated_version)
             except MCPProtocolError as e:
@@ -335,11 +340,20 @@ class HttpTransport:
             return line
 
         def consume_line(line: bytes) -> None:
-            nonlocal data_bytes
+            nonlocal data_bytes, event_lines, event_framing_bytes
             text = line.decode("utf-8", errors="replace")
             if not text:
                 dispatch_event()
                 return
+            event_lines += 1
+            event_framing_bytes += len(line) + 1
+            if (
+                event_lines > MAX_SSE_EVENT_LINES
+                or event_framing_bytes > MAX_SSE_EVENT_BYTES
+            ):
+                raise MCPProtocolError(
+                    f"{self.server_name}: SSE event framing exceeds bounds"
+                )
             if text.startswith(":"):
                 return
             field_name, _, value = text.partition(":")

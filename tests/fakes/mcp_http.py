@@ -131,6 +131,9 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         # Per-method fault knobs for streamed direct replies.
         "sse_wrong_id_methods": set(),
         "sse_duplicate_methods": set(),
+        # Replace a direct reply id with JSON boolean true to prove it cannot
+        # alias the client's integer request id 1.
+        "boolean_id_methods": set(),
     }
 
     def count(method: str) -> None:
@@ -140,11 +143,14 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         """One direct JSON-RPC reply, honoring ``state["respond_in_sse"]``
         (the DeepWiki shape: any request may be answered as an SSE stream).
         The per-method fault knobs corrupt the streamed reply only."""
-        if not state["respond_in_sse"]:
-            return web.json_response(msg)
         if method and method in state["sse_wrong_id_methods"]:
             msg = dict(msg)
             msg["id"] = f"wrong-{msg.get('id')}"
+        if method and method in state["boolean_id_methods"]:
+            msg = dict(msg)
+            msg["id"] = True
+        if not state["respond_in_sse"]:
+            return web.json_response(msg)
         messages = [msg, msg] if method and method in state["sse_duplicate_methods"] else [msg]
         return web.Response(text=_sse_body(messages), content_type="text/event-stream")
 

@@ -1430,3 +1430,45 @@ class TestRestartEndpoint:
                 resp = await c.post("/api/restart", json={})
         assert resp.status == 403
         req.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_generic_config_rejects_mcp_without_splitting_any_truth(_active_config):
+    """Config Center is read-only for MCP; only /api/mcp owns mutation."""
+    from ruamel.yaml import YAML
+
+    from src.tools.mcp.manager import STATE_CONNECTED, MCPManager, ToolRecord, _ServerRuntime
+
+    invalidations: list[str] = []
+    manager = MCPManager(on_catalog_changed=lambda: invalidations.append("changed"))
+    config = {
+        "transport": "stdio",
+        "command": "/bin/true",
+        "enabled": True,
+        "timeout_seconds": 120,
+    }
+    runtime = _ServerRuntime(config=config, generation=1, state=STATE_CONNECTED)
+    record = ToolRecord("echo", "Echo", {"type": "object"})
+    runtime.published = {"mcp_fake_echo": record}
+    manager._servers = {"fake": runtime}  # noqa: SLF001
+    manager._global_enabled = True  # noqa: SLF001
+    manager._rebuild_published_index_locked()  # noqa: SLF001
+
+    bot = _bot()
+    bot.config.mcp.enabled = True
+    bot.mcp_manager = manager
+    app, bot = _app(register_discord_config, bot=bot)
+    before_disk = _active_config.read_text()
+    async with TestClient(TestServer(app)) as c:
+        response = await c.put("/api/config", json={"mcp": {"enabled": False}})
+        body = await response.json()
+
+    assert response.status == 409
+    assert body["error"] == "MCP settings are read-only on this route"
+    assert _active_config.read_text() == before_disk
+    assert YAML().load(_active_config.read_text()) == YAML().load(before_disk)
+    assert bot.config.mcp.enabled is True
+    assert manager.global_enabled is True
+    assert manager.has_tool("mcp_fake_echo")
+    assert manager.get_tool_definitions()[0]["name"] == "mcp_fake_echo"
+    assert invalidations == []

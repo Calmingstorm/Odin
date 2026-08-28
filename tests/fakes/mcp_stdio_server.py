@@ -13,6 +13,7 @@ Modes:
   legacy-pushy      legacy that sends a server-initiated sampling request
                     right after initialized and records the client's reply
                     (exposed via the `pushy_reply` tool).
+  legacy-pushy-flood legacy that sends 64 server requests after initialized.
   legacy-unknown-version  counteroffers a version no client supports.
   modern-legacy-list      modern-era server advertising ONLY legacy versions.
   modern-missing-discover-result-type  modern server whose DiscoverResult omits resultType.
@@ -52,6 +53,7 @@ LEGACY_COUNTEROFFERS = {
     "legacy-oldest": "2024-11-05",
     "legacy-batch": "2025-03-26",
     "legacy-pushy": "2025-06-18",
+    "legacy-pushy-flood": "2025-06-18",
     "legacy-cancel": "2025-06-18",
     "legacy-unknown-version": "1999-01-01",
     "garbage": "2025-06-18",
@@ -274,15 +276,17 @@ def handle(msg: dict) -> None:
 
     if method == "notifications/initialized":
         STATE["initialized"] = True
-        if MODE == "legacy-pushy":
-            send(
-                {
-                    "jsonrpc": "2.0",
-                    "id": "srv-req-1",
-                    "method": "sampling/createMessage",
-                    "params": {"messages": []},
-                }
-            )
+        if MODE in {"legacy-pushy", "legacy-pushy-flood"}:
+            count = 64 if MODE == "legacy-pushy-flood" else 1
+            for index in range(count):
+                send(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": f"srv-req-{index + 1}",
+                        "method": "sampling/createMessage",
+                        "params": {"messages": []},
+                    }
+                )
         return
 
     if method == "notifications/cancelled":

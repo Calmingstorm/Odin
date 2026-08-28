@@ -82,6 +82,9 @@ RESULT_TYPE_INPUT_REQUIRED = "input_required"
 WIRE_RESULT_CEILING = 4 * 1024 * 1024  # one JSON body / SSE data accumulation
 MAX_STDOUT_LINE_BYTES = WIRE_RESULT_CEILING
 MAX_SSE_EVENT_BYTES = WIRE_RESULT_CEILING
+# Framing consumes memory too. A stream of empty ``data:`` lines contributes
+# zero payload bytes but still grows the event accumulator without this cap.
+MAX_SSE_EVENT_LINES = 16_384
 MAX_STDERR_STORE_BYTES = 64 * 1024
 MAX_LIST_PAGES = 32
 MAX_DISCOVERED_TOOLS = 128
@@ -122,7 +125,21 @@ def message_kind(msg: Any) -> str:
     """Classify one JSON-RPC message object."""
     if not isinstance(msg, dict) or msg.get("jsonrpc") != "2.0":
         return KIND_INVALID
-    has_id = "id" in msg and msg["id"] is not None
+    msg_id = msg.get("id")
+    # JSON-RPC permits string, number, or null IDs. Booleans are not numbers
+    # here: in Python ``True == 1`` and hashes identically, so accepting one can
+    # correlate a hostile boolean response to integer request 1.
+    valid_id = (
+        isinstance(msg_id, str)
+        or (
+            isinstance(msg_id, (int, float))
+            and not isinstance(msg_id, bool)
+            and (not isinstance(msg_id, float) or math.isfinite(msg_id))
+        )
+    )
+    has_id = "id" in msg and msg_id is not None
+    if has_id and not valid_id:
+        return KIND_INVALID
     has_method = isinstance(msg.get("method"), str) and bool(msg.get("method"))
     if has_method and has_id:
         return KIND_REQUEST

@@ -234,3 +234,28 @@ class TestBoundedSessionDelete:
         await conn.disconnect()
         assert not transport.started
         await server.close()
+
+
+class TestSSEFramingBounds:
+    async def test_empty_data_line_flood_is_bounded(self, monkeypatch):
+        monkeypatch.setattr(transport_http, "MAX_SSE_EVENT_LINES", 8)
+
+        async def handler(request):
+            response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+            await response.prepare(request)
+            await response.write(b"data:\n" * 9)
+            await response.write_eof()
+            return response
+
+        server, url = await _serve(handler)
+        transport = HttpTransport("empty-flood", url)
+        await transport.start()
+        try:
+            with pytest.raises(MCPProtocolError, match="framing exceeds bounds"):
+                await transport.post(
+                    {"jsonrpc": "2.0", "id": 1, "method": "x"},
+                    protocol_version=None,
+                )
+        finally:
+            await transport.close()
+            await server.close()
