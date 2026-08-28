@@ -107,14 +107,16 @@ export function buildMCPServerPayload(form, { mode = 'add', originalTransport = 
   return payload;
 }
 
-/** Edits that alter the spawned command or remote endpoint deserve a warning. */
-export function mcpConnectionEditNeedsConfirmation(form, originalTransport) {
-  if (!originalTransport) return false;
-  return form.transport !== originalTransport
-    || Boolean(String(form.command || '').trim())
-    || Boolean(String(form.url || '').trim())
-    || Boolean(form.replaceArgs)
-    || Boolean(form.replaceCwd);
+/**
+ * Any effective edit replaces the manager's server runtime. Compare the
+ * already-normalized update payload to the two fields returned by status;
+ * every other key is present only when the operator explicitly changed it.
+ */
+export function mcpConnectionEditNeedsConfirmation(payload, originalServer) {
+  if (!originalServer) return false;
+  if (payload.transport !== originalServer.transport) return true;
+  if (Boolean(payload.enabled) !== Boolean(originalServer.enabled)) return true;
+  return Object.keys(payload).some(key => !['enabled', 'transport'].includes(key));
 }
 
 export function normalizeMCPState(value) {

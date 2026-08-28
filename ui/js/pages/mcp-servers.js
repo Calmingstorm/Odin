@@ -495,10 +495,10 @@ export default {
         await nextTick(); document.querySelector('.mcp-editor')?.scrollTo({ top: 0, behavior: 'smooth' });
         return;
       }
-      if (editorMode.value === 'edit' && mcpConnectionEditNeedsConfirmation(form.value, editingServer.value?.transport)) {
+      if (editorMode.value === 'edit' && mcpConnectionEditNeedsConfirmation(payload, editingServer.value)) {
         const ok = await confirmDialog({
           title: `Change ${editingName.value} connection`,
-          message: 'This edit changes the command, endpoint, transport, arguments, or working directory. The current MCP connection will be retired and rebuilt, and its tools will be unpublished during the transition.',
+          message: 'Saving this configuration replaces the server runtime. Any current connection will be retired and its tools unpublished; enabled servers reconnect after the change.',
           confirmLabel: 'Save and reconnect', danger: true,
         });
         if (!ok) return;
