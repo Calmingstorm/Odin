@@ -92,6 +92,22 @@ console.warn = quietWarn;
   assert.equal(state.errors.value[0].tool_name, 'live');
 }
 
+// An unrelated successful event is not error truth and must not conceal a
+// failed error snapshot.
+{
+  const gate = deferred();
+  globalThis.fetch = path => path.includes('error_only')
+    ? gate.promise : Promise.resolve(response([]));
+  console.warn = () => {};
+  const state = dashboardPage.setup();
+  console.warn = quietWarn;
+  const request = state.fetchErrors();
+  state.onEvent({ payload: { timestamp: 't2', tool_name: 'live-success', error: '' } });
+  gate.resolve(response({ error: 'snapshot down' }, 500));
+  await request;
+  assert.equal(state.errorsError.value, true);
+}
+
 // Sessions: reversed completion order — the newest response alone owns rows,
 // error, and loading. This is the audit/knowledge epoch primitive, not a new
 // abort-controller side channel.

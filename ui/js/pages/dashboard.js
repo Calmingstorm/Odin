@@ -361,6 +361,7 @@ export default {
     let activityFetchEpoch = 0;
     let errorsFetchEpoch = 0;
     let liveEventEpoch = 0;
+    let liveErrorEpoch = 0;
 
     function mergeByAuditIdentity(snapshot, live) {
       const seen = new Set();
@@ -391,13 +392,13 @@ export default {
 
     async function fetchErrors() {
       const epoch = ++errorsFetchEpoch;
-      const eventEpoch = liveEventEpoch;
+      const errorEventEpoch = liveErrorEpoch;
       errorsLoading.value = true;
       try {
         const snapshot = await api.get('/api/audit?error_only=1&limit=5');
         if (epoch !== errorsFetchEpoch) return;
-        const freshLive = eventEpoch === liveEventEpoch
-          ? [] : errors.value.filter(e => (e._liveEpoch || 0) > eventEpoch && e.error);
+        const freshLive = errorEventEpoch === liveErrorEpoch
+          ? [] : errors.value.filter(e => (e._liveErrorEpoch || 0) > errorEventEpoch);
         errors.value = mergeByAuditIdentity(snapshot, freshLive).slice(0, 5);
         errorsError.value = false;
       } catch {
@@ -405,7 +406,7 @@ export default {
         // A failed load must never render as "All clear" (audit 2.2),
         // but a live error received during this request is newer usable truth
         // and must remain visible rather than being covered by the failure UI.
-        errorsError.value = eventEpoch === liveEventEpoch || errors.value.length === 0;
+        errorsError.value = errorEventEpoch === liveErrorEpoch || errors.value.length === 0;
       }
       if (epoch === errorsFetchEpoch) errorsLoading.value = false;
     }
@@ -512,6 +513,8 @@ export default {
         if (activity.value.length > 10) activity.value.pop();
         newEventCount.value++;
         if (entry.error) {
+          liveErrorEpoch += 1;
+          entry._liveErrorEpoch = liveErrorEpoch;
           // A live error is newer truth than a failed REST snapshot. Make it
           // visible immediately instead of leaving the failure panel on top.
           errorsError.value = false;
