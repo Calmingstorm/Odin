@@ -56,6 +56,7 @@ if TYPE_CHECKING:
     from ..permissions.manager import PermissionManager
     from ..tools.autonomous_loop import LoopManager
     from ..tools.executor import ToolExecutor
+    from ..tools.mcp import MCPManager
     from ..tools.skill_manager import SkillManager
     from ..trajectories.saver import TrajectoryTurn
     from .channel_config import ChannelConfigManager
@@ -70,6 +71,8 @@ if TYPE_CHECKING:
     from .turn_recorder import TurnRecorder
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .llm_gateway import LLMServingIdentity
+from .mcp_dispatch import dispatch_mcp_tool, is_mcp_tool
+from .mcp_dispatch import uncertain_outcome as _mcp_uncertain
 from .response_guards import (
     _CODE_HEDGING_RETRY_MSG,
     _CONTINUATION_MSG,
@@ -480,6 +483,9 @@ class ToolLoopDeps:
     # Passive window observer (phase 5): downward clamp source + rescue
     # evidence sink. None = feature-inert (tests, minimal constructions).
     window_observer: object | None = None
+    # MCP control plane (mcp_dispatch seam). None keeps MCP branches inert
+    # for direct test constructions; wiring always passes the real manager.
+    mcp_manager: MCPManager | None = None
 
 
 class ToolLoopRunner:
@@ -497,6 +503,7 @@ class ToolLoopRunner:
         self._turn_recorder = deps.turn_recorder
         self._completion_classifier = deps.completion_classifier
         self._native_tools = deps.native_tools
+        self._mcp_manager = deps.mcp_manager
         self._tool_executor = deps.tool_executor
         self._permissions = deps.permissions
         self._skill_manager = deps.skill_manager
@@ -506,6 +513,50 @@ class ToolLoopRunner:
         self._turn_store = deps.turn_store
         self._window_observer = deps.window_observer
         self._on_turn_suspended = deps.on_turn_suspended
+
+    def _scoped_tools_for_request(
+        self,
+        *,
+        user_id: str,
+        api_allowed: list[str] | None = None,
+        bypass_rbac: bool = False,
+        current_tools: list[dict] | None = None,
+        cache_result: bool = True,
+        request_config=None,
+    ) -> list[dict] | None:
+        """Re-pull the live catalog at request assembly, then scope it.
+
+        Publication can change between generations in one turn. A list
+        captured at turn entry is therefore not an assembled-request
+        boundary. Execution retains its independent RBAC/publication fences.
+        """
+        config = request_config if request_config is not None else self._get_config()
+        tools_config = getattr(config, "tools", None)
+        if tools_config is None or not hasattr(self, "_tool_catalog"):
+            # Narrow direct-call unit seams construct the runner with only the
+            # LLM dependencies. Preserve their supplied catalog; production
+            # construction always has both dependencies.
+            return current_tools
+        if not tools_config.enabled:
+            return None
+        if cache_result:
+            merged = self._tool_catalog.merged_definitions()
+        else:
+            try:
+                merged = self._tool_catalog.merged_definitions(cache_result=False)
+            except TypeError:
+                # Narrow test/minimal catalog doubles may expose only the
+                # historical no-argument seam; production ToolCatalog accepts
+                # the non-caching request-assembly mode.
+                merged = self._tool_catalog.merged_definitions()
+        tools: list[dict] | None = merged
+        filter_tools = getattr(self._permissions, "filter_tools", None)
+        if not bypass_rbac and filter_tools is not None:
+            tools = filter_tools(user_id, merged)
+        if api_allowed is not None and tools:
+            allowed_set = set(api_allowed)
+            tools = [tool for tool in tools if tool["name"] in allowed_set]
+        return tools
 
     # ------------------------------------------------------------------
     # Chat pipeline (old _process_with_tools) — orchestrator + phases
@@ -767,9 +818,6 @@ class ToolLoopRunner:
         filtering, trajectory + correlation init, cancellation wiring."""
 
         system_prompt = system_prompt_override or self._get_default_system_prompt()
-        tools = (
-            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else None
-        )
         messages = list(history)
 
         # Insert context separator between history and the current user request
@@ -834,15 +882,17 @@ class ToolLoopRunner:
 
         user_id = str(message.author.id)
 
-        # Filter tools based on user permission tier (skip for test webhooks)
-        is_test_wh = message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
-        if tools is not None and not is_test_wh:
-            tools = self._permissions.filter_tools(user_id, tools)
-            # Apply API token allowed_tools scope if present
-            api_allowed = getattr(message, "allowed_tools", None)
-            if api_allowed is not None and tools:
-                allowed_set = set(api_allowed)
-                tools = [t for t in tools if t["name"] in allowed_set]
+        # Snapshot only the caller scope; the catalog itself is re-pulled at
+        # each physical request assembly so same-turn publication changes land.
+        is_test_wh = bool(
+            message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
+        )
+        api_allowed = getattr(message, "allowed_tools", None)
+        tools = self._scoped_tools_for_request(
+            user_id=user_id,
+            api_allowed=api_allowed,
+            bypass_rbac=is_test_wh,
+        )
 
         chat_cap = self._get_config().tools.max_tool_iterations_chat
         log.info(
@@ -1221,6 +1271,17 @@ class ToolLoopRunner:
                 pin_kwargs["reasoning_effort"] = serving_identity.reasoning_effort
 
         async def _attempt():
+            webhook_id = getattr(st.message, "webhook_id", None)
+            st.tools = self._scoped_tools_for_request(
+                user_id=st.user_id,
+                api_allowed=getattr(st.message, "allowed_tools", None),
+                bypass_rbac=bool(
+                    webhook_id and str(webhook_id) in _ALLOWED_WEBHOOK_IDS
+                ),
+                current_tools=st.tools,
+                cache_result=False,
+                request_config=request_config,
+            )
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -1479,12 +1540,20 @@ class ToolLoopRunner:
         from ..trajectories.saver import ToolIteration
 
         iter_tool_calls = [
-            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in (llm_resp.tool_calls or [])
+            {"id": tc.id, "name": tc.name, "input": tc.input}
+            for tc in (llm_resp.tool_calls or [])
+        ]
+        stored_tool_calls = [
+            {
+                **call,
+                "input": _scrub_tool_input_for_storage(call["name"], call["input"]),
+            }
+            for call in iter_tool_calls
         ]
         st._trajectory.iterations.append(
             ToolIteration(
                 iteration=st.iteration,
-                tool_calls=iter_tool_calls,
+                tool_calls=stored_tool_calls,
                 llm_text=llm_resp.text or "",
                 input_tokens=llm_resp.input_tokens,
                 output_tokens=llm_resp.output_tokens,
@@ -1637,7 +1706,9 @@ class ToolLoopRunner:
 
         Returns True iff this was a wait-class iteration.
         """
-        iter_tool_calls = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls]
+        iter_tool_calls = [
+            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls
+        ]
         if not is_wait_iteration(iter_tool_calls):
             return False
         tc = tool_calls[0]
@@ -1874,7 +1945,11 @@ class ToolLoopRunner:
         bookkeeping. (The old `_run_tool` closure.)"""
         tool_name = block.name
         tool_input = block.input
-        log.info("Tool call: %s(%s)", tool_name, tool_input)
+        log.info(
+            "Tool call: %s(%s)",
+            tool_name,
+            _scrub_tool_input_for_storage(tool_name, tool_input),
+        )
         # The provider could not parse the model's arguments — do NOT
         # run the tool with a silently-empty input; bounce the error
         # back so the model retries with valid arguments.
@@ -1951,6 +2026,17 @@ class ToolLoopRunner:
                 # carries non-model-facing audit_metadata) — unwrap it so the
                 # audit record picks up the metadata like the executor path.
                 tool_result, result = _unwrap_native_result(result)
+            elif is_mcp_tool(self._mcp_manager, tool_name):
+                # MCP seam (P3): typed outcome → ToolResult. Uncertain
+                # outcomes (request written, effect unknowable) flow into the
+                # same OUTCOME_UNKNOWN ledger path as timeouts — never
+                # confidently failed, never replayed.
+                tool_result = await dispatch_mcp_tool(self._mcp_manager, tool_name, tool_input)
+                result = str(tool_result)
+                if not tool_result.ok:
+                    error = tool_result.error or f"MCP tool {tool_name} failed"
+                if _mcp_uncertain(tool_result):
+                    uncertain_outcome = True
             else:
                 # Bind this invocation's identity so streamed output can be
                 # attributed to ONE call rather than merged by tool name.
@@ -2444,9 +2530,7 @@ class ToolLoopRunner:
                 _trace.section("loop_prev_context", tokens=len(prev_context) // 4)
         else:
             system_prompt = self._prompt_builder.build_full_prompt(channel=channel, user_id=user_id)
-        tools = (
-            self._tool_catalog.merged_definitions() if self._get_config().tools.enabled else None
-        )
+        tools = self._scoped_tools_for_request(user_id=user_id)
 
         tool_timeout = self._get_config().tools.tool_timeout_seconds
         channel_id_str = str(getattr(channel, "id", ""))
@@ -2604,6 +2688,12 @@ class ToolLoopRunner:
         async def _attempt():
             if cancel_event is not None and cancel_event.is_set():
                 raise asyncio.CancelledError
+            st.tools = self._scoped_tools_for_request(
+                user_id=getattr(st, "user_id", ""),
+                current_tools=st.tools,
+                cache_result=False,
+                request_config=request_config,
+            )
             return await serving_identity.client.chat_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -2740,7 +2830,11 @@ class ToolLoopRunner:
                 ToolIteration(
                     iteration=_iteration,
                     tool_calls=[
-                        {"id": tc.id, "name": tc.name, "input": tc.input}
+                        {
+                            "id": tc.id,
+                            "name": tc.name,
+                            "input": _scrub_tool_input_for_storage(tc.name, tc.input),
+                        }
                         for tc in (response.tool_calls or [])
                     ],
                     llm_text=response.text or "",
@@ -2768,7 +2862,11 @@ class ToolLoopRunner:
         with failure visibility and audit. (The old `_run_loop_tool` closure.)"""
         tool_name = block.name
         tool_input = block.input
-        log.info("Loop tool call: %s(%s)", tool_name, tool_input)
+        log.info(
+            "Loop tool call: %s(%s)",
+            tool_name,
+            _scrub_tool_input_for_storage(tool_name, tool_input),
+        )
         # Provider couldn't parse the model's arguments — don't run
         # the tool on a silently-empty input (see _run_one_tool).
         if getattr(block, "parse_error", None):
@@ -2994,16 +3092,19 @@ class ToolLoopRunner:
         result = await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
         elapsed_ms = int((time.monotonic() - t0) * 1000)
         try:
+            metadata = {
+                "tool_input_keys": list((tool_input or {}).keys()),
+                "elapsed_ms": elapsed_ms,
+            }
+            if isinstance(result, ToolResult) and result.audit_metadata:
+                metadata.update(result.audit_metadata)
             await self._audit.log_event(
                 event_type="loop_tool",
                 action=tool_name,
                 actor=user_id,
                 detail=str(result)[:200] if isinstance(result, str) else "",
                 channel_id=str(getattr(msg_proxy.channel, "id", "")),
-                metadata={
-                    "tool_input_keys": list((tool_input or {}).keys()),
-                    "elapsed_ms": elapsed_ms,
-                },
+                metadata=metadata,
             )
         except Exception:
             pass
@@ -3032,5 +3133,9 @@ class ToolLoopRunner:
                 skill_file_delivery="stage",
             )
             return result
+        # MCP seam (P3): same live-publication predicate as the chat path;
+        # returns the structured ToolResult (callers consume .ok).
+        if is_mcp_tool(self._mcp_manager, tool_name):
+            return await dispatch_mcp_tool(self._mcp_manager, tool_name, tool_input)
         # --- Executor-routed tools (run_command, run_script, SSH, etc.) ---
         return await self._tool_executor.execute(tool_name, tool_input, user_id=user_id)

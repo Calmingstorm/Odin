@@ -223,7 +223,7 @@ web:
   session_timeout_minutes: 0     # 0 = persist until logout
 ```
 
-19-page dashboard: Dashboard, Chat, Sessions, Tools, Skills, Knowledge, Schedules, Loops, Agents, Processes, Audit, Config, Logs, Memory, Traces, Health, Resources, Internals, Usage.
+The management console groups workspace, operations, history, capabilities, and system surfaces. MCP server management lives under Capabilities; credentials remain write-only.
 
 ## Permissions
 
@@ -333,3 +333,65 @@ turn_state:
 
 All keys are optional; disabling `turn_state.enabled` restores the previous
 behavior (capacity exhaustion ends the turn with an error).
+
+## MCP Servers
+
+MCP servers are managed from **Manage → Capabilities → MCP Servers** in the
+WebUI. That page is the sole editor: Configuration Center deliberately shows
+only a read-only MCP summary and links to it. Changes are persisted to
+`config.yml`, applied live, and report saved configuration separately from the
+current connection state. A server that cannot connect remains saved so its
+sanitized error can be inspected and the connection retried.
+
+```yaml
+mcp:
+  enabled: true
+  servers:
+    local_tools:
+      enabled: true
+      transport: stdio
+      command: /usr/local/bin/my-mcp-server
+      args: ["--flag"]
+      cwd: /srv/my-mcp-server
+      env:
+        API_KEY: "${MCP_API_KEY}"
+      tool_allowlist: []       # empty = all validated discovered tools
+      timeout_seconds: 120
+    remote_tools:
+      enabled: true
+      transport: http
+      url: https://mcp.example.com/mcp
+      headers:
+        Authorization: "Bearer ${MCP_HTTP_TOKEN}"
+      tool_allowlist: [search, lookup]
+      timeout_seconds: 120
+```
+
+The global switch and each server's `enabled` switch must both be on. A tool is
+published only while its current configuration generation is connected and a
+complete discovery result has passed schema, provider, and limit validation.
+Disabled, stale, disconnected, errored, removed, or blocked servers publish no
+tools. Servers that exceed a safety limit are **blocked**, not partially
+published; use `tool_allowlist` to narrow discovery when appropriate.
+
+Odin supports MCP tools over stdio and Streamable HTTP in both the deployed
+sessionful 2025 generation and the stateless 2026-07-28 generation. The
+supported revisions are `2024-11-05` (stdio only), `2025-03-26`, `2025-06-18`,
+`2025-11-25`, and `2026-07-28`. The deprecated HTTP+SSE transport is not
+supported.
+
+Authentication is static in v1: HTTP headers and stdio environment variables.
+Secret values are write-only in the API and WebUI. Reads return key names only;
+rotations and removals use explicit operations so a masked or blank display
+value can never overwrite a credential accidentally. Prefer `${ENV_VAR}`
+placeholders in YAML. Interactive OAuth, MCP resources/prompts, sampling,
+elicitation, roots, and tasks are not supported in v1.
+
+The server panel exposes two different recovery actions:
+
+- **Refresh tools** re-runs discovery on the existing connection.
+- **Reconnect** retires and rebuilds the transport before discovery.
+
+Server-reported instructions, errors, and stderr are untrusted diagnostic text;
+the management API scrubs configured credential values and bounds all exposed
+fields before the WebUI renders them.

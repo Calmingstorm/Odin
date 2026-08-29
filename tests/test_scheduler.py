@@ -24,7 +24,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.scheduler.scheduler import Scheduler
+from src.scheduler.scheduler import NonRetryableScheduleError, Scheduler
 
 # ---------------------------------------------------------------------------
 # Helpers
@@ -576,6 +576,30 @@ class TestSchedulerUpdate:
 
 class TestSchedulerRetry:
     """Test retry with exponential backoff and failure tracking."""
+
+    async def test_non_retryable_failure_never_schedules_retry(self, tmp_path):
+        scheduler = Scheduler(str(tmp_path / "schedules.json"))
+        schedule = {
+            "id": "uncertain",
+            "description": "uncertain MCP effect",
+            "action": "workflow",
+            "max_retries": 5,
+            "retry_count": 0,
+            "one_time": True,
+            "next_run": "2099-01-01T00:00:00+00:00",
+        }
+
+        async def callback(_schedule):
+            raise NonRetryableScheduleError("manual resolution required")
+
+        scheduler._callback = callback
+        await scheduler._execute_and_record_inner(schedule)
+        assert "retry_at" not in schedule
+        assert schedule["retry_count"] == 0
+        assert "next_run" not in schedule
+        assert schedule["last_error"] == "manual resolution required"
+        records = await scheduler.history.query(limit=1)
+        assert "retry_attempt" not in records[0]
 
     async def test_add_with_retry_config(self, tmp_path):
         s = _make_scheduler(tmp_path)

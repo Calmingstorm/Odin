@@ -53,6 +53,7 @@ const routes = [
   { path: '/usage',      redirect: legacyTabRedirect('/history', 'usage') },
   { path: '/tools',      redirect: legacyTabRedirect('/capabilities', 'tools') },
   { path: '/skills',     redirect: legacyTabRedirect('/capabilities', 'skills') },
+  { path: '/mcp',        redirect: legacyTabRedirect('/capabilities', 'mcp-servers') },
   { path: '/knowledge',  redirect: legacyTabRedirect('/capabilities', 'knowledge') },
   { path: '/memory',     redirect: legacyTabRedirect('/capabilities', 'memory') },
   { path: '/learned',    redirect: legacyTabRedirect('/capabilities', 'learned') },

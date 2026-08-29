@@ -1073,12 +1073,6 @@
   "percent": 99.53,
   "statements": 214
  },
- "src/tools/mcp_client.py": {
-  "covered": 265,
-  "missing": 81,
-  "percent": 76.59,
-  "statements": 346
- },
  "src/tools/output_streamer.py": {
   "covered": 91,
   "missing": 0,

@@ -22,7 +22,9 @@ from typing import TYPE_CHECKING
 import discord
 
 from ..odin_log import get_logger
+from ..scheduler.scheduler import NonRetryableScheduleError
 from ..tools import ToolResult
+from .mcp_dispatch import uncertain_outcome as mcp_uncertain_outcome
 from .response_guards import scrub_response_secrets
 from .tool_loop import _LoopMessageProxy
 
@@ -207,6 +209,17 @@ class ScheduledEventHandlers:
                 msg_proxy,
                 requester_id or "",
             )
+            if isinstance(result, ToolResult) and result.audit_metadata:
+                try:
+                    await self._audit.log_event(
+                        event_type="scheduled_tool",
+                        action=tool_name,
+                        actor=requester_id or "scheduler",
+                        channel_id=str(getattr(channel, "id", "")),
+                        metadata=dict(result.audit_metadata),
+                    )
+                except Exception:
+                    log.warning("Failed to audit scheduled MCP tool %s", tool_name)
         except Exception as e:
             return ToolResult(
                 output=f"Error executing {tool_name}: {e}",
@@ -304,6 +317,12 @@ class ScheduledEventHandlers:
 
                 prev_output = str(result)
 
+                if isinstance(result, ToolResult) and mcp_uncertain_outcome(result):
+                    raise NonRetryableScheduleError(
+                        f"Scheduled MCP step {tool_name} has an unknown outcome; "
+                        "manual resolution is required"
+                    )
+
                 if isinstance(result, ToolResult) and not result.ok:
                     results.append(
                         f"**Step {i + 1}** (`{step_desc}`): FAILED\n```\n{str(result)[:1600]}\n```"
@@ -319,6 +338,8 @@ class ScheduledEventHandlers:
                     results.append(
                         f"**Step {i + 1}** (`{step_desc}`): OK\n```\n{str(result)[:1600]}\n```"
                     )
+            except NonRetryableScheduleError:
+                raise
             except Exception as e:
                 results.append(f"**Step {i + 1}** (`{step_desc}`): FAILED — {e}")
                 on_failure = step.get("on_failure", "abort")
@@ -410,6 +431,15 @@ class ScheduledEventHandlers:
                     req_id,
                     req_name,
                 )
+                if isinstance(result, ToolResult) and mcp_uncertain_outcome(result):
+                    text = f"**Scheduled check outcome unknown:** {schedule['description']}\n```\n{str(result)[:1800]}\n```"  # noqa: E501
+                    try:
+                        await channel.send(scrub_response_secrets(text))
+                    except Exception:
+                        pass
+                    raise NonRetryableScheduleError(
+                        "Scheduled MCP check has an unknown outcome; manual resolution is required"
+                    )
                 if isinstance(result, ToolResult) and not result.ok:
                     text = f"**Scheduled check failed:** {schedule['description']}\n```\n{str(result)[:1800]}\n```"  # noqa: E501
                     try:

@@ -326,7 +326,7 @@ export default {
                 </button>
 
                 <div v-if="isSectionExpanded(section)" :id="'cfgc-section-' + section" class="cfgc-section-body">
-                  <div v-if="searchQuery && sectionSearchHits(section).length" class="cfgc-search-hits">
+                  <div v-if="section !== 'mcp' && searchQuery && sectionSearchHits(section).length" class="cfgc-search-hits">
                     <span>Matched</span>
                     <button v-for="hit in sectionSearchHits(section).slice(0, 5)" :key="hit.path" type="button" @click="focusField(hit.path)">
                       {{ hit.label }} <code>{{ hit.path }}</code>
@@ -337,7 +337,18 @@ export default {
 
 
 
-                  <div class="cfgc-field-groups">
+                  <div v-if="section === 'mcp'" class="cfgc-mcp-owner">
+                    <span class="cfgc-mcp-owner-icon" aria-hidden="true"><odin-icon name="network" :size="18" /></span>
+                    <div>
+                      <strong>Managed in MCP Servers</strong>
+                      <p>{{ mcpConfigSummary() }} Configuration Center is read-only for this section so there is one editor for durable and runtime truth.</p>
+                    </div>
+                    <router-link class="btn btn-ghost text-xs" :to="{ path: '/capabilities', query: { tab: 'mcp-servers' } }">
+                      Open MCP Servers <odin-icon name="chevronRight" :size="14" />
+                    </router-link>
+                  </div>
+
+                  <div v-else class="cfgc-field-groups">
                     <section v-for="fieldGroup in fieldGroups(section)" :key="fieldGroup.key" :class="['cfgc-field-group', { nested: fieldGroup.path }]">
                       <header v-if="fieldGroup.path" class="cfgc-field-group-header">
                         <div>
@@ -728,6 +739,12 @@ export default {
 
     function sectionValue(section) {
       return Object.hasOwn(drafts.value, section) ? drafts.value[section] : config.value?.[section];
+    }
+
+    function mcpConfigSummary() {
+      const value = sectionValue('mcp') || {};
+      const count = Object.keys(value.servers || {}).length;
+      return `${value.enabled ? 'Globally enabled' : 'Globally disabled'} · ${count} configured server${count === 1 ? '' : 's'}.`;
     }
 
     function valueAtPath(root, path) {
@@ -1336,7 +1353,7 @@ export default {
       hasDraftErrors, canUndo, canRedo, globalFilterActive, reviewRestartCount, pendingRestartCount, pendingRestartFields,
       healthCount, categoryStats, selectCategory, selectHealthFilter, clearFilters,
       sectionLabel, sectionDescription, sectionFieldCount, sectionHealthCount,
-      sectionApplySummary, sectionApplyDetails, sectionEntries, fieldGroups, sectionSearchHits,
+      sectionApplySummary, sectionApplyDetails, sectionEntries, fieldGroups, sectionSearchHits, mcpConfigSummary,
       fieldRuntimeCopy, fieldSpecificRuntimeNote, hasHonestAction, runFieldAction,
       sectionChanged, fieldChanged, isSectionExpanded, toggleSection,
       discardAllDrafts,

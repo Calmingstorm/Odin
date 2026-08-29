@@ -5,6 +5,7 @@ parsing, validation, and delegation/response shaping for MCP / Slack / issue
 tracker / Grafana alerts / outbound webhooks — never the network. Each service
 is a faked object; the "disabled" path is simply the attribute being absent.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -43,50 +44,66 @@ def _bot(**attrs):
 # MCP servers
 # --------------------------------------------------------------------------- #
 class TestMcpServers:
-    async def test_disabled_503(self):
-        async with TestClient(TestServer(_app(register_mcp_servers, bot=_bot()))) as c:
-            assert (await c.get("/api/mcp/servers")).status == 503
-            assert (await c.get("/api/mcp/servers/x/tools")).status == 503
-            assert (await c.post("/api/mcp/servers", json={"name": "x"})).status == 503
-            assert (await c.delete("/api/mcp/servers/x")).status == 503
+    """Route-shape pins for the live P4 management contract. Full
+    persistence round-trips (disk truth, secret patch ops, fake-server
+    reconciliation) live in tests/test_mcp_admin.py; these pin the thin
+    route behaviors against a real (empty) control plane."""
 
-    async def test_list_and_tools(self):
-        conn = SimpleNamespace(tools=[{"name": "ping", "description": "d"}])
-        mgr = MagicMock()
-        mgr.get_status.return_value = [{"name": "srv", "connected": True}]
-        mgr.get_server.side_effect = lambda n: conn if n == "srv" else None
-        bot = _bot(mcp_manager=mgr)
-        async with TestClient(TestServer(_app(register_mcp_servers, bot=bot))) as c:
-            assert (await (await c.get("/api/mcp/servers")).json())["servers"][0]["name"] == "srv"
-            body = await (await c.get("/api/mcp/servers/srv/tools")).json()
-            assert body["tools"][0]["original_name"] == "ping"
+    def _mcp_bot(self):
+        from types import SimpleNamespace
+
+        from src.config.schema import MCPConfig
+        from src.tools.mcp import MCPManager
+
+        bot = _bot()
+        bot.mcp_manager = MCPManager()
+        bot.config = SimpleNamespace(mcp=MCPConfig())
+        return bot
+
+    async def test_status_always_works_even_disabled(self):
+        async with TestClient(TestServer(_app(register_mcp_servers, bot=self._mcp_bot()))) as c:
+            response = await c.get("/api/mcp/status")
+            assert response.status == 200
+            body = await response.json()
+            assert body["enabled"] is False
+            assert body["servers"] == []
+
+    async def test_list_and_unknown_lookups(self):
+        async with TestClient(TestServer(_app(register_mcp_servers, bot=self._mcp_bot()))) as c:
+            assert (await c.get("/api/mcp/servers")).status == 200
             assert (await c.get("/api/mcp/servers/ghost/tools")).status == 404
+            assert (await c.put("/api/mcp/servers/ghost", json={})).status == 404
+            assert (await c.delete("/api/mcp/servers/ghost")).status == 404
+            assert (await c.post("/api/mcp/servers/ghost/reconnect")).status == 404
+            assert (await c.post("/api/mcp/servers/ghost/refresh-tools")).status == 404
 
-    async def test_add_success_and_validation_and_error(self):
-        mgr = MagicMock()
-        mgr.add_server = AsyncMock(return_value={"name": "srv", "tools": 3})
-        bot = _bot(mcp_manager=mgr, tool_catalog=MagicMock())
-        async with TestClient(TestServer(_app(register_mcp_servers, bot=bot))) as c:
-            r = await c.post("/api/mcp/servers", json={"name": "srv", "command": "run"})
-            assert r.status == 201
-            bot.tool_catalog.invalidate.assert_called_once()
-            assert (await c.post("/api/mcp/servers", json={})).status == 400  # no name
-            mgr.add_server.side_effect = RuntimeError("boom")
-            assert (await c.post("/api/mcp/servers", json={"name": "y"})).status == 400
+    async def test_add_validates_before_any_persistence(self):
+        async with TestClient(TestServer(_app(register_mcp_servers, bot=self._mcp_bot()))) as c:
+            assert (await c.post("/api/mcp/servers", json={})).status == 400
+            response = await c.post(
+                "/api/mcp/servers", json={"name": "x", "transport": "carrier-pigeon"}
+            )
+            assert response.status == 400
 
-    async def test_remove_success_and_error(self):
-        mgr = MagicMock()
-        mgr.remove_server = AsyncMock()
-        bot = _bot(mcp_manager=mgr, tool_catalog=MagicMock())
-        async with TestClient(TestServer(_app(register_mcp_servers, bot=bot))) as c:
-            assert (await c.delete("/api/mcp/servers/srv")).status == 200
-            mgr.remove_server.side_effect = RuntimeError("nope")
-            assert (await c.delete("/api/mcp/servers/srv")).status == 404
+    async def test_mask_values_rejected(self):
+        async with TestClient(TestServer(_app(register_mcp_servers, bot=self._mcp_bot()))) as c:
+            response = await c.post(
+                "/api/mcp/servers",
+                json={
+                    "name": "x",
+                    "transport": "stdio",
+                    "command": "/bin/true",
+                    "headers_set": {"Authorization": "\u2022" * 8},
+                },
+            )
+            assert response.status == 400
+            assert "mask" in (await response.json())["error"]
+
+    async def test_enabled_requires_boolean(self):
+        async with TestClient(TestServer(_app(register_mcp_servers, bot=self._mcp_bot()))) as c:
+            assert (await c.post("/api/mcp/enabled", json={"enabled": "yes"})).status == 400
 
 
-# --------------------------------------------------------------------------- #
-# Slack
-# --------------------------------------------------------------------------- #
 class TestSlack:
     def _notifier(self):
         n = MagicMock()
@@ -121,8 +138,9 @@ class TestSlack:
             assert (await c.post("/api/slack/send", json={})).status == 400  # no text
             assert (await c.post("/api/slack/send", json={"text": "hello"})).status == 200
             notifier.send.assert_awaited()
-            assert (await c.post("/api/slack/send",
-                                 json={"text": "warn", "severity": "critical"})).status == 200
+            assert (
+                await c.post("/api/slack/send", json={"text": "warn", "severity": "critical"})
+            ).status == 200
             notifier.send_formatted.assert_awaited()
 
     async def test_send_disabled(self):
@@ -212,14 +230,19 @@ class TestGrafanaAlerts:
             assert (await c.post("/api/grafana-alerts/rules", data="bad")).status == 400
             # missing name_pattern → 400
             assert (await c.post("/api/grafana-alerts/rules", json={"id": "r1"})).status == 400
-            r = await c.post("/api/grafana-alerts/rules",
-                             json={"id": "r1", "name_pattern": "CPU.*", "remediation_goal": "go"})
+            r = await c.post(
+                "/api/grafana-alerts/rules",
+                json={"id": "r1", "name_pattern": "CPU.*", "remediation_goal": "go"},
+            )
             assert r.status == 201 and (await r.json())["rule"] == "r1"
             handler.add_rule.assert_called_once()
             # a rule the handler rejects surfaces as 400
             handler.add_rule.side_effect = ValueError("duplicate rule id")
-            assert (await c.post("/api/grafana-alerts/rules",
-                                 json={"id": "r2", "name_pattern": "Mem.*"})).status == 400
+            assert (
+                await c.post(
+                    "/api/grafana-alerts/rules", json={"id": "r2", "name_pattern": "Mem.*"}
+                )
+            ).status == 400
 
     async def test_delete_rule(self):
         handler = self._handler()
@@ -268,10 +291,10 @@ class TestOutboundWebhooks:
         async with TestClient(TestServer(_app(register_outbound_webhooks, bot=bot))) as c:
             assert (await c.post("/api/outbound-webhooks", data="bad")).status == 400
             # name is length-validated (max 128); an over-long name is rejected
-            assert (await c.post("/api/outbound-webhooks",
-                                 json={"name": "n" * 200})).status == 400
-            r = await c.post("/api/outbound-webhooks",
-                             json={"name": "hook", "url": "https://example.test/x"})
+            assert (await c.post("/api/outbound-webhooks", json={"name": "n" * 200})).status == 400
+            r = await c.post(
+                "/api/outbound-webhooks", json={"name": "hook", "url": "https://example.test/x"}
+            )
             assert r.status == 201 and (await r.json())["id"] == "wh1"
             # dispatcher rejecting the target (e.g. bad url) surfaces as 400
             d.register.side_effect = ValueError("bad url")

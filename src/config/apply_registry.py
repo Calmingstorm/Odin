@@ -140,9 +140,7 @@ class SectionSpec:
 # --------------------------------------------------------------------------
 
 SECTIONS: dict[str, SectionSpec] = {
-    "timezone": SectionSpec(
-        "restart", "Locale and scheduling defaults used across Odin."
-    ),
+    "timezone": SectionSpec("restart", "Locale and scheduling defaults used across Odin."),
     "discord": SectionSpec(
         "live_read",
         "Discord conversational-intake policy. Allowed users and channels are "
@@ -196,8 +194,7 @@ SECTIONS: dict[str, SectionSpec] = {
     "logging": SectionSpec(
         "restart",
         "Runtime log verbosity and workspace-fence declarations.",
-        restart_reason="Logging verbosity is selected when startup installs the "
-        "process handlers.",
+        restart_reason="Logging verbosity is selected when startup installs the process handlers.",
     ),
     "usage": SectionSpec(
         "activation_required",
@@ -245,9 +242,7 @@ SECTIONS: dict[str, SectionSpec] = {
         "Management API listener, authentication, and sessions.",
         restart_reason="The management listener binds its socket and auth at startup.",
     ),
-    "attachments": SectionSpec(
-        "live_read", "Attachment limits, paths, and cleanup policy."
-    ),
+    "attachments": SectionSpec("live_read", "Attachment limits, paths, and cleanup policy."),
     "personality": SectionSpec(
         "live_for_new_work",
         "Response identity, style, and personality presets.",
@@ -270,12 +265,14 @@ SECTIONS: dict[str, SectionSpec] = {
         "activation action yet.",
     ),
     "mcp": SectionSpec(
-        "dormant",
+        "live_apply",
         "Model Context Protocol servers and tool publication.",
         owner="mcp",
-        activation_policy="No production path constructs the MCP manager, so "
-        "these values are stored and read by nothing. Configure them freely; "
-        "wiring comes later.",
+        apply_handler="POST/PUT/DELETE /api/mcp/servers*, POST /api/mcp/enabled",
+        activation_policy="Managed live through the dedicated /api/mcp routes: "
+        "server CRUD, the global switch, reconnect, and tools refresh persist "
+        "desired state to this file and reconcile the running control plane "
+        "in the same operation. Direct file edits apply on restart.",
     ),
     "slack": SectionSpec(
         "restart",
@@ -348,17 +345,19 @@ SECTIONS: dict[str, SectionSpec] = {
 #: Sections whose leaves genuinely disagree with each other. A leaf here must be
 #: classified explicitly — inheriting the section default would publish a claim
 #: nobody checked against a consumer. Enforced by the CI gate.
-MIXED_SECTIONS: frozenset[str] = frozenset({
-    "openai_codex",
-    "tools",
-    "llm_recovery",
-    "turn_state",
-    "learning",
-    "personality",
-    "agents",
-    "observability",
-    "issue_tracker",
-})
+MIXED_SECTIONS: frozenset[str] = frozenset(
+    {
+        "openai_codex",
+        "tools",
+        "llm_recovery",
+        "turn_state",
+        "learning",
+        "personality",
+        "agents",
+        "observability",
+        "issue_tracker",
+    }
+)
 
 #: Heading copy for every two-segment subgroup the page renders as a card.
 #: The page groups deeper-than-two-segment leaves by their first two path
@@ -387,8 +386,7 @@ GROUP_DESCRIPTIONS: dict[str, str] = {
     "tools.branch_freshness": "Warn when work starts from a stale git branch.",
     "tools.bulkhead": "Concurrency ceilings per execution kind, so one busy "
     "path cannot starve the others.",
-    "tools.governor": "The command safety governor: what it refuses, and who "
-    "may override it.",
+    "tools.governor": "The command safety governor: what it refuses, and who may override it.",
     "tools.hosts": "Named hosts commands may target over SSH.",
     "tools.recovery": "Automatic recovery after a failed tool call.",
     "tools.ssh_pool": "Reuse SSH connections across commands.",
@@ -445,8 +443,7 @@ FIELDS: dict[str, FieldSpec] = {
         sensitivity="sensitive",
         apply_mode="restart",
         description="Write-only Discord bot credential.",
-        restart_reason="The gateway connection is established with this token at "
-        "startup.",
+        restart_reason="The gateway connection is established with this token at startup.",
     ),
     "discord.allowed_users": FieldSpec(
         description="Absolute global user gate for ordinary conversational "
@@ -512,15 +509,12 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     "usage.directory": FieldSpec(
         apply_mode="activation_required",
-        description="Target for durable usage history; no durable store is active "
-        "today.",
-        activation_policy="Validate the path and explicitly enable durable usage "
-        "history.",
+        description="Target for durable usage history; no durable store is active today.",
+        activation_policy="Validate the path and explicitly enable durable usage history.",
     ),
     "slack.forward_alerts": FieldSpec(
         apply_mode="activation_required",
-        description="Forward normalized internal alerts to tested Slack "
-        "destinations.",
+        description="Forward normalized internal alerts to tested Slack destinations.",
         activation_policy="Requires an effective notifier, a tested destination, "
         "and an activation receipt.",
     ),
@@ -742,14 +736,12 @@ FIELDS: dict[str, FieldSpec] = {
         apply_mode="restart",
         unit="hours",
         description="Minimum gap between loop reflections.",
-        restart_reason="The loop-reflection gate is built with this value at "
-        "startup.",
+        restart_reason="The loop-reflection gate is built with this value at startup.",
     ),
     "learning.loop_reflection_max_per_hour": FieldSpec(
         apply_mode="restart",
         description="Loop reflections allowed per hour.",
-        restart_reason="The loop-reflection gate is built with this value at "
-        "startup.",
+        restart_reason="The loop-reflection gate is built with this value at startup.",
     ),
     # ---------------- personality ----------------
     # The generic save republishes presets and rebuilds the prompt, so these
@@ -796,8 +788,7 @@ FIELDS: dict[str, FieldSpec] = {
             Consumer(
                 "generate_image tool visibility",
                 "live_read",
-                "Read from the tool catalogue, which the generic save "
-                "invalidates.",
+                "Read from the tool catalogue, which the generic save invalidates.",
             ),
         ),
     ),
@@ -809,8 +800,7 @@ FIELDS: dict[str, FieldSpec] = {
             Consumer(
                 "Chat and autonomous loops",
                 "live_apply",
-                "Requests use the live client's model, which only a Codex "
-                "reload refreshes.",
+                "Requests use the live client's model, which only a Codex reload refreshes.",
             ),
             Consumer(
                 "Spawned agents inheriting the main model",
@@ -828,8 +818,7 @@ FIELDS: dict[str, FieldSpec] = {
             Consumer(
                 "Chat and autonomous loops",
                 "live_apply",
-                "Requests use the live client's effort, refreshed by a Codex "
-                "reload.",
+                "Requests use the live client's effort, refreshed by a Codex reload.",
             ),
             Consumer(
                 "Agents that inherit effort",
@@ -863,8 +852,7 @@ FIELDS: dict[str, FieldSpec] = {
         apply_mode="live_apply",
         apply_handler="POST /api/codex/reload",
         unit="seconds",
-        description="Whole-request timeout, a backstop rather than a working "
-        "limit.",
+        description="Whole-request timeout, a backstop rather than a working limit.",
         consumers=(
             Consumer(
                 "Primary Codex client",
@@ -904,8 +892,7 @@ FIELDS: dict[str, FieldSpec] = {
     "openai_codex.retry.max_retries": FieldSpec(
         apply_mode="live_apply",
         apply_handler="POST /api/codex/reload",
-        description="Total request attempts. Zero means one attempt with no "
-        "retries.",
+        description="Total request attempts. Zero means one attempt with no retries.",
         consumers=(
             Consumer(
                 "Primary Codex client",
@@ -975,8 +962,7 @@ FIELDS: dict[str, FieldSpec] = {
             Consumer(
                 "Auxiliary Codex client",
                 "live_apply",
-                "The auxiliary client is rebuilt from live config, so it does "
-                "adopt this.",
+                "The auxiliary client is rebuilt from live config, so it does adopt this.",
             ),
         ),
     ),
@@ -1093,16 +1079,14 @@ FIELDS: dict[str, FieldSpec] = {
             Consumer(
                 "Execution",
                 "restart",
-                "The executor resolves the host from the configuration it was "
-                "built with.",
+                "The executor resolves the host from the configuration it was built with.",
             ),
         ),
     ),
     "tools.claude_code_user": FieldSpec(
         apply_mode="restart",
         description="User the coding tool runs as.",
-        restart_reason="The executor resolves this from the configuration it "
-        "was built with.",
+        restart_reason="The executor resolves this from the configuration it was built with.",
     ),
     "tools.command_timeout_seconds": FieldSpec(
         apply_mode="restart",
@@ -1170,8 +1154,7 @@ FIELDS: dict[str, FieldSpec] = {
             Consumer(
                 "Prompt host list",
                 "activation_required",
-                "The prompt's host list is cached; POST /api/reload republishes "
-                "it.",
+                "The prompt's host list is cached; POST /api/reload republishes it.",
             ),
         ),
     ),
@@ -1218,8 +1201,7 @@ FIELDS: dict[str, FieldSpec] = {
     "tools.skill_allowed_urls": FieldSpec(
         apply_mode="restart",
         description="Sources a skill may be installed from.",
-        restart_reason="The allowlist is published to a process-wide value at "
-        "startup.",
+        restart_reason="The allowlist is published to a process-wide value at startup.",
     ),
     "tools.local_working_dir": FieldSpec(
         apply_mode="restart",
@@ -1298,8 +1280,7 @@ FIELDS: dict[str, FieldSpec] = {
     "tools.ssh_pool.enabled": FieldSpec(
         apply_mode="restart",
         description="Reuse SSH connections across commands.",
-        restart_reason="The connection pool exists only if it was enabled at "
-        "startup.",
+        restart_reason="The connection pool exists only if it was enabled at startup.",
     ),
     "tools.ssh_pool.control_persist": FieldSpec(
         apply_mode="restart",
@@ -1324,8 +1305,7 @@ FIELDS: dict[str, FieldSpec] = {
     "tools.streaming.enabled": FieldSpec(
         apply_mode="restart",
         description="Stream long tool output as it is produced.",
-        restart_reason="The streamer is built only when this is enabled at "
-        "startup.",
+        restart_reason="The streamer is built only when this is enabled at startup.",
     ),
     "tools.streaming.tools": FieldSpec(
         apply_mode="restart",
@@ -1390,8 +1370,7 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     "turn_state.auto_resume": FieldSpec(
         apply_mode="restart",
-        description="Resume a suspended turn automatically once capacity "
-        "returns.",
+        description="Resume a suspended turn automatically once capacity returns.",
         restart_reason="The resume waiter captures this flag when it is built.",
     ),
     "turn_state.resume_ttl_hours": FieldSpec(
@@ -1451,9 +1430,7 @@ def _pattern_spec(path: str) -> FieldSpec | None:
             apply_handler="PUT /api/config (republishes the preset registry)",
             description="Field of a saved custom preset.",
         )
-    if path.startswith("mcp.servers.") and (
-        path.endswith(".headers") or path.endswith(".env")
-    ):
+    if path.startswith("mcp.servers.") and (path.endswith(".headers") or path.endswith(".env")):
         return FieldSpec(
             owner="secrets",
             sensitivity="secret_container",
@@ -1499,9 +1476,7 @@ def _is_sensitive_path(path: str) -> bool:
 
 
 def _title_case(value: str) -> str:
-    return " ".join(
-        word.capitalize() for word in str(value).replace("-", "_").split("_") if word
-    )
+    return " ".join(word.capitalize() for word in str(value).replace("-", "_").split("_") if word)
 
 
 def has_explicit_spec(path: str) -> bool:
@@ -1545,8 +1520,7 @@ def spec_for(path: str) -> FieldSpec:
         reason = section_spec.restart_reason if section_spec else None
         resolved = replace(
             resolved,
-            restart_reason=reason
-            or f"{_title_case(section)} is constructed during startup.",
+            restart_reason=reason or f"{_title_case(section)} is constructed during startup.",
         )
     if (
         resolved.apply_mode in ("activation_required", "dormant")
@@ -1577,7 +1551,8 @@ def spec_for(path: str) -> FieldSpec:
         if not any(consumer.name == fence_name for consumer in resolved.consumers):
             resolved = replace(
                 resolved,
-                consumers=resolved.consumers + (
+                consumers=resolved.consumers
+                + (
                     Consumer(
                         fence_name,
                         "restart",
@@ -1774,15 +1749,11 @@ def schema_facts() -> dict[str, dict[str, Any]]:
             ]
             facts["constraints"] = _constraint_facts(info)
             default = info.default
-            facts["default"] = (
-                None if repr(default) == "PydanticUndefined" else default
-            )
+            facts["default"] = None if repr(default) == "PydanticUndefined" else default
             # Object maps have operator-defined keys, while record containers
             # have a schema per entry but no scalar editor. Plain scalar arrays
             # remain chip-editable and are deliberately not marked read-only.
-            facts["structured_container"] = (
-                facts.get("type") == "object" or element is not None
-            )
+            facts["structured_container"] = facts.get("type") == "object" or element is not None
             if not isinstance(facts["default"], (str, int, float, bool, type(None))):
                 facts["default"] = None
             out[path] = facts
@@ -1799,10 +1770,7 @@ def schema_facts() -> dict[str, dict[str, Any]]:
         prefix = f"{path}."
         facts["secret_container"] = any(
             key.startswith(prefix)
-            and any(
-                is_sensitive_key(segment)
-                for segment in key[len(prefix):].split(".")
-            )
+            and any(is_sensitive_key(segment) for segment in key[len(prefix) :].split("."))
             for key in out
         )
     return out
@@ -1934,9 +1902,7 @@ def _apply_state(
     return "applied"
 
 
-def _plain_effects(
-    apply_mode: ApplyMode, spec: FieldSpec
-) -> tuple[str, str | None]:
+def _plain_effects(apply_mode: ApplyMode, spec: FieldSpec) -> tuple[str, str | None]:
     """The two sentences an operator actually needs: what saving does, and
     what the running bot does now.
 
@@ -1958,8 +1924,7 @@ def _plain_effects(
                 f"Applied live through {handler}.",
             )
         return (
-            "Saving through Config updates config.yml but does not reload the "
-            "running provider.",
+            "Saving through Config updates config.yml but does not reload the running provider.",
             f"Apply the saved value through {handler}; the running provider is "
             "unchanged until that endpoint succeeds.",
         )
@@ -1970,8 +1935,7 @@ def _plain_effects(
         )
     if apply_mode == "restart":
         return (
-            "Saving updates config.yml. Odin keeps its startup value until "
-            "restarted.",
+            "Saving updates config.yml. Odin keeps its startup value until restarted.",
             spec.restart_reason,
         )
     if apply_mode == "activation_required":
@@ -2010,9 +1974,7 @@ def build_field_record(
     desired = _public_value(desired_value, sensitivity)
     pending_restart = False
     effective_known = True
-    has_restart_consumer = any(
-        consumer.apply_mode == "restart" for consumer in spec.consumers
-    )
+    has_restart_consumer = any(consumer.apply_mode == "restart" for consumer in spec.consumers)
     if apply_mode == "restart" or has_restart_consumer:
         # A boot snapshot is evidence only when wiring actually passed that
         # schema value to the running component. For consumer-split fields it
@@ -2039,9 +2001,7 @@ def build_field_record(
         resolved_type = "string"
     else:
         resolved_type = facts.get("type") or _value_type(desired_value)
-    resolved_constraints = dict(spec.constraints) or dict(
-        facts.get("constraints") or {}
-    )
+    resolved_constraints = dict(spec.constraints) or dict(facts.get("constraints") or {})
     record: dict[str, Any] = {
         "path": path,
         "owner": spec.owner,
@@ -2065,14 +2025,11 @@ def build_field_record(
         "apply_mode": apply_mode,
         "apply_handler": spec.apply_handler,
         "consumers": [
-            {"name": c.name, "apply_mode": c.apply_mode, "detail": c.detail}
-            for c in spec.consumers
+            {"name": c.name, "apply_mode": c.apply_mode, "detail": c.detail} for c in spec.consumers
         ],
         "restart_reason": spec.restart_reason,
         "activation_policy": spec.activation_policy,
-        "group_description": GROUP_DESCRIPTIONS.get(
-            ".".join(path.split(".")[:2])
-        ),
+        "group_description": GROUP_DESCRIPTIONS.get(".".join(path.split(".")[:2])),
         "save_effect": save_effect,
         "runtime_effect": runtime_effect,
         # Honest-buttons-only: a button renders ONLY when a real action
@@ -2128,9 +2085,7 @@ def config_revision(config_dump: dict[str, Any]) -> str:
     correct: it identifies a state within the life of a process.
     """
     canonical = json.dumps(config_dump, sort_keys=True, default=str)
-    return hmac.new(
-        _REVISION_KEY, canonical.encode("utf-8"), hashlib.sha256
-    ).hexdigest()[:16]
+    return hmac.new(_REVISION_KEY, canonical.encode("utf-8"), hashlib.sha256).hexdigest()[:16]
 
 
 def build_meta_payload(
