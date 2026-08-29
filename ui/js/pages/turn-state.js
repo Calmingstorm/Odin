@@ -12,6 +12,10 @@ import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } fro
 const POLL_MS = 10000;
 const STALE_AFTER_MS = 30000;
 
+export function elapsedMs(nowMs, receivedAtMs) {
+  return Math.max(0, nowMs - receivedAtMs);
+}
+
 // Rendering priority (settled design): external-effect uncertainty first.
 function turnPriority(turn, nowSeconds) {
   const states = new Set((turn.operations || []).map(op => op.state));
@@ -20,7 +24,8 @@ function turnPriority(turn, nowSeconds) {
   if (turn.status === 'ACTIVE' && turn.lease_expires_at
       && turn.lease_expires_at < nowSeconds) return 2;
   if (turn.status === 'SUSPENDED') return 3;
-  return 4;
+  if (turn.status === 'ACTIVE') return 4;
+  return 5;
 }
 
 const PRIORITY_BADGES = [
@@ -29,6 +34,7 @@ const PRIORITY_BADGES = [
   { label: 'Lease expired', cls: 'badge-warning' },
   { label: 'Suspended', cls: 'badge-warning' },
   { label: 'Active', cls: 'badge-success' },
+  { label: 'Terminal', cls: 'badge-info' },
 ];
 
 export default {
@@ -63,7 +69,7 @@ export default {
           <button @click="fetchTurns" class="btn btn-ghost text-xs">Retry</button>
         </div>
         <template v-else-if="turnsData">
-          <div v-if="turnsError" class="dash-load-warning text-xs mb-2">Refresh failed — showing last known posture</div>
+          <div v-if="turnsError" class="dash-load-warning text-xs mb-2">Refresh failed: {{ turnsError }} — showing last known posture</div>
           <div class="ts-count-row mb-3">
             <div class="ts-count"><span class="ts-count-value">{{ turnsData.counts.active }}</span><span class="ts-count-label">Active</span></div>
             <div class="ts-count"><span class="ts-count-value">{{ turnsData.counts.suspended }}</span><span class="ts-count-label">Suspended</span></div>
@@ -131,7 +137,7 @@ export default {
           <button @click="fetchBreakers" class="btn btn-ghost text-xs">Retry</button>
         </div>
         <template v-else-if="breakersData">
-          <div v-if="breakersError" class="dash-load-warning text-xs mb-2">Refresh failed — showing last known posture</div>
+          <div v-if="breakersError" class="dash-load-warning text-xs mb-2">Refresh failed: {{ breakersError }} — showing last known posture</div>
           <div v-if="breakersData.breakers.length === 0" class="text-xs text-gray-500">
             No breakers registered yet this process.
           </div>
@@ -226,14 +232,14 @@ export default {
     }
 
     const turnsStale = computed(() =>
-      turnsData.value !== null && nowTick.value - turnsReceivedAt.value > STALE_AFTER_MS);
+      turnsData.value !== null && elapsedMs(nowTick.value, turnsReceivedAt.value) > STALE_AFTER_MS);
     const breakersStale = computed(() =>
-      breakersData.value !== null && nowTick.value - breakersReceivedAt.value > STALE_AFTER_MS);
+      breakersData.value !== null && elapsedMs(nowTick.value, breakersReceivedAt.value) > STALE_AFTER_MS);
     const anyStale = computed(() => turnsStale.value || breakersStale.value);
     const turnsAgeSeconds = computed(() =>
-      Math.round((nowTick.value - turnsReceivedAt.value) / 1000));
+      Math.round(elapsedMs(nowTick.value, turnsReceivedAt.value) / 1000));
     const breakersAgeSeconds = computed(() =>
-      Math.round((nowTick.value - breakersReceivedAt.value) / 1000));
+      Math.round(elapsedMs(nowTick.value, breakersReceivedAt.value) / 1000));
 
     function priorityOf(turn) {
       return turnPriority(turn, nowTick.value / 1000);
@@ -262,7 +268,7 @@ export default {
       // Countdown decrements client-side from the value received; reaching
       // zero changes COPY only — probing appears solely when the server
       // reports an actually-held probe slot.
-      const elapsed = (nowTick.value - breakersReceivedAt.value) / 1000;
+      const elapsed = elapsedMs(nowTick.value, breakersReceivedAt.value) / 1000;
       const remaining = Math.max(0, (b.cooldown_remaining_seconds || 0) - elapsed);
       if (remaining > 0) return `${Math.ceil(remaining)}s`;
       return b.state === 'probing' ? 'probe in flight' : 'probe eligible';
@@ -310,7 +316,7 @@ export default {
       breakersData, breakersAvailability, breakersError, breakersLoading,
       turnsStale, breakersStale, anyStale, turnsAgeSeconds, breakersAgeSeconds,
       sortedTurns, priorityOf, priorityBadge, breakerBadge, cooldownLabel,
-      ageLabel, fetchTurns, fetchBreakers, refreshAll,
+      ageLabel, fetchTurns, fetchBreakers, refreshAll, arm, disarm,
     };
   },
 };

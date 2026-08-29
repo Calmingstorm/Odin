@@ -21,18 +21,10 @@ from pathlib import Path
 
 from .store import OpState, TurnStatus
 
-# Operation states worth an operator's attention in a posture view: the
-# not-yet-settled pair plus the never-expire evidence pair. Settled APPLIED /
-# DEFINITELY_FAILED / RECONCILED_* rows are history, not posture.
-_POSTURE_OP_STATES = (
-    OpState.PREPARED,
-    OpState.RUNNING,
-    OpState.OUTCOME_UNKNOWN,
-    OpState.MANUAL_RESOLUTION_REQUIRED,
-)
-
-# Never-expire evidence: a turn carrying one of these stays visible even when
-# the turn itself is terminal.
+# Pending operations are useful posture but may be bounded noise. Attention
+# evidence is different: it is why even a terminal turn remains visible and
+# therefore must never disappear behind the per-turn display cap.
+_PENDING_OP_STATES = (OpState.PREPARED, OpState.RUNNING)
 _ATTENTION_OP_STATES = (OpState.OUTCOME_UNKNOWN, OpState.MANUAL_RESOLUTION_REQUIRED)
 
 _MAX_OPS_PER_TURN = 50
@@ -83,16 +75,23 @@ def _op_row(row: sqlite3.Row) -> dict:
 
 
 def read_turn_snapshot(db_path: str, limit: int) -> dict:
-    """One bounded posture snapshot: counts plus the matching turn set.
+    """One coherent, bounded posture snapshot over the matching turn set.
 
     Matching set (design-settled): every ACTIVE turn, every SUSPENDED turn,
     and any turn — terminal included — carrying an OUTCOME_UNKNOWN or
     MANUAL_RESOLUTION_REQUIRED operation. Newest first, bounded by *limit*
-    with an explicit truncation flag. Synchronous by design; call it through
-    ``asyncio.to_thread``.
+    with an explicit truncation flag. Attention operations are never truncated;
+    only pending PREPARED/RUNNING noise is subject to the per-turn cap.
+    Synchronous by design; call it through ``asyncio.to_thread``.
     """
     conn = _connect_read_only(db_path)
     try:
+        # A sequence of SELECTs on an autocommit connection is not one snapshot:
+        # a WAL writer may commit between the match count, rows, operation
+        # evidence, and aggregates. BEGIN pins all reads below to one coherent
+        # SQLite snapshot without taking the store's write lock.
+        conn.execute("BEGIN")
+
         attention_marks = ",".join("?" for _ in _ATTENTION_OP_STATES)
         match_where = f"""
             status IN (?, ?)
@@ -123,22 +122,41 @@ def read_turn_snapshot(db_path: str, limit: int) -> dict:
             )
         ]
 
-        posture_marks = ",".join("?" for _ in _POSTURE_OP_STATES)
+        attention_op_marks = ",".join("?" for _ in _ATTENTION_OP_STATES)
+        pending_op_marks = ",".join("?" for _ in _PENDING_OP_STATES)
         for turn in turns:
             key = (turn["source"], turn["channel_id"], turn["message_id"])
-            ops = conn.execute(
+            attention_ops = conn.execute(
                 f"""
                 SELECT state, tool_name, tool_call_id, iteration,
                        created_at, updated_at
                 FROM operations
                 WHERE source = ? AND channel_id = ? AND message_id = ?
-                  AND state IN ({posture_marks})
+                  AND state IN ({attention_op_marks})
+                ORDER BY updated_at DESC
+                """,
+                (*key, *_ATTENTION_OP_STATES),
+            ).fetchall()
+
+            # Attention evidence is never capped. Pending rows fill whatever
+            # remains of the ordinary display budget; fetch one extra solely to
+            # report that pending noise was omitted.
+            pending_budget = max(0, _MAX_OPS_PER_TURN - len(attention_ops))
+            pending_ops = conn.execute(
+                f"""
+                SELECT state, tool_name, tool_call_id, iteration,
+                       created_at, updated_at
+                FROM operations
+                WHERE source = ? AND channel_id = ? AND message_id = ?
+                  AND state IN ({pending_op_marks})
                 ORDER BY updated_at DESC LIMIT ?
                 """,
-                (*key, *_POSTURE_OP_STATES, _MAX_OPS_PER_TURN + 1),
+                (*key, *_PENDING_OP_STATES, pending_budget + 1),
             ).fetchall()
-            turn["operations"] = [_op_row(op) for op in ops[:_MAX_OPS_PER_TURN]]
-            turn["operations_truncated"] = len(ops) > _MAX_OPS_PER_TURN
+            visible_ops = [*attention_ops, *pending_ops[:pending_budget]]
+            visible_ops.sort(key=lambda row: row["updated_at"], reverse=True)
+            turn["operations"] = [_op_row(op) for op in visible_ops]
+            turn["operations_truncated"] = len(pending_ops) > pending_budget
 
         def _count_turns(status: str) -> int:
             return conn.execute(
@@ -152,8 +170,10 @@ def read_turn_snapshot(db_path: str, limit: int) -> dict:
 
         attention_turns = conn.execute(
             f"""
-            SELECT COUNT(DISTINCT source || ':' || channel_id || ':' || message_id)
-            FROM operations WHERE state IN ({attention_marks})
+            SELECT COUNT(*) FROM (
+                SELECT 1 FROM operations WHERE state IN ({attention_marks})
+                GROUP BY source, channel_id, message_id
+            )
             """,
             _ATTENTION_OP_STATES,
         ).fetchone()[0]
@@ -164,12 +184,12 @@ def read_turn_snapshot(db_path: str, limit: int) -> dict:
                 "suspended": _count_turns(TurnStatus.SUSPENDED),
                 "attention_required": attention_turns,
                 "outcome_unknown_operations": _count_ops(OpState.OUTCOME_UNKNOWN),
-                "manual_resolution_operations": _count_ops(
-                    OpState.MANUAL_RESOLUTION_REQUIRED
-                ),
+                "manual_resolution_operations": _count_ops(OpState.MANUAL_RESOLUTION_REQUIRED),
             },
             "turns": turns,
             "truncated": total_matching > limit,
         }
     finally:
+        if conn.in_transaction:
+            conn.rollback()
         conn.close()

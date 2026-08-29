@@ -1,13 +1,20 @@
 // Turn-State page contract (deep-dive W3, read-only v1).
 //
-// Drives the REAL page setup with stubbed fetch: rendering priority puts
-// external-effect uncertainty first, refresh failures retain last-good
-// posture, staleness ticks from client receipt time, cooldown reaching zero
-// changes copy only, and the template carries NO mutating controls — the
-// v1 boundary is observational by construction.
+// Drives the real page setup with deterministic client time. The check pins
+// priority, retained named failures, activation-owned polling/reconnect
+// lifecycle, cooldown copy, and the refresh-only interaction boundary.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
+import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
+import { createSSRApp } from 'vue';
+import { renderToString } from '@vue/server-renderer';
 import { baseParse, NodeTypes } from '@vue/compiler-dom';
+
+const here = dirname(fileURLToPath(import.meta.url));
+let fakeNow = 2_000_000_000_000;
+Date.now = () => fakeNow;
 
 function storage() {
   const values = new Map();
@@ -40,17 +47,44 @@ function response(body, status = 200) {
   });
 }
 
+function turnsEnvelope(turns = []) {
+  return {
+    schema_version: 1, availability: 'available', observed_at: 'display-only',
+    configured_enabled: true, limit: 100,
+    data: {
+      counts: { active: 3, suspended: 1, attention_required: 2,
+                outcome_unknown_operations: 1, manual_resolution_operations: 1 },
+      truncated: false, turns,
+    },
+  };
+}
+
+function breakersEnvelope(breakers = []) {
+  return {
+    schema_version: 1, availability: 'available', observed_at: 'display-only',
+    lifetime: 'process', data: { breakers },
+  };
+}
+
 const quietWarn = console.warn;
 console.warn = () => {};
-const { default: page } = await import('../ui/js/pages/turn-state.js');
+const { default: page, elapsedMs } = await import('../ui/js/pages/turn-state.js');
+const { ws } = await import('../ui/js/api.js');
 console.warn = quietWarn;
+
+function setupPage() {
+  console.warn = () => {};
+  const state = page.setup();
+  console.warn = quietWarn;
+  return state;
+}
 
 function turnFixture(id, extra = {}) {
   return {
     source: 'discord', channel_id: 'c1', message_id: id,
     turn_generation: 'g', revision: 1, status: 'ACTIVE',
-    lease_expires_at: Date.now() / 1000 + 600, recovery_deadline_utc: null,
-    last_progress_at: Date.now() / 1000, created_at: Date.now() / 1000,
+    lease_expires_at: fakeNow / 1000 + 600, recovery_deadline_utc: null,
+    last_progress_at: fakeNow / 1000, created_at: fakeNow / 1000,
     suspended_at: null, guild_id: null, user_id: 'u', code_version: 'x',
     schema_version: 4, has_checkpoint: false,
     operations: [], operations_truncated: false,
@@ -58,97 +92,159 @@ function turnFixture(id, extra = {}) {
   };
 }
 
-// Priority: wire order deliberately scrambled; OUTCOME_UNKNOWN must lead,
-// then manual resolution, expired lease, suspended, healthy active.
-{
-  const turnsBody = {
-    schema_version: 1, availability: 'available', observed_at: 'x',
-    configured_enabled: true, limit: 100,
-    data: {
-      counts: { active: 3, suspended: 1, attention_required: 2,
-                outcome_unknown_operations: 1, manual_resolution_operations: 1 },
-      truncated: false,
-      turns: [
-        turnFixture('healthy'),
-        turnFixture('suspended', { status: 'SUSPENDED' }),
-        turnFixture('unknown', { operations: [{ state: 'OUTCOME_UNKNOWN', tool_name: 'run_command', tool_call_id: 'a', iteration: 1, created_at: 0, updated_at: 0 }] }),
-        turnFixture('expired', { lease_expires_at: Date.now() / 1000 - 120 }),
-        turnFixture('manual', { status: 'TERMINAL_FAILED', operations: [{ state: 'MANUAL_RESOLUTION_REQUIRED', tool_name: 'write_file', tool_call_id: 'b', iteration: 2, created_at: 0, updated_at: 0 }] }),
-      ],
-    },
-  };
-  globalThis.fetch = async (path) => {
-    if (path.startsWith('/api/turn-state/turns')) return response(turnsBody);
-    return response({ schema_version: 1, availability: 'available', observed_at: 'x', lifetime: 'process', data: { breakers: [] } });
-  };
-  console.warn = () => {};
-  const state = page.setup();
-  console.warn = quietWarn;
-  await state.fetchTurns();
-  assert.equal(state.turnsAvailability.value, 'available');
-  assert.deepEqual(state.sortedTurns.value.map(t => t.message_id),
-    ['unknown', 'manual', 'expired', 'suspended', 'healthy'],
-    'rendering priority order broken');
-  assert.equal(state.priorityBadge(state.sortedTurns.value[0]).label, 'Outcome unknown');
-  // Expired lease is a DISPLAY fact — status itself is untouched.
-  assert.equal(state.sortedTurns.value[2].status, 'ACTIVE');
+async function renderState(state) {
+  return renderToString(createSSRApp({
+    template: page.template,
+    setup() { return state; },
+  }));
 }
 
-// Failure retention + staleness: a failed refresh keeps last-good posture
-// and names the failure; staleness ticks from client receipt time.
+// Priority: wire order deliberately scrambled; OUTCOME_UNKNOWN must lead,
+// then manual resolution, expired lease, suspended, healthy active. A terminal
+// row without visible attention evidence must never be mislabeled Active.
+{
+  const turns = [
+    turnFixture('healthy'),
+    turnFixture('terminal', { status: 'TERMINAL_FAILED' }),
+    turnFixture('suspended', { status: 'SUSPENDED' }),
+    turnFixture('unknown', { operations: [{ state: 'OUTCOME_UNKNOWN', tool_name: 'run_command', tool_call_id: 'a', iteration: 1, created_at: 0, updated_at: 0 }] }),
+    turnFixture('expired', { lease_expires_at: fakeNow / 1000 - 120 }),
+    turnFixture('manual', { status: 'TERMINAL_FAILED', operations: [{ state: 'MANUAL_RESOLUTION_REQUIRED', tool_name: 'write_file', tool_call_id: 'b', iteration: 2, created_at: 0, updated_at: 0 }] }),
+  ];
+  globalThis.fetch = async (path) => path.startsWith('/api/turn-state/turns')
+    ? response(turnsEnvelope(turns)) : response(breakersEnvelope());
+  const state = setupPage();
+  await state.fetchTurns();
+  assert.deepEqual(state.sortedTurns.value.map(t => t.message_id),
+    ['unknown', 'manual', 'expired', 'suspended', 'healthy', 'terminal'],
+    'rendering priority order broken');
+  assert.equal(state.priorityBadge(state.sortedTurns.value[0]).label, 'Outcome unknown');
+  assert.equal(state.priorityBadge(turns[1]).label, 'Terminal',
+    'terminal posture was mislabeled Active');
+  assert.equal(state.sortedTurns.value[2].status, 'ACTIVE',
+    'expired lease reclassified the durable status');
+}
+
+// Failure retention: both independently loaded sections keep last-good data
+// and render the escaped, named failure beside that retained posture.
 {
   let fail = false;
   globalThis.fetch = async (path) => {
-    if (fail) return response({ error: 'down' }, 500);
-    if (path.startsWith('/api/turn-state/turns')) {
-      return response({ schema_version: 1, availability: 'available', observed_at: 'x', configured_enabled: true, limit: 100,
-        data: { counts: { active: 1, suspended: 0, attention_required: 0, outcome_unknown_operations: 0, manual_resolution_operations: 0 }, truncated: false, turns: [turnFixture('t1')] } });
-    }
-    return response({ schema_version: 1, availability: 'available', observed_at: 'x', lifetime: 'process', data: { breakers: [] } });
+    if (fail) return response({ error: path.includes('capacity')
+      ? '<breaker snapshot unavailable>' : '<turn snapshot unavailable>' }, 503);
+    return path.startsWith('/api/turn-state/turns')
+      ? response(turnsEnvelope([turnFixture('retained')]))
+      : response(breakersEnvelope([{ name: 'codex:sol', provider: 'codex', model: 'sol', state: 'closed', failed_generations: 0, consecutive_opens: 0, cooldown_remaining_seconds: 0 }]));
   };
-  console.warn = () => {};
-  const state = page.setup();
-  console.warn = quietWarn;
-  await state.fetchTurns();
-  assert.equal(state.turnsData.value.turns.length, 1);
-  fail = true;
-  await state.fetchTurns();
-  assert.equal(state.turnsData.value.turns.length, 1, 'failed refresh erased last-good posture');
-  assert.match(state.turnsError.value, /down|HTTP 500/);
-  assert.equal(state.turnsStale.value, false);
-}
-
-// Cooldown copy: countdown decrements client-side; zero flips COPY only —
-// "probing" never appears unless the server reported it.
-{
-  globalThis.fetch = async (path) => {
-    if (path.startsWith('/api/turn-state/turns')) {
-      return response({ schema_version: 1, availability: 'not_enabled', observed_at: 'x', configured_enabled: false, data: {} });
-    }
-    return response({ schema_version: 1, availability: 'available', observed_at: 'x', lifetime: 'process',
-      data: { breakers: [
-        { name: 'codex:sol', provider: 'codex', model: 'sol', state: 'open', failed_generations: 3, consecutive_opens: 1, cooldown_seconds: 60, cooldown_remaining_seconds: 0, probe_eligible: true },
-        { name: 'codex:terra', provider: 'codex', model: 'terra', state: 'probing', failed_generations: 3, consecutive_opens: 1, cooldown_seconds: 60, cooldown_remaining_seconds: 0, probe_eligible: false },
-        { name: 'ollama:q', provider: 'ollama', model: 'q', state: 'closed', failed_generations: 0, consecutive_opens: 0, cooldown_seconds: 0, cooldown_remaining_seconds: 0, probe_eligible: false },
-      ] } });
-  };
-  console.warn = () => {};
-  const state = page.setup();
-  console.warn = quietWarn;
+  const state = setupPage();
   await state.fetchTurns();
   await state.fetchBreakers();
-  assert.equal(state.turnsAvailability.value, 'not_enabled');
-  assert.equal(state.turnsData.value, null);
-  const rows = state.breakersData.value.breakers;
-  assert.equal(state.cooldownLabel(rows[0]), 'probe eligible', 'elapsed cooldown must not claim probing');
-  assert.equal(state.cooldownLabel(rows[1]), 'probe in flight');
-  assert.equal(state.cooldownLabel(rows[2]), '—');
-  assert.equal(state.breakerBadge(rows[0]), 'badge-danger');
-  assert.equal(state.breakerBadge(rows[2]), 'badge-success');
+  fail = true;
+  await state.fetchTurns();
+  await state.fetchBreakers();
+  assert.equal(state.turnsData.value.turns.length, 1, 'turn failure erased last-good posture');
+  assert.equal(state.breakersData.value.breakers.length, 1, 'breaker failure erased last-good posture');
+  const html = await renderState(state);
+  assert.match(html, /Refresh failed: &lt;turn snapshot unavailable&gt; — showing last known posture/,
+    'rendered retained turn posture did not name and escape its failure');
+  assert.match(html, /Refresh failed: &lt;breaker snapshot unavailable&gt; — showing last known posture/,
+    'rendered retained breaker posture did not name and escape its failure');
 }
 
-// Read-only boundary: the template's interactive surface is refresh-only.
+// Deterministic cooldown copy: received-at and now are identical, so a zero
+// server cooldown is eligible immediately. Moving client time backwards must
+// clamp elapsed to zero rather than inventing one remaining second.
 {
+  assert.equal(elapsedMs(10, 20), 0, 'client elapsed must clamp at zero');
+  const rows = [
+    { name: 'codex:sol', provider: 'codex', model: 'sol', state: 'open', failed_generations: 3, consecutive_opens: 1, cooldown_remaining_seconds: 0, probe_eligible: true },
+    { name: 'codex:terra', provider: 'codex', model: 'terra', state: 'probing', failed_generations: 3, consecutive_opens: 1, cooldown_remaining_seconds: 0, probe_eligible: false },
+    { name: 'ollama:q', provider: 'ollama', model: 'q', state: 'closed', failed_generations: 0, consecutive_opens: 0, cooldown_remaining_seconds: 0, probe_eligible: false },
+  ];
+  globalThis.fetch = async (path) => path.startsWith('/api/turn-state/turns')
+    ? response({ schema_version: 1, availability: 'not_enabled', observed_at: 'x', configured_enabled: false, data: {} })
+    : response(breakersEnvelope(rows));
+  const state = setupPage();
+  await state.fetchBreakers();
+  assert.equal(state.cooldownLabel(rows[0]), 'probe eligible');
+  fakeNow -= 5_000;
+  assert.equal(state.cooldownLabel(rows[0]), 'probe eligible',
+    'negative client elapsed invented cooldown time');
+  fakeNow += 5_000;
+  assert.equal(state.cooldownLabel(rows[1]), 'probe in flight');
+  assert.equal(state.cooldownLabel(rows[2]), '—');
+}
+
+// Lifecycle behavior, not merely source spelling: activation makes one initial
+// request per endpoint, owns a 10s poll and reconnect listener, and disarm
+// tears all of them down. A dead view must never continue refreshing.
+{
+  const realSetInterval = globalThis.setInterval;
+  const realClearInterval = globalThis.clearInterval;
+  let nextTimer = 1;
+  const timers = new Map();
+  const cleared = new Set();
+  const fakeSetInterval = (fn, delay) => {
+    const id = nextTimer++;
+    timers.set(id, { fn, delay });
+    return id;
+  };
+  const fakeClearInterval = id => { cleared.add(id); timers.delete(id); };
+  globalThis.setInterval = fakeSetInterval;
+  globalThis.clearInterval = fakeClearInterval;
+  window.setInterval = fakeSetInterval;
+  window.clearInterval = fakeClearInterval;
+
+  const calls = { turns: 0, breakers: 0 };
+  globalThis.fetch = async (path) => {
+    if (path.startsWith('/api/turn-state/turns')) {
+      calls.turns += 1;
+      return response(turnsEnvelope());
+    }
+    calls.breakers += 1;
+    return response(breakersEnvelope());
+  };
+  const state = setupPage();
+  state.arm();
+  state.arm();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, { turns: 1, breakers: 1 }, 'arm was not idempotent');
+  assert.deepEqual([...timers.values()].map(t => t.delay).sort((a, b) => a - b),
+    [1000, 10000], 'active view did not own exact tick and 10s poll timers');
+
+  const poll = [...timers.values()].find(t => t.delay === 10000);
+  poll.fn();
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, { turns: 2, breakers: 2 }, '10s poll did not refresh both sections');
+
+  ws._emitLifecycle('reconnected', 1);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, { turns: 3, breakers: 3 }, 'reconnect did not refresh both sections');
+
+  state.disarm();
+  state.disarm();
+  assert.equal(timers.size, 0, 'deactivation left a timer armed');
+  assert.equal(cleared.size, 2, 'deactivation did not release both timers exactly once');
+  ws._emitLifecycle('reconnected', 2);
+  await new Promise(resolve => setImmediate(resolve));
+  assert.deepEqual(calls, { turns: 3, breakers: 3 },
+    'deactivated view retained its reconnect listener');
+
+  globalThis.setInterval = realSetInterval;
+  globalThis.clearInterval = realClearInterval;
+  window.setInterval = realSetInterval;
+  window.clearInterval = realClearInterval;
+}
+
+// Pin lifecycle hook ownership and the v1 interactive surface structurally.
+{
+  const source = readFileSync(join(here, '../ui/js/pages/turn-state.js'), 'utf8');
+  for (const registration of [
+    'onMounted(arm)', 'onActivated(arm)', 'onDeactivated(disarm)', 'onUnmounted(disarm)',
+  ]) {
+    assert.ok(source.includes(registration), `missing lifecycle registration: ${registration}`);
+  }
+
   const ast = baseParse(page.template);
   const handlers = [];
   (function walk(node) {
@@ -162,12 +258,12 @@ function turnFixture(id, extra = {}) {
     for (const child of node.children || []) walk(child);
   })(ast);
   const allowed = /^(refreshAll|fetchTurns|fetchBreakers)$/;
-  const offenders = handlers.filter(h => !allowed.test(h.trim()));
-  assert.deepEqual(offenders, [], `mutating or unknown handlers in a read-only view: ${offenders}`);
+  assert.deepEqual(handlers.filter(h => !allowed.test(h.trim())), [],
+    `mutating or unknown handlers in read-only view: ${handlers}`);
   for (const word of ['Resume', 'Resolve', 'Retry the turn', 'Sweep', 'Delete']) {
     assert.ok(!page.template.includes(`>${word}<`), `forbidden control rendered: ${word}`);
   }
 }
 
-console.log('turn-state-webui: priority, retention, cooldown-copy, and read-only contracts pinned');
+console.log('turn-state-webui: priority, named retention, deterministic cooldown, lifecycle, and read-only contracts pinned');
 process.exit(0);

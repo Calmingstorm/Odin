@@ -3,6 +3,7 @@
 All endpoints are prefixed with /api/ and require Bearer token auth
 (unless api_token is empty in config, which disables auth for dev mode).
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING
@@ -72,7 +73,6 @@ from .llm_admin import (  # noqa: E501
     register_ollama_admin,
     register_provider_config,
 )
-from .turn_state import register_turn_state
 from .observability import (
     register_affordances,
     register_aggregates,
@@ -103,11 +103,13 @@ from .sessions_chat import (
     register_trajectories,
 )
 from .skills_api import register_skills
+from .turn_state import register_turn_state
 
 if TYPE_CHECKING:
     from ...discord.client import OdinBot
 
 log = get_logger("web.api")
+
 
 def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     """Create all API route handlers bound to the given bot instance."""
