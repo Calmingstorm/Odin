@@ -71,7 +71,7 @@ const inventory = {
   global_enabled: true,
   disabled_count: 0,
   tools: [
-    { name: 'kubectl', description: 'k8s', is_core: false, enabled: true, state: 'available' },
+    { name: 'kubectl', description: 'k8s', is_core: false, enabled: true, state: 'available', input_schema: { properties: { args: { type: 'string' } } } },
     { name: 'run_command', description: 'sh', is_core: true, enabled: true, state: 'available' },
   ],
 };
@@ -112,9 +112,23 @@ assert.equal(posts.length, 1);
 assert.equal(posts[0].path, '/api/tools/builtins/kubectl/enabled');
 const kubectlRow = state.tools.value.find(t => t.name === 'kubectl');
 assert.equal(kubectlRow.enabled, false);
+assert.ok(kubectlRow.input_schema, 'inventory input_schema must survive the merge');
 assert.equal(kubectlRow.state, 'disabled');
 // Non-builtin rows from /api/tools carry no switch eligibility.
 assert.equal(state.tools.value.find(t => t.name === 'mcp_X_probe').source, 'mcp');
+
+// Audit 1.3: input_schema flows from the inventory into built-in rows so
+// the Parameters detail finally has data; stat cards count by SOURCE
+// (new defect 1: non-core built-ins and MCP tools are not "skills").
+state.tools.value = [
+  { name: 'run_command', source: 'builtin', is_core: true, input_schema: { properties: { command: { type: 'string' } } } },
+  { name: 'kubectl', source: 'builtin', is_core: false },
+  { name: 'mcp_X_probe', source: 'mcp' },
+  { name: 'my_skill', source: 'skill' },
+];
+assert.equal(state.coreCount.value, 1);
+assert.equal(state.skillCount.value, 1);
+assert.ok(state.tools.value[0].input_schema.properties.command);
 
 // Exact committed-truth interleaving: POST succeeds, then the best-effort
 // visible-catalog GET fails. The canonical POST inventory must remain adopted
