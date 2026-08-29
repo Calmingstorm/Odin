@@ -182,7 +182,9 @@ def register_status_info(routes: web.RouteTableDef, bot) -> None:
         ]
         user_count = sum(g.member_count or 0 for g in bot.guilds)
         tools = bot.tool_catalog.merged_definitions()
-        uptime = time.monotonic() - bot.start_time if hasattr(bot, "_start_time") else 0
+        # The bot sets ``start_time``; this guard checked ``_start_time`` (a
+        # name nothing ever set), so uptime reported 0 forever (audit 2.1).
+        uptime = time.monotonic() - bot.start_time if hasattr(bot, "start_time") else 0
 
         # Agent counts
         try:
