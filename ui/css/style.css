@@ -1401,6 +1401,8 @@ textarea.hm-input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.dash-load-failed .dash-empty-icon { color: #d9a441; }
+.dash-load-failed span:last-child { color: var(--hm-text-muted); }
 .dash-empty {
   display: flex;
   flex-direction: column;

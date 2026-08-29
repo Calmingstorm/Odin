@@ -180,7 +180,11 @@ export default {
                 <span class="dash-panel-title">Recent Errors</span>
                 <span v-if="errors.length > 0" class="badge badge-danger" style="font-size:0.625rem;">{{ errors.length }}</span>
               </div>
-              <div v-if="errors.length === 0" class="dash-empty">
+              <div v-if="errorsError" class="dash-empty dash-load-failed">
+                <span class="dash-empty-icon"><odin-icon name="warning" :size="21" /></span>
+                <span>Couldn't load recent errors</span>
+              </div>
+              <div v-else-if="errors.length === 0" class="dash-empty">
                 <span class="dash-empty-icon"><odin-icon name="success" :size="21" /></span>
                 <span>All clear</span>
               </div>
@@ -191,7 +195,7 @@ export default {
                     <span class="dash-error-tool">{{ e.tool_name }}</span>
                     <span class="dash-error-time">{{ formatTime(e.timestamp) }}</span>
                   </div>
-                  <div v-if="e.error_message" class="dash-error-msg">{{ e.error_message }}</div>
+                  <div v-if="e.error" class="dash-error-msg">{{ e.error }}</div>
                 </div>
               </div>
             </div>
@@ -208,6 +212,7 @@ export default {
     const activityLoading = ref(false);
     const errors = ref([]);
     const errorsLoading = ref(false);
+    const errorsError = ref(false);
     const agents = ref([]);
     const newEventCount = ref(0);
     const knowledgeChunks = ref(null);
@@ -365,7 +370,11 @@ export default {
       errorsLoading.value = true;
       try {
         errors.value = await api.get('/api/audit?error_only=1&limit=5');
-      } catch { /* ignore */ }
+        errorsError.value = false;
+      } catch {
+        // A failed load must never render as "All clear" (audit 2.2).
+        errorsError.value = true;
+      }
       errorsLoading.value = false;
     }
 
@@ -492,7 +501,7 @@ export default {
       status, loading, error, uptime, uptimeRingOffset, stats,
       healthIndicators,
       activity, activityLoading, newEventCount,
-      errors, errorsLoading,
+      errors, errorsLoading, errorsError,
       agents,
       actionLoading,
       fetchActivity, fetchStatus, formatTime, formatDuration, retry,
