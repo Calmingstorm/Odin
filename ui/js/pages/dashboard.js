@@ -474,11 +474,19 @@ export default {
       }
     }
 
+    let unsubReconnected = null;
+
     onMounted(async () => {
       await Promise.all([fetchStatus(), fetchActivity(), fetchErrors(), fetchAgents(), fetchKnowledgeCount()]);
       statusInterval = setInterval(fetchStatus, 15000);
       agentInterval = setInterval(fetchAgents, 10000);
       ws.subscribe('events', onEvent);
+      // Activity/Errors are fed by pushed events with no replay — a drop
+      // means missed entries shown as fresh (audit 3.4). Refetch on resume.
+      unsubReconnected = ws.onReconnected(() => {
+        fetchActivity();
+        fetchErrors();
+      });
     });
 
     onUnmounted(() => {
@@ -486,6 +494,7 @@ export default {
       if (agentInterval) clearInterval(agentInterval);
       clearTimeout(eventResetTimer);
       ws.unsubscribe('events', onEvent);
+      if (unsubReconnected) { unsubReconnected(); unsubReconnected = null; }
     });
 
     return {

@@ -65,7 +65,7 @@ function newSocketClient() {
   sockets.length = 0;
   const client = new OdinWebSocket(new OdinAPI());
   const latencies = [];
-  client.onLatency = (ms) => latencies.push(ms);
+  client.onLatencyChange((ms) => latencies.push(ms));
   return { client, latencies };
 }
 

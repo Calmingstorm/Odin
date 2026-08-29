@@ -806,6 +806,7 @@ export default {
     }
 
     let armed = false;
+    let unsubReconnected = null;
 
     // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
     // DEACTIVATES this component without unmounting it — anything armed in
@@ -819,6 +820,10 @@ export default {
       // occurrence) leaves a live copy behind on every visit.
       fetchSessions();
       ws.subscribe('events', onEvent);
+      // The list is event-fed with no replay: a drop while this tab is
+      // active means silently missed sessions (audit 3.4). A drop while
+      // DEACTIVATED is already covered — arm() refetches on every return.
+      unsubReconnected = ws.onReconnected(() => fetchSessions());
     }
 
     onMounted(() => {
@@ -834,6 +839,7 @@ export default {
       if (!armed) return;
       armed = false;
       ws.unsubscribe('events', onEvent);
+      if (unsubReconnected) { unsubReconnected(); unsubReconnected = null; }
       clearTimeout(debounceTimer);
     }
 

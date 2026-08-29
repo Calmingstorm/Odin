@@ -184,13 +184,44 @@ class OdinWebSocket {
     this._chatPending = false;
     // state: 'disconnected' | 'connecting' | 'connected' | 'reconnecting'
     this._state = 'disconnected';
-    this.onStatusChange = null; // callback(connected: boolean)
-    this.onStateChange = null;  // callback(state: string, detail: object)
-    // Latency is measured on every pong but was only ever published through
-    // onStateChange — which _setState suppresses when the state is unchanged,
-    // and _latency is reset to -1 on disconnect, so the sidebar readout could
-    // never render a real value.
-    this.onLatency = null;      // callback(latencyMs: number)
+    // Lifecycle listeners are SETS, never single-slot properties. The old
+    // assignable callbacks made every page a rival for one hook: chat and
+    // logs chained prev-handler saves around the app shell's, and an
+    // interleaved order (chat mounts, logs activates, chat unmounts, logs
+    // deactivates) restored a DEAD component's handler while the shell's
+    // was lost for good. Registration returns an unsubscribe closure; each
+    // page owns exactly its own hook.
+    this._lifecycle = {
+      status: new Set(),      // fn(connected: boolean)
+      state: new Set(),       // fn(state: string, detail: object)
+      latency: new Set(),     // fn(latencyMs: number) — published on every
+      //   pong; onState alone can't carry it because _setState suppresses
+      //   unchanged states, so a steady connection would never report.
+      reconnected: new Set(), // fn(epoch: number) — see socket.onopen
+    };
+    // 'reconnected' fires only when an open FOLLOWS a drop inside one
+    // connect() session — never on the first open, never after an explicit
+    // disconnect() (logout/login remounts pages, which refetch anyway).
+    this._everConnected = false;
+    this._reconnectEpoch = 0;
+  }
+
+  onStatus(fn) { return this._addLifecycle('status', fn); }
+  onState(fn) { return this._addLifecycle('state', fn); }
+  onLatencyChange(fn) { return this._addLifecycle('latency', fn); }
+  onReconnected(fn) { return this._addLifecycle('reconnected', fn); }
+
+  _addLifecycle(kind, fn) {
+    this._lifecycle[kind].add(fn);
+    return () => { this._lifecycle[kind].delete(fn); };
+  }
+
+  _emitLifecycle(kind, ...args) {
+    // Snapshot first: a listener unsubscribing (itself or a sibling) mid-
+    // dispatch must not change who this emission reaches.
+    for (const fn of [...this._lifecycle[kind]]) {
+      try { fn(...args); } catch { /* listener errors are not ours */ }
+    }
   }
 
   get connected() { return this._ws?.readyState === WebSocket.OPEN; }
@@ -199,15 +230,16 @@ class OdinWebSocket {
   get state() { return this._state; }
   get reconnectAttempt() { return this._reconnectAttempt; }
   get latency() { return this._latency; }
+  /** Monotonic count of resumed connections — lets a page that was
+   * deactivated across a drop compare seen-vs-current on re-activation. */
+  get reconnectEpoch() { return this._reconnectEpoch; }
 
   _resetLatency() {
     // Publish the reset, not just record it. Recording silently left the last
     // reading from a now-dead socket on screen, so the sidebar could read
     // "Disconnected — 12ms".
     this._latency = -1;
-    if (this.onLatency) {
-      try { this.onLatency(-1); } catch { /* listener errors are not ours */ }
-    }
+    this._emitLifecycle('latency', -1);
   }
 
   connect() {
@@ -218,6 +250,9 @@ class OdinWebSocket {
 
   disconnect() {
     this._shouldConnect = false;
+    // Explicit teardown ends the session: the next open is a fresh start,
+    // not a resume, so it must not fire 'reconnected'.
+    this._everConnected = false;
     if (this._reconnectTimer) {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
@@ -235,12 +270,10 @@ class OdinWebSocket {
   _setState(state) {
     if (this._state === state) return;
     this._state = state;
-    if (this.onStateChange) {
-      this.onStateChange(state, {
-        attempt: this._reconnectAttempt,
-        latency: this._latency,
-      });
-    }
+    this._emitLifecycle('state', state, {
+      attempt: this._reconnectAttempt,
+      latency: this._latency,
+    });
   }
 
   _startPing() {
@@ -336,6 +369,8 @@ class OdinWebSocket {
 
     socket.onopen = () => {
       if (!isCurrent()) return;
+      const resumed = this._everConnected;
+      this._everConnected = true;
       this._reconnectDelay = 1000;
       this._reconnectAttempt = 0;
       // Re-subscribe to channels
@@ -344,7 +379,14 @@ class OdinWebSocket {
       }
       this._startPing();
       this._setState('connected');
-      if (this.onStatusChange) this.onStatusChange(true);
+      this._emitLifecycle('status', true);
+      if (resumed) {
+        // Events emitted while the socket was down are gone — there is no
+        // replay. Event-fed views register here to refetch their base data.
+        // Emitted LAST so refetch callbacks observe a connected socket.
+        this._reconnectEpoch += 1;
+        this._emitLifecycle('reconnected', this._reconnectEpoch);
+      }
     };
 
     socket.onmessage = (evt) => {
@@ -356,9 +398,7 @@ class OdinWebSocket {
         if (data.ts) {
           this._latency = Date.now() - data.ts;
           this._lastPongTime = Date.now();
-          if (this.onLatency) {
-            try { this.onLatency(this._latency); } catch { /* listener errors are not ours */ }
-          }
+          this._emitLifecycle('latency', this._latency);
         }
         return;
       }
@@ -389,7 +429,7 @@ class OdinWebSocket {
         };
         for (const h of this._handlers.chat || []) h(lost);
       }
-      if (this.onStatusChange) this.onStatusChange(false);
+      this._emitLifecycle('status', false);
       if (this._shouldConnect) {
         this._reconnectAttempt++;
         this._setState('reconnecting');
