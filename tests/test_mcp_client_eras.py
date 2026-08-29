@@ -889,3 +889,16 @@ class TestStdioProbeCasualtyRespawn:
             await conn.connect()
         assert "stdio EOF" not in str(excinfo.value)
         assert len(spawns) == 1
+
+    async def test_failed_second_phase_reaps_the_living_replacement(self, monkeypatch):
+        """Ownership pin: when the fresh process survives its own failed
+        initialize (unsupported counteroffer), connect cleanup must reap
+        THE REPLACEMENT — reaping only the phase-one corpse leaks a live
+        child."""
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy-die-discover-bad-version")
+        with pytest.raises(MCPConnectError):
+            await conn.connect()
+        assert len(spawns) == 2
+        assert conn._stdio is None  # noqa: SLF001
+        assert not spawns[1].running, "replacement child must be reaped"

@@ -55,6 +55,9 @@ MODE = sys.argv[1] if len(sys.argv) > 1 else "legacy"
 
 MODERN_VERSION = "2026-07-28"
 LEGACY_COUNTEROFFERS = {
+    # Fresh process of the respawn counteroffers an unsupported version and
+    # STAYS ALIVE — the ownership pin needs a living phase-2 child.
+    "legacy-die-discover-bad-version": "9999-01-01",
     "legacy": "2025-06-18",
     "legacy-oldest": "2024-11-05",
     "legacy-batch": "2025-03-26",
@@ -201,6 +204,11 @@ def handle(msg: dict) -> None:
         sys.stdout.write("x" * (5 * 1024 * 1024) + "\n")
         sys.stdout.flush()
         return
+
+    if method == "server/discover" and MODE == "legacy-die-discover-bad-version":
+        # Phase 1 dies on the probe like the strict class...
+        sys.stdout.close()
+        os._exit(3)
 
     if method == "server/discover" and MODE == "legacy-die-on-discover":
         # Strict legacy server (Uncraftbar's Roblox Studio proxy class):
