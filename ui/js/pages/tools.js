@@ -266,9 +266,17 @@ export default {
           `/api/tools/builtins/${encodeURIComponent(t.name)}/enabled`,
           { enabled: desired },
         );
-        // Canonical inventory adoption — never an optimistic state.
-        const visible = await api.get('/api/tools');
-        applyInventory(inv, visible);
+        // The POST response is the committed canonical operator inventory.
+        // Adopt it before any secondary read: a best-effort visible-catalog
+        // refresh must never roll a successful mutation back in the UI.
+        applyInventory(inv, tools.value);
+        error.value = null;
+        try {
+          const visible = await api.get('/api/tools');
+          applyInventory(inv, visible);
+        } catch (refreshError) {
+          console.warn('Built-in toggle committed; visible catalog refresh failed', refreshError);
+        }
       } catch (e) {
         event.target.checked = Boolean(t.enabled);
         error.value = e.message || `Failed to toggle ${t.name}`;

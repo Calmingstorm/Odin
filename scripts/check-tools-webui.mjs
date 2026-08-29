@@ -116,6 +116,36 @@ assert.equal(kubectlRow.state, 'disabled');
 // Non-builtin rows from /api/tools carry no switch eligibility.
 assert.equal(state.tools.value.find(t => t.name === 'mcp_X_probe').source, 'mcp');
 
+// Exact committed-truth interleaving: POST succeeds, then the best-effort
+// visible-catalog GET fails. The canonical POST inventory must remain adopted
+// and the switch must not be restored to its stale pre-commit state.
+state.tools.value = inventory.tools.map(t => ({ ...t, source: 'builtin' }));
+globalThis.fetch = async (path, opts = {}) => {
+  if ((opts.method || 'GET') === 'POST') {
+    return jsonResponse({
+      ...inventory,
+      disabled_count: 1,
+      tools: inventory.tools.map(t =>
+        t.name === 'kubectl' ? { ...t, enabled: false, state: 'disabled' } : t,
+      ),
+    });
+  }
+  throw new Error(`secondary refresh failed: ${path}`);
+};
+const committedInput = { checked: false };
+const savedWarnAfterCommit = console.warn;
+console.warn = () => {};
+await state.toggleBuiltinTool(
+  state.tools.value.find(t => t.name === 'kubectl'),
+  { target: committedInput },
+);
+console.warn = savedWarnAfterCommit;
+const committedKubectl = state.tools.value.find(t => t.name === 'kubectl');
+assert.equal(committedKubectl.enabled, false);
+assert.equal(committedKubectl.state, 'disabled');
+assert.equal(committedInput.checked, false);
+assert.equal(state.error.value, null);
+
 // A failed toggle restores the prior switch position.
 globalThis.fetch = async () => {
   throw new Error('down');

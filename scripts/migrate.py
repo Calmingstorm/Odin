@@ -3,6 +3,7 @@
 In production, this would use Alembic to run migrations.
 """
 
+import sys
 
 
 def main():

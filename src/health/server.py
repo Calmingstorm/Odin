@@ -64,7 +64,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/update", "/api/codex", "/api/llm",
     "/api/ollama", "/api/kimi", "/api/skills",
     "/api/mcp", "/api/tokens", "/api/personality",
-    "/api/tools/timeouts", "/api/pools",
+    "/api/tools/timeouts", "/api/tools/builtins", "/api/pools",
     "/api/outbound-webhooks", "/api/grafana-alerts", "/api/slack",
     "/api/context",
     "/api/restart",

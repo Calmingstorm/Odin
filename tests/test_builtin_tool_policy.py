@@ -25,6 +25,7 @@ from src.tools.builtin_policy import (
 )
 from src.tools.executor import ToolExecutor
 from src.tools.registry import get_tool_definitions
+from src.tools.result_validator import ToolResult
 from src.web.api.observability import register_tools_meta
 
 
@@ -199,6 +200,59 @@ class TestDispatchRejection:
     def test_rejection_shape(self):
         r = disabled_rejection("kubectl")
         assert r.ok is False and r.error == "tool_disabled" and r.tool_name == "kubectl"
+
+    @pytest.mark.parametrize(
+        "tool_name,tool_input",
+        [
+            ("ingest_document", {"source": "blocked", "content": "must not persist"}),
+            ("search_knowledge", {"query": "must not search"}),
+            ("list_knowledge", {}),
+            (
+                "bulk_ingest_knowledge",
+                {"items": [{"type": "url", "url": "https://example.invalid"}]},
+            ),
+            ("invoke_skill", {"name": "must-not-run", "input": {}}),
+        ],
+    )
+    async def test_background_special_cased_builtins_reject_before_effect(
+        self, tool_name, tool_input
+    ):
+        """Every pre-executor built-in branch shares one fail-closed gate.
+
+        These dependencies explode on inspection, not merely on mutation, so
+        each row proves the corresponding store/skill branch was never entered.
+        """
+        from src.discord.background_task import _execute_tool
+
+        class _ExplodingStore:
+            def __getattribute__(self, name):
+                if name.startswith("_"):
+                    return object.__getattribute__(self, name)
+                raise AssertionError(f"knowledge store entered for {tool_name}: {name}")
+
+        class _ExplodingSkills:
+            def has_skill(self, name):
+                raise AssertionError(f"skill manager entered for {tool_name}: {name}")
+
+        executor = ToolExecutor(ToolsConfig())
+        executor.set_builtin_policy(
+            BuiltinToolPolicy(get_config=lambda: self._config([tool_name]))
+        )
+        result = await _execute_tool(
+            tool_name,
+            tool_input,
+            executor,
+            _ExplodingSkills(),
+            _ExplodingStore(),
+            object(),
+            "operator",
+        )
+
+        assert isinstance(result, ToolResult)
+        assert result.ok is False
+        assert result.error == "tool_disabled"
+        assert result.tool_name == tool_name
+        assert "was not executed" in result.output
 
 
 SEED_CONFIG = """\
