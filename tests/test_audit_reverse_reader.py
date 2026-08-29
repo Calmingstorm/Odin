@@ -143,6 +143,19 @@ class _TrackingLock:
 
 
 class TestStableGenerationSnapshot:
+    async def test_hardlinked_generation_is_queried_once(self, tmp_path):
+        # Two retained-generation names can briefly resolve to one inode during
+        # an external rename/link race.  The descriptor snapshot must collapse
+        # those aliases or every matching audit entry is returned twice.
+        base = tmp_path / "audit.jsonl"
+        _write_lines(base, [_entry(0), _entry(1)])
+        base.with_name("audit.jsonl.1").hardlink_to(base)
+
+        logger = AuditLogger(path=str(base), max_files=2)
+        got = await logger.search(limit=10)
+
+        assert [entry["seq"] for entry in got] == [1, 0]
+
     async def test_descriptor_set_is_opened_under_persistence_lock(self, tmp_path, monkeypatch):
         base = tmp_path / "audit.jsonl"
         _write_lines(base, [_entry(0)])
