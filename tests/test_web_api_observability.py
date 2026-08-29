@@ -48,7 +48,7 @@ def _bot():
     ex.freshness_stats.get_summary.return_value = {"f": 1}
     ex.freshness_stats.get_recent.return_value = []
     ex.validation_stats.as_dict.return_value = {"v": 1}
-    bot.executor.bulkheads.get_all_metrics.return_value = {"b": 1}
+    ex.bulkheads.get_all_metrics.return_value = {"b": 1}
     bot.cost_tracker.get_totals.return_value = {"c": 1}
     bot.cost_tracker.get_summary.return_value = {"c": 2}
     bot.compression_stats.as_dict.return_value = {"comp": 1}
@@ -91,11 +91,18 @@ class TestToolsMeta:
 
 class TestBulkheadsAndAggregates:
     async def test_bulkheads(self):
-        bot = _bot()
-        async with TestClient(TestServer(_app(obs.register_bulkheads, bot=bot))) as c:
+        # The executor surface is bot.tool_executor. The old fake configured
+        # bot.executor — a name that never existed post-decomposition — so the
+        # test validated the dead route (audit 7.3). A MagicMock bot satisfies
+        # ANY attribute name, so the positive arm uses a rigid bot exposing
+        # only the real name: attribute drift now fails loudly instead of
+        # being auto-satisfied.
+        bulkheads = SimpleNamespace(get_all_metrics=lambda: {"b": 1})
+        rigid = SimpleNamespace(tool_executor=SimpleNamespace(bulkheads=bulkheads))
+        async with TestClient(TestServer(_app(obs.register_bulkheads, bot=rigid))) as c:
             assert (await (await c.get("/api/tools/bulkheads")).json())["b"] == 1
-        bot.executor = None
-        async with TestClient(TestServer(_app(obs.register_bulkheads, bot=bot))) as c:
+        bare = SimpleNamespace(tool_executor=None)
+        async with TestClient(TestServer(_app(obs.register_bulkheads, bot=bare))) as c:
             assert (await c.get("/api/tools/bulkheads")).status == 503
 
     async def test_aggregates(self):

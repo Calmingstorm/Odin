@@ -96,7 +96,8 @@ export default {
                 <span class="toggle-switch">
                   <input type="checkbox"
                     :checked="guildEnabled(guild)"
-                    @change="setGuildConfig(guild.id, 'enabled', $event.target.checked)" />
+                    :disabled="mutationPending.has('guild:' + guild.id + ':enabled')"
+                    @change="setGuildConfig(guild.id, 'enabled', $event.target.checked, $event)" />
                   <span class="toggle-slider"></span>
                 </span>
               </label>
@@ -105,7 +106,8 @@ export default {
                 <span class="toggle-switch">
                   <input type="checkbox"
                     :checked="guildMention(guild)"
-                    @change="setGuildConfig(guild.id, 'require_mention', $event.target.checked)" />
+                    :disabled="mutationPending.has('guild:' + guild.id + ':require_mention')"
+                    @change="setGuildConfig(guild.id, 'require_mention', $event.target.checked, $event)" />
                   <span class="toggle-slider"></span>
                 </span>
               </label>
@@ -114,7 +116,8 @@ export default {
                 <span class="toggle-switch">
                   <input type="checkbox"
                     :checked="guildBots(guild)"
-                    @change="setGuildConfig(guild.id, 'respond_to_bots', $event.target.checked)" />
+                    :disabled="mutationPending.has('guild:' + guild.id + ':respond_to_bots')"
+                    @change="setGuildConfig(guild.id, 'respond_to_bots', $event.target.checked, $event)" />
                   <span class="toggle-slider"></span>
                 </span>
               </label>
@@ -147,7 +150,8 @@ export default {
                     <label class="toggle-switch">
                       <input type="checkbox"
                         :checked="ch.effective.enabled"
-                        @change="setChannelConfig(ch.id, guild.id, 'enabled', $event.target.checked)" />
+                        :disabled="mutationPending.has('channel:' + ch.id + ':enabled')"
+                        @change="setChannelConfig(ch.id, guild.id, 'enabled', $event.target.checked, $event)" />
                       <span class="toggle-slider"></span>
                     </label>
                   </td>
@@ -155,7 +159,8 @@ export default {
                     <label class="toggle-switch">
                       <input type="checkbox"
                         :checked="ch.effective.require_mention"
-                        @change="setChannelConfig(ch.id, guild.id, 'require_mention', $event.target.checked)" />
+                        :disabled="mutationPending.has('channel:' + ch.id + ':require_mention')"
+                        @change="setChannelConfig(ch.id, guild.id, 'require_mention', $event.target.checked, $event)" />
                       <span class="toggle-slider"></span>
                     </label>
                   </td>
@@ -163,7 +168,8 @@ export default {
                     <label class="toggle-switch">
                       <input type="checkbox"
                         :checked="ch.effective.respond_to_bots"
-                        @change="setChannelConfig(ch.id, guild.id, 'respond_to_bots', $event.target.checked)" />
+                        :disabled="mutationPending.has('channel:' + ch.id + ':respond_to_bots')"
+                        @change="setChannelConfig(ch.id, guild.id, 'respond_to_bots', $event.target.checked, $event)" />
                       <span class="toggle-slider"></span>
                     </label>
                   </td>
@@ -277,31 +283,63 @@ export default {
       }
     }
 
-    async function setGuildConfig(guildId, key, value) {
-      try {
-        await api.put('/api/discord/guild/' + guildId + '/config', { [key]: value });
-        await fetchGuilds({ showLoading: false });
-      } catch (e) {
-        error.value = e.message;
-      }
+    // Guild/channel mutations are SERIALIZED through one chain — rapid
+    // clicks used to race uncoordinated PUT+refetch pairs (audit 6.3) — and
+    // each control is disabled while its own mutation is in flight.
+    let mutationChain = Promise.resolve();
+    const mutationPending = ref(new Set());
+
+    function enqueueConfigMutation(key, run) {
+      const armed = new Set(mutationPending.value);
+      armed.add(key);
+      mutationPending.value = armed;
+      const settled = mutationChain.then(run);
+      mutationChain = settled.catch(() => {});
+      return settled.finally(() => {
+        const after = new Set(mutationPending.value);
+        after.delete(key);
+        mutationPending.value = after;
+      });
     }
 
-    async function setChannelConfig(channelId, guildId, key, value) {
-      try {
-        await api.put('/api/discord/channel/' + channelId + '/config', { [key]: value });
-        await fetchGuilds({ showLoading: false });
-      } catch (e) {
-        error.value = e.message;
-      }
+    function setGuildConfig(guildId, key, value, event) {
+      const control = event?.target ?? null;
+      return enqueueConfigMutation(`guild:${guildId}:${key}`, async () => {
+        try {
+          await api.put('/api/discord/guild/' + guildId + '/config', { [key]: value });
+          await fetchGuilds({ showLoading: false });
+        } catch (e) {
+          error.value = e.message;
+          // The browser flipped the checkbox before the server answered, and
+          // the vdom value never changed, so a re-render will not undo it —
+          // restore the control to the position the server still holds.
+          if (control && typeof value === 'boolean') control.checked = !value;
+        }
+      });
     }
 
-    async function clearOverride(channelId, guildId) {
-      try {
-        await api.put('/api/discord/channel/' + channelId + '/config', { clear: true });
-        await fetchGuilds({ showLoading: false });
-      } catch (e) {
-        error.value = e.message;
-      }
+    function setChannelConfig(channelId, guildId, key, value, event) {
+      const control = event?.target ?? null;
+      return enqueueConfigMutation(`channel:${channelId}:${key}`, async () => {
+        try {
+          await api.put('/api/discord/channel/' + channelId + '/config', { [key]: value });
+          await fetchGuilds({ showLoading: false });
+        } catch (e) {
+          error.value = e.message;
+          if (control && typeof value === 'boolean') control.checked = !value;
+        }
+      });
+    }
+
+    function clearOverride(channelId, guildId) {
+      return enqueueConfigMutation(`channel:${channelId}:clear`, async () => {
+        try {
+          await api.put('/api/discord/channel/' + channelId + '/config', { clear: true });
+          await fetchGuilds({ showLoading: false });
+        } catch (e) {
+          error.value = e.message;
+        }
+      });
     }
 
     function globalItemLabel(editor, item) {
@@ -349,7 +387,7 @@ export default {
     return {
       guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalMembers, globalListEditors, globalChanged,
       guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
-      fetchAll, fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, globalItemLabel, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
+      fetchAll, fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, mutationPending, globalItemLabel, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
     };
   },
 };

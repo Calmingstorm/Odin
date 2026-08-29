@@ -1,7 +1,7 @@
 import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
-import { computed, onMounted, ref } from 'vue';
+import { computed, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 import { createHostAccessMutationCoordinator } from '../host-access-state.js';
 import { DiscordUserCombobox } from '../discord-user-combobox.js';
 
@@ -239,10 +239,46 @@ export default {
       }
     }
 
+    // Select-driven saves used to fire one PUT (and one toast) per arrow
+    // keypress (audit 6.3). Saves are debounced per key and read the LATEST
+    // draft at fire time, so scrubbing through options commits one final
+    // state. The coordinator below still owns serialization and rollback.
+    const SAVE_DEBOUNCE_MS = 500;
+    const pendingSaves = new Map(); // key -> { timer, run }
+
+    function scheduleSave(key, run) {
+      const prior = pendingSaves.get(key);
+      if (prior) clearTimeout(prior.timer);
+      const entry = { run, timer: null };
+      entry.timer = setTimeout(() => {
+        pendingSaves.delete(key);
+        run();
+      }, SAVE_DEBOUNCE_MS);
+      pendingSaves.set(key, entry);
+    }
+
+    function cancelPendingSave(key) {
+      const prior = pendingSaves.get(key);
+      if (prior) {
+        clearTimeout(prior.timer);
+        pendingSaves.delete(key);
+      }
+    }
+
+    // Flush, never cancel: a user's last edit must not silently vanish when
+    // they navigate away before the quiet window elapses.
+    function flushPendingSaves() {
+      for (const [key, entry] of [...pendingSaves]) {
+        clearTimeout(entry.timer);
+        pendingSaves.delete(key);
+        entry.run();
+      }
+    }
+
     function saveDefaultPolicy() {
       // No parameters: this is bound directly as a @change handler. Passing a
       // snapshot here receives the DOM Event because v-model has already run.
-      coordinator.saveDefault(defaultPolicy.value);
+      scheduleSave('default', () => coordinator.saveDefault(defaultPolicy.value));
     }
 
     function toggleDefaultHost(host, checked) {
@@ -259,9 +295,14 @@ export default {
     }
 
     function saveUser(uid) {
-      const entry = users.value[uid];
-      if (!entry) return;
-      coordinator.saveUser(uid, entry);
+      // The entry is re-read at fire time: coalesced edits send ONE snapshot
+      // carrying every change, and a user deleted during the quiet window
+      // resolves to nothing rather than a resurrecting PUT.
+      scheduleSave(`user:${uid}`, () => {
+        const entry = users.value[uid];
+        if (!entry) return;
+        coordinator.saveUser(uid, entry);
+      });
     }
 
     function toggleUserHost(uid, host, checked) {
@@ -297,7 +338,9 @@ export default {
         default_host: availableHosts.value[0] || '',
         allow_all: false,
       };
-      saveUser(uid);
+      // A deliberate button action commits immediately — only per-keypress
+      // control changes ride the debounce.
+      coordinator.saveUser(uid, users.value[uid]);
       showAddUser.value = false;
     }
 
@@ -310,6 +353,9 @@ export default {
         danger: true,
       });
       if (!ok) return;
+      // A save still sitting in its quiet window must not fire after the
+      // delete and resurrect the entry.
+      cancelPendingSave(`user:${uid}`);
       await coordinator.deleteUser(uid);
       // The coordinator publishes only after the server confirms deletion and
       // participates in the same ordering protocol as in-flight PUTs.
@@ -319,12 +365,17 @@ export default {
     }
 
     onMounted(fetchData);
+    // The tab host keeps this component alive; pending edits are committed,
+    // not dropped, when the operator switches away.
+    onDeactivated(flushPendingSaves);
+    onUnmounted(flushPendingSaves);
 
     return {
       loading, error, data, availableHosts, defaultPolicy, users,
       showAddUser, members,
       fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
       toggleUserHost, setUserDefault, openAddUser, addUserById, deleteUser,
+      flushPendingSaves,
     };
   },
 };

@@ -6,7 +6,7 @@
  * /api/config/meta registry; the page never reconstructs it from local rules.
  */
 import { api } from '../api.js';
-import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
+import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 import { collectApplyDetails } from '../config-apply-details.js';
 import { HEALTH_FILTERS } from '../config-health.js';
 import { findVerticalScrollOwner } from '../config-scroll-owner.js';
@@ -1331,21 +1331,45 @@ export default {
       try { localStorage.setItem(EXPANDED_STORAGE_KEY, JSON.stringify(value)); } catch { /* storage unavailable */ }
     }, { deep: true });
 
+    // The System tabs render inside <keep-alive>: switching away only
+    // DEACTIVATES this component, so a mount-scoped document listener kept
+    // capturing Ctrl+Z/Y on sibling tabs and silently mutated hidden Config
+    // drafts (audit 6.1). Global keyboard ownership follows activation, and
+    // arming is idempotent because Vue fires both onMounted and onActivated
+    // on the initial keep-alive mount.
+    let keydownArmed = false;
+
+    function armKeydown() {
+      if (keydownArmed) return;
+      keydownArmed = true;
+      document.addEventListener('keydown', handleKeydown);
+    }
+
+    function disarmKeydown() {
+      if (!keydownArmed) return;
+      keydownArmed = false;
+      document.removeEventListener('keydown', handleKeydown);
+    }
+
     onMounted(() => {
       fetchConfig();
-      document.addEventListener('keydown', handleKeydown);
+      armKeydown();
       mobileMedia = window.matchMedia('(max-width: 760px)');
       updateMobileState(mobileMedia);
       mobileMedia.addEventListener?.('change', updateMobileState);
     });
 
+    onActivated(armKeydown);
+    onDeactivated(disarmKeydown);
+
     onUnmounted(() => {
-      document.removeEventListener('keydown', handleKeydown);
+      disarmKeydown();
       mobileMedia?.removeEventListener?.('change', updateMobileState);
       if (restartPollTimer) window.clearTimeout(restartPollTimer);
     });
 
     return {
+      armKeydown, disarmKeydown, handleKeydown,
       config, meta, loading, saving, error, toast, metaRefreshError, restartPromptOpen, restartScheduled, restartError, configMain,
       searchQuery, healthFilter, activeCategory, reviewOpen, mobileOverflowOpen, warningThresholdInput, arrayInputs,
       healthFilters, visibleCategories, displayGroups, reviewGroups,

@@ -11,7 +11,7 @@
     "check:templates": "node scripts/check-vue-templates.mjs",
     "check:template-bindings": "node scripts/check-template-bindings.mjs",
     "check:modal-race": "node scripts/check-modal-race.mjs",
-    "check": "npm run check:templates && npm run check:template-bindings && npm run check:w1-webui && npm run check:modal-race && npm run check:host-access-races && npm run check:socket-identity && npm run check:ws-lifecycle && npm run check:w2-freshness && npm run check:schedule-time && npm run check:schedule-report-format && npm run check:config-health && npm run check:config-center-ui2 && npm run check:mcp-webui && npm run check:tools-webui && npm run check:config-save-boundaries && npm run build",
+    "check": "npm run check:templates && npm run check:template-bindings && npm run check:w1-webui && npm run check:modal-race && npm run check:host-access-races && npm run check:socket-identity && npm run check:ws-lifecycle && npm run check:w2-freshness && npm run check:toggle-serialization && npm run check:search-races && npm run check:schedule-time && npm run check:schedule-report-format && npm run check:config-health && npm run check:config-center-ui2 && npm run check:mcp-webui && npm run check:tools-webui && npm run check:config-save-boundaries && npm run build",
     "check:host-access-races": "node scripts/check-host-access-races.mjs",
     "check:socket-identity": "node scripts/check-socket-identity.mjs",
     "check:ws-lifecycle": "node scripts/check-ws-lifecycle.mjs",
@@ -23,7 +23,9 @@
     "check:mcp-webui": "node scripts/check-mcp-webui.mjs",
     "check:tools-webui": "node scripts/check-tools-webui.mjs",
     "check:w1-webui": "node scripts/check-w1-webui.mjs",
-    "check:w2-freshness": "node scripts/check-w2-freshness.mjs"
+    "check:w2-freshness": "node scripts/check-w2-freshness.mjs",
+    "check:toggle-serialization": "node scripts/check-toggle-serialization.mjs",
+    "check:search-races": "node scripts/check-search-races.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.0",
