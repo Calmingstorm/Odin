@@ -412,13 +412,20 @@ class TestCoherentSnapshotAndAttentionEvidence:
             status="TERMINAL_FAILED",
             created_at=time.time(),
         )
-        _seed_op(
-            store.db_path,
-            message_id="m-terminal-attention",
-            state="MANUAL_RESOLUTION_REQUIRED",
-            seq=1,
+        attention_ops = (
+            (1, "MANUAL_RESOLUTION_REQUIRED", "run_command"),
+            (2, "OUTCOME_UNKNOWN", "email_send"),
+            (3, "MANUAL_RESOLUTION_REQUIRED", "cloudflare_dns_manage"),
         )
-        for seq in range(2, 53):
+        for seq, state, tool_name in attention_ops:
+            _seed_op(
+                store.db_path,
+                message_id="m-terminal-attention",
+                state=state,
+                tool_name=tool_name,
+                seq=seq,
+            )
+        for seq in range(4, 55):
             _seed_op(
                 store.db_path,
                 message_id="m-terminal-attention",
@@ -427,9 +434,17 @@ class TestCoherentSnapshotAndAttentionEvidence:
             )
 
         [turn] = read_turn_snapshot(store.db_path, 10)["turns"]
+        rendered_attention = {
+            (operation["tool_call_id"], operation["state"], operation["tool_name"])
+            for operation in turn["operations"]
+            if operation["state"] in {"OUTCOME_UNKNOWN", "MANUAL_RESOLUTION_REQUIRED"}
+        }
+        assert rendered_attention == {
+            (f"call-{seq}", state, tool_name)
+            for seq, state, tool_name in attention_ops
+        }
         states = [operation["state"] for operation in turn["operations"]]
-        assert states.count("MANUAL_RESOLUTION_REQUIRED") == 1
-        assert states.count("PREPARED") == 49
+        assert states.count("PREPARED") == 47
         assert turn["operations_truncated"] is True
 
 
