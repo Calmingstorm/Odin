@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import deque
-from collections.abc import Callable
+import os
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Literal
@@ -27,6 +27,45 @@ DEFAULT_TOOL_INPUT_CAP = 4000
 # Without rotation the file grew unbounded (48 MB / 65k lines observed).
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024  # 100 MB
 DEFAULT_MAX_FILES = 5
+
+
+# Block size for reverse reads. Big enough that a limit-10 dashboard query
+# usually resolves inside one block of the newest log; small enough that a
+# match-poor filter walking deep never holds more than block + one line.
+_REVERSE_BLOCK_SIZE = 64 * 1024
+
+
+async def _iter_lines_reverse(
+    path: Path, block_size: int = _REVERSE_BLOCK_SIZE
+) -> AsyncIterator[bytes]:
+    """Yield the file's non-empty lines newest-first without a full scan.
+
+    Reads fixed-size blocks backwards from EOF, reassembling lines that
+    straddle block boundaries. The iteration anchors at the EOF observed on
+    open: entries appended afterwards are simply not seen (the forward scan
+    had the same exposure at its own moment of EOF), and rotation renames
+    the inode this handle already holds, so the anchored view stays intact.
+    A torn final line (no trailing newline) is yielded as-is — callers
+    already skip what fails to parse.
+    """
+    async with aiofiles.open(path, "rb") as f:
+        pos = await f.seek(0, os.SEEK_END)
+        tail = b""
+        while pos > 0:
+            read_size = min(block_size, pos)
+            pos -= read_size
+            await f.seek(pos)
+            block = await f.read(read_size)
+            lines = (block + tail).split(b"\n")
+            # lines[0] may be the tail of a line whose head lives in the
+            # not-yet-read earlier block — hold it until that block arrives
+            # (or BOF proves it complete).
+            tail = lines[0]
+            for raw in reversed(lines[1:]):
+                if raw.strip():
+                    yield raw
+        if tail.strip():
+            yield tail
 
 
 def _cap_tool_input(tool_input: dict, cap: int) -> dict | str:
@@ -114,33 +153,31 @@ class AuditLogger:
         return paths
 
     async def _collect_matches(self, predicate: Callable[[dict], bool], limit: int) -> list[dict]:
-        """Return up to *limit* matching entries, most-recent first, streaming.
+        """Return up to *limit* matching entries, most-recent first.
 
-        Streams line-by-line into a bounded deque instead of readlines()-ing the
-        whole file into RAM (a multi-hundred-MB read per query as the log grew).
-        Reads the current file first, then rotated files, until *limit* is met."""
+        Reads blocks BACKWARDS from EOF and stops the moment *limit* entries
+        have matched — a dashboard limit-10 query touches kilobytes of the
+        newest log instead of scanning every line ever written (the forward
+        streaming pass cost seconds per query once the live log grew).
+        Falls through current file → rotated files, newest → oldest, with
+        the same ordering the forward scan produced."""
+        if limit <= 0:
+            return []
         collected: list[dict] = []
         for path in self._rotated_paths_newest_first():
-            per_file: deque[dict] = deque(maxlen=limit)
             try:
-                async with aiofiles.open(path) as f:
-                    async for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        try:
-                            entry = json.loads(line)
-                        except json.JSONDecodeError:
-                            continue
-                        if predicate(entry):
-                            per_file.append(entry)  # keeps newest `limit` in-file
+                async for raw in _iter_lines_reverse(path):
+                    try:
+                        entry = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    if predicate(entry):
+                        collected.append(entry)
+                        if len(collected) >= limit:
+                            return collected
             except OSError as e:
                 log.error("Failed to read audit log %s: %s", path, e)
                 continue
-            for entry in reversed(per_file):  # newest first within the file
-                collected.append(entry)
-                if len(collected) >= limit:
-                    return collected
         return collected
 
     def set_event_callback(self, callback: Callable) -> None:
@@ -517,23 +554,24 @@ class AuditLogger:
         if not self._signer or not self.path.exists():
             return
         async with self._persist_lock:
+            # Only the newest parseable entry matters, so read backwards from
+            # EOF — readlines() pulled the whole multi-MB log into RAM at
+            # every boot to look at one line. Semantics preserved exactly:
+            # unparseable tails are skipped; the first parseable entry ends
+            # the search whether or not it carries a chain value (an unsigned
+            # newest entry leaves the chain at genesis, as before).
             try:
-                async with aiofiles.open(self.path) as f:
-                    lines = await f.readlines()
+                async for raw in _iter_lines_reverse(self.path):
+                    try:
+                        entry = json.loads(raw)
+                    except json.JSONDecodeError:
+                        continue
+                    prev = entry.get("_hmac")
+                    if prev:
+                        self._signer.prev_hmac = prev
+                    return
             except Exception as exc:
                 log.error("Failed to read audit log for chain init: %s", exc)
-                return
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                prev = entry.get("_hmac")
-                if prev:
-                    self._signer.prev_hmac = prev
                 return
 
     async def verify_integrity(self) -> dict:
