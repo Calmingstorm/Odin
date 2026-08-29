@@ -341,6 +341,9 @@ const App = {
     async function logout() {
       await api.logout();
       ws.disconnect();
+      // Status polling must die with the session — it survived logout and
+      // spammed 401s against a cleared token (audit 3.3).
+      if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
       authState.value = 'login';
     }
 

@@ -93,7 +93,9 @@ class TestAuth:
     async def test_accepts_matching_token(self):
         client, _ = _client(api_token="s3cret")
         async with client:
-            async with client.ws_connect("/api/ws?token=s3cret") as ws:
+            async with client.ws_connect(
+                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto("s3cret")]
+            ) as ws:
                 await ws.send_json({"type": "ping", "ts": 1})
                 assert (await ws.receive_json())["type"] == "pong"
 
@@ -102,7 +104,9 @@ class TestAuth:
         sm = SimpleNamespace(validate=lambda t: t == "good", get_identity=lambda t: None)
         client, _ = _client(web_config=SimpleNamespace(), session_manager=sm)
         async with client:
-            async with client.ws_connect("/api/ws?token=good") as ws:
+            async with client.ws_connect(
+                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto("good")]
+            ) as ws:
                 await ws.send_json({"type": "ping", "ts": 1})
                 assert (await ws.receive_json())["type"] == "pong"
 
@@ -338,3 +342,50 @@ class TestTailLogs:
     def test_resolve_identity_returns_none(self):
         mgr = WebSocketManager(_bot())
         assert mgr._resolve_identity("tok") is None
+
+
+# --------------------------------------------------------------------------- #
+# Bearer-subprotocol auth (audit 3.1: the token must never ride the URL)
+# --------------------------------------------------------------------------- #
+class TestBearerSubprotocolAuth:
+    @staticmethod
+    def _proto(token: str) -> str:
+        import base64
+
+        return "odin.bearer." + base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
+
+    async def test_subprotocol_token_authenticates_and_echoes(self):
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws", protocols=[self._proto("sekrit-tok")])
+            assert ws.protocol == self._proto("sekrit-tok")
+            await ws.send_json({"type": "ping", "ts": 1})
+            reply = await ws.receive_json()
+            assert reply["type"] == "pong"
+            await ws.close()
+
+    async def test_query_token_rejected_even_when_valid(self):
+        """A valid token in the URL must REJECT, not authenticate — query
+        strings land in access journals, and journals ride backups."""
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws?token=sekrit-tok")
+            msg = await ws.receive()
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4001
+
+    async def test_bad_subprotocol_rejected(self):
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws", protocols=[self._proto("wrong")])
+            msg = await ws.receive()
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4001
+
+    async def test_malformed_subprotocol_payload_rejected(self):
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws", protocols=["odin.bearer.!!!not-b64!!!"])
+            msg = await ws.receive()
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4001

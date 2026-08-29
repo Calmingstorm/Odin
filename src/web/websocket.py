@@ -9,6 +9,8 @@ Endpoint: /api/ws
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import hmac
 import json
 from pathlib import Path
@@ -25,6 +27,34 @@ if TYPE_CHECKING:
     from ..discord.client import OdinBot
 
 log = get_logger("web.ws")
+
+# WebSocket bearer credential carrier: browsers cannot set an Authorization
+# header on a WebSocket, so the token rides a subprotocol as
+# ``odin.bearer.<base64url(token, unpadded)>`` — header-borne, never logged
+# by access journals, echoed back in the handshake per RFC 6455.
+BEARER_SUBPROTOCOL_PREFIX = "odin.bearer."
+
+
+def _bearer_subprotocol(request: web.Request) -> str | None:
+    """The client-offered odin bearer subprotocol, verbatim (for echo)."""
+    header = request.headers.get("Sec-WebSocket-Protocol", "")
+    for offered in header.split(","):
+        candidate = offered.strip()
+        if candidate.startswith(BEARER_SUBPROTOCOL_PREFIX):
+            return candidate
+    return None
+
+
+def _decode_bearer_subprotocol(offered: str | None) -> str:
+    """Decode the token from the offered subprotocol; '' when absent/bad."""
+    if not offered:
+        return ""
+    payload = offered[len(BEARER_SUBPROTOCOL_PREFIX) :]
+    padding = "=" * (-len(payload) % 4)
+    try:
+        return base64.urlsafe_b64decode(payload + padding).decode("utf-8")
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return ""
 
 # How many lines to send from the end of the log when a client first subscribes
 _LOG_TAIL_LINES = 50
@@ -78,10 +108,25 @@ class WebSocketManager:
         return None
 
     async def handle(self, request: web.Request) -> web.WebSocketResponse:
-        """Handle a WebSocket connection at /api/ws."""
+        """Handle a WebSocket connection at /api/ws.
+
+        Authentication rides the ``Sec-WebSocket-Protocol`` header (the one
+        place browser WebSocket clients can carry a credential), never the
+        URL: query strings land verbatim in access journals — and journals
+        ride backups — so a ``?token=`` is REJECTED outright rather than
+        merely ignored (audit 3.1)."""
         identity = getattr(request, "_api_identity", None)
+        offered_protocol = _bearer_subprotocol(request)
+        if request.query.get("token"):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.close(
+                code=4001,
+                message=b"token in URL is not accepted; use the bearer subprotocol",
+            )
+            return ws
         if self._api_token or self._web_config:
-            token = request.query.get("token", "")
+            token = _decode_bearer_subprotocol(offered_protocol)
             valid = bool(identity)
             if not valid and self._api_token and token:
                 valid = hmac.compare_digest(token, self._api_token)
@@ -100,7 +145,12 @@ class WebSocketManager:
             if identity is None and token:
                 identity = self._resolve_identity(token, request)
 
-        ws = web.WebSocketResponse(heartbeat=30.0)
+        # A client that OFFERED subprotocols requires the server to select
+        # one, or the browser fails the handshake.
+        ws = web.WebSocketResponse(
+            heartbeat=30.0,
+            protocols=(offered_protocol,) if offered_protocol else (),
+        )
         await ws.prepare(request)
         self._clients.add(ws)
         ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"  # type: ignore[attr-defined]  # sanctioned dynamic attr

@@ -218,6 +218,10 @@ class OdinWebSocket {
 
   disconnect() {
     this._shouldConnect = false;
+    if (this._reconnectTimer) {
+      clearTimeout(this._reconnectTimer);
+      this._reconnectTimer = null;
+    }
     this._reconnectAttempt = 0;
     this._resetLatency();
     this._stopPing();
@@ -241,12 +245,19 @@ class OdinWebSocket {
 
   _startPing() {
     this._stopPing();
+    this._lastPongTime = Date.now();
     this._pingInterval = setInterval(() => {
-      if (this.connected) {
-        try {
-          this._ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
-        } catch { /* ignore */ }
+      if (!this.connected) return;
+      // Half-open detection (audit 3.2): pongs were recorded but never
+      // CHECKED, so a silently dead path looked connected forever. Three
+      // missed pongs force a close; the normal onclose path reconnects.
+      if (this._lastPongTime && Date.now() - this._lastPongTime > 47000) {
+        try { this._ws.close(4000, 'pong timeout'); } catch { /* ignore */ }
+        return;
       }
+      try {
+        this._ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+      } catch { /* ignore */ }
     }, 15000);
   }
 
@@ -304,10 +315,17 @@ class OdinWebSocket {
 
   _open() {
     if (this._ws) return;
+    if (!this._shouldConnect) return; // logged out between schedule and fire
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
-    let url = `${proto}//${location.host}/api/ws`;
-    if (this._api.token) url += `?token=${encodeURIComponent(this._api.token)}`;
-    const socket = new WebSocket(url);
+    const url = `${proto}//${location.host}/api/ws`;
+    // The token rides a subprotocol, NEVER the URL: query strings land
+    // verbatim in server access journals, and journals ride backups
+    // (audit 3.1). base64url unpadded keeps it inside RFC 6455's token
+    // charset; the server echoes the selected protocol back.
+    const protocols = this._api.token
+      ? ['odin.bearer.' + btoa(this._api.token).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '')]
+      : undefined;
+    const socket = protocols ? new WebSocket(url, protocols) : new WebSocket(url);
     this._ws = socket;
     // Every callback below is guarded on socket identity. Closing a socket does
     // not cancel its already-queued events: disconnect() clears _ws, connect()
@@ -375,7 +393,9 @@ class OdinWebSocket {
       if (this._shouldConnect) {
         this._reconnectAttempt++;
         this._setState('reconnecting');
-        setTimeout(() => this._open(), this._reconnectDelay);
+        // The handle is OWNED so logout can cancel it — an unstored timeout
+        // outlived disconnect() and reopened the socket tokenless (audit 3.3).
+        this._reconnectTimer = setTimeout(() => this._open(), this._reconnectDelay);
         this._reconnectDelay = Math.min(this._reconnectDelay * 2, this._maxReconnectDelay);
       } else {
         this._setState('disconnected');
