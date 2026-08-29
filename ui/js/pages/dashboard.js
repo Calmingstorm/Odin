@@ -358,25 +358,57 @@ export default {
       }
     }
 
+    let activityFetchEpoch = 0;
+    let errorsFetchEpoch = 0;
+    let liveEventEpoch = 0;
+    let liveErrorEpoch = 0;
+
+    function mergeByAuditIdentity(snapshot, live) {
+      const seen = new Set();
+      return [...live, ...snapshot].filter(entry => {
+        const key = entry._hmac || JSON.stringify([
+          entry.timestamp, entry.tool_name, entry.user_id, entry.result_summary, entry.error,
+        ]);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
     async function fetchActivity() {
+      const epoch = ++activityFetchEpoch;
+      const eventEpoch = liveEventEpoch;
       activityLoading.value = true;
       try {
-        activity.value = await api.get('/api/audit?limit=10');
-        newEventCount.value = 0;
+        const snapshot = await api.get('/api/audit?limit=10');
+        if (epoch !== activityFetchEpoch) return;
+        const freshLive = eventEpoch === liveEventEpoch
+          ? [] : activity.value.filter(e => (e._liveEpoch || 0) > eventEpoch);
+        activity.value = mergeByAuditIdentity(snapshot, freshLive).slice(0, 10);
+        newEventCount.value = freshLive.length;
       } catch { /* ignore */ }
-      activityLoading.value = false;
+      if (epoch === activityFetchEpoch) activityLoading.value = false;
     }
 
     async function fetchErrors() {
+      const epoch = ++errorsFetchEpoch;
+      const errorEventEpoch = liveErrorEpoch;
       errorsLoading.value = true;
       try {
-        errors.value = await api.get('/api/audit?error_only=1&limit=5');
+        const snapshot = await api.get('/api/audit?error_only=1&limit=5');
+        if (epoch !== errorsFetchEpoch) return;
+        const freshLive = errorEventEpoch === liveErrorEpoch
+          ? [] : errors.value.filter(e => (e._liveErrorEpoch || 0) > errorEventEpoch);
+        errors.value = mergeByAuditIdentity(snapshot, freshLive).slice(0, 5);
         errorsError.value = false;
       } catch {
-        // A failed load must never render as "All clear" (audit 2.2).
-        errorsError.value = true;
+        if (epoch !== errorsFetchEpoch) return;
+        // A failed load must never render as "All clear" (audit 2.2),
+        // but a live error received during this request is newer usable truth
+        // and must remain visible rather than being covered by the failure UI.
+        errorsError.value = errorEventEpoch === liveErrorEpoch || errors.value.length === 0;
       }
-      errorsLoading.value = false;
+      if (epoch === errorsFetchEpoch) errorsLoading.value = false;
     }
 
     async function fetchKnowledgeCount() {
@@ -470,11 +502,19 @@ export default {
 
     function onEvent(data) {
       if (data.payload && data.payload.tool_name) {
-        const entry = { ...data.payload, _isNew: true, _key: ++eventKeyCounter };
+        liveEventEpoch += 1;
+        const entry = {
+          ...data.payload,
+          _isNew: true,
+          _key: ++eventKeyCounter,
+          _liveEpoch: liveEventEpoch,
+        };
         activity.value.unshift(entry);
         if (activity.value.length > 10) activity.value.pop();
         newEventCount.value++;
         if (entry.error) {
+          liveErrorEpoch += 1;
+          entry._liveErrorEpoch = liveErrorEpoch;
           // A live error is newer truth than a failed REST snapshot. Make it
           // visible immediately instead of leaving the failure panel on top.
           errorsError.value = false;
@@ -487,11 +527,19 @@ export default {
       }
     }
 
+    let unsubReconnected = null;
+
     onMounted(async () => {
       await Promise.all([fetchStatus(), fetchActivity(), fetchErrors(), fetchAgents(), fetchKnowledgeCount()]);
       statusInterval = setInterval(fetchStatus, 15000);
       agentInterval = setInterval(fetchAgents, 10000);
       ws.subscribe('events', onEvent);
+      // Activity/Errors are fed by pushed events with no replay — a drop
+      // means missed entries shown as fresh (audit 3.4). Refetch on resume.
+      unsubReconnected = ws.onReconnected(() => {
+        fetchActivity();
+        fetchErrors();
+      });
     });
 
     onUnmounted(() => {
@@ -499,6 +547,7 @@ export default {
       if (agentInterval) clearInterval(agentInterval);
       clearTimeout(eventResetTimer);
       ws.unsubscribe('events', onEvent);
+      if (unsubReconnected) { unsubReconnected(); unsubReconnected = null; }
     });
 
     return {

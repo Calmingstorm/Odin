@@ -978,9 +978,8 @@ export default {
 
     // The tab host uses <keep-alive>, so subscription ownership follows
     // activation rather than mount/unmount. Hidden Logs tabs must not retain
-    // the global WebSocket state callback.
-    let prevStateHandler = null;
-    let logsStateHandler = null;
+    // a live state listener.
+    let unsubState = null;
     let logStreamActive = false;
 
     function activateLogStream() {
@@ -989,22 +988,17 @@ export default {
       ws.subscribe('logs', onLog);
       subscribed.value = ws.connected;
       wsState.value = ws.state || 'disconnected';
-      prevStateHandler = ws.onStateChange;
-      logsStateHandler = (state, detail) => {
+      unsubState = ws.onState((state) => {
         wsState.value = state;
         subscribed.value = state === 'connected';
-        if (prevStateHandler) prevStateHandler(state, detail);
-      };
-      ws.onStateChange = logsStateHandler;
+      });
     }
 
     function deactivateLogStream() {
       if (!logStreamActive) return;
       logStreamActive = false;
       ws.unsubscribe('logs', onLog);
-      if (ws.onStateChange === logsStateHandler) ws.onStateChange = prevStateHandler;
-      logsStateHandler = null;
-      prevStateHandler = null;
+      if (unsubState) { unsubState(); unsubState = null; }
     }
 
     // A scrollbar drag routinely ENDS outside the log element (and outside

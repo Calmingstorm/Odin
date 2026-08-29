@@ -656,15 +656,25 @@ export default {
       return 'badge-info';
     }
 
+    // Latest-request ownership: reconnect, activation, and debounced event
+    // refreshes may overlap. Only the newest request may commit or settle the
+    // shared loading/error state (the same epoch primitive used by audit and
+    // knowledge search in the campaign).
+    let fetchSessionsEpoch = 0;
+
     async function fetchSessions() {
+      const epoch = ++fetchSessionsEpoch;
       loading.value = true;
       error.value = null;
       try {
-        sessions.value = await api.get('/api/sessions');
+        const loaded = await api.get('/api/sessions');
+        if (epoch !== fetchSessionsEpoch) return;
+        sessions.value = loaded;
       } catch (e) {
+        if (epoch !== fetchSessionsEpoch) return;
         error.value = e.message;
       }
-      loading.value = false;
+      if (epoch === fetchSessionsEpoch) loading.value = false;
     }
 
     function retry() {
@@ -806,6 +816,7 @@ export default {
     }
 
     let armed = false;
+    let unsubReconnected = null;
 
     // Tabs live inside <keep-alive> (tabbed-page.js), so switching away
     // DEACTIVATES this component without unmounting it — anything armed in
@@ -819,6 +830,10 @@ export default {
       // occurrence) leaves a live copy behind on every visit.
       fetchSessions();
       ws.subscribe('events', onEvent);
+      // The list is event-fed with no replay: a drop while this tab is
+      // active means silently missed sessions (audit 3.4). A drop while
+      // DEACTIVATED is already covered — arm() refetches on every return.
+      unsubReconnected = ws.onReconnected(() => fetchSessions());
     }
 
     onMounted(() => {
@@ -834,6 +849,7 @@ export default {
       if (!armed) return;
       armed = false;
       ws.unsubscribe('events', onEvent);
+      if (unsubReconnected) { unsubReconnected(); unsubReconnected = null; }
       clearTimeout(debounceTimer);
     }
 

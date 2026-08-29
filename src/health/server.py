@@ -197,9 +197,14 @@ def _make_auth_middleware(
     web_config: WebConfig,
     session_manager: SessionManager,
 ) -> Middleware:
-    """Create middleware that enforces Bearer token auth on /api/ routes.
+    """Create middleware that enforces authentication on ``/api/`` routes.
 
-    Accepts either the raw api_token or a valid session token.
+    Normal HTTP requests accept Authorization bearer credentials and the
+    historical query carrier used by downloads.  ``/api/ws`` is deliberately
+    different: browsers cannot set Authorization on a WebSocket handshake, so
+    it accepts the bearer subprotocol and NEVER authenticates a query token.
+    Query-token presence is left for the WebSocket handler to reject with its
+    explicit close reason before any credential is validated/refreshed.
     """
 
     @web.middleware
@@ -208,27 +213,46 @@ def _make_auth_middleware(
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
         path = request.path
-        # Skip auth for non-API routes
         if not path.startswith("/api/"):
             return await handler(request)
-        # Skip auth for login endpoint
         if path in _AUTH_SKIP_PATHS:
             return await handler(request)
-        # Skip auth if no token configured (dev mode)
-        token = web_config.api_token
+
+        is_websocket = path == "/api/ws"
+        # Presence, not truthiness or first-value order, is the security
+        # boundary.  Do not validate/refresh ANY query credential on /api/ws;
+        # the handler turns this into the protocol-level 4001 rejection.
+        if is_websocket and "token" in request.query:
+            return await handler(request)
+
+        configured_token = getattr(web_config, "api_token", "") or ""
         tm = request.app.get("token_manager")
-        has_any_token = token or getattr(web_config, "api_tokens", None) or (tm
-            and tm.list_tokens())
+        has_any_token = (
+            configured_token
+            or getattr(web_config, "api_tokens", None)
+            or (tm and tm.list_tokens())
+        )
         if not has_any_token:
             return await handler(request)
 
-        # Extract bearer value from Authorization header
+        bearer_value = ""
         auth_header = request.headers.get("Authorization", "")
-        bearer_prefix = "Bearer "
-        if auth_header.startswith(bearer_prefix):
-            bearer_value = auth_header[len(bearer_prefix):]
-            # Check legacy single token
-            if token and hmac.compare_digest(bearer_value, token):
+        if auth_header.startswith("Bearer "):
+            bearer_value = auth_header[len("Bearer "):]
+        elif is_websocket:
+            # Shared decoder with WebSocketManager.handle: one wire format,
+            # including malformed/base64 handling, at both auth boundaries.
+            from ..web.websocket import (
+                _bearer_subprotocol,
+                _decode_bearer_subprotocol,
+            )
+            bearer_value = _decode_bearer_subprotocol(_bearer_subprotocol(request))
+        else:
+            query_tokens = request.query.getall("token", [])
+            bearer_value = query_tokens[0] if query_tokens else ""
+
+        if bearer_value:
+            if configured_token and hmac.compare_digest(bearer_value, configured_token):
                 from ..config.schema import ApiTokenIdentity
                 request._session_id = "api-admin"
                 request._api_identity = ApiTokenIdentity(
@@ -236,8 +260,7 @@ def _make_auth_middleware(
                     username="Admin", tier="admin", label="default",
                 )
                 return await handler(request)
-            # Check dynamic token manager first, then static config tokens
-            tm = request.app.get("token_manager")
+
             identity = tm.resolve(bearer_value) if tm else None
             if identity is None and hasattr(web_config, "resolve_api_identity"):
                 identity = web_config.resolve_api_identity(bearer_value)
@@ -245,7 +268,7 @@ def _make_auth_middleware(
                 request._session_id = identity.user_id
                 request._api_identity = identity
                 return await handler(request)
-            # Check session tokens — restore bound identity if present
+
             if session_manager.validate(bearer_value):
                 request._session_id = bearer_value
                 session_identity = session_manager.get_identity(bearer_value)
@@ -253,36 +276,9 @@ def _make_auth_middleware(
                     request._api_identity = session_identity
                 return await handler(request)
 
-        # Check query param token (for downloads, WebSocket)
-        query_token = request.query.get("token", "")
-        if query_token:
-            if token and hmac.compare_digest(query_token, token):
-                from ..config.schema import ApiTokenIdentity
-                request._session_id = "api-admin"
-                request._api_identity = ApiTokenIdentity(
-                    token="", user_id="api-admin",
-                    username="Admin", tier="admin", label="default",
-                )
-                return await handler(request)
-            tm = request.app.get("token_manager")
-            identity = tm.resolve(query_token) if tm else None
-            if identity is None and hasattr(web_config, "resolve_api_identity"):
-                identity = web_config.resolve_api_identity(query_token)
-            if identity is not None:
-                request._session_id = identity.user_id
-                request._api_identity = identity
-                return await handler(request)
-            if session_manager.validate(query_token):
-                request._session_id = query_token
-                session_identity = session_manager.get_identity(query_token)
-                if session_identity is not None:
-                    request._api_identity = session_identity
-                return await handler(request)
-
         return web.json_response({"error": "unauthorized"}, status=401)
 
     return auth_middleware
-
 
 def _make_admin_middleware(web_config) -> Middleware:
     """Enforce the admin tier on control-plane prefixes (ADMIN_ONLY_PREFIXES).

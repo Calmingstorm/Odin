@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
@@ -93,7 +93,9 @@ class TestAuth:
     async def test_accepts_matching_token(self):
         client, _ = _client(api_token="s3cret")
         async with client:
-            async with client.ws_connect("/api/ws?token=s3cret") as ws:
+            async with client.ws_connect(
+                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto("s3cret")]
+            ) as ws:
                 await ws.send_json({"type": "ping", "ts": 1})
                 assert (await ws.receive_json())["type"] == "pong"
 
@@ -102,7 +104,9 @@ class TestAuth:
         sm = SimpleNamespace(validate=lambda t: t == "good", get_identity=lambda t: None)
         client, _ = _client(web_config=SimpleNamespace(), session_manager=sm)
         async with client:
-            async with client.ws_connect("/api/ws?token=good") as ws:
+            async with client.ws_connect(
+                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto("good")]
+            ) as ws:
                 await ws.send_json({"type": "ping", "ts": 1})
                 assert (await ws.receive_json())["type"] == "pong"
 
@@ -269,6 +273,21 @@ class TestBroadcastAndClose:
         mgr = WebSocketManager(_bot())
         await mgr.broadcast_event({"kind": "test"})  # no raise, early return
 
+    async def test_close_by_session_id_is_exact_not_user_wide(self):
+        mgr = WebSocketManager(_bot())
+        first = _fake_ws(
+            _odin_session_id="s1", _odin_identity=SimpleNamespace(user_id="same-user"),
+        )
+        second = _fake_ws(
+            _odin_session_id="s2", _odin_identity=SimpleNamespace(user_id="same-user"),
+        )
+        mgr._clients.update({first, second})
+        mgr._event_subscribers.update({first, second})
+        assert await mgr.close_by_session_id("s1") == 1
+        first.close.assert_awaited_once()
+        second.close.assert_not_awaited()
+        assert first not in mgr._clients and second in mgr._clients
+
     async def test_close_by_user_id(self):
         mgr = WebSocketManager(_bot())
         match = _fake_ws(_odin_identity=SimpleNamespace(user_id="u1"))
@@ -338,3 +357,137 @@ class TestTailLogs:
     def test_resolve_identity_returns_none(self):
         mgr = WebSocketManager(_bot())
         assert mgr._resolve_identity("tok") is None
+
+
+# --------------------------------------------------------------------------- #
+# Bearer-subprotocol auth (audit 3.1: the token must never ride the URL)
+# --------------------------------------------------------------------------- #
+class TestBearerSubprotocolAuth:
+    @staticmethod
+    def _proto(token: str) -> str:
+        import base64
+
+        return "odin.bearer." + base64.urlsafe_b64encode(token.encode()).decode().rstrip("=")
+
+    async def test_subprotocol_token_authenticates_and_echoes(self):
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws", protocols=[self._proto("sekrit-tok")])
+            assert ws.protocol == self._proto("sekrit-tok")
+            await ws.send_json({"type": "ping", "ts": 1})
+            reply = await ws.receive_json()
+            assert reply["type"] == "pong"
+            await ws.close()
+
+    async def test_query_token_rejected_even_when_valid(self):
+        """A valid token in the URL must REJECT, not authenticate — query
+        strings land in access journals, and journals ride backups."""
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws?token=sekrit-tok")
+            msg = await ws.receive()
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4001
+
+    async def test_bad_subprotocol_rejected(self):
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws", protocols=[self._proto("wrong")])
+            msg = await ws.receive()
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4001
+
+    async def test_malformed_subprotocol_payload_rejected(self):
+        client, _ = _client(api_token="sekrit-tok")
+        async with client:
+            ws = await client.ws_connect("/api/ws", protocols=["odin.bearer.!!!not-b64!!!"])
+            msg = await ws.receive()
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4001
+
+# --------------------------------------------------------------------------- #
+# Production auth boundary — these install the REAL middleware before the WS
+# route. Bare route-table tests cannot catch a handshake rejected upstream.
+# --------------------------------------------------------------------------- #
+class TestProductionMiddlewareBearerAuth:
+    @staticmethod
+    def _stack(*, session_manager, web_config):
+        from src.health.server import _make_auth_middleware
+
+        # This is the deployed auth middleware itself, not a handler-only app.
+        app = web.Application(middlewares=[
+            _make_auth_middleware(web_config, session_manager),
+        ])
+        app["session_manager"] = session_manager
+        manager = setup_websocket(app, _bot(), web_config=web_config)
+        return TestClient(TestServer(app)), manager
+
+    async def test_session_subprotocol_reaches_handler_and_binds_exact_session(self):
+        identity = SimpleNamespace(user_id="u1", tier="admin")
+        sm = SimpleNamespace(
+            validate=MagicMock(side_effect=lambda token: token == "session-one"),
+            get_identity=MagicMock(return_value=identity),
+        )
+        config = SimpleNamespace(
+            api_token="configured-so-auth-is-on",
+            api_tokens=[],
+            resolve_api_identity=lambda _token: None,
+        )
+        client, manager = self._stack(session_manager=sm, web_config=config)
+        async with client:
+            ws = await client.ws_connect(
+                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto("session-one")]
+            )
+            await ws.send_json({"type": "ping", "ts": 9})
+            assert (await ws.receive_json())["type"] == "pong"
+            server_ws = next(iter(manager._clients))
+            assert server_ws._odin_session_id == "session-one"
+            await ws.close()
+
+    @pytest.mark.parametrize("query", ["token=", "token=&token=valid", "token=valid&token="])
+    async def test_any_query_token_presence_rejected_before_validation(self, query):
+        sm = SimpleNamespace(
+            validate=MagicMock(return_value=True),
+            get_identity=MagicMock(return_value=SimpleNamespace(user_id="u1")),
+        )
+        config = SimpleNamespace(
+            api_token="configured-so-auth-is-on",
+            api_tokens=[],
+            resolve_api_identity=lambda _token: None,
+        )
+        client, _manager = self._stack(session_manager=sm, web_config=config)
+        # The handler is a spy so this pin proves the MIDDLEWARE's early
+        # presence branch is what forwarded the request; handler-level query
+        # rejection alone is insufficient evidence.
+        forwarded = 0
+        original_handle = _manager.handle
+        async def counted(request):
+            nonlocal forwarded
+            forwarded += 1
+            return await original_handle(request)
+        route = next(
+            route for route in client.server.app.router.routes()
+            if route.resource.canonical == "/api/ws" and route.method == "GET"
+        )
+        route._handler = counted
+        async with client:
+            ws = await client.ws_connect(
+                f"/api/ws?{query}",
+                protocols=[TestBearerSubprotocolAuth._proto("valid")],
+            )
+            msg = await ws.receive()
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4001
+        assert forwarded == 1
+        sm.validate.assert_not_called()
+
+    async def test_missing_subprotocol_is_http_unauthorized_in_real_stack(self):
+        sm = SimpleNamespace(validate=MagicMock(return_value=False), get_identity=MagicMock())
+        config = SimpleNamespace(
+            api_token="configured", api_tokens=[], resolve_api_identity=lambda _token: None,
+        )
+        client, _manager = self._stack(session_manager=sm, web_config=config)
+        async with client:
+            with pytest.raises(aiohttp.WSServerHandshakeError) as exc:
+                await client.ws_connect("/api/ws")
+            assert exc.value.status == 401
