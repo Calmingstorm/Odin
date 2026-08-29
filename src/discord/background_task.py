@@ -448,6 +448,18 @@ async def _execute_tool(
     The executor path returns the structured ToolResult (the caller consumes
     .ok); every other branch returns a plain string.
     """
+    # This dispatcher has several special-cased built-ins below which never
+    # enter ToolExecutor.execute(). Apply the SAME live policy at this shared
+    # background/scheduled entry point before RBAC, handler selection, store
+    # access, skill lookup, or any other effect. The policy's disabled set is
+    # restricted to the static built-in universe, so skills and MCP tools pass
+    # through untouched.
+    from ..tools.builtin_policy import BuiltinToolPolicy, disabled_rejection
+
+    policy = getattr(executor, "_builtin_policy", None)
+    if isinstance(policy, BuiltinToolPolicy) and policy.is_disabled(tool_name):
+        return disabled_rejection(tool_name)
+
     # Central RBAC gate for deferred/background execution. Skills, MCP, and the
     # knowledge tools below bypass ToolExecutor.execute() (the only place
     # check_permission runs), and even the final execute() call only enforces

@@ -90,6 +90,100 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
             "overrides": bot.config.tools.tool_timeouts,
         })
 
+    def _builtin_inventory() -> dict:
+        """Operator inventory of ALL static built-ins with per-tool state.
+        The switch reports configured intent; ``state`` reports what the
+        model actually experiences — the two truths stay separate."""
+        from ...tools.builtin_policy import normalize_disabled_tools
+
+        config = bot.config
+        disabled = set(normalize_disabled_tools(config.tools.disabled_tools))
+        catalog = getattr(bot, "tool_catalog", None)
+        hidden = catalog.backend_hidden_names(config) if catalog else set()
+        globally_on = bool(config.tools.enabled)
+        tools = []
+        for tool in get_tool_definitions():
+            name = tool["name"]
+            enabled = name not in disabled
+            if not enabled:
+                state = "disabled"
+            elif not globally_on:
+                state = "global_disabled"
+            elif name in hidden:
+                state = "unavailable"
+            else:
+                state = "available"
+            tools.append(
+                {
+                    "name": name,
+                    "description": tool.get("description", ""),
+                    "is_core": tool.get("is_core", False),
+                    "enabled": enabled,
+                    "state": state,
+                }
+            )
+        return {
+            "global_enabled": globally_on,
+            "disabled_count": len(disabled),
+            "tools": tools,
+        }
+
+    @routes.get("/api/tools/builtins")
+    async def builtin_tool_inventory(_request: web.Request) -> web.Response:
+        return web.json_response(_builtin_inventory())
+
+    @routes.post("/api/tools/builtins/{name}/enabled")
+    async def set_builtin_tool_enabled(request: web.Request) -> web.Response:
+        """Single-purpose per-tool switch (Tools panel). Mutates ONLY the
+        ``tools.disabled_tools`` leaf from transaction-current configuration;
+        idempotent repeats persist nothing. The catalog is invalidated
+        synchronously before the response, so the next assembled request
+        reflects the change; dispatch guards backstop in-flight turns."""
+        from ...config import persistence as config_persistence
+        from ...config.persistence import config_transaction
+        from ...tools.builtin_policy import BUILTIN_TOOL_NAMES, normalize_disabled_tools
+
+        name = request.match_info["name"]
+        if name not in BUILTIN_TOOL_NAMES:
+            return web.json_response(
+                {"error": f"'{name}' is not a built-in tool"}, status=404
+            )
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+            return web.json_response({"error": "enabled must be a boolean"}, status=400)
+        extra = sorted(set(body) - {"enabled"})
+        if extra:
+            return web.json_response(
+                {"error": f"only 'enabled' is accepted on this route (got: {', '.join(extra)})"},
+                status=400,
+            )
+        enabled = body["enabled"]
+
+        async with config_transaction():
+            current = normalize_disabled_tools(list(bot.config.tools.disabled_tools))
+            if enabled:
+                new_list = [n for n in current if n != name]
+            else:
+                new_list = current if name in current else [*current, name]
+            if new_list == current:
+                return web.json_response(_builtin_inventory())
+            exc, cancelled = await config_persistence.persist_config_paths_locked(
+                [(("tools", "disabled_tools"), new_list)]
+            )
+            if exc is not None:
+                raise exc
+            bot.config.tools.disabled_tools = new_list
+        catalog = getattr(bot, "tool_catalog", None)
+        if catalog is not None:
+            catalog.invalidate()
+        response = web.json_response(_builtin_inventory())
+        if cancelled:
+            raise asyncio.CancelledError
+        return response
+
 
 def register_bulkheads(routes: web.RouteTableDef, bot) -> None:
     """Bulkhead isolation status (verbatim from the monolith)."""

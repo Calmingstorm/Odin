@@ -396,6 +396,18 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
                 status=409,
             )
 
+        # tools.disabled_tools has the same transactional-owner rule: the
+        # Tools management API persists, rebinds, and invalidates the catalog
+        # in one commit. Accepting the leaf here would split those truths.
+        if isinstance(updates.get("tools"), dict) and "disabled_tools" in updates["tools"]:
+            return web.json_response(
+                {
+                    "error": "tools.disabled_tools is read-only on this route",
+                    "detail": "Use the Tools management API and panel.",
+                },
+                status=409,
+            )
+
         # Block sensitive field updates
         if _contains_blocked_fields(updates, _SENSITIVE_FIELDS):
             return web.json_response(

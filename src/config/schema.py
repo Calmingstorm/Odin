@@ -250,6 +250,24 @@ class ToolsConfig(BaseModel):
     claude_code_user: str = ""
     claude_code_dir: str = "/opt/odin"
     skill_allowed_urls: list[str] = Field(default_factory=list)
+    # Operator-disabled built-in tools (config-gated visibility): a disabled
+    # tool is absent from the model catalog on every surface and rejected at
+    # dispatch. Case-sensitive built-in names; unknown entries are preserved
+    # and ignored (never a startup failure) so lists survive catalog drift.
+    disabled_tools: list[str] = Field(default_factory=list)
+
+    @field_validator("disabled_tools")
+    @classmethod
+    def _normalize_disabled_tools(cls, value: list[str]) -> list[str]:
+        seen: set[str] = set()
+        result: list[str] = []
+        for item in value:
+            name = item.strip()
+            if not name or name in seen:
+                continue
+            seen.add(name)
+            result.append(name)
+        return result
     # Odin's PR #18 self-audit caught that these were read via
     # getattr(..., None) with hardcoded defaults in the handlers —
     # Pydantic silently dropped the values when operators set them,

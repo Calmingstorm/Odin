@@ -1203,6 +1203,15 @@ FIELDS: dict[str, FieldSpec] = {
         description="Sources a skill may be installed from.",
         restart_reason="The allowlist is published to a process-wide value at startup.",
     ),
+    "tools.disabled_tools": FieldSpec(
+        apply_mode="live_apply",
+        description="Built-in tools removed from the model catalog for this installation.",
+        apply_handler=(
+            "GET /api/tools/builtins, POST /api/tools/builtins/{name}/enabled "
+            "(Capabilities → Tools switches); the generic config route "
+            "rejects this leaf"
+        ),
+    ),
     "tools.local_working_dir": FieldSpec(
         apply_mode="restart",
         description="Working directory for local commands.",

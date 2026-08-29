@@ -175,6 +175,10 @@ class ToolExecutor:
         # so tests and the __new__ patch seam still construct.
         self._app_config = app_config
         self._email_config = email_config
+        # Operator tool policy (config-gated built-ins). Injected by wiring
+        # AFTER the bot exists (the policy reads live bot.config); None =
+        # ungated, so tests and the __new__ patch seam construct unchanged.
+        self._builtin_policy = None
         # The configured workspace VALUE is restart-required, but it is
         # re-validated on every local command rather than cached: existence,
         # type, ownership and mode are mutable filesystem state (see
@@ -565,6 +569,15 @@ class ToolExecutor:
     async def execute(
         self, tool_name: str, tool_input: dict, *, user_id: str | None = None
     ) -> ToolResult:
+        # Operator-disabled built-in (config-gated visibility): typed
+        # rejection BEFORE handler resolution, durability transitions,
+        # recovery machinery, or any external effect. getattr tolerates the
+        # sanctioned ``__new__`` test seam, which skips ``__init__``.
+        policy = getattr(self, "_builtin_policy", None)
+        if policy is not None and policy.is_disabled(tool_name):
+            from .builtin_policy import disabled_rejection
+
+            return disabled_rejection(tool_name)
         handler = self._resolve_handler(tool_name)
         if handler is None:
             return ToolResult(
@@ -937,6 +950,10 @@ class ToolExecutor:
     # --- Process management ---
 
     # --- Claude Code ---
+
+    def set_builtin_policy(self, policy) -> None:
+        """Inject the operator tool policy (wiring, post-bot construction)."""
+        self._builtin_policy = policy
 
     def set_user_context(self, user_id: str | None) -> None:
         """Deprecated: user_id is now passed directly to execute().

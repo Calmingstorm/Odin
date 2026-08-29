@@ -246,3 +246,59 @@ class TestContextWindowsAdminPolicy:
             headers = {"Authorization": "Bearer admin-token"}
             assert (await client.get("/api/context/windows", headers=headers)).status == 200
             assert (await client.post("/api/context/windows/clear", headers=headers)).status == 200
+
+
+class TestBuiltinToolsAdminPolicy:
+    def test_builtin_tools_surface_is_centrally_admin_only(self):
+        assert _is_admin_only_path("/api/tools/builtins")
+        assert _is_admin_only_path("/api/tools/builtins/kubectl/enabled")
+        # Neighboring observability remains available to authenticated tiers.
+        assert not _is_admin_only_path("/api/tools")
+        assert not _is_admin_only_path("/api/tools/stats")
+
+    async def test_both_routes_reject_user_and_guest_but_allow_admin(self):
+        web_config = WebConfig(
+            api_tokens=[
+                ApiTokenIdentity(token="admin-token", user_id="a", tier="admin"),
+                ApiTokenIdentity(token="user-token", user_id="u", tier="user"),
+                ApiTokenIdentity(token="guest-token", user_id="g", tier="guest"),
+            ]
+        )
+        server = HealthServer(port=0, webhook_config=WebhookConfig(), web_config=web_config)
+        server._app.router.add_get(
+            "/api/tools/builtins", lambda _r: web.json_response({"ok": True})
+        )
+        server._app.router.add_post(
+            "/api/tools/builtins/{name}/enabled",
+            lambda _r: web.json_response({"ok": True}),
+        )
+        async with TestClient(TestServer(server._app)) as client:
+            routes = (
+                ("GET", "/api/tools/builtins"),
+                ("POST", "/api/tools/builtins/kubectl/enabled"),
+            )
+            for token in ("user-token", "guest-token"):
+                headers = {"Authorization": f"Bearer {token}"}
+                for method, route_path in routes:
+                    response = (
+                        await client.get(route_path, headers=headers)
+                        if method == "GET"
+                        else await client.post(
+                            route_path, headers=headers, json={"enabled": False}
+                        )
+                    )
+                    assert response.status == 403, (
+                        token,
+                        method,
+                        route_path,
+                        response.status,
+                    )
+            headers = {"Authorization": "Bearer admin-token"}
+            assert (await client.get("/api/tools/builtins", headers=headers)).status == 200
+            assert (
+                await client.post(
+                    "/api/tools/builtins/kubectl/enabled",
+                    headers=headers,
+                    json={"enabled": False},
+                )
+            ).status == 200

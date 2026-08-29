@@ -71,6 +71,7 @@ COMPONENT_HANDLES = [
     "llm_gateway",
     "prompt_builder",
     "tool_catalog",
+    "builtin_tool_policy",
     "native_tools",
     "scheduling_tools",
     "knowledge_tools",

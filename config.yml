@@ -125,6 +125,11 @@ tools:
     enabled: true
   skill_allowed_urls:
     - "http://localhost:8188"
+  # Built-in tools removed from the model catalog for this installation.
+  # Managed from the WebUI Tools page (Capabilities → Tools); a disabled
+  # tool is invisible to the model and rejected at dispatch. Unknown names
+  # are preserved and ignored. Default: all built-ins enabled.
+  disabled_tools: []
   # Hostname or IP where Claude Code is accessible; leave empty if not used
   claude_code_host: ""
   # SSH user for Claude Code host; leave empty if not used
