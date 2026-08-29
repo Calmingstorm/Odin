@@ -23,6 +23,13 @@ Modes:
                     the legacy handshake normally otherwise (the strict
                     die-on-unknown-method class; compatibility respawn pin).
   legacy-die-always closes stdout and exits on ANY request (both-phase pin).
+  legacy-malformed-die-on-discover  emits malformed JSON before probe EOF;
+                    the protocol-fault latch must forbid compatibility respawn.
+  legacy-pushy-die-on-discover  sends a server request before probe EOF;
+                    phase-one reply tasks must be retired before respawn.
+  legacy-delayed-die-discover-bad-version  closes stdout, exits 7 after a
+                    delay, then counteroffers an unsupported legacy version
+                    from the replacement (post-reap exit-status pin).
   oversized-on-discover  answers the probe with an over-ceiling line while
                     staying alive (non-EOF probe failure: no respawn pin).
   garbage           emits non-JSON noise, then behaves like `legacy`.
@@ -58,6 +65,7 @@ LEGACY_COUNTEROFFERS = {
     # Fresh process of the respawn counteroffers an unsupported version and
     # STAYS ALIVE — the ownership pin needs a living phase-2 child.
     "legacy-die-discover-bad-version": "9999-01-01",
+    "legacy-delayed-die-discover-bad-version": "9999-01-01",
     "legacy": "2025-06-18",
     "legacy-oldest": "2024-11-05",
     "legacy-batch": "2025-03-26",
@@ -204,6 +212,37 @@ def handle(msg: dict) -> None:
         sys.stdout.write("x" * (5 * 1024 * 1024) + "\n")
         sys.stdout.flush()
         return
+
+    if method == "server/discover" and MODE == "legacy-malformed-die-on-discover":
+        # A malformed frame poisons clean-EOF classification. Dropping the
+        # bad line and then treating EOF as strict-legacy evidence would
+        # conceal a protocol fault behind a successful replacement.
+        sys.stdout.write("{not-json}\n")
+        sys.stdout.flush()
+        sys.stdout.close()
+        os._exit(6)
+
+    if method == "server/discover" and MODE == "legacy-pushy-die-on-discover":
+        # Create a phase-one client-reply task, then die. The client must
+        # cancel/reap that task before constructing the replacement.
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": "phase-one-request",
+                "method": "sampling/createMessage",
+                "params": {"messages": []},
+            }
+        )
+        time.sleep(0.1)
+        sys.stdout.close()
+        os._exit(5)
+
+    if method == "server/discover" and MODE == "legacy-delayed-die-discover-bad-version":
+        # stdout EOF can precede process exit. Shutdown/reap must complete
+        # before the first-phase status is read for the combined diagnostic.
+        sys.stdout.close()
+        time.sleep(0.15)
+        os._exit(7)
 
     if method == "server/discover" and MODE == "legacy-die-discover-bad-version":
         # Phase 1 dies on the probe like the strict class...

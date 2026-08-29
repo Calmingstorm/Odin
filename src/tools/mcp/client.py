@@ -292,19 +292,24 @@ class MCPServerConnection:
         initialize on it. Any failure raises ONE bounded error naming both
         phases (exit status only — never command, environment, or stderr);
         cancellation propagates unchanged."""
-        exit_status = dead.returncode
+        # A phase-one server request may have created an asynchronous -32601
+        # reply. Cancel it before shutdown can block on a task waiting to
+        # write to the dying process; each reply is also bound to the
+        # transport that originated its request.
+        await self._cancel_server_reply_tasks()
         await dead.shutdown()
+        exit_status = dead.returncode
+        # Retire phase one's loss before phase two starts. A later closure
+        # from the replacement may then set a fresh, truthful error without
+        # being overwritten after its handshake.
+        self._lost_reason = None
         fresh = self._new_stdio_transport()
         self._stdio = fresh
         try:
             await fresh.start()
             await self._initialize_legacy_stdio()
-        except asyncio.CancelledError:
-            raise
-        except BaseException as e:
-            detail = (
-                _clean_text(str(e), 200) if isinstance(e, MCPError) else e.__class__.__name__
-            )
+        except Exception as e:
+            detail = _clean_text(str(e), 200) if isinstance(e, MCPError) else e.__class__.__name__
             suffix = (
                 f" (first process exit status {exit_status})" if exit_status is not None else ""
             )
@@ -379,7 +384,9 @@ class MCPServerConnection:
         elif kind == proto.KIND_NOTIFICATION:
             self._handle_notification(msg)
         elif kind == proto.KIND_REQUEST:
-            self._handle_server_request(msg, channel="stdio")
+            # Capture the originating transport now. A delayed phase-one
+            # reply must never follow self._stdio to a respawned process.
+            self._handle_server_request(msg, channel="stdio", stdio_transport=self._stdio)
 
     # --------------------------- HTTP ----------------------------------
 
@@ -618,7 +625,13 @@ class MCPServerConnection:
         else:
             log.debug("MCP %s: notification %s", self.name, method)
 
-    def _handle_server_request(self, msg: dict, *, channel: str) -> None:
+    def _handle_server_request(
+        self,
+        msg: dict,
+        *,
+        channel: str,
+        stdio_transport: StdioTransport | None = None,
+    ) -> None:
         """Legacy servers may initiate requests (sampling/roots/elicitation).
         We support none of those capabilities: answer -32601 on the correct
         channel instead of silently dropping (a dropped request hangs the
@@ -646,11 +659,20 @@ class MCPServerConnection:
             )
             return
         task = asyncio.get_running_loop().create_task(
-            self._send_reply(reply, channel),
+            self._send_reply(reply, channel, stdio_transport=stdio_transport),
             name=f"mcp-server-reply-{self.name}",
         )
         self._server_reply_tasks.add(task)
         task.add_done_callback(self._server_reply_tasks.discard)
+
+    async def _cancel_server_reply_tasks(self) -> None:
+        """Cancel and reap replies owned by a transport being retired."""
+        while self._server_reply_tasks:
+            tasks = tuple(self._server_reply_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._server_reply_tasks.difference_update(tasks)
 
     async def _drain_server_reply_tasks(self) -> None:
         tasks = tuple(self._server_reply_tasks)
@@ -667,11 +689,18 @@ class MCPServerConnection:
             except (asyncio.CancelledError, Exception):
                 pass
 
-    async def _send_reply(self, reply: dict, channel: str) -> None:
+    async def _send_reply(
+        self,
+        reply: dict,
+        channel: str,
+        *,
+        stdio_transport: StdioTransport | None = None,
+    ) -> None:
         try:
-            if channel == "stdio" and self._stdio is not None:
-                await self._stdio.send(reply)
-            elif self._http is not None:
+            if channel == "stdio":
+                if stdio_transport is not None:
+                    await stdio_transport.send(reply)
+            elif channel == "http" and self._http is not None:
                 await self._http.post(
                     reply,
                     protocol_version=self.negotiated_version,

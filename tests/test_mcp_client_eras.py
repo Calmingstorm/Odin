@@ -779,7 +779,7 @@ class TestBoundedServerRequestReplies:
         active = 0
         peak = 0
 
-        async def parked_reply(_reply, _channel):
+        async def parked_reply(_reply, _channel, **_kwargs):
             nonlocal active, peak
             active += 1
             peak = max(peak, active)
@@ -834,6 +834,7 @@ class TestStdioProbeCasualtyRespawn:
             assert len(spawns) == 2
             assert conn.era == "legacy"
             assert conn.negotiated_version == "2025-06-18"
+            assert conn.status()["last_error"] == ""
             discovery = await conn.discover_tools()
             echo = next(t for t in discovery.tools if t.name == "echo")
             outcome = await conn.call_tool(echo, {"text": "respawned"})
@@ -889,6 +890,161 @@ class TestStdioProbeCasualtyRespawn:
             await conn.connect()
         assert "stdio EOF" not in str(excinfo.value)
         assert len(spawns) == 1
+
+    async def test_protocol_fault_before_eof_forbids_respawn(self, monkeypatch):
+        """Malformed output followed by EOF is a protocol-faulted stream,
+        never the clean strict-legacy EOF that grants a fresh process."""
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy-malformed-die-on-discover")
+        with pytest.raises(MCPConnectError):
+            await conn.connect()
+        assert len(spawns) == 1
+        assert not spawns[0].closed_by_eof
+
+    async def test_phase_one_reply_tasks_cancelled_before_respawn(self, monkeypatch):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy-pushy-die-on-discover")
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def parked_reply(_reply, _channel, **_kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(conn, "_send_reply", parked_reply)
+        await conn.connect()
+        try:
+            assert started.is_set()
+            assert cancelled.is_set()
+            assert conn._server_reply_tasks == set()  # noqa: SLF001
+            assert len(spawns) == 2
+        finally:
+            await conn.disconnect()
+
+    async def test_phase_one_reply_tasks_finish_before_shutdown(self, monkeypatch):
+        """Ordering pin: teardown must not await transport shutdown while a
+        phase-one reply can still be parked in that transport's send path."""
+        conn = _stdio("legacy")
+
+        class ParkedTransport:
+            async def send(self, _message):
+                await asyncio.Event().wait()
+
+        conn._accept_server_requests = True  # noqa: SLF001
+        conn._stdio = ParkedTransport()  # type: ignore[assignment]  # noqa: SLF001
+        conn._on_stdio_message(  # noqa: SLF001
+            {
+                "jsonrpc": "2.0",
+                "id": "phase-one-request",
+                "method": "sampling/createMessage",
+                "params": {},
+            }
+        )
+        await asyncio.sleep(0)
+
+        class DeadTransport:
+            returncode = 3
+
+            async def shutdown(self):
+                assert conn._server_reply_tasks == set()  # noqa: SLF001
+
+        class FreshTransport:
+            async def start(self):
+                return None
+
+        monkeypatch.setattr(conn, "_new_stdio_transport", FreshTransport)
+
+        async def fail_initialize():
+            raise MCPConnectError("unsupported")
+
+        monkeypatch.setattr(conn, "_initialize_legacy_stdio", fail_initialize)
+        with pytest.raises(MCPConnectError):
+            await conn._respawn_probe_casualty_for_legacy(  # noqa: SLF001
+                DeadTransport()  # type: ignore[arg-type]
+            )
+
+    async def test_stdio_server_reply_is_bound_to_originating_transport(self):
+        """Even without lifecycle cancellation as a backstop, a delayed
+        phase-one reply cannot resolve self._stdio to a replacement."""
+
+        class RecordingTransport:
+            def __init__(self):
+                self.sent: list[dict] = []
+
+            async def send(self, message):
+                self.sent.append(message)
+
+        conn = _stdio("legacy")
+        first = RecordingTransport()
+        replacement = RecordingTransport()
+        conn._accept_server_requests = True  # noqa: SLF001
+        conn._stdio = first  # type: ignore[assignment]  # noqa: SLF001
+        conn._on_stdio_message(  # noqa: SLF001
+            {
+                "jsonrpc": "2.0",
+                "id": "phase-one-request",
+                "method": "sampling/createMessage",
+                "params": {},
+            }
+        )
+        # No await occurred after task creation, so this swap precedes the
+        # reply coroutine's first instruction deterministically.
+        conn._stdio = replacement  # type: ignore[assignment]  # noqa: SLF001
+        await conn._drain_server_reply_tasks()  # noqa: SLF001
+        assert [msg.get("id") for msg in first.sent] == ["phase-one-request"]
+        assert replacement.sent == []
+
+    async def test_delayed_phase_one_exit_status_captured_after_reap(self, monkeypatch):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy-delayed-die-discover-bad-version")
+        with pytest.raises(MCPConnectError) as excinfo:
+            await conn.connect()
+        assert "first process exit status 7" in str(excinfo.value)
+        assert len(spawns) == 2
+        assert all(not transport.running for transport in spawns)
+
+    async def test_exit_status_is_sampled_only_after_shutdown(self, monkeypatch):
+        """Deterministic ordering pin: EOF can arrive before wait() publishes
+        returncode, so diagnostics must inspect it only after shutdown/reap."""
+
+        class DeadTransport:
+            returncode = None
+
+            async def shutdown(self):
+                self.returncode = 7
+
+        class FreshTransport:
+            async def start(self):
+                return None
+
+        conn = _stdio("legacy")
+        fresh = FreshTransport()
+        monkeypatch.setattr(conn, "_new_stdio_transport", lambda: fresh)
+
+        async def fail_initialize():
+            raise MCPConnectError("unsupported")
+
+        monkeypatch.setattr(conn, "_initialize_legacy_stdio", fail_initialize)
+        with pytest.raises(MCPConnectError) as excinfo:
+            await conn._respawn_probe_casualty_for_legacy(  # noqa: SLF001
+                DeadTransport()  # type: ignore[arg-type]
+            )
+        assert "first process exit status 7" in str(excinfo.value)
+
+    @pytest.mark.parametrize("control", [asyncio.CancelledError, SystemExit, KeyboardInterrupt])
+    async def test_respawn_does_not_wrap_process_control_exceptions(self, monkeypatch, control):
+        conn = _stdio("legacy-die-on-discover")
+
+        async def stop_control():
+            raise control
+
+        monkeypatch.setattr(conn, "_initialize_legacy_stdio", stop_control)
+        with pytest.raises(control):
+            await conn.connect()
+        assert conn._stdio is None  # noqa: SLF001
 
     async def test_failed_second_phase_reaps_the_living_replacement(self, monkeypatch):
         """Ownership pin: when the fresh process survives its own failed
