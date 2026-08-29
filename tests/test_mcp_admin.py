@@ -655,3 +655,93 @@ class TestErrorArms:
         body = await response.json()
         assert response.status == 201
         assert body["state"] == "unknown"
+
+
+class TestPerServerEnabledToggle:
+    """The dedicated card-toggle route: single-purpose, idempotent, and the
+    disabled server's tools leave the MODEL catalog before the response."""
+
+    async def test_disable_unpublishes_and_removes_from_model_catalog(self, harness):
+        client, bot, config_path = harness
+        assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+        assert (
+            await client.post("/api/mcp/servers", json=_server_body(name="other"))
+        ).status == 201
+        assert bot.mcp_manager.has_tool("mcp_fake_echo")
+
+        response = await client.post("/api/mcp/servers/fake/enabled", json={"enabled": False})
+        body = await response.json()
+        assert response.status == 200
+        # Canonical refreshed status payload — one source of truth.
+        row = next(s for s in body["servers"] if s["name"] == "fake")
+        assert row["enabled"] is False
+        assert row["state"] == "disabled"
+        assert row["published_count"] == 0
+        # The disabled server's tools are OUT of the model catalog while the
+        # other server's tools survive.
+        names = [d["name"] for d in bot.mcp_manager.get_tool_definitions()]
+        assert "mcp_fake_echo" not in names
+        assert any(n.startswith("mcp_other_") for n in names)
+        # Disk truth.
+        assert _disk(config_path)["mcp"]["servers"]["fake"]["enabled"] is False
+
+    async def test_enable_reconnects_and_republishes(self, harness):
+        client, bot, config_path = harness
+        assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+        assert (
+            await client.post("/api/mcp/servers/fake/enabled", json={"enabled": False})
+        ).status == 200
+        assert not bot.mcp_manager.has_tool("mcp_fake_echo")
+
+        response = await client.post("/api/mcp/servers/fake/enabled", json={"enabled": True})
+        body = await response.json()
+        assert response.status == 200
+        row = next(s for s in body["servers"] if s["name"] == "fake")
+        assert row["enabled"] is True
+        assert row["state"] == "connected"
+        assert bot.mcp_manager.has_tool("mcp_fake_echo")
+        assert _disk(config_path)["mcp"]["servers"]["fake"]["enabled"] is True
+
+    async def test_unknown_server_404(self, harness):
+        client, _bot, _config_path = harness
+        response = await client.post("/api/mcp/servers/ghost/enabled", json={"enabled": False})
+        assert response.status == 404
+
+    async def test_non_boolean_rejected(self, harness):
+        client, _bot, _config_path = harness
+        assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+        response = await client.post("/api/mcp/servers/fake/enabled", json={"enabled": "false"})
+        assert response.status == 400
+
+    async def test_other_fields_rejected_and_state_untouched(self, harness):
+        client, bot, config_path = harness
+        assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+        before = _disk(config_path)
+        response = await client.post(
+            "/api/mcp/servers/fake/enabled",
+            json={"enabled": False, "transport": "http", "url": "https://evil.example/mcp"},
+        )
+        body = await response.json()
+        assert response.status == 400
+        assert "only 'enabled'" in body["error"]
+        # Nothing changed: disk identical, still published.
+        assert _disk(config_path) == before
+        assert bot.mcp_manager.has_tool("mcp_fake_echo")
+
+    async def test_idempotent_repeat_no_reconnect_no_persist(self, harness):
+        client, bot, config_path = harness
+        assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
+        row_before = next(
+            s for s in bot.mcp_manager.get_status()["servers"] if s["name"] == "fake"
+        )
+        disk_before = _disk(config_path)
+
+        response = await client.post("/api/mcp/servers/fake/enabled", json={"enabled": True})
+        body = await response.json()
+        assert response.status == 200
+        row_after = next(s for s in body["servers"] if s["name"] == "fake")
+        # Same generation = the runtime was NOT retired/rebuilt; same disk =
+        # nothing persisted for a repeat of the current value.
+        assert row_after["generation"] == row_before["generation"]
+        assert row_after["state"] == "connected"
+        assert _disk(config_path) == disk_before

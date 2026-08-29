@@ -221,4 +221,91 @@ assert.match(docs, /Interactive OAuth[\s\S]*not supported/i);
 assert.match(docs, /2026-07-28/);
 assert.match(docs, /blocked[\s\S]*not partially[\s\S]*published/i);
 
-console.log('mcp-webui: modal navigation, endpoint honesty, payloads, routes, confirmations, and docs pinned');
+// ---------------------------------------------------------------------------
+// Per-server card toggle + masked endpoint display (post-v3.78.0 R1/R2).
+// ---------------------------------------------------------------------------
+assert.match(page, /:checked="server\.enabled"/);
+assert.match(page, /@change="toggleServerEnabled\(server, \$event\)"/);
+assert.match(page, /:aria-busy="togglePending\.has\(server\.name\)/);
+assert.match(page, /Takes effect immediately and changes tool availability\./);
+assert.match(page, /Currently set — masked display/);
+assert.match(page, /recognition only and is not the literal saved URL/);
+assert.match(page, /editingServer\?\.url_display/);
+
+// The display field never round-trips: the payload builder does not know it,
+// so no update patch can ever carry it back.
+const policySource = readFileSync('ui/js/mcp-config-policy.js', 'utf8');
+assert.doesNotMatch(policySource, /url_display/);
+
+// Modal enabled flips (concealed behind Save) still require confirmation.
+assert.equal(
+  mcpConnectionEditNeedsConfirmation(
+    { enabled: false, transport: 'http' },
+    { enabled: true, transport: 'http' },
+  ),
+  true,
+);
+
+// The card toggle performs exactly ONE dedicated enabled mutation — never the
+// broad PUT — and opens no confirmation modal.
+const toggleSource = page.slice(
+  page.indexOf('async function toggleServerEnabled'),
+  page.indexOf('async function setMasterEnabled'),
+);
+assert.ok(toggleSource.length > 0, 'toggleServerEnabled must precede setMasterEnabled');
+assert.doesNotMatch(toggleSource, /confirmDialog/);
+
+const fetchCalls = [];
+globalThis.fetch = async (path, opts) => {
+  fetchCalls.push({ path, opts });
+  return {
+    status: 200,
+    ok: true,
+    json: async () => ({
+      enabled: true,
+      connected_count: 0,
+      servers: [{ name: 'dw', enabled: false, state: 'disabled' }],
+    }),
+  };
+};
+pageState.status.value = {
+  enabled: true,
+  connected_count: 1,
+  servers: [{ name: 'dw', enabled: true, state: 'connected' }],
+};
+await pageState.toggleServerEnabled(pageState.status.value.servers[0], {
+  target: { checked: false },
+});
+assert.equal(fetchCalls.length, 1);
+assert.equal(fetchCalls[0].path, '/api/mcp/servers/dw/enabled');
+assert.equal(fetchCalls[0].opts.method, 'POST');
+assert.deepEqual(JSON.parse(fetchCalls[0].opts.body), { enabled: false });
+// The canonical returned payload is adopted — no optimistic state invented.
+assert.equal(pageState.status.value.servers[0].enabled, false);
+assert.equal(pageState.status.value.servers[0].state, 'disabled');
+
+// A failed toggle restores the prior configured switch state.
+globalThis.fetch = async () => {
+  throw new Error('network down');
+};
+const failedInput = { checked: true };
+await pageState.toggleServerEnabled(
+  { name: 'dw', enabled: false, state: 'disabled' },
+  { target: failedInput },
+);
+assert.equal(failedInput.checked, false);
+
+// The two disabled causes stay textually distinguishable.
+pageState.status.value = { enabled: true, connected_count: 0, servers: [] };
+assert.equal(
+  pageState.stateLabel({ enabled: false, state: 'disabled' }),
+  'Disabled — server switch off',
+);
+pageState.status.value = { enabled: false, connected_count: 0, servers: [] };
+assert.equal(
+  pageState.stateLabel({ enabled: true, state: 'disabled' }),
+  'Disabled — global MCP is off',
+);
+
+console.log('mcp-webui: modal navigation, endpoint honesty, payloads, routes, confirmations, card toggle, and masked endpoint pinned');
+process.exit(0);

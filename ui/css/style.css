@@ -4626,6 +4626,19 @@ a:focus-visible {
 .mcp-server-card.state-blocked::before { background: var(--hm-warning); }
 .mcp-server-card.state-error::before { background: var(--hm-danger); }
 .mcp-server-header { align-items: center; padding: var(--hm-space-5); border-bottom: 1px solid var(--hm-border-subtle); }
+.mcp-card-switch { display: flex; align-items: center; gap: var(--hm-space-3); margin-left: auto; padding-right: var(--hm-space-4); }
+.mcp-card-switch-copy { display: grid; gap: 2px; text-align: right; }
+.mcp-card-switch-copy strong { color: var(--hm-text-muted); font-size: 0.63rem; font-weight: 600; }
+.mcp-card-switch-copy small { color: var(--hm-text-dim); font-size: 0.56rem; line-height: 1.3; max-width: 24ch; }
+.mcp-card-switch .toggle-switch[aria-busy="true"] { opacity: 0.55; pointer-events: none; }
+/* Configured-off servers mute the frame, never the content: Edit, Remove,
+   errors, and configuration keep full contrast. */
+.mcp-server-card.mcp-card-off { background: var(--hm-surface); border-color: var(--hm-border-subtle); box-shadow: none; }
+.mcp-server-card.mcp-card-off .mcp-server-header { background: rgba(255,255,255,.015); }
+.mcp-current-endpoint { display: grid; gap: var(--hm-space-2); padding: var(--hm-space-3) var(--hm-space-4); background: rgba(255,255,255,.02); border: 1px solid var(--hm-border-subtle); border-radius: var(--hm-radius-md); }
+.mcp-current-endpoint > span { color: var(--hm-text-muted); font-size: 0.6rem; font-weight: 600; letter-spacing: .04em; text-transform: uppercase; }
+.mcp-current-endpoint code { font-size: 0.66rem; color: var(--hm-text); word-break: break-all; background: transparent; padding: 0; }
+.mcp-current-endpoint small { color: var(--hm-text-dim); font-size: 0.59rem; line-height: 1.4; }
 .mcp-server-identity { display: flex; align-items: center; gap: var(--hm-space-4); min-width: 0; }
 .mcp-state-indicator { width: 10px; height: 10px; flex: none; border: 2px solid currentColor; border-radius: 50%; color: #687384; background: rgba(104,115,132,.22); }
 .mcp-state-indicator.connected { color: var(--hm-success); background: var(--hm-success); box-shadow: 0 0 8px rgba(61,185,131,.38); }
