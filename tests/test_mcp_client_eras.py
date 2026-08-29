@@ -806,3 +806,86 @@ class TestBoundedServerRequestReplies:
         finally:
             release.set()
             await conn.disconnect()
+
+
+class TestStdioProbeCasualtyRespawn:
+    """Die-on-unknown-method strict legacy servers (Uncraftbar's field
+    report): a clean stdout EOF during the era probe — and ONLY that,
+    typed, never text-matched — grants exactly one fresh-process legacy
+    attempt. Era is established solely by the fresh initialize."""
+
+    def _count_spawns(self, monkeypatch):
+        instances: list = []
+        real = client_mod.StdioTransport
+
+        class CountingTransport(real):  # type: ignore[misc, valid-type]
+            def __init__(self, *args, **kwargs):
+                super().__init__(*args, **kwargs)
+                instances.append(self)
+
+        monkeypatch.setattr(client_mod, "StdioTransport", CountingTransport)
+        return instances
+
+    async def test_strict_legacy_two_spawns_then_full_service(self, monkeypatch):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy-die-on-discover")
+        await conn.connect()
+        try:
+            assert len(spawns) == 2
+            assert conn.era == "legacy"
+            assert conn.negotiated_version == "2025-06-18"
+            discovery = await conn.discover_tools()
+            echo = next(t for t in discovery.tools if t.name == "echo")
+            outcome = await conn.call_tool(echo, {"text": "respawned"})
+            assert outcome.ok and "respawned" in outcome.text
+        finally:
+            await conn.disconnect()
+
+    async def test_both_phases_dead_names_both_and_reaps(self, monkeypatch):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy-die-always")
+        with pytest.raises(MCPConnectError) as excinfo:
+            await conn.connect()
+        message = str(excinfo.value)
+        assert "server/discover ended by unexpected stdio EOF" in message
+        assert "fresh legacy initialization failed" in message
+        assert "exit status 4" in message
+        assert len(spawns) == 2
+        # Both children reaped; no transport left owned.
+        assert conn._stdio is None  # noqa: SLF001
+        for transport in spawns:
+            assert not transport.running
+
+    async def test_post_handshake_death_keeps_single_spawn(self, monkeypatch):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("dies-mid-call")
+        await conn.connect()
+        try:
+            assert len(spawns) == 1
+            discovery = await conn.discover_tools()
+            echo = next(t for t in discovery.tools if t.name == "echo")
+            outcome = await conn.call_tool(echo, {"text": "boom"})
+            # Existing lost/uncertain semantics — and no compatibility
+            # respawn for post-handshake deaths, ever.
+            assert not outcome.ok
+            assert len(spawns) == 1
+        finally:
+            await conn.disconnect()
+
+    async def test_compliant_legacy_single_spawn(self, monkeypatch):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy")
+        await conn.connect()
+        try:
+            assert len(spawns) == 1
+            assert conn.era == "legacy"
+        finally:
+            await conn.disconnect()
+
+    async def test_non_eof_probe_failure_no_respawn(self, monkeypatch):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("oversized-on-discover")
+        with pytest.raises(MCPConnectError) as excinfo:
+            await conn.connect()
+        assert "stdio EOF" not in str(excinfo.value)
+        assert len(spawns) == 1

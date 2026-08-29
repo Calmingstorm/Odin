@@ -19,6 +19,12 @@ Modes:
   modern-missing-discover-result-type  modern server whose DiscoverResult omits resultType.
   modern-missing-call-result-type  modern server whose tools/call result omits resultType.
   silent            never answers anything (probe/initialize time out).
+  legacy-die-on-discover  closes stdout and exits on the era probe, serves
+                    the legacy handshake normally otherwise (the strict
+                    die-on-unknown-method class; compatibility respawn pin).
+  legacy-die-always closes stdout and exits on ANY request (both-phase pin).
+  oversized-on-discover  answers the probe with an over-ceiling line while
+                    staying alive (non-EOF probe failure: no respawn pin).
   garbage           emits non-JSON noise, then behaves like `legacy`.
   dies-mid-call     exits abruptly during tools/call.
   oversized-response emits a response line beyond the transport ceiling.
@@ -181,6 +187,28 @@ def handle(msg: dict) -> None:
 
     if MODE == "silent":
         return
+
+    if MODE == "legacy-die-always":
+        # Dies on receipt of ANY request — the fresh process of a
+        # compatibility respawn dies again at initialize (both-phase pin).
+        sys.stdout.close()
+        os._exit(4)
+
+    if method == "server/discover" and MODE == "oversized-on-discover":
+        # Non-EOF probe-phase transport failure: an oversized frame while
+        # the process stays ALIVE — must remain an honest failure with no
+        # compatibility respawn (typed-classification pin).
+        sys.stdout.write("x" * (5 * 1024 * 1024) + "\n")
+        sys.stdout.flush()
+        return
+
+    if method == "server/discover" and MODE == "legacy-die-on-discover":
+        # Strict legacy server (Uncraftbar's Roblox Studio proxy class):
+        # an unknown method makes it close stdout and EXIT instead of
+        # answering -32601 or staying alive. A fresh process serves the
+        # legacy handshake normally (the mode only kills on the probe).
+        sys.stdout.close()
+        os._exit(3)
 
     if method == "server/discover":
         if MODE in {"modern", "modern-missing-call-result-type"}:

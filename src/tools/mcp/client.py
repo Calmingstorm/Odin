@@ -33,7 +33,14 @@ from typing import Any
 
 from ...odin_log import get_logger
 from . import protocol as proto
-from .errors import MCPConnectError, MCPError, MCPPreWriteError, MCPProtocolError, MCPTimeoutError
+from .errors import (
+    MCPConnectError,
+    MCPError,
+    MCPPreWriteError,
+    MCPProtocolError,
+    MCPStdioEOFError,
+    MCPTimeoutError,
+)
 from .outcomes import (
     OUTCOME_FAILED,
     OUTCOME_OK,
@@ -214,8 +221,11 @@ class MCPServerConnection:
 
     # -------------------------- stdio ---------------------------------
 
-    async def _connect_stdio(self) -> None:
-        transport = StdioTransport(
+    def _new_stdio_transport(self) -> StdioTransport:
+        """One construction site for every stdio transport this connection
+        spawns — the initial probe process and the compatibility respawn
+        must be built identically (env allowlist, cwd, pumps, callbacks)."""
+        return StdioTransport(
             self.name,
             self.command,
             self.args,
@@ -225,6 +235,9 @@ class MCPServerConnection:
             on_closed=self._on_transport_closed,
             negotiated_version=lambda: self.negotiated_version,
         )
+
+    async def _connect_stdio(self) -> None:
+        transport = self._new_stdio_transport()
         self._stdio = transport
         try:
             await transport.start()
@@ -240,6 +253,15 @@ class MCPServerConnection:
                 reply = await self._stdio_roundtrip(probe_id, probe, _PROBE_TIMEOUT)
             except MCPTimeoutError:
                 reply = None  # silence ⇒ legacy probe outcome
+            except MCPStdioEOFError:
+                # A strict legacy server closed stdout and exited on the
+                # unknown probe (die-on-unknown-method class — Uncraftbar's
+                # field report). Ambiguous, NOT era evidence: retire the
+                # first process completely, then grant exactly one
+                # fresh-process legacy attempt. Era is established only if
+                # that initialize returns a valid supported result.
+                await self._respawn_probe_casualty_for_legacy(transport)
+                return
             if reply is not None and "result" in reply:
                 self._adopt_modern(reply["result"])
                 return
@@ -255,9 +277,41 @@ class MCPServerConnection:
             # Any other error or timeout: legacy fallback.
             await self._initialize_legacy_stdio()
         except BaseException:
-            self._stdio = None
-            await transport.shutdown()
+            # Reap the ACTIVE transport: after a compatibility respawn the
+            # local ``transport`` is the phase-one corpse — cleaning up only
+            # that would leak the replacement child.
+            active, self._stdio = self._stdio, None
+            if active is not None:
+                await active.shutdown()
             raise
+
+    async def _respawn_probe_casualty_for_legacy(self, dead: StdioTransport) -> None:
+        """The one-shot compatibility respawn for servers that die on the
+        era probe. Fully retires the first process group (bounded), starts
+        exactly one fresh identical transport, and runs the legacy
+        initialize on it. Any failure raises ONE bounded error naming both
+        phases (exit status only — never command, environment, or stderr);
+        cancellation propagates unchanged."""
+        exit_status = dead.returncode
+        await dead.shutdown()
+        fresh = self._new_stdio_transport()
+        self._stdio = fresh
+        try:
+            await fresh.start()
+            await self._initialize_legacy_stdio()
+        except asyncio.CancelledError:
+            raise
+        except BaseException as e:
+            detail = (
+                _clean_text(str(e), 200) if isinstance(e, MCPError) else e.__class__.__name__
+            )
+            suffix = (
+                f" (first process exit status {exit_status})" if exit_status is not None else ""
+            )
+            raise MCPConnectError(
+                f"{self.name}: server/discover ended by unexpected stdio EOF{suffix}; "
+                f"fresh legacy initialization failed: {detail}"
+            ) from e
 
     async def _initialize_legacy_stdio(self) -> None:
         req_id = next(self._ids)
@@ -630,7 +684,13 @@ class MCPServerConnection:
         was_connected = self.connected
         self.connected = False
         self._lost_reason = reason
-        self._fail_pending(MCPConnectError(f"{self.name}: {reason}"))
+        # Typed classification for pending waiters: only a clean stdout EOF
+        # (the transport's flag, set before this callback fires) raises the
+        # subtype the era probe may treat as a die-on-unknown-method legacy
+        # server. Every other closure stays the plain connect error.
+        eof = bool(self._stdio is not None and getattr(self._stdio, "closed_by_eof", False))
+        exc_type = MCPStdioEOFError if eof else MCPConnectError
+        self._fail_pending(exc_type(f"{self.name}: {reason}"))
         if was_connected and self._on_connection_lost is not None:
             try:
                 self._on_connection_lost(reason)
