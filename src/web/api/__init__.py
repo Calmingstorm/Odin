@@ -72,6 +72,7 @@ from .llm_admin import (  # noqa: E501
     register_ollama_admin,
     register_provider_config,
 )
+from .turn_state import register_turn_state
 from .observability import (
     register_affordances,
     register_aggregates,
@@ -208,6 +209,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_agent_trajectories(routes, bot)
 
     register_outbound_webhooks(routes, bot)
+
+    register_turn_state(routes, bot)
 
     return routes
 
