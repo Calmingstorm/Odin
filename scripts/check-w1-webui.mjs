@@ -1,6 +1,7 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { baseParse, NodeTypes } from '@vue/compiler-dom';
+import { baseParse, compile, NodeTypes } from '@vue/compiler-dom';
+import * as Vue from 'vue';
 
 function storage() {
   const values = new Map();
@@ -319,6 +320,40 @@ console.warn = quietWarn;
     && directive(node, 'on')?.arg?.content === 'click'
     && directive(node, 'on')?.exp?.content === 'fetchCodexStatus');
   assert.equal(retryButtons.length, 1, 'Codex Retry is not wired to fetchCodexStatus');
+
+  // Compile the real template, find the rendered Retry control, and invoke its
+  // actual onClick handler. This is click-through coverage rather than merely
+  // proving that setup() exports a same-named function.
+  state.loading.value = false;
+  state.codexError.value = 'retry me';
+  state.codexLoading.value = false;
+  enqueue('/api/codex/status', {
+    body: { configured: true, account_count: 2, current_index: 0, accounts: [] },
+    status: 200,
+  });
+  const savedVueWarn = console.warn;
+  console.warn = () => {};
+  const render = new Function('Vue', compile(llmPage.template, { mode: 'function' }).code)(Vue);
+  const vnode = render(Vue.proxyRefs(state), []);
+  console.warn = savedVueWarn;
+  function flattenVnodes(node, out = []) {
+    if (!node) return out;
+    if (Array.isArray(node)) {
+      for (const child of node) flattenVnodes(child, out);
+      return out;
+    }
+    if (typeof node !== 'object') return out;
+    out.push(node);
+    flattenVnodes(node.children, out);
+    return out;
+  }
+  const renderedRetries = flattenVnodes(vnode)
+    .filter(node => node.type === 'button' && node.children === 'Retry');
+  assert.equal(renderedRetries.length, 1, 'Codex Retry did not render in the failure state');
+  assert.equal(typeof renderedRetries[0].props?.onClick, 'function');
+  await renderedRetries[0].props.onClick();
+  assert.equal(state.codexError.value, '');
+  assert.equal(state.codexData.value.account_count, 2);
 }
 
 // ---------------------------------------------------------------------------
