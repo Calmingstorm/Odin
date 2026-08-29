@@ -183,7 +183,13 @@ export default {
       fetchAudit();
     }
 
+    // Rapid filter changes fire overlapping requests; without ownership the
+    // OLDER response can land last and render rows that do not match the
+    // current filters (audit 6.2). Only the newest request may commit.
+    let fetchEpoch = 0;
+
     async function fetchAudit() {
+      const epoch = ++fetchEpoch;
       loading.value = true;
       error.value = null;
       expandedIdx.value = null;
@@ -196,11 +202,13 @@ export default {
         params.set('limit', String(filters.value.limit));
         const qs = params.toString();
         const data = await api.get(`/api/audit${qs ? '?' + qs : ''}`);
+        if (epoch !== fetchEpoch) return; // a newer request owns the view
         entries.value = Array.isArray(data) ? data : [];
       } catch (e) {
+        if (epoch !== fetchEpoch) return;
         error.value = e.message;
       }
-      loading.value = false;
+      if (epoch === fetchEpoch) loading.value = false;
     }
 
     onMounted(() => { fetchAudit(); });

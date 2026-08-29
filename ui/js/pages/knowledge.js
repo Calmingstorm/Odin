@@ -321,23 +321,34 @@ export default {
       return request;
     }
 
+    // Enter can be pressed while a search is in flight; without ownership
+    // the OLDER response can land last and replace the newer results
+    // (audit 6.2). Only the newest search may commit, and clearing while
+    // in flight retires whatever is still airborne.
+    let searchEpoch = 0;
+
     async function doSearch() {
       const q = searchQuery.value.trim();
       if (!q) return;
+      const epoch = ++searchEpoch;
       searching.value = true;
       searchError.value = null;
       lastQuery.value = q;
       try {
         const results = await api.get(`/api/knowledge/search?q=${encodeURIComponent(q)}`);
+        if (epoch !== searchEpoch) return; // a newer search owns the view
         searchResults.value = Array.isArray(results) ? results : [];
       } catch (e) {
+        if (epoch !== searchEpoch) return;
         searchResults.value = [];
         searchError.value = e.message || 'Search failed';
       }
-      searching.value = false;
+      if (epoch === searchEpoch) searching.value = false;
     }
 
     function clearSearch() {
+      searchEpoch += 1; // an in-flight response must not resurrect results
+      searching.value = false;
       searchResults.value = null;
       searchQuery.value = '';
       searchError.value = null;
