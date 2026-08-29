@@ -29,6 +29,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
@@ -141,8 +142,47 @@ def validate_server_config(name: str, config: dict[str, Any]) -> None:
         raise MCPConfigError(f"{name}: cwd must be an absolute path without NUL bytes")
 
 
-def _configured_secret_values(config: dict[str, Any]) -> list[str]:
+def _configured_url_secret_values(config: dict[str, Any]) -> set[str]:
+    """Extract credential-bearing endpoint components for operator scrubbing.
+
+    The masked display hides HTTP userinfo, query values (including bare query
+    components), and fragments. Server-authored identity/instruction text can
+    echo the request URL, so both the URL-encoded spelling and its decoded form
+    join the same scrub set as configured header/environment values.
+    """
+    url = config.get("url")
+    if config.get("transport") != "http" or not isinstance(url, str) or not url:
+        return set()
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return set()
+
     values: set[str] = set()
+
+    def add(raw: str | None, *, query: bool = False) -> None:
+        if not raw:
+            return
+        values.add(raw)
+        decoded = unquote_plus(raw) if query else unquote(raw)
+        if decoded:
+            values.add(decoded)
+
+    if "@" in parts.netloc:
+        add(parts.netloc.rsplit("@", 1)[0])
+    add(parts.username)
+    add(parts.password)
+    for component in parts.query.split("&") if parts.query else ():
+        _name, separator, raw_value = component.partition("=")
+        add(raw_value if separator else component, query=True)
+    # Fragments are not sent in an HTTP request, but the configured URL can be
+    # reflected synthetically and the recognition display masks them entirely.
+    add(parts.fragment)
+    return values
+
+
+def _configured_secret_values(config: dict[str, Any]) -> list[str]:
+    values = _configured_url_secret_values(config)
     for config_field in ("headers", "env"):
         mapping = config.get(config_field) or {}
         if isinstance(mapping, dict):
@@ -178,6 +218,48 @@ def _scrub_operator_value(config: dict[str, Any], value: Any, *, depth: int = 0)
     if isinstance(value, list):
         return [_scrub_operator_value(config, item, depth=depth + 1) for item in value[:64]]
     return value if isinstance(value, (bool, int, float)) or value is None else ""
+
+
+_URL_DISPLAY_MASK = "••••"
+_URL_DISPLAY_MAX = 200
+
+
+def scrub_url_display(url: str) -> str:
+    """Recognition-only display form of a configured HTTP endpoint.
+
+    Preserves scheme, canonical host, explicit port, and path. Userinfo is
+    replaced with one fixed marker (neither username nor password survives),
+    every query VALUE is masked (parameter names kept; a bare component with
+    no ``=`` is masked whole), and the fragment is masked entirely. The raw
+    configured URL never reaches the browser — this is built server-side,
+    is response-only, and must never be accepted back on a mutation route.
+    """
+    try:
+        parts = urlsplit(url)
+        hostname = parts.hostname
+        port = parts.port
+    except ValueError:
+        return _URL_DISPLAY_MASK
+    if not parts.scheme or not hostname:
+        return _URL_DISPLAY_MASK
+    host = f"[{hostname}]" if ":" in hostname else hostname
+    netloc = host if port is None else f"{host}:{port}"
+    if parts.username is not None or parts.password is not None:
+        netloc = f"{_URL_DISPLAY_MASK}@{netloc}"
+    query = ""
+    if parts.query:
+        masked = []
+        for component in parts.query.split("&"):
+            if not component:
+                continue
+            name, sep, _value = component.partition("=")
+            masked.append(f"{name}={_URL_DISPLAY_MASK}" if sep else _URL_DISPLAY_MASK)
+        query = "?" + "&".join(masked)
+    fragment = f"#{_URL_DISPLAY_MASK}" if parts.fragment else ""
+    display = f"{parts.scheme}://{netloc}{parts.path}{query}{fragment}"
+    if len(display) > _URL_DISPLAY_MAX:
+        display = display[: _URL_DISPLAY_MAX - 1] + "…"
+    return display
 
 
 class MCPManager:
@@ -294,6 +376,13 @@ class MCPManager:
                     # Secret KEY NAMES only — values never leave the manager.
                     "header_keys": sorted((runtime.config.get("headers") or {}).keys()),
                     "env_keys": sorted((runtime.config.get("env") or {}).keys()),
+                    # Recognition-only masked endpoint (response-only; the raw
+                    # configured URL never leaves the manager). Null for stdio.
+                    "url_display": (
+                        scrub_url_display(str(runtime.config.get("url", "")))
+                        if runtime.config.get("transport") == "http"
+                        else None
+                    ),
                 }
             )
         return {

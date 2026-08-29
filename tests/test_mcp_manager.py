@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestServer
@@ -612,3 +613,109 @@ class TestOwnedLostConnectionRetirement:
         await shutdown
         assert not manager._loss_retirements  # noqa: SLF001
         assert not connection.connected
+
+
+class TestUrlDisplayScrubbing:
+    """Recognition-only masked endpoint display: server-generated, response-
+    only, raw configured URL never in the status payload."""
+
+    def test_credential_free_url_displays_fully(self):
+        assert (
+            manager_mod.scrub_url_display("https://mcp.example.com/mcp")
+            == "https://mcp.example.com/mcp"
+        )
+
+    def test_userinfo_replaced_with_fixed_marker(self):
+        out = manager_mod.scrub_url_display("https://alice:hunter2@host.example/mcp")
+        assert "alice" not in out and "hunter2" not in out
+        assert out == "https://••••@host.example/mcp"
+
+    def test_query_values_masked_names_kept(self):
+        out = manager_mod.scrub_url_display("https://host.example/mcp?api_key=abc123&mode=fast")
+        assert "abc123" not in out and "fast" not in out
+        assert out == "https://host.example/mcp?api_key=••••&mode=••••"
+
+    def test_bare_query_component_masked_whole(self):
+        out = manager_mod.scrub_url_display("https://host.example/mcp?bare-token-value")
+        assert "bare-token-value" not in out
+        assert out == "https://host.example/mcp?••••"
+
+    def test_fragment_masked_entirely(self):
+        out = manager_mod.scrub_url_display("https://host.example/mcp#access_token=zzz")
+        assert "zzz" not in out
+        assert out == "https://host.example/mcp#••••"
+
+    def test_explicit_port_preserved(self):
+        assert (
+            manager_mod.scrub_url_display("http://127.0.0.1:8765/mcp")
+            == "http://127.0.0.1:8765/mcp"
+        )
+
+    def test_display_length_bounded(self):
+        out = manager_mod.scrub_url_display("https://host.example/" + "a" * 500)
+        assert len(out) <= 200
+
+    def test_unparseable_input_fully_masked(self):
+        assert manager_mod.scrub_url_display("http://[unclosed") == "••••"
+        assert manager_mod.scrub_url_display("not a url at all") == "••••"
+
+    async def test_status_scrubs_endpoint_secrets_echoed_by_connected_server(self):
+        manager = MCPManager()
+        raw = "https://alice:hunter2@host.example/mcp?token=raw-query-token&mode=fast"
+        await manager.load_desired_state(
+            enabled=False,
+            servers={"remote": {"transport": "http", "url": raw, "enabled": False}},
+        )
+        try:
+            runtime = manager._servers["remote"]  # noqa: SLF001
+            runtime.state = STATE_CONNECTED
+
+            async def disconnect() -> None:
+                return None
+
+            runtime.connection = SimpleNamespace(
+                status=lambda: {
+                    "server_info": {"name": f"echoed {raw}"},
+                    "instructions": f"Call the endpoint at {raw}",
+                },
+                disconnect=disconnect,
+            )
+
+            import json as _json
+
+            status = manager.get_status()
+            serialized = _json.dumps(status)
+            assert "raw-query-token" not in serialized
+            assert "hunter2" not in serialized
+            assert "alice:" not in serialized
+            assert status["servers"][0]["url_display"] == (
+                "https://••••@host.example/mcp?token=••••&mode=••••"
+            )
+            assert "[REDACTED]" in serialized
+        finally:
+            await manager.shutdown()
+
+    async def test_status_masks_http_and_nulls_stdio(self):
+        manager = MCPManager()
+        raw = "https://svc:sekret@host.example/mcp?key=verysecret"
+        await manager.load_desired_state(
+            enabled=True,
+            servers={
+                "remote": {"transport": "http", "url": raw, "enabled": False},
+                "local": {**_stdio_config(), "enabled": False},
+            },
+        )
+        try:
+            status = manager.get_status()
+            rows = {s["name"]: s for s in status["servers"]}
+            assert rows["remote"]["url_display"] == "https://••••@host.example/mcp?key=••••"
+            assert rows["local"]["url_display"] is None
+            # The raw credential parts appear NOWHERE in the whole payload.
+            import json as _json
+
+            serialized = _json.dumps(status)
+            assert "sekret" not in serialized
+            assert "verysecret" not in serialized
+            assert "svc:" not in serialized
+        finally:
+            await manager.shutdown()

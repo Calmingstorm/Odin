@@ -398,6 +398,59 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
             raise asyncio.CancelledError
         return response
 
+    @routes.post("/api/mcp/servers/{name}/enabled")
+    async def set_mcp_server_enabled(request: web.Request) -> web.Response:
+        """Single-purpose per-server switch (panel card toggle).
+
+        Mutates ONLY ``enabled`` from transaction-current configuration —
+        never transport or any other field, so a toggle can never overwrite a
+        concurrent edit. Repeating the current value is idempotent (no
+        reconnect). A server disabled here is unpublished before the response
+        reports it disabled. Returns the canonical refreshed status payload
+        so card and aggregate render from one source of truth.
+        """
+        name = request.match_info["name"]
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        if not isinstance(body, dict) or not isinstance(body.get("enabled"), bool):
+            return web.json_response({"error": "enabled must be a boolean"}, status=400)
+        extra = sorted(set(body) - {"enabled"})
+        if extra:
+            return web.json_response(
+                {"error": f"only 'enabled' is accepted on this route (got: {', '.join(extra)})"},
+                status=400,
+            )
+        enabled = body["enabled"]
+        commit_started = asyncio.Event()
+
+        async def mutate():
+            async with management_lock:
+                async with config_transaction():
+                    servers = _live_servers()
+                    current = servers.get(name)
+                    if current is None:
+                        return web.json_response({"error": "server not found"}, status=404), False
+                    if bool(current.get("enabled", True)) == enabled:
+                        # Idempotent repeat: no persist, no reconnect.
+                        return web.json_response(_manager().get_status()), False
+                    servers[name] = {**current, "enabled": enabled}
+                    transition, writer_cancelled = await _commit_desired(
+                        servers,
+                        enabled=bool(bot.config.mcp.enabled),
+                        commit_started=commit_started,
+                    )
+                await _manager().finish_desired_state(transition)
+                return web.json_response(_manager().get_status()), writer_cancelled
+
+        response, writer_cancelled = await _drain_mcp_management(
+            mutate(), commit_started=commit_started
+        )
+        if writer_cancelled:
+            raise asyncio.CancelledError
+        return response
+
 
 def register_slack(routes: web.RouteTableDef, bot) -> None:
     """Slack notifications (verbatim from the monolith)."""

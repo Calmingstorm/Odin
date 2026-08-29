@@ -116,7 +116,7 @@ export default {
             <button type="button" class="btn btn-primary text-xs" @click="openAdd">Add your first server</button>
           </div>
 
-          <article v-for="server in servers" :key="server.name" :class="['mcp-server-card', 'state-' + serverState(server)]">
+          <article v-for="server in servers" :key="server.name" :class="['mcp-server-card', 'state-' + serverState(server), { 'mcp-card-off': !server.enabled }]">
             <header class="mcp-server-header">
               <div class="mcp-server-identity">
                 <span :class="['mcp-state-indicator', serverState(server)]" aria-hidden="true"></span>
@@ -132,6 +132,13 @@ export default {
                   </div>
                 </div>
               </div>
+              <label class="mcp-card-switch">
+                <span class="mcp-card-switch-copy"><strong>Server enabled</strong><small>Takes effect immediately and changes tool availability.</small></span>
+                <span class="toggle-switch" :aria-busy="togglePending.has(server.name) ? 'true' : 'false'">
+                  <input type="checkbox" :checked="server.enabled" :disabled="togglePending.has(server.name)" :aria-label="'Server enabled — ' + server.name" @change="toggleServerEnabled(server, $event)" />
+                  <span class="toggle-slider"></span>
+                </span>
+              </label>
               <div class="mcp-server-actions">
                 <button type="button" class="btn btn-ghost text-xs" @click="refreshTools(server)" :disabled="busy(server.name) || !masterEnabled || !server.enabled" title="Re-list tools without rebuilding the transport">
                   <odin-icon name="refresh" :size="14" /> Refresh tools
@@ -242,6 +249,11 @@ export default {
                 <button v-else type="button" class="mcp-replace-field" @click="form.replaceCwd = true"><odin-icon name="folder" :size="14" /><span><strong>Replace working directory</strong><small>Leave unchanged unless you explicitly replace it.</small></span></button>
               </div>
               <div v-else class="mcp-form-grid">
+                <div v-if="editorMode === 'edit' && editingServer?.url_display" class="mcp-current-endpoint">
+                  <span>Currently set — masked display</span>
+                  <code>{{ editingServer.url_display }}</code>
+                  <small>Sensitive URL components are hidden. This display is for recognition only and is not the literal saved URL. Enter a complete URL below only to replace it.</small>
+                </div>
                 <label class="mcp-field">
                   <span>{{ endpointFieldLabel }} <small v-if="savedHttpEndpoint" class="mcp-configured-indicator">Endpoint configured</small><small v-else-if="endpointRequired">required</small></span>
                   <input v-model="form.url" class="hm-input font-mono" type="url" autocomplete="off" :placeholder="endpointPlaceholder" :required="endpointRequired" />
@@ -367,7 +379,15 @@ export default {
       activeServerOps.value = next;
     }
     function serverState(server) { return normalizeMCPState(server.state); }
-    function stateLabel(server) { return STATE_LABELS[serverState(server)]; }
+    function stateLabel(server) {
+      // The switch says what the server is CONFIGURED to do; this text says
+      // what it is actually doing — the two disabled causes stay distinct.
+      if (serverState(server) === 'disabled') {
+        if (!server.enabled) return 'Disabled — server switch off';
+        if (!masterEnabled.value) return 'Disabled — global MCP is off';
+      }
+      return STATE_LABELS[serverState(server)];
+    }
     function transportLabel(server) { return server.transport === 'http' ? 'Streamable HTTP' : 'stdio'; }
     function protocolLabel(server) {
       if (!server.negotiated_version) return 'Not negotiated';
@@ -377,6 +397,34 @@ export default {
     function toolSummary(server) {
       if (!server.discovered_count) return 'No tools discovered';
       return `${server.published_count || 0} published · ${server.excluded_count || 0} excluded`;
+    }
+
+    const togglePending = ref(new Set());
+    async function toggleServerEnabled(server, event) {
+      // Single-purpose dedicated mutation — never the broad PUT, never a
+      // confirmation dialog: the labeled switch IS the explicit intent.
+      if (togglePending.value.has(server.name)) return;
+      const desired = Boolean(event.target.checked);
+      const next = new Set(togglePending.value);
+      next.add(server.name);
+      togglePending.value = next;
+      try {
+        const resp = await api.post(
+          `/api/mcp/servers/${encodeURIComponent(server.name)}/enabled`,
+          { enabled: desired },
+        );
+        // Canonical refreshed status payload — card and aggregate update
+        // from one source of truth; never an optimistic 'Connected'.
+        if (resp && Array.isArray(resp.servers)) status.value = resp;
+        else await refreshAll({ quiet: true });
+      } catch (error) {
+        event.target.checked = Boolean(server.enabled);
+        toast.error(error.message || `Failed to toggle ${server.name}`);
+      } finally {
+        const done = new Set(togglePending.value);
+        done.delete(server.name);
+        togglePending.value = done;
+      }
     }
 
     async function setMasterEnabled(enabled) {
@@ -546,11 +594,12 @@ export default {
     return {
       status, loading, mutating, pageError, servers, masterEnabled, aggregate,
       expandedServers, toolQueries, toolErrors, toolsLoading,
-      editorOpen, editorMode, editingName, form, formError, saving, editorGroups,
+      editorOpen, editorMode, editingName, editingServer, form, formError, saving, editorGroups,
       configuredHeaderKeys, configuredEnvKeys, savedHttpEndpoint, endpointRequired,
       endpointFieldLabel, endpointPlaceholder,
       refreshAll, busy, serverState, stateLabel, transportLabel, protocolLabel, toolSummary, formatAge,
-      setMasterEnabled, reconnect, refreshTools, removeServer, toggleTools, filteredTools, setToolQuery,
+      setMasterEnabled, togglePending, toggleServerEnabled,
+      reconnect, refreshTools, removeServer, toggleTools, filteredTools, setToolQuery,
       openAdd, openEdit, closeEditor, jumpToEditorGroup,
       addSecretRow, removeSecretRow, toggleSecretRemoval, saveServer,
     };
