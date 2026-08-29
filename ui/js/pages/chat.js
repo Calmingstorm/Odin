@@ -7,6 +7,7 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
 import { api, ws } from '../api.js';
+import { toast } from '../toast.js';
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 
 
@@ -466,7 +467,12 @@ export default {
           });
         }
       } catch (e) {
-        // No session yet — that's fine, start fresh
+        // 404 = no session yet, a fresh start. Anything else is a REAL
+        // load failure — starting silently "fresh" hides existing history
+        // (audit 2.7); say so instead of impersonating an empty session.
+        if (e && e.status !== 404) {
+          toast.error('Couldn\'t load chat history — earlier messages may be missing. Refresh to retry.');
+        }
       }
     }
 

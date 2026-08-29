@@ -191,6 +191,7 @@ export default {
                   <div v-else class="kb-chunk-preview">{{ truncate(chunk.content, 120) }}</div>
                 </div>
               </div>
+              <div v-else-if="chunkErrors[s.source || s.name || s]" class="kb-chunk-empty kb-chunk-error text-xs">Couldn't load chunks — {{ chunkErrors[s.source || s.name || s] }}. Collapse and expand to retry.</div>
               <div v-else class="kb-chunk-empty text-gray-500 text-xs">No chunks found</div>
             </div>
           </div>
@@ -246,6 +247,7 @@ export default {
     // Tree / chunk browser
     const expanded = ref({});
     const sourceChunks = ref({});
+    const chunkErrors = ref({});
     const loadingChunks = ref(null);
     const selectedChunk = ref(null);
 
@@ -289,9 +291,13 @@ export default {
       try {
         const chunks = await api.get(`/api/knowledge/${encodeURIComponent(source)}/chunks`);
         sourceChunks.value[source] = Array.isArray(chunks) ? chunks : [];
+        delete chunkErrors.value[source];
+        chunkErrors.value = { ...chunkErrors.value };
       } catch (e) {
-        sourceChunks.value[source] = [];
-        toast.error(`Failed to load chunks: ${e.message}`);
+        // Never cache a failure as an empty list: "No chunks found" is a
+        // claim about the source, not about our network (audit 2.7) — and
+        // the old cached [] made every later expand skip the refetch.
+        chunkErrors.value = { ...chunkErrors.value, [source]: e.message || 'load failed' };
       }
       loadingChunks.value = null;
     }
@@ -393,7 +399,7 @@ export default {
       showIngest, ingestSource, ingestContent, ingestError, ingestSuccess, ingesting,
       reingesting, reingestResult,
       deleteTarget, deleting,
-      expanded, sourceChunks, loadingChunks, selectedChunk,
+      expanded, sourceChunks, chunkErrors, loadingChunks, selectedChunk,
       totalChunks, uploaderCount,
       truncate, formatTs, highlightTerms, chunkBarWidth,
       fetchSources, toggleSource, doSearch, clearSearch,

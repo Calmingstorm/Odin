@@ -2337,6 +2337,7 @@ tr.tl-tool-off td { color: var(--hm-text-dim); }
   border-bottom: 1px solid var(--hm-border);
 }
 .kb-chunk-empty { padding: var(--hm-space-2) 0; }
+.kb-chunk-error { color: #d9a441; }
 .kb-chunk-item {
   padding: var(--hm-space-2) var(--hm-space-3); border-radius: var(--hm-radius-md);
   border: 1px solid var(--hm-border-subtle); cursor: pointer; transition: all 0.15s;
