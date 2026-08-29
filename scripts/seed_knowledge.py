@@ -14,9 +14,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import load_config
-from src.search.embedder import LocalEmbedder
 from src.knowledge.store import KnowledgeStore
-from src.odin_log import setup_logging, get_logger
+from src.odin_log import get_logger, setup_logging
+from src.search.embedder import LocalEmbedder
 
 
 async def main():

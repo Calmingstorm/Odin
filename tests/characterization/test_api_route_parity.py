@@ -63,6 +63,8 @@ EXPECTED_ROUTES = [
     ("GET", "/api/tools/stats", "tool_stats"),
     ("GET", "/api/tools/timeouts", "get_tool_timeouts"),
     ("PUT", "/api/tools/timeouts", "set_tool_timeouts"),
+    ("GET", "/api/tools/builtins", "builtin_tool_inventory"),
+    ("POST", "/api/tools/builtins/{name}/enabled", "set_builtin_tool_enabled"),
     ("GET", "/api/tools/bulkheads", "get_bulkheads"),
     ("GET", "/api/pools/ssh", "get_ssh_pool"),
     ("GET", "/api/pools/http", "get_http_pool"),
@@ -244,7 +246,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 196
+        assert len(actual) == len(expected) == 198
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

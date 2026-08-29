@@ -14,12 +14,12 @@ Usage:
 import argparse
 import asyncio
 import json
-import webbrowser
-from http.server import HTTPServer, BaseHTTPRequestHandler
-from pathlib import Path
-from urllib.parse import urlparse, parse_qs
-
 import sys
+import webbrowser
+from http.server import BaseHTTPRequestHandler, HTTPServer
+from pathlib import Path
+from urllib.parse import parse_qs, urlparse
+
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.llm.codex_auth import CodexAuth
@@ -70,12 +70,12 @@ def _save_creds(creds: dict, path: Path) -> None:
     email = creds.get("email", "unknown")
     account_id = creds.get("account_id", "unknown")
 
-    print(f"\nAuthentication successful!")
+    print("\nAuthentication successful!")
     print(f"  Email: {email}")
     print(f"  Account ID: {account_id}")
     print(f"  Credentials saved to: {path}")
-    print(f"\nThe bot will auto-refresh tokens at runtime.")
-    print(f"If tokens expire (bot down >8 days), re-run this script.")
+    print("\nThe bot will auto-refresh tokens at runtime.")
+    print("If tokens expire (bot down >8 days), re-run this script.")
 
 
 def browser_login(creds_path: Path) -> None:
@@ -114,7 +114,7 @@ def device_login(creds_path: Path) -> None:
 
     print(f"\n  1. Open:  {device_info['verify_url']}")
     print(f"  2. Enter: {device_info['user_code']}")
-    print(f"\nWaiting for authorization (up to 15 minutes)...\n")
+    print("\nWaiting for authorization (up to 15 minutes)...\n")
 
     try:
         creds = asyncio.run(CodexAuth.poll_device_auth(

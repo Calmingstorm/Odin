@@ -64,6 +64,7 @@ class NativeToolDispatcher:
         tool_catalog,
         prompt_builder,
         channel_state,
+        builtin_policy=None,
     ) -> None:
         # Handlers are stored as (OWNER KEY, ATTRIBUTE NAME) and resolved
         # against the owner object at dispatch time (RFC-002 P5). Late
@@ -77,6 +78,8 @@ class NativeToolDispatcher:
         self.tool_catalog = tool_catalog
         self.prompt_builder = prompt_builder
         self.channel_state = channel_state
+        # Operator tool policy (config-gated built-ins); None = ungated.
+        self.builtin_policy = builtin_policy
         # RFC-004 P3: skill dispatch lives in its own domain owner, built on
         # the SAME objects (shared references — monkeypatching e.g.
         # ``dispatcher.skill_manager.has_skill`` reaches both).
@@ -114,6 +117,13 @@ class NativeToolDispatcher:
         skill_file_delivery: Literal["send", "stage"],
     ) -> tuple[Any, NativeToolEffects]:
         effects = NativeToolEffects()
+
+        # Operator-disabled built-in: typed rejection BEFORE any handler —
+        # covers requests assembled before a live disable landed.
+        if self.builtin_policy is not None and self.builtin_policy.is_disabled(tool_name):
+            from ...tools.builtin_policy import disabled_rejection
+
+            return disabled_rejection(tool_name), effects
 
         # --- registered native handlers ---
         entry = self._handlers.get(tool_name)

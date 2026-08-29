@@ -49,6 +49,7 @@ from ..search import LocalEmbedder, SessionVectorStore
 from ..sessions import SessionManager
 from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
+from ..tools.builtin_policy import BuiltinToolPolicy
 from ..tools.mcp import MCPManager
 from ..tools.process_manager import ProcessCleanupError
 from ..tools.workspace import DEFAULT_MEMORY_PATH
@@ -603,6 +604,7 @@ class BotComponents:
     llm_gateway: LLMGateway
     prompt_builder: PromptBuilder
     tool_catalog: ToolCatalog
+    builtin_tool_policy: BuiltinToolPolicy
     native_tools: NativeToolDispatcher
     scheduling_tools: SchedulingTools
     knowledge_tools: KnowledgeTools
@@ -757,6 +759,15 @@ def build_components(bot, services: BotServices) -> BotComponents:
     # domain is attached below after the tool loop exists (agents ->
     # tool_loop -> dispatcher is the one construction cycle); registration
     # runs after that attach, so it can assert every owner is present.
+    # Operator tool policy (config-gated built-ins): ONE shared live-read
+    # policy for every dispatch surface — native dispatch, the executor
+    # route (set below), and the Tools management API. Reads through
+    # lambda: bot.config so a config update rebinding that attribute is
+    # observed immediately; a captured snapshot would leave dispatch
+    # enforcement stale.
+    builtin_tool_policy = BuiltinToolPolicy(get_config=lambda: bot.config)
+    services.tool_executor.set_builtin_policy(builtin_tool_policy)
+
     native_tools = NativeToolDispatcher(
         owners={
             "scheduling": scheduling_tools,
@@ -768,6 +779,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         tool_catalog=tool_catalog,
         prompt_builder=prompt_builder,
         channel_state=services.channel_state,
+        builtin_policy=builtin_tool_policy,
     )
     delivery = ResponseDelivery(
         channel_state=services.channel_state,
@@ -948,6 +960,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         llm_gateway=llm_gateway,
         prompt_builder=prompt_builder,
         tool_catalog=tool_catalog,
+        builtin_tool_policy=builtin_tool_policy,
         native_tools=native_tools,
         scheduling_tools=scheduling_tools,
         knowledge_tools=knowledge_tools,

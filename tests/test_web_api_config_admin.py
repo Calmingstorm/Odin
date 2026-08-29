@@ -1472,3 +1472,26 @@ async def test_generic_config_rejects_mcp_without_splitting_any_truth(_active_co
     assert manager.has_tool("mcp_fake_echo")
     assert manager.get_tool_definitions()[0]["name"] == "mcp_fake_echo"
     assert invalidations == []
+
+
+@pytest.mark.asyncio
+async def test_generic_config_rejects_disabled_tools_leaf(_active_config):
+    """tools.disabled_tools has a transactional owner (the Tools API);
+    the generic route must 409 without touching disk or runtime config —
+    while OTHER tools leaves stay writable here."""
+    from ruamel.yaml import YAML
+
+    bot = _bot()
+    app, bot = _app(register_discord_config, bot=bot)
+    before_disk = _active_config.read_text()
+    async with TestClient(TestServer(app)) as c:
+        response = await c.put(
+            "/api/config", json={"tools": {"disabled_tools": ["kubectl"]}}
+        )
+        body = await response.json()
+
+    assert response.status == 409
+    assert body["error"] == "tools.disabled_tools is read-only on this route"
+    assert _active_config.read_text() == before_disk
+    assert YAML().load(_active_config.read_text()) == YAML().load(before_disk)
+    assert bot.config.tools.disabled_tools == []

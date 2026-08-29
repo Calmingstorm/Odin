@@ -55,6 +55,23 @@ tools:
     browser_max_concurrent: 3
 ```
 
+### Disabling Built-in Tools
+
+```yaml
+tools:
+  disabled_tools: []              # Built-in tool names hidden from the model
+```
+
+Operator-disabled built-ins are removed from the model catalog on every
+surface (chat, agents, loops, schedules) and rejected at dispatch with a
+typed `tool_disabled` result. Manage them from the WebUI Tools page — the
+switches apply live, no restart. Names are case-sensitive; unknown entries
+are preserved and ignored so a list survives catalog drift. Disabled names
+stay reserved: a skill or MCP tool can never shadow a disabled built-in.
+This leaf is read-only on the generic config route; the Tools management
+API (`GET /api/tools/builtins`, `POST /api/tools/builtins/{name}/enabled`)
+owns it.
+
 ### Claude Code Integration
 
 ```yaml

@@ -142,6 +142,7 @@ class OdinBot(commands.Bot):
         self.llm_gateway = components.llm_gateway
         self.prompt_builder = components.prompt_builder
         self.tool_catalog = components.tool_catalog
+        self.builtin_tool_policy = components.builtin_tool_policy
         self.native_tools = components.native_tools
         self.scheduling_tools = components.scheduling_tools
         self.knowledge_tools = components.knowledge_tools
