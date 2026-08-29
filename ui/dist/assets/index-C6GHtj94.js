@@ -4592,30 +4592,30 @@ var Ym=Object.defineProperty;var Qm=(e,t,s)=>t in e?Ym(e,t,{enumerable:!0,config
             <div class="flex items-center gap-4">
               <label class="flex items-center gap-2 text-xs text-gray-400">
                 Enabled
-                <label class="toggle-switch">
+                <span class="toggle-switch">
                   <input type="checkbox"
                     :checked="guildEnabled(guild)"
                     @change="setGuildConfig(guild.id, 'enabled', $event.target.checked)" />
                   <span class="toggle-slider"></span>
-                </label>
+                </span>
               </label>
               <label class="flex items-center gap-2 text-xs text-gray-400">
                 Require @mention
-                <label class="toggle-switch">
+                <span class="toggle-switch">
                   <input type="checkbox"
                     :checked="guildMention(guild)"
                     @change="setGuildConfig(guild.id, 'require_mention', $event.target.checked)" />
                   <span class="toggle-slider"></span>
-                </label>
+                </span>
               </label>
               <label class="flex items-center gap-2 text-xs text-gray-400">
                 Respond to bots
-                <label class="toggle-switch">
+                <span class="toggle-switch">
                   <input type="checkbox"
                     :checked="guildBots(guild)"
                     @change="setGuildConfig(guild.id, 'respond_to_bots', $event.target.checked)" />
                   <span class="toggle-slider"></span>
-                </label>
+                </span>
               </label>
               <button @click="toggleGuild(guild.id)" class="btn btn-ghost text-xs">
                 {{ expanded[guild.id] ? 'Hide channels' : 'Show channels' }}
