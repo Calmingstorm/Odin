@@ -656,15 +656,25 @@ export default {
       return 'badge-info';
     }
 
+    // Latest-request ownership: reconnect, activation, and debounced event
+    // refreshes may overlap. Only the newest request may commit or settle the
+    // shared loading/error state (the same epoch primitive used by audit and
+    // knowledge search in the campaign).
+    let fetchSessionsEpoch = 0;
+
     async function fetchSessions() {
+      const epoch = ++fetchSessionsEpoch;
       loading.value = true;
       error.value = null;
       try {
-        sessions.value = await api.get('/api/sessions');
+        const loaded = await api.get('/api/sessions');
+        if (epoch !== fetchSessionsEpoch) return;
+        sessions.value = loaded;
       } catch (e) {
+        if (epoch !== fetchSessionsEpoch) return;
         error.value = e.message;
       }
-      loading.value = false;
+      if (epoch === fetchSessionsEpoch) loading.value = false;
     }
 
     function retry() {

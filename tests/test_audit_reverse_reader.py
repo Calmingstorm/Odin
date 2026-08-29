@@ -1,9 +1,9 @@
 """Reverse block reader for audit reads (WebUI deep-dive W2C, read-path only).
 
-Every bounded audit query (search/search_logs/search_diffs/search_by_risk) and
-the boot-time chain resume used to scan the WHOLE log forward — seconds of
-jank per dashboard query and a full multi-MB read per boot once the live log
-grew. Reads now walk blocks backwards from EOF and stop at the limit.
+Every bounded audit query (search/search_logs/search_diffs/search_by_risk)
+used to scan the WHOLE log forward — seconds of jank per dashboard query once
+the live log grew. Reads now walk blocks backwards from EOF and stop at the
+limit. Chain initialization remains deliberately outside this campaign.
 
 SAFE: real file I/O in tmp only; no network, no tool dispatch. The write path
 (_persist, rotation, signing) is untouched and stays covered by the existing
@@ -15,7 +15,6 @@ import json
 
 import src.audit.logger as logger_mod
 from src.audit.logger import AuditLogger, _iter_lines_reverse
-from src.audit.signer import GENESIS_HASH
 
 
 def _write_lines(path, lines, *, trailing_newline=True):
@@ -134,42 +133,91 @@ class TestCollectMatchesReverse:
         assert len(consumed) == 3
 
 
-class TestInitializeChainReverse:
-    def _signed_logger(self, path):
-        return AuditLogger(path=str(path), hmac_key="k" * 32)
+class _TrackingLock:
+    def __init__(self):
+        self.held = False
+    async def __aenter__(self):
+        self.held = True
+    async def __aexit__(self, *_args):
+        self.held = False
 
-    async def test_resumes_from_last_signed_entry_without_full_read(self, tmp_path, monkeypatch):
-        p = tmp_path / "audit.jsonl"
-        _write_lines(p, [_entry(i, _hmac=f"h{i}") for i in range(30)])
-        consumed = []
+
+class TestStableGenerationSnapshot:
+    async def test_descriptor_set_is_opened_under_persistence_lock(self, tmp_path, monkeypatch):
+        base = tmp_path / "audit.jsonl"
+        _write_lines(base, [_entry(0)])
+        logger = AuditLogger(path=str(base))
+        tracking = _TrackingLock()
+        logger._persist_lock = tracking
+        real_paths = logger._rotated_paths_newest_first
+        def paths_while_locked():
+            assert tracking.held, "generation names sampled outside rotation lock"
+            return real_paths()
+        monkeypatch.setattr(logger, "_rotated_paths_newest_first", paths_while_locked)
+        assert [entry["seq"] for entry in await logger.search(limit=1)] == [0]
+
+    async def test_rotation_between_generation_reads_neither_duplicates_nor_omits(
+        self, tmp_path, monkeypatch,
+    ):
+        base = tmp_path / "audit.jsonl"
+        _write_lines(base.with_name("audit.jsonl.1"), [_entry(i) for i in range(0, 4)])
+        _write_lines(base, [_entry(i) for i in range(4, 8)])
+        logger = AuditLogger(path=str(base), max_files=3)
         real = _iter_lines_reverse
+        calls = 0
 
-        def counting(path, block_size=logger_mod._REVERSE_BLOCK_SIZE):
+        def rotate_after_current_opened(path, block_size=logger_mod._REVERSE_BLOCK_SIZE):
             async def gen():
+                nonlocal calls
                 async for raw in real(path, block_size=block_size):
-                    consumed.append(raw)
                     yield raw
+                calls += 1
+                if calls == 1:
+                    base.with_name("audit.jsonl.1").rename(base.with_name("audit.jsonl.2"))
+                    base.rename(base.with_name("audit.jsonl.1"))
+                    _write_lines(base, [_entry(i) for i in range(8, 10)])
             return gen()
 
-        monkeypatch.setattr(logger_mod, "_iter_lines_reverse", counting)
-        logger = self._signed_logger(p)
-        await logger.initialize_chain()
-        assert logger._signer.prev_hmac == "h29"
-        assert len(consumed) == 1  # one line answers the question
+        monkeypatch.setattr(logger_mod, "_iter_lines_reverse", rotate_after_current_opened)
+        got = await logger.search(limit=8)
+        assert [entry["seq"] for entry in got] == [7, 6, 5, 4, 3, 2, 1, 0]
 
-    async def test_torn_tail_falls_back_to_previous_parseable(self, tmp_path):
-        p = tmp_path / "audit.jsonl"
-        _write_lines(p, [_entry(0, _hmac="good"), '{"torn": tr'], trailing_newline=False)
-        logger = self._signed_logger(p)
-        await logger.initialize_chain()
-        assert logger._signer.prev_hmac == "good"
 
-    async def test_unsigned_newest_entry_leaves_genesis(self, tmp_path):
-        # Preserved semantics: the FIRST parseable entry ends the search even
-        # when it carries no chain value — an unsigned tail never adopts an
-        # older _hmac from deeper in the file.
-        p = tmp_path / "audit.jsonl"
-        _write_lines(p, [_entry(0, _hmac="older"), _entry(1)])
-        logger = self._signed_logger(p)
-        await logger.initialize_chain()
-        assert logger._signer.prev_hmac == GENESIS_HASH
+class TestToolCountReadCache:
+    async def test_counts_rotated_history_and_consumes_only_new_bytes(self, tmp_path):
+        base = tmp_path / "audit.jsonl"
+        _write_lines(base.with_name("audit.jsonl.1"), [
+            _entry(0, tool_name="old"), _entry(1, tool_name="shared"),
+        ])
+        _write_lines(base, [
+            _entry(2, tool_name="new"), _entry(3, tool_name="shared"),
+        ])
+        logger = AuditLogger(path=str(base), max_files=3)
+        assert await logger.count_by_tool() == {"shared": 2, "new": 1, "old": 1}
+
+        # If the old bytes are reparsed, this monkeypatch makes the second call
+        # red. Appended bytes alone must be consumed and folded into the cache.
+        real_loads = logger_mod.json.loads
+        seen = []
+        def only_appended(raw):
+            seen.append(raw)
+            entry = real_loads(raw)
+            assert entry["seq"] == 4
+            return entry
+        logger_mod.json.loads = only_appended
+        try:
+            with base.open("a") as f:
+                f.write(_entry(4, tool_name="new") + "\n")
+            assert await logger.count_by_tool() == {"shared": 2, "new": 2, "old": 1}
+        finally:
+            logger_mod.json.loads = real_loads
+        assert len(seen) == 1
+
+    async def test_rotation_reuses_inode_counts_and_adds_new_current(self, tmp_path):
+        base = tmp_path / "audit.jsonl"
+        _write_lines(base, [_entry(0, tool_name="old")])
+        logger = AuditLogger(path=str(base), max_files=3)
+        assert await logger.count_by_tool() == {"old": 1}
+        base.rename(base.with_name("audit.jsonl.1"))
+        _write_lines(base, [_entry(1, tool_name="new")])
+        assert await logger.count_by_tool() == {"old": 1, "new": 1}

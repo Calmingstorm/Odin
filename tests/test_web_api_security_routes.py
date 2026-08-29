@@ -339,6 +339,21 @@ class TestAuthRoutes:
             sm.destroy.assert_called_once_with("sess-123")
 
     @pytest.mark.asyncio
+    async def test_logout_closes_only_exact_session_websockets(self, tmp_path):
+        bot, sm = self._bot_with_sessions(tmp_path)
+        sm.destroy.return_value = True
+        ws = SimpleNamespace(close_by_session_id=AsyncMock())
+        app = self._app_with_sm(bot, sm)
+        app["ws_manager"] = ws
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post(
+                "/api/auth/logout", headers={"Authorization": "Bearer sess-exact"},
+            )
+            assert r.status == 200
+        sm.destroy.assert_called_once_with("sess-exact")
+        ws.close_by_session_id.assert_awaited_once_with("sess-exact")
+
+    @pytest.mark.asyncio
     async def test_session_check(self, tmp_path):
         bot, sm = self._bot_with_sessions(tmp_path)
         app = self._app_with_sm(bot, sm)

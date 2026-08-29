@@ -28,14 +28,15 @@ function check(name, condition, detail = '') {
 const sockets = [];
 class FakeWebSocket {
   static OPEN = 1;
-  constructor(url) {
+  constructor(url, protocols) {
     this.url = url;
+    this.protocols = protocols;
     this.readyState = FakeWebSocket.OPEN;
     this.sent = [];
     sockets.push(this);
   }
   send(payload) { this.sent.push(payload); }
-  close() { this.closed = true; }
+  close() { this.closed = true; this.readyState = 2; }
 }
 
 function memoryStorage() {
@@ -73,6 +74,41 @@ function firingCapturedTimers(fn) {
   globalThis.setTimeout = (cb) => { captured.push(cb); return 0; };
   try { fn(); } finally { globalThis.setTimeout = realSetTimeout; }
   for (const cb of captured) cb();
+}
+
+
+/** Capture timeout callbacks without auto-running them. */
+function captureTimeouts(fn) {
+  const realSetTimeout = globalThis.setTimeout;
+  const timers = [];
+  globalThis.setTimeout = (cb, delay) => {
+    const timer = { cb, delay, cleared: false };
+    timers.push(timer);
+    return timer;
+  };
+  const realClearTimeout = globalThis.clearTimeout;
+  globalThis.clearTimeout = timer => { if (timer) timer.cleared = true; };
+  try { fn(timers); } finally {
+    globalThis.setTimeout = realSetTimeout;
+    globalThis.clearTimeout = realClearTimeout;
+  }
+  return timers;
+}
+
+// Logout clears local session state before a stalled network response and
+// constructs the request with the old bearer header. This pins API-level
+// terminal teardown independently of App's socket-first teardown.
+{
+  const api = new OdinAPI();
+  api.setToken('session-secret', 0);
+  let seenAuth = null;
+  globalThis.fetch = (_path, opts) => {
+    seenAuth = opts.headers.Authorization;
+    return new Promise(() => {}); // deliberately never settles
+  };
+  void api.logout();
+  check('logout request retains prior bearer', seenAuth === 'Bearer session-secret', String(seenAuth));
+  check('logout clears local token before network completion', api.token === '', api.token);
 }
 
 // Two state listeners both receive; removing one never detaches the other.
@@ -157,6 +193,7 @@ function firingCapturedTimers(fn) {
   const order = [];
   client.onState((s) => order.push(['state', s]));
   client.onReconnected((epoch) => order.push(['reconnected', epoch]));
+  client.subscribe('events', () => {});
 
   client.connect();
   sockets[0].onopen();
@@ -169,6 +206,9 @@ function firingCapturedTimers(fn) {
   order.length = 0;
   firingCapturedTimers(() => sockets[0].onclose());   // drop -> immediate retry
   sockets[sockets.length - 1].onopen();
+  check('resume waits for subscription acknowledgement',
+    !order.some(([k]) => k === 'reconnected'), JSON.stringify(order));
+  sockets[sockets.length - 1].onmessage({ data: JSON.stringify({ type: 'subscribed', channel: 'events' }) });
   const firstResume = order.filter(([k]) => k === 'reconnected');
   check('resumed open fires reconnected once', firstResume.length === 1
     && firstResume[0][1] === 1, JSON.stringify(order));
@@ -189,6 +229,7 @@ function firingCapturedTimers(fn) {
 
   firingCapturedTimers(() => sockets[sockets.length - 1].onclose());
   sockets[sockets.length - 1].onopen();
+  sockets[sockets.length - 1].onmessage({ data: JSON.stringify({ type: 'subscribed', channel: 'events' }) });
   check('epoch is monotonic across sessions', client.reconnectEpoch === 2,
     String(client.reconnectEpoch));
 }
@@ -204,6 +245,47 @@ function firingCapturedTimers(fn) {
   sockets[sockets.length - 1].onopen();                // first real connection
   check('failed-then-first open is not a resume', resumes.length === 0,
     JSON.stringify(resumes));
+}
+
+// A half-open socket that never emits onclose must still be retired and a
+// reconnect scheduled. Drive the actual timeout arm; close() is intentionally
+// inert beyond changing readyState, exactly the dead-path case.
+{
+  const client = newClient();
+  client.connect();
+  const dead = sockets[0];
+  dead.onopen();
+  client._lastPongTime = Date.now() - 60000;
+  const timers = captureTimeouts(() => {
+    client._pingInterval._onTimeout();
+  });
+  const forced = timers.find(timer => timer.delay === 1000);
+  check('pong timeout arms bounded forced retirement', Boolean(forced),
+    JSON.stringify(timers.map(t => t.delay)));
+  const reconnectTimers = captureTimeouts(() => forced.cb());
+  check('forced retirement releases dead socket', client._ws === null,
+    `state=${client.state}`);
+  check('forced retirement schedules reconnect without onclose',
+    reconnectTimers.some(timer => timer.delay >= 1000),
+    JSON.stringify(reconnectTimers.map(t => t.delay)));
+}
+
+// App teardown contract: both manual logout and inactivity expiry use the
+// same terminal local teardown. The logout must happen before its network
+// await, and stopLive must own both the socket and status poll.
+{
+  const appSource = readFileSync(join(uiJsDir, 'app.js'), 'utf8');
+  const stopLive = appSource.match(/function stopLive\(\)\s*\{([\s\S]*?)\n    \}/)?.[1] || '';
+  const expiry = appSource.match(/api\.onSessionExpired\s*=\s*\(\)\s*=>\s*\{([\s\S]*?)\n    \};/)?.[1] || '';
+  const logout = appSource.match(/async function logout\(\)\s*\{([\s\S]*?)\n    \}/)?.[1] || '';
+  check('terminal teardown disconnects socket', stopLive.includes('ws.disconnect()'), stopLive);
+  check('terminal teardown clears status poll',
+    /clearInterval\(statusInterval\)/.test(stopLive) && /statusInterval\s*=\s*null/.test(stopLive),
+    stopLive);
+  check('inactivity expiry uses terminal teardown', expiry.includes('stopLive()'), expiry);
+  check('manual logout tears down before network await',
+    logout.indexOf('stopLive()') >= 0
+      && logout.indexOf('stopLive()') < logout.indexOf('await api.logout()'), logout);
 }
 
 // Source scan: the retired single-slot property form now silently no-ops, so

@@ -35,7 +35,7 @@ class FakeWebSocket {
     sockets.push(this);
   }
   send(payload) { this.sent.push(payload); }
-  close() { this.closed = true; }
+  close() { this.closed = true; this.readyState = 2; }
 }
 
 function memoryStorage() {

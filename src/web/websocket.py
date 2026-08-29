@@ -117,7 +117,7 @@ class WebSocketManager:
         merely ignored (audit 3.1)."""
         identity = getattr(request, "_api_identity", None)
         offered_protocol = _bearer_subprotocol(request)
-        if request.query.get("token"):
+        if request.query.getall("token", []):
             ws = web.WebSocketResponse()
             await ws.prepare(request)
             await ws.close(
@@ -336,6 +336,29 @@ class WebSocketManager:
         if snapshot:
             log.info("Closed %d WebSocket client(s) at shutdown", len(snapshot))
         return len(snapshot)
+
+    async def close_by_session_id(self, session_id: str) -> int:
+        """Close only sockets authenticated by one exact browser session."""
+        to_close = [
+            ws for ws in list(self._clients)
+            if getattr(ws, "_odin_session_id", None) == session_id
+        ]
+        for ws in to_close:
+            try:
+                await asyncio.wait_for(
+                    ws.close(code=4002, message=b"session ended"), timeout=1.0,
+                )
+            except Exception:
+                pass
+            self._clients.discard(ws)
+            self._log_subscribers.discard(ws)
+            self._event_subscribers.discard(ws)
+        if to_close:
+            log.info(
+                "Closed %d WebSocket connection(s) for ended session",
+                len(to_close),
+            )
+        return len(to_close)
 
     async def close_by_user_id(self, user_id: str) -> int:
         """Close all WebSocket connections for a given user_id."""

@@ -135,10 +135,13 @@ class OdinAPI {
 
   /** Logout — invalidate the server-side session. */
   async logout() {
-    try {
-      await this.post('/api/auth/logout', {});
-    } catch { /* ignore errors during logout */ }
+    // Build the authenticated request before clearing local state; _request()
+    // calls fetch synchronously up to its first await, so the request retains
+    // the session credential while local privilege ends immediately even if
+    // the network never settles.
+    const request = this.post('/api/auth/logout', {});
     this.setToken('');
+    try { await request; } catch { /* ignore errors during logout */ }
   }
 
   /** Check if the server is reachable and auth is valid. */
@@ -176,8 +179,12 @@ class OdinWebSocket {
     this._shouldConnect = false;
     this._subscriptions = new Set();
     this._reconnectAttempt = 0;
+    this._reconnectTimer = null;
     this._lastPongTime = 0;
     this._pingInterval = null;
+    this._forcedRetireTimer = null;
+    this._subscriptionAckTimer = null;
+    this._pendingReconnect = null;
     this._latency = -1;
     // True while a WS chat awaits its response — on connection loss the
     // page gets a chat_error via socket lifecycle, never a duration timer.
@@ -257,6 +264,15 @@ class OdinWebSocket {
       clearTimeout(this._reconnectTimer);
       this._reconnectTimer = null;
     }
+    if (this._forcedRetireTimer) {
+      clearTimeout(this._forcedRetireTimer);
+      this._forcedRetireTimer = null;
+    }
+    if (this._subscriptionAckTimer) {
+      clearTimeout(this._subscriptionAckTimer);
+      this._subscriptionAckTimer = null;
+    }
+    this._pendingReconnect = null;
     this._reconnectAttempt = 0;
     this._resetLatency();
     this._stopPing();
@@ -276,22 +292,106 @@ class OdinWebSocket {
     });
   }
 
-  _startPing() {
+  _startPing(socket) {
     this._stopPing();
     this._lastPongTime = Date.now();
     this._pingInterval = setInterval(() => {
-      if (!this.connected) return;
-      // Half-open detection (audit 3.2): pongs were recorded but never
-      // CHECKED, so a silently dead path looked connected forever. Three
-      // missed pongs force a close; the normal onclose path reconnects.
+      if (this._ws !== socket || socket.readyState !== WebSocket.OPEN) return;
+      // A close handshake is cooperative; a half-open peer may never deliver
+      // onclose. Announce the loss now, then forcibly retire this socket on a
+      // bounded timer so reconnect does not depend on the dead path.
       if (this._lastPongTime && Date.now() - this._lastPongTime > 47000) {
-        try { this._ws.close(4000, 'pong timeout'); } catch { /* ignore */ }
+        this._beginForcedRetirement(socket, 'pong timeout');
         return;
       }
       try {
-        this._ws.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
+        socket.send(JSON.stringify({ type: 'ping', ts: Date.now() }));
       } catch { /* ignore */ }
     }, 15000);
+  }
+
+  _beginForcedRetirement(socket, reason) {
+    if (this._ws !== socket || this._forcedRetireTimer) return;
+    this._stopPing();
+    this._reconnectAttempt++;
+    this._setState('reconnecting');
+    this._emitLifecycle('status', false);
+    // Arm the authoritative retirement BEFORE close(): queued close delivery
+    // is normally asynchronous, but this remains correct for synchronous
+    // implementations and test doubles too.
+    this._forcedRetireTimer = setTimeout(() => {
+      this._forcedRetireTimer = null;
+      this._retireSocket(socket, true, true);
+    }, 1000);
+    try { socket.close(4000, reason); } catch { /* retirement timer is authoritative */ }
+  }
+
+  _scheduleReconnect(incrementAttempt = true) {
+    if (!this._shouldConnect || this._reconnectTimer) return;
+    if (incrementAttempt) this._reconnectAttempt++;
+    this._setState('reconnecting');
+    this._reconnectTimer = setTimeout(() => {
+      this._reconnectTimer = null;
+      this._open();
+    }, this._reconnectDelay);
+    this._reconnectDelay = Math.min(this._reconnectDelay * 2, this._maxReconnectDelay);
+  }
+
+  _retireSocket(socket, lossAlreadyPublished = false, reconnectAlreadyPublished = false) {
+    if (this._ws !== socket) return;
+    if (this._forcedRetireTimer) {
+      clearTimeout(this._forcedRetireTimer);
+      this._forcedRetireTimer = null;
+    }
+    if (this._subscriptionAckTimer) {
+      clearTimeout(this._subscriptionAckTimer);
+      this._subscriptionAckTimer = null;
+    }
+    this._pendingReconnect = null;
+    this._ws = null;
+    this._stopPing();
+    this._resetLatency();
+    if (this._chatPending) {
+      this._chatPending = false;
+      const lost = {
+        type: 'chat_error',
+        error: 'Connection lost — the response may still complete; check session history.',
+      };
+      for (const h of this._handlers.chat || []) h(lost);
+    }
+    if (!lossAlreadyPublished) this._emitLifecycle('status', false);
+    if (this._shouldConnect) this._scheduleReconnect(!reconnectAlreadyPublished);
+    else this._setState('disconnected');
+  }
+
+  _beginReconnectBarrier(socket, resumed) {
+    if (!resumed) return;
+    const channels = new Set(this._subscriptions);
+    if (channels.size === 0) {
+      this._reconnectEpoch += 1;
+      this._emitLifecycle('reconnected', this._reconnectEpoch);
+      return;
+    }
+    this._pendingReconnect = { socket, channels };
+    this._subscriptionAckTimer = setTimeout(() => {
+      if (this._pendingReconnect?.socket === socket) {
+        this._beginForcedRetirement(socket, 'subscription acknowledgement timeout');
+      }
+    }, 5000);
+  }
+
+  _ackSubscription(socket, channel) {
+    const pending = this._pendingReconnect;
+    if (!pending || pending.socket !== socket || !pending.channels.has(channel)) return;
+    pending.channels.delete(channel);
+    if (pending.channels.size > 0) return;
+    this._pendingReconnect = null;
+    if (this._subscriptionAckTimer) {
+      clearTimeout(this._subscriptionAckTimer);
+      this._subscriptionAckTimer = null;
+    }
+    this._reconnectEpoch += 1;
+    this._emitLifecycle('reconnected', this._reconnectEpoch);
   }
 
   _stopPing() {
@@ -308,7 +408,11 @@ class OdinWebSocket {
     if (channel !== 'chat') {
       this._subscriptions.add(channel);
       if (this.connected) {
-        this._ws.send(JSON.stringify({ subscribe: channel }));
+        const socket = this._ws;
+        if (this._pendingReconnect?.socket === socket) {
+          this._pendingReconnect.channels.add(channel);
+        }
+        socket.send(JSON.stringify({ subscribe: channel }));
       }
     }
   }
@@ -322,7 +426,9 @@ class OdinWebSocket {
         if (channel !== 'chat') {
           this._subscriptions.delete(channel);
           if (this.connected) {
-            this._ws.send(JSON.stringify({ unsubscribe: channel }));
+            const socket = this._ws;
+            socket.send(JSON.stringify({ unsubscribe: channel }));
+            this._ackSubscription(socket, channel);
           }
         }
       }
@@ -377,16 +483,13 @@ class OdinWebSocket {
       for (const ch of this._subscriptions) {
         socket.send(JSON.stringify({ subscribe: ch }));
       }
-      this._startPing();
+      this._startPing(socket);
       this._setState('connected');
       this._emitLifecycle('status', true);
-      if (resumed) {
-        // Events emitted while the socket was down are gone — there is no
-        // replay. Event-fed views register here to refetch their base data.
-        // Emitted LAST so refetch callbacks observe a connected socket.
-        this._reconnectEpoch += 1;
-        this._emitLifecycle('reconnected', this._reconnectEpoch);
-      }
+      // A resumed view may refetch only after every desired server-side
+      // subscription is acknowledged. Otherwise an event can fall between
+      // the REST snapshot and subscription installation and disappear.
+      this._beginReconnectBarrier(socket, resumed);
     };
 
     socket.onmessage = (evt) => {
@@ -402,6 +505,10 @@ class OdinWebSocket {
         }
         return;
       }
+      if (type === 'subscribed') {
+        this._ackSubscription(socket, data.channel);
+        return;
+      }
       if (type === 'log') {
         for (const h of this._handlers.logs || []) h(data);
       } else if (type === 'event') {
@@ -414,32 +521,11 @@ class OdinWebSocket {
     };
 
     socket.onclose = () => {
-      // A stale socket's close must not touch the current connection's state.
-      if (!isCurrent()) return;
-      this._ws = null;
-      this._stopPing();
-      this._resetLatency();
-      if (this._chatPending) {
-        // The server does not cancel an in-flight turn on disconnect — it
-        // finishes under its own guards and lands in session history.
-        this._chatPending = false;
-        const lost = {
-          type: 'chat_error',
-          error: 'Connection lost — the response may still complete; check session history.',
-        };
-        for (const h of this._handlers.chat || []) h(lost);
-      }
-      this._emitLifecycle('status', false);
-      if (this._shouldConnect) {
-        this._reconnectAttempt++;
-        this._setState('reconnecting');
-        // The handle is OWNED so logout can cancel it — an unstored timeout
-        // outlived disconnect() and reopened the socket tokenless (audit 3.3).
-        this._reconnectTimer = setTimeout(() => this._open(), this._reconnectDelay);
-        this._reconnectDelay = Math.min(this._reconnectDelay * 2, this._maxReconnectDelay);
-      } else {
-        this._setState('disconnected');
-      }
+      // If a pong/subscription timeout already published the loss, do not
+      // publish it twice; either way this path and the forced timer converge
+      // on the same identity-safe retirement primitive.
+      const forced = Boolean(this._forcedRetireTimer);
+      this._retireSocket(socket, forced, forced);
     };
 
     socket.onerror = () => {

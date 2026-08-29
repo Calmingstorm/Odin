@@ -266,9 +266,14 @@ const App = {
     const currentDescription = computed(() => router.currentRoute.value.meta?.description || 'Management console');
 
     // Handle session expiry from the API client
+    function stopLive() {
+      ws.disconnect();
+      if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+    }
+
     api.onSessionExpired = () => {
       sessionExpired.value = true;
-      ws.disconnect();
+      stopLive();
       api.setToken('');
       authState.value = 'login';
     };
@@ -339,12 +344,11 @@ const App = {
     }
 
     async function logout() {
-      await api.logout();
-      ws.disconnect();
-      // Status polling must die with the session — it survived logout and
-      // spammed 401s against a cleared token (audit 3.3).
-      if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+      // Local privilege teardown is terminal and synchronous. A stalled logout
+      // request must not leave a bearer socket or status poll alive.
+      stopLive();
       authState.value = 'login';
+      await api.logout();
     }
 
     function toggleSidebar() {
