@@ -164,6 +164,9 @@ function firingCapturedTimers(fn) {
     JSON.stringify(order));
   check('epoch starts at zero', client.reconnectEpoch === 0, String(client.reconnectEpoch));
 
+  // Scope the ordering assertions to the resumed segment alone — the first
+  // session's own 'connected' entry must never be able to satisfy them.
+  order.length = 0;
   firingCapturedTimers(() => sockets[0].onclose());   // drop -> immediate retry
   sockets[sockets.length - 1].onopen();
   const firstResume = order.filter(([k]) => k === 'reconnected');
