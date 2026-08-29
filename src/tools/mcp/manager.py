@@ -29,7 +29,7 @@ import re
 import time
 from dataclasses import dataclass, field
 from typing import Any
-from urllib.parse import urlsplit
+from urllib.parse import unquote, unquote_plus, urlsplit
 
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
@@ -142,8 +142,47 @@ def validate_server_config(name: str, config: dict[str, Any]) -> None:
         raise MCPConfigError(f"{name}: cwd must be an absolute path without NUL bytes")
 
 
-def _configured_secret_values(config: dict[str, Any]) -> list[str]:
+def _configured_url_secret_values(config: dict[str, Any]) -> set[str]:
+    """Extract credential-bearing endpoint components for operator scrubbing.
+
+    The masked display hides HTTP userinfo, query values (including bare query
+    components), and fragments. Server-authored identity/instruction text can
+    echo the request URL, so both the URL-encoded spelling and its decoded form
+    join the same scrub set as configured header/environment values.
+    """
+    url = config.get("url")
+    if config.get("transport") != "http" or not isinstance(url, str) or not url:
+        return set()
+    try:
+        parts = urlsplit(url)
+    except ValueError:
+        return set()
+
     values: set[str] = set()
+
+    def add(raw: str | None, *, query: bool = False) -> None:
+        if not raw:
+            return
+        values.add(raw)
+        decoded = unquote_plus(raw) if query else unquote(raw)
+        if decoded:
+            values.add(decoded)
+
+    if "@" in parts.netloc:
+        add(parts.netloc.rsplit("@", 1)[0])
+    add(parts.username)
+    add(parts.password)
+    for component in parts.query.split("&") if parts.query else ():
+        _name, separator, raw_value = component.partition("=")
+        add(raw_value if separator else component, query=True)
+    # Fragments are not sent in an HTTP request, but the configured URL can be
+    # reflected synthetically and the recognition display masks them entirely.
+    add(parts.fragment)
+    return values
+
+
+def _configured_secret_values(config: dict[str, Any]) -> list[str]:
+    values = _configured_url_secret_values(config)
     for config_field in ("headers", "env"):
         mapping = config.get(config_field) or {}
         if isinstance(mapping, dict):

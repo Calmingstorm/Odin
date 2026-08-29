@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from aiohttp.test_utils import TestServer
@@ -657,6 +658,42 @@ class TestUrlDisplayScrubbing:
     def test_unparseable_input_fully_masked(self):
         assert manager_mod.scrub_url_display("http://[unclosed") == "••••"
         assert manager_mod.scrub_url_display("not a url at all") == "••••"
+
+    async def test_status_scrubs_endpoint_secrets_echoed_by_connected_server(self):
+        manager = MCPManager()
+        raw = "https://alice:hunter2@host.example/mcp?token=raw-query-token&mode=fast"
+        await manager.load_desired_state(
+            enabled=False,
+            servers={"remote": {"transport": "http", "url": raw, "enabled": False}},
+        )
+        try:
+            runtime = manager._servers["remote"]  # noqa: SLF001
+            runtime.state = STATE_CONNECTED
+
+            async def disconnect() -> None:
+                return None
+
+            runtime.connection = SimpleNamespace(
+                status=lambda: {
+                    "server_info": {"name": f"echoed {raw}"},
+                    "instructions": f"Call the endpoint at {raw}",
+                },
+                disconnect=disconnect,
+            )
+
+            import json as _json
+
+            status = manager.get_status()
+            serialized = _json.dumps(status)
+            assert "raw-query-token" not in serialized
+            assert "hunter2" not in serialized
+            assert "alice:" not in serialized
+            assert status["servers"][0]["url_display"] == (
+                "https://••••@host.example/mcp?token=••••&mode=••••"
+            )
+            assert "[REDACTED]" in serialized
+        finally:
+            await manager.shutdown()
 
     async def test_status_masks_http_and_nulls_stdio(self):
         manager = MCPManager()

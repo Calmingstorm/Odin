@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { baseParse } from '@vue/compiler-dom';
 
 // Import the actual Vue page setup in Node. Runtime-dom only needs a document
 // creation stub at import time; the navigation fixture below supplies the
@@ -226,6 +227,35 @@ assert.match(docs, /blocked[\s\S]*not partially[\s\S]*published/i);
 // ---------------------------------------------------------------------------
 assert.match(page, /:checked="server\.enabled"/);
 assert.match(page, /@change="toggleServerEnabled\(server, \$event\)"/);
+
+// Pin the rendered control association, not merely its handler. The visual
+// slider is pointer-clickable because the card control is a real <label>
+// containing its checkbox; changing this wrapper back to a div/span must fail.
+const mcpTemplateAst = baseParse(mcpServersPage.template);
+function staticAttribute(node, name) {
+  return node.props?.find(prop => prop.type === 6 && prop.name === name)?.value?.content || '';
+}
+function findElement(node, predicate) {
+  if (node.type === 1 && predicate(node)) return node;
+  for (const child of node.children || []) {
+    const match = findElement(child, predicate);
+    if (match) return match;
+  }
+  return null;
+}
+const cardSwitchLabel = findElement(
+  mcpTemplateAst,
+  node => staticAttribute(node, 'class').split(/\s+/).includes('mcp-card-switch'),
+);
+assert.ok(cardSwitchLabel, 'card switch control must exist');
+assert.equal(cardSwitchLabel.tag, 'label', 'card switch must label its checkbox');
+assert.ok(
+  findElement(
+    cardSwitchLabel,
+    node => node.tag === 'input' && staticAttribute(node, 'type') === 'checkbox',
+  ),
+  'card switch label must contain its checkbox',
+);
 assert.match(page, /:aria-busy="togglePending\.has\(server\.name\)/);
 assert.match(page, /Takes effect immediately and changes tool availability\./);
 assert.match(page, /Currently set — masked display/);

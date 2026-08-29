@@ -497,14 +497,14 @@ class TestMutationSerialization:
 
 
 class TestPostCommitCancellation:
-    @pytest.mark.parametrize("operation", ["add", "update", "delete", "global"])
+    @pytest.mark.parametrize("operation", ["add", "update", "delete", "global", "server_enabled"])
     async def test_real_committed_write_rebinds_every_truth_before_cancellation(
         self, harness, monkeypatch, operation
     ):
         import aiohttp
 
         client, bot, config_path = harness
-        if operation in {"update", "delete"}:
+        if operation in {"update", "delete", "server_enabled"}:
             assert (await client.post("/api/mcp/servers", json=_server_body())).status == 201
 
         real = persistence_mod.persist_config_paths_locked
@@ -521,6 +521,9 @@ class TestPostCommitCancellation:
             "update": lambda: client.put("/api/mcp/servers/fake", json={"timeout_seconds": 77}),
             "delete": lambda: client.delete("/api/mcp/servers/fake"),
             "global": lambda: client.post("/api/mcp/enabled", json={"enabled": False}),
+            "server_enabled": lambda: client.post(
+                "/api/mcp/servers/fake/enabled", json={"enabled": False}
+            ),
         }[operation]
         try:
             response = await request()
@@ -542,10 +545,15 @@ class TestPostCommitCancellation:
             assert "fake" not in bot.config.mcp.servers
             assert "fake" not in bot.mcp_manager.desired_servers()
             assert not bot.mcp_manager.has_tool("mcp_fake_echo")
-        else:
+        elif operation == "global":
             assert disk["mcp"]["enabled"] is False
             assert bot.config.mcp.enabled is False
             assert bot.mcp_manager.global_enabled is False
+        else:
+            assert disk["mcp"]["servers"]["fake"]["enabled"] is False
+            assert bot.config.mcp.servers["fake"].enabled is False
+            assert bot.mcp_manager.desired_servers()["fake"]["enabled"] is False
+            assert not bot.mcp_manager.has_tool("mcp_fake_echo")
 
 
 class TestPostCommitPublicationFence:
@@ -605,6 +613,7 @@ class TestErrorArms:
             ("post", "/api/mcp/servers"),
             ("put", "/api/mcp/servers/fake"),
             ("post", "/api/mcp/enabled"),
+            ("post", "/api/mcp/servers/fake/enabled"),
         ):
             response = await getattr(client, method)(
                 route, data="not json", headers={"Content-Type": "application/json"}

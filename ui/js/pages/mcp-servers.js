@@ -132,13 +132,13 @@ export default {
                   </div>
                 </div>
               </div>
-              <div class="mcp-card-switch">
+              <label class="mcp-card-switch">
                 <span class="mcp-card-switch-copy"><strong>Server enabled</strong><small>Takes effect immediately and changes tool availability.</small></span>
                 <span class="toggle-switch" :aria-busy="togglePending.has(server.name) ? 'true' : 'false'">
                   <input type="checkbox" :checked="server.enabled" :disabled="togglePending.has(server.name)" :aria-label="'Server enabled — ' + server.name" @change="toggleServerEnabled(server, $event)" />
                   <span class="toggle-slider"></span>
                 </span>
-              </div>
+              </label>
               <div class="mcp-server-actions">
                 <button type="button" class="btn btn-ghost text-xs" @click="refreshTools(server)" :disabled="busy(server.name) || !masterEnabled || !server.enabled" title="Re-list tools without rebuilding the transport">
                   <odin-icon name="refresh" :size="14" /> Refresh tools
