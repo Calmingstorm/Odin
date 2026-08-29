@@ -54,7 +54,8 @@ export default {
                 <span class="text-sm" :class="llmStatus.codex.configured ? 'text-gray-200' : 'text-gray-500'">
                   Codex (OpenAI)
                 </span>
-                <span v-if="!llmStatus.codex.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-if="llmStatus.load_failed" class="text-xs text-amber-500">— status unavailable</span>
+                <span v-else-if="!llmStatus.codex.configured" class="text-xs text-yellow-500">— not configured</span>
                 <span v-else-if="llmStatus.codex.configured" class="text-xs text-gray-500">
                   {{ llmStatus.codex.model }}
                 </span>
@@ -69,7 +70,8 @@ export default {
                 <span class="text-sm" :class="llmStatus.ollama.configured ? 'text-gray-200' : 'text-gray-500'">
                   Ollama (Local/Remote)
                 </span>
-                <span v-if="!llmStatus.ollama.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-if="llmStatus.load_failed" class="text-xs text-amber-500">— status unavailable</span>
+                <span v-else-if="!llmStatus.ollama.configured" class="text-xs text-yellow-500">— not configured</span>
                 <span v-else-if="llmStatus.ollama.configured" class="text-xs text-gray-500">
                   {{ llmStatus.ollama.model }}
                 </span>
@@ -84,7 +86,8 @@ export default {
                 <span class="text-sm" :class="llmStatus.kimi.configured ? 'text-gray-200' : 'text-gray-500'">
                   Kimi (Moonshot AI)
                 </span>
-                <span v-if="!llmStatus.kimi.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-if="llmStatus.load_failed" class="text-xs text-amber-500">— status unavailable</span>
+                <span v-else-if="!llmStatus.kimi.configured" class="text-xs text-yellow-500">— not configured</span>
                 <span v-else-if="llmStatus.kimi.configured" class="text-xs text-gray-500">
                   {{ llmStatus.kimi.model }}
                 </span>
@@ -469,7 +472,8 @@ export default {
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-300">Kimi (Moonshot AI)</h2>
             <div class="flex items-center gap-3">
-              <div v-if="kimiStatus.configured" class="text-sm">
+              <div v-if="kimiStatus.load_failed" class="text-sm"><span class="provider-status text-amber-500">Status unavailable</span></div>
+              <div v-else-if="kimiStatus.configured" class="text-sm">
                 <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
                 <span v-else class="provider-status text-red-400"><span class="status-dot offline" aria-hidden="true"></span>Unreachable</span>
               </div>
@@ -527,7 +531,8 @@ export default {
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
             <div class="flex items-center gap-3">
-              <div v-if="ollamaStatus.configured" class="text-sm">
+              <div v-if="ollamaStatus.load_failed" class="text-sm"><span class="provider-status text-amber-500">Status unavailable</span></div>
+              <div v-else-if="ollamaStatus.configured" class="text-sm">
                 <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
                 <span v-else class="provider-status text-red-400"><span class="status-dot offline" aria-hidden="true"></span>Unreachable</span>
               </div>
@@ -857,7 +862,9 @@ export default {
           }
         }
       } catch (e) {
-        llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false }, kimi: { configured: false } };
+        // A failed status load is NOT "nothing is configured" (audit 2.3):
+        // keep the shape template-safe, flag the failure, render the truth.
+        llmStatus.value = { load_failed: true, active_provider: '', codex: {}, ollama: {}, kimi: {} };
       }
     }
 
@@ -903,7 +910,7 @@ export default {
           } catch { ollamaModels.value = []; }
         }
       } catch {
-        ollamaStatus.value = { configured: false };
+        ollamaStatus.value = { configured: false, load_failed: true };
       }
     }
 
@@ -990,7 +997,7 @@ export default {
           } catch { kimiModels.value = []; }
         }
       } catch {
-        kimiStatus.value = { configured: false };
+        kimiStatus.value = { configured: false, load_failed: true };
       }
     }
 
@@ -1259,6 +1266,7 @@ export default {
       mainMaxAllowed, agentMaxAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
+      fetchCodexStatus,
       ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
       kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
