@@ -120,6 +120,9 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
                     "is_core": tool.get("is_core", False),
                     "enabled": enabled,
                     "state": state,
+                    # Single inventory source for the panel's Parameters
+                    # detail (audit 1.3) — /api/tools stays schema-free.
+                    "input_schema": tool.get("input_schema", {}),
                 }
             )
         return {

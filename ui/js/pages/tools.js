@@ -243,7 +243,12 @@ export default {
       const invTools = (inv && Array.isArray(inv.tools)) ? inv.tools : null;
       globalEnabled.value = inv ? Boolean(inv.global_enabled) : true;
       if (!invTools) {
-        tools.value = visible;
+        // No inventory (e.g. non-admin viewer): best-effort source tags so
+        // the stat cards stay meaningful; switches never render here.
+        tools.value = visible.map(t => ({
+          ...t,
+          source: t.name.startsWith('mcp_') ? 'mcp' : (t.is_core ? 'builtin' : 'skill'),
+        }));
         return;
       }
       const builtinNames = new Set(invTools.map(t => t.name));
@@ -287,8 +292,11 @@ export default {
       }
     }
 
-    const coreCount = computed(() => tools.value.filter(t => t.is_core).length);
-    const skillCount = computed(() => tools.value.filter(t => !t.is_core).length);
+    // Count by SOURCE, not by is_core: with the merged inventory, "not
+    // core" spans non-core built-ins and MCP tools too — the old filter
+    // reported them all as skills (Odin's re-validation, new defect 1).
+    const coreCount = computed(() => tools.value.filter(t => t.source === 'builtin' && t.is_core).length);
+    const skillCount = computed(() => tools.value.filter(t => t.source === 'skill').length);
     const totalUsage = computed(() => Object.values(stats.value).reduce((a, b) => a + b, 0));
 
     /** Categorize a tool based on its name */
