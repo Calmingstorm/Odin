@@ -571,8 +571,10 @@ class ToolExecutor:
     ) -> ToolResult:
         # Operator-disabled built-in (config-gated visibility): typed
         # rejection BEFORE handler resolution, durability transitions,
-        # recovery machinery, or any external effect.
-        if self._builtin_policy is not None and self._builtin_policy.is_disabled(tool_name):
+        # recovery machinery, or any external effect. getattr tolerates the
+        # sanctioned ``__new__`` test seam, which skips ``__init__``.
+        policy = getattr(self, "_builtin_policy", None)
+        if policy is not None and policy.is_disabled(tool_name):
             from .builtin_policy import disabled_rejection
 
             return disabled_rejection(tool_name)
