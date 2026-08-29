@@ -7,6 +7,7 @@ delegation, and response shaping, not real loop/process startup.
 """
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -204,6 +205,47 @@ class TestLoops:
             body = await r.json()
             assert body["old_id"] == "L1" and body["new_id"] == "loop-new"
             bot.loop_manager.stop_loop.assert_called_once_with("L1")  # stopped first
+
+    @pytest.mark.asyncio
+    async def test_restart_callback_accepts_manager_invocation_shape(self):
+        # LoopManager invokes every iteration callback as
+        # `await cb(prompt, channel, prev_context, info._cancel_event)`
+        # (autonomous_loop.py). The restart route's callback used to take
+        # three parameters, so every iteration of a restarted loop raised
+        # TypeError and five in a row terminated it with error status —
+        # invisible to route tests that fake start_loop without ever
+        # invoking the callback they captured.
+        bot = MagicMock()
+        bot.loop_manager._loops = {"L1": _loop_info(status="stopped", channel_id="123")}
+        bot.get_channel.return_value = MagicMock()
+        bot.loop_manager.start_loop.return_value = "loop-new"
+        bot.tool_loop.run_autonomous = AsyncMock(return_value="iterated")
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            assert (await c.post("/api/loops/L1/restart")).status == 201
+        cb = bot.loop_manager.start_loop.call_args.kwargs["iteration_callback"]
+        cancel_event = asyncio.Event()
+        assert await cb("iterate now", "chan", "prev", cancel_event) == "iterated"
+        bot.tool_loop.run_autonomous.assert_awaited_once_with(
+            "iterate now", "chan", "prev", "web-api", cancel_event=cancel_event,
+        )
+
+    @pytest.mark.asyncio
+    async def test_create_callback_accepts_manager_invocation_shape(self):
+        # Same contract pinned on the create route so neither web-registered
+        # callback can drift from the manager's four-argument invocation.
+        bot = MagicMock()
+        bot.get_channel.return_value = MagicMock()
+        bot.loop_manager.start_loop.return_value = "loop-1"
+        bot.tool_loop.run_autonomous = AsyncMock(return_value="ran")
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            r = await c.post("/api/loops", json={"goal": "watch X", "channel_id": "123"})
+            assert r.status == 201
+        cb = bot.loop_manager.start_loop.call_args.kwargs["iteration_callback"]
+        cancel_event = asyncio.Event()
+        assert await cb("go", "chan", None, cancel_event) == "ran"
+        bot.tool_loop.run_autonomous.assert_awaited_once_with(
+            "go", "chan", None, "web-api", cancel_event=cancel_event,
+        )
 
     @pytest.mark.asyncio
     async def test_restart_channel_gone(self):

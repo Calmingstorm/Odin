@@ -222,12 +222,16 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
         if not channel:
             return web.json_response({"error": "channel not found"}, status=404)
 
-        # Build callback
+        # Build iteration callback (same shape as the create route: the loop
+        # manager invokes it with the loop's cancel event, and run_autonomous
+        # needs that event for cooperative stop to reach a restarted loop).
         async def _iteration_cb(
             prompt: str, ch: object, prev_context: str | None,
+            cancel_event: asyncio.Event,
         ) -> str:
             return await bot.tool_loop.run_autonomous(
                 prompt, ch, prev_context, requester_id,
+                cancel_event=cancel_event,
             )
 
         new_id = bot.loop_manager.start_loop(

@@ -6,7 +6,7 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatAge, formatDuration } from '../utils.js';
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { analyzeLocalDateTime, enforceExclusiveTiming } from '../schedule-time.js';
 
 
@@ -621,7 +621,27 @@ export default {
       togglingId.value = null;
     }
 
-    async function doUpdateReportFormat(schedule, reportFormat) {
+    // Arrow-keying through the report-format select fires @change once per
+    // step; each used to be its own PUT + toast + refetch (audit 6.3). The
+    // commit is debounced per schedule so one request carries the final
+    // choice; the select still disables while that request is in flight.
+    const reportFormatTimers = new Map();
+
+    function doUpdateReportFormat(schedule, reportFormat) {
+      const prior = reportFormatTimers.get(schedule.id);
+      if (prior) clearTimeout(prior.timer);
+      const entry = {
+        run: () => commitReportFormat(schedule, reportFormat),
+        timer: null,
+      };
+      entry.timer = setTimeout(() => {
+        reportFormatTimers.delete(schedule.id);
+        entry.run();
+      }, 500);
+      reportFormatTimers.set(schedule.id, entry);
+    }
+
+    async function commitReportFormat(schedule, reportFormat) {
       reportUpdatingId.value = schedule.id;
       try {
         await api.put(`/api/schedules/${encodeURIComponent(schedule.id)}`, {
@@ -633,6 +653,16 @@ export default {
       } finally {
         await fetchSchedules();
         reportUpdatingId.value = null;
+      }
+    }
+
+    // Commit, never drop, a choice still inside its quiet window when the
+    // operator leaves the page.
+    function flushReportFormatTimers() {
+      for (const [id, entry] of [...reportFormatTimers]) {
+        clearTimeout(entry.timer);
+        reportFormatTimers.delete(id);
+        entry.run();
       }
     }
 
@@ -669,13 +699,14 @@ export default {
     }
 
     onMounted(() => { fetchSchedules(); });
+    onUnmounted(flushReportFormatTimers);
 
     return {
       schedules, loading, error,
       showCreate, form, creating, createError, runAtUtcPreview,
       runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
-      runningId, deletingId, togglingId, resettingId, reportUpdatingId,
+      runningId, deletingId, togglingId, resettingId, reportUpdatingId, flushReportFormatTimers,
       expandedId, history, historyLoading, historyError,
       cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,
