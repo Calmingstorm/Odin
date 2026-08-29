@@ -1401,6 +1401,10 @@ textarea.hm-input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.dash-load-failed .dash-empty-icon { color: #d9a441; }
+.dash-load-failed span:last-child { color: var(--hm-text-muted); }
+.dash-load-warning { color: #d9a441; padding: 0.1rem 0 0.35rem; }
+.chat-history-warning { color: #d9a441; padding: 0.55rem 1rem; border-bottom: 1px solid var(--hm-border); background: rgba(217, 164, 65, 0.08); }
 .dash-empty {
   display: flex;
   flex-direction: column;
@@ -2335,6 +2339,7 @@ tr.tl-tool-off td { color: var(--hm-text-dim); }
   border-bottom: 1px solid var(--hm-border);
 }
 .kb-chunk-empty { padding: var(--hm-space-2) 0; }
+.kb-chunk-error { color: #d9a441; }
 .kb-chunk-item {
   padding: var(--hm-space-2) var(--hm-space-3); border-radius: var(--hm-radius-md);
   border: 1px solid var(--hm-border-subtle); cursor: pointer; transition: all 0.15s;

@@ -452,3 +452,16 @@ class TestRouteFailureArms:
         assert _disk_disabled(config_path) == ["kubectl"]
         assert bot.config.tools.disabled_tools == ["kubectl"]
         assert "kubectl" not in [t["name"] for t in bot.tool_catalog.merged_definitions()]
+
+
+class TestInventorySchemas:
+    async def test_inventory_carries_input_schema(self, tools_api):
+        """Audit 1.3: the inventory is the single schema source for the
+        panel's Parameters detail; /api/tools stays schema-free."""
+        client, _bot, _ = tools_api
+        body = await (await client.get("/api/tools/builtins")).json()
+        row = next(t for t in body["tools"] if t["name"] == "run_command")
+        assert isinstance(row["input_schema"], dict)
+        assert "properties" in row["input_schema"]
+        visible = await (await client.get("/api/tools")).json()
+        assert all("input_schema" not in t for t in visible)

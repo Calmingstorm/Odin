@@ -125,10 +125,20 @@ class TestBulkheadsAndAggregates:
 class TestAuditAndLogs:
     async def test_audit(self):
         bot = _bot()
+        bot.audit.search = AsyncMock(return_value=[{"tool_name": "t", "error": "boom"}])
         async with TestClient(TestServer(_app(obs.register_audit_log, bot=bot))) as c:
-            # error_only filter keeps only the entry with an error field
+            # error_only is delegated into the bounded search predicate.
             body = await (await c.get("/api/audit?error_only=true&tool=t")).json()
             assert len(body) == 1 and body[0]["error"] == "boom"
+            bot.audit.search.assert_awaited_with(
+                tool_name="t",
+                user=None,
+                host=None,
+                keyword=None,
+                date=None,
+                has_error=True,
+                limit=50,
+            )
             assert (await (await c.get("/api/audit/diffs")).json())["count"] == 1
             assert (await c.get("/api/audit/verify")).status == 200
         bot.audit.verify_integrity = AsyncMock(return_value={"valid": False})

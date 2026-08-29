@@ -7,6 +7,7 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
 import { api, ws } from '../api.js';
+import { toast } from '../toast.js';
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 
 
@@ -58,6 +59,7 @@ function extractImageUrls(text) {
 export default {
   template: `
     <div class="chat-container page-fade-in" role="region" aria-label="Chat">
+      <div v-if="historyError" class="chat-history-warning" role="alert">{{ historyError }}</div>
       <!-- Message list -->
       <div class="chat-messages" ref="messagesEl" role="log" aria-live="polite" aria-label="Messages">
         <!-- Empty state -->
@@ -225,6 +227,7 @@ export default {
     const messages = ref([]);
     const input = ref('');
     const sending = ref(false);
+    const historyError = ref('');
     const messagesEl = ref(null);
     const inputEl = ref(null);
     const typingElapsed = ref(0);
@@ -428,6 +431,7 @@ export default {
     }
 
     async function loadHistory() {
+      historyError.value = '';
       try {
         if (!channelId.value) {
           const sess = await api.get('/api/auth/session');
@@ -464,7 +468,13 @@ export default {
           });
         }
       } catch (e) {
-        // No session yet — that's fine, start fresh
+        // 404 = no session yet, a fresh start. Anything else is a REAL
+        // load failure — starting silently "fresh" hides existing history
+        // (audit 2.7); say so instead of impersonating an empty session.
+        if (e && e.status !== 404) {
+          historyError.value = 'Couldn\'t load chat history — earlier messages may be missing. Refresh to retry.';
+          toast.error(historyError.value);
+        }
       }
     }
 
@@ -483,11 +493,11 @@ export default {
     });
 
     return {
-      messages, input, sending, messagesEl, inputEl,
+      messages, input, sending, historyError, messagesEl, inputEl,
       canSend, wsStatus, typingText, suggestions,
       send, autoResize, formatTime, formatDate,
       showDateSeparator, useSuggestion, openImage,
-      onImageError, getToolIcon,
+      onImageError, getToolIcon, loadHistory,
     };
   },
 };
