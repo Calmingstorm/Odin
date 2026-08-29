@@ -346,3 +346,55 @@ class TestToolsManagementRoutes:
         body = await (await client.get("/api/tools/builtins")).json()
         row = next(t for t in body["tools"] if t["name"] == "kubectl")
         assert row["state"] == "disabled"
+
+
+class TestRouteFailureArms:
+    async def test_backend_hidden_names_defaults_to_live_config(self):
+        catalog = _catalog(_cfg())
+        assert catalog.backend_hidden_names() == catalog.backend_hidden_names(_cfg())
+
+    async def test_persist_failure_escapes_without_partial_truths(
+        self, tools_api, monkeypatch
+    ):
+        client, bot, config_path = tools_api
+        before = config_path.read_text(encoding="utf-8")
+
+        async def boom(changes):
+            return RuntimeError("disk full"), False
+
+        monkeypatch.setattr(persistence_mod, "persist_config_paths_locked", boom)
+        response = await client.post(
+            "/api/tools/builtins/kubectl/enabled", json={"enabled": False}
+        )
+        assert response.status == 500
+        # No truth moved: disk, runtime config, and catalog all unchanged.
+        assert config_path.read_text(encoding="utf-8") == before
+        assert bot.config.tools.disabled_tools == []
+        assert "kubectl" in [t["name"] for t in bot.tool_catalog.merged_definitions()]
+
+    async def test_writer_cancellation_after_commit_converges_all_truths(
+        self, tools_api, monkeypatch
+    ):
+        import aiohttp
+
+        client, bot, config_path = tools_api
+        real = persistence_mod.persist_config_paths_locked
+
+        async def cancelled_after_commit(changes):
+            exc, _ = await real(changes)
+            return exc, True
+
+        monkeypatch.setattr(
+            persistence_mod, "persist_config_paths_locked", cancelled_after_commit
+        )
+        try:
+            response = await client.post(
+                "/api/tools/builtins/kubectl/enabled", json={"enabled": False}
+            )
+            assert response.status >= 500
+        except (aiohttp.ServerDisconnectedError, aiohttp.ClientOSError):
+            pass
+        # The committed write converged every truth before cancellation.
+        assert _disk_disabled(config_path) == ["kubectl"]
+        assert bot.config.tools.disabled_tools == ["kubectl"]
+        assert "kubectl" not in [t["name"] for t in bot.tool_catalog.merged_definitions()]
