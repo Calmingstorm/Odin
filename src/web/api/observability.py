@@ -268,10 +268,9 @@ def register_audit_log(routes: web.RouteTableDef, bot) -> None:
             host=host,
             keyword=keyword,
             date=date,
+            has_error=True if error_only else None,
             limit=limit,
         )
-        if error_only:
-            results = [r for r in results if r.get("error")]
         return web.json_response(results)
 
     @routes.get("/api/audit/diffs")

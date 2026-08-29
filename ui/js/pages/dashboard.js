@@ -180,7 +180,7 @@ export default {
                 <span class="dash-panel-title">Recent Errors</span>
                 <span v-if="errors.length > 0" class="badge badge-danger" style="font-size:0.625rem;">{{ errors.length }}</span>
               </div>
-              <div v-if="errorsError" class="dash-empty dash-load-failed">
+              <div v-if="errors.length === 0 && errorsError" class="dash-empty dash-load-failed">
                 <span class="dash-empty-icon"><odin-icon name="warning" :size="21" /></span>
                 <span>Couldn't load recent errors</span>
               </div>
@@ -189,6 +189,7 @@ export default {
                 <span>All clear</span>
               </div>
               <div v-else class="dash-error-list">
+                <div v-if="errorsError" class="dash-load-warning text-xs">Refresh failed — showing known errors</div>
                 <div v-for="(e, i) in errors" :key="i" class="dash-error-item">
                   <div class="dash-error-top">
                     <span class="text-red-400"><odin-icon name="warning" :size="16" /></span>
@@ -474,6 +475,9 @@ export default {
         if (activity.value.length > 10) activity.value.pop();
         newEventCount.value++;
         if (entry.error) {
+          // A live error is newer truth than a failed REST snapshot. Make it
+          // visible immediately instead of leaving the failure panel on top.
+          errorsError.value = false;
           errors.value.unshift(entry);
           if (errors.value.length > 5) errors.value.pop();
         }
@@ -504,7 +508,7 @@ export default {
       errors, errorsLoading, errorsError,
       agents,
       actionLoading,
-      fetchActivity, fetchStatus, formatTime, formatDuration, retry,
+      fetchActivity, fetchErrors, fetchStatus, onEvent, formatTime, formatDuration, retry,
       reloadConfig, clearSessions, stopAllLoops,
     };
   },

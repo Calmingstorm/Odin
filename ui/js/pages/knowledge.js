@@ -166,7 +166,7 @@ export default {
 
             <!-- Chunk browser (expanded) -->
             <div v-if="expanded[s.source || s.name || s]" class="kb-chunk-browser">
-              <div v-if="loadingChunks === (s.source || s.name || s)" class="kb-chunk-loading">
+              <div v-if="loadingChunks[s.source || s.name || s]" class="kb-chunk-loading">
                 <div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Loading chunks...
               </div>
               <div v-else-if="sourceChunks[s.source || s.name || s]" class="kb-chunk-list">
@@ -248,7 +248,8 @@ export default {
     const expanded = ref({});
     const sourceChunks = ref({});
     const chunkErrors = ref({});
-    const loadingChunks = ref(null);
+    const loadingChunks = ref({});
+    const chunkRequests = new Map();
     const selectedChunk = ref(null);
 
     // Computed stats
@@ -285,21 +286,39 @@ export default {
         return;
       }
       expanded.value[source] = true;
-      if (sourceChunks.value[source] || loadingChunks.value === source) return;
+      if (Object.prototype.hasOwnProperty.call(sourceChunks.value, source)) return;
+      if (chunkRequests.has(source)) return chunkRequests.get(source);
 
-      loadingChunks.value = source;
-      try {
-        const chunks = await api.get(`/api/knowledge/${encodeURIComponent(source)}/chunks`);
-        sourceChunks.value[source] = Array.isArray(chunks) ? chunks : [];
-        delete chunkErrors.value[source];
-        chunkErrors.value = { ...chunkErrors.value };
-      } catch (e) {
-        // Never cache a failure as an empty list: "No chunks found" is a
-        // claim about the source, not about our network (audit 2.7) — and
-        // the old cached [] made every later expand skip the refetch.
-        chunkErrors.value = { ...chunkErrors.value, [source]: e.message || 'load failed' };
-      }
-      loadingChunks.value = null;
+      const nextLoading = { ...loadingChunks.value, [source]: true };
+      loadingChunks.value = nextLoading;
+      const nextErrors = { ...chunkErrors.value };
+      delete nextErrors[source];
+      chunkErrors.value = nextErrors;
+
+      const request = api.get(`/api/knowledge/${encodeURIComponent(source)}/chunks`)
+        .then(chunks => {
+          sourceChunks.value = {
+            ...sourceChunks.value,
+            [source]: Array.isArray(chunks) ? chunks : [],
+          };
+        })
+        .catch(e => {
+          // Never cache a failure as an empty list: "No chunks found" is a
+          // claim about the source, not about our network (audit 2.7).
+          chunkErrors.value = {
+            ...chunkErrors.value,
+            [source]: e.message || 'load failed',
+          };
+        })
+        .finally(() => {
+          if (chunkRequests.get(source) !== request) return;
+          chunkRequests.delete(source);
+          const remaining = { ...loadingChunks.value };
+          delete remaining[source];
+          loadingChunks.value = remaining;
+        });
+      chunkRequests.set(source, request);
+      return request;
     }
 
     async function doSearch() {
