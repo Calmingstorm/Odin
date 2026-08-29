@@ -594,7 +594,7 @@ export default {
     return {
       status, loading, mutating, pageError, servers, masterEnabled, aggregate,
       expandedServers, toolQueries, toolErrors, toolsLoading,
-      editorOpen, editorMode, editingName, form, formError, saving, editorGroups,
+      editorOpen, editorMode, editingName, editingServer, form, formError, saving, editorGroups,
       configuredHeaderKeys, configuredEnvKeys, savedHttpEndpoint, endpointRequired,
       endpointFieldLabel, endpointPlaceholder,
       refreshAll, busy, serverState, stateLabel, transportLabel, protocolLabel, toolSummary, formatAge,

@@ -259,6 +259,21 @@ assert.ok(
 assert.match(page, /:aria-busy="togglePending\.has\(server\.name\)/);
 assert.match(page, /Takes effect immediately and changes tool availability\./);
 assert.match(page, /Currently set — masked display/);
+
+// The template reads editingServer?.url_display DIRECTLY, so editingServer
+// must be a returned setup() binding — an unreturned identifier renders as
+// undefined and the display block silently never appears (live-found
+// 2026-08-28: check-template-bindings validates callable bindings only, so
+// a property read slipped through). Drive the real openEdit and prove the
+// exposed binding carries the field the template needs.
+assert.ok('editingServer' in pageState, 'editingServer must be returned from setup()');
+pageState.openEdit({
+  name: 'pin_srv', transport: 'http', enabled: true,
+  url_display: 'https://host.example/mcp', header_keys: [], env_keys: [],
+});
+assert.equal(pageState.editingServer.value?.url_display, 'https://host.example/mcp');
+assert.equal(pageState.editorMode.value, 'edit');
+pageState.closeEditor();
 assert.match(page, /recognition only and is not the literal saved URL/);
 assert.match(page, /editingServer\?\.url_display/);
 
