@@ -221,3 +221,70 @@ class TestToolCountReadCache:
         base.rename(base.with_name("audit.jsonl.1"))
         _write_lines(base, [_entry(1, tool_name="new")])
         assert await logger.count_by_tool() == {"old": 1, "new": 1}
+
+
+class TestReadSideFailureCoverage:
+    async def test_snapshot_open_oserror_and_duplicate_identity_are_safe(
+        self, tmp_path, monkeypatch,
+    ):
+        base = tmp_path / "audit.jsonl"
+        _write_lines(base, [_entry(0)])
+        alias = base.with_name("audit.jsonl.1")
+        alias.hardlink_to(base)
+        logger = AuditLogger(path=str(base), max_files=2)
+        import builtins
+        real_open = builtins.open
+        calls = 0
+        def flaky_open(path, mode):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise PermissionError("denied")
+            return real_open(path, mode)
+        monkeypatch.setattr(logger_mod, "open", flaky_open, raising=False)
+        snapshot = await logger._open_read_snapshot()
+        try:
+            assert len(snapshot) == 1
+        finally:
+            for handle, _stat in snapshot:
+                handle.close()
+
+    async def test_collect_logs_snapshot_read_error_and_closes_handle(
+        self, tmp_path, monkeypatch,
+    ):
+        base = tmp_path / "audit.jsonl"
+        _write_lines(base, [_entry(0)])
+        logger = AuditLogger(path=str(base))
+        handle = open(base, "rb")
+        stat = base.stat()
+        async def snapshot():
+            return [(handle, stat)]
+        async def broken(_fd):
+            raise OSError("read failed")
+            yield b"unreachable"
+        monkeypatch.setattr(logger, "_open_read_snapshot", snapshot)
+        monkeypatch.setattr(logger_mod, "_iter_lines_reverse", broken)
+        assert await logger.search(limit=1) == []
+        assert handle.closed
+
+    async def test_count_empty_truncated_corrupt_and_pruned_generations(
+        self, tmp_path,
+    ):
+        base = tmp_path / "audit.jsonl"
+        logger = AuditLogger(path=str(base), max_files=2)
+        logger._tool_count_cache[(1, 1)] = (1, b"", {"ghost": 1})
+        assert await logger.count_by_tool() == {}
+        assert logger._tool_count_cache == {}
+
+        _write_lines(base, ["", "not-json", _entry(1, tool_name="live")])
+        assert await logger.count_by_tool() == {"live": 1}
+        identity = next(iter(logger._tool_count_cache))
+        offset, tail, counts = logger._tool_count_cache[identity]
+        # Force the defensive truncate/replacement path on the next read.
+        logger._tool_count_cache[identity] = (offset + 100, tail, counts)
+        assert await logger.count_by_tool() == {"live": 1}
+
+        # A formerly cached rotated generation that no longer exists is pruned.
+        logger._tool_count_cache[(999, 999)] = (1, b"", {"gone": 2})
+        assert await logger.count_by_tool() == {"live": 1}
+        assert (999, 999) not in logger._tool_count_cache
