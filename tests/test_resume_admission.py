@@ -141,6 +141,17 @@ def heal_capacity(h, *responses):
     make_breaker_probe_ready(h)
 
 
+class TestCalibrationReleaseTotality:
+    def test_release_callback_failure_never_breaks_terminal_resolution(self, tmp_path):
+        h = Harness([], tmp_path)
+
+        def broken(_key):
+            raise RuntimeError("observer down")
+
+        h.manager._release_workload = broken
+        h.manager._release_calibration(tr.TurnKey("discord", "c", "m"))
+
+
 class TestExplicitResume:
     async def test_resume_completes_preserved_work_with_continuity(self, tmp_path):
         h, original = await suspend_turn(tmp_path)

@@ -82,6 +82,16 @@ class TestTwoStageComposition:
         assert bot.pipeline._turn_resume is not None
         assert bot.pipeline._turn_resume._release_workload is not None
 
+    def test_wired_chat_release_callback_removes_exact_scope(self, bot):
+        from src.llm.context_budget import WorkloadScope
+        from src.turn_state import TurnKey
+
+        observer = bot.services.window_observer
+        scope = WorkloadScope("chat", "discord:c1:m1")
+        observer._density_milli[("chat", "discord:c1:m1", "gpt-5.6-sol")] = 609
+        bot.pipeline._turn_resume._release_workload(TurnKey("discord", "c1", "m1"))
+        assert observer.density_for(scope, "gpt-5.6-sol") is None
+
     def test_scheduler_start_wires_scheduled_events_methods(self):
         # on_ready is too heavy to drive here (guild sync); pin the spelling.
         from src.discord.client import OdinBot

@@ -1476,6 +1476,17 @@ class TestWorkloadIsolation:
         runner._window_observer = _Broken()
         assert runner._observed_density(_scope("chat", "discord:c1:t1"), "gpt-5.6-sol") is None
 
+    def test_chat_release_is_total_when_observer_is_broken(self):
+        from src.discord.tool_loop import ToolLoopRunner
+
+        class Broken:
+            def release_workload(self, _scope):
+                raise RuntimeError("observer down")
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._window_observer = Broken()
+        runner._release_workload(_chat_st_stub())  # must not raise on terminal exit
+
     def test_agent_density_lookup_survives_a_broken_observer(self):
         from src.discord.native_tools.agents_tasks import _agent_scope, _observer_density
 
