@@ -6,7 +6,7 @@ import { api } from '../api.js';
 import { toast } from '../toast.js';
 import { confirmDialog } from '../confirm.js';
 import { formatTs, formatAge, formatDuration } from '../utils.js';
-import { computed, onMounted, ref, watch } from 'vue';
+import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { analyzeLocalDateTime, enforceExclusiveTiming } from '../schedule-time.js';
 
 
@@ -288,27 +288,30 @@ export default {
                     </div>
                   </div>
 
-                  <!-- Schedule details -->
-                  <div class="grid grid-cols-2 md:grid-cols-4 gap-2 mb-3 text-xs">
-                    <div><span class="text-gray-500">ID:</span> <span class="font-mono">{{ s.id }}</span></div>
-                    <div><span class="text-gray-500">Action:</span> {{ s.action }}</div>
+                  <!-- Schedule details: every cell is label-above-value so the
+                       band stays uniform whether the value is text or the
+                       report select (audit 4.5 — mixed inline/stacked cells
+                       made the first detail row ragged). -->
+                  <div class="sched-detail-grid mb-3 text-xs">
+                    <div><span class="sched-detail-label">ID</span><span class="font-mono">{{ s.id }}</span></div>
+                    <div><span class="sched-detail-label">Action</span><span>{{ s.action }}</span></div>
                     <div v-if="s.action === 'check'">
-                      <label class="text-gray-500">Report:
-                      <select :value="s.report_format || ''"
+                      <label class="sched-detail-label" :for="'report-format-' + s.id">Report</label>
+                      <select :id="'report-format-' + s.id"
+                              :value="s.report_format || ''"
                               @change="doUpdateReportFormat(s, $event.target.value)"
-                              class="hm-input text-xs mt-1"
+                              class="hm-input text-xs"
                               :disabled="reportUpdatingId === s.id">
                         <option value="">Plain text</option>
                         <option value="paginated_embed_v1">Paginated embeds</option>
                       </select>
-                      </label>
                     </div>
-                    <div v-else><span class="text-gray-500">Report:</span> plain text</div>
-                    <div><span class="text-gray-500">Next run:</span>
+                    <div v-else><span class="sched-detail-label">Report</span><span>plain text</span></div>
+                    <div><span class="sched-detail-label">Next run</span>
                       <span v-if="s.next_run">{{ formatFuture(s.next_run) }}</span>
                       <span v-else>on trigger</span>
                     </div>
-                    <div><span class="text-gray-500">Created:</span> {{ formatTs(s.created_at) }}</div>
+                    <div><span class="sched-detail-label">Created</span><span>{{ formatTs(s.created_at) }}</span></div>
                   </div>
 
                   <!-- Execution history -->
@@ -621,7 +624,27 @@ export default {
       togglingId.value = null;
     }
 
-    async function doUpdateReportFormat(schedule, reportFormat) {
+    // Arrow-keying through the report-format select fires @change once per
+    // step; each used to be its own PUT + toast + refetch (audit 6.3). The
+    // commit is debounced per schedule so one request carries the final
+    // choice; the select still disables while that request is in flight.
+    const reportFormatTimers = new Map();
+
+    function doUpdateReportFormat(schedule, reportFormat) {
+      const prior = reportFormatTimers.get(schedule.id);
+      if (prior) clearTimeout(prior.timer);
+      const entry = {
+        run: () => commitReportFormat(schedule, reportFormat),
+        timer: null,
+      };
+      entry.timer = setTimeout(() => {
+        reportFormatTimers.delete(schedule.id);
+        entry.run();
+      }, 500);
+      reportFormatTimers.set(schedule.id, entry);
+    }
+
+    async function commitReportFormat(schedule, reportFormat) {
       reportUpdatingId.value = schedule.id;
       try {
         await api.put(`/api/schedules/${encodeURIComponent(schedule.id)}`, {
@@ -633,6 +656,16 @@ export default {
       } finally {
         await fetchSchedules();
         reportUpdatingId.value = null;
+      }
+    }
+
+    // Commit, never drop, a choice still inside its quiet window when the
+    // operator leaves the page.
+    function flushReportFormatTimers() {
+      for (const [id, entry] of [...reportFormatTimers]) {
+        clearTimeout(entry.timer);
+        reportFormatTimers.delete(id);
+        entry.run();
       }
     }
 
@@ -669,13 +702,14 @@ export default {
     }
 
     onMounted(() => { fetchSchedules(); });
+    onUnmounted(flushReportFormatTimers);
 
     return {
       schedules, loading, error,
       showCreate, form, creating, createError, runAtUtcPreview,
       runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
-      runningId, deletingId, togglingId, resettingId, reportUpdatingId,
+      runningId, deletingId, togglingId, resettingId, reportUpdatingId, flushReportFormatTimers,
       expandedId, history, historyLoading, historyError,
       cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,

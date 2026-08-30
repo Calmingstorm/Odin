@@ -69,11 +69,11 @@ export default {
             <div class="tl-stat-value">{{ tools.length }}</div>
             <div class="tl-stat-label">Total Tools</div>
           </div>
-          <div class="tl-stat-card">
+          <div v-if="inventoryAvailable" class="tl-stat-card">
             <div class="tl-stat-value">{{ coreCount }}</div>
             <div class="tl-stat-label">Core Tools</div>
           </div>
-          <div class="tl-stat-card">
+          <div v-if="inventoryAvailable" class="tl-stat-card">
             <div class="tl-stat-value">{{ skillCount }}</div>
             <div class="tl-stat-label">Skill Tools</div>
           </div>
@@ -196,6 +196,14 @@ export default {
                     <td colspan="4" class="tool-detail-cell">
                       <div class="text-gray-300 text-sm whitespace-pre-wrap">{{ t.description }}</div>
                       <div v-if="t.source === 'builtin' && t.is_core" class="tl-core-advisory">Core capability. Disabling it may cause automation, recovery, or stored workflows that depend on it to fail.</div>
+                      <div v-if="t.input_schema && t.input_schema.properties" class="tl-tool-params">
+                        <div class="tl-tool-params-title">Parameters</div>
+                        <div v-for="(prop, pname) in t.input_schema.properties" :key="pname" class="tl-tool-param">
+                          <span class="tl-tool-param-name">{{ pname }}</span>
+                          <span v-if="prop.type" class="tl-tool-param-type">{{ prop.type }}</span>
+                          <span v-if="(t.input_schema.required || []).includes(pname)" class="tl-tool-param-req">required</span>
+                        </div>
+                      </div>
                     </td>
                   </tr>
                 </template>
@@ -223,7 +231,8 @@ export default {
     const expanded = ref({});
     const viewMode = ref('cards');
     const activeCategory = ref(null);
-    const globalEnabled = ref(true);
+    const globalEnabled = ref(null);
+    const inventoryAvailable = ref(false);
     const togglePending = ref(new Set());
 
     const STATE_BADGES = {
@@ -241,9 +250,19 @@ export default {
      *  truth; only they get switches. */
     function applyInventory(inv, visible) {
       const invTools = (inv && Array.isArray(inv.tools)) ? inv.tools : null;
-      globalEnabled.value = inv ? Boolean(inv.global_enabled) : true;
+      inventoryAvailable.value = Boolean(invTools);
+      globalEnabled.value = invTools ? Boolean(inv.global_enabled) : null;
       if (!invTools) {
-        tools.value = visible;
+        // /api/tools is the visible catalog, not a provenance inventory.
+        // Non-admin viewers cannot access /api/tools/builtins, so source,
+        // source-specific counts, and mutation eligibility are honestly
+        // unknown rather than inferred from names or is_core.
+        tools.value = visible.map(t => ({
+          ...t,
+          source: 'unknown',
+          enabled: undefined,
+          state: null,
+        }));
         return;
       }
       const builtinNames = new Set(invTools.map(t => t.name));
@@ -287,8 +306,11 @@ export default {
       }
     }
 
-    const coreCount = computed(() => tools.value.filter(t => t.is_core).length);
-    const skillCount = computed(() => tools.value.filter(t => !t.is_core).length);
+    // Count by SOURCE, not by is_core: with the merged inventory, "not
+    // core" spans non-core built-ins and MCP tools too — the old filter
+    // reported them all as skills (Odin's re-validation, new defect 1).
+    const coreCount = computed(() => tools.value.filter(t => t.source === 'builtin' && t.is_core).length);
+    const skillCount = computed(() => tools.value.filter(t => t.source === 'skill').length);
     const totalUsage = computed(() => Object.values(stats.value).reduce((a, b) => a + b, 0));
 
     /** Categorize a tool based on its name */
@@ -373,9 +395,9 @@ export default {
 
     return {
       tools, loading, error, search, stats, expanded, viewMode,
-      activeCategory, globalEnabled, togglePending,
+      activeCategory, globalEnabled, inventoryAvailable, togglePending,
       coreCount, skillCount, totalUsage, filteredTools, groupedTools,
-      usedCategories, stateBadge, toggleBuiltinTool,
+      usedCategories, stateBadge, applyInventory, toggleBuiltinTool,
       truncate, toggleExpand, refresh,
     };
   },

@@ -1401,6 +1401,10 @@ textarea.hm-input {
   text-transform: uppercase;
   letter-spacing: 0.04em;
 }
+.dash-load-failed .dash-empty-icon { color: #d9a441; }
+.dash-load-failed span:last-child { color: var(--hm-text-muted); }
+.dash-load-warning { color: #d9a441; padding: 0.1rem 0 0.35rem; }
+.chat-history-warning { color: #d9a441; padding: 0.55rem 1rem; border-bottom: 1px solid var(--hm-border); background: rgba(217, 164, 65, 0.08); }
 .dash-empty {
   display: flex;
   flex-direction: column;
@@ -2335,6 +2339,7 @@ tr.tl-tool-off td { color: var(--hm-text-dim); }
   border-bottom: 1px solid var(--hm-border);
 }
 .kb-chunk-empty { padding: var(--hm-space-2) 0; }
+.kb-chunk-error { color: #d9a441; }
 .kb-chunk-item {
   padding: var(--hm-space-2) var(--hm-space-3); border-radius: var(--hm-radius-md);
   border: 1px solid var(--hm-border-subtle); cursor: pointer; transition: all 0.15s;
@@ -3484,7 +3489,7 @@ a:focus-visible {
 .llm-advanced-footer { grid-column: 1 / -1; display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-4); }
 .llm-advanced-footer p { max-width: 680px; color: var(--hm-text-dim); font-size: var(--hm-text-xs); line-height: 1.5; }
 .llm-advanced-state { grid-column: 1 / -1; margin: 0; color: var(--hm-text-dim); font-size: var(--hm-text-xs); line-height: 1.45; }
-.llm-advanced-state.pending { color: var(--hm-warning-text); }
+.llm-advanced-state.pending { color: var(--hm-warning); }
 .llm-advanced.compact .llm-advanced-body { grid-template-columns: minmax(0, 1fr) auto; align-items: end; }
 .llm-advanced.compact .llm-advanced-footer { grid-column: auto; }
 .llm-field-note { display: block; margin-top: 0.3rem; color: #9a8255; line-height: 1.4; }
@@ -4386,12 +4391,12 @@ a:focus-visible {
   cursor: pointer;
 }
 .llm-budget-reset:hover { color: var(--hm-accent); }
-.llm-budget-warning { color: var(--hm-warning-text) !important; }
+.llm-budget-warning { color: var(--hm-warning) !important; }
 .llm-budget-pending {
   display: inline-flex;
   margin-top: 0.3rem;
   padding: 0.12rem 0.42rem;
-  color: var(--hm-warning-text);
+  color: var(--hm-warning);
   background: rgba(217, 119, 6, 0.1);
   border: 1px solid rgba(217, 119, 6, 0.23);
   border-radius: var(--hm-radius-full);
@@ -4411,11 +4416,11 @@ a:focus-visible {
 }
 .llm-budget-provenance.is-built-in { color: #94a0b0; background: rgba(126, 136, 152, 0.09); border-color: rgba(126, 136, 152, 0.18); }
 .llm-budget-provenance.is-override { color: #ccb474; background: rgba(201, 162, 78, 0.09); border-color: rgba(201, 162, 78, 0.2); }
-.llm-budget-provenance.is-clamp { color: var(--hm-warning-text); background: rgba(217, 119, 6, 0.1); border-color: rgba(217, 119, 6, 0.23); }
+.llm-budget-provenance.is-clamp { color: var(--hm-warning); background: rgba(217, 119, 6, 0.1); border-color: rgba(217, 119, 6, 0.23); }
 .llm-clamp-list { padding: var(--hm-space-4); border-top: 1px solid rgba(217, 119, 6, 0.2); }
 .llm-clamp-list-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-4); margin-bottom: var(--hm-space-3); }
 .llm-clamp-list-heading > div { display: grid; gap: 0.1rem; }
-.llm-clamp-list-heading strong { color: var(--hm-warning-text); font-size: var(--hm-text-xs); }
+.llm-clamp-list-heading strong { color: var(--hm-warning); font-size: var(--hm-text-xs); }
 .llm-clamp-list-heading > div > span { color: var(--hm-text-dim); font-size: 0.6rem; }
 .llm-clamp-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--hm-space-3); }
 .llm-clamp-card {
@@ -4430,7 +4435,7 @@ a:focus-visible {
   border-radius: var(--hm-radius-md);
 }
 .llm-clamp-card > div { min-width: 0; display: flex; align-items: baseline; gap: var(--hm-space-2); overflow: hidden; }
-.llm-clamp-card > div span { color: var(--hm-warning-text); font-size: var(--hm-text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.llm-clamp-card > div span { color: var(--hm-warning); font-size: var(--hm-text-xs); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .llm-clamp-card p { grid-column: 1; margin: 0; color: var(--hm-text-dim); font-size: 0.58rem; }
 .llm-clamp-card .btn { grid-column: 2; grid-row: 1 / span 2; }
 @media (max-width: 1180px) {
@@ -4813,3 +4818,28 @@ a:focus-visible {
   .cfgc-mcp-owner { grid-template-columns: 34px minmax(0, 1fr); }
   .cfgc-mcp-owner .btn { grid-column: 1 / -1; justify-content: center; }
 }
+
+/* ---- Turn State (deep-dive W3) ---- */
+.ts-count-row { display: flex; flex-wrap: wrap; gap: 0.75rem; }
+.ts-count { display: flex; flex-direction: column; gap: 0.1rem; padding: 0.4rem 0.7rem; border: 1px solid var(--hm-border); border-radius: 6px; min-width: 90px; }
+.ts-count-value { font-size: var(--hm-text-lg); font-weight: 600; font-variant-numeric: tabular-nums; }
+.ts-count-label { font-size: var(--hm-text-xs); color: var(--hm-text-muted); }
+.ts-count-alert { border-color: rgba(217, 119, 6, 0.45); }
+.ts-count-alert .ts-count-value { color: var(--hm-warning); }
+.ts-turn-row { border: 1px solid var(--hm-border); border-radius: 6px; padding: 0.5rem 0.7rem; }
+.ts-turn-head { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; }
+.ts-turn-age { margin-left: auto; }
+.ts-turn-warning { color: var(--hm-warning); font-size: var(--hm-text-xs); margin-top: 0.35rem; }
+.ts-op-list { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.45rem; }
+.ts-op { font-size: var(--hm-text-xs); color: var(--hm-text-muted); border: 1px solid var(--hm-border); border-radius: 4px; padding: 0.1rem 0.4rem; overflow-wrap: anywhere; }
+.ts-op-alert { color: var(--hm-warning); border-color: rgba(217, 119, 6, 0.45); }
+
+/* ---- Schedule detail band (deep-dive 4.5) ---- */
+.sched-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--hm-space-3); align-content: start; }
+@media (min-width: 768px) { .sched-detail-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.sched-detail-grid > div { display: grid; align-content: start; gap: 0.3rem; min-width: 0; }
+.sched-detail-label { color: var(--hm-text-muted); font-size: var(--hm-text-xs); line-height: 1; }
+
+/* ---- Audit tamper-evidence (deep-dive 7.2) ---- */
+.audit-verify-ok { border-color: rgba(34, 197, 94, 0.35); }
+.audit-verify-valid { color: #4ade80; }

@@ -7,6 +7,7 @@ import DOMPurify from 'dompurify';
 import { marked } from 'marked';
 
 import { api, ws } from '../api.js';
+import { toast } from '../toast.js';
 import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue';
 
 
@@ -58,6 +59,7 @@ function extractImageUrls(text) {
 export default {
   template: `
     <div class="chat-container page-fade-in" role="region" aria-label="Chat">
+      <div v-if="historyError" class="chat-history-warning" role="alert">{{ historyError }}</div>
       <!-- Message list -->
       <div class="chat-messages" ref="messagesEl" role="log" aria-live="polite" aria-label="Messages">
         <!-- Empty state -->
@@ -225,6 +227,7 @@ export default {
     const messages = ref([]);
     const input = ref('');
     const sending = ref(false);
+    const historyError = ref('');
     const messagesEl = ref(null);
     const inputEl = ref(null);
     const typingElapsed = ref(0);
@@ -243,11 +246,9 @@ export default {
     // ws is a plain class instance, not a reactive object, so a computed over
     // ws.state has NO reactive dependency — it evaluates once and freezes,
     // leaving the pill claiming "Connected" long after the socket dropped and
-    // sends fell back to REST. Mirror logs.js: hold a ref, fed by a CHAINED
-    // onStateChange so the app-level handler still runs.
+    // sends fell back to REST. Hold a ref, fed by an owned state listener.
     const wsState = ref(ws.state || 'disconnected');
-    let prevStateHandler = null;
-    let chatStateHandler = null;
+    let unsubState = null;
 
     const wsStatus = computed(() => {
       const state = wsState.value;
@@ -430,6 +431,7 @@ export default {
     }
 
     async function loadHistory() {
+      historyError.value = '';
       try {
         if (!channelId.value) {
           const sess = await api.get('/api/auth/session');
@@ -466,36 +468,36 @@ export default {
           });
         }
       } catch (e) {
-        // No session yet — that's fine, start fresh
+        // 404 = no session yet, a fresh start. Anything else is a REAL
+        // load failure — starting silently "fresh" hides existing history
+        // (audit 2.7); say so instead of impersonating an empty session.
+        if (e && e.status !== 404) {
+          historyError.value = 'Couldn\'t load chat history — earlier messages may be missing. Refresh to retry.';
+          toast.error(historyError.value);
+        }
       }
     }
 
     onMounted(() => {
       ws.subscribe('chat', onChatMessage);
       wsState.value = ws.state || 'disconnected';
-      prevStateHandler = ws.onStateChange;
-      chatStateHandler = (state, detail) => {
-        wsState.value = state;
-        if (prevStateHandler) prevStateHandler(state, detail);
-      };
-      ws.onStateChange = chatStateHandler;
+      unsubState = ws.onState((state) => { wsState.value = state; });
       loadHistory();
       nextTick(() => inputEl.value?.focus());
     });
 
     onUnmounted(() => {
       ws.unsubscribe('chat', onChatMessage);
-      // Only relinquish the hook if nobody chained on top of ours.
-      if (ws.onStateChange === chatStateHandler) ws.onStateChange = prevStateHandler;
+      if (unsubState) { unsubState(); unsubState = null; }
       stopTypingTimer();
     });
 
     return {
-      messages, input, sending, messagesEl, inputEl,
+      messages, input, sending, historyError, messagesEl, inputEl,
       canSend, wsStatus, typingText, suggestions,
       send, autoResize, formatTime, formatDate,
       showDateSeparator, useSuggestion, openImage,
-      onImageError, getToolIcon,
+      onImageError, getToolIcon, loadHistory,
     };
   },
 };

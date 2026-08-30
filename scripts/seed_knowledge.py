@@ -6,6 +6,7 @@ Can be run inside the container or externally with the right Python path.
 
 Usage: python -m scripts.seed_knowledge
 """
+
 import asyncio
 import sys
 from pathlib import Path
@@ -14,9 +15,9 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from src.config import load_config
-from src.search.embedder import LocalEmbedder
 from src.knowledge.store import KnowledgeStore
-from src.odin_log import setup_logging, get_logger
+from src.odin_log import get_logger, setup_logging
+from src.search.embedder import LocalEmbedder
 
 
 async def main():
@@ -29,8 +30,7 @@ async def main():
         return
 
     embedder = LocalEmbedder()
-    from pathlib import Path as _P
-    search_dir = _P(config.search.search_db_path)
+    search_dir = Path(config.search.search_db_path)
     search_dir.mkdir(parents=True, exist_ok=True)
     store = KnowledgeStore(str(search_dir / "knowledge.db"))
 
@@ -51,8 +51,9 @@ async def main():
         log.info("  %s: %d chunks", md_file.name, chunks)
         total += chunks
 
-    log.info("Seeding complete: %d total chunks across %d files",
-             total, len(list(seed_dir.glob("*.md"))))
+    log.info(
+        "Seeding complete: %d total chunks across %d files", total, len(list(seed_dir.glob("*.md")))
+    )
     log.info("Knowledge base now has %d total chunks", store.count())
 
 

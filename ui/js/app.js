@@ -194,12 +194,17 @@ const App = {
             <span>Quick jump</span><kbd>Ctrl K</kbd>
           </button>
         </div>
-        <transition name="ws-toast">
-          <div v-if="wsToast" class="ws-toast" :class="'ws-toast-' + wsToast.level" role="status" aria-live="assertive">
-            {{ wsToast.text }}
-          </div>
-        </transition>
       </aside>
+
+      <!-- Outside the aside on purpose: the mobile sidebar is translated
+           off-canvas, and a transformed ancestor becomes the containing
+           block for position:fixed — a toast mounted inside it renders
+           off-screen with the rail (audit 4.1). -->
+      <transition name="ws-toast">
+        <div v-if="wsToast" class="ws-toast" :class="'ws-toast-' + wsToast.level" role="status" aria-live="assertive">
+          {{ wsToast.text }}
+        </div>
+      </transition>
 
       <div v-if="mobileOpen" class="mobile-scrim" @click="mobileOpen = false" aria-hidden="true"></div>
 
@@ -266,9 +271,14 @@ const App = {
     const currentDescription = computed(() => router.currentRoute.value.meta?.description || 'Management console');
 
     // Handle session expiry from the API client
+    function stopLive() {
+      ws.disconnect();
+      if (statusInterval) { clearInterval(statusInterval); statusInterval = null; }
+    }
+
     api.onSessionExpired = () => {
       sessionExpired.value = true;
-      ws.disconnect();
+      stopLive();
       api.setToken('');
       authState.value = 'login';
     };
@@ -339,9 +349,11 @@ const App = {
     }
 
     async function logout() {
-      await api.logout();
-      ws.disconnect();
+      // Local privilege teardown is terminal and synchronous. A stalled logout
+      // request must not leave a bearer socket or status poll alive.
+      stopLive();
       authState.value = 'login';
+      await api.logout();
     }
 
     function toggleSidebar() {
@@ -382,24 +394,27 @@ const App = {
     // Live updates
     let statusInterval = null;
     let wasConnected = false;
+    let wsUnsubs = [];
 
     function startLive() {
-      ws.onStatusChange = (connected) => { wsConnected.value = connected; };
-      // Published on every pong. Without this the readout was dead code:
-      // onStateChange is the only other publisher and _setState suppresses it
-      // when the state has not changed, so a steady connection never reported.
-      ws.onLatency = (ms) => { wsLatency.value = ms; };
-      ws.onStateChange = (state, detail) => {
-        wsState.value = state;
-        if (state === 'connected') {
-          if (wasConnected) {
-            showWsToast('Connection restored', 'success');
+      // startLive runs on every login \u2014 release the previous session's
+      // hooks first so re-authentication never stacks duplicate listeners.
+      for (const u of wsUnsubs) u();
+      wsUnsubs = [
+        ws.onStatus((connected) => { wsConnected.value = connected; }),
+        ws.onLatencyChange((ms) => { wsLatency.value = ms; }),
+        ws.onState((state, detail) => {
+          wsState.value = state;
+          if (state === 'connected') {
+            if (wasConnected) {
+              showWsToast('Connection restored', 'success');
+            }
+            wasConnected = true;
+          } else if (state === 'reconnecting' && detail.attempt === 1) {
+            showWsToast('Connection lost \u2014 reconnecting\u2026', 'warn');
           }
-          wasConnected = true;
-        } else if (state === 'reconnecting' && detail.attempt === 1) {
-          showWsToast('Connection lost \u2014 reconnecting\u2026', 'warn');
-        }
-      };
+        }),
+      ];
       ws.connect();
       fetchStatus();
       if (statusInterval) clearInterval(statusInterval);
@@ -422,6 +437,8 @@ const App = {
 
     onUnmounted(() => {
       if (statusInterval) clearInterval(statusInterval);
+      for (const u of wsUnsubs) u();
+      wsUnsubs = [];
       ws.disconnect();
       document.removeEventListener('keydown', onKeydown);
       mobileMedia?.removeEventListener('change', syncMobileViewport);

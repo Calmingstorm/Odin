@@ -166,7 +166,7 @@ export default {
 
             <!-- Chunk browser (expanded) -->
             <div v-if="expanded[s.source || s.name || s]" class="kb-chunk-browser">
-              <div v-if="loadingChunks === (s.source || s.name || s)" class="kb-chunk-loading">
+              <div v-if="loadingChunks[s.source || s.name || s]" class="kb-chunk-loading">
                 <div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Loading chunks...
               </div>
               <div v-else-if="sourceChunks[s.source || s.name || s]" class="kb-chunk-list">
@@ -191,6 +191,7 @@ export default {
                   <div v-else class="kb-chunk-preview">{{ truncate(chunk.content, 120) }}</div>
                 </div>
               </div>
+              <div v-else-if="chunkErrors[s.source || s.name || s]" class="kb-chunk-empty kb-chunk-error text-xs">Couldn't load chunks — {{ chunkErrors[s.source || s.name || s] }}. Collapse and expand to retry.</div>
               <div v-else class="kb-chunk-empty text-gray-500 text-xs">No chunks found</div>
             </div>
           </div>
@@ -246,7 +247,9 @@ export default {
     // Tree / chunk browser
     const expanded = ref({});
     const sourceChunks = ref({});
-    const loadingChunks = ref(null);
+    const chunkErrors = ref({});
+    const loadingChunks = ref({});
+    const chunkRequests = new Map();
     const selectedChunk = ref(null);
 
     // Computed stats
@@ -283,36 +286,69 @@ export default {
         return;
       }
       expanded.value[source] = true;
-      if (sourceChunks.value[source] || loadingChunks.value === source) return;
+      if (Object.prototype.hasOwnProperty.call(sourceChunks.value, source)) return;
+      if (chunkRequests.has(source)) return chunkRequests.get(source);
 
-      loadingChunks.value = source;
-      try {
-        const chunks = await api.get(`/api/knowledge/${encodeURIComponent(source)}/chunks`);
-        sourceChunks.value[source] = Array.isArray(chunks) ? chunks : [];
-      } catch (e) {
-        sourceChunks.value[source] = [];
-        toast.error(`Failed to load chunks: ${e.message}`);
-      }
-      loadingChunks.value = null;
+      const nextLoading = { ...loadingChunks.value, [source]: true };
+      loadingChunks.value = nextLoading;
+      const nextErrors = { ...chunkErrors.value };
+      delete nextErrors[source];
+      chunkErrors.value = nextErrors;
+
+      const request = api.get(`/api/knowledge/${encodeURIComponent(source)}/chunks`)
+        .then(chunks => {
+          sourceChunks.value = {
+            ...sourceChunks.value,
+            [source]: Array.isArray(chunks) ? chunks : [],
+          };
+        })
+        .catch(e => {
+          // Never cache a failure as an empty list: "No chunks found" is a
+          // claim about the source, not about our network (audit 2.7).
+          chunkErrors.value = {
+            ...chunkErrors.value,
+            [source]: e.message || 'load failed',
+          };
+        })
+        .finally(() => {
+          if (chunkRequests.get(source) !== request) return;
+          chunkRequests.delete(source);
+          const remaining = { ...loadingChunks.value };
+          delete remaining[source];
+          loadingChunks.value = remaining;
+        });
+      chunkRequests.set(source, request);
+      return request;
     }
+
+    // Enter can be pressed while a search is in flight; without ownership
+    // the OLDER response can land last and replace the newer results
+    // (audit 6.2). Only the newest search may commit, and clearing while
+    // in flight retires whatever is still airborne.
+    let searchEpoch = 0;
 
     async function doSearch() {
       const q = searchQuery.value.trim();
       if (!q) return;
+      const epoch = ++searchEpoch;
       searching.value = true;
       searchError.value = null;
       lastQuery.value = q;
       try {
         const results = await api.get(`/api/knowledge/search?q=${encodeURIComponent(q)}`);
+        if (epoch !== searchEpoch) return; // a newer search owns the view
         searchResults.value = Array.isArray(results) ? results : [];
       } catch (e) {
+        if (epoch !== searchEpoch) return;
         searchResults.value = [];
         searchError.value = e.message || 'Search failed';
       }
-      searching.value = false;
+      if (epoch === searchEpoch) searching.value = false;
     }
 
     function clearSearch() {
+      searchEpoch += 1; // an in-flight response must not resurrect results
+      searching.value = false;
       searchResults.value = null;
       searchQuery.value = '';
       searchError.value = null;
@@ -393,7 +429,7 @@ export default {
       showIngest, ingestSource, ingestContent, ingestError, ingestSuccess, ingesting,
       reingesting, reingestResult,
       deleteTarget, deleting,
-      expanded, sourceChunks, loadingChunks, selectedChunk,
+      expanded, sourceChunks, chunkErrors, loadingChunks, selectedChunk,
       totalChunks, uploaderCount,
       truncate, formatTs, highlightTerms, chunkBarWidth,
       fetchSources, toggleSource, doSearch, clearSearch,

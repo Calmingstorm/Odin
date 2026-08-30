@@ -217,6 +217,30 @@ class TestStatus:
             assert body["schedule_paused"] == 1
 
     @pytest.mark.asyncio
+    async def test_uptime_reports_real_seconds(self):
+        """Audit 2.1: the guard checked `_start_time` (never set by the real
+        bot) while reading `start_time` — MagicMock's permissive hasattr hid
+        it, so uptime shipped as a permanent 0. Deleting the underscore attr
+        makes the mock's surface match the real bot's."""
+        import time as _time
+
+        app, bot = _app(register_status_info)
+        del bot._start_time  # real bots never have this name
+        bot.start_time = _time.monotonic() - 90
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/status")).json()
+        assert body["uptime_seconds"] >= 90
+
+    @pytest.mark.asyncio
+    async def test_uptime_absent_start_time_is_zero_not_crash(self):
+        app, bot = _app(register_status_info)
+        del bot._start_time
+        del bot.start_time
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/status")).json()
+        assert body["uptime_seconds"] == 0
+
+    @pytest.mark.asyncio
     async def test_status_with_guilds(self):
         app, bot = _app(register_status_info)
         g = MagicMock()

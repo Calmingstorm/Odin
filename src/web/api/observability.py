@@ -120,6 +120,9 @@ def register_tools_meta(routes: web.RouteTableDef, bot) -> None:
                     "is_core": tool.get("is_core", False),
                     "enabled": enabled,
                     "state": state,
+                    # Single inventory source for the panel's Parameters
+                    # detail (audit 1.3) — /api/tools stays schema-free.
+                    "input_schema": tool.get("input_schema", {}),
                 }
             )
         return {
@@ -193,7 +196,10 @@ def register_bulkheads(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/tools/bulkheads")
     async def get_bulkheads(_request: web.Request) -> web.Response:
-        executor = getattr(bot, "executor", None)
+        # The executor surface is bot.tool_executor; "bot.executor" never
+        # existed post-decomposition, so this route answered 503 forever
+        # (audit 7.3 — the /api/pools/ssh stale-name class).
+        executor = getattr(bot, "tool_executor", None)
         if executor is None or not hasattr(executor, "bulkheads"):
             return web.json_response({"error": "bulkheads not available"}, status=503)
         return web.json_response(executor.bulkheads.get_all_metrics())
@@ -265,10 +271,9 @@ def register_audit_log(routes: web.RouteTableDef, bot) -> None:
             host=host,
             keyword=keyword,
             date=date,
+            has_error=True if error_only else None,
             limit=limit,
         )
-        if error_only:
-            results = [r for r in results if r.get("error")]
         return web.json_response(results)
 
     @routes.get("/api/audit/diffs")

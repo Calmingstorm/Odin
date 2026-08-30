@@ -2,11 +2,11 @@ from __future__ import annotations
 
 import asyncio
 import json
-from collections import deque
-from collections.abc import Callable
+import os
+from collections.abc import AsyncIterator, Callable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Literal
+from typing import BinaryIO, Literal
 
 import aiofiles
 
@@ -27,6 +27,49 @@ DEFAULT_TOOL_INPUT_CAP = 4000
 # Without rotation the file grew unbounded (48 MB / 65k lines observed).
 DEFAULT_MAX_BYTES = 100 * 1024 * 1024  # 100 MB
 DEFAULT_MAX_FILES = 5
+
+
+# Block size for reverse reads. Big enough that a limit-10 dashboard query
+# usually resolves inside one block of the newest log; small enough that a
+# match-poor filter walking deep never holds more than block + one line.
+_REVERSE_BLOCK_SIZE = 64 * 1024
+
+
+async def _iter_lines_reverse(
+    path: Path | int, block_size: int = _REVERSE_BLOCK_SIZE
+) -> AsyncIterator[bytes]:
+    """Yield the file's non-empty lines newest-first without a full scan.
+
+    Reads fixed-size blocks backwards from EOF, reassembling lines that
+    straddle block boundaries. The iteration anchors at the EOF observed on
+    open: entries appended afterwards are simply not seen (the forward scan
+    had the same exposure at its own moment of EOF), and rotation renames
+    the inode this handle already holds, so the anchored view stays intact.
+    A torn final line (no trailing newline) is yielded as-is — callers
+    already skip what fails to parse.
+    """
+    if isinstance(path, int):
+        opened = aiofiles.open(path, "rb", closefd=False)
+    else:
+        opened = aiofiles.open(path, "rb")
+    async with opened as f:
+        pos = await f.seek(0, os.SEEK_END)
+        tail = b""
+        while pos > 0:
+            read_size = min(block_size, pos)
+            pos -= read_size
+            await f.seek(pos)
+            block = await f.read(read_size)
+            lines = (block + tail).split(b"\n")
+            # lines[0] may be the tail of a line whose head lives in the
+            # not-yet-read earlier block — hold it until that block arrives
+            # (or BOF proves it complete).
+            tail = lines[0]
+            for raw in reversed(lines[1:]):
+                if raw.strip():
+                    yield raw
+        if tail.strip():
+            yield tail
 
 
 def _cap_tool_input(tool_input: dict, cap: int) -> dict | str:
@@ -70,6 +113,14 @@ class AuditLogger:
         self._tool_input_cap = tool_input_cap
         self._max_bytes = max_bytes
         self._max_files = max_files
+        # Read-side, identity-keyed incremental counters.  Values are
+        # (consumed byte offset, unconsumed torn tail, counts).  Rotation keeps
+        # the inode, so an already-counted generation is reused under its new
+        # pathname; only appended bytes of the active inode are consumed.
+        self._tool_count_cache: dict[
+            tuple[int, int], tuple[int, bytes, dict[str, int]]
+        ] = {}
+        self._tool_count_lock = asyncio.Lock()
 
     def _maybe_rotate(self) -> None:
         """Rotate audit.jsonl → .1 → .2 … once it exceeds max_bytes.
@@ -113,34 +164,63 @@ class AuditLogger:
                 paths.append(p)
         return paths
 
-    async def _collect_matches(self, predicate: Callable[[dict], bool], limit: int) -> list[dict]:
-        """Return up to *limit* matching entries, most-recent first, streaming.
+    async def _open_read_snapshot(self) -> list[tuple[BinaryIO, os.stat_result]]:
+        """Open one stable descriptor for every retained generation.
 
-        Streams line-by-line into a bounded deque instead of readlines()-ing the
-        whole file into RAM (a multi-hundred-MB read per query as the log grew).
-        Reads the current file first, then rotated files, until *limit* is met."""
+        Pathnames are mutable during rotation; descriptors are not.  The lock
+        is held only while the descriptor set is opened, never while content is
+        scanned.  Identity de-duplication also makes an external rename race
+        fail closed rather than reading one inode twice.
+        """
+        opened: list[tuple[BinaryIO, os.stat_result]] = []
+        seen: set[tuple[int, int]] = set()
+        async with self._persist_lock:
+            for path in self._rotated_paths_newest_first():
+                try:
+                    handle = open(path, "rb")
+                    stat = os.fstat(handle.fileno())
+                except FileNotFoundError:
+                    continue
+                except OSError as exc:
+                    log.error("Failed to open audit log %s: %s", path, exc)
+                    continue
+                identity = (stat.st_dev, stat.st_ino)
+                if identity in seen:
+                    handle.close()
+                    continue
+                seen.add(identity)
+                opened.append((handle, stat))
+        return opened
+
+    async def _collect_matches(self, predicate: Callable[[dict], bool], limit: int) -> list[dict]:
+        """Return up to *limit* matching entries, most-recent first.
+
+        Reads blocks backwards from a stable descriptor snapshot and stops at
+        the limit.  Briefly serializing descriptor acquisition with rotation
+        prevents current→.1 from being read twice while the former .1 vanishes
+        to .2; scans themselves never hold the persistence lock.
+        """
+        if limit <= 0:
+            return []
         collected: list[dict] = []
-        for path in self._rotated_paths_newest_first():
-            per_file: deque[dict] = deque(maxlen=limit)
-            try:
-                async with aiofiles.open(path) as f:
-                    async for line in f:
-                        line = line.strip()
-                        if not line:
-                            continue
+        snapshot = await self._open_read_snapshot()
+        try:
+            for handle, _stat in snapshot:
+                try:
+                    async for raw in _iter_lines_reverse(handle.fileno()):
                         try:
-                            entry = json.loads(line)
+                            entry = json.loads(raw)
                         except json.JSONDecodeError:
                             continue
                         if predicate(entry):
-                            per_file.append(entry)  # keeps newest `limit` in-file
-            except OSError as e:
-                log.error("Failed to read audit log %s: %s", path, e)
-                continue
-            for entry in reversed(per_file):  # newest first within the file
-                collected.append(entry)
-                if len(collected) >= limit:
-                    return collected
+                            collected.append(entry)
+                            if len(collected) >= limit:
+                                return collected
+                except OSError as exc:
+                    log.error("Failed to read audit log snapshot: %s", exc)
+        finally:
+            for handle, _stat in snapshot:
+                handle.close()
         return collected
 
     def set_event_callback(self, callback: Callable) -> None:
@@ -294,26 +374,80 @@ class AuditLogger:
         await self._persist(entry)
 
     async def count_by_tool(self) -> dict[str, int]:
-        """Return execution counts per tool name (most used first)."""
-        if not self.path.exists():
+        """Return retained-history execution counts without rescanning history."""
+        async with self._tool_count_lock:
+            return await self._count_by_tool_unlocked()
+
+    async def _count_by_tool_unlocked(self) -> dict[str, int]:
+        """Consume each retained inode once, then only its appended bytes.
+
+        Each retained inode is consumed once and then only from its previous
+        EOF. Rotation renames an inode but does not invalidate its cached
+        counts; generations that age out are pruned after the snapshot.
+        """
+        snapshot = await self._open_read_snapshot()
+        if not snapshot:
+            self._tool_count_cache.clear()
             return {}
-        counts: dict[str, int] = {}
         try:
-            async with aiofiles.open(self.path) as f:
-                async for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except json.JSONDecodeError:
-                        continue
-                    name = entry.get("tool_name")
-                    if name:
-                        counts[name] = counts.get(name, 0) + 1
-        except Exception as e:
-            log.error("Failed to read audit log for counts: %s", e)
-        return dict(sorted(counts.items(), key=lambda x: x[1], reverse=True))
+            for handle, stat in snapshot:
+                identity = (stat.st_dev, stat.st_ino)
+                cached = self._tool_count_cache.get(identity)
+                if cached is None or cached[0] > stat.st_size:
+                    offset, tail = 0, b""
+                    counts: dict[str, int] = {}
+                else:
+                    offset, tail, counts = cached
+                    counts = dict(counts)
+                if offset < stat.st_size:
+                    await asyncio.to_thread(handle.seek, offset)
+                    chunk = await asyncio.to_thread(handle.read, stat.st_size - offset)
+                    data = tail + chunk
+                    lines = data.split(b"\n")
+                    tail = lines.pop()
+                    for raw in lines:
+                        if not raw.strip():
+                            continue
+                        try:
+                            entry = json.loads(raw)
+                        except json.JSONDecodeError:
+                            continue
+                        name = entry.get("tool_name")
+                        if name:
+                            counts[name] = counts.get(name, 0) + 1
+                    offset = stat.st_size
+                self._tool_count_cache[identity] = (offset, tail, counts)
+        finally:
+            for handle, _stat in snapshot:
+                handle.close()
+        # Cache only COMPLETE retained generations. A descriptor can rotate
+        # out after the snapshot opens; it must not contribute forever merely
+        # because we saw it in this call. Current is allowed to grow beyond the
+        # snapshotted size; rotated generations must still have the same size.
+        retained: set[tuple[int, int]] = set()
+        async with self._persist_lock:
+            for index, path in enumerate(self._rotated_paths_newest_first()):
+                try:
+                    current_stat = path.stat()
+                except OSError:
+                    continue
+                identity = (current_stat.st_dev, current_stat.st_ino)
+                cached = self._tool_count_cache.get(identity)
+                if cached is None:
+                    continue
+                consumed = cached[0]
+                if index == 0 or current_stat.st_size == consumed:
+                    retained.add(identity)
+        self._tool_count_cache = {
+            identity: state
+            for identity, state in self._tool_count_cache.items()
+            if identity in retained
+        }
+        total: dict[str, int] = {}
+        for _offset, _tail, counts in self._tool_count_cache.values():
+            for name, count in counts.items():
+                total[name] = total.get(name, 0) + count
+        return dict(sorted(total.items(), key=lambda item: item[1], reverse=True))
 
     async def search(
         self,
@@ -335,9 +469,6 @@ class AuditLogger:
         - has_error: True = only entries with non-empty error field
         - min_duration_ms: only entries with duration_ms >= this value
         """
-        if not self.path.exists():
-            return []
-
         def _match(entry: dict) -> bool:
             if tool_name and entry.get("tool_name") != tool_name:
                 return False
@@ -394,9 +525,6 @@ class AuditLogger:
         ``start_time`` / ``end_time`` are ISO-8601 prefixes compared
         lexicographically against the entry timestamp.
         """
-        if not self.path.exists():
-            return []
-
         def _match(entry: dict) -> bool:
             ts = entry.get("timestamp", "")
             if start_time and ts < start_time:
@@ -469,9 +597,6 @@ class AuditLogger:
         limit: int = 20,
     ) -> list[dict]:
         """Return audit entries that contain a diff, most recent first."""
-        if not self.path.exists():
-            return []
-
         def _match(entry: dict) -> bool:
             if not entry.get("diff"):
                 return False
@@ -495,9 +620,6 @@ class AuditLogger:
         limit: int = 20,
     ) -> list[dict]:
         """Return audit entries that have a risk_level field, most recent first."""
-        if not self.path.exists():
-            return []
-
         def _match(entry: dict) -> bool:
             if not entry.get("risk_level"):
                 return False
@@ -549,6 +671,12 @@ class AuditLogger:
                 "verified": 0,
                 "unsigned_prefix": 0,
                 "first_bad": None,
+                "availability": "not_enabled",
                 "error": "Signing not enabled (no hmac_key configured)",
             }
-        return await verify_log(self.path, self._signer._key.decode())
+        result = await verify_log(self.path, self._signer._key.decode())
+        # Availability is distinct from verdict. A configured verifier that
+        # returns valid=False is a failure even when its diagnostic has an
+        # error string; only the explicit not_enabled shape is soft copy.
+        result["availability"] = "available"
+        return result

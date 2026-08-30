@@ -339,6 +339,21 @@ class TestAuthRoutes:
             sm.destroy.assert_called_once_with("sess-123")
 
     @pytest.mark.asyncio
+    async def test_logout_uses_session_managers_terminal_teardown_contract(self, tmp_path):
+        bot, sm = self._bot_with_sessions(tmp_path)
+        sm.destroy.return_value = True
+        app = self._app_with_sm(bot, sm)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.post(
+                "/api/auth/logout", headers={"Authorization": "Bearer sess-exact"},
+            )
+            assert r.status == 200
+        # WebSocket closure is registered on the real SessionManager once and
+        # is entered by destroy() for both logout and lease expiry. The route
+        # must not fork a second, logout-only teardown path.
+        sm.destroy.assert_called_once_with("sess-exact")
+
+    @pytest.mark.asyncio
     async def test_session_check(self, tmp_path):
         bot, sm = self._bot_with_sessions(tmp_path)
         app = self._app_with_sm(bot, sm)

@@ -488,11 +488,18 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         if not sm:
             return web.json_response({"status": "ok"})
 
-        # Extract session ID from Authorization header
-        auth_header = request.headers.get("Authorization", "")
-        bearer_prefix = "Bearer "
-        if auth_header.startswith(bearer_prefix):
-            sid = auth_header[len(bearer_prefix):]
+        # Prefer the exact session established by auth middleware.  The header
+        # fallback preserves bare-route tests/dev composition, but never widen
+        # logout to every session owned by the same API identity.
+        sid = getattr(request, "_session_id", None)
+        if not sid:
+            auth_header = request.headers.get("Authorization", "")
+            if auth_header.startswith("Bearer "):
+                sid = auth_header[len("Bearer "):]
+        if sid:
+            # SessionManager owns the one terminal teardown contract.  Its
+            # callback enters WebSocketManager.close_by_session_id for both
+            # explicit logout and expiry-driven destruction.
             sm.destroy(sid)
 
         return web.json_response({"status": "logged_out"})

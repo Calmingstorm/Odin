@@ -98,6 +98,9 @@ class ModelCapacityBreaker:
 
     def snapshot(self) -> dict:
         with self._lock:
+            cooldown = self._current_cooldown() if self._open else 0.0
+            elapsed = time.monotonic() - self._opened_at if self._open else 0.0
+            remaining = max(0.0, cooldown - elapsed) if self._open else 0.0
             return {
                 "name": self.name,
                 "state": (
@@ -107,7 +110,14 @@ class ModelCapacityBreaker:
                 ),
                 "failed_generations": self._failed_generations,
                 "consecutive_opens": self._consecutive_opens,
-                "cooldown_seconds": self._current_cooldown() if self._open else 0.0,
+                "cooldown_seconds": cooldown,
+                # Pure observation: an elapsed cooldown makes the breaker
+                # probe-ELIGIBLE, but only acquire_attempt() ever claims the
+                # probe slot — a snapshot must never fabricate "probing".
+                "cooldown_remaining_seconds": remaining,
+                "probe_eligible": bool(
+                    self._open and remaining <= 0.0 and self._probe_token is None
+                ),
             }
 
     # -- attempt admission ---------------------------------------------

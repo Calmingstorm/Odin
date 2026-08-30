@@ -54,7 +54,8 @@ export default {
                 <span class="text-sm" :class="llmStatus.codex.configured ? 'text-gray-200' : 'text-gray-500'">
                   Codex (OpenAI)
                 </span>
-                <span v-if="!llmStatus.codex.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-if="llmStatusLoadFailed" class="text-xs text-amber-500">— status unavailable</span>
+                <span v-else-if="!llmStatus.codex.configured" class="text-xs text-yellow-500">— not configured</span>
                 <span v-else-if="llmStatus.codex.configured" class="text-xs text-gray-500">
                   {{ llmStatus.codex.model }}
                 </span>
@@ -69,7 +70,8 @@ export default {
                 <span class="text-sm" :class="llmStatus.ollama.configured ? 'text-gray-200' : 'text-gray-500'">
                   Ollama (Local/Remote)
                 </span>
-                <span v-if="!llmStatus.ollama.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-if="llmStatusLoadFailed" class="text-xs text-amber-500">— status unavailable</span>
+                <span v-else-if="!llmStatus.ollama.configured" class="text-xs text-yellow-500">— not configured</span>
                 <span v-else-if="llmStatus.ollama.configured" class="text-xs text-gray-500">
                   {{ llmStatus.ollama.model }}
                 </span>
@@ -84,7 +86,8 @@ export default {
                 <span class="text-sm" :class="llmStatus.kimi.configured ? 'text-gray-200' : 'text-gray-500'">
                   Kimi (Moonshot AI)
                 </span>
-                <span v-if="!llmStatus.kimi.configured" class="text-xs text-yellow-500">— not configured</span>
+                <span v-if="llmStatusLoadFailed" class="text-xs text-amber-500">— status unavailable</span>
+                <span v-else-if="!llmStatus.kimi.configured" class="text-xs text-yellow-500">— not configured</span>
                 <span v-else-if="llmStatus.kimi.configured" class="text-xs text-gray-500">
                   {{ llmStatus.kimi.model }}
                 </span>
@@ -469,7 +472,8 @@ export default {
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-300">Kimi (Moonshot AI)</h2>
             <div class="flex items-center gap-3">
-              <div v-if="kimiStatus.configured" class="text-sm">
+              <div v-if="kimiStatusLoadFailed" class="text-sm"><span class="provider-status text-amber-500">Status unavailable</span></div>
+              <div v-else-if="kimiStatus.configured" class="text-sm">
                 <span v-if="kimiStatus.health && kimiStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
                 <span v-else class="provider-status text-red-400"><span class="status-dot offline" aria-hidden="true"></span>Unreachable</span>
               </div>
@@ -516,7 +520,7 @@ export default {
               <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveKimiAdvancedConfigNow" :disabled="savingKimi">Save timeout</button></div>
             </div>
           </details>
-          <div v-if="kimiStatus.health && kimiStatus.health.error"
+          <div v-if="kimiStatus?.health && kimiStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ kimiStatus.health.error }}
           </div>
@@ -527,7 +531,8 @@ export default {
           <div class="flex items-center justify-between mb-3">
             <h2 class="text-sm font-semibold text-gray-300">Ollama (Local/Remote)</h2>
             <div class="flex items-center gap-3">
-              <div v-if="ollamaStatus.configured" class="text-sm">
+              <div v-if="ollamaStatusLoadFailed" class="text-sm"><span class="provider-status text-amber-500">Status unavailable</span></div>
+              <div v-else-if="ollamaStatus.configured" class="text-sm">
                 <span v-if="ollamaStatus.health && ollamaStatus.health.healthy" class="provider-status text-green-400"><span class="status-dot online" aria-hidden="true"></span>Connected</span>
                 <span v-else class="provider-status text-red-400"><span class="status-dot offline" aria-hidden="true"></span>Unreachable</span>
               </div>
@@ -577,7 +582,7 @@ export default {
               <div class="llm-advanced-footer"><button type="button" class="btn btn-primary text-xs" @click="saveOllamaAdvancedConfigNow" :disabled="savingOllama">Save timeout</button></div>
             </div>
           </details>
-          <div v-if="ollamaStatus.health && ollamaStatus.health.error"
+          <div v-if="ollamaStatus?.health && ollamaStatus.health.error"
                class="text-sm text-red-400 bg-red-900/20 rounded p-2 border border-red-800 mt-3">
             {{ ollamaStatus.health.error }}
           </div>
@@ -592,6 +597,7 @@ export default {
 
     // --- LLM Provider ---
     const llmStatus = ref(null);
+    const llmStatusLoadFailed = ref(false);
     const selectedProvider = ref('codex');
 
     // --- Config forms ---
@@ -708,14 +714,16 @@ export default {
     const switching = ref(false);
 
     // --- Ollama ---
-    const ollamaStatus = ref({ configured: false });
+    const ollamaStatus = ref({ configured: null });
+    const ollamaStatusLoadFailed = ref(false);
     const ollamaModels = ref([]);
     const ollamaSelectedModel = ref('');
     const reloading = ref(false);
     const settingModel = ref(false);
 
     // --- Kimi ---
-    const kimiStatus = ref({ configured: false });
+    const kimiStatus = ref({ configured: null });
+    const kimiStatusLoadFailed = ref(false);
     const kimiModels = ref([]);
     const kimiSelectedModel = ref('');
     const reloadingKimi = ref(false);
@@ -724,7 +732,7 @@ export default {
     // --- Codex ---
     const codexLoading = ref(true);
     const codexError = ref('');
-    const codexData = ref({ configured: false, accounts: [] });
+    const codexData = ref({ configured: null, accounts: [] });
     const refreshing = ref(null);
     const editingLabel = ref(null);
     const labelValue = ref('');
@@ -807,6 +815,7 @@ export default {
       try {
         const data = await api.get('/api/llm/status');
         llmStatus.value = data;
+        llmStatusLoadFailed.value = false;
         selectedProvider.value = data.active_provider || 'codex';
         // Never clobber a form that has a NEWER edit waiting in its debounce
         // timer — the stale refresh would get re-saved (last-write-lost).
@@ -857,7 +866,19 @@ export default {
           }
         }
       } catch (e) {
-        llmStatus.value = { active_provider: 'codex', codex: { configured: false }, ollama: { configured: false }, kimi: { configured: false } };
+        // Failure provenance is separate from the last successful payload.
+        // A refresh failure must not erase known provider configuration.
+        // Before the first successful load, use an explicitly unknown shape
+        // so the template can render "unavailable" without claiming false.
+        if (!llmStatus.value) {
+          llmStatus.value = {
+            active_provider: '',
+            codex: { configured: null },
+            ollama: { configured: null },
+            kimi: { configured: null },
+          };
+        }
+        llmStatusLoadFailed.value = true;
       }
     }
 
@@ -890,6 +911,7 @@ export default {
     async function fetchOllamaStatus() {
       try {
         ollamaStatus.value = await api.get('/api/ollama/status');
+        ollamaStatusLoadFailed.value = false;
         if (ollamaStatus.value.model) ollamaSelectedModel.value = ollamaStatus.value.model;
         if (ollamaStatus.value.configured) {
           try {
@@ -903,7 +925,7 @@ export default {
           } catch { ollamaModels.value = []; }
         }
       } catch {
-        ollamaStatus.value = { configured: false };
+        ollamaStatusLoadFailed.value = true;
       }
     }
 
@@ -982,6 +1004,7 @@ export default {
     async function fetchKimiStatus() {
       try {
         kimiStatus.value = await api.get('/api/kimi/status');
+        kimiStatusLoadFailed.value = false;
         if (kimiStatus.value.model) kimiSelectedModel.value = kimiStatus.value.model;
         if (kimiStatus.value.configured) {
           try {
@@ -990,7 +1013,7 @@ export default {
           } catch { kimiModels.value = []; }
         }
       } catch {
-        kimiStatus.value = { configured: false };
+        kimiStatusLoadFailed.value = true;
       }
     }
 
@@ -1254,17 +1277,19 @@ export default {
     });
 
     return {
-      loading, llmStatus, selectedProvider, switching, advancedOpen,
+      loading, llmStatus, llmStatusLoadFailed, selectedProvider, switching, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
       mainMaxAllowed, agentMaxAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
-      ollamaStatus, ollamaModels, ollamaSelectedModel, reloading, settingModel,
-      kimiStatus, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
+      fetchCodexStatus,
+      ollamaStatus, ollamaStatusLoadFailed, ollamaModels, ollamaSelectedModel, reloading, settingModel,
+      kimiStatus, kimiStatusLoadFailed, kimiModels, kimiSelectedModel, reloadingKimi, settingKimiModel,
       codexLoading, codexError, codexData, refreshing, editingLabel, labelValue,
       contextWindows, contextWindowsLoading, contextWindowsError, contextBudgetRows, activeClampRows, activeContextBudget, clearingClamp, contextPolicyDirty,
       deviceState, deviceLoading, deviceInfo, deviceResult, deviceError,
-      fetchAll, switchProvider, reloadOllama, setOllamaModel,
+      fetchAll, fetchLLMStatus, fetchOllamaStatus, fetchKimiStatus,
+      switchProvider, reloadOllama, setOllamaModel,
       reloadKimi, setKimiModel, probeOllamaModels,
       saveCodexConfig, saveOllamaConfig, saveKimiConfig,
       saveCodexAdvancedConfig, saveOllamaAdvancedConfig, saveKimiAdvancedConfig,

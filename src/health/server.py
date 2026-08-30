@@ -68,6 +68,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/outbound-webhooks", "/api/grafana-alerts", "/api/slack",
     "/api/context",
     "/api/restart",
+    "/api/turn-state",
 )
 
 
@@ -127,6 +128,31 @@ class SessionManager:
         self._sessions: dict[str, float] = {}  # session_id -> last_activity (monotonic)
         self._identities: dict[str, object] = {}  # session_id -> ApiTokenIdentity or None
         self._timeout = timeout_minutes * 60 if timeout_minutes > 0 else 0
+        self._destroy_callback: Callable[[str], object] | None = None
+
+    def set_destroy_callback(self, callback: Callable[[str], object] | None) -> None:
+        """Register the exact-session teardown hook used by WebSockets.
+
+        Session bookkeeping is synchronous because it runs inside auth
+        middleware.  The callback therefore schedules its own bounded async
+        close; expiry and explicit logout still enter the same manager-owned
+        ``close_by_session_id`` contract.
+        """
+        self._destroy_callback = callback
+
+    def _remove(self, sid: str) -> bool:
+        self._identities.pop(sid, None)
+        existed = self._sessions.pop(sid, None) is not None
+        if existed and self._destroy_callback is not None:
+            try:
+                self._destroy_callback(sid)
+            except Exception:
+                log.exception("Session teardown callback failed")
+        return existed
+
+    def contains(self, sid: str) -> bool:
+        """Whether *sid* is currently tracked, without refreshing its lease."""
+        return sid in self._sessions
 
     @property
     def active_count(self) -> int:
@@ -149,22 +175,41 @@ class SessionManager:
         """Return the identity bound to a session, if any."""
         return self._identities.get(sid)
 
-    def validate(self, sid: str) -> bool:
-        """Validate a session ID. Returns False if expired or unknown."""
+    def seconds_until_expiry(self, sid: str) -> float | None:
+        """Return the remaining inactivity lease without touching it.
+
+        ``None`` means the session is absent or expiry is disabled.  WebSocket
+        ownership uses this read-only deadline to discover idle expiry even
+        when the browser sends no further application frames.
+        """
+        if self._timeout <= 0:
+            return None
+        ts = self._sessions.get(sid)
+        if ts is None:
+            return None
+        return max(0.0, ts + self._timeout - time.monotonic())
+
+    def validate(self, sid: str, *, touch: bool = True) -> bool:
+        """Validate a session ID. Returns False if expired or unknown.
+
+        ``touch=False`` is the WebSocket liveness check: protocol pings prove
+        the connection is alive but must not extend an authentication lease
+        forever.
+        """
         ts = self._sessions.get(sid)
         if ts is None:
             return False
-        if self._timeout > 0 and (time.monotonic() - ts) > self._timeout:
-            del self._sessions[sid]
-            self._identities.pop(sid, None)
+        now = time.monotonic()
+        if self._timeout > 0 and (now - ts) >= self._timeout:
+            self._remove(sid)
             return False
-        self._sessions[sid] = time.monotonic()
+        if touch:
+            self._sessions[sid] = now
         return True
 
     def destroy(self, sid: str) -> bool:
         """Destroy a session. Returns True if it existed."""
-        self._identities.pop(sid, None)
-        return self._sessions.pop(sid, None) is not None
+        return self._remove(sid)
 
     def destroy_by_user_id(self, user_id: str) -> int:
         """Destroy all sessions whose bound identity has the given user_id."""
@@ -173,8 +218,7 @@ class SessionManager:
             if getattr(identity, "user_id", None) == user_id:
                 to_remove.append(sid)
         for sid in to_remove:
-            self._sessions.pop(sid, None)
-            self._identities.pop(sid, None)
+            self._remove(sid)
         return len(to_remove)
 
     def cleanup(self) -> int:
@@ -182,10 +226,9 @@ class SessionManager:
         if self._timeout <= 0:
             return 0
         now = time.monotonic()
-        expired = [sid for sid, ts in self._sessions.items() if now - ts > self._timeout]
+        expired = [sid for sid, ts in self._sessions.items() if now - ts >= self._timeout]
         for sid in expired:
-            del self._sessions[sid]
-            self._identities.pop(sid, None)
+            self._remove(sid)
         return len(expired)
 
 
@@ -197,9 +240,14 @@ def _make_auth_middleware(
     web_config: WebConfig,
     session_manager: SessionManager,
 ) -> Middleware:
-    """Create middleware that enforces Bearer token auth on /api/ routes.
+    """Create middleware that enforces authentication on ``/api/`` routes.
 
-    Accepts either the raw api_token or a valid session token.
+    Normal HTTP requests accept Authorization bearer credentials and the
+    historical query carrier used by downloads.  ``/api/ws`` is deliberately
+    different: browsers cannot set Authorization on a WebSocket handshake, so
+    it accepts the bearer subprotocol and NEVER authenticates a query token.
+    Query-token presence is left for the WebSocket handler to reject with its
+    explicit close reason before any credential is validated/refreshed.
     """
 
     @web.middleware
@@ -208,27 +256,46 @@ def _make_auth_middleware(
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
         path = request.path
-        # Skip auth for non-API routes
         if not path.startswith("/api/"):
             return await handler(request)
-        # Skip auth for login endpoint
         if path in _AUTH_SKIP_PATHS:
             return await handler(request)
-        # Skip auth if no token configured (dev mode)
-        token = web_config.api_token
+
+        is_websocket = path == "/api/ws"
+        # Presence, not truthiness or first-value order, is the security
+        # boundary.  Do not validate/refresh ANY query credential on /api/ws;
+        # the handler turns this into the protocol-level 4001 rejection.
+        if is_websocket and "token" in request.query:
+            return await handler(request)
+
+        configured_token = getattr(web_config, "api_token", "") or ""
         tm = request.app.get("token_manager")
-        has_any_token = token or getattr(web_config, "api_tokens", None) or (tm
-            and tm.list_tokens())
+        has_any_token = (
+            configured_token
+            or getattr(web_config, "api_tokens", None)
+            or (tm and tm.list_tokens())
+        )
         if not has_any_token:
             return await handler(request)
 
-        # Extract bearer value from Authorization header
+        bearer_value = ""
         auth_header = request.headers.get("Authorization", "")
-        bearer_prefix = "Bearer "
-        if auth_header.startswith(bearer_prefix):
-            bearer_value = auth_header[len(bearer_prefix):]
-            # Check legacy single token
-            if token and hmac.compare_digest(bearer_value, token):
+        if auth_header.startswith("Bearer "):
+            bearer_value = auth_header[len("Bearer "):]
+        elif is_websocket:
+            # Shared decoder with WebSocketManager.handle: one wire format,
+            # including malformed/base64 handling, at both auth boundaries.
+            from ..web.websocket import (
+                _bearer_subprotocol,
+                _decode_bearer_subprotocol,
+            )
+            bearer_value = _decode_bearer_subprotocol(_bearer_subprotocol(request))
+        else:
+            query_tokens = request.query.getall("token", [])
+            bearer_value = query_tokens[0] if query_tokens else ""
+
+        if bearer_value:
+            if configured_token and hmac.compare_digest(bearer_value, configured_token):
                 from ..config.schema import ApiTokenIdentity
                 request._session_id = "api-admin"
                 request._api_identity = ApiTokenIdentity(
@@ -236,8 +303,7 @@ def _make_auth_middleware(
                     username="Admin", tier="admin", label="default",
                 )
                 return await handler(request)
-            # Check dynamic token manager first, then static config tokens
-            tm = request.app.get("token_manager")
+
             identity = tm.resolve(bearer_value) if tm else None
             if identity is None and hasattr(web_config, "resolve_api_identity"):
                 identity = web_config.resolve_api_identity(bearer_value)
@@ -245,36 +311,11 @@ def _make_auth_middleware(
                 request._session_id = identity.user_id
                 request._api_identity = identity
                 return await handler(request)
-            # Check session tokens — restore bound identity if present
+
             if session_manager.validate(bearer_value):
                 request._session_id = bearer_value
+                request._session_managed = True
                 session_identity = session_manager.get_identity(bearer_value)
-                if session_identity is not None:
-                    request._api_identity = session_identity
-                return await handler(request)
-
-        # Check query param token (for downloads, WebSocket)
-        query_token = request.query.get("token", "")
-        if query_token:
-            if token and hmac.compare_digest(query_token, token):
-                from ..config.schema import ApiTokenIdentity
-                request._session_id = "api-admin"
-                request._api_identity = ApiTokenIdentity(
-                    token="", user_id="api-admin",
-                    username="Admin", tier="admin", label="default",
-                )
-                return await handler(request)
-            tm = request.app.get("token_manager")
-            identity = tm.resolve(query_token) if tm else None
-            if identity is None and hasattr(web_config, "resolve_api_identity"):
-                identity = web_config.resolve_api_identity(query_token)
-            if identity is not None:
-                request._session_id = identity.user_id
-                request._api_identity = identity
-                return await handler(request)
-            if session_manager.validate(query_token):
-                request._session_id = query_token
-                session_identity = session_manager.get_identity(query_token)
                 if session_identity is not None:
                     request._api_identity = session_identity
                 return await handler(request)
@@ -282,7 +323,6 @@ def _make_auth_middleware(
         return web.json_response({"error": "unauthorized"}, status=401)
 
     return auth_middleware
-
 
 def _make_admin_middleware(web_config) -> Middleware:
     """Enforce the admin tier on control-plane prefixes (ADMIN_ONLY_PREFIXES).

@@ -639,6 +639,7 @@ class TestVerifyIntegrity:
             )
         result = await logger.verify_integrity()
         assert result["valid"] is True
+        assert result["availability"] == "available"
         assert result["verified"] == 3
 
     async def test_tampered_log(self, tmp_path):
@@ -657,11 +658,14 @@ class TestVerifyIntegrity:
 
         result = await logger.verify_integrity()
         assert result["valid"] is False
+        assert result["availability"] == "available"
+        assert result["error"]
 
     async def test_no_signing_returns_error(self, tmp_path):
         logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
         result = await logger.verify_integrity()
         assert result["valid"] is False
+        assert result["availability"] == "not_enabled"
         assert "not enabled" in result["error"]
         # Stable response shape across all verify outcomes
         assert result["unsigned_prefix"] == 0
@@ -768,6 +772,8 @@ class TestAuditVerifyAPI:
             assert resp.status == 409
             data = await resp.json()
             assert data["valid"] is False
+            assert data["availability"] == "available"
+            assert data["error"]
 
     async def test_no_signing_returns_error(self, tmp_path):
         from aiohttp import web as aio_web
@@ -786,6 +792,7 @@ class TestAuditVerifyAPI:
             assert resp.status == 409
             data = await resp.json()
             assert data["valid"] is False
+            assert data["availability"] == "not_enabled"
             assert "not enabled" in data["error"]
             assert data["unsigned_prefix"] == 0
 

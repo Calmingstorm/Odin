@@ -58,6 +58,16 @@ class TestSearchFilters:
         assert len(await logger.search(date="20")) == 1     # ISO year prefix matches
         assert await logger.search(date="1999") == []       # no such day
 
+    async def test_error_filter_applies_before_limit(self, logger):
+        await _exec(logger, tool_name="old_error", error="older failure")
+        for index in range(5):
+            await _exec(logger, tool_name=f"new_success_{index}")
+
+        results = await logger.search(has_error=True, limit=1)
+
+        assert [entry["tool_name"] for entry in results] == ["old_error"]
+        assert results[0]["error"] == "older failure"
+
     async def test_status_filter_via_web_action(self, logger):
         await logger.log_web_action(method="POST", path="/x", status=200)
         assert len(await logger.search(status="200")) == 1

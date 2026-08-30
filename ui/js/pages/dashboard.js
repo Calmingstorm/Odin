@@ -180,18 +180,23 @@ export default {
                 <span class="dash-panel-title">Recent Errors</span>
                 <span v-if="errors.length > 0" class="badge badge-danger" style="font-size:0.625rem;">{{ errors.length }}</span>
               </div>
-              <div v-if="errors.length === 0" class="dash-empty">
+              <div v-if="errors.length === 0 && errorsError" class="dash-empty dash-load-failed">
+                <span class="dash-empty-icon"><odin-icon name="warning" :size="21" /></span>
+                <span>Couldn't load recent errors</span>
+              </div>
+              <div v-else-if="errors.length === 0" class="dash-empty">
                 <span class="dash-empty-icon"><odin-icon name="success" :size="21" /></span>
                 <span>All clear</span>
               </div>
               <div v-else class="dash-error-list">
+                <div v-if="errorsError" class="dash-load-warning text-xs">Refresh failed — showing known errors</div>
                 <div v-for="(e, i) in errors" :key="i" class="dash-error-item">
                   <div class="dash-error-top">
                     <span class="text-red-400"><odin-icon name="warning" :size="16" /></span>
                     <span class="dash-error-tool">{{ e.tool_name }}</span>
                     <span class="dash-error-time">{{ formatTime(e.timestamp) }}</span>
                   </div>
-                  <div v-if="e.error_message" class="dash-error-msg">{{ e.error_message }}</div>
+                  <div v-if="e.error" class="dash-error-msg">{{ e.error }}</div>
                 </div>
               </div>
             </div>
@@ -208,6 +213,7 @@ export default {
     const activityLoading = ref(false);
     const errors = ref([]);
     const errorsLoading = ref(false);
+    const errorsError = ref(false);
     const agents = ref([]);
     const newEventCount = ref(0);
     const knowledgeChunks = ref(null);
@@ -352,21 +358,57 @@ export default {
       }
     }
 
+    let activityFetchEpoch = 0;
+    let errorsFetchEpoch = 0;
+    let liveEventEpoch = 0;
+    let liveErrorEpoch = 0;
+
+    function mergeByAuditIdentity(snapshot, live) {
+      const seen = new Set();
+      return [...live, ...snapshot].filter(entry => {
+        const key = entry._hmac || JSON.stringify([
+          entry.timestamp, entry.tool_name, entry.user_id, entry.result_summary, entry.error,
+        ]);
+        if (seen.has(key)) return false;
+        seen.add(key);
+        return true;
+      });
+    }
+
     async function fetchActivity() {
+      const epoch = ++activityFetchEpoch;
+      const eventEpoch = liveEventEpoch;
       activityLoading.value = true;
       try {
-        activity.value = await api.get('/api/audit?limit=10');
-        newEventCount.value = 0;
+        const snapshot = await api.get('/api/audit?limit=10');
+        if (epoch !== activityFetchEpoch) return;
+        const freshLive = eventEpoch === liveEventEpoch
+          ? [] : activity.value.filter(e => (e._liveEpoch || 0) > eventEpoch);
+        activity.value = mergeByAuditIdentity(snapshot, freshLive).slice(0, 10);
+        newEventCount.value = freshLive.length;
       } catch { /* ignore */ }
-      activityLoading.value = false;
+      if (epoch === activityFetchEpoch) activityLoading.value = false;
     }
 
     async function fetchErrors() {
+      const epoch = ++errorsFetchEpoch;
+      const errorEventEpoch = liveErrorEpoch;
       errorsLoading.value = true;
       try {
-        errors.value = await api.get('/api/audit?error_only=1&limit=5');
-      } catch { /* ignore */ }
-      errorsLoading.value = false;
+        const snapshot = await api.get('/api/audit?error_only=1&limit=5');
+        if (epoch !== errorsFetchEpoch) return;
+        const freshLive = errorEventEpoch === liveErrorEpoch
+          ? [] : errors.value.filter(e => (e._liveErrorEpoch || 0) > errorEventEpoch);
+        errors.value = mergeByAuditIdentity(snapshot, freshLive).slice(0, 5);
+        errorsError.value = false;
+      } catch {
+        if (epoch !== errorsFetchEpoch) return;
+        // A failed load must never render as "All clear" (audit 2.2),
+        // but a live error received during this request is newer usable truth
+        // and must remain visible rather than being covered by the failure UI.
+        errorsError.value = errorEventEpoch === liveErrorEpoch || errors.value.length === 0;
+      }
+      if (epoch === errorsFetchEpoch) errorsLoading.value = false;
     }
 
     async function fetchKnowledgeCount() {
@@ -460,11 +502,22 @@ export default {
 
     function onEvent(data) {
       if (data.payload && data.payload.tool_name) {
-        const entry = { ...data.payload, _isNew: true, _key: ++eventKeyCounter };
+        liveEventEpoch += 1;
+        const entry = {
+          ...data.payload,
+          _isNew: true,
+          _key: ++eventKeyCounter,
+          _liveEpoch: liveEventEpoch,
+        };
         activity.value.unshift(entry);
         if (activity.value.length > 10) activity.value.pop();
         newEventCount.value++;
         if (entry.error) {
+          liveErrorEpoch += 1;
+          entry._liveErrorEpoch = liveErrorEpoch;
+          // A live error is newer truth than a failed REST snapshot. Make it
+          // visible immediately instead of leaving the failure panel on top.
+          errorsError.value = false;
           errors.value.unshift(entry);
           if (errors.value.length > 5) errors.value.pop();
         }
@@ -474,11 +527,19 @@ export default {
       }
     }
 
+    let unsubReconnected = null;
+
     onMounted(async () => {
       await Promise.all([fetchStatus(), fetchActivity(), fetchErrors(), fetchAgents(), fetchKnowledgeCount()]);
       statusInterval = setInterval(fetchStatus, 15000);
       agentInterval = setInterval(fetchAgents, 10000);
       ws.subscribe('events', onEvent);
+      // Activity/Errors are fed by pushed events with no replay — a drop
+      // means missed entries shown as fresh (audit 3.4). Refetch on resume.
+      unsubReconnected = ws.onReconnected(() => {
+        fetchActivity();
+        fetchErrors();
+      });
     });
 
     onUnmounted(() => {
@@ -486,16 +547,17 @@ export default {
       if (agentInterval) clearInterval(agentInterval);
       clearTimeout(eventResetTimer);
       ws.unsubscribe('events', onEvent);
+      if (unsubReconnected) { unsubReconnected(); unsubReconnected = null; }
     });
 
     return {
       status, loading, error, uptime, uptimeRingOffset, stats,
       healthIndicators,
       activity, activityLoading, newEventCount,
-      errors, errorsLoading,
+      errors, errorsLoading, errorsError,
       agents,
       actionLoading,
-      fetchActivity, fetchStatus, formatTime, formatDuration, retry,
+      fetchActivity, fetchErrors, fetchStatus, onEvent, formatTime, formatDuration, retry,
       reloadConfig, clearSessions, stopAllLoops,
     };
   },

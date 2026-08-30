@@ -8,6 +8,7 @@ import HostAccessPage from './host-access.js';
 import ApiTokensPage from './api-tokens.js';
 import LLMConfigPage from './llm-config.js';
 import InternalsPage from './internals.js';
+import TurnStatePage from './turn-state.js';
 import UpdatePage from './update.js';
 
 // Exported so the command palette derives its destinations from the SAME
@@ -24,6 +25,7 @@ export const TABS = [
     { id: 'api-tokens', label: 'API Tokens', component: ApiTokensPage },
     { id: 'llm', label: 'LLM Config', component: LLMConfigPage },
     { id: 'internals', label: 'Internals', component: InternalsPage },
+    { id: 'turn-state', label: 'Turn State', component: TurnStatePage },
     { id: 'update', label: 'Update', component: UpdatePage },
 ];
 
