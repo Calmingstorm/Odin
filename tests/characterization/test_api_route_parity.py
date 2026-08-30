@@ -226,6 +226,8 @@ EXPECTED_ROUTES = [
     ("DELETE", "/api/outbound-webhooks/{webhook_id}", "delete_outbound_webhook"),
     ("POST", "/api/outbound-webhooks/{webhook_id}/test", "test_outbound_webhook"),
     ("GET", "/api/outbound-webhooks/stats", "outbound_webhook_stats"),
+    ("GET", "/api/turn-state/turns", "get_turn_state_turns"),
+    ("GET", "/api/turn-state/capacity-breakers", "get_capacity_breakers"),
 ]
 
 
@@ -246,7 +248,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 198
+        assert len(actual) == len(expected) == 200
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

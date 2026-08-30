@@ -14,14 +14,15 @@ Configuration:
     export ODIN_URL=http://localhost:3001
     export ODIN_API_TOKEN=your-api-token
 """
+
 from __future__ import annotations
 
 import argparse
 import json
 import os
 import sys
-import urllib.request
 import urllib.error
+import urllib.request
 
 
 def main() -> int:
@@ -30,14 +31,22 @@ def main() -> int:
         epilog="Set ODIN_URL and ODIN_API_TOKEN environment variables for defaults.",
     )
     parser.add_argument("prompt", nargs="?", help="Prompt to send (reads stdin if omitted)")
-    parser.add_argument("--url", default=os.environ.get("ODIN_URL", "http://localhost:3001"),
-                        help="Odin API URL (default: $ODIN_URL or http://localhost:3001)")
-    parser.add_argument("--token", default=os.environ.get("ODIN_API_TOKEN", ""),
-                        help="API token (default: $ODIN_API_TOKEN)")
-    parser.add_argument("--json", action="store_true", dest="json_output",
-                        help="Output raw JSON response")
-    parser.add_argument("--timeout", type=int, default=600,
-                        help="Request timeout in seconds (default: 600)")
+    parser.add_argument(
+        "--url",
+        default=os.environ.get("ODIN_URL", "http://localhost:3001"),
+        help="Odin API URL (default: $ODIN_URL or http://localhost:3001)",
+    )
+    parser.add_argument(
+        "--token",
+        default=os.environ.get("ODIN_API_TOKEN", ""),
+        help="API token (default: $ODIN_API_TOKEN)",
+    )
+    parser.add_argument(
+        "--json", action="store_true", dest="json_output", help="Output raw JSON response"
+    )
+    parser.add_argument(
+        "--timeout", type=int, default=600, help="Request timeout in seconds (default: 600)"
+    )
     args = parser.parse_args()
 
     # Get prompt from argument or stdin

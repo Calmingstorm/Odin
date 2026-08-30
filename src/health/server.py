@@ -68,6 +68,7 @@ ADMIN_ONLY_PREFIXES = (
     "/api/outbound-webhooks", "/api/grafana-alerts", "/api/slack",
     "/api/context",
     "/api/restart",
+    "/api/turn-state",
 )
 
 

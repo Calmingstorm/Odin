@@ -53,15 +53,17 @@ jobs:
           else
             python -m playwright install --with-deps chromium
           fi
-      - name: Exercise real Chromium request guard paths
+      - name: Exercise real Chromium request guard and committed render paths
         env:
-          # The tests may skip on developer machines without Chromium, but this
-          # job must fail rather than silently stop exercising the guard.
+          # These tests may skip on developer machines without Chromium, but
+          # this dependency-provisioned CI job must never fake green.
           ODIN_REQUIRE_BROWSER_TESTS: '1'
+          ODIN_REQUIRE_TURN_STATE_RENDER: '1'
         run: |
           pytest -q \
             tests/test_browser_automation.py::test_real_public_page_loads_to_completion_through_request_guard \
-            tests/test_browser_automation.py::test_real_browser_blocks_redirects_and_subresources_to_private_loopback
+            tests/test_browser_automation.py::test_real_browser_blocks_redirects_and_subresources_to_private_loopback \
+            tests/test_webui_turn_state_render.py
 
   lint-no-new:
     runs-on: ${{ (github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository) && 'odin-ci' || 'ubuntu-latest' }}
