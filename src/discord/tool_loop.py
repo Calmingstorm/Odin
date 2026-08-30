@@ -38,7 +38,11 @@ import discord
 
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
-from ..llm.context_budget import ContextBudgetSnapshot, snapshot_for_codex_config
+from ..llm.context_budget import (
+    DEFAULT_DENSITY_MILLI,
+    ContextBudgetSnapshot,
+    snapshot_for_codex_config,
+)
 from ..llm.context_compressor import SurfaceBoundary
 from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
@@ -1011,18 +1015,164 @@ class ToolLoopRunner:
             log.exception("active_clamp failed (non-fatal); treating as unclamped")
             return None
 
-    async def _record_window_evidence(self, overflow: object, response: object) -> None:
+    async def _record_window_evidence(
+        self, overflow: object, response: object, believed_within: bool | None = None
+    ) -> None:
         """Feed one rescue's overflow→acceptance pair to the observer.
 
         Total: evidence is never worth failing the request that just
-        succeeded (plan §11 invariant)."""
+        succeeded (plan §11 invariant). ``believed_within`` is the REJECTED
+        attempt's belief and is what qualifies a clamp — a rejection we
+        already predicted says nothing about the served window."""
         observer = getattr(self, "_window_observer", None)
         if observer is None or overflow is None:
             return
         try:
-            await observer.record_rescue(overflow=overflow, response=response)
+            await observer.record_rescue(
+                overflow=overflow,
+                response=response,
+                rejected_attempt_believed_within_effective_budget=believed_within,
+            )
         except Exception:
             log.exception("window-evidence recording failed (non-fatal)")
+
+    @staticmethod
+    def _measure_payload(messages: list[dict]) -> tuple[int, int]:
+        """(chars, wire-real images) for the payload about to be sent."""
+        try:
+            from ..llm.context_compressor import (
+                estimate_message_chars,
+                estimate_message_images,
+            )
+
+            return estimate_message_chars(messages), estimate_message_images(messages)
+        except Exception:
+            log.exception("payload measurement failed")
+            return 0, 0
+
+    def _record_density(
+        self, response: object, chars_sent: int, images_sent: int, serving_identity: object
+    ) -> None:
+        """Fold one accepted request into the model's density calibration.
+
+        Codex-only: no other provider returns the server-authoritative
+        accepted-token echo this calibration is built on. Total — calibration
+        never disturbs a request that already succeeded."""
+        observer = getattr(self, "_window_observer", None)
+        if observer is None or not getattr(serving_identity, "is_codex", False):
+            return
+        try:
+            observer.record_density(
+                model=getattr(response, "provenance_model", None)
+                or getattr(serving_identity, "model", None),
+                chars_sent=chars_sent,
+                images_sent=images_sent,
+                server_input_tokens=getattr(response, "server_input_tokens", None),
+            )
+        except Exception:
+            log.exception("density calibration failed (non-fatal)")
+
+    @staticmethod
+    def _believed_within_effective_budget(
+        messages: list[dict], snapshot: object, serving_identity: object
+    ) -> bool | None:
+        """Whether this payload is believed to fit the believed WINDOW.
+
+        None means no honest belief exists (non-Codex serving, no snapshot, or
+        a persisted reconstruction whose budget fields are placeholders) and
+        can never qualify a clamp. Compares against ``effective_budget``, not
+        the utilization-derived working target: utilization is quality POLICY
+        and overflow is PHYSICS.
+        """
+        if snapshot is None or not getattr(serving_identity, "is_codex", False):
+            return None
+        if getattr(snapshot, "base_source", None) == "persisted":
+            return None
+        effective = getattr(snapshot, "effective_budget", 0)
+        if not isinstance(effective, int) or effective <= 0:
+            return None
+        try:
+            from ..llm.context_budget import estimate_request_tokens
+            from ..llm.context_compressor import (
+                estimate_message_chars,
+                estimate_message_images,
+            )
+
+            estimated = estimate_request_tokens(
+                estimate_message_chars(messages),
+                estimate_message_images(messages),
+                density_milli=getattr(snapshot, "density_milli", 2500),
+            )
+            return estimated <= effective
+        except Exception:
+            log.exception("belief estimation failed; recording belief as unknown")
+            return None
+
+    def _predictive_presend_descent(
+        self, st: object, snapshot: object, serving_identity: object
+    ) -> int:
+        """Descend rescue rungs BEFORE sending a payload believed not to fit.
+
+        Returns the count of rungs consumed; the caller passes only the
+        REMAINING ladder to the physical-attempt loop, so pre-send and
+        post-rejection rescue share one total ladder.
+
+        Fail-OPEN by contract: any estimator or compactor failure leaves the
+        payload untouched and lets the provider decide. Accepted-latch
+        enforcement stays fail-closed elsewhere; this is prediction, not
+        proof. Skipped entirely for resumed generations, whose persisted
+        remaining ladder already governs further rejection.
+        """
+        consumed = 0
+        ladder = tuple(getattr(snapshot, "ladder", ()) or ())
+        if not ladder or not getattr(serving_identity, "is_codex", False):
+            return 0
+        if getattr(snapshot, "base_source", None) == "persisted":
+            return 0
+        try:
+            from ..llm.context_compressor import emergency_compress_for_window
+
+            while consumed < len(ladder):
+                if (
+                    self._believed_within_effective_budget(
+                        st.messages, snapshot, serving_identity
+                    )
+                    is not False
+                ):
+                    break
+                compressed, report = emergency_compress_for_window(
+                    st.messages,
+                    target_chars=ladder[consumed],
+                    boundary=SurfaceBoundary(
+                        request_start=getattr(st, "_boundary_request_start", 0),
+                        elided_replay=getattr(st, "_boundary_elided_replay", 0),
+                        envelope_len=getattr(st, "_boundary_envelope_len", None),
+                    ),
+                )
+                consumed += 1
+                report["attempt"] = 0
+                report["trigger"] = "predictive"
+                trajectory = getattr(st, "_trajectory", None)
+                if trajectory is not None:
+                    trajectory.context_recoveries.append(report)
+                # Monotonic only: never adopt a rung that would enlarge the
+                # payload, and never manufacture a local "fit" by violating
+                # newest/current-envelope survival.
+                if report["compressed_chars"] >= report["original_chars"]:
+                    break
+                st.messages = compressed
+                if report.get("boundary_request_start") is not None:
+                    st._boundary_request_start = report["boundary_request_start"]
+                    st._boundary_elided_replay = report["boundary_elided_replay"]
+                log.info(
+                    "predictive pre-send: rung %d compacted %d -> %d chars",
+                    consumed,
+                    report["original_chars"],
+                    report["compressed_chars"],
+                )
+        except Exception:
+            log.exception("predictive pre-send failed (non-fatal); sending as-is")
+        return consumed
 
     def _clear_active(self, st: _ChatTurn) -> None:
         self._channel_state.clear_active_request(st._ch_id, st._req_id)
@@ -1064,6 +1214,13 @@ class ToolLoopRunner:
             primary_chars=primary,
             ceiling_applied=False,
             ladder=tuple(facts.get("ladder") or ()),
+            # A resumed generation's belief cannot be reconstructed: the
+            # density in force at capture was never persisted. Placeholder
+            # budget fields plus this source marker make predictive descent
+            # and clamp qualification skip the generation honestly rather
+            # than splice CURRENT evidence into a FROZEN one.
+            density_milli=DEFAULT_DENSITY_MILLI,
+            density_source="default",
         )
 
     def _capture_budget_snapshot(self, serving, config) -> ContextBudgetSnapshot:
@@ -1321,11 +1478,22 @@ class ToolLoopRunner:
         else:
             _root_config = request_config if request_config is not None else self._get_config()
             _snapshot = self._capture_budget_snapshot(serving_identity, _root_config)
-        _ladder: tuple[int, ...] = _snapshot.ladder
+        # Predictive pre-send descent consumes a PREFIX of the frozen ladder
+        # locally, and only the remaining subset governs physical attempts.
+        # This keeps ONE total ladder without inventing fake provider
+        # attempts: st._rescue_passes and the codec's attempt records keep
+        # meaning "rejected by the provider", and a resumed generation
+        # continues its persisted remaining ladder rather than re-arming
+        # rungs pre-send already spent.
+        _presend_consumed = self._predictive_presend_descent(st, _snapshot, serving_identity)
+        _ladder: tuple[int, ...] = _snapshot.ladder[_presend_consumed:]
         _generation_deadline = time.monotonic() + deadline_seconds
         _pending_latch: int | None = None
         _rescued_this_call = False
         _last_overflow: BaseException | None = None
+        # Belief about the attempt the provider actually REJECTED, captured
+        # before that attempt and paired with its overflow.
+        _last_overflow_belief: bool | None = None
         if st._gen_identity and st._rescue_passes:
             # Resume reconstructs the pending rejection from durable attempt
             # facts. The already-compressed payload is the acceptance
@@ -1347,6 +1515,13 @@ class ToolLoopRunner:
         async with _best_effort_typing(st.message.channel):
             try:
                 while True:
+                    # Captured from the exact payload this attempt sends, and
+                    # recomputed after every compaction, so a rescued retry
+                    # never inherits the rejected attempt's belief.
+                    _attempt_chars, _attempt_images = self._measure_payload(st.messages)
+                    _attempt_belief = self._believed_within_effective_budget(
+                        st.messages, _snapshot, serving_identity
+                    )
                     try:
                         llm_resp = await generate_with_recovery(
                             _attempt,
@@ -1360,12 +1535,17 @@ class ToolLoopRunner:
                             cancel_event=st._cancel,
                             on_wait=_on_wait,
                         )
+                        self._record_density(
+                            llm_resp, _attempt_chars, _attempt_images, serving_identity
+                        )
                         if _pending_latch is not None:
                             # Server-accepted evidence (the settled latch
                             # rule); the generation is settled, so its frozen
                             # facts and rung phase reset for the next one.
                             st._char_latch = _pending_latch
-                            await self._record_window_evidence(_last_overflow, llm_resp)
+                            await self._record_window_evidence(
+                                _last_overflow, llm_resp, _last_overflow_belief
+                            )
                         if st._gen_identity is not None or st._rescue_passes:
                             st._gen_identity = None
                             st._rescue_passes = 0
@@ -1401,6 +1581,7 @@ class ToolLoopRunner:
                         st._rescue_passes += 1
                         _rescued_this_call = True
                         _last_overflow = overflow_exc
+                        _last_overflow_belief = _attempt_belief
                         if report.get("boundary_request_start") is not None:
                             st._boundary_request_start = report["boundary_request_start"]
                             st._boundary_elided_replay = report["boundary_elided_replay"]
@@ -2706,6 +2887,10 @@ class ToolLoopRunner:
             if budget_snapshot is not None
             else self._capture_budget_snapshot(serving_identity, request_config)
         )
+        # Predictive descent consumes a ladder PREFIX before any physical
+        # attempt; only the remainder governs post-rejection rescue.
+        _presend_consumed = self._predictive_presend_descent(st, _snapshot, serving_identity)
+        _remaining_ladder: tuple[int, ...] = _snapshot.ladder[_presend_consumed:]
         # ONE monotonic deadline for the whole logical generation: the first
         # attempt runs on the policy's own budget; rescue retries pay for the
         # time already burned instead of minting a fresh window.
@@ -2713,6 +2898,7 @@ class ToolLoopRunner:
         rescue_passes = 0
         pending_latch: int | None = None
         last_overflow: BaseException | None = None
+        last_overflow_belief: bool | None = None
 
         try:
             # Pre-admission fast-fail, same contract as the chat path — and
@@ -2721,6 +2907,10 @@ class ToolLoopRunner:
             # like any other failed generation instead of escaping
             # run_autonomous(). Frozen: the captured client, not live state.
             while True:
+                attempt_chars, attempt_images = self._measure_payload(st.messages)
+                attempt_belief = self._believed_within_effective_budget(
+                    st.messages, _snapshot, serving_identity
+                )
                 try:
                     preflight_incompatible_effort(
                         serving_identity.client,
@@ -2738,10 +2928,15 @@ class ToolLoopRunner:
                     )
                     if cancel_event is not None and cancel_event.is_set():
                         raise asyncio.CancelledError
+                    self._record_density(
+                        response, attempt_chars, attempt_images, serving_identity
+                    )
                     if pending_latch is not None:
                         # Server-accepted evidence, per the settled latch rule.
                         st._char_latch = pending_latch
-                        await self._record_window_evidence(last_overflow, response)
+                        await self._record_window_evidence(
+                            last_overflow, response, last_overflow_belief
+                        )
                     break
                 except Exception as overflow_exc:
                     from ..llm.errors import LLMRequestError
@@ -2750,7 +2945,7 @@ class ToolLoopRunner:
                         isinstance(overflow_exc, LLMRequestError)
                         and getattr(overflow_exc, "code", None) == "context_length_exceeded"
                     )
-                    ladder = _snapshot.ladder
+                    ladder = _remaining_ladder
                     if (
                         not is_overflow
                         or rescue_passes >= len(ladder)
@@ -2783,6 +2978,7 @@ class ToolLoopRunner:
                         )
                     pending_latch = report["compressed_chars"]
                     last_overflow = overflow_exc
+                    last_overflow_belief = attempt_belief
                     if generation_deadline - time.monotonic() <= 0:
                         # Same rule as chat: recovery deadlines bound waiting,
                         # not an admitted stream — never start a request

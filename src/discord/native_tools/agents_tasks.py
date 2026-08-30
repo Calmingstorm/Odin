@@ -263,6 +263,9 @@ def _capture_agent_generation_plan(
         "client": client,
         "effort": effective_effort,
         "model": resolved_model,
+        # Predictive pre-send admission is Codex-only: no other provider
+        # supplies the accepted-token evidence contract calibration needs.
+        "is_codex": hasattr(client, "reasoning_effort"),
         "snapshot": _generation_budget_snapshot(
             cfg,
             client,
@@ -324,7 +327,7 @@ def _make_evidence_recorder(observer):
     if observer is None:
         return None
 
-    async def recorder(overflow, response):
+    async def recorder(overflow, response, believed_within=None):
         try:
             if isinstance(response, dict):
                 from types import SimpleNamespace
@@ -334,9 +337,38 @@ def _make_evidence_recorder(observer):
                     server_input_tokens=response.get("server_input_tokens"),
                     provenance_model=response.get("model"),
                 )
-            await observer.record_rescue(overflow=overflow, response=response)
+            await observer.record_rescue(
+                overflow=overflow,
+                response=response,
+                rejected_attempt_believed_within_effective_budget=believed_within,
+            )
         except Exception:
             log.exception("agent window-evidence recording failed (non-fatal)")
+
+    return recorder
+
+
+def _make_density_recorder(observer):
+    """Adapter folding one accepted agent request into the density EMA.
+
+    The agent callback returns a plain dict, so provenance and usage are
+    lifted out here. Total — calibration never disturbs a succeeded request.
+    """
+    if observer is None:
+        return None
+
+    def recorder(response, chars_sent, images_sent):
+        try:
+            if not isinstance(response, dict):
+                return
+            observer.record_density(
+                model=response.get("model"),
+                chars_sent=chars_sent,
+                images_sent=images_sent,
+                server_input_tokens=response.get("server_input_tokens"),
+            )
+        except Exception:
+            log.exception("agent density recording failed (non-fatal)")
 
     return recorder
 
@@ -959,6 +991,7 @@ class AgentTaskTools:
                 observer=self._window_observer,
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
+            density_recorder=_make_density_recorder(self._window_observer),
         )
 
         if agent_id.startswith("Error"):
@@ -1278,6 +1311,7 @@ class AgentTaskTools:
                 )
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
+            density_recorder=_make_density_recorder(self._window_observer),
         )
 
         # Format response

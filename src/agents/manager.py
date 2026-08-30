@@ -472,6 +472,7 @@ class AgentManager:
         budget_snapshot_provider: Callable | None = None,
         generation_plan_provider: Callable | None = None,
         evidence_recorder: Callable | None = None,
+        density_recorder: Callable | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string.
 
@@ -630,6 +631,7 @@ class AgentManager:
                 budget_snapshot_provider=budget_snapshot_provider,
                 generation_plan_provider=generation_plan_provider,
                 evidence_recorder=evidence_recorder,
+                density_recorder=density_recorder,
             )
         )
         agent._task = task
@@ -1023,6 +1025,7 @@ async def _run_agent(
     budget_snapshot_provider: Callable | None = None,
     generation_plan_provider: Callable | None = None,
     evidence_recorder: Callable | None = None,
+    density_recorder: Callable | None = None,
 ) -> None:
     """Execute an agent's tool loop until completion, error, or timeout.
 
@@ -1219,6 +1222,7 @@ async def _run_agent(
                 rescue_ladder=(budget_snapshot.ladder if budget_snapshot is not None else None),
                 generation_state=generation_state,
                 evidence_recorder=evidence_recorder,
+                density_recorder=density_recorder,
             )
             if response is None:
                 # Terminal state already set by recovery logic
@@ -1444,6 +1448,89 @@ def _lifetime_timeout(agent: AgentInfo) -> None:
     )
 
 
+def _measure_payload(messages: list[dict]) -> tuple[int, int]:
+    """(chars, wire-real images) for the payload about to be sent."""
+    from ..llm.context_compressor import estimate_message_chars, estimate_message_images
+
+    return estimate_message_chars(messages), estimate_message_images(messages)
+
+
+def _believed_within_effective_budget(messages: list[dict], snapshot) -> bool | None:
+    """Whether THIS payload is believed to fit the believed physical window.
+
+    Returns None when no belief can honestly be formed (no snapshot, or a
+    persisted reconstruction whose budget fields are not real). ``None`` is
+    never treated as "within" downstream — it cannot qualify a clamp.
+
+    Compares against ``effective_budget`` deliberately: utilization is quality
+    POLICY and overflow is PHYSICS. Judging admission against the policy
+    target would both convert an operator's compaction preference into a hard
+    wall and make an aggressive policy setting indistinguishable from a real
+    window shrink.
+    """
+    if snapshot is None or getattr(snapshot, "base_source", None) == "persisted":
+        return None
+    effective = getattr(snapshot, "effective_budget", 0)
+    if not isinstance(effective, int) or effective <= 0:
+        return None
+    try:
+        from ..llm.context_budget import estimate_request_tokens
+
+        chars, images = _measure_payload(messages)
+        estimated = estimate_request_tokens(
+            chars, images, density_milli=getattr(snapshot, "density_milli", 2500)
+        )
+        return estimated <= effective
+    except Exception:
+        log.exception("belief estimation failed; recording belief as unknown")
+        return None
+
+
+def _predictive_presend_descent(agent: AgentInfo, snapshot, ladder: tuple[int, ...]) -> int:
+    """Descend rescue rungs BEFORE sending a payload believed not to fit.
+
+    Returns the number of rungs consumed, which the post-rejection loop skips
+    so one total ladder is shared rather than two independent budgets.
+
+    Fail-OPEN by contract: any estimator or compactor failure leaves the
+    payload untouched and lets the provider be the authority. Accepted-latch
+    enforcement elsewhere stays fail-closed; this is prediction, not proof.
+    Rungs are adopted only when they genuinely shrink the payload, and an
+    exhausted ladder still sends the smallest valid result.
+    """
+    consumed = 0
+    try:
+        from ..llm.context_compressor import emergency_compress_for_window
+
+        while consumed < len(ladder):
+            if _believed_within_effective_budget(agent.messages, snapshot) is not False:
+                break
+            target = ladder[consumed]
+            compressed, report = emergency_compress_for_window(
+                agent.messages, target_chars=target
+            )
+            consumed += 1
+            report["attempt"] = 0
+            report["trigger"] = "predictive"
+            agent.context_recoveries.append(report)
+            # Monotonic only: never adopt a rung that would enlarge the
+            # payload, and never let prediction manufacture a "fit" by
+            # violating newest/current-envelope survival.
+            if report["compressed_chars"] >= report["original_chars"]:
+                break
+            agent.messages = compressed
+            log.info(
+                "agent predictive pre-send: agent=%s rung %d compacted %d -> %d chars",
+                agent.id,
+                consumed,
+                report["original_chars"],
+                report["compressed_chars"],
+            )
+    except Exception:
+        log.exception("agent predictive pre-send failed (non-fatal); sending as-is")
+    return consumed
+
+
 async def _call_llm_with_recovery(
     agent: AgentInfo,
     iteration_callback: IterationCallback,
@@ -1452,6 +1539,7 @@ async def _call_llm_with_recovery(
     rescue_ladder: tuple[int, ...] | None = None,
     generation_state: dict | None = None,
     evidence_recorder: Callable | None = None,
+    density_recorder: Callable | None = None,
 ) -> dict | None:
     """Call the LLM for one agent iteration.
 
@@ -1496,6 +1584,22 @@ async def _call_llm_with_recovery(
     iteration_deadline = time.monotonic() + call_timeout
     first_attempt = True
     last_overflow: BaseException | None = None
+    # Belief about the attempt that was actually REJECTED — paired with the
+    # overflow it belongs to, never reconstructed later from messages that
+    # rescue has already mutated.
+    last_overflow_belief: bool | None = None
+
+    _plan = generation_state.get("plan")
+    _plan_snapshot = _plan.get("snapshot") if isinstance(_plan, dict) else None
+    _is_codex = bool(_plan.get("is_codex")) if isinstance(_plan, dict) else False
+    # Predictive descent runs AFTER soft compaction and mandatory latch
+    # enforcement (both already applied by the caller) and only for Codex
+    # serving identities: other providers supply no accepted-token evidence
+    # contract, so there is nothing to predict against.
+    if _is_codex and _plan_snapshot is not None:
+        presend_ladder = tuple(getattr(_plan_snapshot, "ladder", ()) or ())
+        if presend_ladder:
+            emergency_passes = _predictive_presend_descent(agent, _plan_snapshot, presend_ladder)
     while True:
         if _remaining_lifetime(agent) <= 0:
             _lifetime_timeout(agent)
@@ -1516,6 +1620,11 @@ async def _call_llm_with_recovery(
             agent.error = err_desc
             agent.ended_at = time.time()
             return None
+        # Captured BEFORE awaiting the provider, from the exact payload this
+        # attempt sends. Recomputed every pass, so a rescue-compacted retry
+        # carries its own belief rather than inheriting the rejected one.
+        attempt_chars, attempt_images = _measure_payload(agent.messages)
+        attempt_belief = _believed_within_effective_budget(agent.messages, _plan_snapshot)
         try:
             response = await asyncio.wait_for(
                 iteration_callback(
@@ -1526,6 +1635,11 @@ async def _call_llm_with_recovery(
                 ),
                 timeout=attempt_budget,
             )
+            if density_recorder is not None:
+                try:
+                    density_recorder(response, attempt_chars, attempt_images)
+                except Exception:
+                    log.exception("agent density recording failed (non-fatal)")
             if pending_ceiling is not None:
                 # The rescue rung is now server-accepted evidence.
                 agent.context_char_ceiling = pending_ceiling
@@ -1533,8 +1647,10 @@ async def _call_llm_with_recovery(
                     try:
                         # Phase 5: the overflow→acceptance pair feeds the
                         # window observer. Total — evidence never fails the
-                        # iteration that just succeeded.
-                        await evidence_recorder(last_overflow, response)
+                        # iteration that just succeeded. The belief carried
+                        # here is the REJECTED attempt's, which is what
+                        # qualifies (or disqualifies) a window clamp.
+                        await evidence_recorder(last_overflow, response, last_overflow_belief)
                     except Exception:
                         log.exception("agent window-evidence recording failed (non-fatal)")
             return response
@@ -1593,6 +1709,7 @@ async def _call_llm_with_recovery(
                     if report["fits"]:
                         agent.messages = compressed
                         last_overflow = exc
+                        last_overflow_belief = attempt_belief
                         # Latch candidate: held until the retry actually
                         # succeeds (the provider is the authority on
                         # survivable size).

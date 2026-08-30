@@ -837,8 +837,8 @@ class TestResumeIdentityReconstruction:
         )
         runner = _runner(gw)
 
-        async def record(overflow, response):
-            recorded.append((overflow, response))
+        async def record(overflow, response, believed_within=None):
+            recorded.append((overflow, response, believed_within))
 
         runner._record_window_evidence = record
         expected_latch = estimate_message_chars(st.messages)
@@ -846,11 +846,15 @@ class TestResumeIdentityReconstruction:
         assert kind == "ok"
         assert st._char_latch == expected_latch
         assert len(recorded) == 1
-        overflow, accepted = recorded[0]
+        overflow, accepted, believed = recorded[0]
         assert overflow.code == "context_length_exceeded"
         assert overflow.account_key == account
         assert overflow.server_input_tokens == 272_000
         assert accepted is response
+        # A RESUMED generation never persisted the belief that governed the
+        # rejected attempt, so it stays unknown and cannot qualify a clamp —
+        # the no-codec-v5 contract.
+        assert believed is None
         assert st._gen_identity is None and st._rescue_passes == 0
 
     async def test_missing_frozen_provider_ends_honestly(self):

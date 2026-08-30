@@ -944,6 +944,8 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
             "primary_chars": snapshot.primary_chars,
             "ceiling_applied": snapshot.ceiling_applied,
             "ladder": list(snapshot.ladder),
+            "density_milli": snapshot.density_milli,
+            "density_source": snapshot.density_source,
         }
 
     @routes.get("/api/context/windows")
@@ -1016,25 +1018,44 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
                 or (row["value"] == prior["value"] and row["expires_at"] > prior["expires_at"])
             ):
                 active_clamp_rows[row["model"]] = row
+        # ONE density snapshot for the whole response: re-reading ephemeral
+        # calibration per model could pair one model's target with another's
+        # calibration generation.
+        density_snapshot: dict[str, int] = {}
+        if observer is not None:
+            try:
+                density_snapshot = observer.density_snapshot()
+            except Exception:
+                log.exception("density snapshot failed; serving uncalibrated targets")
         models = set(CODEX_MODEL_INPUT_BUDGETS) | set(overrides)
         for account in evidence.get("accounts", {}).values():
             models |= set(account.get("models", {}))
+        # A model may exist ONLY in ephemeral density state (calibrated but
+        # never clamped and not in the static registry); the census must still
+        # describe it or the table would omit a model whose runtime target is
+        # actively calibrated.
+        models |= set(density_snapshot)
         out = {}
         for model in sorted(models):
             active_row = active_clamp_rows.get(model)
             clamp = active_row["value"] if active_row is not None else None
+            # Configured resolution describes SAVED policy and therefore uses
+            # the uncalibrated default; only the runtime resolution consumes
+            # live calibration, so the two columns stay honestly different.
             configured = resolve_context_budget(
                 model,
                 overrides=overrides,
                 utilization=utilization,
                 max_context_chars=configured_ceiling,
             )
+            model_density = density_snapshot.get(model)
             effective = resolve_context_budget(
                 model,
                 overrides=overrides,
                 utilization=utilization,
                 max_context_chars=runtime_ceiling,
                 observed_clamp=clamp,
+                density_milli=model_density,
             )
             out[model] = {
                 "floor": CODEX_MODEL_INPUT_BUDGETS.get(model),
@@ -1049,6 +1070,11 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
                 ),
                 "configured": _resolution(configured),
                 "effective": _resolution(effective),
+                # Density provenance is SEPARATE from capability/clamp
+                # provenance: both can be true at once, so the UI renders two
+                # chips rather than one concatenated string.
+                "density_milli": effective.density_milli,
+                "density_source": effective.density_source,
                 "clamp_expires_at": (
                     active_row["expires_at"]
                     if effective.clamp_applied and active_row is not None

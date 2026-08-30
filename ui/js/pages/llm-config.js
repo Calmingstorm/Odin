@@ -180,6 +180,7 @@ export default {
                 <span class="llm-context-summary-pair">
                   <strong>{{ formatCount(activeContextBudget?.effective?.effective_budget) }} <small>tokens</small></strong>
                   <span class="llm-budget-provenance" :class="provenanceClass(activeContextBudget?.provenance)">{{ activeContextBudget?.provenance || 'unavailable' }}</span>
+                  <span v-if="activeContextBudget?.density_source === 'calibrated'" class="llm-budget-density">density-calibrated · {{ formatDensity(activeContextBudget.density_milli) }} chars/token</span>
                 </span>
                 <small v-if="activeContextBudget?.clamp_expires_at">Expires {{ formatExpiry(activeContextBudget.clamp_expires_at) }}</small>
               </div>
@@ -315,6 +316,7 @@ export default {
                           </td>
                           <td data-label="Provenance">
                             <span class="llm-budget-provenance" :class="provenanceClass(row.provenance)">{{ row.provenance }}</span>
+                            <span v-if="row.densitySource === 'calibrated'" class="llm-budget-density">density-calibrated · {{ formatDensity(row.densityMilli) }} chars/token</span>
                             <small v-if="row.clampExpiresAt">Expires {{ formatExpiry(row.clampExpiresAt) }}</small>
                           </td>
                         </tr>
@@ -700,6 +702,8 @@ export default {
       primaryChars: details.effective?.primary_chars,
       provenance: details.provenance,
       clampExpiresAt: details.clamp_expires_at,
+      densityMilli: details.density_milli,
+      densitySource: details.density_source,
     })));
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
@@ -773,6 +777,10 @@ export default {
       return typeof value === 'string' && value.length > 12 ? value.slice(0, 8) + '…' + value.slice(-4) : value;
     }
 
+    function formatDensity(milli) {
+      if (typeof milli !== 'number' || !Number.isFinite(milli)) return '—';
+      return (milli / 1000).toFixed(2);
+    }
     function provenanceClass(value) {
       if (value === 'temporary learned clamp') return 'is-clamp';
       if (value === 'override') return 'is-override';
@@ -1299,7 +1307,7 @@ export default {
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
-      formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass,
+      formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass, formatDensity,
     };
   },
 };

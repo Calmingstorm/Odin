@@ -104,6 +104,7 @@ class LoopAgentBridge:
         budget_snapshot_provider_factory=None,
         generation_plan_provider_factory=None,
         evidence_recorder=None,
+        density_recorder=None,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
@@ -218,6 +219,7 @@ class LoopAgentBridge:
                     else None
                 ),
                 evidence_recorder=evidence_recorder,
+                density_recorder=density_recorder,
             )
 
             if not agent_id.startswith("Error"):
