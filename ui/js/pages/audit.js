@@ -12,9 +12,36 @@ export default {
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
         <h1 class="text-xl font-semibold">Audit Log</h1>
-        <button @click="fetchAudit" class="btn btn-ghost text-xs" :disabled="loading">
-          {{ loading ? 'Loading...' : 'Refresh' }}
-        </button>
+        <div class="flex items-center gap-2">
+          <button @click="verifyIntegrity" class="btn btn-ghost text-xs" :disabled="verifying">
+            {{ verifying ? 'Verifying...' : 'Verify integrity' }}
+          </button>
+          <button @click="fetchAudit" class="btn btn-ghost text-xs" :disabled="loading">
+            {{ loading ? 'Loading...' : 'Refresh' }}
+          </button>
+        </div>
+      </div>
+
+      <!-- Tamper-evidence result (audit 7.2): the HMAC chain verifier has
+           existed since v3.49.0 with no operator surface. Every state is
+           rendered honestly — disabled signing and the permanent
+           pre-enablement unsigned prefix are facts, not alarms. -->
+      <div v-if="verifyError" class="hm-card mb-4 border-red-900">
+        <p class="text-red-400 text-sm">Verification failed: {{ verifyError }}</p>
+      </div>
+      <div v-else-if="verifyResult && verifyResult.not_enabled" class="hm-card mb-4">
+        <p class="text-xs text-gray-400">Tamper-evidence is not enabled — no signing key is configured, so the chain cannot be verified.</p>
+      </div>
+      <div v-else-if="verifyResult" class="hm-card mb-4" :class="verifyResult.valid ? 'audit-verify-ok' : 'border-red-900'">
+        <p v-if="verifyResult.valid" class="text-sm audit-verify-valid">
+          Chain valid — {{ verifyResult.verified }} signed entr{{ verifyResult.verified === 1 ? 'y' : 'ies' }} verified.
+        </p>
+        <p v-else class="text-sm text-red-400">
+          Chain INVALID — first break at entry {{ verifyResult.first_bad }}; {{ verifyResult.verified }} verified before it.
+        </p>
+        <p v-if="verifyResult.unsigned_prefix > 0" class="text-xs text-gray-500 mt-1">
+          {{ verifyResult.unsigned_prefix.toLocaleString() }} older entries predate signing and are permanently unsigned — expected, not tampering.
+        </p>
       </div>
 
       <!-- Filters -->
@@ -188,6 +215,30 @@ export default {
     // current filters (audit 6.2). Only the newest request may commit.
     let fetchEpoch = 0;
 
+    const verifying = ref(false);
+    const verifyResult = ref(null);
+    const verifyError = ref(null);
+
+    async function verifyIntegrity() {
+      verifying.value = true;
+      verifyError.value = null;
+      try {
+        verifyResult.value = await api.get('/api/audit/verify');
+      } catch (e) {
+        // 409 carries the verifier's own structured verdict: either signing
+        // is not enabled (error string) or the chain is genuinely broken.
+        if (e.status === 409 && e.data && typeof e.data === 'object') {
+          verifyResult.value = e.data.error
+            ? { ...e.data, not_enabled: true }
+            : e.data;
+        } else {
+          verifyResult.value = null;
+          verifyError.value = e.message || 'verification request failed';
+        }
+      }
+      verifying.value = false;
+    }
+
     async function fetchAudit() {
       const epoch = ++fetchEpoch;
       loading.value = true;
@@ -216,6 +267,7 @@ export default {
     return {
       entries, loading, error, expandedIdx, filters,
       formatTs, formatDetail, truncateBlock, toggleExpand, clearFilters, fetchAudit,
+      verifying, verifyResult, verifyError, verifyIntegrity,
     };
   },
 };

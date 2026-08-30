@@ -4839,3 +4839,7 @@ a:focus-visible {
 @media (min-width: 768px) { .sched-detail-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
 .sched-detail-grid > div { display: grid; align-content: start; gap: 0.3rem; min-width: 0; }
 .sched-detail-label { color: var(--hm-text-muted); font-size: var(--hm-text-xs); line-height: 1; }
+
+/* ---- Audit tamper-evidence (deep-dive 7.2) ---- */
+.audit-verify-ok { border-color: rgba(34, 197, 94, 0.35); }
+.audit-verify-valid { color: #4ade80; }
