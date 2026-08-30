@@ -541,6 +541,15 @@ class TestSessionTerminalTeardown:
             assert not manager._clients
             assert not manager._session_expiry_tasks
 
+    def test_teardown_callback_failure_cannot_break_session_destruction(self):
+        from src.health.server import SessionManager
+
+        sessions = SessionManager(timeout_minutes=1)
+        sid, _ = sessions.create(SimpleNamespace(user_id="u1", tier="admin"))
+        sessions.set_destroy_callback(MagicMock(side_effect=RuntimeError("loop closed")))
+        assert sessions.destroy(sid) is True
+        assert not sessions.contains(sid)
+
     async def test_expiry_closes_only_the_exact_session_socket(self, monkeypatch):
         from src.health.server import SessionManager
 

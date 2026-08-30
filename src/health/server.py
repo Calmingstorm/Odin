@@ -144,7 +144,10 @@ class SessionManager:
         self._identities.pop(sid, None)
         existed = self._sessions.pop(sid, None) is not None
         if existed and self._destroy_callback is not None:
-            self._destroy_callback(sid)
+            try:
+                self._destroy_callback(sid)
+            except Exception:
+                log.exception("Session teardown callback failed")
         return existed
 
     def contains(self, sid: str) -> bool:
