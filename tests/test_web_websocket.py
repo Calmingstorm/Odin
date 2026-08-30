@@ -442,6 +442,71 @@ class TestTailLogs:
 
 
 class TestSessionTerminalTeardown:
+    def test_background_task_exception_is_consumed(self):
+        manager = WebSocketManager(_bot())
+        task = MagicMock()
+        task.result.side_effect = RuntimeError("background failure")
+        manager._consume_task(task)
+        task.result.assert_called_once_with()
+
+    def test_expiry_watch_requires_a_session_manager(self):
+        manager = WebSocketManager(_bot())
+        manager._ensure_session_expiry_watch("sid")
+        assert manager._session_expiry_tasks == {}
+
+    async def test_absent_session_deadline_retires_its_watcher(self):
+        manager = WebSocketManager(
+            _bot(),
+            session_manager=SimpleNamespace(
+                seconds_until_expiry=lambda _sid: None,
+                validate=MagicMock(),
+            ),
+        )
+        manager._ensure_session_expiry_watch("absent")
+        task = manager._session_expiry_tasks["absent"]
+        await task
+        assert manager._session_expiry_tasks == {}
+        manager._session_manager.validate.assert_not_called()
+
+    async def test_terminal_teardown_cancels_an_external_deadline_owner(self):
+        manager = WebSocketManager(_bot())
+        started = asyncio.Event()
+        retired = asyncio.Event()
+
+        async def watcher():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                retired.set()
+
+        watcher_task = asyncio.create_task(watcher())
+        await started.wait()
+        manager._session_expiry_tasks["sid"] = watcher_task
+        manager.close_by_session_id = AsyncMock(return_value=0)
+        manager.schedule_close_by_session_id("sid")
+        await asyncio.gather(*list(manager._session_close_tasks))
+        with pytest.raises(asyncio.CancelledError):
+            await watcher_task
+        assert retired.is_set()
+        manager.close_by_session_id.assert_awaited_once_with("sid")
+
+    async def test_session_close_failure_is_bounded_cleanup(self):
+        manager = WebSocketManager(_bot())
+        class Socket:
+            pass
+
+        ws = Socket()
+        ws._odin_session_id = "sid"
+        ws.close = AsyncMock(side_effect=RuntimeError("peer gone"))
+        manager._clients.add(ws)
+        manager._log_subscribers.add(ws)
+        manager._event_subscribers.add(ws)
+        assert await manager.close_by_session_id("sid") == 1
+        assert ws not in manager._clients
+        assert ws not in manager._log_subscribers
+        assert ws not in manager._event_subscribers
+
     async def test_idle_managed_socket_expires_without_inbound_traffic(self):
         from src.health.server import SessionManager
 

@@ -106,6 +106,35 @@ class TestCloseAll:
         manager = _manager_with([])
         assert await manager.close_all() == 0
 
+    async def test_chat_and_session_close_tasks_are_owned_to_completion(self):
+        manager = _manager_with([])
+        chat_started = asyncio.Event()
+        chat_retired = asyncio.Event()
+        close_finished = asyncio.Event()
+
+        async def chat_owner():
+            chat_started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                chat_retired.set()
+
+        async def close_owner():
+            await asyncio.sleep(0)
+            close_finished.set()
+            return 0
+
+        chat_task = asyncio.create_task(chat_owner())
+        close_task = asyncio.create_task(close_owner())
+        await chat_started.wait()
+        manager._chat_tasks.add(chat_task)
+        manager._session_close_tasks.add(close_task)
+        assert await manager.close_all() == 0
+        assert chat_retired.is_set()
+        assert close_finished.is_set()
+        assert chat_task.done()
+        assert close_task.done()
+
     async def test_session_expiry_watchers_are_cancelled_and_awaited(self):
         manager = _manager_with([])
         started = asyncio.Event()
