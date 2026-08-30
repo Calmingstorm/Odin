@@ -194,12 +194,17 @@ const App = {
             <span>Quick jump</span><kbd>Ctrl K</kbd>
           </button>
         </div>
-        <transition name="ws-toast">
-          <div v-if="wsToast" class="ws-toast" :class="'ws-toast-' + wsToast.level" role="status" aria-live="assertive">
-            {{ wsToast.text }}
-          </div>
-        </transition>
       </aside>
+
+      <!-- Outside the aside on purpose: the mobile sidebar is translated
+           off-canvas, and a transformed ancestor becomes the containing
+           block for position:fixed — a toast mounted inside it renders
+           off-screen with the rail (audit 4.1). -->
+      <transition name="ws-toast">
+        <div v-if="wsToast" class="ws-toast" :class="'ws-toast-' + wsToast.level" role="status" aria-live="assertive">
+          {{ wsToast.text }}
+        </div>
+      </transition>
 
       <div v-if="mobileOpen" class="mobile-scrim" @click="mobileOpen = false" aria-hidden="true"></div>
 
