@@ -152,6 +152,27 @@ class TestCalibrationReleaseTotality:
         h.manager._release_calibration(tr.TurnKey("discord", "c", "m"))
 
 
+    async def test_rebuild_author_mismatch_is_terminal_and_releases(self, tmp_path):
+        from tests.fakes.discord_objects import FakeAuthor
+
+        h, original = await suspend_turn(tmp_path)
+        key = tr.TurnKey("discord", str(original.channel.id), str(original.id))
+        row = h.store.load_resumable_sync(key)
+        assert row is not None
+        h.messages[(str(original.channel.id), str(original.id))] = FakeMessage(
+            original.content,
+            author=FakeAuthor(id=999999, name="intruder"),
+            channel=original.channel,
+        )
+
+        rebuilt, message, reason = await h.manager._validate_and_rebuild(key, row)
+
+        assert rebuilt is None and message is None
+        assert reason == "the original author no longer matches"
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
+        assert h.released_workloads == [key]
+
+
 class TestExplicitResume:
     async def test_resume_completes_preserved_work_with_continuity(self, tmp_path):
         h, original = await suspend_turn(tmp_path)
