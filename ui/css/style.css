@@ -4833,3 +4833,9 @@ a:focus-visible {
 .ts-op-list { display: flex; flex-wrap: wrap; gap: 0.35rem; margin-top: 0.45rem; }
 .ts-op { font-size: var(--hm-text-xs); color: var(--hm-text-muted); border: 1px solid var(--hm-border); border-radius: 4px; padding: 0.1rem 0.4rem; overflow-wrap: anywhere; }
 .ts-op-alert { color: var(--hm-warning); border-color: rgba(217, 119, 6, 0.45); }
+
+/* ---- Schedule detail band (deep-dive 4.5) ---- */
+.sched-detail-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--hm-space-3); align-content: start; }
+@media (min-width: 768px) { .sched-detail-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); } }
+.sched-detail-grid > div { display: grid; align-content: start; gap: 0.3rem; min-width: 0; }
+.sched-detail-label { color: var(--hm-text-muted); font-size: var(--hm-text-xs); line-height: 1; }
