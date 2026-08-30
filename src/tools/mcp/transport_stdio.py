@@ -95,10 +95,20 @@ class StdioTransport:
         self._closed_fired = False
         self._closing = False
         self._shutdown_task: asyncio.Task[None] | None = None
+        # True exactly when the closure cause was a clean stdout EOF with
+        # no earlier malformed/oversized frame. The era probe reads this
+        # typed signal; a protocol-faulted stream never earns compatibility
+        # respawn merely because the process later exits.
+        self.closed_by_eof = False
 
     @property
     def running(self) -> bool:
         return self._process is not None and self._process.returncode is None
+
+    @property
+    def returncode(self) -> int | None:
+        """Child exit status if it has exited (diagnostics only)."""
+        return self._process.returncode if self._process else None
 
     @property
     def pid(self) -> int | None:
@@ -173,14 +183,20 @@ class StdioTransport:
     async def _pump_stdout(self) -> None:
         assert self._process and self._process.stdout
         reason = "server closed its output stream"
+        eof = False
+        protocol_faulted = False
         try:
             while True:
                 try:
                     line = await self._process.stdout.readline()
                 except (ValueError, asyncio.LimitOverrunError):
+                    protocol_faulted = True
                     reason = f"stdout line exceeded {MAX_STDOUT_LINE_BYTES} bytes"
                     break
                 if not line:
+                    # Clean stdout EOF — the ONE closure cause the era probe
+                    # may treat as a die-on-unknown-method legacy server.
+                    eof = True
                     break
                 stripped = line.strip()
                 if not stripped:
@@ -190,6 +206,7 @@ class StdioTransport:
                         stripped, negotiated_version=self._negotiated_version()
                     )
                 except MCPProtocolError as e:
+                    protocol_faulted = True
                     log.warning("MCP %s: dropping stdout line: %s", self.server_name, e)
                     continue
                 for msg in messages:
@@ -203,6 +220,7 @@ class StdioTransport:
             log.exception("MCP %s: stdout pump error", self.server_name)
             reason = f"stdout pump error: {e.__class__.__name__}"
         finally:
+            self.closed_by_eof = eof and not protocol_faulted
             self._fire_closed(reason)
 
     async def _pump_stderr(self) -> None:

@@ -23,6 +23,14 @@ class MCPConnectError(MCPError):
     negotiation, or the initialize handshake. Retryable by reconnect."""
 
 
+class MCPStdioEOFError(MCPConnectError):
+    """Typed classification: the stdio server closed stdout (unexpected
+    EOF). Raised into pending futures so the era probe can distinguish a
+    die-on-unknown-method strict-legacy server (grants exactly one
+    fresh-process legacy attempt) from every other transport failure —
+    never by exception-text matching."""
+
+
 class MCPPreWriteError(MCPConnectError):
     """A tool request was rejected locally before any bytes could be written."""
 

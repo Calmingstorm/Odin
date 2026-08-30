@@ -33,7 +33,14 @@ from typing import Any
 
 from ...odin_log import get_logger
 from . import protocol as proto
-from .errors import MCPConnectError, MCPError, MCPPreWriteError, MCPProtocolError, MCPTimeoutError
+from .errors import (
+    MCPConnectError,
+    MCPError,
+    MCPPreWriteError,
+    MCPProtocolError,
+    MCPStdioEOFError,
+    MCPTimeoutError,
+)
 from .outcomes import (
     OUTCOME_FAILED,
     OUTCOME_OK,
@@ -214,8 +221,11 @@ class MCPServerConnection:
 
     # -------------------------- stdio ---------------------------------
 
-    async def _connect_stdio(self) -> None:
-        transport = StdioTransport(
+    def _new_stdio_transport(self) -> StdioTransport:
+        """One construction site for every stdio transport this connection
+        spawns — the initial probe process and the compatibility respawn
+        must be built identically (env allowlist, cwd, pumps, callbacks)."""
+        return StdioTransport(
             self.name,
             self.command,
             self.args,
@@ -225,6 +235,9 @@ class MCPServerConnection:
             on_closed=self._on_transport_closed,
             negotiated_version=lambda: self.negotiated_version,
         )
+
+    async def _connect_stdio(self) -> None:
+        transport = self._new_stdio_transport()
         self._stdio = transport
         try:
             await transport.start()
@@ -240,6 +253,15 @@ class MCPServerConnection:
                 reply = await self._stdio_roundtrip(probe_id, probe, _PROBE_TIMEOUT)
             except MCPTimeoutError:
                 reply = None  # silence ⇒ legacy probe outcome
+            except MCPStdioEOFError:
+                # A strict legacy server closed stdout and exited on the
+                # unknown probe (die-on-unknown-method class — Uncraftbar's
+                # field report). Ambiguous, NOT era evidence: retire the
+                # first process completely, then grant exactly one
+                # fresh-process legacy attempt. Era is established only if
+                # that initialize returns a valid supported result.
+                await self._respawn_probe_casualty_for_legacy(transport)
+                return
             if reply is not None and "result" in reply:
                 self._adopt_modern(reply["result"])
                 return
@@ -255,9 +277,46 @@ class MCPServerConnection:
             # Any other error or timeout: legacy fallback.
             await self._initialize_legacy_stdio()
         except BaseException:
-            self._stdio = None
-            await transport.shutdown()
+            # Reap the ACTIVE transport: after a compatibility respawn the
+            # local ``transport`` is the phase-one corpse — cleaning up only
+            # that would leak the replacement child.
+            active, self._stdio = self._stdio, None
+            if active is not None:
+                await active.shutdown()
             raise
+
+    async def _respawn_probe_casualty_for_legacy(self, dead: StdioTransport) -> None:
+        """The one-shot compatibility respawn for servers that die on the
+        era probe. Fully retires the first process group (bounded), starts
+        exactly one fresh identical transport, and runs the legacy
+        initialize on it. Any failure raises ONE bounded error naming both
+        phases (exit status only — never command, environment, or stderr);
+        cancellation propagates unchanged."""
+        # A phase-one server request may have created an asynchronous -32601
+        # reply. Cancel it before shutdown can block on a task waiting to
+        # write to the dying process; each reply is also bound to the
+        # transport that originated its request.
+        await self._cancel_server_reply_tasks()
+        await dead.shutdown()
+        exit_status = dead.returncode
+        # Retire phase one's loss before phase two starts. A later closure
+        # from the replacement may then set a fresh, truthful error without
+        # being overwritten after its handshake.
+        self._lost_reason = None
+        fresh = self._new_stdio_transport()
+        self._stdio = fresh
+        try:
+            await fresh.start()
+            await self._initialize_legacy_stdio()
+        except Exception as e:
+            detail = _clean_text(str(e), 200) if isinstance(e, MCPError) else e.__class__.__name__
+            suffix = (
+                f" (first process exit status {exit_status})" if exit_status is not None else ""
+            )
+            raise MCPConnectError(
+                f"{self.name}: server/discover ended by unexpected stdio EOF{suffix}; "
+                f"fresh legacy initialization failed: {detail}"
+            ) from e
 
     async def _initialize_legacy_stdio(self) -> None:
         req_id = next(self._ids)
@@ -325,7 +384,9 @@ class MCPServerConnection:
         elif kind == proto.KIND_NOTIFICATION:
             self._handle_notification(msg)
         elif kind == proto.KIND_REQUEST:
-            self._handle_server_request(msg, channel="stdio")
+            # Capture the originating transport now. A delayed phase-one
+            # reply must never follow self._stdio to a respawned process.
+            self._handle_server_request(msg, channel="stdio", stdio_transport=self._stdio)
 
     # --------------------------- HTTP ----------------------------------
 
@@ -564,7 +625,13 @@ class MCPServerConnection:
         else:
             log.debug("MCP %s: notification %s", self.name, method)
 
-    def _handle_server_request(self, msg: dict, *, channel: str) -> None:
+    def _handle_server_request(
+        self,
+        msg: dict,
+        *,
+        channel: str,
+        stdio_transport: StdioTransport | None = None,
+    ) -> None:
         """Legacy servers may initiate requests (sampling/roots/elicitation).
         We support none of those capabilities: answer -32601 on the correct
         channel instead of silently dropping (a dropped request hangs the
@@ -592,11 +659,20 @@ class MCPServerConnection:
             )
             return
         task = asyncio.get_running_loop().create_task(
-            self._send_reply(reply, channel),
+            self._send_reply(reply, channel, stdio_transport=stdio_transport),
             name=f"mcp-server-reply-{self.name}",
         )
         self._server_reply_tasks.add(task)
         task.add_done_callback(self._server_reply_tasks.discard)
+
+    async def _cancel_server_reply_tasks(self) -> None:
+        """Cancel and reap replies owned by a transport being retired."""
+        while self._server_reply_tasks:
+            tasks = tuple(self._server_reply_tasks)
+            for task in tasks:
+                task.cancel()
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._server_reply_tasks.difference_update(tasks)
 
     async def _drain_server_reply_tasks(self) -> None:
         tasks = tuple(self._server_reply_tasks)
@@ -613,11 +689,18 @@ class MCPServerConnection:
             except (asyncio.CancelledError, Exception):
                 pass
 
-    async def _send_reply(self, reply: dict, channel: str) -> None:
+    async def _send_reply(
+        self,
+        reply: dict,
+        channel: str,
+        *,
+        stdio_transport: StdioTransport | None = None,
+    ) -> None:
         try:
-            if channel == "stdio" and self._stdio is not None:
-                await self._stdio.send(reply)
-            elif self._http is not None:
+            if channel == "stdio":
+                if stdio_transport is not None:
+                    await stdio_transport.send(reply)
+            elif channel == "http" and self._http is not None:
                 await self._http.post(
                     reply,
                     protocol_version=self.negotiated_version,
@@ -630,7 +713,13 @@ class MCPServerConnection:
         was_connected = self.connected
         self.connected = False
         self._lost_reason = reason
-        self._fail_pending(MCPConnectError(f"{self.name}: {reason}"))
+        # Typed classification for pending waiters: only a clean stdout EOF
+        # (the transport's flag, set before this callback fires) raises the
+        # subtype the era probe may treat as a die-on-unknown-method legacy
+        # server. Every other closure stays the plain connect error.
+        eof = bool(self._stdio is not None and getattr(self._stdio, "closed_by_eof", False))
+        exc_type = MCPStdioEOFError if eof else MCPConnectError
+        self._fail_pending(exc_type(f"{self.name}: {reason}"))
         if was_connected and self._on_connection_lost is not None:
             try:
                 self._on_connection_lost(reason)
