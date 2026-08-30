@@ -186,13 +186,52 @@ def _observer_clamp(observer, model) -> int | None:
         return None
 
 
-def _generation_budget_snapshot(cfg, client, resolved_model, compressor, observer=None):
+def _agent_scope(agent_id: str | None):
+    """This agent's own calibration lineage.
+
+    Keyed on the INDIVIDUAL agent id, never ``root_id``: a child agent has its
+    own message history, so importing a parent's density would republish one
+    workload's measurement to another. Once a child's result lands in the
+    parent's messages, the parent's next accepted generation measures the
+    resulting payload itself.
+    """
+    from ...llm.context_budget import WorkloadScope
+
+    return WorkloadScope("agent", str(agent_id)) if agent_id else None
+
+
+def _observer_density(observer, scope, model) -> int | None:
+    """Total density lookup — a broken observer never breaks a spawn."""
+    if observer is None or not model or scope is None:
+        return None
+    try:
+        return observer.density_for(scope, model)
+    except Exception:
+        log.exception("density_for failed (non-fatal); treating as uncalibrated")
+        return None
+
+
+def _generation_budget_snapshot(
+    cfg,
+    client,
+    resolved_model,
+    compressor,
+    observer=None,
+    *,
+    is_codex: bool | None = None,
+    scope=None,
+):
     """The frozen generation's budget snapshot, from the SAME identity capture
     as the request (collision-gated: non-Codex clients get unknown-model
     math regardless of what their model is named)."""
     from ...llm.context_budget import snapshot_for_codex_config
 
-    if hasattr(client, "reasoning_effort"):
+    if is_codex is None:
+        # Compatibility callers predate immutable serving identities; their
+        # client shape remains the conservative fallback. Production passes
+        # the captured provider decision explicitly below.
+        is_codex = hasattr(client, "reasoning_effort")
+    if is_codex:
         model_for_budget = resolved_model or getattr(client, "model", None)
     else:
         model_for_budget = None
@@ -201,6 +240,7 @@ def _generation_budget_snapshot(cfg, client, resolved_model, compressor, observe
         getattr(cfg, "openai_codex", None),
         max_context_chars=(getattr(compressor, "max_context_chars", None) if compressor else None),
         observed_clamp=_observer_clamp(observer, model_for_budget),
+        density_milli=_observer_density(observer, scope, model_for_budget),
     )
 
 
@@ -225,6 +265,7 @@ def _capture_agent_generation_plan(
     model_override: str | None,
     effort_override: str | None,
     observer=None,
+    agent_id_cell=None,
 ) -> dict:
     """Capture one immutable agent-generation identity and budget plan.
 
@@ -258,23 +299,36 @@ def _capture_agent_generation_plan(
         effective_effort = getattr(client, "reasoning_effort", None)
     if effective_effort is None and hasattr(client, "reasoning_effort"):
         raise ValueError("Codex client has no resolved reasoning effort")
+    # Provider identity, captured beside this generation's client/model,
+    # is authoritative. Model names and Codex-shaped client attributes are
+    # not evidence that a non-Codex response carries Codex usage semantics.
+    is_codex = provider == "codex" and client is not None
+    workload_scope = _agent_scope(
+        agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
+    )
     return {
         "provider": provider,
         "client": client,
         "effort": effective_effort,
         "model": resolved_model,
+        # Predictive pre-send admission is Codex-only: no other provider
+        # supplies the accepted-token evidence contract calibration needs.
+        "is_codex": is_codex,
+        "workload_scope": workload_scope,
         "snapshot": _generation_budget_snapshot(
             cfg,
             client,
             resolved_model,
             get_compressor(),
             observer=observer,
+            scope=workload_scope,
+            is_codex=is_codex,
         ),
     }
 
 
 def _make_budget_snapshot_provider(
-    get_config, get_client, get_compressor, model_override, observer=None
+    get_config, get_client, get_compressor, model_override, observer=None, agent_id_cell=None
 ):
     """Per-generation context-budget snapshot for a spawned agent.
 
@@ -311,6 +365,11 @@ def _make_budget_snapshot_provider(
                 getattr(compressor, "max_context_chars", None) if compressor else None
             ),
             observed_clamp=_observer_clamp(observer, model_for_budget),
+            density_milli=_observer_density(
+                observer,
+                _agent_scope(agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None),
+                model_for_budget,
+            ),
         )
 
     return provider
@@ -324,19 +383,74 @@ def _make_evidence_recorder(observer):
     if observer is None:
         return None
 
-    async def recorder(overflow, response):
+    async def recorder(
+        overflow,
+        response,
+        rejected_attempt=None,
+        accepted_chars=None,
+        accepted_images=None,
+        workload_scope=None,
+    ):
         try:
             if isinstance(response, dict):
+                # Accepted-response provenance is authoritative. A non-Codex
+                # provider may use a Codex-looking model slug and expose token
+                # counts; neither makes it Codex window evidence.
+                if response.get("provider") != "codex":
+                    return
                 from types import SimpleNamespace
 
                 response = SimpleNamespace(
                     account_key=response.get("account_key"),
                     server_input_tokens=response.get("server_input_tokens"),
+                    provenance_provider=response.get("provider"),
                     provenance_model=response.get("model"),
                 )
-            await observer.record_rescue(overflow=overflow, response=response)
+            elif getattr(response, "provenance_provider", None) != "codex":
+                return
+            await observer.record_rescue(
+                overflow=overflow,
+                response=response,
+                rejected_attempt=rejected_attempt,
+                accepted_chars=accepted_chars,
+                accepted_images=accepted_images,
+                workload_scope=workload_scope,
+            )
         except Exception:
             log.exception("agent window-evidence recording failed (non-fatal)")
+
+    return recorder
+
+
+def _make_density_recorder(observer, agent_id_cell=None):
+    """Adapter folding one accepted agent request into the density EMA.
+
+    The agent callback returns a plain dict, so provenance and usage are
+    lifted out here. Total — calibration never disturbs a succeeded request.
+    """
+    if observer is None:
+        return None
+
+    def recorder(response, chars_sent, images_sent):
+        try:
+            if not isinstance(response, dict):
+                return
+            # Immutable response provenance is the authority. A non-Codex
+            # provider may legally use a Codex-looking model slug and may even
+            # expose a token count; neither may contaminate Codex calibration.
+            if response.get("provider") != "codex":
+                return
+            observer.record_density(
+                scope=_agent_scope(
+                    agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
+                ),
+                model=response.get("model"),
+                chars_sent=chars_sent,
+                images_sent=images_sent,
+                server_input_tokens=response.get("server_input_tokens"),
+            )
+        except Exception:
+            log.exception("agent density recording failed (non-fatal)")
 
     return recorder
 
@@ -957,8 +1071,10 @@ class AgentTaskTools:
                 model_override=model_override,
                 effort_override=effort_override,
                 observer=self._window_observer,
+                agent_id_cell=_self_id,
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
+            density_recorder=_make_density_recorder(self._window_observer, _self_id),
         )
 
         if agent_id.startswith("Error"):
@@ -1267,7 +1383,7 @@ class AgentTaskTools:
             context_compression_enabled=bool(cc),
             max_context_chars=cc.resolved_max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
-            generation_plan_provider_factory=lambda mo, eo: (
+            generation_plan_provider_factory=lambda mo, eo, cell: (
                 lambda: _capture_agent_generation_plan(
                     self._get_config,
                     lambda config: _gateway_serving_for_config(self._llm_gateway, config),
@@ -1275,9 +1391,13 @@ class AgentTaskTools:
                     model_override=mo,
                     effort_override=eo,
                     observer=self._window_observer,
+                    agent_id_cell=cell,
                 )
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
+            density_recorder_factory=lambda cell: _make_density_recorder(
+                self._window_observer, cell
+            ),
         )
 
         # Format response

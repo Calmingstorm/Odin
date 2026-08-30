@@ -104,6 +104,8 @@ class LoopAgentBridge:
         budget_snapshot_provider_factory=None,
         generation_plan_provider_factory=None,
         evidence_recorder=None,
+        density_recorder=None,
+        density_recorder_factory=None,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
@@ -212,12 +214,20 @@ class LoopAgentBridge:
                     if budget_snapshot_provider_factory is not None
                     else None
                 ),
+                # Each loop-spawned agent is its OWN calibration workload:
+                # the per-agent id cell goes into the factories so a fleet
+                # member's density never lands on a sibling.
                 generation_plan_provider=(
-                    generation_plan_provider_factory(model_override, effort_override)
+                    generation_plan_provider_factory(model_override, effort_override, _self_id)
                     if generation_plan_provider_factory is not None
                     else None
                 ),
                 evidence_recorder=evidence_recorder,
+                density_recorder=(
+                    density_recorder_factory(_self_id)
+                    if density_recorder_factory is not None
+                    else density_recorder
+                ),
             )
 
             if not agent_id.startswith("Error"):

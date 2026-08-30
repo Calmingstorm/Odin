@@ -33,6 +33,7 @@ class Housekeeping:
         channel_logger,
         fts_index,
         turn_store=None,
+        window_observer=None,
     ) -> None:
         self._get_config = get_config
         self._sessions = sessions
@@ -44,6 +45,7 @@ class Housekeeping:
         self._channel_logger = channel_logger
         self._fts_index = fts_index
         self._turn_store = turn_store
+        self._window_observer = window_observer
 
     def cleanup_stale(self) -> None:
         """Remove stale entries from per-channel caches to prevent memory leaks.
@@ -118,7 +120,15 @@ class Housekeeping:
                     payload_retention_days=getattr(ts, "payload_retention_days", 7.0),
                     ledger_retention_days=getattr(ts, "ledger_retention_days", 90.0),
                 )
-                if any(swept.values()):
+                expired_keys = swept.get("expired_turn_keys") or []
+                if self._window_observer is not None:
+                    from ..llm.context_budget import chat_workload_scope
+
+                    for source, channel_id, message_id in expired_keys:
+                        scope = chat_workload_scope(source, channel_id, message_id)
+                        if scope is not None:
+                            self._window_observer.release_workload(scope)
+                if any(value for key, value in swept.items() if key != "expired_turn_keys"):
                     log.info("Turn-state TTL sweep: %s", swept)
             except Exception:
                 pass

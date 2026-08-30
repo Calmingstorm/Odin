@@ -223,6 +223,45 @@ def _structural_envelope_end(messages: list[dict]) -> int:
 # ------------------------------------------------------------------
 
 
+def estimate_message_images(messages: list[dict]) -> int:
+    """Count image blocks that actually reach the wire, for token estimation.
+
+    Characters are blind to images: a screenshot carries real tokens and
+    almost no characters, so ``estimate_message_chars`` cannot see it at all.
+    This counter supplies the missing term.
+
+    SEMANTIC PARITY with ``CodexChatClient._convert_messages_with_tools``,
+    deliberately NOT raw block-count identity (settled with Odin 2026-08-30):
+
+    - base64 source with non-empty ``data``  → serialized AND counted
+    - base64 source with empty ``data``      → serialized but NOT counted:
+      structurally wire-real, yet it carries no image payload worth charging
+      a full surcharge for
+    - non-base64 / malformed source          → not serialized, not counted
+    - image nested inside ``tool_result``    → the converter flattens
+      tool_result content to TEXT ONLY, so nested images never reach the
+      wire; counting them would fabricate cost
+
+    The converter is not "fixed" here — if nested images ever become
+    transmissible, that change and this counter move together.
+    """
+    total = 0
+    for msg in messages:
+        content = msg.get("content")
+        if not isinstance(content, list):
+            continue
+        for block in content:
+            if not isinstance(block, dict) or block.get("type") != "image":
+                continue
+            source = block.get("source")
+            if not isinstance(source, dict) or source.get("type") != "base64":
+                continue
+            data = source.get("data")
+            if isinstance(data, str) and data:
+                total += 1
+    return total
+
+
 def estimate_message_chars(messages: list[dict]) -> int:
     """Estimate total character payload across a message list."""
     total = 0

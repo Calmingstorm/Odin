@@ -2012,3 +2012,32 @@ class TestAgentErrorTextSanitized:
 
         await _call_llm_with_recovery(agent, iter_cb, "sys", [])
         assert agent.error == "LLM error: ValueError"
+
+
+def test_periodic_removal_releases_calibration_even_if_delayed_cleanup_is_cancelled():
+    """Release belongs to _remove_agent, the single owner-removal point."""
+    from src.agents.manager import AgentInfo, AgentManager
+
+    class Observer:
+        def __init__(self):
+            self.released = []
+
+        def release_workload(self, scope):
+            self.released.append(scope)
+
+    manager = AgentManager()
+    observer = Observer()
+    manager.set_calibration_observer(observer)
+    agent = AgentInfo(
+        id="done-agent",
+        label="done",
+        goal="g",
+        channel_id="c",
+        requester_id="u",
+        requester_name="u",
+    )
+    manager._agents[agent.id] = agent
+    manager._remove_agent(agent.id, source="periodic")
+    assert [(s.surface_kind, s.workload_id) for s in observer.released] == [
+        ("agent", "done-agent")
+    ]

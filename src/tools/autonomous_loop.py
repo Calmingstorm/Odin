@@ -82,6 +82,20 @@ class LoopManager:
     def __init__(self, agents_enabled: bool = False) -> None:
         self._loops: dict[str, LoopInfo] = {}
         self._agents_enabled = agents_enabled
+        # Installed by the composition root after WindowObserver construction.
+        # The loop owner invokes it exactly when the loop task settles, not an
+        # hour later when the historical LoopInfo row is pruned.
+        self._calibration_releaser: Callable[[str], None] | None = None
+
+    def set_calibration_releaser(self, releaser: Callable[[str], None] | None) -> None:
+        self._calibration_releaser = releaser
+
+    def _release_calibration(self, loop_id: str) -> None:
+        try:
+            if self._calibration_releaser is not None:
+                self._calibration_releaser(loop_id)
+        except Exception:
+            log.exception("loop calibration release failed (non-fatal)")
 
     @property
     def active_count(self) -> int:
@@ -474,6 +488,8 @@ class LoopManager:
                 )
             except Exception:
                 pass
+        finally:
+            self._release_calibration(info.id)
 
     def _build_iteration_prompt(self, info: LoopInfo) -> str:
         """Build the prompt for a single loop iteration."""

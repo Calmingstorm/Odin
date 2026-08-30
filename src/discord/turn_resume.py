@@ -37,7 +37,7 @@ from typing import Any
 from ..odin_log import get_logger
 from ..turn_state.codec import compute_content_digest, restore_field_values
 from ..turn_state.durability import TurnDurability
-from ..turn_state.store import OpState, TurnKey, TurnStateStore
+from ..turn_state.store import OpState, TurnKey, TurnStateStore, TurnStatus
 from .tool_loop import CHAT_POLICY, ToolLoopRunner, _ChatTurn
 
 log = get_logger("turn_resume")
@@ -67,6 +67,7 @@ class TurnResumeManager:
         auto_resume_enabled: bool = True,
         resume_ttl_hours: float = 24.0,
         get_bot_user: Callable | None = None,
+        release_workload: Callable | None = None,
     ) -> None:
         self._store = store
         self._tool_loop = tool_loop
@@ -82,7 +83,15 @@ class TurnResumeManager:
         self._resume_ttl_hours = resume_ttl_hours
         # Live root (None-tolerant): the bot user exists only after login.
         self._get_bot_user = get_bot_user
+        self._release_workload = release_workload
         self._waiters: dict[TurnKey, asyncio.Task] = {}
+
+    def _release_calibration(self, key: TurnKey) -> None:
+        try:
+            if self._release_workload is not None:
+                self._release_workload(key)
+        except Exception:
+            log.exception("resumed-turn calibration release failed (non-fatal)")
 
     # ── queries ──────────────────────────────────────────────────────
 
@@ -341,6 +350,13 @@ class TurnResumeManager:
         )
         row = await asyncio.to_thread(self._store.load_resumable_sync, key)
         if row is None:
+            # load_resumable can return None because the payload self-healed
+            # to a terminal rejection OR because another resumer acquired the
+            # still-live owner. Only a terminal/absent owner releases lineage;
+            # racing an ACTIVE winner must not erase its calibration.
+            current_status = await asyncio.to_thread(self._store.turn_status_sync, key)
+            if current_status is None or current_status in TurnStatus.TERMINAL:
+                self._release_calibration(key)
             # row_summary established preserved work moments ago; the
             # detailed load coming back empty means it just became
             # unresumable (corrupt payload self-healed to rejected, another
@@ -379,6 +395,7 @@ class TurnResumeManager:
                 self._store.reject_resumable_sync, key,
                 f"{len(unresolved)} unresolved operation(s) — manual resolution",
             )
+            self._release_calibration(key)
             log.warning(
                 "Resume of %s halted: %d unresolved op(s) (%d moved to manual)",
                 key, len(unresolved), moved,
@@ -415,17 +432,20 @@ class TurnResumeManager:
             await asyncio.to_thread(
                 self._store.reject_resumable_sync, key, "original message unavailable"
             )
+            self._release_calibration(key)
             return None, None, "the original message is gone"
         if str(original.author.id) != str(row.get("user_id") or ""):
             await asyncio.to_thread(
                 self._store.reject_resumable_sync, key, "author mismatch"
             )
+            self._release_calibration(key)
             return None, None, "the original author no longer matches"
         digest = compute_content_digest(getattr(original, "content", "") or "")
         if digest != (row.get("content_digest") or ""):
             await asyncio.to_thread(
                 self._store.reject_resumable_sync, key, "content edited"
             )
+            self._release_calibration(key)
             return None, None, "the original message was edited"
 
         # RECONSTRUCT BEFORE ACQUIRING (review blocker #5, PR #242): every
@@ -459,6 +479,7 @@ class TurnResumeManager:
             await asyncio.to_thread(
                 self._store.reject_resumable_sync, key, "checkpoint unreadable"
             )
+            self._release_calibration(key)
             return None, None, "the checkpoint could not be restored"
 
         cancel = self._channel_state.cancel_events.setdefault(

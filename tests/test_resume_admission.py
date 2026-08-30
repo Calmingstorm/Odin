@@ -51,6 +51,7 @@ class Harness:
         self.bot.tool_loop._turn_store = self.store
         self.bot.llm_gateway._recovery_policy_source = lambda: FAST_POLICY
         self.messages: dict[tuple[str, str], object] = {}
+        self.released_workloads = []
 
         async def fetch(channel_id: str, message_id: str):
             return self.messages.get((channel_id, message_id))
@@ -66,6 +67,7 @@ class Harness:
             tool_catalog=self.bot.tool_catalog,
             get_config=lambda: self.bot.config,
             fetch_message=fetch,
+            release_workload=self.released_workloads.append,
         )
         self.bot.tool_loop._on_turn_suspended = self.manager.on_turn_suspended
 
@@ -139,6 +141,38 @@ def heal_capacity(h, *responses):
     make_breaker_probe_ready(h)
 
 
+class TestCalibrationReleaseTotality:
+    def test_release_callback_failure_never_breaks_terminal_resolution(self, tmp_path):
+        h = Harness([], tmp_path)
+
+        def broken(_key):
+            raise RuntimeError("observer down")
+
+        h.manager._release_workload = broken
+        h.manager._release_calibration(tr.TurnKey("discord", "c", "m"))
+
+
+    async def test_rebuild_author_mismatch_is_terminal_and_releases(self, tmp_path):
+        from tests.fakes.discord_objects import FakeAuthor
+
+        h, original = await suspend_turn(tmp_path)
+        key = tr.TurnKey("discord", str(original.channel.id), str(original.id))
+        row = h.store.load_resumable_sync(key)
+        assert row is not None
+        h.messages[(str(original.channel.id), str(original.id))] = FakeMessage(
+            original.content,
+            author=FakeAuthor(id=999999, name="intruder"),
+            channel=original.channel,
+        )
+
+        rebuilt, message, reason = await h.manager._validate_and_rebuild(key, row)
+
+        assert rebuilt is None and message is None
+        assert reason == "the original author no longer matches"
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
+        assert h.released_workloads == [key]
+
+
 class TestExplicitResume:
     async def test_resume_completes_preserved_work_with_continuity(self, tmp_path):
         h, original = await suspend_turn(tmp_path)
@@ -207,6 +241,7 @@ class TestExplicitResume:
         assert "edited" in result[0]
         assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
         assert h.row()[1] is None  # payload compacted
+        assert len(h.released_workloads) == 1
 
     async def test_deleted_original_is_terminal_rejected(self, tmp_path):
         h, original = await suspend_turn(tmp_path)
@@ -215,6 +250,7 @@ class TestExplicitResume:
         assert result is not None
         assert "gone" in result[0]
         assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
+        assert len(h.released_workloads) == 1
 
     async def test_non_trigger_and_no_checkpoint_pass_through(self, tmp_path):
         h, original = await suspend_turn(tmp_path)
@@ -960,6 +996,36 @@ class TestCheckpointIntegrityRejectsSameTypeTampering:
             "UPDATE turns SET payload=?", [json.dumps(payload, sort_keys=True)]
         )
         h.store._conn.commit()
+
+    async def test_concurrent_resume_winner_keeps_workload_calibration(self, tmp_path):
+        """An ACTIVE winner still owns the lineage; the loser cannot release it."""
+        h, original = await suspend_turn(tmp_path)
+        summary = (await h.manager._latest_suspended_for_channel(str(original.channel.id)))
+        key = tr.TurnKey("discord", str(original.channel.id), str(original.id))
+        row = h.store.load_resumable_sync(key)
+        assert row is not None
+        assert h.store.acquire_resume_lease_sync(key, row["generation"]) is not None
+
+        released = []
+        h.manager._release_workload = released.append
+        result = await h.manager._explicit_resume_recognized(resume_msg(original), summary)
+
+        assert result is not None and "no longer resumable" in result[0]
+        assert h.store.turn_status_sync(key) == TurnStatus.ACTIVE
+        assert released == []
+
+    async def test_payload_self_heal_releases_terminal_lineage(self, tmp_path):
+        h, original = await suspend_turn(tmp_path)
+        summary = (await h.manager._latest_suspended_for_channel(str(original.channel.id)))
+        key = tr.TurnKey("discord", str(original.channel.id), str(original.id))
+        h.store._conn.execute("UPDATE turns SET payload=?", ['{"tampered":true}'])
+        h.store._conn.commit()
+
+        result = await h.manager._explicit_resume_recognized(resume_msg(original), summary)
+
+        assert result is not None and "no longer resumable" in result[0]
+        assert h.store.turn_status_sync(key) == TurnStatus.TERMINAL_REJECTED
+        assert h.released_workloads == [key]
 
     async def test_consumed_true_guard_flipped_false_halts_zero_generation(
         self, tmp_path

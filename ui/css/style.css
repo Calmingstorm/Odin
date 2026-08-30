@@ -4417,6 +4417,23 @@ a:focus-visible {
 .llm-budget-provenance.is-built-in { color: #94a0b0; background: rgba(126, 136, 152, 0.09); border-color: rgba(126, 136, 152, 0.18); }
 .llm-budget-provenance.is-override { color: #ccb474; background: rgba(201, 162, 78, 0.09); border-color: rgba(201, 162, 78, 0.2); }
 .llm-budget-provenance.is-clamp { color: var(--hm-warning); background: rgba(217, 119, 6, 0.1); border-color: rgba(217, 119, 6, 0.23); }
+/* Density provenance is independent of capability/clamp provenance: both can
+   be true at once, so it renders as its own chip rather than being folded
+   into the provenance string. */
+.llm-budget-density {
+  display: inline-flex;
+  align-items: center;
+  min-height: 22px;
+  margin-top: 0.18rem;
+  padding: 0.16rem 0.48rem;
+  border: 1px solid rgba(122, 162, 201, 0.2);
+  border-radius: var(--hm-radius-full);
+  color: #8fb3d1;
+  background: rgba(122, 162, 201, 0.09);
+  font-size: 0.58rem;
+  font-weight: 650;
+  white-space: nowrap;
+}
 .llm-clamp-list { padding: var(--hm-space-4); border-top: 1px solid rgba(217, 119, 6, 0.2); }
 .llm-clamp-list-heading { display: flex; align-items: center; justify-content: space-between; gap: var(--hm-space-4); margin-bottom: var(--hm-space-3); }
 .llm-clamp-list-heading > div { display: grid; gap: 0.1rem; }

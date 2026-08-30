@@ -504,3 +504,16 @@ async def test_self_stop_all_never_awaits_its_own_manager_task():
     await asyncio.wait_for(task, timeout=2)
     assert outcome == [f"Stop requested for 1 loop(s): {loop_id}"]
     assert manager._loops[loop_id].status == "stopped"
+
+
+async def test_loop_calibration_releases_when_owner_task_settles():
+    manager = LoopManager()
+    released = []
+    manager.set_calibration_releaser(released.append)
+    info = _loop_info(max_iterations=1)
+
+    async def _ok(_prompt, _channel, _prev, _cancel):
+        return "done"
+
+    await manager._run_loop(info, _SilentChannel(), _ok)
+    assert released == [info.id]

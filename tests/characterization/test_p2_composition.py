@@ -75,6 +75,23 @@ class TestTwoStageComposition:
     def test_gateway_owns_the_llm_surface(self, bot):
         assert bot.llm_gateway is bot.components.llm_gateway
 
+    def test_calibration_release_hooks_are_wired_to_owner_managers(self, bot):
+        assert bot.agent_manager._window_observer is bot.services.window_observer
+        assert bot.loop_manager._calibration_releaser is not None
+        assert bot.housekeeping._window_observer is bot.services.window_observer
+        assert bot.pipeline._turn_resume is not None
+        assert bot.pipeline._turn_resume._release_workload is not None
+
+    def test_wired_chat_release_callback_removes_exact_scope(self, bot):
+        from src.llm.context_budget import WorkloadScope
+        from src.turn_state import TurnKey
+
+        observer = bot.services.window_observer
+        scope = WorkloadScope("chat", "discord:c1:m1")
+        observer._density_milli[("chat", "discord:c1:m1", "gpt-5.6-sol")] = 609
+        bot.pipeline._turn_resume._release_workload(TurnKey("discord", "c1", "m1"))
+        assert observer.density_for(scope, "gpt-5.6-sol") is None
+
     def test_scheduler_start_wires_scheduled_events_methods(self):
         # on_ready is too heavy to drive here (guild sync); pin the spelling.
         from src.discord.client import OdinBot

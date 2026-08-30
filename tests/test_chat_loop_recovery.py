@@ -119,7 +119,7 @@ def _chat_state(messages, *, durability=None) -> SimpleNamespace:
         stuck_tracker=StuckLoopTracker(),
         wait_judgment_pending=False,
         _cancel=asyncio.Event(),
-        _trajectory=TrajectoryTurn(),
+        _trajectory=TrajectoryTurn(source="discord", channel_id="c1", message_id="r1"),
         trace=None,
         _ch_id="c1",
         _req_id="r1",
@@ -180,6 +180,21 @@ def _runner(gateway) -> ToolLoopRunner:
     runner._llm_error_done = _fake_error_done
     return runner
 
+
+
+
+async def test_non_durable_terminal_chat_releases_workload_scope():
+    runner = _runner(_Gateway(None))
+    st = _chat_state(_ENVELOPE)
+    released = []
+    runner._release_workload = released.append
+
+    async def done(_st):
+        return ("ok", False, False, [], False)
+
+    runner._run_chat_iterations = done
+    assert await runner._run_with_guards(st) == ("ok", False, False, [], False)
+    assert released == [st]
 
 class TestChatRescue:
     async def test_overflow_rescues_history_and_retries_same_identity(self):
@@ -837,8 +852,15 @@ class TestResumeIdentityReconstruction:
         )
         runner = _runner(gw)
 
-        async def record(overflow, response):
-            recorded.append((overflow, response))
+        async def record(
+            overflow,
+            response,
+            facts=None,
+            accepted_chars=None,
+            accepted_images=None,
+            workload_scope=None,
+        ):
+            recorded.append((overflow, response, facts))
 
         runner._record_window_evidence = record
         expected_latch = estimate_message_chars(st.messages)
@@ -846,11 +868,15 @@ class TestResumeIdentityReconstruction:
         assert kind == "ok"
         assert st._char_latch == expected_latch
         assert len(recorded) == 1
-        overflow, accepted = recorded[0]
+        overflow, accepted, facts = recorded[0]
         assert overflow.code == "context_length_exceeded"
         assert overflow.account_key == account
         assert overflow.server_input_tokens == 272_000
         assert accepted is response
+        # A RESUMED generation never persisted the facts that governed the
+        # rejected attempt, so they stay unknown and cannot qualify a clamp —
+        # the no-codec-v5 contract.
+        assert facts is None
         assert st._gen_identity is None and st._rescue_passes == 0
 
     async def test_missing_frozen_provider_ends_honestly(self):
@@ -1037,9 +1063,7 @@ class TestChatLatchEnforcement:
             ]
         )
         st._char_latch = 50_000
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is False
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is False
         assert st._trajectory.context_recoveries[-1]["fits"] is False
 
     def test_chat_latch_enforced_without_compressor_at_iteration_zero(self):
@@ -1062,13 +1086,9 @@ class TestChatLatchEnforcement:
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("policy failed")),
         )
         st = _chat_state(_ENVELOPE)
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is True
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is True
         st._char_latch = 50_000
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is False
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is False
 
     def test_already_fitting_latch_is_noop(self):
         gw = _Gateway(None)
@@ -1076,9 +1096,7 @@ class TestChatLatchEnforcement:
         st = _chat_state(_ENVELOPE)
         st._char_latch = 50_000
         before = list(st.messages)
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is True
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is True
         assert st.messages == before
         assert st._trajectory.context_recoveries == []
 

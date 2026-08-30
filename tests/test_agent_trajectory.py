@@ -470,6 +470,40 @@ class TestRunAgentTrajectory:
         assert entry["source"] == "agent"
 
 
+    async def test_real_agent_path_records_frozen_generation_budget(self, tmp_path):
+        from src.llm.context_budget import WorkloadScope, resolve_context_budget
+
+        saver = AgentTrajectorySaver(directory=str(tmp_path))
+        agent = AgentInfo(
+            id="budget-agent", label="budget", goal="inspect",
+            channel_id="ch1", requester_id="u1", requester_name="Alice",
+        )
+        snapshot = resolve_context_budget("gpt-5.6-sol", density_milli=609)
+
+        def plan_provider():
+            return {
+                "snapshot": snapshot,
+                "workload_scope": WorkloadScope("agent", agent.id),
+                "is_codex": True,
+            }
+
+        cb = AsyncMock(return_value={"text": "Done", "tool_calls": []})
+        await _run_agent(
+            agent=agent,
+            system_prompt="sys",
+            tools=[],
+            iteration_callback=cb,
+            tool_executor_callback=AsyncMock(return_value="ok"),
+            trajectory_saver=saver,
+            generation_plan_provider=plan_provider,
+        )
+
+        entry = await saver.find_by_agent_id(agent.id)
+        row = entry["iterations"][0]
+        assert row["context_density_milli"] == 609
+        assert row["context_density_source"] == "calibrated"
+        assert row["context_primary_chars"] == snapshot.primary_chars
+
     async def test_structured_tool_failure_and_audit_metadata_survive(self, tmp_path):
         saver = AgentTrajectorySaver(directory=str(tmp_path))
         agent = AgentInfo(

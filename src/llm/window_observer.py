@@ -44,6 +44,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 from collections.abc import Callable, Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -57,6 +58,28 @@ log = get_logger("window_observer")
 STORE_VERSION = 1
 CLAMP_TTL = timedelta(hours=24)
 DEFAULT_STORE_PATH = Path("data/context_windows.json")
+
+#: Density calibration is EPHEMERAL workload evidence, not durable capability
+#: evidence: it lives in memory only and never enters the version-1 store
+#: shape. Persisting it would demand expiry/reset semantics and a schema
+#: migration to describe something a restart can safely relearn in one turn.
+#:
+#: Asymmetric EMA (settled with Odin): dense evidence must bite on the NEXT
+#: turn, while ordinary prose must not erase the lesson just as fast. Weights
+#: are integer reciprocals so the update stays exact.
+_DENSITY_ALPHA_DOWN_RECIP = 2  # α = 1/2  — react fast toward denser content
+_DENSITY_ALPHA_UP_RECIP = 16  # α = 1/16 — relax slowly back toward sparse
+
+#: An observation is only meaningful once enough NON-image, non-envelope
+#: material is present to attribute. Image-only or envelope-dominated
+#: requests must never pin text density to the floor.
+_MIN_OBSERVABLE_CONTENT_TOKENS = 32_000
+_MIN_OBSERVABLE_CHARS = 32_000
+
+#: Bounded leak defense for workload calibration. Owners release their own
+#: scope on termination; this only catches abandoned entries, and evicting one
+#: merely returns that workload to the fixed prior.
+_MAX_WORKLOAD_SCOPES = 512
 
 #: Evidence for three pool accounts across a handful of models is a few KB;
 #: anything near this cap is not our file.
@@ -93,6 +116,48 @@ def _is_account_key(value: object) -> bool:
 
 def _positive_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
+
+
+def derive_sample_density(
+    *, chars_sent: object, images_sent: object, server_input_tokens: object
+) -> int | None:
+    """Raw observed millichars/token for ONE measured request, or None.
+
+    The single attribution authority, shared by EMA calibration and by
+    forensic clamp qualification. Attribution removes the fixed envelope and
+    the image surcharge so the remainder describes TEXT density — the only
+    thing a character measure can predict.
+
+    Returns None whenever the sample cannot support an honest observation
+    (missing/!positive usage echo, non-integer counts, too little text, or
+    an image/envelope-dominated request). None means UNKNOWN, and callers
+    must never read it as agreement.
+    """
+    from .context_budget import FIXED_ENVELOPE_RESERVE_TOKENS, IMAGE_TOKEN_SURCHARGE
+
+    if not _positive_int(server_input_tokens):
+        return None
+    if not isinstance(chars_sent, int) or isinstance(chars_sent, bool):
+        return None
+    if not isinstance(images_sent, int) or isinstance(images_sent, bool):
+        return None
+    if images_sent < 0:
+        return None
+    if chars_sent < _MIN_OBSERVABLE_CHARS:
+        return None
+    content_tokens = (
+        int(server_input_tokens)
+        - FIXED_ENVELOPE_RESERVE_TOKENS
+        - images_sent * IMAGE_TOKEN_SURCHARGE
+    )
+    if content_tokens < _MIN_OBSERVABLE_CONTENT_TOKENS:
+        return None
+    # RAW positive attribution. Do not apply the EMA/admission band here:
+    # forensic qualification needs to preserve an observed value below 400
+    # so it can veto a false clamp. ``record_density`` alone bands the value
+    # before publishing it to future admission snapshots.
+    raw = chars_sent * 1000 // content_tokens
+    return raw if raw > 0 else None
 
 
 def _empty_model_record() -> dict:
@@ -207,6 +272,14 @@ class WindowObserver:
         # composition root installs the production pool-backed provider.
         self._eligible_account_keys = eligible_account_keys
         self._state: dict = {"version": STORE_VERSION, "accounts": {}}
+        # Ephemeral WORKLOAD-LOCAL density calibration, keyed
+        # (surface_kind, workload_id, canonical_model) -> millichars/token.
+        # Never global: one job's dense content must not make every other job
+        # compact against a stranger's density. Never persisted, never in
+        # ``view()``. ``_scope_touched`` carries a monotonic last-use stamp so
+        # abandoned workloads can be evicted even if owner cleanup fails.
+        self._density_milli: dict[tuple[str, str, str], int] = {}
+        self._scope_touched: dict[tuple[str, str, str], float] = {}
         try:
             self._load_initial()
         except Exception:
@@ -411,14 +484,325 @@ class WindowObserver:
             log.exception("account_clamps failed; serving no management rows")
             return []
 
+    # ── density calibration (ephemeral) ────────────────────────────────
+
+    @staticmethod
+    def _scope_key(scope: object, model: str | None) -> tuple[str, str, str] | None:
+        """``(surface_kind, workload_id, canonical_model)`` or None.
+
+        A missing or malformed scope is NOT silently promoted to a global
+        entry — it yields None, which callers must read as "use the fixed
+        prior, record nothing". There is deliberately no omitted-scope
+        compatibility path: that is exactly how a workload sample would leak
+        back into global calibration.
+        """
+        try:
+            from .context_budget import WorkloadScope
+
+            # Exact type, not duck-typing: a scope-shaped object from
+            # elsewhere must not be able to claim a calibration lineage.
+            if type(scope) is not WorkloadScope or not scope.is_valid():
+                return None
+            canonical = canonical_codex_model(model)
+            if not canonical:
+                return None
+            return (scope.surface_kind.strip(), scope.workload_id.strip(), canonical)
+        except Exception:
+            return None
+
+    def density_for(self, scope: object, model: str | None) -> int | None:
+        """Calibrated millichars/token for THIS workload, or None for none yet.
+
+        Synchronous, disk-free and total — safe inside budget resolution.
+        None means "no local evidence", and the caller uses the fixed prior;
+        it never falls back to another workload's measurement.
+        """
+        try:
+            key = self._scope_key(scope, model)
+            if key is None:
+                return None
+            value = self._density_milli.get(key)
+            if value is not None:
+                self._scope_touched[key] = time.monotonic()
+            return value
+        except Exception:
+            log.exception("density_for failed; treating as uncalibrated")
+            return None
+
+    def release_workload(self, scope: object) -> int:
+        """Drop every model entry for a finished workload. Owner-called.
+
+        Total and idempotent: cleanup failure is not worth an exception on a
+        turn or agent that has already finished.
+        """
+        try:
+            from .context_budget import WorkloadScope
+
+            if type(scope) is not WorkloadScope or not scope.is_valid():
+                return 0
+            prefix = (scope.surface_kind.strip(), scope.workload_id.strip())
+            doomed = [k for k in self._density_milli if k[:2] == prefix]
+            for k in doomed:
+                self._density_milli.pop(k, None)
+                self._scope_touched.pop(k, None)
+            return len(doomed)
+        except Exception:
+            log.exception("release_workload failed; leaving entries for eviction")
+            return 0
+
+    def _evict_if_needed(self) -> None:
+        """Bounded leak defense. Eviction only returns a workload to the fixed
+        prior, so it is safe even when an owner's cleanup never ran."""
+        try:
+            excess = len(self._density_milli) - _MAX_WORKLOAD_SCOPES
+            if excess <= 0:
+                return
+            oldest = sorted(self._density_milli, key=lambda k: self._scope_touched.get(k, 0.0))
+            for key in oldest[:excess]:
+                self._density_milli.pop(key, None)
+                self._scope_touched.pop(key, None)
+        except Exception:
+            log.exception("density eviction failed")
+
+    def workload_calibration_summary(self) -> dict[str, dict]:
+        """Per-model OBSERVABILITY only: how many workloads are calibrated and
+        the range they span.
+
+        Deliberately not a value the API can present as a runtime target.
+        After workload-local scoping there IS no global calibrated density,
+        and substituting a minimum, average or most-recent value would assert
+        a target that no generation actually uses.
+        """
+        try:
+            out: dict[str, dict] = {}
+            for (_kind, _wid, model), value in self._density_milli.items():
+                row = out.setdefault(model, {"active_workloads": 0, "min": value, "max": value})
+                row["active_workloads"] += 1
+                row["min"] = min(row["min"], value)
+                row["max"] = max(row["max"], value)
+            return out
+        except Exception:
+            log.exception("workload_calibration_summary failed")
+            return {}
+
+    def record_density(
+        self,
+        *,
+        scope: object,
+        model: str | None,
+        chars_sent: int,
+        images_sent: int,
+        server_input_tokens: object,
+    ) -> None:
+        """Fold one accepted request's measured density into the model's EMA.
+
+        Attribution removes the fixed envelope and the image surcharge so the
+        remainder describes TEXT density, the only thing a character measure
+        can predict. Total: any unusable sample is silently skipped — a
+        calibration miss must never disturb a request that already succeeded.
+        """
+        try:
+            from .context_budget import clamp_density_milli
+
+            key = self._scope_key(scope, model)
+            if key is None:
+                # No honest owner for this sample. Recording it anywhere else
+                # would republish one workload's density to another.
+                return
+            observed = derive_sample_density(
+                chars_sent=chars_sent,
+                images_sent=images_sent,
+                server_input_tokens=server_input_tokens,
+            )
+            if observed is None:
+                return
+            prior = self._density_milli.get(key)
+            banded_observed = clamp_density_milli(observed)
+            self._scope_touched[key] = time.monotonic()
+            if prior is None:
+                self._density_milli[key] = banded_observed
+                self._evict_if_needed()
+                log.info(
+                    "context density calibrated for workload %s/%s on %s: "
+                    "%d millichars/token (%d chars, %d images, %d server tokens; raw=%d)",
+                    key[0],
+                    key[1],
+                    key[2],
+                    banded_observed,
+                    chars_sent,
+                    images_sent,
+                    server_input_tokens,
+                    observed,
+                )
+                return
+            # Asymmetric EMA. Moving DOWN (denser content than believed) is
+            # the safety direction and reacts fast; moving UP relaxes slowly
+            # so one sparse turn cannot erase a dense lesson.
+            recip = (
+                _DENSITY_ALPHA_DOWN_RECIP
+                if banded_observed < prior
+                else _DENSITY_ALPHA_UP_RECIP
+            )
+            updated = prior + (banded_observed - prior) // recip
+            if updated == prior and banded_observed != prior:
+                # Integer division stalls within one step of the target; take
+                # the single-unit step so convergence cannot deadlock.
+                updated = prior + (1 if banded_observed > prior else -1)
+            self._density_milli[key] = clamp_density_milli(updated)
+        except Exception:
+            log.exception("record_density failed; sample discarded")
+
     # ── evidence intake ───────────────────────────────────────────────
 
-    async def record_rescue(self, *, overflow: object, response: object) -> None:
+    @staticmethod
+    def _clamp_qualifies(
+        rejected_attempt: object,
+        *,
+        rejected_tokens: int | None,
+        accepted_chars: object,
+        accepted_images: object,
+        accepted_tokens: int,
+        accepted_workload_scope: object,
+    ) -> bool:
+        """Whether this rescue is affirmative evidence that the window shrank.
+
+        Prior belief alone is not enough: belief rests on a density estimate,
+        and a COLD or stale estimate can call a dense payload "within" and
+        then read its inevitable rejection as capability evidence. That is the
+        original defect surviving in a narrower band — and a cold observer is
+        the normal state after every restart.
+
+        So the rescue must also survive POST-HOC consistency. When the
+        rejection carries its own authoritative input-token echo, that direct
+        fact decides whether the rejected payload fit the frozen budget. When
+        it does not, the retry that the server accepted supplies a raw density
+        sample for this workload; re-run the rejected payload's fit verdict
+        against that fresh evidence:
+
+            qualification = min(assumed density, accepted sample density)
+            posthoc       = estimate(rejected chars/images, qualification)
+            qualifies     ⇔ posthoc still fits the believed budget
+
+        ``min`` is load-bearing: post-hoc evidence is a VETO, never permission
+        to make the rejected payload look safer than it did when sent, so a
+        sparse accepted retry cannot rehabilitate a doomed one. The raw sample
+        is used rather than the smoothed EMA — smoothing is right for future
+        admission, wrong for forensics about this specific rescue.
+
+        An unusable accepted sample leaves consistency UNKNOWN, and unknown
+        never clamps: clamp evidence must be affirmative, and the absence of
+        contradiction is not proof that capacity moved. When a real shrink
+        coincides with newly discovered density the clamp is withheld too —
+        calibration protects the next request, and a later rejection that is
+        still believed within under the corrected density can clamp then. One
+        extra overflow costs less than a false 24-hour capability claim.
+        """
+        from .context_budget import (
+            RejectedAttemptFacts,
+            clamp_density_milli,
+            estimate_request_tokens,
+            estimate_request_tokens_forensic,
+        )
+
+        # This is a durable-capability decision, not a convenience API:
+        # accept only the exact frozen facts type produced by the send path.
+        if type(rejected_attempt) is not RejectedAttemptFacts:
+            return False
+        facts = rejected_attempt
+        from .context_budget import WorkloadScope
+
+        if (
+            type(accepted_workload_scope) is not WorkloadScope
+            or not accepted_workload_scope.is_valid()
+            or type(facts.workload_scope) is not WorkloadScope
+            or not facts.workload_scope.is_valid()
+            or facts.workload_scope != accepted_workload_scope
+        ):
+            return False
+        if facts.believed_within is not True:
+            return False
+        if (
+            isinstance(facts.chars, bool)
+            or not isinstance(facts.chars, int)
+            or facts.chars < 0
+            or isinstance(facts.images, bool)
+            or not isinstance(facts.images, int)
+            or facts.images < 0
+            or not _positive_int(facts.density_milli)
+            or clamp_density_milli(facts.density_milli) != facts.density_milli
+            or not _positive_int(facts.estimated_tokens)
+            or not _positive_int(facts.effective_budget)
+        ):
+            return False
+
+        # The redundant verdict fields are an integrity check, not alternate
+        # authorities. Recompute exactly as admission did and reject any
+        # contradictory object rather than duck-typing it into evidence.
+        expected = estimate_request_tokens(
+            facts.chars,
+            facts.images,
+            density_milli=facts.density_milli,
+        )
+        if facts.estimated_tokens != expected:
+            return False
+        if facts.believed_within is not (expected <= facts.effective_budget):
+            return False
+
+        # A rejection-side server echo is direct evidence about the rejected
+        # payload itself. If it says the request exceeded the frozen believed
+        # budget, no density estimate may rehabilitate it into shrink evidence.
+        if rejected_tokens is not None:
+            return rejected_tokens <= facts.effective_budget
+
+        # Older/ordinary rejections carry no usage echo. Fall back to the
+        # accepted retry's raw workload density. Raw is load-bearing here:
+        # applying the [400,2500] EMA/admission band can turn a true 100-milli
+        # contradiction into a false clamp.
+        accepted_density = derive_sample_density(
+            chars_sent=accepted_chars,
+            images_sent=accepted_images,
+            server_input_tokens=accepted_tokens,
+        )
+        if accepted_density is None:
+            return False
+        qualification_density = min(facts.density_milli, accepted_density)
+        posthoc = estimate_request_tokens_forensic(
+            facts.chars,
+            facts.images,
+            density_milli=qualification_density,
+        )
+        return posthoc <= facts.effective_budget
+
+    async def record_rescue(
+        self,
+        *,
+        overflow: object,
+        response: object,
+        workload_scope: object = None,
+        rejected_attempt: object = None,
+        accepted_chars: object = None,
+        accepted_images: object = None,
+    ) -> None:
         """Record one overflow→compressed-retry-acceptance pair.
 
         ``overflow`` is the structural overflow error (phase-2 stamped);
         ``response`` is the SAME logical request's successful retry. Total:
         every failure logs and forfeits the observation.
+
+        ``rejected_attempt`` is the frozen ``RejectedAttemptFacts`` for the
+        payload the provider actually refused, and ``accepted_chars`` /
+        ``accepted_images`` measure the retry it accepted. Together they
+        qualify the CLAMP and nothing else — bounds, overflow counts and
+        acceptance high-water marks record regardless.
+
+        A clamp asserts "the served window shrank". That follows only when the
+        rejected payload was believed to FIT and STILL looks like it should
+        have fit once the acceptance's own density evidence is applied (see
+        ``_clamp_qualifies``). A rejection explained by density — the terra
+        case that clamped 288,499 against a 917,506 floor — proves nothing
+        about capacity and must rescue without clamping. Absent facts (a
+        resumed generation never persisted them) mean unknown, and unknown
+        never clamps.
         """
         try:
             if getattr(overflow, "code", None) != "context_length_exceeded":
@@ -463,6 +847,14 @@ class WindowObserver:
                     and reject_model
                     and reject_model == accept_model
                     and accept_tokens is not None
+                    and self._clamp_qualifies(
+                        rejected_attempt,
+                        rejected_tokens=reject_tokens,
+                        accepted_chars=accepted_chars,
+                        accepted_images=accepted_images,
+                        accepted_tokens=accept_tokens,
+                        accepted_workload_scope=workload_scope,
+                    )
                 ):
                     record = self._record_for(state, reject_key, reject_model)
                     record["clamp"] = self._merged_clamp(record.get("clamp"), accept_tokens, now)

@@ -32,13 +32,17 @@ import unicodedata
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import discord
 
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
-from ..llm.context_budget import ContextBudgetSnapshot, snapshot_for_codex_config
+from ..llm.context_budget import (
+    DEFAULT_DENSITY_MILLI,
+    ContextBudgetSnapshot,
+    snapshot_for_codex_config,
+)
 from ..llm.context_compressor import SurfaceBoundary
 from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
@@ -449,6 +453,7 @@ class _LoopTurn:
     _char_latch: int | None = None
     context_recoveries: list = field(default_factory=list)
     _iteration_index: int = 0
+    _generation_budget_snapshot: ContextBudgetSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -685,6 +690,13 @@ class ToolLoopRunner:
             except BaseException:  # noqa: BLE001 — the original error must win
                 log.warning("Durable failure mark failed (non-fatal)")
             raise
+        finally:
+            # A suspended durable turn still owns its lineage and may resume.
+            # Every other exit is terminal for this process-local owner.
+            if getattr(st.durability, "settled", False) and not getattr(
+                st.durability, "suspended", False
+            ):
+                self._release_workload(st)
 
     async def _run_chat_iterations(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
         """The chat iteration loop — every phase-method exit returns through
@@ -717,8 +729,17 @@ class ToolLoopRunner:
             if st._gen_identity:
                 budget_snapshot = self._snapshot_from_generation_facts(st._gen_identity)
             else:
-                budget_snapshot = self._capture_budget_snapshot(serving, config)
+                budget_snapshot = self._capture_budget_snapshot(serving, config, st)
             st._generation_budget_snapshot = budget_snapshot
+            trace = st.trace
+            if trace is not None:
+                density, source, primary = self._context_budget_observation(budget_snapshot)
+                trace.context_budget(
+                    generation=iteration,
+                    density_milli=density,
+                    density_source=source,
+                    primary_chars=primary,
+                )
             if not self._maybe_compress(st, serving.client, config):
                 return await self._llm_error_done(
                     st,
@@ -1011,18 +1032,302 @@ class ToolLoopRunner:
             log.exception("active_clamp failed (non-fatal); treating as unclamped")
             return None
 
-    async def _record_window_evidence(self, overflow: object, response: object) -> None:
+    @staticmethod
+    def _workload_scope(st: object) -> object | None:
+        """This turn's independent prompt lineage.
+
+        Chat uses the durable top-level request id and the loop uses its
+        loop id. Deliberately NOT the channel: a channel holds several users
+        and unrelated jobs, so channel-scoped calibration would recreate the
+        cross-workload defect at a smaller radius.
+        """
+        from ..llm.context_budget import WorkloadScope
+
+        loop_id = getattr(st, "_loop_id", None)
+        if loop_id:
+            return WorkloadScope("loop", str(loop_id))
+        from ..llm.context_budget import chat_workload_scope
+
+        trajectory = getattr(st, "_trajectory", None)
+        if trajectory is None:
+            return None
+        scope = chat_workload_scope(
+            str(getattr(trajectory, "source", "") or ""),
+            str(getattr(trajectory, "channel_id", "") or ""),
+            str(getattr(trajectory, "message_id", "") or ""),
+        )
+        if scope is not None:
+            return scope
+        # Narrow compatibility for tests/extensions that construct a
+        # trajectory-shaped object without identity. Production and restored
+        # turns always have the durable fields above. `_req_id` must never be
+        # consulted: it is a hash of message content.
+        return None
+
+    def _observed_density(self, scope: object, model: object) -> int | None:
+        """The observer's calibrated density for the NEXT generation.
+
+        Total like clamp lookup: calibration is runtime evidence, never a
+        reason to fail a request whose uncalibrated path remains usable.
+        """
+        observer = getattr(self, "_window_observer", None)
+        if observer is None or scope is None:
+            # No workload identity means no honest owner for a calibrated
+            # value; the fixed prior is correct, borrowing is not.
+            return None
+        try:
+            return observer.density_for(scope, model)
+        except Exception:
+            log.exception("density_for failed (non-fatal); treating as uncalibrated")
+            return None
+
+    def _release_workload(self, st: object) -> None:
+        """Release a terminal chat/loop owner from ephemeral calibration."""
+        observer = getattr(self, "_window_observer", None)
+        if observer is None:
+            return
+        try:
+            scope = self._workload_scope(st)
+            if scope is not None:
+                observer.release_workload(scope)
+        except Exception:
+            log.exception("workload calibration release failed (non-fatal)")
+
+    async def _record_window_evidence(
+        self,
+        overflow: object,
+        response: object,
+        rejected_attempt: object = None,
+        accepted_chars: object = None,
+        accepted_images: object = None,
+        workload_scope: object = None,
+    ) -> None:
         """Feed one rescue's overflow→acceptance pair to the observer.
 
         Total: evidence is never worth failing the request that just
-        succeeded (plan §11 invariant)."""
+        succeeded (plan §11 invariant). ``believed_within`` is the REJECTED
+        attempt's belief and is what qualifies a clamp — a rejection we
+        already predicted says nothing about the served window."""
         observer = getattr(self, "_window_observer", None)
         if observer is None or overflow is None:
             return
         try:
-            await observer.record_rescue(overflow=overflow, response=response)
+            await observer.record_rescue(
+                overflow=overflow,
+                response=response,
+                rejected_attempt=rejected_attempt,
+                accepted_chars=accepted_chars,
+                accepted_images=accepted_images,
+                workload_scope=workload_scope,
+            )
         except Exception:
             log.exception("window-evidence recording failed (non-fatal)")
+
+    @staticmethod
+    def _measure_payload(messages: list[dict]) -> tuple[int, int]:
+        """(chars, wire-real images) for the payload about to be sent."""
+        try:
+            from ..llm.context_compressor import (
+                estimate_message_chars,
+                estimate_message_images,
+            )
+
+            return estimate_message_chars(messages), estimate_message_images(messages)
+        except Exception:
+            log.exception("payload measurement failed")
+            return 0, 0
+
+    def _record_density(
+        self,
+        st: object,
+        response: object,
+        chars_sent: int,
+        images_sent: int,
+        serving_identity: object,
+    ) -> None:
+        """Fold one accepted request into the model's density calibration.
+
+        Codex-only: no other provider returns the server-authoritative
+        accepted-token echo this calibration is built on. Total — calibration
+        never disturbs a request that already succeeded."""
+        observer = getattr(self, "_window_observer", None)
+        if observer is None or not getattr(serving_identity, "is_codex", False):
+            return
+        try:
+            observer.record_density(
+                scope=self._workload_scope(st),
+                model=getattr(response, "provenance_model", None)
+                or getattr(serving_identity, "model", None),
+                chars_sent=chars_sent,
+                images_sent=images_sent,
+                server_input_tokens=getattr(response, "server_input_tokens", None),
+            )
+        except Exception:
+            log.exception("density calibration failed (non-fatal)")
+
+    @staticmethod
+    def _attempt_facts(
+        messages: list[dict], snapshot: object, serving_identity: object, workload_scope: object
+    ) -> object | None:
+        """Freeze everything this attempt's fit verdict rests on, or None.
+
+        One structured unit rather than a loose bool beside loose numbers, so
+        the verdict and the evidence behind it cannot drift apart between
+        capture and clamp qualification.
+        """
+        from ..llm.context_budget import WorkloadScope
+
+        if (
+            snapshot is None
+            or not getattr(serving_identity, "is_codex", False)
+            or type(workload_scope) is not WorkloadScope
+            or not workload_scope.is_valid()
+        ):
+            return None
+        if getattr(snapshot, "base_source", None) == "persisted":
+            return None
+        effective = getattr(snapshot, "effective_budget", 0)
+        if not isinstance(effective, int) or effective <= 0:
+            return None
+        try:
+            from ..llm.context_budget import RejectedAttemptFacts, estimate_request_tokens
+            from ..llm.context_compressor import (
+                estimate_message_chars,
+                estimate_message_images,
+            )
+
+            density = getattr(snapshot, "density_milli", DEFAULT_DENSITY_MILLI)
+            chars = estimate_message_chars(messages)
+            images = estimate_message_images(messages)
+            estimated = estimate_request_tokens(chars, images, density_milli=density)
+            return RejectedAttemptFacts(
+                chars=chars,
+                images=images,
+                density_milli=density,
+                estimated_tokens=estimated,
+                effective_budget=effective,
+                believed_within=estimated <= effective,
+                workload_scope=workload_scope,
+            )
+        except Exception:
+            log.exception("attempt fact capture failed; recording belief as unknown")
+            return None
+
+    @staticmethod
+    def _believed_within_effective_budget(
+        messages: list[dict], snapshot: object, serving_identity: object
+    ) -> bool | None:
+        """Whether this payload is believed to fit the believed WINDOW.
+
+        None means no honest belief exists (non-Codex serving, no snapshot, or
+        a persisted reconstruction whose budget fields are placeholders) and
+        can never qualify a clamp. Compares against ``effective_budget``, not
+        the utilization-derived working target: utilization is quality POLICY
+        and overflow is PHYSICS.
+        """
+        if snapshot is None or not getattr(serving_identity, "is_codex", False):
+            return None
+        if getattr(snapshot, "base_source", None) == "persisted":
+            return None
+        effective = getattr(snapshot, "effective_budget", 0)
+        if not isinstance(effective, int) or effective <= 0:
+            return None
+        try:
+            from ..llm.context_budget import estimate_request_tokens
+            from ..llm.context_compressor import (
+                estimate_message_chars,
+                estimate_message_images,
+            )
+
+            estimated = estimate_request_tokens(
+                estimate_message_chars(messages),
+                estimate_message_images(messages),
+                density_milli=getattr(snapshot, "density_milli", 2500),
+            )
+            return estimated <= effective
+        except Exception:
+            log.exception("belief estimation failed; recording belief as unknown")
+            return None
+
+    def _predictive_presend_descent(
+        self, st: Any, snapshot: object, serving_identity: object
+    ) -> int:
+        """Descend rescue rungs BEFORE sending a payload believed not to fit.
+
+        Returns the count of rungs consumed; the caller passes only the
+        REMAINING ladder to the physical-attempt loop, so pre-send and
+        post-rejection rescue share one total ladder.
+
+        Fail-OPEN by contract: any estimator or compactor failure leaves the
+        payload untouched and lets the provider decide. Accepted-latch
+        enforcement stays fail-closed elsewhere; this is prediction, not
+        proof. Skipped entirely for resumed generations, whose persisted
+        remaining ladder already governs further rejection.
+        """
+        consumed = 0
+        ladder = tuple(getattr(snapshot, "ladder", ()) or ())
+        if not ladder or not getattr(serving_identity, "is_codex", False):
+            return 0
+        if getattr(snapshot, "base_source", None) == "persisted":
+            return 0
+        try:
+            from ..llm.context_compressor import emergency_compress_for_window
+
+            while consumed < len(ladder):
+                if (
+                    self._believed_within_effective_budget(
+                        st.messages, snapshot, serving_identity
+                    )
+                    is not False
+                ):
+                    break
+                surface_boundary = getattr(st, "_boundary", None)
+                if surface_boundary is None:
+                    surface_boundary = SurfaceBoundary(
+                        request_start=getattr(st, "_boundary_request_start", 0),
+                        elided_replay=getattr(st, "_boundary_elided_replay", 0),
+                        envelope_len=getattr(st, "_boundary_envelope_len", None),
+                    )
+                compressed, report = emergency_compress_for_window(
+                    st.messages,
+                    target_chars=ladder[consumed],
+                    boundary=surface_boundary,
+                )
+                consumed += 1
+                report["attempt"] = 0
+                report["trigger"] = "predictive"
+                trajectory = getattr(st, "_trajectory", None)
+                if trajectory is not None:
+                    trajectory.context_recoveries.append(report)
+                # A no-op character rung is not a terminator: image
+                # surcharge can leave the request over its token window even
+                # when target_chars exceeds the current character count, so a
+                # lower rung may still be useful. An enlarging result remains
+                # a hard non-adoption guard.
+                if report["compressed_chars"] > report["original_chars"]:
+                    break
+                if report["compressed_chars"] == report["original_chars"]:
+                    continue
+                st.messages = compressed
+                if report.get("boundary_request_start") is not None:
+                    if getattr(st, "_boundary", None) is not None:
+                        st._boundary = SurfaceBoundary(
+                            request_start=report["boundary_request_start"],
+                            elided_replay=report["boundary_elided_replay"],
+                            envelope_len=surface_boundary.envelope_len,
+                        )
+                    else:
+                        st._boundary_request_start = report["boundary_request_start"]
+                        st._boundary_elided_replay = report["boundary_elided_replay"]
+                log.info(
+                    "predictive pre-send: rung %d compacted %d -> %d chars",
+                    consumed,
+                    report["original_chars"],
+                    report["compressed_chars"],
+                )
+        except Exception:
+            log.exception("predictive pre-send failed (non-fatal); sending as-is")
+        return consumed
 
     def _clear_active(self, st: _ChatTurn) -> None:
         self._channel_state.clear_active_request(st._ch_id, st._req_id)
@@ -1064,10 +1369,35 @@ class ToolLoopRunner:
             primary_chars=primary,
             ceiling_applied=False,
             ladder=tuple(facts.get("ladder") or ()),
+            # A resumed generation's belief cannot be reconstructed: the
+            # density in force at capture was never persisted. Placeholder
+            # budget fields plus this source marker make predictive descent
+            # and clamp qualification skip the generation honestly rather
+            # than splice CURRENT evidence into a FROZEN one.
+            density_milli=DEFAULT_DENSITY_MILLI,
+            density_source="default",
         )
 
-    def _capture_budget_snapshot(self, serving, config) -> ContextBudgetSnapshot:
-        """Capture one budget snapshot beside one serving identity."""
+    @staticmethod
+    def _context_budget_observation(snapshot: object) -> tuple[int | None, str, int | None]:
+        """Trajectory-safe frozen budget facts; persisted reconstructions stay unknown."""
+        if snapshot is None or getattr(snapshot, "base_source", None) == "persisted":
+            return None, "unknown", getattr(snapshot, "primary_chars", None)
+        density = getattr(snapshot, "density_milli", None)
+        primary = getattr(snapshot, "primary_chars", None)
+        return (
+            density if type(density) is int else None,
+            str(getattr(snapshot, "density_source", "") or "unknown"),
+            primary if type(primary) is int else None,
+        )
+
+    def _capture_budget_snapshot(self, serving, config, st=None) -> ContextBudgetSnapshot:
+        """Capture one budget snapshot beside one serving identity.
+
+        ``st`` supplies the workload scope. Without it there is no honest
+        owner for a calibrated density, so the snapshot uses the fixed prior
+        rather than borrowing another workload's measurement.
+        """
         compressor = self._get_context_compressor()
         model_for_budget = serving.model if serving.is_codex else None
         return snapshot_for_codex_config(
@@ -1075,6 +1405,7 @@ class ToolLoopRunner:
             getattr(config, "openai_codex", None),
             max_context_chars=(compressor.max_context_chars if compressor is not None else None),
             observed_clamp=self._observed_clamp(model_for_budget),
+            density_milli=self._observed_density(self._workload_scope(st), model_for_budget),
         )
 
     def _maybe_compress(
@@ -1126,6 +1457,9 @@ class ToolLoopRunner:
                         compressor.max_context_chars if compressor is not None else None
                     ),
                     observed_clamp=self._observed_clamp(model_for_budget),
+                    density_milli=self._observed_density(
+                        self._workload_scope(st), model_for_budget
+                    ),
                 )
             snapshot = budget_snapshot
             boundary = SurfaceBoundary(
@@ -1320,12 +1654,23 @@ class ToolLoopRunner:
             _snapshot = budget_snapshot
         else:
             _root_config = request_config if request_config is not None else self._get_config()
-            _snapshot = self._capture_budget_snapshot(serving_identity, _root_config)
-        _ladder: tuple[int, ...] = _snapshot.ladder
+            _snapshot = self._capture_budget_snapshot(serving_identity, _root_config, st)
+        # Predictive pre-send descent consumes a PREFIX of the frozen ladder
+        # locally, and only the remaining subset governs physical attempts.
+        # This keeps ONE total ladder without inventing fake provider
+        # attempts: st._rescue_passes and the codec's attempt records keep
+        # meaning "rejected by the provider", and a resumed generation
+        # continues its persisted remaining ladder rather than re-arming
+        # rungs pre-send already spent.
+        _presend_consumed = self._predictive_presend_descent(st, _snapshot, serving_identity)
+        _ladder: tuple[int, ...] = _snapshot.ladder[_presend_consumed:]
         _generation_deadline = time.monotonic() + deadline_seconds
         _pending_latch: int | None = None
         _rescued_this_call = False
         _last_overflow: BaseException | None = None
+        # Frozen facts for the attempt the provider actually REJECTED,
+        # captured before that attempt and paired with its own overflow.
+        _last_overflow_facts: object | None = None
         if st._gen_identity and st._rescue_passes:
             # Resume reconstructs the pending rejection from durable attempt
             # facts. The already-compressed payload is the acceptance
@@ -1347,6 +1692,13 @@ class ToolLoopRunner:
         async with _best_effort_typing(st.message.channel):
             try:
                 while True:
+                    # Captured from the exact payload this attempt sends, and
+                    # recomputed after every compaction, so a rescued retry
+                    # never inherits the rejected attempt's belief.
+                    _attempt_chars, _attempt_images = self._measure_payload(st.messages)
+                    _attempt_facts = self._attempt_facts(
+                        st.messages, _snapshot, serving_identity, self._workload_scope(st)
+                    )
                     try:
                         llm_resp = await generate_with_recovery(
                             _attempt,
@@ -1360,12 +1712,22 @@ class ToolLoopRunner:
                             cancel_event=st._cancel,
                             on_wait=_on_wait,
                         )
+                        self._record_density(
+                            st, llm_resp, _attempt_chars, _attempt_images, serving_identity
+                        )
                         if _pending_latch is not None:
                             # Server-accepted evidence (the settled latch
                             # rule); the generation is settled, so its frozen
                             # facts and rung phase reset for the next one.
                             st._char_latch = _pending_latch
-                            await self._record_window_evidence(_last_overflow, llm_resp)
+                            await self._record_window_evidence(
+                                _last_overflow,
+                                llm_resp,
+                                _last_overflow_facts,
+                                accepted_chars=_attempt_chars,
+                                accepted_images=_attempt_images,
+                                workload_scope=self._workload_scope(st),
+                            )
                         if st._gen_identity is not None or st._rescue_passes:
                             st._gen_identity = None
                             st._rescue_passes = 0
@@ -1401,6 +1763,7 @@ class ToolLoopRunner:
                         st._rescue_passes += 1
                         _rescued_this_call = True
                         _last_overflow = overflow_exc
+                        _last_overflow_facts = _attempt_facts
                         if report.get("boundary_request_start") is not None:
                             st._boundary_request_start = report["boundary_request_start"]
                             st._boundary_elided_replay = report["boundary_elided_replay"]
@@ -1550,6 +1913,9 @@ class ToolLoopRunner:
             }
             for call in iter_tool_calls
         ]
+        density, density_source, primary_chars = self._context_budget_observation(
+            getattr(st, "_generation_budget_snapshot", None)
+        )
         st._trajectory.iterations.append(
             ToolIteration(
                 iteration=st.iteration,
@@ -1563,6 +1929,9 @@ class ToolLoopRunner:
                 provider=getattr(llm_resp, "provenance_provider", "") or "",
                 model=getattr(llm_resp, "provenance_model", "") or "",
                 reasoning_effort=getattr(llm_resp, "provenance_reasoning_effort", None),
+                context_density_milli=density,
+                context_density_source=density_source,
+                context_primary_chars=primary_chars,
             )
         )
         if is_wait_iteration(iter_tool_calls):
@@ -2421,7 +2790,17 @@ class ToolLoopRunner:
             # every physical retry describe this exact client/model/effort.
             _config = self._get_config()
             _serving = _serving_identity_for(self._llm_gateway, _config)
-            _budget_snapshot = self._capture_budget_snapshot(_serving, _config)
+            _budget_snapshot = self._capture_budget_snapshot(_serving, _config, st)
+            st._generation_budget_snapshot = _budget_snapshot
+            loop_trace = getattr(st, "_trace", None)
+            if loop_trace is not None:
+                density, source, primary = self._context_budget_observation(_budget_snapshot)
+                loop_trace.context_budget(
+                    generation=_iteration,
+                    density_milli=density,
+                    density_source=source,
+                    primary_chars=primary,
+                )
             self._maybe_compress_loop(st, _serving, _config, budget_snapshot=_budget_snapshot)
             kind, val = await self._call_loop_llm(
                 st,
@@ -2608,7 +2987,7 @@ class ToolLoopRunner:
             snapshot = (
                 budget_snapshot
                 if budget_snapshot is not None
-                else self._capture_budget_snapshot(serving, config)
+                else self._capture_budget_snapshot(serving, config, st)
             )
             if (
                 compressor is not None
@@ -2704,8 +3083,12 @@ class ToolLoopRunner:
         _snapshot = (
             budget_snapshot
             if budget_snapshot is not None
-            else self._capture_budget_snapshot(serving_identity, request_config)
+            else self._capture_budget_snapshot(serving_identity, request_config, st)
         )
+        # Predictive descent consumes a ladder PREFIX before any physical
+        # attempt; only the remainder governs post-rejection rescue.
+        _presend_consumed = self._predictive_presend_descent(st, _snapshot, serving_identity)
+        _remaining_ladder: tuple[int, ...] = _snapshot.ladder[_presend_consumed:]
         # ONE monotonic deadline for the whole logical generation: the first
         # attempt runs on the policy's own budget; rescue retries pay for the
         # time already burned instead of minting a fresh window.
@@ -2713,6 +3096,7 @@ class ToolLoopRunner:
         rescue_passes = 0
         pending_latch: int | None = None
         last_overflow: BaseException | None = None
+        last_overflow_facts: object | None = None
 
         try:
             # Pre-admission fast-fail, same contract as the chat path — and
@@ -2721,6 +3105,10 @@ class ToolLoopRunner:
             # like any other failed generation instead of escaping
             # run_autonomous(). Frozen: the captured client, not live state.
             while True:
+                attempt_chars, attempt_images = self._measure_payload(st.messages)
+                attempt_facts = self._attempt_facts(
+                    st.messages, _snapshot, serving_identity, self._workload_scope(st)
+                )
                 try:
                     preflight_incompatible_effort(
                         serving_identity.client,
@@ -2738,10 +3126,20 @@ class ToolLoopRunner:
                     )
                     if cancel_event is not None and cancel_event.is_set():
                         raise asyncio.CancelledError
+                    self._record_density(
+                        st, response, attempt_chars, attempt_images, serving_identity
+                    )
                     if pending_latch is not None:
                         # Server-accepted evidence, per the settled latch rule.
                         st._char_latch = pending_latch
-                        await self._record_window_evidence(last_overflow, response)
+                        await self._record_window_evidence(
+                            last_overflow,
+                            response,
+                            last_overflow_facts,
+                            accepted_chars=attempt_chars,
+                            accepted_images=attempt_images,
+                            workload_scope=self._workload_scope(st),
+                        )
                     break
                 except Exception as overflow_exc:
                     from ..llm.errors import LLMRequestError
@@ -2750,7 +3148,7 @@ class ToolLoopRunner:
                         isinstance(overflow_exc, LLMRequestError)
                         and getattr(overflow_exc, "code", None) == "context_length_exceeded"
                     )
-                    ladder = _snapshot.ladder
+                    ladder = _remaining_ladder
                     if (
                         not is_overflow
                         or rescue_passes >= len(ladder)
@@ -2783,6 +3181,7 @@ class ToolLoopRunner:
                         )
                     pending_latch = report["compressed_chars"]
                     last_overflow = overflow_exc
+                    last_overflow_facts = attempt_facts
                     if generation_deadline - time.monotonic() <= 0:
                         # Same rule as chat: recovery deadlines bound waiting,
                         # not an admitted stream — never start a request
@@ -2826,6 +3225,9 @@ class ToolLoopRunner:
         from ..trajectories.saver import ToolIteration
 
         if st._trajectory is not None:
+            density, density_source, primary_chars = self._context_budget_observation(
+                getattr(st, "_generation_budget_snapshot", None)
+            )
             st._trajectory.iterations.append(
                 ToolIteration(
                     iteration=_iteration,
@@ -2846,6 +3248,9 @@ class ToolLoopRunner:
                     provider=getattr(response, "provenance_provider", "") or "",
                     model=getattr(response, "provenance_model", "") or "",
                     reasoning_effort=getattr(response, "provenance_reasoning_effort", None),
+                    context_density_milli=density,
+                    context_density_source=density_source,
+                    context_primary_chars=primary_chars,
                 )
             )
 

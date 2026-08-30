@@ -89,10 +89,17 @@ class TestCollector:
         c = ContextTraceCollector(max_trace_bytes=500)
         for i in range(100):
             c.segment(f"seg_{i}", decision="skipped", reason="low_relevance", tokens=10)
+            c.context_budget(
+                generation=i,
+                density_milli=609,
+                density_source="calibrated",
+                primary_chars=193_184,
+            )
         trace = c.finalize()
         assert trace["summary"]["trace_truncated"] is True
         assert trace["truncation_reason"] == "max_trace_bytes"
         assert trace["segments"] == []
+        assert trace["context_budgets"] == []
 
     def test_secret_scan_flags_leaks(self):
         c = ContextTraceCollector(memory_key_mode="raw")
@@ -366,3 +373,20 @@ class TestTrajectorySerialization:
         assert "context_trace" not in turn.to_dict()
         turn.context_trace = {"schema_version": 1}
         assert turn.to_dict()["context_trace"] == {"schema_version": 1}
+
+
+def test_context_trace_records_frozen_generation_budget_facts():
+    c = ContextTraceCollector()
+    c.context_budget(
+        generation=3,
+        density_milli=609,
+        density_source="calibrated",
+        primary_chars=193_184,
+    )
+    trace = c.finalize()
+    assert trace["context_budgets"] == [{
+        "generation": 3,
+        "density_milli": 609,
+        "density_source": "calibrated",
+        "primary_chars": 193_184,
+    }]

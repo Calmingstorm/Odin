@@ -376,6 +376,7 @@ class TestTtlSweep:
         self._age(store, KEY, progress_age_s=25 * 3600)
         out = store.ttl_sweep_sync(resume_ttl_hours=24.0)
         assert out["expired_turns"] == 1
+        assert out["expired_turn_keys"] == [(KEY.source, KEY.channel_id, KEY.message_id)]
         (status,) = _row(store, cols="status")
         assert status == TurnStatus.TERMINAL_EXPIRED
         # Diagnostic payload retained until the 7d clock.
@@ -501,6 +502,13 @@ class TestLedgerFencing:
 
 
 class TestReleaseAcquired:
+    def test_turn_status_distinguishes_active_terminal_and_absent(self, store):
+        lease = _admit(store)
+        assert store.turn_status_sync(KEY) == TurnStatus.ACTIVE
+        store.finish_sync(lease, TurnStatus.TERMINAL_COMPLETED)
+        assert store.turn_status_sync(KEY) == TurnStatus.TERMINAL_COMPLETED
+        assert store.turn_status_sync(TurnKey("discord", "other", "missing")) is None
+
     def test_release_returns_to_suspended(self, store):
         lease = _admit(store)
         store.suspend_sync(lease, {"p": 1})

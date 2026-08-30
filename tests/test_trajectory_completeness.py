@@ -530,3 +530,19 @@ class TestAgentSaverWiring:
             "trajectory_saver=self._agent_trajectory_saver"
             in inspect.getsource(AgentTaskTools._handle_spawn_agent)
         )
+
+
+def test_tool_iteration_serializes_frozen_context_budget_facts():
+    from dataclasses import asdict
+
+    from src.trajectories.saver import ToolIteration
+
+    row = asdict(ToolIteration(
+        iteration=1,
+        context_density_milli=609,
+        context_density_source="calibrated",
+        context_primary_chars=193_184,
+    ))
+    assert row["context_density_milli"] == 609
+    assert row["context_density_source"] == "calibrated"
+    assert row["context_primary_chars"] == 193_184

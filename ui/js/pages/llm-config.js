@@ -180,6 +180,7 @@ export default {
                 <span class="llm-context-summary-pair">
                   <strong>{{ formatCount(activeContextBudget?.effective?.effective_budget) }} <small>tokens</small></strong>
                   <span class="llm-budget-provenance" :class="provenanceClass(activeContextBudget?.provenance)">{{ activeContextBudget?.provenance || 'unavailable' }}</span>
+                  <span v-if="activeContextBudget?.workload_calibration?.active_workloads" class="llm-budget-density">{{ activeContextBudget.density_scope }} · {{ activeContextBudget.workload_calibration.active_workloads }} active</span>
                 </span>
                 <small v-if="activeContextBudget?.clamp_expires_at">Expires {{ formatExpiry(activeContextBudget.clamp_expires_at) }}</small>
               </div>
@@ -288,7 +289,7 @@ export default {
                           <th>Configured override</th>
                           <th>Effective budget</th>
                           <th>Configured target</th>
-                          <th>Runtime target</th>
+                          <th>Fresh-workload target</th>
                           <th>Provenance</th>
                         </tr>
                       </thead>
@@ -309,12 +310,13 @@ export default {
                           </td>
                           <td data-label="Effective budget"><span class="llm-budget-value llm-budget-effective">{{ formatCount(row.effectiveBudget) }}</span><small>tokens</small></td>
                           <td data-label="Configured target"><span class="llm-budget-value">{{ formatCount(row.configuredPrimaryChars) }}</span><small>characters · saved policy</small></td>
-                          <td data-label="Runtime target">
-                            <span class="llm-budget-value llm-budget-effective">{{ formatCount(row.primaryChars) }}</span><small>characters · active process</small>
+                          <td data-label="Fresh-workload target">
+                            <span class="llm-budget-value llm-budget-effective">{{ formatCount(row.primaryChars) }}</span><small>characters · fixed prior for a new workload</small>
                             <span v-if="contextWindows.max_context_chars_pending_restart === true && row.configuredPrimaryChars !== row.primaryChars" class="llm-budget-pending">Restart pending</span>
                           </td>
                           <td data-label="Provenance">
                             <span class="llm-budget-provenance" :class="provenanceClass(row.provenance)">{{ row.provenance }}</span>
+                            <span v-if="row.workloadCalibration?.active_workloads" class="llm-budget-density">{{ row.densityScope }} · {{ row.workloadCalibration.active_workloads }} active</span>
                             <small v-if="row.clampExpiresAt">Expires {{ formatExpiry(row.clampExpiresAt) }}</small>
                           </td>
                         </tr>
@@ -700,6 +702,9 @@ export default {
       primaryChars: details.effective?.primary_chars,
       provenance: details.provenance,
       clampExpiresAt: details.clamp_expires_at,
+      densityPriorMilli: details.density_prior_milli,
+      densityScope: details.density_scope,
+      workloadCalibration: details.workload_calibration,
     })));
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);
@@ -773,6 +778,10 @@ export default {
       return typeof value === 'string' && value.length > 12 ? value.slice(0, 8) + '…' + value.slice(-4) : value;
     }
 
+    function formatDensity(milli) {
+      if (typeof milli !== 'number' || !Number.isFinite(milli)) return '—';
+      return (milli / 1000).toFixed(2);
+    }
     function provenanceClass(value) {
       if (value === 'temporary learned clamp') return 'is-clamp';
       if (value === 'override') return 'is-override';
@@ -1299,7 +1308,7 @@ export default {
       activateAccount, refreshAccount, startEditLabel, saveLabel, deleteAccount,
       startDeviceLogin, cancelDeviceLogin, formatSize,
       fetchContextWindows, clearContextClamp, setContextOverride, setContextUtilization, resetContextOverride, overrideAboveFloor,
-      formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass,
+      formatCount, formatContextCeiling, formatExpiry, shortAccountKey, provenanceClass, formatDensity,
     };
   },
 };
