@@ -442,6 +442,11 @@ class TestTailLogs:
 
 
 class TestSessionTerminalTeardown:
+    def test_sync_teardown_without_event_loop_is_a_quiet_noop(self):
+        manager = WebSocketManager(_bot())
+        manager.schedule_close_by_session_id("sid")
+        assert manager._session_close_tasks == set()
+
     def test_background_task_exception_is_consumed(self):
         manager = WebSocketManager(_bot())
         task = MagicMock()

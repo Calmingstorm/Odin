@@ -110,18 +110,19 @@ class WebSocketManager:
         SessionManager invokes callbacks synchronously inside auth middleware;
         the manager owns and observes the bounded asynchronous socket close.
         """
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            # No running event loop means no live aiohttp socket can exist.
+            return
         expiry_task = self._session_expiry_tasks.pop(session_id, None)
         current = asyncio.current_task()
         if expiry_task is not None and expiry_task is not current:
             expiry_task.cancel()
-        try:
-            task = asyncio.create_task(
-                self.close_by_session_id(session_id),
-                name=f"ws-session-close-{session_id[:8]}",
-            )
-        except RuntimeError:
-            # No running event loop means no live aiohttp socket can exist.
-            return
+        task = loop.create_task(
+            self.close_by_session_id(session_id),
+            name=f"ws-session-close-{session_id[:8]}",
+        )
         self._session_close_tasks.add(task)
         task.add_done_callback(self._session_close_tasks.discard)
         task.add_done_callback(self._consume_task)
