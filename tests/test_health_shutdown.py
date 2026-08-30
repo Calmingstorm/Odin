@@ -106,6 +106,26 @@ class TestCloseAll:
         manager = _manager_with([])
         assert await manager.close_all() == 0
 
+    async def test_session_expiry_watchers_are_cancelled_and_awaited(self):
+        manager = _manager_with([])
+        started = asyncio.Event()
+        retired = asyncio.Event()
+
+        async def watcher():
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                retired.set()
+
+        task = asyncio.create_task(watcher())
+        await started.wait()
+        manager._session_expiry_tasks["sid"] = task
+        assert await manager.close_all() == 0
+        assert retired.is_set()
+        assert task.done()
+        assert manager._session_expiry_tasks == {}
+
     async def test_outer_cancellation_propagates_and_still_clears(self):
         manager = _manager_with([_FakeWS(hang=True)])
         task = asyncio.create_task(manager.close_all())

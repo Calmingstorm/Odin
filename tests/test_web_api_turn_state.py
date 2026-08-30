@@ -44,6 +44,10 @@ TURN_KEYS = {
     "has_checkpoint",
     "operations",
     "operations_truncated",
+    "attention_operations_count",
+    "outcome_unknown_operations",
+    "manual_resolution_operations",
+    "more_attention_evidence",
 }
 OP_KEYS = {
     "state",
@@ -321,7 +325,10 @@ class TestTurnsAvailability:
 
         assert response.status == 200
         _assert_envelope(body, "available", {"configured_enabled", "limit"})
-        assert set(body["data"]) == {"counts", "turns", "truncated"}
+        assert set(body["data"]) == {
+            "counts", "turns", "truncated", "omitted_turns",
+            "omitted_attention_turns",
+        }
         counts = body["data"]["counts"]
         assert counts["active"] == 2
         assert counts["suspended"] == 1
@@ -404,7 +411,7 @@ class TestCoherentSnapshotAndAttentionEvidence:
         # response coherent with the row set it had already observed.
         assert read_turn_snapshot(store.db_path, 10)["turns"] == []
 
-    def test_attention_evidence_survives_newer_pending_noise(self, tmp_path):
+    def test_attention_evidence_is_bounded_and_reports_exact_omission(self, tmp_path):
         store = _store(tmp_path)
         _seed_turn(
             store.db_path,
@@ -412,20 +419,18 @@ class TestCoherentSnapshotAndAttentionEvidence:
             status="TERMINAL_FAILED",
             created_at=time.time(),
         )
-        attention_ops = (
-            (1, "MANUAL_RESOLUTION_REQUIRED", "run_command"),
-            (2, "OUTCOME_UNKNOWN", "email_send"),
-            (3, "MANUAL_RESOLUTION_REQUIRED", "cloudflare_dns_manage"),
-        )
-        for seq, state, tool_name in attention_ops:
+        # More unresolved-effect rows than the wire cap, plus pending noise.
+        # The body stays bounded while preserving exact state counts and an
+        # explicit more-evidence signal.
+        for seq in range(1, 76):
             _seed_op(
                 store.db_path,
                 message_id="m-terminal-attention",
-                state=state,
-                tool_name=tool_name,
+                state=("OUTCOME_UNKNOWN" if seq % 2 else "MANUAL_RESOLUTION_REQUIRED"),
+                tool_name=f"effect-{seq}",
                 seq=seq,
             )
-        for seq in range(4, 55):
+        for seq in range(76, 101):
             _seed_op(
                 store.db_path,
                 message_id="m-terminal-attention",
@@ -434,18 +439,46 @@ class TestCoherentSnapshotAndAttentionEvidence:
             )
 
         [turn] = read_turn_snapshot(store.db_path, 10)["turns"]
-        rendered_attention = {
-            (operation["tool_call_id"], operation["state"], operation["tool_name"])
-            for operation in turn["operations"]
-            if operation["state"] in {"OUTCOME_UNKNOWN", "MANUAL_RESOLUTION_REQUIRED"}
-        }
-        assert rendered_attention == {
-            (f"call-{seq}", state, tool_name)
-            for seq, state, tool_name in attention_ops
-        }
-        states = [operation["state"] for operation in turn["operations"]]
-        assert states.count("PREPARED") == 47
+        assert len(turn["operations"]) == observer._MAX_OPS_PER_TURN
+        assert all(op["state"] != "PREPARED" for op in turn["operations"])
+        assert turn["attention_operations_count"] == 75
+        assert turn["outcome_unknown_operations"] == 38
+        assert turn["manual_resolution_operations"] == 37
+        assert turn["more_attention_evidence"] is True
         assert turn["operations_truncated"] is True
+
+    def test_attention_turns_own_page_before_newer_healthy_posture(self, tmp_path):
+        store = _store(tmp_path)
+        now = time.time()
+        for seq in range(5):
+            _seed_turn(
+                store.db_path,
+                message_id=f"healthy-{seq}",
+                status="ACTIVE",
+                created_at=now + seq,
+            )
+        for seq in range(3):
+            message_id = f"attention-{seq}"
+            _seed_turn(
+                store.db_path,
+                message_id=message_id,
+                status="TERMINAL_FAILED",
+                created_at=now - 100 - seq,
+            )
+            _seed_op(
+                store.db_path,
+                message_id=message_id,
+                state="OUTCOME_UNKNOWN",
+                seq=seq + 1,
+            )
+
+        snapshot = read_turn_snapshot(store.db_path, 2)
+        assert [turn["message_id"] for turn in snapshot["turns"]] == [
+            "attention-0", "attention-1",
+        ]
+        assert snapshot["truncated"] is True
+        assert snapshot["omitted_turns"] == 6
+        assert snapshot["omitted_attention_turns"] == 1
 
 
 class TestReadOnlyIsolation:

@@ -184,6 +184,81 @@ class TestChat:
                     assert resp["type"] == "chat_error"
                     assert resp["error"] == "RuntimeError: kaboom"
 
+    async def test_ping_is_answered_while_chat_turn_is_still_running(self):
+        release = asyncio.Event()
+
+        async def _blocked_chat(*args, **kwargs):
+            await release.wait()
+            return CHAT_RESULT
+
+        client, manager = _client()
+        with patch("src.web.websocket.process_web_chat", new=_blocked_chat):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "long task"})
+                    for _ in range(20):
+                        if manager._chat_tasks:
+                            break
+                        await asyncio.sleep(0.005)
+                    assert len(manager._chat_tasks) == 1
+                    await ws.send_json({"type": "ping", "ts": 99})
+                    pong = await asyncio.wait_for(ws.receive_json(), timeout=0.25)
+                    assert pong == {"type": "pong", "ts": 99}
+                    release.set()
+                    response = await asyncio.wait_for(ws.receive_json(), timeout=0.25)
+                    assert response["type"] == "chat_response"
+
+    async def test_busy_chat_rejection_creates_no_background_send_task(self, monkeypatch):
+        manager = WebSocketManager(_bot())
+        in_flight = asyncio.get_running_loop().create_future()
+        ws = SimpleNamespace(_odin_chat_task=in_flight, send_json=AsyncMock())
+        created = []
+        real_create_task = asyncio.create_task
+
+        def capture_task(coro, *args, **kwargs):
+            created.append(coro)
+            return real_create_task(coro, *args, **kwargs)
+
+        monkeypatch.setattr("src.web.websocket.asyncio.create_task", capture_task)
+        await manager._start_chat(ws, {"type": "chat", "content": "duplicate"})
+        assert created == []
+        assert manager._chat_tasks == set()
+        ws.send_json.assert_awaited_once_with({
+            "type": "chat_error",
+            "error": "a chat turn is already in progress",
+        })
+        in_flight.cancel()
+
+    async def test_busy_chat_rejections_are_bounded_and_rate_limited(self):
+        release = asyncio.Event()
+
+        async def _blocked_chat(*args, **kwargs):
+            await release.wait()
+            return CHAT_RESULT
+
+        client, manager = _client()
+        with patch("src.web.websocket.process_web_chat", new=_blocked_chat):
+            async with client:
+                async with client.ws_connect("/api/ws") as ws:
+                    await ws.send_json({"type": "chat", "content": "long task"})
+                    for _ in range(20):
+                        if manager._chat_tasks:
+                            break
+                        await asyncio.sleep(0.005)
+                    assert len(manager._chat_tasks) == 1
+
+                    replies = []
+                    for _ in range(10):
+                        await ws.send_json({"type": "chat", "content": "duplicate"})
+                        replies.append(await asyncio.wait_for(ws.receive_json(), 0.25))
+
+                    assert len(manager._chat_tasks) == 1
+                    assert all(reply["type"] == "chat_error" for reply in replies)
+                    assert replies[-1]["error"] == "rate limit exceeded (10/min)"
+                    release.set()
+                    response = await asyncio.wait_for(ws.receive_json(), 0.25)
+                    assert response["type"] == "chat_response"
+
     async def test_delayed_chat_completes_without_any_wall(self):
         async def _slow_chat(*args, **kwargs):
             await asyncio.sleep(0.3)
@@ -224,14 +299,21 @@ class TestChat:
                     assert "[REDACTED]" in resp["error"]
 
     async def test_cancellation_is_not_swallowed_into_chat_error(self):
-        client, _ = _client()
+        client, manager = _client()
         with patch("src.web.websocket.process_web_chat",
                    new=AsyncMock(side_effect=asyncio.CancelledError())):
             async with client:
                 async with client.ws_connect("/api/ws") as ws:
                     await ws.send_json({"type": "chat", "content": "x"})
-                    msg = await ws.receive()
-                    assert msg.type is not aiohttp.WSMsgType.TEXT
+                    for _ in range(20):
+                        if not manager._chat_tasks:
+                            await asyncio.sleep(0.005)
+                            continue
+                        break
+                    # Cancellation terminates the child task and emits no
+                    # chat_error; the receive loop itself remains healthy.
+                    await ws.send_json({"type": "ping", "ts": 7})
+                    assert await ws.receive_json() == {"type": "pong", "ts": 7}
 
 
 # --------------------------------------------------------------------------- #
@@ -359,6 +441,72 @@ class TestTailLogs:
         assert mgr._resolve_identity("tok") is None
 
 
+class TestSessionTerminalTeardown:
+    async def test_idle_managed_socket_expires_without_inbound_traffic(self):
+        from src.health.server import SessionManager
+
+        sessions = SessionManager(timeout_minutes=1 / 6000)
+        sid, _ = sessions.create(SimpleNamespace(user_id="u1", tier="admin"))
+        config = SimpleNamespace(
+            api_token="configured",
+            api_tokens=[],
+            resolve_api_identity=lambda _token: None,
+        )
+        client, manager = TestProductionMiddlewareBearerAuth._stack(
+            session_manager=sessions,
+            web_config=config,
+        )
+        async with client:
+            ws = await client.ws_connect(
+                "/api/ws", protocols=[TestBearerSubprotocolAuth._proto(sid)]
+            )
+            await ws.send_json({"subscribe": "events"})
+            assert (await ws.receive_json())["type"] == "subscribed"
+            # No ping, command, unrelated login, or manual validate call.  The
+            # manager-owned deadline must discover expiry and close exactly it.
+            msg = await asyncio.wait_for(ws.receive(), timeout=0.5)
+            assert msg.type == aiohttp.WSMsgType.CLOSE
+            assert msg.data == 4002
+            assert not sessions.contains(sid)
+            assert not manager._clients
+            assert not manager._session_expiry_tasks
+
+    async def test_expiry_closes_only_the_exact_session_socket(self, monkeypatch):
+        from src.health.server import SessionManager
+
+        clock = [100.0]
+        monkeypatch.setattr("src.health.server.time.monotonic", lambda: clock[0])
+        sessions = SessionManager(timeout_minutes=1)
+        sid, _ = sessions.create(SimpleNamespace(user_id="u1", tier="admin"))
+        other_sid, _ = sessions.create(SimpleNamespace(user_id="u2", tier="admin"))
+        manager = WebSocketManager(_bot(), session_manager=sessions)
+        class Socket:
+            pass
+
+        first = Socket()
+        first._odin_session_id = sid
+        first.close = AsyncMock()
+        other = Socket()
+        other._odin_session_id = other_sid
+        other.close = AsyncMock()
+        manager._clients.update({first, other})
+        sessions.set_destroy_callback(manager.schedule_close_by_session_id)
+
+        clock[0] += 61
+        # Refresh the unrelated lease, then expire only the first session.
+        sessions._sessions[other_sid] = clock[0]
+        assert sessions.validate(sid, touch=False) is False
+        await asyncio.sleep(0)
+        await asyncio.gather(*list(manager._session_close_tasks))
+
+        first.close.assert_awaited_once()
+        other.close.assert_not_awaited()
+        assert first not in manager._clients
+        assert other in manager._clients
+        assert not sessions.contains(sid)
+        assert sessions.contains(other_sid)
+
+
 # --------------------------------------------------------------------------- #
 # Bearer-subprotocol auth (audit 3.1: the token must never ride the URL)
 # --------------------------------------------------------------------------- #
@@ -425,7 +573,7 @@ class TestProductionMiddlewareBearerAuth:
     async def test_session_subprotocol_reaches_handler_and_binds_exact_session(self):
         identity = SimpleNamespace(user_id="u1", tier="admin")
         sm = SimpleNamespace(
-            validate=MagicMock(side_effect=lambda token: token == "session-one"),
+            validate=MagicMock(side_effect=lambda token, **_kw: token == "session-one"),
             get_identity=MagicMock(return_value=identity),
         )
         config = SimpleNamespace(

@@ -179,6 +179,18 @@ class MCPServerConnection:
         except BaseException:
             self._accept_server_requests = False
             raise
+        # Publication is the handshake commit boundary. A stdio replacement
+        # may close after its initialize reply/notification but before this
+        # assignment; never overwrite that observed loss with connected=True.
+        if self.transport_kind == "stdio":
+            transport = self._stdio
+            if (
+                transport is None
+                or not transport.available
+                or self._lost_reason is not None
+            ):
+                reason = self._lost_reason or "server process exited during handshake"
+                raise MCPConnectError(f"{self.name}: {reason}")
         self.connected = True
 
     async def disconnect(self) -> None:
@@ -225,16 +237,22 @@ class MCPServerConnection:
         """One construction site for every stdio transport this connection
         spawns — the initial probe process and the compatibility respawn
         must be built identically (env allowlist, cwd, pumps, callbacks)."""
-        return StdioTransport(
+        transport: StdioTransport
+
+        def on_closed(reason: str) -> None:
+            self._on_stdio_transport_closed(transport, reason)
+
+        transport = StdioTransport(
             self.name,
             self.command,
             self.args,
             env=self.env,
             cwd=self.cwd or None,
             on_message=self._on_stdio_message,
-            on_closed=self._on_transport_closed,
+            on_closed=on_closed,
             negotiated_version=lambda: self.negotiated_version,
         )
+        return transport
 
     async def _connect_stdio(self) -> None:
         transport = self._new_stdio_transport()
@@ -308,14 +326,33 @@ class MCPServerConnection:
         try:
             await fresh.start()
             await self._initialize_legacy_stdio()
+            # The replacement can return a valid initialize response and then
+            # immediately close stdout. Give the reader a short, bounded
+            # publication fence: it returns instantly on closure and never
+            # changes the negotiated era of healthy servers.
+            await fresh.wait_closed(timeout=0.05)
+            if not fresh.available or self._lost_reason is not None:
+                reason = self._lost_reason or "server process exited during handshake"
+                raise MCPConnectError(f"{self.name}: {reason}")
         except Exception as e:
+            # Reap before reading phase two's status. EOF and process exit are
+            # separate events, so sampling earlier loses delayed return codes.
+            shutdown = getattr(fresh, "shutdown", None)
+            if shutdown is not None:
+                await shutdown()
+            fresh_exit_status = getattr(fresh, "returncode", None)
             detail = _clean_text(str(e), 200) if isinstance(e, MCPError) else e.__class__.__name__
-            suffix = (
+            first_suffix = (
                 f" (first process exit status {exit_status})" if exit_status is not None else ""
             )
+            second_suffix = (
+                f" (fresh process exit status {fresh_exit_status})"
+                if fresh_exit_status is not None
+                else ""
+            )
             raise MCPConnectError(
-                f"{self.name}: server/discover ended by unexpected stdio EOF{suffix}; "
-                f"fresh legacy initialization failed: {detail}"
+                f"{self.name}: server/discover ended by unexpected stdio EOF{first_suffix}; "
+                f"fresh legacy initialization failed{second_suffix}: {detail}"
             ) from e
 
     async def _initialize_legacy_stdio(self) -> None:
@@ -709,15 +746,30 @@ class MCPServerConnection:
         except Exception:
             log.debug("MCP %s: failed to deliver -32601 reply", self.name, exc_info=True)
 
-    def _on_transport_closed(self, reason: str) -> None:
+    def _on_stdio_transport_closed(self, transport: StdioTransport, reason: str) -> None:
+        # A retired probe process may finish its pump after the fresh process
+        # has been installed. Its callback has no authority over the current
+        # transport's pending calls or publication state.
+        if transport is not self._stdio:
+            return
+        self._on_transport_closed(reason, stdio_transport=transport)
+
+    def _on_transport_closed(
+        self,
+        reason: str,
+        *,
+        stdio_transport: StdioTransport | None = None,
+    ) -> None:
         was_connected = self.connected
         self.connected = False
         self._lost_reason = reason
         # Typed classification for pending waiters: only a clean stdout EOF
-        # (the transport's flag, set before this callback fires) raises the
-        # subtype the era probe may treat as a die-on-unknown-method legacy
-        # server. Every other closure stays the plain connect error.
-        eof = bool(self._stdio is not None and getattr(self._stdio, "closed_by_eof", False))
+        # (the originating transport's flag, set before this callback fires)
+        # raises the subtype the era probe may treat as die-on-unknown-method.
+        eof = bool(
+            stdio_transport is not None
+            and getattr(stdio_transport, "closed_by_eof", False)
+        )
         exc_type = MCPStdioEOFError if eof else MCPConnectError
         self._fail_pending(exc_type(f"{self.name}: {reason}"))
         if was_connected and self._on_connection_lost is not None:

@@ -89,7 +89,11 @@ export default {
           </div>
           <div v-else class="space-y-2">
             <div v-if="turnsData.truncated" class="text-xs text-amber-500">
-              Showing the newest {{ sortedTurns.length }} matching turns — older matches exist.
+              Showing {{ sortedTurns.length }} prioritized matching turns —
+              {{ turnsData.omitted_turns }} older match{{ turnsData.omitted_turns === 1 ? '' : 'es' }} omitted.
+              <span v-if="turnsData.omitted_attention_turns > 0" role="alert">
+                {{ turnsData.omitted_attention_turns }} omitted turn{{ turnsData.omitted_attention_turns === 1 ? '' : 's' }} still carry unresolved-effect evidence.
+              </span>
             </div>
             <div v-for="t in sortedTurns" :key="t.source + ':' + t.channel_id + ':' + t.message_id"
                  class="ts-turn-row">
@@ -109,7 +113,10 @@ export default {
                       :class="{ 'ts-op-alert': op.state === 'OUTCOME_UNKNOWN' || op.state === 'MANUAL_RESOLUTION_REQUIRED' }">
                   {{ op.tool_name }} · {{ op.state }}<template v-if="op.iteration !== null"> · iter {{ op.iteration }}</template>
                 </span>
-                <span v-if="t.operations_truncated" class="text-xs text-gray-500">…more</span>
+                <span v-if="t.more_attention_evidence" class="text-xs text-amber-500" role="alert">
+                  …{{ t.attention_operations_count - t.operations.filter(op => op.state === 'OUTCOME_UNKNOWN' || op.state === 'MANUAL_RESOLUTION_REQUIRED').length }} more unresolved-effect operation{{ t.attention_operations_count - t.operations.filter(op => op.state === 'OUTCOME_UNKNOWN' || op.state === 'MANUAL_RESOLUTION_REQUIRED').length === 1 ? '' : 's' }}
+                </span>
+                <span v-else-if="t.operations_truncated" class="text-xs text-gray-500">…more pending operations</span>
               </div>
             </div>
           </div>

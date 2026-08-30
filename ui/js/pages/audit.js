@@ -225,10 +225,11 @@ export default {
       try {
         verifyResult.value = await api.get('/api/audit/verify');
       } catch (e) {
-        // 409 carries the verifier's own structured verdict: either signing
-        // is not enabled (error string) or the chain is genuinely broken.
+        // 409 carries the verifier's structured verdict. Availability is
+        // independent of validity: a broken chain commonly has a diagnostic
+        // error string and must never be softened into "not enabled" copy.
         if (e.status === 409 && e.data && typeof e.data === 'object') {
-          verifyResult.value = e.data.error
+          verifyResult.value = e.data.availability === 'not_enabled'
             ? { ...e.data, not_enabled: true }
             : e.data;
         } else {

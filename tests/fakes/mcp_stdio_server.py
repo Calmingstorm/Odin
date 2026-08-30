@@ -23,6 +23,8 @@ Modes:
                     the legacy handshake normally otherwise (the strict
                     die-on-unknown-method class; compatibility respawn pin).
   legacy-die-always closes stdout and exits on ANY request (both-phase pin).
+  legacy-die-after-initialize dies on the probe in phase one; the replacement
+                    replies to initialize, then closes stdout and exits 8.
   legacy-malformed-die-on-discover  emits malformed JSON before probe EOF;
                     the protocol-fault latch must forbid compatibility respawn.
   legacy-pushy-die-on-discover  sends a server request before probe EOF;
@@ -59,6 +61,18 @@ import threading
 import time
 
 MODE = sys.argv[1] if len(sys.argv) > 1 else "legacy"
+# The strict compatibility class behaves differently across fresh processes.
+# A tiny parent-owned counter makes the fake deterministic without changing
+# the production spawn contract.
+SPAWN_COUNT = 1
+if MODE == "legacy-die-after-initialize":
+    count_path = sys.argv[2]
+    try:
+        SPAWN_COUNT = int(open(count_path).read()) + 1
+    except (FileNotFoundError, ValueError):
+        SPAWN_COUNT = 1
+    with open(count_path, "w") as count_file:
+        count_file.write(str(SPAWN_COUNT))
 
 MODERN_VERSION = "2026-07-28"
 LEGACY_COUNTEROFFERS = {
@@ -67,6 +81,7 @@ LEGACY_COUNTEROFFERS = {
     "legacy-die-discover-bad-version": "9999-01-01",
     "legacy-delayed-die-discover-bad-version": "9999-01-01",
     "legacy": "2025-06-18",
+    "legacy-die-after-initialize": "2025-06-18",
     "legacy-oldest": "2024-11-05",
     "legacy-batch": "2025-03-26",
     "legacy-pushy": "2025-06-18",
@@ -244,6 +259,14 @@ def handle(msg: dict) -> None:
         time.sleep(0.15)
         os._exit(7)
 
+    if (
+        method == "server/discover"
+        and MODE == "legacy-die-after-initialize"
+        and SPAWN_COUNT == 1
+    ):
+        sys.stdout.close()
+        os._exit(3)
+
     if method == "server/discover" and MODE == "legacy-die-discover-bad-version":
         # Phase 1 dies on the probe like the strict class...
         sys.stdout.close()
@@ -347,6 +370,12 @@ def handle(msg: dict) -> None:
                 },
             }
         )
+        if MODE == "legacy-die-after-initialize":
+            # The initialize result is valid, but stdout closes before the
+            # client may publish the replacement as connected. Delay process
+            # exit so the diagnostic must reap to learn status 8.
+            sys.stdout.close()
+            os._exit(8)
         return
 
     if method == "notifications/initialized":

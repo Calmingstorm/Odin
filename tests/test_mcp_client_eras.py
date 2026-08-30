@@ -842,6 +842,21 @@ class TestStdioProbeCasualtyRespawn:
         finally:
             await conn.disconnect()
 
+    async def test_initialized_replacement_that_closes_is_never_published(
+        self, monkeypatch, tmp_path,
+    ):
+        spawns = self._count_spawns(monkeypatch)
+        conn = _stdio("legacy-die-after-initialize")
+        conn.args.append(str(tmp_path / "spawn-count"))
+        with pytest.raises(MCPConnectError) as excinfo:
+            await conn.connect()
+        message = str(excinfo.value)
+        assert len(spawns) == 2
+        assert conn.connected is False
+        assert "first process exit status 3" in message
+        assert "fresh process exit status 8" in message
+        assert all(not transport.running for transport in spawns)
+
     async def test_both_phases_dead_names_both_and_reaps(self, monkeypatch):
         spawns = self._count_spawns(monkeypatch)
         conn = _stdio("legacy-die-always")

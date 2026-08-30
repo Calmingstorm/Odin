@@ -106,6 +106,16 @@ class StdioTransport:
         return self._process is not None and self._process.returncode is None
 
     @property
+    def available(self) -> bool:
+        """Whether the transport can still carry protocol traffic.
+
+        Process returncode alone lags stdout EOF.  The close latch is set
+        before the owner's callback, making this the handshake publication
+        fence for a replacement that dies immediately after initialize.
+        """
+        return self.running and not self._closed_fired and not self._closing
+
+    @property
     def returncode(self) -> int | None:
         """Child exit status if it has exited (diagnostics only)."""
         return self._process.returncode if self._process else None
@@ -150,6 +160,22 @@ class StdioTransport:
             self._spawned_pgid = None
         self._reader_task = asyncio.create_task(self._pump_stdout())
         self._stderr_task = asyncio.create_task(self._pump_stderr())
+
+    async def wait_closed(self, timeout: float) -> bool:
+        """Wait briefly for an already-adjacent transport close event.
+
+        Returns ``True`` when closure was observed, ``False`` when the
+        transport remained available through the publication fence.
+        """
+        if self._closed_fired:
+            return True
+        deadline = asyncio.get_running_loop().time() + timeout
+        while not self._closed_fired:
+            remaining = deadline - asyncio.get_running_loop().time()
+            if remaining <= 0:
+                return False
+            await asyncio.sleep(min(0.005, remaining))
+        return True
 
     async def send(self, message: dict[str, Any], *, timeout: float | None = None) -> None:
         """Write one bounded frame. When ``timeout`` is supplied it covers

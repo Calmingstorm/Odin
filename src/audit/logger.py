@@ -671,6 +671,12 @@ class AuditLogger:
                 "verified": 0,
                 "unsigned_prefix": 0,
                 "first_bad": None,
+                "availability": "not_enabled",
                 "error": "Signing not enabled (no hmac_key configured)",
             }
-        return await verify_log(self.path, self._signer._key.decode())
+        result = await verify_log(self.path, self._signer._key.decode())
+        # Availability is distinct from verdict. A configured verifier that
+        # returns valid=False is a failure even when its diagnostic has an
+        # error string; only the explicit not_enabled shape is soft copy.
+        result["availability"] = "available"
+        return result

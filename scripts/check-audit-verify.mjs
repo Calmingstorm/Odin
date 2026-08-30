@@ -7,6 +7,7 @@
 // read as expected history, never as tampering.
 
 import assert from 'node:assert/strict';
+import { readFileSync } from 'node:fs';
 import { createSSRApp } from 'vue';
 import { renderToString } from '@vue/server-renderer';
 
@@ -73,7 +74,7 @@ async function renderState(state) {
 // Valid chain with a permanent unsigned prefix: green verdict, and the
 // prefix explained as history — the words "expected, not tampering" carry it.
 {
-  const state = setupPage({ valid: true, total: 500, verified: 420, unsigned_prefix: 80, first_bad: null });
+  const state = setupPage({ valid: true, availability: 'available', total: 500, verified: 420, unsigned_prefix: 80, first_bad: null });
   await state.verifyIntegrity();
   const html = await renderState(state);
   assert.match(html, /Chain valid — 420 signed entries verified/);
@@ -84,7 +85,7 @@ async function renderState(state) {
 
 // Broken chain arrives as a 409 with the verifier's structured verdict.
 {
-  const state = setupPage({ valid: false, total: 500, verified: 12, unsigned_prefix: 0, first_bad: 13 }, 409);
+  const state = setupPage({ valid: false, availability: 'available', total: 500, verified: 12, unsigned_prefix: 0, first_bad: 13, error: 'Line 13: HMAC verification failed' }, 409);
   await state.verifyIntegrity();
   assert.equal(state.verifyResult.value.valid, false);
   const html = await renderState(state);
@@ -94,7 +95,7 @@ async function renderState(state) {
 // Signing not enabled is a configuration fact, not an alarm.
 {
   const state = setupPage({ valid: false, total: 0, verified: 0, unsigned_prefix: 0,
-    first_bad: null, error: 'Signing not enabled (no hmac_key configured)' }, 409);
+    first_bad: null, availability: 'not_enabled', error: 'Signing not enabled (no hmac_key configured)' }, 409);
   await state.verifyIntegrity();
   const html = await renderState(state);
   assert.match(html, /Tamper-evidence is not enabled/);
@@ -112,5 +113,11 @@ async function renderState(state) {
   assert.ok(!/Chain valid/.test(html));
 }
 
+// Mutation guard: an error string on a configured verifier is NOT the
+// not-enabled availability state. Keep the source decision keyed to the
+// explicit availability discriminator, never truthiness of error.
+const auditSource = readFileSync(new URL('../ui/js/pages/audit.js', import.meta.url), 'utf8');
+assert.match(auditSource, /e\.data\.availability === 'not_enabled'/);
+assert.doesNotMatch(auditSource, /e\.data\.error\s*\?\s*\{[^}]*not_enabled/s);
+
 console.log('audit-verify: all four verifier states and the honest-prefix copy pinned');
-process.exit(0);

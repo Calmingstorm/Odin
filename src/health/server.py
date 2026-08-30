@@ -128,6 +128,28 @@ class SessionManager:
         self._sessions: dict[str, float] = {}  # session_id -> last_activity (monotonic)
         self._identities: dict[str, object] = {}  # session_id -> ApiTokenIdentity or None
         self._timeout = timeout_minutes * 60 if timeout_minutes > 0 else 0
+        self._destroy_callback: Callable[[str], object] | None = None
+
+    def set_destroy_callback(self, callback: Callable[[str], object] | None) -> None:
+        """Register the exact-session teardown hook used by WebSockets.
+
+        Session bookkeeping is synchronous because it runs inside auth
+        middleware.  The callback therefore schedules its own bounded async
+        close; expiry and explicit logout still enter the same manager-owned
+        ``close_by_session_id`` contract.
+        """
+        self._destroy_callback = callback
+
+    def _remove(self, sid: str) -> bool:
+        self._identities.pop(sid, None)
+        existed = self._sessions.pop(sid, None) is not None
+        if existed and self._destroy_callback is not None:
+            self._destroy_callback(sid)
+        return existed
+
+    def contains(self, sid: str) -> bool:
+        """Whether *sid* is currently tracked, without refreshing its lease."""
+        return sid in self._sessions
 
     @property
     def active_count(self) -> int:
@@ -150,22 +172,41 @@ class SessionManager:
         """Return the identity bound to a session, if any."""
         return self._identities.get(sid)
 
-    def validate(self, sid: str) -> bool:
-        """Validate a session ID. Returns False if expired or unknown."""
+    def seconds_until_expiry(self, sid: str) -> float | None:
+        """Return the remaining inactivity lease without touching it.
+
+        ``None`` means the session is absent or expiry is disabled.  WebSocket
+        ownership uses this read-only deadline to discover idle expiry even
+        when the browser sends no further application frames.
+        """
+        if self._timeout <= 0:
+            return None
+        ts = self._sessions.get(sid)
+        if ts is None:
+            return None
+        return max(0.0, ts + self._timeout - time.monotonic())
+
+    def validate(self, sid: str, *, touch: bool = True) -> bool:
+        """Validate a session ID. Returns False if expired or unknown.
+
+        ``touch=False`` is the WebSocket liveness check: protocol pings prove
+        the connection is alive but must not extend an authentication lease
+        forever.
+        """
         ts = self._sessions.get(sid)
         if ts is None:
             return False
-        if self._timeout > 0 and (time.monotonic() - ts) > self._timeout:
-            del self._sessions[sid]
-            self._identities.pop(sid, None)
+        now = time.monotonic()
+        if self._timeout > 0 and (now - ts) >= self._timeout:
+            self._remove(sid)
             return False
-        self._sessions[sid] = time.monotonic()
+        if touch:
+            self._sessions[sid] = now
         return True
 
     def destroy(self, sid: str) -> bool:
         """Destroy a session. Returns True if it existed."""
-        self._identities.pop(sid, None)
-        return self._sessions.pop(sid, None) is not None
+        return self._remove(sid)
 
     def destroy_by_user_id(self, user_id: str) -> int:
         """Destroy all sessions whose bound identity has the given user_id."""
@@ -174,8 +215,7 @@ class SessionManager:
             if getattr(identity, "user_id", None) == user_id:
                 to_remove.append(sid)
         for sid in to_remove:
-            self._sessions.pop(sid, None)
-            self._identities.pop(sid, None)
+            self._remove(sid)
         return len(to_remove)
 
     def cleanup(self) -> int:
@@ -183,10 +223,9 @@ class SessionManager:
         if self._timeout <= 0:
             return 0
         now = time.monotonic()
-        expired = [sid for sid, ts in self._sessions.items() if now - ts > self._timeout]
+        expired = [sid for sid, ts in self._sessions.items() if now - ts >= self._timeout]
         for sid in expired:
-            del self._sessions[sid]
-            self._identities.pop(sid, None)
+            self._remove(sid)
         return len(expired)
 
 
@@ -272,6 +311,7 @@ def _make_auth_middleware(
 
             if session_manager.validate(bearer_value):
                 request._session_id = bearer_value
+                request._session_managed = True
                 session_identity = session_manager.get_identity(bearer_value)
                 if session_identity is not None:
                     request._api_identity = session_identity

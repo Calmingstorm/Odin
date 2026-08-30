@@ -84,6 +84,125 @@ class WebSocketManager:
         self._clients: set[web.WebSocketResponse] = set()
         self._log_subscribers: set[web.WebSocketResponse] = set()
         self._event_subscribers: set[web.WebSocketResponse] = set()
+        # Chat turns outlive browser disconnects by design.  Keep explicit
+        # ownership so their terminal exceptions are always consumed without
+        # blocking the socket receive loop (which must remain free for pings).
+        self._chat_tasks: set[asyncio.Task[None]] = set()
+        self._session_close_tasks: set[asyncio.Task[int]] = set()
+        # One deadline watcher per managed browser session.  Session expiry is
+        # otherwise only discovered by later HTTP/WS traffic; an idle socket
+        # could retain privileged subscriptions forever without this owner.
+        self._session_expiry_tasks: dict[str, asyncio.Task[None]] = {}
+        self._shutting_down = False
+
+    @staticmethod
+    def _consume_task(task: asyncio.Task) -> None:
+        try:
+            task.result()
+        except asyncio.CancelledError:
+            pass
+        except Exception:
+            log.exception("WebSocket background task failed")
+
+    def schedule_close_by_session_id(self, session_id: str) -> None:
+        """Enter the exact-session close contract from synchronous expiry.
+
+        SessionManager invokes callbacks synchronously inside auth middleware;
+        the manager owns and observes the bounded asynchronous socket close.
+        """
+        expiry_task = self._session_expiry_tasks.pop(session_id, None)
+        current = asyncio.current_task()
+        if expiry_task is not None and expiry_task is not current:
+            expiry_task.cancel()
+        try:
+            task = asyncio.create_task(
+                self.close_by_session_id(session_id),
+                name=f"ws-session-close-{session_id[:8]}",
+            )
+        except RuntimeError:
+            # No running event loop means no live aiohttp socket can exist.
+            return
+        self._session_close_tasks.add(task)
+        task.add_done_callback(self._session_close_tasks.discard)
+        task.add_done_callback(self._consume_task)
+
+    def _session_is_valid(self, ws: web.WebSocketResponse, *, touch: bool) -> bool:
+        if not getattr(ws, "_odin_session_managed", False):
+            return True
+        session_id = getattr(ws, "_odin_session_id", "")
+        return bool(
+            session_id
+            and self._session_manager is not None
+            and self._session_manager.validate(session_id, touch=touch)
+        )
+
+    def _ensure_session_expiry_watch(self, session_id: str) -> None:
+        if not session_id or self._session_manager is None:
+            return
+        remaining = getattr(self._session_manager, "seconds_until_expiry", None)
+        if remaining is None or session_id in self._session_expiry_tasks:
+            return
+        task = asyncio.create_task(
+            self._watch_session_expiry(session_id),
+            name=f"ws-session-expiry-{session_id[:8]}",
+        )
+        self._session_expiry_tasks[session_id] = task
+        task.add_done_callback(self._consume_task)
+
+    async def _watch_session_expiry(self, session_id: str) -> None:
+        """Discover inactivity expiry without requiring another request.
+
+        The session manager remains the sole lease authority and terminal
+        teardown owner.  This task only sleeps to its current deadline and
+        asks ``validate(touch=False)`` to perform the canonical removal.
+        """
+        current = asyncio.current_task()
+        try:
+            while not self._shutting_down:
+                remaining = self._session_manager.seconds_until_expiry(session_id)
+                if remaining is None:
+                    return
+                if remaining > 0:
+                    await asyncio.sleep(remaining)
+                if not self._session_manager.validate(session_id, touch=False):
+                    return
+        finally:
+            if self._session_expiry_tasks.get(session_id) is current:
+                self._session_expiry_tasks.pop(session_id, None)
+
+    @staticmethod
+    def _chat_rate_limited(ws: web.WebSocketResponse) -> bool:
+        """Count every chat frame, including rejections while one is busy."""
+        import time as _time
+
+        now = _time.monotonic()
+        window_start = getattr(ws, "_chat_window_start", None)
+        if (window_start is None or not isinstance(window_start, (int, float))
+                or now - window_start > _WS_CHAT_RATE_WINDOW):
+            ws._chat_window_start = now  # type: ignore[attr-defined]  # sanctioned dynamic attr
+            ws._chat_count = 0  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        chat_count = getattr(ws, "_chat_count", None)
+        ws._chat_count = (chat_count + 1) if isinstance(chat_count, int) else 1  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        return ws._chat_count > _WS_CHAT_RATE_LIMIT  # type: ignore[attr-defined]  # sanctioned dynamic attr
+
+    async def _start_chat(self, ws: web.WebSocketResponse, data: dict) -> None:
+        if self._chat_rate_limited(ws):
+            await ws.send_json({"type": "chat_error", "error": "rate limit exceeded (10/min)"})
+            return
+        existing = getattr(ws, "_odin_chat_task", None)
+        if existing is not None and not existing.done():
+            # Rejection is handled inline by the receive loop: do not create an
+            # unbounded task/concurrent-write path while one turn is running.
+            await ws.send_json({
+                "type": "chat_error",
+                "error": "a chat turn is already in progress",
+            })
+            return
+        task = asyncio.create_task(self._handle_chat(ws, data), name="ws-chat-turn")
+        ws._odin_chat_task = task  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        self._chat_tasks.add(task)
+        task.add_done_callback(self._chat_tasks.discard)
+        task.add_done_callback(self._consume_task)
 
     @property
     def client_count(self) -> int:
@@ -154,7 +273,10 @@ class WebSocketManager:
         await ws.prepare(request)
         self._clients.add(ws)
         ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        ws._odin_session_managed = bool(getattr(request, "_session_managed", False))  # type: ignore[attr-defined]  # sanctioned dynamic attr
         ws._odin_identity = identity  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        if ws._odin_session_managed:  # type: ignore[attr-defined]
+            self._ensure_session_expiry_watch(ws._odin_session_id)  # type: ignore[attr-defined]
         log.info("WebSocket client connected (%d total)", len(self._clients))
 
         log_task: asyncio.Task | None = None
@@ -167,6 +289,13 @@ class WebSocketManager:
                     except json.JSONDecodeError:
                         await ws.send_json({"error": "invalid JSON"})
                         continue
+
+                    is_ping = data.get("type") == "ping"
+                    # Revalidate the exact browser session before accepting
+                    # every command. Pings detect expiry but never refresh it;
+                    # substantive traffic retains normal inactivity semantics.
+                    if not self._session_is_valid(ws, touch=not is_ping):
+                        break
 
                     sub = data.get("subscribe")
                     unsub = data.get("unsubscribe")
@@ -194,7 +323,7 @@ class WebSocketManager:
                             "ts": data.get("ts"),
                         })
                     elif data.get("type") == "chat":
-                        await self._handle_chat(ws, data)
+                        await self._start_chat(ws, data)
                     else:
                         await ws.send_json({"error": "unknown command"})
 
@@ -225,19 +354,6 @@ class WebSocketManager:
                 "type": "chat_error",
                 "error": f"content exceeds {MAX_CHAT_CONTENT_LEN} chars",
             })
-            return
-
-        import time as _time
-        now = _time.monotonic()
-        window_start = getattr(ws, "_chat_window_start", None)
-        if (window_start is None or not isinstance(window_start, (int, float))
-                or now - window_start > _WS_CHAT_RATE_WINDOW):
-            ws._chat_window_start = now  # type: ignore[attr-defined]  # sanctioned dynamic attr
-            ws._chat_count = 0  # type: ignore[attr-defined]  # sanctioned dynamic attr
-        chat_count = getattr(ws, "_chat_count", None)
-        ws._chat_count = (chat_count + 1) if isinstance(chat_count, int) else 1  # type: ignore[attr-defined]  # sanctioned dynamic attr
-        if ws._chat_count > _WS_CHAT_RATE_LIMIT:  # type: ignore[attr-defined]  # sanctioned dynamic attr
-            await ws.send_json({"type": "chat_error", "error": "rate limit exceeded (10/min)"})
             return
 
         identity = getattr(ws, "_odin_identity", None)
@@ -275,17 +391,19 @@ class WebSocketManager:
             files = result.get("files", [])
             if files:
                 resp["files"] = files
-            await ws.send_json(resp)
+            if not ws.closed:
+                await ws.send_json(resp)
         except Exception as e:
             # A naturally raised TimeoutError lands here and is formatted
             # like any other failure. Never send raw str(e): exception
             # text carries HTTP bodies (HTML pages), control bytes, and
             # secrets — the shared formatter bounds and scrubs it.
             log.error("WebSocket chat error: %s", format_user_facing_error(e), exc_info=True)
-            await ws.send_json({
-                "type": "chat_error",
-                "error": format_user_facing_error(e),
-            })
+            if not ws.closed:
+                await ws.send_json({
+                    "type": "chat_error",
+                    "error": format_user_facing_error(e),
+                })
 
     async def broadcast_event(self, event: dict) -> None:
         """Broadcast an event to all subscribed WebSocket clients."""
@@ -313,6 +431,13 @@ class WebSocketManager:
         the shutdown hang once per client. Subscriber sets are cleared in
         guaranteed cleanup even when individual closes fail.
         """
+        self._shutting_down = True
+        expiry_tasks = list(self._session_expiry_tasks.values())
+        for task in expiry_tasks:
+            task.cancel()
+        if expiry_tasks:
+            await asyncio.gather(*expiry_tasks, return_exceptions=True)
+        self._session_expiry_tasks.clear()
         snapshot = list(self._clients)
 
         async def _close_one(ws: web.WebSocketResponse) -> None:
@@ -333,6 +458,14 @@ class WebSocketManager:
             self._clients.clear()
             self._log_subscribers.clear()
             self._event_subscribers.clear()
+        chat_tasks = list(self._chat_tasks)
+        for task in chat_tasks:
+            task.cancel()
+        if chat_tasks:
+            await asyncio.gather(*chat_tasks, return_exceptions=True)
+        close_tasks = list(self._session_close_tasks)
+        if close_tasks:
+            await asyncio.gather(*close_tasks, return_exceptions=True)
         if snapshot:
             log.info("Closed %d WebSocket client(s) at shutdown", len(snapshot))
         return len(snapshot)
@@ -438,6 +571,10 @@ def setup_websocket(
         web_config=web_config,
     )
     app.router.add_get("/api/ws", manager.handle)
+    if session_manager is not None:
+        register_destroy = getattr(session_manager, "set_destroy_callback", None)
+        if register_destroy is not None:
+            register_destroy(manager.schedule_close_by_session_id)
 
     # The manager owns its shutdown: aiohttp runs on_shutdown between
     # stopping the listener and cancelling remaining handlers, which is the

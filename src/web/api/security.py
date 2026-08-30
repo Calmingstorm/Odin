@@ -497,10 +497,10 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             if auth_header.startswith("Bearer "):
                 sid = auth_header[len("Bearer "):]
         if sid:
+            # SessionManager owns the one terminal teardown contract.  Its
+            # callback enters WebSocketManager.close_by_session_id for both
+            # explicit logout and expiry-driven destruction.
             sm.destroy(sid)
-            ws_mgr = request.app.get("ws_manager")
-            if ws_mgr:
-                await ws_mgr.close_by_session_id(sid)
 
         return web.json_response({"status": "logged_out"})
 
