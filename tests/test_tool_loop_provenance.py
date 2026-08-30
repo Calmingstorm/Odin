@@ -85,6 +85,24 @@ class TestLoopIterationProvenance:
         assert it.reasoning_effort is None
 
 
+def test_loop_iteration_stamps_frozen_context_budget_snapshot():
+    from src.llm.context_budget import resolve_context_budget
+
+    runner = ToolLoopRunner.__new__(ToolLoopRunner)
+    snapshot = resolve_context_budget("gpt-5.6-sol", density_milli=609)
+    st = SimpleNamespace(
+        _trajectory=_turn(),
+        _generation_budget_snapshot=snapshot,
+        final_text="",
+        completed_naturally=False,
+    )
+    runner._record_loop_iteration(st, LLMResponse(text="done"), 2)
+    row = st._trajectory.iterations[-1]
+    assert row.context_density_milli == 609
+    assert row.context_density_source == "calibrated"
+    assert row.context_primary_chars == snapshot.primary_chars
+
+
 def test_chat_iteration_stamps_frozen_context_budget_snapshot():
     from src.llm.context_budget import resolve_context_budget
 
