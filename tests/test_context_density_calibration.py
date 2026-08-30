@@ -36,8 +36,12 @@ UTILIZATIONS = (40, 60, 100)
 
 
 def _chat_st_stub(req_id="t1"):
-    """Minimal turn state carrying only what workload scoping reads."""
-    return SimpleNamespace(_req_id=req_id, _loop_id=None)
+    """Minimal turn state carrying the durable chat-turn identity."""
+    return SimpleNamespace(
+        _req_id=req_id,
+        _loop_id=None,
+        _trajectory=SimpleNamespace(source="discord", channel_id="c1", message_id=req_id),
+    )
 
 
 def _scope(kind="agent", wid="w1"):
@@ -62,6 +66,7 @@ def _rejected_facts(*, chars=100_000, images=0, density=2500, budget=921_601, be
         estimated_tokens=estimate_request_tokens(chars, images, density_milli=density),
         effective_budget=budget,
         believed_within=believed,
+        workload_scope=_scope(),
     )
 
 
@@ -439,6 +444,7 @@ class TestClampQualification:
     async def test_density_overshoot_rescues_without_clamping(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=288_499),
             rejected_attempt=_rejected_facts(believed=False),
@@ -454,6 +460,7 @@ class TestClampQualification:
     async def test_genuine_shrink_still_clamps(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=288_499),
             rejected_attempt=_rejected_facts(),
@@ -466,6 +473,7 @@ class TestClampQualification:
         clamp purposes, never like True."""
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(),
             rejected_attempt=None,
@@ -478,7 +486,9 @@ class TestClampQualification:
         unconditional one: clamp evidence must be affirmative, and the absence
         of contradiction is not proof that the window shrank."""
         obs = _observer(tmp_path)
-        await obs.record_rescue(overflow=_overflow(), response=_acceptance())
+        await obs.record_rescue(
+            workload_scope=_scope(), overflow=_overflow(), response=_acceptance()
+        )
         assert obs.active_clamp("gpt-5.6-sol") is None
         # History still records — the observation is disqualified, not discarded.
         assert obs.view()["accounts"][ACCT_A]["models"]["gpt-5.6-sol"]["overflow_occurrences"] == 1
@@ -486,12 +496,14 @@ class TestClampQualification:
     async def test_disqualified_rescue_does_not_tighten_a_live_clamp(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=500_000),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=200_000),
             rejected_attempt=_rejected_facts(believed=False),
@@ -512,6 +524,7 @@ class TestClampQualification:
         believed_within = estimated <= snapshot.effective_budget
         assert believed_within is False  # we EXPECTED this rejection
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(model="gpt-5.6-terra"),
             response=_acceptance(tokens=288_499, model="gpt-5.6-terra"),
             rejected_attempt=_rejected_facts(
@@ -760,7 +773,9 @@ class TestTotality:
         runner._record_density(_chat_st_stub(), response, FIELD_CHARS, 0, codex)
         # Recorded under the CHAT workload that sent it — an agent scope with
         # the same id must NOT see it.
-        assert obs.density_for(_scope("chat", "t1"), "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        assert (
+            obs.density_for(_scope("chat", "discord:c1:t1"), "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        )
         assert obs.density_for(_scope("agent", "t1"), "gpt-5.6-sol") is None
 
         class _Broken:
@@ -889,6 +904,7 @@ class TestPostHocQualification:
         estimated = estimate_request_tokens(1_541_654, 0, density_milli=2500)
         assert estimated <= snapshot.effective_budget  # believed WITHIN at cold default
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=FIELD_TOKENS),
             rejected_attempt=_rejected_facts(
@@ -913,6 +929,7 @@ class TestPostHocQualification:
         assert estimate_request_tokens(100_000, 0, density_milli=100) == 292_000
         assert estimate_request_tokens_forensic(100_000, 0, density_milli=100) == 1_042_000
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(tokens=None),
             response=_acceptance(tokens=accepted_tokens),
             rejected_attempt=facts,
@@ -936,6 +953,7 @@ class TestPostHocQualification:
         # usage over the frozen budget vetoes it.
         veto = _observer(tmp_path / "veto")
         await veto.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(tokens=1_042_000),
             response=_acceptance(tokens=100_000),
             rejected_attempt=_rejected_facts(chars=100_000, believed=True),
@@ -948,6 +966,7 @@ class TestPostHocQualification:
         # shrink clamp; the accepted retry may have an unusable sample.
         fit = _observer(tmp_path / "fit")
         await fit.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(tokens=200_000),
             response=_acceptance(tokens=250_000),
             rejected_attempt=_rejected_facts(chars=100_000, believed=True),
@@ -965,6 +984,7 @@ class TestPostHocQualification:
             estimate_request_tokens(1_541_654, 0, density_milli=2289) <= snapshot.effective_budget
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=FIELD_TOKENS),
             rejected_attempt=_rejected_facts(
@@ -983,6 +1003,7 @@ class TestPostHocQualification:
         fit is real capability evidence and must clamp."""
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=300_000),
             rejected_attempt=_rejected_facts(chars=100_000, density=2500, believed=True),
@@ -1000,6 +1021,7 @@ class TestPostHocQualification:
             {"accepted_chars": 100_000, "accepted_images": 400},
         ):  # image-dominated
             await obs.record_rescue(
+                workload_scope=_scope(),
                 overflow=_overflow(),
                 response=_acceptance(tokens=300_000),
                 rejected_attempt=_rejected_facts(believed=True),
@@ -1015,6 +1037,7 @@ class TestPostHocQualification:
         # A sparse retry implies a HIGH density (2500, clamped at the ceiling).
         # It must not lift the assumed 609 used for the rejected attempt.
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=100_000),
             rejected_attempt=_rejected_facts(
@@ -1036,6 +1059,7 @@ class TestPostHocQualification:
         obs = _observer(tmp_path)
         snapshot = resolve_context_budget("gpt-5.6-sol", utilization=40)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=FIELD_TOKENS),
             rejected_attempt=_rejected_facts(
@@ -1048,6 +1072,7 @@ class TestPostHocQualification:
         # Later: a small payload, believed within under corrected density, and
         # its acceptance agrees it should have fit.
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=250_000),
             rejected_attempt=_rejected_facts(
@@ -1064,6 +1089,7 @@ class TestPostHocQualification:
     async def test_prior_disbelief_still_short_circuits(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(),
             response=_acceptance(tokens=300_000),
             rejected_attempt=_rejected_facts(believed=False),
@@ -1119,8 +1145,10 @@ class TestPostHocQualification:
             estimated_tokens=442_000,
             effective_budget=300_000,
             believed_within=True,  # impossible: 442K > 300K
+            workload_scope=_scope(),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(tokens=200_000),
             response=_acceptance(tokens=250_000),
             rejected_attempt=facts,
@@ -1134,6 +1162,7 @@ class TestPostHocQualification:
         (
             SimpleNamespace(
                 believed_within=True,
+                workload_scope=_scope(),
                 density_milli=2500,
                 chars=100_000,
                 images=0,
@@ -1149,6 +1178,7 @@ class TestPostHocQualification:
                 estimated_tokens=292_000,
                 effective_budget=921_601,
                 believed_within=True,
+                workload_scope=_scope(),
             ),
             __import__(
                 "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
@@ -1159,6 +1189,7 @@ class TestPostHocQualification:
                 estimated_tokens=42_000,
                 effective_budget=921_601,
                 believed_within=True,
+                workload_scope=_scope(),
             ),
             __import__(
                 "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
@@ -1169,6 +1200,7 @@ class TestPostHocQualification:
                 estimated_tokens=82_000,
                 effective_budget=921_601,
                 believed_within=True,
+                workload_scope=_scope(),
             ),
             __import__(
                 "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
@@ -1179,6 +1211,7 @@ class TestPostHocQualification:
                 estimated_tokens=82_001,  # contradicts recomputation
                 effective_budget=921_601,
                 believed_within=True,
+                workload_scope=_scope(),
             ),
             __import__(
                 "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
@@ -1189,6 +1222,7 @@ class TestPostHocQualification:
                 estimated_tokens=82_000,
                 effective_budget=50_000,
                 believed_within=True,  # contradicts estimate > budget
+                workload_scope=_scope(),
             ),
         ),
     )
@@ -1196,6 +1230,7 @@ class TestPostHocQualification:
         """Only exact, internally consistent frozen facts can assert capacity."""
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             overflow=_overflow(tokens=None),
             response=_acceptance(tokens=300_000),
             rejected_attempt=bad,
@@ -1213,37 +1248,63 @@ class TestPostHocQualification:
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         snapshot = resolve_context_budget("gpt-5.6-sol")
         codex = SimpleNamespace(is_codex=True, model="gpt-5.6-sol")
-        assert runner._attempt_facts([], snapshot, SimpleNamespace(is_codex=False)) is None
         assert (
             runner._attempt_facts(
-                [], SimpleNamespace(base_source="persisted", effective_budget=9), codex
+                [], snapshot, SimpleNamespace(is_codex=False), _scope("chat", "x")
             )
             is None
         )
         assert (
             runner._attempt_facts(
-                [], SimpleNamespace(base_source="floor", effective_budget=0), codex
+                [],
+                SimpleNamespace(base_source="persisted", effective_budget=9),
+                codex,
+                _scope("chat", "x"),
             )
             is None
         )
-        assert runner._attempt_facts(None, snapshot, codex) is None
-        facts = runner._attempt_facts([{"role": "user", "content": "x" * 100}], snapshot, codex)
+        assert (
+            runner._attempt_facts(
+                [],
+                SimpleNamespace(base_source="floor", effective_budget=0),
+                codex,
+                _scope("chat", "x"),
+            )
+            is None
+        )
+        assert runner._attempt_facts(None, snapshot, codex, _scope("chat", "x")) is None
+        facts = runner._attempt_facts(
+            [{"role": "user", "content": "x" * 100}], snapshot, codex, _scope("chat", "x")
+        )
         assert facts is not None and facts.believed_within is True
 
     def test_agent_attempt_facts_are_total_and_gated(self):
         from src.agents.manager import _attempt_facts
 
         snapshot = resolve_context_budget("gpt-5.6-sol")
-        assert _attempt_facts([], snapshot, is_codex=False) is None
-        assert _attempt_facts([], SimpleNamespace(base_source="persisted"), is_codex=True) is None
+        assert _attempt_facts([], snapshot, is_codex=False, workload_scope=_scope()) is None
         assert (
             _attempt_facts(
-                [], SimpleNamespace(base_source="floor", effective_budget=0), is_codex=True
+                [], SimpleNamespace(base_source="persisted"), is_codex=True, workload_scope=_scope()
             )
             is None
         )
-        assert _attempt_facts(None, snapshot, is_codex=True) is None
-        facts = _attempt_facts([{"role": "user", "content": "x" * 100}], snapshot, is_codex=True)
+        assert (
+            _attempt_facts(
+                [],
+                SimpleNamespace(base_source="floor", effective_budget=0),
+                is_codex=True,
+                workload_scope=_scope(),
+            )
+            is None
+        )
+        assert _attempt_facts(None, snapshot, is_codex=True, workload_scope=_scope()) is None
+        facts = _attempt_facts(
+            [{"role": "user", "content": "x" * 100}],
+            snapshot,
+            is_codex=True,
+            workload_scope=_scope(),
+        )
         assert facts is not None and facts.believed_within is True
 
 
@@ -1413,7 +1474,7 @@ class TestWorkloadIsolation:
 
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._window_observer = _Broken()
-        assert runner._observed_density(_scope("chat", "t1"), "gpt-5.6-sol") is None
+        assert runner._observed_density(_scope("chat", "discord:c1:t1"), "gpt-5.6-sol") is None
 
     def test_agent_density_lookup_survives_a_broken_observer(self):
         from src.discord.native_tools.agents_tasks import _agent_scope, _observer_density
@@ -1434,3 +1495,76 @@ class TestWorkloadIsolation:
         assert _agent_scope(None) is None
         assert _agent_scope("") is None
         assert _agent_scope("a1").workload_id == "a1"
+
+
+
+
+class TestWorkloadOwnerLifecycle:
+    async def test_non_durable_terminal_chat_marks_settled_for_release(self):
+        from src.turn_state.durability import TurnDurability
+
+        handle = TurnDurability.disabled()
+        assert handle.settled is False
+        await handle.settle_terminal(cancelled=False, is_error=False)
+        assert handle.settled is True
+
+class TestWorkloadScopeHardening:
+    def test_chat_identity_is_message_identity_not_content(self):
+        from src.discord.tool_loop import ToolLoopRunner
+        from src.trajectories.saver import TrajectoryTurn
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        # Same words in distinct users/channels are represented by distinct
+        # durable message identities. Content-derived request hashes are not
+        # consulted at all, even when they collide exactly.
+        a = SimpleNamespace(
+            _req_id="same-content-hash",
+            _loop_id=None,
+            _trajectory=TrajectoryTurn(
+                source="discord", channel_id="channel-a", message_id="message-a"
+            ),
+        )
+        b = SimpleNamespace(
+            _req_id="same-content-hash",
+            _loop_id=None,
+            _trajectory=TrajectoryTurn(
+                source="discord", channel_id="channel-b", message_id="message-b"
+            ),
+        )
+        assert runner._workload_scope(a) == _scope("chat", "discord:channel-a:message-a")
+        assert runner._workload_scope(b) == _scope("chat", "discord:channel-b:message-b")
+        assert runner._workload_scope(a) != runner._workload_scope(b)
+
+    def test_scope_contract_is_exact_and_closed(self, tmp_path):
+        from src.llm.context_budget import WorkloadScope
+
+        class SubScope(WorkloadScope):
+            pass
+
+        obs = _observer(tmp_path)
+        for bad in (
+            WorkloadScope("typo-surface", "x"),
+            SubScope("agent", "x"),
+            SimpleNamespace(surface_kind="agent", workload_id="x"),
+        ):
+            assert not getattr(bad, "is_valid", lambda: False)()
+            obs.record_density(
+                scope=bad,
+                model="gpt-5.6-sol",
+                chars_sent=FIELD_CHARS,
+                images_sent=0,
+                server_input_tokens=FIELD_TOKENS,
+            )
+        assert obs.workload_calibration_summary() == {}
+
+    async def test_clamp_facts_cannot_cross_lineages(self, tmp_path):
+        obs = _observer(tmp_path)
+        await obs.record_rescue(
+            workload_scope=_scope("agent", "B"),
+            overflow=_overflow(tokens=200_000),
+            response=_acceptance(tokens=250_000),
+            rejected_attempt=_rejected_facts(),  # frozen under agent/w1
+            accepted_chars=100_000,
+            accepted_images=0,
+        )
+        assert obs.active_clamp("gpt-5.6-sol") is None

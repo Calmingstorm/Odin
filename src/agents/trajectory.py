@@ -73,6 +73,9 @@ class AgentTrajectoryTurn:
         provider: str = "",
         model: str = "",
         reasoning_effort: str | None = None,
+        context_density_milli: int | None = None,
+        context_density_source: str = "",
+        context_primary_chars: int | None = None,
     ) -> ToolIteration:
         it = ToolIteration(
             iteration=iteration,
@@ -83,6 +86,9 @@ class AgentTrajectoryTurn:
             provider=provider,
             model=model,
             reasoning_effort=reasoning_effort,
+            context_density_milli=context_density_milli,
+            context_density_source=context_density_source,
+            context_primary_chars=context_primary_chars,
         )
         self.iterations.append(it)
         return it

@@ -607,13 +607,23 @@ class TestRecoveryLoopIntegration:
                 raise overflow
             return {"text": "done", "tool_calls": [], "provider": "codex"}
 
-        async def recorder(err, response, facts=None, acc_chars=None, acc_images=None):
+        async def recorder(
+            err, response, facts=None, acc_chars=None, acc_images=None, workload_scope=None
+        ):
             recorded.append((err, facts))
 
         # Uncalibrated snapshot: ~600K chars estimates well under sol's window,
         # so prediction does NOT fire and the full ladder remains for rescue.
         snapshot = resolve_context_budget("gpt-5.6-sol", utilization=60)
-        state = {"plan": {"snapshot": snapshot, "is_codex": True}}
+        from src.llm.context_budget import WorkloadScope
+
+        state = {
+            "plan": {
+                "snapshot": snapshot,
+                "is_codex": True,
+                "workload_scope": WorkloadScope("agent", "a1"),
+            }
+        }
         out = await _call_llm_with_recovery(
             agent, cb, "sys", [], generation_state=state, evidence_recorder=recorder
         )
@@ -677,8 +687,7 @@ class TestRecoveryLoopIntegration:
             id="a1", label="t", goal="g", channel_id="c1", requester_id="u1", requester_name="u"
         )
         agent.messages = [{"role": "user", "content": "task"}] + [
-            {"role": "assistant", "content": "[Tool result: x]\n" + "y" * 20_000}
-            for _ in range(30)
+            {"role": "assistant", "content": "[Tool result: x]\n" + "y" * 20_000} for _ in range(30)
         ]
         overflow = LLMRequestError(
             "context overflow",

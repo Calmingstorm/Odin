@@ -952,6 +952,10 @@ class AgentManager:
         if ct and not ct.done():
             ct.cancel()
         if agent:
+            # The single removal point owns release. Periodic cleanup may race
+            # and cancel the delayed cleanup task; release-before-pop in that
+            # task was therefore not a lifecycle guarantee.
+            self._release_calibration(agent_id)
             root = agent.root_id or agent_id
             if not any((a.root_id or a.id) == root for a in self._agents.values()):
                 # Last member gone: nothing can ever spawn into this tree
@@ -966,7 +970,6 @@ class AgentManager:
 
         async def _delayed_cleanup():
             await asyncio.sleep(CLEANUP_DELAY)
-            self._release_calibration(agent_id)
             self._remove_agent(agent_id, source="delayed_cleanup")
 
         task = asyncio.ensure_future(_delayed_cleanup())
@@ -1076,6 +1079,19 @@ async def _run_agent(
         reasoning_effort_override=agent.reasoning_effort_override,
     )
     agent_start = time.time()
+
+    def _budget_observation(state: dict) -> tuple[int | None, str, int | None]:
+        plan = state.get("plan")
+        snapshot = plan.get("snapshot") if isinstance(plan, dict) else None
+        if snapshot is None:
+            return None, "unknown", None
+        density = getattr(snapshot, "density_milli", None)
+        primary = getattr(snapshot, "primary_chars", None)
+        return (
+            density if type(density) is int else None,
+            str(getattr(snapshot, "density_source", "") or "unknown"),
+            primary if type(primary) is int else None,
+        )
 
     def _check_kill() -> bool:
         if agent._cancel_event.is_set():  # type: ignore[union-attr]  # __post_init__ always sets it
@@ -1266,6 +1282,9 @@ async def _run_agent(
 
             text = response.get("text", "")
             tool_calls = response.get("tool_calls", [])
+            context_density, context_density_source, context_primary_chars = (
+                _budget_observation(generation_state)
+            )
 
             # Append assistant response to messages
             agent.messages.append({"role": "assistant", "content": text})
@@ -1279,6 +1298,9 @@ async def _run_agent(
                     provider=response.get("provider", ""),
                     model=response.get("model", ""),
                     reasoning_effort=response.get("reasoning_effort"),
+                    context_density_milli=context_density,
+                    context_density_source=context_density_source,
+                    context_primary_chars=context_primary_chars,
                 )
                 agent.transition(AgentState.COMPLETED, "no more tool calls")
                 agent.result = text
@@ -1314,6 +1336,9 @@ async def _run_agent(
                         provider=response.get("provider", ""),
                         model=response.get("model", ""),
                         reasoning_effort=response.get("reasoning_effort"),
+                        context_density_milli=context_density,
+                        context_density_source=context_density_source,
+                        context_primary_chars=context_primary_chars,
                     )
                     _lifetime_timeout(agent)
                     return
@@ -1381,6 +1406,9 @@ async def _run_agent(
                 provider=response.get("provider", ""),
                 model=response.get("model", ""),
                 reasoning_effort=response.get("reasoning_effort"),
+                context_density_milli=context_density,
+                context_density_source=context_density_source,
+                context_primary_chars=context_primary_chars,
             )
 
             # Post-tool deadline check: expiry during the FINAL tool call of
@@ -1483,14 +1511,20 @@ def _measure_payload(messages: list[dict]) -> tuple[int, int]:
 
 
 def _attempt_facts(
-    messages: list[dict], snapshot, *, is_codex: bool
+    messages: list[dict], snapshot, *, is_codex: bool, workload_scope: object
 ) -> object | None:
     """Freeze everything this agent attempt's fit verdict rests on, or None.
 
     One structured unit rather than a loose bool beside loose numbers, so the
     verdict and its evidence cannot drift apart before clamp qualification.
     """
-    if is_codex is not True:
+    from ..llm.context_budget import WorkloadScope
+
+    if (
+        is_codex is not True
+        or type(workload_scope) is not WorkloadScope
+        or not workload_scope.is_valid()
+    ):
         return None
     if snapshot is None or getattr(snapshot, "base_source", None) == "persisted":
         return None
@@ -1510,6 +1544,7 @@ def _attempt_facts(
             estimated_tokens=estimated,
             effective_budget=effective,
             believed_within=estimated <= effective,
+            workload_scope=workload_scope,
         )
     except Exception:
         log.exception("attempt fact capture failed; recording belief as unknown")
@@ -1655,6 +1690,7 @@ async def _call_llm_with_recovery(
     _plan = generation_state.get("plan")
     _plan_snapshot = _plan.get("snapshot") if isinstance(_plan, dict) else None
     _is_codex = bool(_plan.get("is_codex")) if isinstance(_plan, dict) else False
+    _workload_scope = _plan.get("workload_scope") if isinstance(_plan, dict) else None
     # Predictive descent runs AFTER soft compaction and mandatory latch
     # enforcement (both already applied by the caller) and only for Codex
     # serving identities: other providers supply no accepted-token evidence
@@ -1688,7 +1724,10 @@ async def _call_llm_with_recovery(
         # carries its own belief rather than inheriting the rejected one.
         attempt_chars, attempt_images = _measure_payload(agent.messages)
         attempt_facts = _attempt_facts(
-            agent.messages, _plan_snapshot, is_codex=_is_codex
+            agent.messages,
+            _plan_snapshot,
+            is_codex=_is_codex,
+            workload_scope=_workload_scope,
         )
         try:
             response = await asyncio.wait_for(
@@ -1730,6 +1769,7 @@ async def _call_llm_with_recovery(
                             last_overflow_facts,
                             attempt_chars,
                             attempt_images,
+                            workload_scope=_workload_scope,
                         )
                     except Exception:
                         log.exception("agent window-evidence recording failed (non-fatal)")

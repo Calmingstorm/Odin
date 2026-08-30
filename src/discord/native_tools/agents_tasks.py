@@ -303,6 +303,9 @@ def _capture_agent_generation_plan(
     # is authoritative. Model names and Codex-shaped client attributes are
     # not evidence that a non-Codex response carries Codex usage semantics.
     is_codex = provider == "codex" and client is not None
+    workload_scope = _agent_scope(
+        agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
+    )
     return {
         "provider": provider,
         "client": client,
@@ -311,15 +314,14 @@ def _capture_agent_generation_plan(
         # Predictive pre-send admission is Codex-only: no other provider
         # supplies the accepted-token evidence contract calibration needs.
         "is_codex": is_codex,
+        "workload_scope": workload_scope,
         "snapshot": _generation_budget_snapshot(
             cfg,
             client,
             resolved_model,
             get_compressor(),
             observer=observer,
-            scope=_agent_scope(
-                agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
-            ),
+            scope=workload_scope,
             is_codex=is_codex,
         ),
     }
@@ -382,7 +384,12 @@ def _make_evidence_recorder(observer):
         return None
 
     async def recorder(
-        overflow, response, rejected_attempt=None, accepted_chars=None, accepted_images=None
+        overflow,
+        response,
+        rejected_attempt=None,
+        accepted_chars=None,
+        accepted_images=None,
+        workload_scope=None,
     ):
         try:
             if isinstance(response, dict):
@@ -407,6 +414,7 @@ def _make_evidence_recorder(observer):
                 rejected_attempt=rejected_attempt,
                 accepted_chars=accepted_chars,
                 accepted_images=accepted_images,
+                workload_scope=workload_scope,
             )
         except Exception:
             log.exception("agent window-evidence recording failed (non-fatal)")

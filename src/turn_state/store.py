@@ -880,6 +880,20 @@ class TurnStateStore:
         except sqlite3.Error:
             log.exception("release_acquired failed (non-fatal)")
 
+    def turn_status_sync(self, key: TurnKey) -> str | None:
+        """Current persisted status for one durable owner, or None if absent.
+
+        Resume admission uses this only to distinguish a terminal self-heal
+        from another process temporarily owning the still-live turn.
+        """
+        if self._conn is None:
+            return None
+        row = self._conn.execute(
+            "SELECT status FROM turns WHERE source=? AND channel_id=? AND message_id=?",
+            [key.source, key.channel_id, key.message_id],
+        ).fetchone()
+        return str(row[0]) if row is not None else None
+
     def list_suspended_sync(self, source: str | None = None) -> list[dict]:
         if self._conn is None:
             return []
@@ -968,10 +982,16 @@ class TurnStateStore:
         conn = self._conn
         now = time.time()
         expired = payloads = ledger = 0
+        expiring_rows: list[tuple[str, str, str]] = []
         self._restrict_db_modes()  # WAL/SHM sidecars appear lazily
         try:
             with self._write_lock:
                 # Clock 1: resumable window — 24h from last REAL progress.
+                expiring_rows = conn.execute(
+                    "SELECT source, channel_id, message_id FROM turns "
+                    "WHERE status=? AND last_progress_at < ?",
+                    [TurnStatus.SUSPENDED, now - resume_ttl_hours * 3600.0],
+                ).fetchall()
                 cur = conn.execute(
                     "UPDATE turns SET status=? WHERE status=? AND last_progress_at < ?",
                     [TurnStatus.TERMINAL_EXPIRED, TurnStatus.SUSPENDED,
@@ -1002,8 +1022,12 @@ class TurnStateStore:
                 conn.commit()
         except sqlite3.Error:
             log.exception("turn-state TTL sweep failed (non-fatal)")
-        return {"expired_turns": expired, "compacted_payloads": payloads,
-                "ledger_rows_deleted": ledger}
+        return {
+            "expired_turns": expired,
+            "expired_turn_keys": [tuple(row) for row in expiring_rows] if expired else [],
+            "compacted_payloads": payloads,
+            "ledger_rows_deleted": ledger,
+        }
 
     # ── blobs ────────────────────────────────────────────────────────
 

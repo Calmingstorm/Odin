@@ -501,7 +501,7 @@ class WindowObserver:
 
             # Exact type, not duck-typing: a scope-shaped object from
             # elsewhere must not be able to claim a calibration lineage.
-            if not isinstance(scope, WorkloadScope) or not scope.is_valid():
+            if type(scope) is not WorkloadScope or not scope.is_valid():
                 return None
             canonical = canonical_codex_model(model)
             if not canonical:
@@ -538,7 +538,7 @@ class WindowObserver:
         try:
             from .context_budget import WorkloadScope
 
-            if not isinstance(scope, WorkloadScope) or not scope.is_valid():
+            if type(scope) is not WorkloadScope or not scope.is_valid():
                 return 0
             prefix = (scope.surface_kind.strip(), scope.workload_id.strip())
             doomed = [k for k in self._density_milli if k[:2] == prefix]
@@ -662,6 +662,7 @@ class WindowObserver:
         accepted_chars: object,
         accepted_images: object,
         accepted_tokens: int,
+        accepted_workload_scope: object,
     ) -> bool:
         """Whether this rescue is affirmative evidence that the window shrank.
 
@@ -705,9 +706,19 @@ class WindowObserver:
 
         # This is a durable-capability decision, not a convenience API:
         # accept only the exact frozen facts type produced by the send path.
-        if not isinstance(rejected_attempt, RejectedAttemptFacts):
+        if type(rejected_attempt) is not RejectedAttemptFacts:
             return False
         facts = rejected_attempt
+        from .context_budget import WorkloadScope
+
+        if (
+            type(accepted_workload_scope) is not WorkloadScope
+            or not accepted_workload_scope.is_valid()
+            or type(facts.workload_scope) is not WorkloadScope
+            or not facts.workload_scope.is_valid()
+            or facts.workload_scope != accepted_workload_scope
+        ):
+            return False
         if facts.believed_within is not True:
             return False
         if (
@@ -767,6 +778,7 @@ class WindowObserver:
         *,
         overflow: object,
         response: object,
+        workload_scope: object = None,
         rejected_attempt: object = None,
         accepted_chars: object = None,
         accepted_images: object = None,
@@ -841,6 +853,7 @@ class WindowObserver:
                         accepted_chars=accepted_chars,
                         accepted_images=accepted_images,
                         accepted_tokens=accept_tokens,
+                        accepted_workload_scope=workload_scope,
                     )
                 ):
                     record = self._record_for(state, reject_key, reject_model)

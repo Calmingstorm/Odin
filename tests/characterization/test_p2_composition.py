@@ -75,6 +75,13 @@ class TestTwoStageComposition:
     def test_gateway_owns_the_llm_surface(self, bot):
         assert bot.llm_gateway is bot.components.llm_gateway
 
+    def test_calibration_release_hooks_are_wired_to_owner_managers(self, bot):
+        assert bot.agent_manager._window_observer is bot.services.window_observer
+        assert bot.loop_manager._calibration_releaser is not None
+        assert bot.housekeeping._window_observer is bot.services.window_observer
+        assert bot.pipeline._turn_resume is not None
+        assert bot.pipeline._turn_resume._release_workload is not None
+
     def test_scheduler_start_wires_scheduled_events_methods(self):
         # on_ready is too heavy to drive here (guild sync); pin the spelling.
         from src.discord.client import OdinBot

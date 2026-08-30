@@ -444,6 +444,11 @@ class TurnDurability:
         """
         self._stop_heartbeats()  # unconditionally — every turn exit lands here
         if not self.enabled:
+            # A disabled handle still represents a terminal non-durable turn.
+            # Lifecycle owners must not infer "still active" merely because
+            # no SQLite transition was needed.
+            if not self.suspended:
+                self.settled = True
             return
         if cancelled or self.cancelled:
             status = TurnStatus.TERMINAL_CANCELLED

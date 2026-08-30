@@ -459,6 +459,13 @@ def build_services(
     # installed here rather than passed at construction.
     agent_manager.set_calibration_observer(window_observer)
 
+    def _release_loop_calibration(loop_id: str) -> None:
+        from ..llm.context_budget import WorkloadScope
+
+        window_observer.release_workload(WorkloadScope("loop", str(loop_id)))
+
+    loop_manager.set_calibration_releaser(_release_loop_calibration)
+
     # Action diff tracker — records before→after diffs. Always on.
     diff_tracker = DiffTracker()
 
@@ -899,6 +906,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         channel_logger=services.channel_logger,
         fts_index=services.fts_index,
         turn_store=services.turn_store,
+        window_observer=services.window_observer,
     )
 
     # Suspended-turn resume (2026-07-30): explicit `resume` rides the intake
@@ -912,6 +920,14 @@ def build_components(bot, services: BotServices) -> BotComponents:
             if channel is None:
                 channel = await bot.fetch_channel(int(channel_id))
             return await channel.fetch_message(int(message_id))
+
+        def _release_chat_calibration(key) -> None:
+            from ..llm.context_budget import chat_workload_scope
+
+            observer = services.window_observer
+            scope = chat_workload_scope(key.source, key.channel_id, key.message_id)
+            if observer is not None and scope is not None:
+                observer.release_workload(scope)
 
         turn_resume = TurnResumeManager(
             store=services.turn_store,
@@ -927,6 +943,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             auto_resume_enabled=bot.config.turn_state.auto_resume,
             resume_ttl_hours=bot.config.turn_state.resume_ttl_hours,
             get_bot_user=lambda: bot.user,
+            release_workload=_release_chat_calibration,
         )
         # Late instance-attr wiring: the runner exists before the manager
         # (the manager needs the runner), so the suspension callback is

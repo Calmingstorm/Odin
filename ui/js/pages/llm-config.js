@@ -289,7 +289,7 @@ export default {
                           <th>Configured override</th>
                           <th>Effective budget</th>
                           <th>Configured target</th>
-                          <th>Runtime target</th>
+                          <th>Fresh-workload target</th>
                           <th>Provenance</th>
                         </tr>
                       </thead>
@@ -310,8 +310,8 @@ export default {
                           </td>
                           <td data-label="Effective budget"><span class="llm-budget-value llm-budget-effective">{{ formatCount(row.effectiveBudget) }}</span><small>tokens</small></td>
                           <td data-label="Configured target"><span class="llm-budget-value">{{ formatCount(row.configuredPrimaryChars) }}</span><small>characters · saved policy</small></td>
-                          <td data-label="Runtime target">
-                            <span class="llm-budget-value llm-budget-effective">{{ formatCount(row.primaryChars) }}</span><small>characters · active process</small>
+                          <td data-label="Fresh-workload target">
+                            <span class="llm-budget-value llm-budget-effective">{{ formatCount(row.primaryChars) }}</span><small>characters · fixed prior for a new workload</small>
                             <span v-if="contextWindows.max_context_chars_pending_restart === true && row.configuredPrimaryChars !== row.primaryChars" class="llm-budget-pending">Restart pending</span>
                           </td>
                           <td data-label="Provenance">

@@ -5,6 +5,7 @@ from the RESPONSE's provenance fields — the only source that survives
 gateway routing, retries, and live reloads. A response without provenance
 is recorded as UNKNOWN (empty/None), never replaced by a call-site guess.
 """
+import asyncio
 from types import SimpleNamespace
 
 from src.discord.response_guards import StuckLoopTracker
@@ -82,3 +83,19 @@ class TestLoopIterationProvenance:
         assert it.provider == ""
         assert it.model == ""
         assert it.reasoning_effort is None
+
+
+def test_chat_iteration_stamps_frozen_context_budget_snapshot():
+    from src.llm.context_budget import resolve_context_budget
+
+    runner = ToolLoopRunner.__new__(ToolLoopRunner)
+    st = _chat_st()
+    st._generation_budget_snapshot = resolve_context_budget(
+        "gpt-5.6-sol", density_milli=609
+    )
+    resp = LLMResponse(text="hi")
+    asyncio.run(runner._check_stuck_and_record(st, resp))
+    row = st._trajectory.iterations[-1]
+    assert row.context_density_milli == 609
+    assert row.context_density_source == "calibrated"
+    assert row.context_primary_chars == st._generation_budget_snapshot.primary_chars

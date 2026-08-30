@@ -77,6 +77,7 @@ class ContextTraceCollector:
         self._warnings: list[dict] = []
         self._timings: dict[str, float] = {}
         self._provider: dict = {}
+        self._context_budgets: list[dict] = []
         self._continuity_source: str | None = None
         self._finalized: dict | None = None
 
@@ -197,6 +198,25 @@ class ContextTraceCollector:
             self._provider["reasoning_effort"] = reasoning_effort
 
     @_guarded
+    def context_budget(
+        self,
+        *,
+        generation: int,
+        density_milli: int | None,
+        density_source: str,
+        primary_chars: int | None,
+    ) -> None:
+        """Record the frozen budget facts for one logical generation."""
+        self._context_budgets.append(
+            {
+                "generation": int(generation),
+                "density_milli": density_milli,
+                "density_source": str(density_source),
+                "primary_chars": primary_chars,
+            }
+        )
+
+    @_guarded
     def warning(self, code: str, severity: str, detail: str) -> None:
         """Record an invariant violation. Golden eval cases assert zero of these."""
         self._warnings.append({
@@ -276,6 +296,7 @@ class ContextTraceCollector:
                 "segments": self._segments,
                 "continuity_source": self._continuity_source,
                 "provider": self._provider,
+                "context_budgets": self._context_budgets,
                 "warnings": self._warnings,
             }
             serialized = json.dumps(trace, default=str)
@@ -287,7 +308,7 @@ class ContextTraceCollector:
             # Enforce the size cap by shedding the bulkiest sublists —
             # explicitly flagged, never silent.
             if len(serialized) > self._max_trace_bytes:
-                for bulky in ("segments", "sections"):
+                for bulky in ("segments", "sections", "context_budgets"):
                     trace[bulky] = []
                 self._learned.pop("gated_out", None)
                 trace["summary"]["trace_truncated"] = True

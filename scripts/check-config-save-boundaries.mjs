@@ -187,6 +187,9 @@ assert.doesNotMatch(
 const llm = LLMConfigPage.setup();
 await llm.fetchAll();
 assert.equal(llm.contextBudgetRows.value[0].primaryChars, 1277400, 'Context target did not come from GET /api/context/windows');
+assert.match(LLMConfigPage.template, /Fresh-workload target/, 'prior-derived target is mislabeled as active runtime truth');
+assert.match(LLMConfigPage.template, /fixed prior for a new workload/, 'fresh-workload semantics are not named');
+assert.doesNotMatch(LLMConfigPage.template, /Runtime target|characters · active process/, 'global active-runtime fiction returned');
 assert.equal(llm.formatContextCeiling(null), 'automatic (model-derived)', 'automatic runtime ceiling rendered as a numeric zero');
 assert.equal(llm.formatContextCeiling(500000), '500,000 characters', 'explicit runtime ceiling lost its unit/value');
 const lateContextRefresh = defer('GET /api/context/windows');

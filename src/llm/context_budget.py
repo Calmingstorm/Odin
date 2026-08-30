@@ -165,12 +165,46 @@ class WorkloadScope:
     workload_id: str
 
     def is_valid(self) -> bool:
+        """Whether this is one exact, closed-set workload identity.
+
+        Subclasses and invented surface names are rejected.  This object is an
+        isolation boundary for calibration evidence, not an extensibility
+        protocol: accepting a merely scope-shaped value would let a typo or a
+        foreign caller create a new calibration namespace silently.
+        """
         return bool(
-            isinstance(self.surface_kind, str)
-            and self.surface_kind.strip()
-            and isinstance(self.workload_id, str)
+            type(self) is WorkloadScope
+            and type(self.surface_kind) is str
+            and self.surface_kind.strip() in {"chat", "agent", "loop"}
+            and type(self.workload_id) is str
             and self.workload_id.strip()
         )
+
+
+def chat_workload_scope(
+    source: object, channel_id: object, message_id: object
+) -> WorkloadScope | None:
+    """Build the identity of one top-level chat turn.
+
+    The identity is derived from message identity, never message CONTENT and
+    never the channel alone.  Discord snowflakes are globally unique; web/API
+    shims allocate a fresh message id per request.  Source and channel remain
+    in the key so every message-like surface has an explicit provenance
+    namespace rather than relying on that implementation detail.
+    """
+    if not (
+        type(source) is str
+        and source.strip()
+        and type(channel_id) is str
+        and channel_id.strip()
+        and type(message_id) is str
+        and message_id.strip()
+    ):
+        return None
+    return WorkloadScope(
+        "chat",
+        f"{source.strip()}:{channel_id.strip()}:{message_id.strip()}",
+    )
 
 
 @dataclass(frozen=True)
@@ -190,6 +224,7 @@ class RejectedAttemptFacts:
     estimated_tokens: int
     effective_budget: int
     believed_within: bool
+    workload_scope: WorkloadScope
 
 
 def clamp_density_milli(value: object) -> int:

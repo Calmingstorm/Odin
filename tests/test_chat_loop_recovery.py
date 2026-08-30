@@ -119,7 +119,7 @@ def _chat_state(messages, *, durability=None) -> SimpleNamespace:
         stuck_tracker=StuckLoopTracker(),
         wait_judgment_pending=False,
         _cancel=asyncio.Event(),
-        _trajectory=TrajectoryTurn(),
+        _trajectory=TrajectoryTurn(source="discord", channel_id="c1", message_id="r1"),
         trace=None,
         _ch_id="c1",
         _req_id="r1",
@@ -180,6 +180,21 @@ def _runner(gateway) -> ToolLoopRunner:
     runner._llm_error_done = _fake_error_done
     return runner
 
+
+
+
+async def test_non_durable_terminal_chat_releases_workload_scope():
+    runner = _runner(_Gateway(None))
+    st = _chat_state(_ENVELOPE)
+    released = []
+    runner._release_workload = released.append
+
+    async def done(_st):
+        return ("ok", False, False, [], False)
+
+    runner._run_chat_iterations = done
+    assert await runner._run_with_guards(st) == ("ok", False, False, [], False)
+    assert released == [st]
 
 class TestChatRescue:
     async def test_overflow_rescues_history_and_retries_same_identity(self):
@@ -837,7 +852,14 @@ class TestResumeIdentityReconstruction:
         )
         runner = _runner(gw)
 
-        async def record(overflow, response, facts=None, accepted_chars=None, accepted_images=None):
+        async def record(
+            overflow,
+            response,
+            facts=None,
+            accepted_chars=None,
+            accepted_images=None,
+            workload_scope=None,
+        ):
             recorded.append((overflow, response, facts))
 
         runner._record_window_evidence = record

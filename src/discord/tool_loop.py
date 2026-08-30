@@ -453,6 +453,7 @@ class _LoopTurn:
     _char_latch: int | None = None
     context_recoveries: list = field(default_factory=list)
     _iteration_index: int = 0
+    _generation_budget_snapshot: ContextBudgetSnapshot | None = None
 
 
 @dataclass(frozen=True)
@@ -689,6 +690,13 @@ class ToolLoopRunner:
             except BaseException:  # noqa: BLE001 — the original error must win
                 log.warning("Durable failure mark failed (non-fatal)")
             raise
+        finally:
+            # A suspended durable turn still owns its lineage and may resume.
+            # Every other exit is terminal for this process-local owner.
+            if getattr(st.durability, "settled", False) and not getattr(
+                st.durability, "suspended", False
+            ):
+                self._release_workload(st)
 
     async def _run_chat_iterations(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
         """The chat iteration loop — every phase-method exit returns through
@@ -723,6 +731,15 @@ class ToolLoopRunner:
             else:
                 budget_snapshot = self._capture_budget_snapshot(serving, config, st)
             st._generation_budget_snapshot = budget_snapshot
+            trace = st.trace
+            if trace is not None:
+                density, source, primary = self._context_budget_observation(budget_snapshot)
+                trace.context_budget(
+                    generation=iteration,
+                    density_milli=density,
+                    density_source=source,
+                    primary_chars=primary,
+                )
             if not self._maybe_compress(st, serving.client, config):
                 return await self._llm_error_done(
                     st,
@@ -1029,9 +1046,22 @@ class ToolLoopRunner:
         loop_id = getattr(st, "_loop_id", None)
         if loop_id:
             return WorkloadScope("loop", str(loop_id))
-        req_id = getattr(st, "_req_id", None)
-        if req_id:
-            return WorkloadScope("chat", str(req_id))
+        from ..llm.context_budget import chat_workload_scope
+
+        trajectory = getattr(st, "_trajectory", None)
+        if trajectory is None:
+            return None
+        scope = chat_workload_scope(
+            str(getattr(trajectory, "source", "") or ""),
+            str(getattr(trajectory, "channel_id", "") or ""),
+            str(getattr(trajectory, "message_id", "") or ""),
+        )
+        if scope is not None:
+            return scope
+        # Narrow compatibility for tests/extensions that construct a
+        # trajectory-shaped object without identity. Production and restored
+        # turns always have the durable fields above. `_req_id` must never be
+        # consulted: it is a hash of message content.
         return None
 
     def _observed_density(self, scope: object, model: object) -> int | None:
@@ -1051,6 +1081,18 @@ class ToolLoopRunner:
             log.exception("density_for failed (non-fatal); treating as uncalibrated")
             return None
 
+    def _release_workload(self, st: object) -> None:
+        """Release a terminal chat/loop owner from ephemeral calibration."""
+        observer = getattr(self, "_window_observer", None)
+        if observer is None:
+            return
+        try:
+            scope = self._workload_scope(st)
+            if scope is not None:
+                observer.release_workload(scope)
+        except Exception:
+            log.exception("workload calibration release failed (non-fatal)")
+
     async def _record_window_evidence(
         self,
         overflow: object,
@@ -1058,6 +1100,7 @@ class ToolLoopRunner:
         rejected_attempt: object = None,
         accepted_chars: object = None,
         accepted_images: object = None,
+        workload_scope: object = None,
     ) -> None:
         """Feed one rescue's overflow→acceptance pair to the observer.
 
@@ -1075,6 +1118,7 @@ class ToolLoopRunner:
                 rejected_attempt=rejected_attempt,
                 accepted_chars=accepted_chars,
                 accepted_images=accepted_images,
+                workload_scope=workload_scope,
             )
         except Exception:
             log.exception("window-evidence recording failed (non-fatal)")
@@ -1123,7 +1167,7 @@ class ToolLoopRunner:
 
     @staticmethod
     def _attempt_facts(
-        messages: list[dict], snapshot: object, serving_identity: object
+        messages: list[dict], snapshot: object, serving_identity: object, workload_scope: object
     ) -> object | None:
         """Freeze everything this attempt's fit verdict rests on, or None.
 
@@ -1131,7 +1175,14 @@ class ToolLoopRunner:
         the verdict and the evidence behind it cannot drift apart between
         capture and clamp qualification.
         """
-        if snapshot is None or not getattr(serving_identity, "is_codex", False):
+        from ..llm.context_budget import WorkloadScope
+
+        if (
+            snapshot is None
+            or not getattr(serving_identity, "is_codex", False)
+            or type(workload_scope) is not WorkloadScope
+            or not workload_scope.is_valid()
+        ):
             return None
         if getattr(snapshot, "base_source", None) == "persisted":
             return None
@@ -1156,6 +1207,7 @@ class ToolLoopRunner:
                 estimated_tokens=estimated,
                 effective_budget=effective,
                 believed_within=estimated <= effective,
+                workload_scope=workload_scope,
             )
         except Exception:
             log.exception("attempt fact capture failed; recording belief as unknown")
@@ -1324,6 +1376,19 @@ class ToolLoopRunner:
             # than splice CURRENT evidence into a FROZEN one.
             density_milli=DEFAULT_DENSITY_MILLI,
             density_source="default",
+        )
+
+    @staticmethod
+    def _context_budget_observation(snapshot: object) -> tuple[int | None, str, int | None]:
+        """Trajectory-safe frozen budget facts; persisted reconstructions stay unknown."""
+        if snapshot is None or getattr(snapshot, "base_source", None) == "persisted":
+            return None, "unknown", getattr(snapshot, "primary_chars", None)
+        density = getattr(snapshot, "density_milli", None)
+        primary = getattr(snapshot, "primary_chars", None)
+        return (
+            density if type(density) is int else None,
+            str(getattr(snapshot, "density_source", "") or "unknown"),
+            primary if type(primary) is int else None,
         )
 
     def _capture_budget_snapshot(self, serving, config, st=None) -> ContextBudgetSnapshot:
@@ -1632,7 +1697,7 @@ class ToolLoopRunner:
                     # never inherits the rejected attempt's belief.
                     _attempt_chars, _attempt_images = self._measure_payload(st.messages)
                     _attempt_facts = self._attempt_facts(
-                        st.messages, _snapshot, serving_identity
+                        st.messages, _snapshot, serving_identity, self._workload_scope(st)
                     )
                     try:
                         llm_resp = await generate_with_recovery(
@@ -1661,6 +1726,7 @@ class ToolLoopRunner:
                                 _last_overflow_facts,
                                 accepted_chars=_attempt_chars,
                                 accepted_images=_attempt_images,
+                                workload_scope=self._workload_scope(st),
                             )
                         if st._gen_identity is not None or st._rescue_passes:
                             st._gen_identity = None
@@ -1847,6 +1913,9 @@ class ToolLoopRunner:
             }
             for call in iter_tool_calls
         ]
+        density, density_source, primary_chars = self._context_budget_observation(
+            getattr(st, "_generation_budget_snapshot", None)
+        )
         st._trajectory.iterations.append(
             ToolIteration(
                 iteration=st.iteration,
@@ -1860,6 +1929,9 @@ class ToolLoopRunner:
                 provider=getattr(llm_resp, "provenance_provider", "") or "",
                 model=getattr(llm_resp, "provenance_model", "") or "",
                 reasoning_effort=getattr(llm_resp, "provenance_reasoning_effort", None),
+                context_density_milli=density,
+                context_density_source=density_source,
+                context_primary_chars=primary_chars,
             )
         )
         if is_wait_iteration(iter_tool_calls):
@@ -2719,6 +2791,16 @@ class ToolLoopRunner:
             _config = self._get_config()
             _serving = _serving_identity_for(self._llm_gateway, _config)
             _budget_snapshot = self._capture_budget_snapshot(_serving, _config, st)
+            st._generation_budget_snapshot = _budget_snapshot
+            loop_trace = getattr(st, "_trace", None)
+            if loop_trace is not None:
+                density, source, primary = self._context_budget_observation(_budget_snapshot)
+                loop_trace.context_budget(
+                    generation=_iteration,
+                    density_milli=density,
+                    density_source=source,
+                    primary_chars=primary,
+                )
             self._maybe_compress_loop(st, _serving, _config, budget_snapshot=_budget_snapshot)
             kind, val = await self._call_loop_llm(
                 st,
@@ -3024,7 +3106,9 @@ class ToolLoopRunner:
             # run_autonomous(). Frozen: the captured client, not live state.
             while True:
                 attempt_chars, attempt_images = self._measure_payload(st.messages)
-                attempt_facts = self._attempt_facts(st.messages, _snapshot, serving_identity)
+                attempt_facts = self._attempt_facts(
+                    st.messages, _snapshot, serving_identity, self._workload_scope(st)
+                )
                 try:
                     preflight_incompatible_effort(
                         serving_identity.client,
@@ -3054,6 +3138,7 @@ class ToolLoopRunner:
                             last_overflow_facts,
                             accepted_chars=attempt_chars,
                             accepted_images=attempt_images,
+                            workload_scope=self._workload_scope(st),
                         )
                     break
                 except Exception as overflow_exc:
@@ -3140,6 +3225,9 @@ class ToolLoopRunner:
         from ..trajectories.saver import ToolIteration
 
         if st._trajectory is not None:
+            density, density_source, primary_chars = self._context_budget_observation(
+                getattr(st, "_generation_budget_snapshot", None)
+            )
             st._trajectory.iterations.append(
                 ToolIteration(
                     iteration=_iteration,
@@ -3160,6 +3248,9 @@ class ToolLoopRunner:
                     provider=getattr(response, "provenance_provider", "") or "",
                     model=getattr(response, "provenance_model", "") or "",
                     reasoning_effort=getattr(response, "provenance_reasoning_effort", None),
+                    context_density_milli=density,
+                    context_density_source=density_source,
+                    context_primary_chars=primary_chars,
                 )
             )
 

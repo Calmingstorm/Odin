@@ -257,7 +257,7 @@ def _stub_state(channel=None):
         stuck_tracker=StuckLoopTracker(),
         wait_judgment_pending=False,
         _cancel=asyncio.Event(),
-        _trajectory=SimpleNamespace(),
+        _trajectory=SimpleNamespace(source="discord", channel_id="c1", message_id="r1"),
         trace=None,
         _ch_id="c1",
         _req_id="r1",

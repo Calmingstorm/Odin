@@ -442,6 +442,12 @@ class TestHousekeepingSweep:
             ),
             attachments=None,
         )
+        released = []
+
+        class _Observer:
+            def release_workload(self, scope):
+                released.append(scope)
+
         hk = Housekeeping(
             get_config=lambda: cfg,
             sessions=MagicMock(ids=lambda: []),
@@ -453,10 +459,14 @@ class TestHousekeepingSweep:
             channel_logger=None,
             fts_index=None,
             turn_store=store,
+            window_observer=_Observer(),
         )
         hk.cleanup_stale()
         row = store._conn.execute("SELECT status FROM turns").fetchone()
         assert row[0] == TurnStatus.TERMINAL_EXPIRED
+        assert [(scope.surface_kind, scope.workload_id) for scope in released] == [
+            ("chat", "discord:c1:m1")
+        ]
 
         # The expired-active defense sweep runs too: park a dead-owner
         # ACTIVE row and let housekeeping suspend it (log-line branch).

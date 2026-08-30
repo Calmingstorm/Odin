@@ -52,6 +52,7 @@ def _rejected_facts(*, chars=100_000, images=0, density=2500, budget=921_601, be
         estimated_tokens=estimate_request_tokens(chars, images, density_milli=density),
         effective_budget=budget,
         believed_within=believed,
+        workload_scope=_scope(),
     )
 
 
@@ -85,6 +86,7 @@ class TestStoreLifecycle:
         obs = _observer(tmp_path)
         assert obs.active_clamp("gpt-5.6-sol") is None
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -105,6 +107,7 @@ class TestStoreLifecycle:
     async def test_alias_models_share_one_canonical_record(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(model="codex-auto-review"),
@@ -114,6 +117,18 @@ class TestStoreLifecycle:
         assert obs.active_clamp("codex-auto-review") == 408_004
         assert "gpt-5.6-luna" in obs.view()["accounts"][ACCT_A]["models"]
 
+
+
+    def test_exact_scope_contract_rejects_subclasses_and_unknown_surfaces(self, tmp_path):
+        from src.llm.context_budget import WorkloadScope
+
+        class SubScope(WorkloadScope):
+            pass
+
+        obs = _observer(tmp_path)
+        for scope in (SubScope("agent", "a"), WorkloadScope("typo-surface", "a")):
+            assert obs.density_for(scope, "gpt-5.6-sol") is None
+            assert obs.release_workload(scope) == 0
 
 class TestHostileStoreInputs:
     """The filesystem-contract sweep: every hostile shape at the store path
@@ -171,6 +186,7 @@ class TestClampQualification:
     async def test_cross_account_retry_records_both_but_derives_no_clamp(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_A),
@@ -184,6 +200,7 @@ class TestClampQualification:
     async def test_missing_acceptance_usage_records_occurrence_only(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(tokens=None),
@@ -198,6 +215,7 @@ class TestClampQualification:
     async def test_model_mismatch_derives_no_clamp(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(model="gpt-5.6-sol"),
@@ -209,6 +227,7 @@ class TestClampQualification:
     async def test_non_overflow_error_is_ignored(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(code="other"),
@@ -219,6 +238,7 @@ class TestClampQualification:
     async def test_missing_account_keys_disqualify_scoped_evidence(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=None),
@@ -229,6 +249,7 @@ class TestClampQualification:
     async def test_estimate_shaped_junk_never_qualifies(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(tokens=930_001),
@@ -245,12 +266,14 @@ class TestDownwardOnlyMergeAndTTL:
     async def test_lower_evidence_replaces_with_fresh_ttl(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
             response=_acceptance(tokens=500_000),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -261,12 +284,14 @@ class TestDownwardOnlyMergeAndTTL:
     async def test_higher_evidence_never_raises_a_live_clamp(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
             response=_acceptance(tokens=400_000),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -277,6 +302,7 @@ class TestDownwardOnlyMergeAndTTL:
     async def test_expired_clamp_is_not_served_and_is_replaceable(self, tmp_path, monkeypatch):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -286,6 +312,7 @@ class TestDownwardOnlyMergeAndTTL:
         monkeypatch.setattr(wo, "_utc_now", lambda: real_now() + timedelta(hours=25))
         assert obs.active_clamp("gpt-5.6-sol") is None
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -296,12 +323,14 @@ class TestDownwardOnlyMergeAndTTL:
     async def test_active_clamp_is_minimum_across_accounts(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_A),
             response=_acceptance(key=ACCT_A, tokens=500_000),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_B),
@@ -316,12 +345,14 @@ class TestDownwardOnlyMergeAndTTL:
             eligible_account_keys=lambda: frozenset(eligible),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_A),
             response=_acceptance(key=ACCT_A, tokens=500_000),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_B),
@@ -338,12 +369,14 @@ class TestDownwardOnlyMergeAndTTL:
             eligible_account_keys=lambda: frozenset(eligible),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_A),
             response=_acceptance(key=ACCT_A, tokens=500_000),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_B),
@@ -367,6 +400,7 @@ class TestDownwardOnlyMergeAndTTL:
             eligible_account_keys=lambda: None,
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -389,6 +423,7 @@ class TestForfeitInvariant:
 
         monkeypatch.setattr(obs, "_persist_locked", _boom)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -402,13 +437,18 @@ class TestForfeitInvariant:
     async def test_every_entry_point_is_total_on_junk(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=object(),
             response=object(),
         )
         await obs.record_rescue(
-            rejected_attempt=_rejected_facts(), **ACCEPTED_SAMPLE, overflow=None, response=None
+            workload_scope=_scope(),
+            rejected_attempt=_rejected_facts(),
+            **ACCEPTED_SAMPLE,
+            overflow=None,
+            response=None,
         )
         assert obs.active_clamp(object()) is None
         assert await obs.clear_account("not-a-key") == 0
@@ -427,6 +467,7 @@ class TestPersistFdDiscipline:
         fd_dir = "/proc/self/fd"
         before = len(os.listdir(fd_dir))
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -441,6 +482,7 @@ class TestPersistFdDiscipline:
     async def test_crashed_write_never_corrupts_the_published_store(self, tmp_path, monkeypatch):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -453,6 +495,7 @@ class TestPersistFdDiscipline:
 
         monkeypatch.setattr(os, "fsync", _boom)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -512,12 +555,14 @@ class TestManualClear:
     async def test_clear_is_account_scoped_and_preserves_bounds(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_A),
             response=_acceptance(key=ACCT_A),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_B),
@@ -533,6 +578,7 @@ class TestManualClear:
     async def test_failed_clear_is_truthful_and_retains_state(self, tmp_path, monkeypatch):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -552,12 +598,14 @@ class TestManualClear:
     async def test_model_scoped_clear(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
             response=_acceptance(),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(model="gpt-5.5", tokens=272_000),
@@ -570,6 +618,7 @@ class TestManualClear:
     async def test_view_is_a_defensive_copy_with_expiry_flags(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -649,7 +698,7 @@ class _CaptureObserver:
     def density_for(self, _scope, model):
         return self._density
 
-    def record_density(self, *, model, chars_sent, images_sent, server_input_tokens):
+    def record_density(self, *, scope=None, model, chars_sent, images_sent, server_input_tokens):
         self.densities.append(
             {
                 "model": model,
@@ -667,6 +716,7 @@ class _CaptureObserver:
         rejected_attempt=None,
         accepted_chars=None,
         accepted_images=None,
+        workload_scope=None,
     ):
         self.recorded.append((overflow, response, rejected_attempt))
         self.accepted_samples.append((accepted_chars, accepted_images))
@@ -742,7 +792,7 @@ def _chat_st(messages):
         stuck_tracker=StuckLoopTracker(),
         wait_judgment_pending=False,
         _cancel=asyncio.Event(),
-        _trajectory=TrajectoryTurn(),
+        _trajectory=TrajectoryTurn(source="discord", channel_id="c1", message_id="r1"),
         trace=None,
         _ch_id="c1",
         _req_id="r1",
@@ -965,7 +1015,7 @@ class TestAgentSurfaceHooks:
             == 408_004
         )
         # The same pair WITH a qualifying belief forms the clamp.
-        await recorder(_overflow(), payload, _rejected_facts(), 100_000, 0)
+        await recorder(_overflow(), payload, _rejected_facts(), 100_000, 0, _scope())
         assert obs.active_clamp("gpt-5.6-sol") == 408_004
 
     async def test_evidence_recorder_rejects_non_codex_response_provenance(self, tmp_path):
@@ -980,7 +1030,7 @@ class TestAgentSurfaceHooks:
             "model": "gpt-5.6-sol",
         }
         await _make_evidence_recorder(obs)(
-            _overflow(tokens=None), payload, _rejected_facts(), 100_000, 0
+            _overflow(tokens=None), payload, _rejected_facts(), 100_000, 0, _scope()
         )
         assert obs.view()["accounts"] == {}
         assert obs.active_clamp("gpt-5.6-sol") is None
@@ -1008,7 +1058,9 @@ class TestAgentSurfaceHooks:
         overflow = _overflow()
         recorded = []
 
-        async def recorder(err, response, facts=None, acc_chars=None, acc_images=None):
+        async def recorder(
+            err, response, facts=None, acc_chars=None, acc_images=None, workload_scope=None
+        ):
             recorded.append((err, response, facts))
 
         calls = {"n": 0}
@@ -1028,6 +1080,7 @@ class TestAgentSurfaceHooks:
             generation_state={
                 "plan": {
                     "is_codex": True,
+                    "workload_scope": _scope(),
                     "snapshot": resolve_context_budget("gpt-5.6-sol"),
                 }
             },
@@ -1107,6 +1160,7 @@ class TestContextWindowsApi:
     async def test_clamp_provenance_is_independent_of_workload_calibration(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -1148,6 +1202,7 @@ class TestContextWindowsApi:
     async def test_get_serves_floors_overrides_clamps_and_both_resolutions(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -1181,6 +1236,7 @@ class TestContextWindowsApi:
         now = wo._utc_now()
         monkeypatch.setattr(wo, "_utc_now", lambda: now)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_A),
@@ -1189,6 +1245,7 @@ class TestContextWindowsApi:
         first_expiry = obs.account_clamps()[0]["expires_at"]
         monkeypatch.setattr(wo, "_utc_now", lambda: now + timedelta(hours=1))
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(key=ACCT_B),
@@ -1208,6 +1265,7 @@ class TestContextWindowsApi:
         # is not an applied clamp and must not put expiry copy on built-in truth.
         high = _observer(tmp_path / "high")
         await high.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(tokens=500_000),
@@ -1388,6 +1446,7 @@ class TestContextWindowsApi:
     async def test_failed_clear_returns_503_and_truthful_state(self, tmp_path, monkeypatch):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -1407,6 +1466,7 @@ class TestContextWindowsApi:
     async def test_clear_endpoint_is_account_scoped(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(),
@@ -1432,12 +1492,14 @@ class TestContextWindowsApi:
     async def test_clear_endpoint_preserves_other_model_for_same_account(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(model="gpt-5.6-sol"),
             response=_acceptance(model="gpt-5.6-sol"),
         )
         await obs.record_rescue(
+            workload_scope=_scope(),
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
             overflow=_overflow(model="gpt-5.6-terra"),
