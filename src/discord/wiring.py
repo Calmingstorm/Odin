@@ -454,6 +454,10 @@ def build_services(
     # Passive context-window observer (phase 5): evidence + downward clamps.
     # Construction is total — a broken store loads empty, never blocks boot.
     window_observer = WindowObserver()
+    # Finished agents must return their workload-local density to the fixed
+    # prior; the manager is built before the observer exists, so it is
+    # installed here rather than passed at construction.
+    agent_manager.set_calibration_observer(window_observer)
 
     # Action diff tracker — records before→after diffs. Always on.
     diff_tracker = DiffTracker()

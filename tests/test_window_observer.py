@@ -30,6 +30,13 @@ ACCT_A = "a" * 32
 ACCT_B = "b" * 32
 
 
+def _scope(kind="agent", wid="w1"):
+    """A workload identity for calibration tests."""
+    from src.llm.context_budget import WorkloadScope
+
+    return WorkloadScope(kind, wid)
+
+
 def _rejected_facts(*, chars=100_000, images=0, density=2500, budget=921_601, believed=True):
     """Frozen facts for a rejected attempt, defaulting to the QUALIFYING shape.
 
@@ -639,7 +646,7 @@ class _CaptureObserver:
     def active_clamp(self, model):
         return self._clamp
 
-    def density_for(self, model):
+    def density_for(self, _scope, model):
         return self._density
 
     def record_density(self, *, model, chars_sent, images_sent, server_input_tokens):
@@ -1075,10 +1082,29 @@ def _api_app(
 
 
 class TestContextWindowsApi:
-    async def test_density_provenance_coexists_with_clamp_provenance(self, tmp_path):
-        """Both can be true at once: a clamped model that is also calibrated
-        must report BOTH, and the runtime target must consume the calibration
-        while the configured target stays on the uncalibrated default."""
+    async def test_model_row_reports_the_prior_not_a_global_calibrated_value(self, tmp_path):
+        """After workload-local scoping there IS no global calibrated density.
+
+        The row must describe the fixed prior and the FRESH-workload target.
+        Substituting a minimum, average or most-recent workload density would
+        assert a runtime target that no generation actually uses.
+        """
+        obs = _observer(tmp_path)
+        obs._density_milli[("agent", "a1", "gpt-5.6-sol")] = 900
+        obs._density_milli[("chat", "t1", "gpt-5.6-sol")] = 2100
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        sol = body["models"]["gpt-5.6-sol"]
+        assert sol["density_prior_milli"] == 2500
+        assert sol["density_scope"] == "workload-local calibration"
+        # Fresh-workload target: the prior, never either live workload value.
+        fresh = resolve_context_budget("gpt-5.6-sol", utilization=60)
+        assert sol["effective"]["primary_chars"] == fresh.primary_chars
+        # Live calibration appears only as observability.
+        assert sol["workload_calibration"] == {"active_workloads": 2, "min": 900, "max": 2100}
+
+    async def test_clamp_provenance_is_independent_of_workload_calibration(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(
             rejected_attempt=_rejected_facts(),
@@ -1086,44 +1112,38 @@ class TestContextWindowsApi:
             overflow=_overflow(),
             response=_acceptance(tokens=300_000),
         )
-        obs.record_density(
-            model="gpt-5.6-sol", chars_sent=391_046, images_sent=0, server_input_tokens=684_031
-        )
+        obs._density_milli[("agent", "a1", "gpt-5.6-sol")] = 900
         app = _api_app(obs)
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/context/windows")).json()
         sol = body["models"]["gpt-5.6-sol"]
         assert sol["provenance"] == "temporary learned clamp"
-        assert sol["density_source"] == "calibrated"
-        assert sol["density_milli"] == 609
-        assert sol["configured"]["density_source"] == "default"
-        assert sol["effective"]["primary_chars"] < sol["configured"]["primary_chars"]
+        assert sol["effective"]["clamp_applied"] is True
+        assert sol["workload_calibration"]["active_workloads"] == 1
+        # The clamp governs the row; the workload density does not.
+        assert sol["effective"]["effective_budget"] == 300_000
 
-    async def test_a_model_known_only_to_density_still_appears(self, tmp_path):
-        """Census completeness: a calibrated-but-never-clamped model outside
-        the static registry must still be described."""
+    async def test_a_model_known_only_to_calibration_still_appears(self, tmp_path):
         obs = _observer(tmp_path)
-        obs._density_milli["gpt-5.9-experimental"] = 800
+        obs._density_milli[("agent", "a1", "gpt-5.9-experimental")] = 800
         app = _api_app(obs)
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/context/windows")).json()
         assert "gpt-5.9-experimental" in body["models"]
-        assert body["models"]["gpt-5.9-experimental"]["density_source"] == "calibrated"
 
-    async def test_broken_density_snapshot_serves_uncalibrated_targets(self, tmp_path):
-        """A calibration failure must degrade to the default, never 500."""
+    async def test_broken_calibration_summary_still_serves_the_row(self, tmp_path):
         obs = _observer(tmp_path)
 
         def _boom():
-            raise RuntimeError("density down")
+            raise RuntimeError("summary down")
 
-        obs.density_snapshot = _boom
+        obs.workload_calibration_summary = _boom
         app = _api_app(obs)
         async with TestClient(TestServer(app)) as c:
             resp = await c.get("/api/context/windows")
             body = await resp.json()
         assert resp.status == 200
-        assert body["models"]["gpt-5.6-sol"]["density_source"] == "default"
+        assert body["models"]["gpt-5.6-sol"]["density_prior_milli"] == 2500
 
     async def test_get_serves_floors_overrides_clamps_and_both_resolutions(self, tmp_path):
         obs = _observer(tmp_path)

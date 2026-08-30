@@ -44,6 +44,7 @@ import json
 import os
 import stat
 import tempfile
+import time
 from collections.abc import Callable, Collection
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -74,6 +75,11 @@ _DENSITY_ALPHA_UP_RECIP = 16  # α = 1/16 — relax slowly back toward sparse
 #: requests must never pin text density to the floor.
 _MIN_OBSERVABLE_CONTENT_TOKENS = 32_000
 _MIN_OBSERVABLE_CHARS = 32_000
+
+#: Bounded leak defense for workload calibration. Owners release their own
+#: scope on termination; this only catches abandoned entries, and evicting one
+#: merely returns that workload to the fixed prior.
+_MAX_WORKLOAD_SCOPES = 512
 
 #: Evidence for three pool accounts across a handful of models is a few KB;
 #: anything near this cap is not our file.
@@ -266,11 +272,14 @@ class WindowObserver:
         # composition root installs the production pool-backed provider.
         self._eligible_account_keys = eligible_account_keys
         self._state: dict = {"version": STORE_VERSION, "accounts": {}}
-        # Ephemeral per-canonical-model density calibration (millichars per
-        # token). Shared across accounts: density is model/request-shape
-        # behavior, so account-scoping would relearn the same lesson after
-        # every rotation. Never persisted, never in ``view()``.
-        self._density_milli: dict[str, int] = {}
+        # Ephemeral WORKLOAD-LOCAL density calibration, keyed
+        # (surface_kind, workload_id, canonical_model) -> millichars/token.
+        # Never global: one job's dense content must not make every other job
+        # compact against a stranger's density. Never persisted, never in
+        # ``view()``. ``_scope_touched`` carries a monotonic last-use stamp so
+        # abandoned workloads can be evicted even if owner cleanup fails.
+        self._density_milli: dict[tuple[str, str, str], int] = {}
+        self._scope_touched: dict[tuple[str, str, str], float] = {}
         try:
             self._load_initial()
         except Exception:
@@ -477,35 +486,109 @@ class WindowObserver:
 
     # ── density calibration (ephemeral) ────────────────────────────────
 
-    def density_for(self, model: str | None) -> int | None:
-        """Calibrated millichars/token for ``model``, or None if uncalibrated.
+    @staticmethod
+    def _scope_key(scope: object, model: str | None) -> tuple[str, str, str] | None:
+        """``(surface_kind, workload_id, canonical_model)`` or None.
 
-        Synchronous, disk-free and total — safe inside budget resolution.
+        A missing or malformed scope is NOT silently promoted to a global
+        entry — it yields None, which callers must read as "use the fixed
+        prior, record nothing". There is deliberately no omitted-scope
+        compatibility path: that is exactly how a workload sample would leak
+        back into global calibration.
         """
         try:
+            from .context_budget import WorkloadScope
+
+            # Exact type, not duck-typing: a scope-shaped object from
+            # elsewhere must not be able to claim a calibration lineage.
+            if not isinstance(scope, WorkloadScope) or not scope.is_valid():
+                return None
             canonical = canonical_codex_model(model)
             if not canonical:
                 return None
-            return self._density_milli.get(canonical)
+            return (scope.surface_kind.strip(), scope.workload_id.strip(), canonical)
+        except Exception:
+            return None
+
+    def density_for(self, scope: object, model: str | None) -> int | None:
+        """Calibrated millichars/token for THIS workload, or None for none yet.
+
+        Synchronous, disk-free and total — safe inside budget resolution.
+        None means "no local evidence", and the caller uses the fixed prior;
+        it never falls back to another workload's measurement.
+        """
+        try:
+            key = self._scope_key(scope, model)
+            if key is None:
+                return None
+            value = self._density_milli.get(key)
+            if value is not None:
+                self._scope_touched[key] = time.monotonic()
+            return value
         except Exception:
             log.exception("density_for failed; treating as uncalibrated")
             return None
 
-    def density_snapshot(self) -> dict[str, int]:
-        """Ephemeral calibration view for the API.
+    def release_workload(self, scope: object) -> int:
+        """Drop every model entry for a finished workload. Owner-called.
 
-        Deliberately separate from ``view()``: density must never enter the
-        durable version-1 store shape.
+        Total and idempotent: cleanup failure is not worth an exception on a
+        turn or agent that has already finished.
         """
         try:
-            return dict(self._density_milli)
+            from .context_budget import WorkloadScope
+
+            if not isinstance(scope, WorkloadScope) or not scope.is_valid():
+                return 0
+            prefix = (scope.surface_kind.strip(), scope.workload_id.strip())
+            doomed = [k for k in self._density_milli if k[:2] == prefix]
+            for k in doomed:
+                self._density_milli.pop(k, None)
+                self._scope_touched.pop(k, None)
+            return len(doomed)
         except Exception:
-            log.exception("density_snapshot failed")
+            log.exception("release_workload failed; leaving entries for eviction")
+            return 0
+
+    def _evict_if_needed(self) -> None:
+        """Bounded leak defense. Eviction only returns a workload to the fixed
+        prior, so it is safe even when an owner's cleanup never ran."""
+        try:
+            excess = len(self._density_milli) - _MAX_WORKLOAD_SCOPES
+            if excess <= 0:
+                return
+            oldest = sorted(self._density_milli, key=lambda k: self._scope_touched.get(k, 0.0))
+            for key in oldest[:excess]:
+                self._density_milli.pop(key, None)
+                self._scope_touched.pop(key, None)
+        except Exception:
+            log.exception("density eviction failed")
+
+    def workload_calibration_summary(self) -> dict[str, dict]:
+        """Per-model OBSERVABILITY only: how many workloads are calibrated and
+        the range they span.
+
+        Deliberately not a value the API can present as a runtime target.
+        After workload-local scoping there IS no global calibrated density,
+        and substituting a minimum, average or most-recent value would assert
+        a target that no generation actually uses.
+        """
+        try:
+            out: dict[str, dict] = {}
+            for (_kind, _wid, model), value in self._density_milli.items():
+                row = out.setdefault(model, {"active_workloads": 0, "min": value, "max": value})
+                row["active_workloads"] += 1
+                row["min"] = min(row["min"], value)
+                row["max"] = max(row["max"], value)
+            return out
+        except Exception:
+            log.exception("workload_calibration_summary failed")
             return {}
 
     def record_density(
         self,
         *,
+        scope: object,
         model: str | None,
         chars_sent: int,
         images_sent: int,
@@ -521,8 +604,10 @@ class WindowObserver:
         try:
             from .context_budget import clamp_density_milli
 
-            canonical = canonical_codex_model(model)
-            if not canonical:
+            key = self._scope_key(scope, model)
+            if key is None:
+                # No honest owner for this sample. Recording it anywhere else
+                # would republish one workload's density to another.
                 return
             observed = derive_sample_density(
                 chars_sent=chars_sent,
@@ -531,14 +616,18 @@ class WindowObserver:
             )
             if observed is None:
                 return
-            prior = self._density_milli.get(canonical)
+            prior = self._density_milli.get(key)
             banded_observed = clamp_density_milli(observed)
+            self._scope_touched[key] = time.monotonic()
             if prior is None:
-                self._density_milli[canonical] = banded_observed
+                self._density_milli[key] = banded_observed
+                self._evict_if_needed()
                 log.info(
-                    "context density calibrated for %s: %d millichars/token "
-                    "(%d chars, %d images, %d server tokens; raw=%d)",
-                    canonical,
+                    "context density calibrated for workload %s/%s on %s: "
+                    "%d millichars/token (%d chars, %d images, %d server tokens; raw=%d)",
+                    key[0],
+                    key[1],
+                    key[2],
                     banded_observed,
                     chars_sent,
                     images_sent,
@@ -559,7 +648,7 @@ class WindowObserver:
                 # Integer division stalls within one step of the target; take
                 # the single-unit step so convergence cannot deadlock.
                 updated = prior + (1 if banded_observed > prior else -1)
-            self._density_milli[canonical] = clamp_density_milli(updated)
+            self._density_milli[key] = clamp_density_milli(updated)
         except Exception:
             log.exception("record_density failed; sample discarded")
 

@@ -180,7 +180,7 @@ export default {
                 <span class="llm-context-summary-pair">
                   <strong>{{ formatCount(activeContextBudget?.effective?.effective_budget) }} <small>tokens</small></strong>
                   <span class="llm-budget-provenance" :class="provenanceClass(activeContextBudget?.provenance)">{{ activeContextBudget?.provenance || 'unavailable' }}</span>
-                  <span v-if="activeContextBudget?.density_source === 'calibrated'" class="llm-budget-density">density-calibrated · {{ formatDensity(activeContextBudget.density_milli) }} chars/token</span>
+                  <span v-if="activeContextBudget?.workload_calibration?.active_workloads" class="llm-budget-density">{{ activeContextBudget.density_scope }} · {{ activeContextBudget.workload_calibration.active_workloads }} active</span>
                 </span>
                 <small v-if="activeContextBudget?.clamp_expires_at">Expires {{ formatExpiry(activeContextBudget.clamp_expires_at) }}</small>
               </div>
@@ -316,7 +316,7 @@ export default {
                           </td>
                           <td data-label="Provenance">
                             <span class="llm-budget-provenance" :class="provenanceClass(row.provenance)">{{ row.provenance }}</span>
-                            <span v-if="row.densitySource === 'calibrated'" class="llm-budget-density">density-calibrated · {{ formatDensity(row.densityMilli) }} chars/token</span>
+                            <span v-if="row.workloadCalibration?.active_workloads" class="llm-budget-density">{{ row.densityScope }} · {{ row.workloadCalibration.active_workloads }} active</span>
                             <small v-if="row.clampExpiresAt">Expires {{ formatExpiry(row.clampExpiresAt) }}</small>
                           </td>
                         </tr>
@@ -702,8 +702,9 @@ export default {
       primaryChars: details.effective?.primary_chars,
       provenance: details.provenance,
       clampExpiresAt: details.clamp_expires_at,
-      densityMilli: details.density_milli,
-      densitySource: details.density_source,
+      densityPriorMilli: details.density_prior_milli,
+      densityScope: details.density_scope,
+      workloadCalibration: details.workload_calibration,
     })));
     const activeClampRows = computed(() => contextWindows.value?.clamps || []);
     const activeContextBudget = computed(() => contextWindows.value?.models?.[codexForm.value.model] || null);

@@ -35,6 +35,18 @@ ACCT_B = "b" * 32
 UTILIZATIONS = (40, 60, 100)
 
 
+def _chat_st_stub(req_id="t1"):
+    """Minimal turn state carrying only what workload scoping reads."""
+    return SimpleNamespace(_req_id=req_id, _loop_id=None)
+
+
+def _scope(kind="agent", wid="w1"):
+    """A workload identity for calibration tests."""
+    from src.llm.context_budget import WorkloadScope
+
+    return WorkloadScope(kind, wid)
+
+
 def _rejected_facts(*, chars=100_000, images=0, density=2500, budget=921_601, believed=True):
     """Frozen facts for a rejected attempt, defaulting to the QUALIFYING shape.
 
@@ -138,9 +150,7 @@ class TestRequestEstimation:
     @pytest.mark.parametrize("bad_density", (True, 0, -1, 1.5, "100"))
     def test_forensic_estimator_rejects_nonpositive_or_nonintegral_density(self, bad_density):
         with pytest.raises(ValueError, match="positive integer"):
-            estimate_request_tokens_forensic(
-                100_000, 0, density_milli=bad_density
-            )
+            estimate_request_tokens_forensic(100_000, 0, density_milli=bad_density)
 
     def test_images_are_charged_because_characters_cannot_see_them(self):
         envelope = estimate_request_tokens(0, 0)
@@ -265,30 +275,36 @@ class TestDensityCalibration:
     def test_first_observation_seeds_from_measurement(self, tmp_path):
         obs = _observer(tmp_path)
         obs.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=FIELD_CHARS,
             images_sent=0,
             server_input_tokens=FIELD_TOKENS,
         )
-        assert obs.density_for("gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        assert obs.density_for(_scope(), "gpt-5.6-sol") == FIELD_DENSITY_MILLI
 
     def test_repeated_downward_updates_cross_below_1000_and_converge(self, tmp_path):
         """Odin's load-bearing pin: from a sparse prior, dense evidence must
         cross below 1000 and converge on the measured value."""
         obs = _observer(tmp_path)
         obs.record_density(
-            model="gpt-5.6-sol", chars_sent=900_000, images_sent=0, server_input_tokens=350_000
+            scope=_scope(),
+            model="gpt-5.6-sol",
+            chars_sent=900_000,
+            images_sent=0,
+            server_input_tokens=350_000,
         )
-        assert obs.density_for("gpt-5.6-sol") == MAX_DENSITY_MILLI
+        assert obs.density_for(_scope(), "gpt-5.6-sol") == MAX_DENSITY_MILLI
         seen = []
         for _ in range(14):
             obs.record_density(
+                scope=_scope(),
                 model="gpt-5.6-sol",
                 chars_sent=FIELD_CHARS,
                 images_sent=0,
                 server_input_tokens=FIELD_TOKENS,
             )
-            seen.append(obs.density_for("gpt-5.6-sol"))
+            seen.append(obs.density_for(_scope(), "gpt-5.6-sol"))
         assert any(v < 1000 for v in seen)
         assert seen[-1] == FIELD_DENSITY_MILLI
         assert seen == sorted(seen, reverse=True)  # monotonic descent
@@ -299,28 +315,37 @@ class TestDensityCalibration:
         down = _observer(tmp_path / "d")
         up = _observer(tmp_path / "u")
         for obs in (down, up):
-            obs._density_milli["gpt-5.6-sol"] = 1500
+            obs._density_milli[("agent", "w1", "gpt-5.6-sol")] = 1500
         down.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=FIELD_CHARS,
             images_sent=0,
             server_input_tokens=FIELD_TOKENS,
         )
         up.record_density(
-            model="gpt-5.6-sol", chars_sent=900_000, images_sent=0, server_input_tokens=350_000
+            scope=_scope(),
+            model="gpt-5.6-sol",
+            chars_sent=900_000,
+            images_sent=0,
+            server_input_tokens=350_000,
         )
-        assert 1500 - down.density_for("gpt-5.6-sol") > up.density_for("gpt-5.6-sol") - 1500
+        assert (
+            1500 - down.density_for(_scope(), "gpt-5.6-sol")
+            > up.density_for(_scope(), "gpt-5.6-sol") - 1500
+        )
 
     def test_calibration_is_per_canonical_model_and_alias_aware(self, tmp_path):
         obs = _observer(tmp_path)
         obs.record_density(
+            scope=_scope(),
             model="codex-auto-review",
             chars_sent=FIELD_CHARS,
             images_sent=0,
             server_input_tokens=FIELD_TOKENS,
         )
-        assert obs.density_for("gpt-5.6-luna") == FIELD_DENSITY_MILLI
-        assert obs.density_for("gpt-5.6-sol") is None  # not shared across models
+        assert obs.density_for(_scope(), "gpt-5.6-luna") == FIELD_DENSITY_MILLI
+        assert obs.density_for(_scope(), "gpt-5.6-sol") is None  # not shared across models
 
     @pytest.mark.parametrize(
         "kwargs",
@@ -356,40 +381,47 @@ class TestDensityCalibration:
     )
     def test_unusable_samples_record_no_observation(self, tmp_path, kwargs):
         obs = _observer(tmp_path)
-        obs.record_density(model="gpt-5.6-sol", **kwargs)
-        assert obs.density_for("gpt-5.6-sol") is None
+        obs.record_density(scope=_scope(), model="gpt-5.6-sol", **kwargs)
+        assert obs.density_for(_scope(), "gpt-5.6-sol") is None
 
     def test_subfloor_sample_seeds_at_floor_and_ema_uses_banded_value(self, tmp_path):
         obs = _observer(tmp_path)
         obs.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=100_000,
             images_sent=0,
             server_input_tokens=1_042_000,  # raw density 100
         )
-        assert obs.density_for("gpt-5.6-sol") == MIN_DENSITY_MILLI
+        assert obs.density_for(_scope(), "gpt-5.6-sol") == MIN_DENSITY_MILLI
 
         # A corrupt prior below the storage band cannot drag a subsequent EMA
         # below the floor; storage applies the band after every update too.
-        obs._density_milli["gpt-5.6-sol"] = 100
+        obs._density_milli[("agent", "w1", "gpt-5.6-sol")] = 100
         obs.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=FIELD_CHARS,
             images_sent=0,
             server_input_tokens=FIELD_TOKENS,
         )
-        assert obs.density_for("gpt-5.6-sol") == MIN_DENSITY_MILLI
+        assert obs.density_for(_scope(), "gpt-5.6-sol") == MIN_DENSITY_MILLI
 
     def test_non_codex_model_names_do_not_calibrate(self, tmp_path):
         obs = _observer(tmp_path)
         obs.record_density(
-            model=None, chars_sent=FIELD_CHARS, images_sent=0, server_input_tokens=FIELD_TOKENS
+            scope=_scope(),
+            model=None,
+            chars_sent=FIELD_CHARS,
+            images_sent=0,
+            server_input_tokens=FIELD_TOKENS,
         )
-        assert obs.density_snapshot() == {}
+        assert obs.workload_calibration_summary() == {}
 
     def test_density_never_enters_the_durable_store(self, tmp_path):
         obs = _observer(tmp_path)
         obs.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=FIELD_CHARS,
             images_sent=0,
@@ -397,7 +429,7 @@ class TestDensityCalibration:
         )
         assert "density" not in repr(obs.view())
         # A fresh observer over the same path relearns from scratch.
-        assert _observer(tmp_path).density_for("gpt-5.6-sol") is None
+        assert _observer(tmp_path).density_for(_scope(), "gpt-5.6-sol") is None
 
 
 class TestClampQualification:
@@ -520,12 +552,12 @@ class TestTotality:
     def test_density_for_survives_broken_internal_state(self, tmp_path):
         obs = _observer(tmp_path)
         obs._density_milli = None  # type: ignore[assignment]
-        assert obs.density_for("gpt-5.6-sol") is None
+        assert obs.density_for(_scope(), "gpt-5.6-sol") is None
 
     def test_density_snapshot_survives_broken_internal_state(self, tmp_path):
         obs = _observer(tmp_path)
         obs._density_milli = None  # type: ignore[assignment]
-        assert obs.density_snapshot() == {}
+        assert obs.workload_calibration_summary() == {}
 
     def test_record_density_survives_broken_internal_state(self, tmp_path):
         obs = _observer(tmp_path)
@@ -533,6 +565,7 @@ class TestTotality:
         # Must not raise: a calibration miss is never worth an exception on a
         # request the server already accepted.
         obs.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=FIELD_CHARS,
             images_sent=0,
@@ -543,9 +576,9 @@ class TestTotality:
         from src.discord.native_tools.agents_tasks import _make_density_recorder
 
         obs = _observer(tmp_path)
-        recorder = _make_density_recorder(obs)
+        recorder = _make_density_recorder(obs, {"id": "w1"})
         recorder(SimpleNamespace(text="not a dict"), FIELD_CHARS, 0)
-        assert obs.density_snapshot() == {}
+        assert obs.workload_calibration_summary() == {}
 
     def test_agent_density_recorder_swallows_observer_failure(self):
         from src.discord.native_tools.agents_tasks import _make_density_recorder
@@ -554,7 +587,7 @@ class TestTotality:
             def record_density(self, **kwargs):
                 raise RuntimeError("observer down")
 
-        recorder = _make_density_recorder(_Broken())
+        recorder = _make_density_recorder(_Broken(), {"id": "w1"})
         recorder(
             {
                 "provider": "codex",
@@ -574,7 +607,7 @@ class TestTotality:
         from src.discord.native_tools.agents_tasks import _make_density_recorder
 
         obs = _observer(tmp_path)
-        _make_density_recorder(obs)(
+        _make_density_recorder(obs, {"id": "w1"})(
             {
                 "provider": "codex",
                 "model": "gpt-5.6-sol",
@@ -583,7 +616,7 @@ class TestTotality:
             FIELD_CHARS,
             0,
         )
-        assert obs.density_for("gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        assert obs.density_for(_scope(), "gpt-5.6-sol") == FIELD_DENSITY_MILLI
 
     def test_agent_density_recorder_rejects_non_codex_response_provenance(self, tmp_path):
         """Response provenance, not a Codex-looking model slug or client
@@ -591,7 +624,7 @@ class TestTotality:
         from src.discord.native_tools.agents_tasks import _make_density_recorder
 
         obs = _observer(tmp_path)
-        _make_density_recorder(obs)(
+        _make_density_recorder(obs, {"id": "w1"})(
             {
                 "provider": "ollama",
                 "model": "gpt-5.6-sol",
@@ -600,7 +633,7 @@ class TestTotality:
             FIELD_CHARS,
             0,
         )
-        assert obs.density_for("gpt-5.6-sol") is None
+        assert obs.density_for(_scope(), "gpt-5.6-sol") is None
 
     def test_agent_plan_uses_authoritative_provider_for_density_and_prediction(self):
         """A non-Codex serving identity may wrap a Codex-shaped client; its
@@ -611,7 +644,7 @@ class TestTotality:
             def active_clamp(self, _model):
                 return None
 
-            def density_for(self, _model):
+            def density_for(self, _scope, _model):
                 return FIELD_DENSITY_MILLI
 
         client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
@@ -646,7 +679,7 @@ class TestTotality:
             def active_clamp(self, _model):
                 return None
 
-            def density_for(self, model):
+            def density_for(self, _scope, model):
                 return FIELD_DENSITY_MILLI if model == "gpt-5.6-sol" else None
 
         observer = Observer()
@@ -657,13 +690,27 @@ class TestTotality:
         runner._window_observer = observer
         runner._get_context_compressor = lambda: None
         serving = LLMServingIdentity("codex", client, client.model, client.reasoning_effort)
-        chat_and_loop = runner._capture_budget_snapshot(serving, cfg)
+        # Every production constructor must be given a workload identity;
+        # without one it must fall back to the prior rather than borrow.
+        chat_and_loop = runner._capture_budget_snapshot(serving, cfg, _chat_st_stub())
+        assert runner._capture_budget_snapshot(serving, cfg).density_milli == 2500
 
         direct_agent = _generation_budget_snapshot(
-            cfg, client, client.model, None, observer=observer, is_codex=True
+            cfg,
+            client,
+            client.model,
+            None,
+            observer=observer,
+            is_codex=True,
+            scope=_scope(),
         )
         compatibility_provider = _make_budget_snapshot_provider(
-            lambda: cfg, lambda: client, lambda: None, None, observer=observer
+            lambda: cfg,
+            lambda: client,
+            lambda: None,
+            None,
+            observer=observer,
+            agent_id_cell={"id": "w1"},
         )()
 
         for snapshot in (chat_and_loop, direct_agent, compatibility_provider):
@@ -681,7 +728,7 @@ class TestTotality:
             def active_clamp(self, _model):
                 return None
 
-            def density_for(self, _model):
+            def density_for(self, _scope, _model):
                 raise RuntimeError("density down")
 
         cfg = SimpleNamespace(openai_codex=OpenAICodexConfig())
@@ -706,19 +753,22 @@ class TestTotality:
         runner._window_observer = obs
         response = SimpleNamespace(provenance_model="gpt-5.6-sol", server_input_tokens=FIELD_TOKENS)
         non_codex = SimpleNamespace(is_codex=False, model="qwen3:14b")
-        runner._record_density(response, FIELD_CHARS, 0, non_codex)
-        assert obs.density_snapshot() == {}
+        runner._record_density(None, response, FIELD_CHARS, 0, non_codex)
+        assert obs.workload_calibration_summary() == {}
 
         codex = SimpleNamespace(is_codex=True, model="gpt-5.6-sol")
-        runner._record_density(response, FIELD_CHARS, 0, codex)
-        assert obs.density_for("gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        runner._record_density(_chat_st_stub(), response, FIELD_CHARS, 0, codex)
+        # Recorded under the CHAT workload that sent it — an agent scope with
+        # the same id must NOT see it.
+        assert obs.density_for(_scope("chat", "t1"), "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        assert obs.density_for(_scope("agent", "t1"), "gpt-5.6-sol") is None
 
         class _Broken:
             def record_density(self, **kwargs):
                 raise RuntimeError("observer down")
 
         runner._window_observer = _Broken()
-        runner._record_density(response, FIELD_CHARS, 0, codex)  # must not raise
+        runner._record_density(_chat_st_stub(), response, FIELD_CHARS, 0, codex)  # must not raise
 
     def test_chat_measure_payload_survives_junk(self):
         from src.discord.tool_loop import ToolLoopRunner
@@ -790,28 +840,33 @@ class TestTotality:
 
     def test_density_for_an_unnameable_model_is_uncalibrated(self, tmp_path):
         obs = _observer(tmp_path)
-        assert obs.density_for("") is None
-        assert obs.density_for(None) is None
+        assert obs.density_for(_scope(), "") is None
+        assert obs.density_for(_scope(), None) is None
 
     def test_non_integer_image_count_records_no_observation(self, tmp_path):
         obs = _observer(tmp_path)
         obs.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=FIELD_CHARS,
             images_sent=True,  # bool is not a count
             server_input_tokens=FIELD_TOKENS,
         )
-        assert obs.density_for("gpt-5.6-sol") is None
+        assert obs.density_for(_scope(), "gpt-5.6-sol") is None
 
     def test_integer_stall_still_converges_by_a_single_step(self, tmp_path):
         """With alpha=1/16 an update within 15 units of the target would floor
         to zero movement; convergence must never deadlock one step short."""
         obs = _observer(tmp_path)
-        obs._density_milli["gpt-5.6-sol"] = 2499
+        obs._density_milli[("agent", "w1", "gpt-5.6-sol")] = 2499
         obs.record_density(
-            model="gpt-5.6-sol", chars_sent=900_000, images_sent=0, server_input_tokens=350_000
+            scope=_scope(),
+            model="gpt-5.6-sol",
+            chars_sent=900_000,
+            images_sent=0,
+            server_input_tokens=350_000,
         )
-        assert obs.density_for("gpt-5.6-sol") == 2500
+        assert obs.density_for(_scope(), "gpt-5.6-sol") == 2500
 
 
 class TestPostHocQualification:
@@ -856,10 +911,7 @@ class TestPostHocQualification:
         # 100K accepted chars over one million attributed text tokens => 100.
         accepted_tokens = 1_042_000
         assert estimate_request_tokens(100_000, 0, density_milli=100) == 292_000
-        assert (
-            estimate_request_tokens_forensic(100_000, 0, density_milli=100)
-            == 1_042_000
-        )
+        assert estimate_request_tokens_forensic(100_000, 0, density_milli=100) == 1_042_000
         await obs.record_rescue(
             overflow=_overflow(tokens=None),
             response=_acceptance(tokens=accepted_tokens),
@@ -870,12 +922,13 @@ class TestPostHocQualification:
         assert obs.active_clamp("gpt-5.6-sol") is None
         # EMA/admission stores only the bounded value despite raw forensics.
         obs.record_density(
+            scope=_scope(),
             model="gpt-5.6-sol",
             chars_sent=100_000,
             images_sent=0,
             server_input_tokens=accepted_tokens,
         )
-        assert obs.density_for("gpt-5.6-sol") == MIN_DENSITY_MILLI
+        assert obs.density_for(_scope(), "gpt-5.6-sol") == MIN_DENSITY_MILLI
 
     async def test_rejection_usage_echo_is_authoritative(self, tmp_path):
         """The rejected request's own server usage dominates retry estimates."""
@@ -1087,8 +1140,9 @@ class TestPostHocQualification:
                 estimated_tokens=82_000,
                 effective_budget=921_601,
             ),
-            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
-            .RejectedAttemptFacts(
+            __import__(
+                "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
+            ).RejectedAttemptFacts(
                 chars=100_000,
                 images=0,
                 density_milli=100,  # impossible production/admission density
@@ -1096,8 +1150,9 @@ class TestPostHocQualification:
                 effective_budget=921_601,
                 believed_within=True,
             ),
-            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
-            .RejectedAttemptFacts(
+            __import__(
+                "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
+            ).RejectedAttemptFacts(
                 chars=-1,
                 images=0,
                 density_milli=2500,
@@ -1105,8 +1160,9 @@ class TestPostHocQualification:
                 effective_budget=921_601,
                 believed_within=True,
             ),
-            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
-            .RejectedAttemptFacts(
+            __import__(
+                "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
+            ).RejectedAttemptFacts(
                 chars=100_000,
                 images=-1,
                 density_milli=2500,
@@ -1114,8 +1170,9 @@ class TestPostHocQualification:
                 effective_budget=921_601,
                 believed_within=True,
             ),
-            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
-            .RejectedAttemptFacts(
+            __import__(
+                "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
+            ).RejectedAttemptFacts(
                 chars=100_000,
                 images=0,
                 density_milli=2500,
@@ -1123,8 +1180,9 @@ class TestPostHocQualification:
                 effective_budget=921_601,
                 believed_within=True,
             ),
-            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
-            .RejectedAttemptFacts(
+            __import__(
+                "src.llm.context_budget", fromlist=["RejectedAttemptFacts"]
+            ).RejectedAttemptFacts(
                 chars=100_000,
                 images=0,
                 density_milli=2500,
@@ -1177,9 +1235,7 @@ class TestPostHocQualification:
 
         snapshot = resolve_context_budget("gpt-5.6-sol")
         assert _attempt_facts([], snapshot, is_codex=False) is None
-        assert (
-            _attempt_facts([], SimpleNamespace(base_source="persisted"), is_codex=True) is None
-        )
+        assert _attempt_facts([], SimpleNamespace(base_source="persisted"), is_codex=True) is None
         assert (
             _attempt_facts(
                 [], SimpleNamespace(base_source="floor", effective_budget=0), is_codex=True
@@ -1187,7 +1243,194 @@ class TestPostHocQualification:
             is None
         )
         assert _attempt_facts(None, snapshot, is_codex=True) is None
-        facts = _attempt_facts(
-            [{"role": "user", "content": "x" * 100}], snapshot, is_codex=True
-        )
+        facts = _attempt_facts([{"role": "user", "content": "x" * 100}], snapshot, is_codex=True)
         assert facts is not None and facts.believed_within is True
+
+
+class TestWorkloadIsolation:
+    """The defect Aaron named: one job's dense content must not change how
+    every other job compacts. Account keys never bounded that — the auth pool
+    is sticky and clamp lookup takes a minimum across accounts — so isolation
+    has to come from the workload identity itself.
+    """
+
+    def _dense(self, obs, scope):
+        obs.record_density(
+            scope=scope,
+            model="gpt-5.6-sol",
+            chars_sent=FIELD_CHARS,
+            images_sent=0,
+            server_input_tokens=FIELD_TOKENS,
+        )
+
+    def test_a_dense_agent_does_not_move_anyone_else(self, tmp_path):
+        obs = _observer(tmp_path)
+        dense_agent = _scope("agent", "A")
+        self._dense(obs, dense_agent)
+        assert obs.density_for(dense_agent, "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        # Every other workload still resolves to the fixed prior.
+        for other in (_scope("chat", "B"), _scope("agent", "C"), _scope("loop", "L")):
+            assert obs.density_for(other, "gpt-5.6-sol") is None
+
+    def test_parent_and_child_agents_do_not_share_density(self, tmp_path):
+        obs = _observer(tmp_path)
+        self._dense(obs, _scope("agent", "child"))
+        assert obs.density_for(_scope("agent", "parent"), "gpt-5.6-sol") is None
+
+    def test_a_new_chat_turn_does_not_inherit_the_previous_one(self, tmp_path):
+        obs = _observer(tmp_path)
+        self._dense(obs, _scope("chat", "turn-1"))
+        assert obs.density_for(_scope("chat", "turn-2"), "gpt-5.6-sol") is None
+
+    def test_one_loop_retains_calibration_across_its_iterations(self, tmp_path):
+        obs = _observer(tmp_path)
+        loop = _scope("loop", "L1")
+        self._dense(obs, loop)
+        assert obs.density_for(loop, "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+        # A loop-spawned agent is its own workload and inherits nothing.
+        assert obs.density_for(_scope("agent", "L1"), "gpt-5.6-sol") is None
+
+    def test_model_switch_stays_isolated_within_one_workload(self, tmp_path):
+        obs = _observer(tmp_path)
+        w = _scope("agent", "A")
+        self._dense(obs, w)
+        assert obs.density_for(w, "gpt-5.6-terra") is None
+        # Returning to the first model recovers that workload/model entry.
+        assert obs.density_for(w, "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+
+    def test_surface_kind_separates_identical_ids(self, tmp_path):
+        obs = _observer(tmp_path)
+        self._dense(obs, _scope("chat", "X"))
+        assert obs.density_for(_scope("agent", "X"), "gpt-5.6-sol") is None
+
+    def test_terminal_cleanup_returns_only_that_workload_to_prior(self, tmp_path):
+        obs = _observer(tmp_path)
+        a, b = _scope("agent", "A"), _scope("agent", "B")
+        self._dense(obs, a)
+        self._dense(obs, b)
+        assert obs.release_workload(a) == 1
+        assert obs.density_for(a, "gpt-5.6-sol") is None
+        assert obs.density_for(b, "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+
+    def test_eviction_is_bounded_and_only_returns_workloads_to_prior(self, tmp_path):
+        from src.llm.window_observer import _MAX_WORKLOAD_SCOPES
+
+        obs = _observer(tmp_path)
+        for i in range(_MAX_WORKLOAD_SCOPES + 25):
+            self._dense(obs, _scope("agent", f"w{i}"))
+        assert len(obs._density_milli) <= _MAX_WORKLOAD_SCOPES
+        # The newest workload survives; eviction only costs the oldest their
+        # calibration, which simply returns them to the fixed prior.
+        newest = _scope("agent", f"w{_MAX_WORKLOAD_SCOPES + 24}")
+        assert obs.density_for(newest, "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+
+    def test_a_malformed_scope_never_creates_a_shared_entry(self, tmp_path):
+        obs = _observer(tmp_path)
+        for bad in (None, SimpleNamespace(), _scope("", "w"), _scope("agent", "   ")):
+            obs.record_density(
+                scope=bad,
+                model="gpt-5.6-sol",
+                chars_sent=FIELD_CHARS,
+                images_sent=0,
+                server_input_tokens=FIELD_TOKENS,
+            )
+        assert obs.workload_calibration_summary() == {}
+
+    def test_agent_manager_releases_calibration_on_cleanup(self, tmp_path):
+        from src.agents.manager import AgentManager
+
+        obs = _observer(tmp_path)
+        self._dense(obs, _scope("agent", "gone"))
+        mgr = AgentManager()
+        mgr.set_calibration_observer(obs)
+        mgr._release_calibration("gone")
+        assert obs.density_for(_scope("agent", "gone"), "gpt-5.6-sol") is None
+
+    def test_release_is_total_when_the_observer_is_broken(self, tmp_path):
+        from src.agents.manager import AgentManager
+
+        class _Broken:
+            def release_workload(self, _scope):
+                raise RuntimeError("observer down")
+
+        mgr = AgentManager()
+        mgr.set_calibration_observer(_Broken())
+        mgr._release_calibration("x")  # must not raise on a finished agent
+
+    def test_scope_key_is_total_on_hostile_scopes(self, tmp_path):
+        """A scope-shaped object that raises must not escape into a request."""
+        obs = _observer(tmp_path)
+
+        class _Hostile:
+            surface_kind = "agent"
+
+            @property
+            def workload_id(self):
+                raise RuntimeError("boom")
+
+            def is_valid(self):
+                return True
+
+        assert obs.density_for(_Hostile(), "gpt-5.6-sol") is None
+        assert obs.release_workload(_Hostile()) == 0
+
+    def test_release_of_an_unknown_workload_is_a_no_op(self, tmp_path):
+        obs = _observer(tmp_path)
+        assert obs.release_workload(_scope("agent", "never-seen")) == 0
+
+    def test_eviction_survives_broken_bookkeeping(self, tmp_path):
+        from src.llm.window_observer import _MAX_WORKLOAD_SCOPES
+
+        obs = _observer(tmp_path)
+        # Force the eviction path to actually run, then break its bookkeeping.
+        obs._density_milli = {("agent", f"w{i}", "m"): 900 for i in range(_MAX_WORKLOAD_SCOPES + 5)}
+        obs._scope_touched = None  # type: ignore[assignment]
+        obs._evict_if_needed()  # must not raise
+
+    def test_scope_key_survives_a_hostile_model(self, tmp_path):
+        """Canonicalisation runs on caller-supplied input; a model object that
+        explodes must yield the prior, not an exception into the request."""
+        obs = _observer(tmp_path)
+
+        class _Hostile:
+            def __str__(self):
+                raise RuntimeError("boom")
+
+        assert obs.density_for(_scope(), _Hostile()) is None
+
+    def test_release_survives_a_broken_store(self, tmp_path):
+        obs = _observer(tmp_path)
+        obs._density_milli = None  # type: ignore[assignment]
+        assert obs.release_workload(_scope()) == 0
+
+    def test_chat_density_lookup_survives_a_broken_observer(self):
+        """Calibration lookup is never worth failing a turn over."""
+        from src.discord.tool_loop import ToolLoopRunner
+
+        class _Broken:
+            def density_for(self, _scope, _model):
+                raise RuntimeError("observer down")
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._window_observer = _Broken()
+        assert runner._observed_density(_scope("chat", "t1"), "gpt-5.6-sol") is None
+
+    def test_agent_density_lookup_survives_a_broken_observer(self):
+        from src.discord.native_tools.agents_tasks import _agent_scope, _observer_density
+
+        class _Broken:
+            def density_for(self, _scope, _model):
+                raise RuntimeError("observer down")
+
+        assert _observer_density(_Broken(), _agent_scope("a1"), "gpt-5.6-sol") is None
+        # No scope, no observer, no model: each independently yields the prior.
+        assert _observer_density(_Broken(), None, "gpt-5.6-sol") is None
+        assert _observer_density(None, _agent_scope("a1"), "gpt-5.6-sol") is None
+        assert _observer_density(_Broken(), _agent_scope("a1"), None) is None
+
+    def test_agent_scope_requires_an_id(self):
+        from src.discord.native_tools.agents_tasks import _agent_scope
+
+        assert _agent_scope(None) is None
+        assert _agent_scope("") is None
+        assert _agent_scope("a1").workload_id == "a1"

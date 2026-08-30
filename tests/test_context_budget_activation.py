@@ -341,7 +341,7 @@ class TestRound2GenerationIdentityPins:
                 self.calls += 1
                 return 500_000 if self.calls == 1 else 100_000
 
-            def density_for(self, _model):
+            def density_for(self, _scope, _model):
                 self.density_calls += 1
                 return 2500 if self.density_calls == 1 else 2000
 
@@ -563,7 +563,7 @@ class TestSingleSnapshotAcrossLoopGeneration:
                 self.calls += 1
                 return 500_000 if self.calls == 1 else 100_000
 
-            def density_for(self, _model):
+            def density_for(self, _scope, _model):
                 self.density_calls += 1
                 return 2500 if self.density_calls == 1 else 2000
 
@@ -595,7 +595,12 @@ class TestSingleSnapshotAcrossLoopGeneration:
         runner._window_observer = observer
         config = SimpleNamespace(openai_codex=OpenAICodexConfig())
         serving = LLMServingIdentity("codex", client, client.model, client.reasoning_effort)
-        snapshot = runner._capture_budget_snapshot(serving, config)
+        # Capture with the loop's workload identity: calibration is scoped to
+        # the lineage that produced it, so a capture without one honestly
+        # resolves to the fixed prior instead of borrowing another workload's.
+        snapshot = runner._capture_budget_snapshot(
+            serving, config, SimpleNamespace(_loop_id="L", _req_id=None)
+        )
         st = SimpleNamespace(
             messages=[
                 {"role": "user", "content": "prior" * 100_000},

@@ -186,19 +186,40 @@ def _observer_clamp(observer, model) -> int | None:
         return None
 
 
-def _observer_density(observer, model) -> int | None:
+def _agent_scope(agent_id: str | None):
+    """This agent's own calibration lineage.
+
+    Keyed on the INDIVIDUAL agent id, never ``root_id``: a child agent has its
+    own message history, so importing a parent's density would republish one
+    workload's measurement to another. Once a child's result lands in the
+    parent's messages, the parent's next accepted generation measures the
+    resulting payload itself.
+    """
+    from ...llm.context_budget import WorkloadScope
+
+    return WorkloadScope("agent", str(agent_id)) if agent_id else None
+
+
+def _observer_density(observer, scope, model) -> int | None:
     """Total density lookup — a broken observer never breaks a spawn."""
-    if observer is None or not model:
+    if observer is None or not model or scope is None:
         return None
     try:
-        return observer.density_for(model)
+        return observer.density_for(scope, model)
     except Exception:
         log.exception("density_for failed (non-fatal); treating as uncalibrated")
         return None
 
 
 def _generation_budget_snapshot(
-    cfg, client, resolved_model, compressor, observer=None, *, is_codex: bool | None = None
+    cfg,
+    client,
+    resolved_model,
+    compressor,
+    observer=None,
+    *,
+    is_codex: bool | None = None,
+    scope=None,
 ):
     """The frozen generation's budget snapshot, from the SAME identity capture
     as the request (collision-gated: non-Codex clients get unknown-model
@@ -219,7 +240,7 @@ def _generation_budget_snapshot(
         getattr(cfg, "openai_codex", None),
         max_context_chars=(getattr(compressor, "max_context_chars", None) if compressor else None),
         observed_clamp=_observer_clamp(observer, model_for_budget),
-        density_milli=_observer_density(observer, model_for_budget),
+        density_milli=_observer_density(observer, scope, model_for_budget),
     )
 
 
@@ -244,6 +265,7 @@ def _capture_agent_generation_plan(
     model_override: str | None,
     effort_override: str | None,
     observer=None,
+    agent_id_cell=None,
 ) -> dict:
     """Capture one immutable agent-generation identity and budget plan.
 
@@ -295,13 +317,16 @@ def _capture_agent_generation_plan(
             resolved_model,
             get_compressor(),
             observer=observer,
+            scope=_agent_scope(
+                agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
+            ),
             is_codex=is_codex,
         ),
     }
 
 
 def _make_budget_snapshot_provider(
-    get_config, get_client, get_compressor, model_override, observer=None
+    get_config, get_client, get_compressor, model_override, observer=None, agent_id_cell=None
 ):
     """Per-generation context-budget snapshot for a spawned agent.
 
@@ -338,7 +363,11 @@ def _make_budget_snapshot_provider(
                 getattr(compressor, "max_context_chars", None) if compressor else None
             ),
             observed_clamp=_observer_clamp(observer, model_for_budget),
-            density_milli=_observer_density(observer, model_for_budget),
+            density_milli=_observer_density(
+                observer,
+                _agent_scope(agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None),
+                model_for_budget,
+            ),
         )
 
     return provider
@@ -385,7 +414,7 @@ def _make_evidence_recorder(observer):
     return recorder
 
 
-def _make_density_recorder(observer):
+def _make_density_recorder(observer, agent_id_cell=None):
     """Adapter folding one accepted agent request into the density EMA.
 
     The agent callback returns a plain dict, so provenance and usage are
@@ -404,6 +433,9 @@ def _make_density_recorder(observer):
             if response.get("provider") != "codex":
                 return
             observer.record_density(
+                scope=_agent_scope(
+                    agent_id_cell.get("id") if isinstance(agent_id_cell, dict) else None
+                ),
                 model=response.get("model"),
                 chars_sent=chars_sent,
                 images_sent=images_sent,
@@ -1031,9 +1063,10 @@ class AgentTaskTools:
                 model_override=model_override,
                 effort_override=effort_override,
                 observer=self._window_observer,
+                agent_id_cell=_self_id,
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
-            density_recorder=_make_density_recorder(self._window_observer),
+            density_recorder=_make_density_recorder(self._window_observer, _self_id),
         )
 
         if agent_id.startswith("Error"):
@@ -1342,7 +1375,7 @@ class AgentTaskTools:
             context_compression_enabled=bool(cc),
             max_context_chars=cc.resolved_max_context_chars if cc else 750000,
             keep_recent_iterations=cc.keep_recent_iterations if cc else 30,
-            generation_plan_provider_factory=lambda mo, eo: (
+            generation_plan_provider_factory=lambda mo, eo, cell: (
                 lambda: _capture_agent_generation_plan(
                     self._get_config,
                     lambda config: _gateway_serving_for_config(self._llm_gateway, config),
@@ -1350,10 +1383,13 @@ class AgentTaskTools:
                     model_override=mo,
                     effort_override=eo,
                     observer=self._window_observer,
+                    agent_id_cell=cell,
                 )
             ),
             evidence_recorder=_make_evidence_recorder(self._window_observer),
-            density_recorder=_make_density_recorder(self._window_observer),
+            density_recorder_factory=lambda cell: _make_density_recorder(
+                self._window_observer, cell
+            ),
         )
 
         # Format response

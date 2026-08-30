@@ -145,6 +145,35 @@ class ContextBudgetSnapshot:
 
 
 @dataclass(frozen=True)
+class WorkloadScope:
+    """Identity of ONE independent prompt lineage, for density calibration.
+
+    Density is a property of the WORKLOAD, not of the model: characters per
+    token describe what a particular job is reading, and publishing one job's
+    measurement globally makes every other job compact against a stranger's
+    content. That is the same failure shape as a false clamp — a local truth
+    published globally — and account keys never bounded it, because the auth
+    pool is sticky and clamp lookup takes a minimum across accounts anyway.
+
+    ``surface_kind`` is "chat", "agent" or "loop"; ``workload_id`` is that
+    surface's independent-lineage id (the durable turn id, the individual
+    agent id, the loop id). Deliberately carries NO account or user identity:
+    neither describes payload density.
+    """
+
+    surface_kind: str
+    workload_id: str
+
+    def is_valid(self) -> bool:
+        return bool(
+            isinstance(self.surface_kind, str)
+            and self.surface_kind.strip()
+            and isinstance(self.workload_id, str)
+            and self.workload_id.strip()
+        )
+
+
+@dataclass(frozen=True)
 class RejectedAttemptFacts:
     """Everything the physical-fit verdict for ONE sent payload rested on.
 

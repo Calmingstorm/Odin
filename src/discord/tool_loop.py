@@ -721,7 +721,7 @@ class ToolLoopRunner:
             if st._gen_identity:
                 budget_snapshot = self._snapshot_from_generation_facts(st._gen_identity)
             else:
-                budget_snapshot = self._capture_budget_snapshot(serving, config)
+                budget_snapshot = self._capture_budget_snapshot(serving, config, st)
             st._generation_budget_snapshot = budget_snapshot
             if not self._maybe_compress(st, serving.client, config):
                 return await self._llm_error_done(
@@ -1015,17 +1015,38 @@ class ToolLoopRunner:
             log.exception("active_clamp failed (non-fatal); treating as unclamped")
             return None
 
-    def _observed_density(self, model: object) -> int | None:
+    @staticmethod
+    def _workload_scope(st: object) -> object | None:
+        """This turn's independent prompt lineage.
+
+        Chat uses the durable top-level request id and the loop uses its
+        loop id. Deliberately NOT the channel: a channel holds several users
+        and unrelated jobs, so channel-scoped calibration would recreate the
+        cross-workload defect at a smaller radius.
+        """
+        from ..llm.context_budget import WorkloadScope
+
+        loop_id = getattr(st, "_loop_id", None)
+        if loop_id:
+            return WorkloadScope("loop", str(loop_id))
+        req_id = getattr(st, "_req_id", None)
+        if req_id:
+            return WorkloadScope("chat", str(req_id))
+        return None
+
+    def _observed_density(self, scope: object, model: object) -> int | None:
         """The observer's calibrated density for the NEXT generation.
 
         Total like clamp lookup: calibration is runtime evidence, never a
         reason to fail a request whose uncalibrated path remains usable.
         """
         observer = getattr(self, "_window_observer", None)
-        if observer is None:
+        if observer is None or scope is None:
+            # No workload identity means no honest owner for a calibrated
+            # value; the fixed prior is correct, borrowing is not.
             return None
         try:
-            return observer.density_for(model)
+            return observer.density_for(scope, model)
         except Exception:
             log.exception("density_for failed (non-fatal); treating as uncalibrated")
             return None
@@ -1073,7 +1094,12 @@ class ToolLoopRunner:
             return 0, 0
 
     def _record_density(
-        self, response: object, chars_sent: int, images_sent: int, serving_identity: object
+        self,
+        st: object,
+        response: object,
+        chars_sent: int,
+        images_sent: int,
+        serving_identity: object,
     ) -> None:
         """Fold one accepted request into the model's density calibration.
 
@@ -1085,6 +1111,7 @@ class ToolLoopRunner:
             return
         try:
             observer.record_density(
+                scope=self._workload_scope(st),
                 model=getattr(response, "provenance_model", None)
                 or getattr(serving_identity, "model", None),
                 chars_sent=chars_sent,
@@ -1299,8 +1326,13 @@ class ToolLoopRunner:
             density_source="default",
         )
 
-    def _capture_budget_snapshot(self, serving, config) -> ContextBudgetSnapshot:
-        """Capture one budget snapshot beside one serving identity."""
+    def _capture_budget_snapshot(self, serving, config, st=None) -> ContextBudgetSnapshot:
+        """Capture one budget snapshot beside one serving identity.
+
+        ``st`` supplies the workload scope. Without it there is no honest
+        owner for a calibrated density, so the snapshot uses the fixed prior
+        rather than borrowing another workload's measurement.
+        """
         compressor = self._get_context_compressor()
         model_for_budget = serving.model if serving.is_codex else None
         return snapshot_for_codex_config(
@@ -1308,7 +1340,7 @@ class ToolLoopRunner:
             getattr(config, "openai_codex", None),
             max_context_chars=(compressor.max_context_chars if compressor is not None else None),
             observed_clamp=self._observed_clamp(model_for_budget),
-            density_milli=self._observed_density(model_for_budget),
+            density_milli=self._observed_density(self._workload_scope(st), model_for_budget),
         )
 
     def _maybe_compress(
@@ -1360,7 +1392,9 @@ class ToolLoopRunner:
                         compressor.max_context_chars if compressor is not None else None
                     ),
                     observed_clamp=self._observed_clamp(model_for_budget),
-                    density_milli=self._observed_density(model_for_budget),
+                    density_milli=self._observed_density(
+                        self._workload_scope(st), model_for_budget
+                    ),
                 )
             snapshot = budget_snapshot
             boundary = SurfaceBoundary(
@@ -1555,7 +1589,7 @@ class ToolLoopRunner:
             _snapshot = budget_snapshot
         else:
             _root_config = request_config if request_config is not None else self._get_config()
-            _snapshot = self._capture_budget_snapshot(serving_identity, _root_config)
+            _snapshot = self._capture_budget_snapshot(serving_identity, _root_config, st)
         # Predictive pre-send descent consumes a PREFIX of the frozen ladder
         # locally, and only the remaining subset governs physical attempts.
         # This keeps ONE total ladder without inventing fake provider
@@ -1614,7 +1648,7 @@ class ToolLoopRunner:
                             on_wait=_on_wait,
                         )
                         self._record_density(
-                            llm_resp, _attempt_chars, _attempt_images, serving_identity
+                            st, llm_resp, _attempt_chars, _attempt_images, serving_identity
                         )
                         if _pending_latch is not None:
                             # Server-accepted evidence (the settled latch
@@ -2684,7 +2718,7 @@ class ToolLoopRunner:
             # every physical retry describe this exact client/model/effort.
             _config = self._get_config()
             _serving = _serving_identity_for(self._llm_gateway, _config)
-            _budget_snapshot = self._capture_budget_snapshot(_serving, _config)
+            _budget_snapshot = self._capture_budget_snapshot(_serving, _config, st)
             self._maybe_compress_loop(st, _serving, _config, budget_snapshot=_budget_snapshot)
             kind, val = await self._call_loop_llm(
                 st,
@@ -2871,7 +2905,7 @@ class ToolLoopRunner:
             snapshot = (
                 budget_snapshot
                 if budget_snapshot is not None
-                else self._capture_budget_snapshot(serving, config)
+                else self._capture_budget_snapshot(serving, config, st)
             )
             if (
                 compressor is not None
@@ -2967,7 +3001,7 @@ class ToolLoopRunner:
         _snapshot = (
             budget_snapshot
             if budget_snapshot is not None
-            else self._capture_budget_snapshot(serving_identity, request_config)
+            else self._capture_budget_snapshot(serving_identity, request_config, st)
         )
         # Predictive descent consumes a ladder PREFIX before any physical
         # attempt; only the remainder governs post-rejection rescue.
@@ -3009,7 +3043,7 @@ class ToolLoopRunner:
                     if cancel_event is not None and cancel_event.is_set():
                         raise asyncio.CancelledError
                     self._record_density(
-                        response, attempt_chars, attempt_images, serving_identity
+                        st, response, attempt_chars, attempt_images, serving_identity
                     )
                     if pending_latch is not None:
                         # Server-accepted evidence, per the settled latch rule.

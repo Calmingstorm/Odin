@@ -442,6 +442,14 @@ class AgentManager:
         # Entries are pruned only when the tree has no registered members
         # left (nothing can spawn into it again — parents must exist).
         self._tree_spawn_counts: dict[str, int] = {}
+        # Installed by the composition root once the observer exists. Only
+        # used to release a finished agent's workload-local calibration; the
+        # manager never reads calibration itself.
+        self._window_observer: object | None = None
+
+    def set_calibration_observer(self, observer: object | None) -> None:
+        """Install the window observer so finished agents release their scope."""
+        self._window_observer = observer
 
     def spawn(
         self,
@@ -958,10 +966,29 @@ class AgentManager:
 
         async def _delayed_cleanup():
             await asyncio.sleep(CLEANUP_DELAY)
+            self._release_calibration(agent_id)
             self._remove_agent(agent_id, source="delayed_cleanup")
 
         task = asyncio.ensure_future(_delayed_cleanup())
         self._cleanup_tasks[agent_id] = task
+
+    def _release_calibration(self, agent_id: str) -> None:
+        """Return this agent's workload calibration to the fixed prior.
+
+        Owner-bound lifetime: calibration describes THIS agent's payloads and
+        has no meaning once it is gone. Total — a cleanup failure must never
+        raise on an agent that already finished; the observer's bounded
+        eviction is the backstop if this never runs.
+        """
+        observer = getattr(self, "_window_observer", None)
+        if observer is None:
+            return
+        try:
+            from ..llm.context_budget import WorkloadScope
+
+            observer.release_workload(WorkloadScope("agent", str(agent_id)))
+        except Exception:
+            log.exception("agent calibration release failed (non-fatal)")
 
     def check_health(self) -> dict:
         """Check agent health: force-kill stuck agents, log stale ones.

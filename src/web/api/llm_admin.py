@@ -1018,23 +1018,25 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
                 or (row["value"] == prior["value"] and row["expires_at"] > prior["expires_at"])
             ):
                 active_clamp_rows[row["model"]] = row
-        # ONE density snapshot for the whole response: re-reading ephemeral
-        # calibration per model could pair one model's target with another's
-        # calibration generation.
-        density_snapshot: dict[str, int] = {}
+        # Density is WORKLOAD-LOCAL: there is no global calibrated value to
+        # report, and substituting a minimum, average, most-recent or
+        # current-account workload density would assert a runtime target no
+        # generation actually uses. The model row therefore describes the
+        # fixed prior and the FRESH-workload target, with active-workload
+        # calibration exposed separately as observability only.
+        workload_calibration: dict[str, dict] = {}
         if observer is not None:
             try:
-                density_snapshot = observer.density_snapshot()
+                workload_calibration = observer.workload_calibration_summary()
             except Exception:
-                log.exception("density snapshot failed; serving uncalibrated targets")
+                log.exception("workload calibration summary failed")
         models = set(CODEX_MODEL_INPUT_BUDGETS) | set(overrides)
         for account in evidence.get("accounts", {}).values():
             models |= set(account.get("models", {}))
-        # A model may exist ONLY in ephemeral density state (calibrated but
-        # never clamped and not in the static registry); the census must still
-        # describe it or the table would omit a model whose runtime target is
-        # actively calibrated.
-        models |= set(density_snapshot)
+        # A model may appear only in active workload calibration; the census
+        # must still describe it rather than omit a model that live work is
+        # currently calibrating.
+        models |= set(workload_calibration)
         out = {}
         for model in sorted(models):
             active_row = active_clamp_rows.get(model)
@@ -1048,14 +1050,15 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
                 utilization=utilization,
                 max_context_chars=configured_ceiling,
             )
-            model_density = density_snapshot.get(model)
+            # The effective row is the FRESH-workload resolution: a workload
+            # with no samples yet uses the fixed prior, which is the only
+            # density this endpoint can honestly attribute to the model.
             effective = resolve_context_budget(
                 model,
                 overrides=overrides,
                 utilization=utilization,
                 max_context_chars=runtime_ceiling,
                 observed_clamp=clamp,
-                density_milli=model_density,
             )
             out[model] = {
                 "floor": CODEX_MODEL_INPUT_BUDGETS.get(model),
@@ -1070,11 +1073,16 @@ def register_context_windows(routes: web.RouteTableDef, bot) -> None:
                 ),
                 "configured": _resolution(configured),
                 "effective": _resolution(effective),
-                # Density provenance is SEPARATE from capability/clamp
-                # provenance: both can be true at once, so the UI renders two
-                # chips rather than one concatenated string.
-                "density_milli": effective.density_milli,
-                "density_source": effective.density_source,
+                # Fixed prior + the fresh-workload target it produces. NOT a
+                # runtime calibrated value: calibration is per workload and
+                # this endpoint has no single one to report.
+                "density_prior_milli": effective.density_milli,
+                "density_scope": "workload-local calibration",
+                # Observability only — how many live workloads are calibrated
+                # on this model and the range they span. Never policy.
+                "workload_calibration": workload_calibration.get(
+                    model, {"active_workloads": 0, "min": None, "max": None}
+                ),
                 "clamp_expires_at": (
                     active_row["expires_at"]
                     if effective.clamp_applied and active_row is not None
