@@ -186,13 +186,31 @@ def _observer_clamp(observer, model) -> int | None:
         return None
 
 
-def _generation_budget_snapshot(cfg, client, resolved_model, compressor, observer=None):
+def _observer_density(observer, model) -> int | None:
+    """Total density lookup — a broken observer never breaks a spawn."""
+    if observer is None or not model:
+        return None
+    try:
+        return observer.density_for(model)
+    except Exception:
+        log.exception("density_for failed (non-fatal); treating as uncalibrated")
+        return None
+
+
+def _generation_budget_snapshot(
+    cfg, client, resolved_model, compressor, observer=None, *, is_codex: bool | None = None
+):
     """The frozen generation's budget snapshot, from the SAME identity capture
     as the request (collision-gated: non-Codex clients get unknown-model
     math regardless of what their model is named)."""
     from ...llm.context_budget import snapshot_for_codex_config
 
-    if hasattr(client, "reasoning_effort"):
+    if is_codex is None:
+        # Compatibility callers predate immutable serving identities; their
+        # client shape remains the conservative fallback. Production passes
+        # the captured provider decision explicitly below.
+        is_codex = hasattr(client, "reasoning_effort")
+    if is_codex:
         model_for_budget = resolved_model or getattr(client, "model", None)
     else:
         model_for_budget = None
@@ -201,6 +219,7 @@ def _generation_budget_snapshot(cfg, client, resolved_model, compressor, observe
         getattr(cfg, "openai_codex", None),
         max_context_chars=(getattr(compressor, "max_context_chars", None) if compressor else None),
         observed_clamp=_observer_clamp(observer, model_for_budget),
+        density_milli=_observer_density(observer, model_for_budget),
     )
 
 
@@ -258,6 +277,10 @@ def _capture_agent_generation_plan(
         effective_effort = getattr(client, "reasoning_effort", None)
     if effective_effort is None and hasattr(client, "reasoning_effort"):
         raise ValueError("Codex client has no resolved reasoning effort")
+    # Provider identity, captured beside this generation's client/model,
+    # is authoritative. Model names and Codex-shaped client attributes are
+    # not evidence that a non-Codex response carries Codex usage semantics.
+    is_codex = provider == "codex" and client is not None
     return {
         "provider": provider,
         "client": client,
@@ -265,13 +288,14 @@ def _capture_agent_generation_plan(
         "model": resolved_model,
         # Predictive pre-send admission is Codex-only: no other provider
         # supplies the accepted-token evidence contract calibration needs.
-        "is_codex": hasattr(client, "reasoning_effort"),
+        "is_codex": is_codex,
         "snapshot": _generation_budget_snapshot(
             cfg,
             client,
             resolved_model,
             get_compressor(),
             observer=observer,
+            is_codex=is_codex,
         ),
     }
 
@@ -314,6 +338,7 @@ def _make_budget_snapshot_provider(
                 getattr(compressor, "max_context_chars", None) if compressor else None
             ),
             observed_clamp=_observer_clamp(observer, model_for_budget),
+            density_milli=_observer_density(observer, model_for_budget),
         )
 
     return provider
@@ -360,6 +385,11 @@ def _make_density_recorder(observer):
     def recorder(response, chars_sent, images_sent):
         try:
             if not isinstance(response, dict):
+                return
+            # Immutable response provenance is the authority. A non-Codex
+            # provider may legally use a Codex-looking model slug and may even
+            # expose a token count; neither may contaminate Codex calibration.
+            if response.get("provider") != "codex":
                 return
             observer.record_density(
                 model=response.get("model"),

@@ -254,10 +254,14 @@ def resolve_context_budget(
     # Integer form of floor(compactable × density). At the default 2500 this
     # is bit-identical to the historical `* 5 // 2` for every non-negative
     # operand; calibration can only lower it (the band's ceiling IS 2500).
+    density_supplied = density_milli is not None
     resolved_density = (
-        DEFAULT_DENSITY_MILLI if density_milli is None else clamp_density_milli(density_milli)
+        DEFAULT_DENSITY_MILLI if not density_supplied else clamp_density_milli(density_milli)
     )
-    density_source = "calibrated" if resolved_density != DEFAULT_DENSITY_MILLI else "default"
+    # Provenance follows the ORIGIN, not numeric inequality. A real accepted
+    # sample may calibrate exactly to the historical 2500 default; that is
+    # still measured evidence and must not be presented as uncalibrated.
+    density_source = "calibrated" if density_supplied else "default"
     derived_chars = compactable_tokens * resolved_density // 1000
 
     if max_context_chars is not None and max_context_chars < derived_chars:

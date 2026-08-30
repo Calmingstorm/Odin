@@ -483,7 +483,13 @@ class TestTotality:
 
         recorder = _make_density_recorder(_Broken())
         recorder(
-            {"model": "gpt-5.6-sol", "server_input_tokens": FIELD_TOKENS}, FIELD_CHARS, 0
+            {
+                "provider": "codex",
+                "model": "gpt-5.6-sol",
+                "server_input_tokens": FIELD_TOKENS,
+            },
+            FIELD_CHARS,
+            0,
         )  # must not raise
 
     def test_agent_density_recorder_for_absent_observer_is_none(self):
@@ -496,9 +502,128 @@ class TestTotality:
 
         obs = _observer(tmp_path)
         _make_density_recorder(obs)(
-            {"model": "gpt-5.6-sol", "server_input_tokens": FIELD_TOKENS}, FIELD_CHARS, 0
+            {
+                "provider": "codex",
+                "model": "gpt-5.6-sol",
+                "server_input_tokens": FIELD_TOKENS,
+            },
+            FIELD_CHARS,
+            0,
         )
         assert obs.density_for("gpt-5.6-sol") == FIELD_DENSITY_MILLI
+
+    def test_agent_density_recorder_rejects_non_codex_response_provenance(self, tmp_path):
+        """Response provenance, not a Codex-looking model slug or client
+        shape, gates shared calibration."""
+        from src.discord.native_tools.agents_tasks import _make_density_recorder
+
+        obs = _observer(tmp_path)
+        _make_density_recorder(obs)(
+            {
+                "provider": "ollama",
+                "model": "gpt-5.6-sol",
+                "server_input_tokens": FIELD_TOKENS,
+            },
+            FIELD_CHARS,
+            0,
+        )
+        assert obs.density_for("gpt-5.6-sol") is None
+
+    def test_agent_plan_uses_authoritative_provider_for_density_and_prediction(self):
+        """A non-Codex serving identity may wrap a Codex-shaped client; its
+        model and usage still cannot enter Codex calibration or prediction."""
+        from src.discord.native_tools.agents_tasks import _capture_agent_generation_plan
+
+        class Observer:
+            def active_clamp(self, _model):
+                return None
+
+            def density_for(self, _model):
+                return FIELD_DENSITY_MILLI
+
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        serving = SimpleNamespace(provider="ollama", client=client)
+        cfg = SimpleNamespace(openai_codex=SimpleNamespace())
+        plan = _capture_agent_generation_plan(
+            lambda: cfg,
+            lambda _cfg: serving,
+            lambda: None,
+            model_override=None,
+            effort_override=None,
+            observer=Observer(),
+        )
+        assert plan["provider"] == "ollama"
+        assert plan["is_codex"] is False
+        assert plan["snapshot"].canonical_model == ""
+        assert plan["snapshot"].density_milli == 2500
+        assert plan["snapshot"].density_source == "default"
+
+    def test_production_snapshot_paths_consume_observer_density(self):
+        """All production snapshot constructors must consume the same live
+        calibration they expose through the API."""
+        from src.config.schema import OpenAICodexConfig
+        from src.discord.llm_gateway import LLMServingIdentity
+        from src.discord.native_tools.agents_tasks import (
+            _generation_budget_snapshot,
+            _make_budget_snapshot_provider,
+        )
+        from src.discord.tool_loop import ToolLoopRunner
+
+        class Observer:
+            def active_clamp(self, _model):
+                return None
+
+            def density_for(self, model):
+                return FIELD_DENSITY_MILLI if model == "gpt-5.6-sol" else None
+
+        observer = Observer()
+        cfg = SimpleNamespace(openai_codex=OpenAICodexConfig())
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._window_observer = observer
+        runner._get_context_compressor = lambda: None
+        serving = LLMServingIdentity("codex", client, client.model, client.reasoning_effort)
+        chat_and_loop = runner._capture_budget_snapshot(serving, cfg)
+
+        direct_agent = _generation_budget_snapshot(
+            cfg, client, client.model, None, observer=observer, is_codex=True
+        )
+        compatibility_provider = _make_budget_snapshot_provider(
+            lambda: cfg, lambda: client, lambda: None, None, observer=observer
+        )()
+
+        for snapshot in (chat_and_loop, direct_agent, compatibility_provider):
+            assert snapshot.density_milli == FIELD_DENSITY_MILLI
+            assert snapshot.density_source == "calibrated"
+            assert snapshot.primary_chars < resolve_context_budget("gpt-5.6-sol").primary_chars
+
+    def test_production_snapshot_density_lookup_is_total(self):
+        from src.config.schema import OpenAICodexConfig
+        from src.discord.llm_gateway import LLMServingIdentity
+        from src.discord.native_tools.agents_tasks import _generation_budget_snapshot
+        from src.discord.tool_loop import ToolLoopRunner
+
+        class Broken:
+            def active_clamp(self, _model):
+                return None
+
+            def density_for(self, _model):
+                raise RuntimeError("density down")
+
+        cfg = SimpleNamespace(openai_codex=OpenAICodexConfig())
+        client = SimpleNamespace(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._window_observer = Broken()
+        runner._get_context_compressor = lambda: None
+        serving = LLMServingIdentity("codex", client, client.model, client.reasoning_effort)
+
+        chat = runner._capture_budget_snapshot(serving, cfg)
+        agent = _generation_budget_snapshot(
+            cfg, client, client.model, None, observer=Broken(), is_codex=True
+        )
+        assert chat.density_source == "default"
+        assert agent.density_source == "default"
 
     def test_chat_surface_density_hook_is_codex_gated_and_total(self, tmp_path):
         from src.discord.tool_loop import ToolLoopRunner

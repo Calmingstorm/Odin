@@ -335,10 +335,15 @@ class TestRound2GenerationIdentityPins:
         class ChangingObserver:
             def __init__(self):
                 self.calls = 0
+                self.density_calls = 0
 
             def active_clamp(self, _model):
                 self.calls += 1
                 return 500_000 if self.calls == 1 else 100_000
+
+            def density_for(self, _model):
+                self.density_calls += 1
+                return 2500 if self.density_calls == 1 else 2000
 
         class Client:
             model = "gpt-5.6-sol"
@@ -387,8 +392,9 @@ class TestRound2GenerationIdentityPins:
         result = await runner._run_chat_iterations(st)
         assert result[2] is True
         assert runner._window_observer.calls == 1
-        # Clamp 500K at 60% utilization yields this frozen ladder. A second
-        # read's 100K clamp would instead produce a much smaller ladder.
+        assert runner._window_observer.density_calls == 1
+        # Clamp 500K and calibrated density 2500 at capture yield this frozen
+        # ladder. A second observer read would splice 2000 into the generation.
         assert st._trajectory.context_recoveries[0]["target_chars"] == 451_500
 
     async def test_chat_physical_retries_keep_captured_identity(self):
@@ -551,10 +557,15 @@ class TestSingleSnapshotAcrossLoopGeneration:
         class ChangingObserver:
             def __init__(self):
                 self.calls = 0
+                self.density_calls = 0
 
             def active_clamp(self, _model):
                 self.calls += 1
                 return 500_000 if self.calls == 1 else 100_000
+
+            def density_for(self, _model):
+                self.density_calls += 1
+                return 2500 if self.density_calls == 1 else 2000
 
         class Client(SimpleNamespace):
             calls = 0
@@ -614,6 +625,7 @@ class TestSingleSnapshotAcrossLoopGeneration:
         )
         assert kind == "ok"
         assert observer.calls == 1
+        assert observer.density_calls == 1
         assert st.context_recoveries[0]["target_chars"] == 451_500
 
 class TestIntegrationAgentGenerationSeams:

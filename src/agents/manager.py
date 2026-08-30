@@ -1513,11 +1513,13 @@ def _predictive_presend_descent(agent: AgentInfo, snapshot, ladder: tuple[int, .
             report["attempt"] = 0
             report["trigger"] = "predictive"
             agent.context_recoveries.append(report)
-            # Monotonic only: never adopt a rung that would enlarge the
-            # payload, and never let prediction manufacture a "fit" by
-            # violating newest/current-envelope survival.
-            if report["compressed_chars"] >= report["original_chars"]:
+            # A character no-op is not a terminator: image surcharge may
+            # still leave the payload over its token window, and a lower rung
+            # may shrink it. An enlarging result is never adopted.
+            if report["compressed_chars"] > report["original_chars"]:
                 break
+            if report["compressed_chars"] == report["original_chars"]:
+                continue
             agent.messages = compressed
             log.info(
                 "agent predictive pre-send: agent=%s rung %d compacted %d -> %d chars",

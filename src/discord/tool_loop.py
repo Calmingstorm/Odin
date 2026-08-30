@@ -1015,6 +1015,21 @@ class ToolLoopRunner:
             log.exception("active_clamp failed (non-fatal); treating as unclamped")
             return None
 
+    def _observed_density(self, model: object) -> int | None:
+        """The observer's calibrated density for the NEXT generation.
+
+        Total like clamp lookup: calibration is runtime evidence, never a
+        reason to fail a request whose uncalibrated path remains usable.
+        """
+        observer = getattr(self, "_window_observer", None)
+        if observer is None:
+            return None
+        try:
+            return observer.density_for(model)
+        except Exception:
+            log.exception("density_for failed (non-fatal); treating as uncalibrated")
+            return None
+
     async def _record_window_evidence(
         self, overflow: object, response: object, believed_within: bool | None = None
     ) -> None:
@@ -1140,14 +1155,17 @@ class ToolLoopRunner:
                     is not False
                 ):
                     break
-                compressed, report = emergency_compress_for_window(
-                    st.messages,
-                    target_chars=ladder[consumed],
-                    boundary=SurfaceBoundary(
+                surface_boundary = getattr(st, "_boundary", None)
+                if surface_boundary is None:
+                    surface_boundary = SurfaceBoundary(
                         request_start=getattr(st, "_boundary_request_start", 0),
                         elided_replay=getattr(st, "_boundary_elided_replay", 0),
                         envelope_len=getattr(st, "_boundary_envelope_len", None),
-                    ),
+                    )
+                compressed, report = emergency_compress_for_window(
+                    st.messages,
+                    target_chars=ladder[consumed],
+                    boundary=surface_boundary,
                 )
                 consumed += 1
                 report["attempt"] = 0
@@ -1155,15 +1173,26 @@ class ToolLoopRunner:
                 trajectory = getattr(st, "_trajectory", None)
                 if trajectory is not None:
                     trajectory.context_recoveries.append(report)
-                # Monotonic only: never adopt a rung that would enlarge the
-                # payload, and never manufacture a local "fit" by violating
-                # newest/current-envelope survival.
-                if report["compressed_chars"] >= report["original_chars"]:
+                # A no-op character rung is not a terminator: image
+                # surcharge can leave the request over its token window even
+                # when target_chars exceeds the current character count, so a
+                # lower rung may still be useful. An enlarging result remains
+                # a hard non-adoption guard.
+                if report["compressed_chars"] > report["original_chars"]:
                     break
+                if report["compressed_chars"] == report["original_chars"]:
+                    continue
                 st.messages = compressed
                 if report.get("boundary_request_start") is not None:
-                    st._boundary_request_start = report["boundary_request_start"]
-                    st._boundary_elided_replay = report["boundary_elided_replay"]
+                    if getattr(st, "_boundary", None) is not None:
+                        st._boundary = SurfaceBoundary(
+                            request_start=report["boundary_request_start"],
+                            elided_replay=report["boundary_elided_replay"],
+                            envelope_len=surface_boundary.envelope_len,
+                        )
+                    else:
+                        st._boundary_request_start = report["boundary_request_start"]
+                        st._boundary_elided_replay = report["boundary_elided_replay"]
                 log.info(
                     "predictive pre-send: rung %d compacted %d -> %d chars",
                     consumed,
@@ -1232,6 +1261,7 @@ class ToolLoopRunner:
             getattr(config, "openai_codex", None),
             max_context_chars=(compressor.max_context_chars if compressor is not None else None),
             observed_clamp=self._observed_clamp(model_for_budget),
+            density_milli=self._observed_density(model_for_budget),
         )
 
     def _maybe_compress(
@@ -1283,6 +1313,7 @@ class ToolLoopRunner:
                         compressor.max_context_chars if compressor is not None else None
                     ),
                     observed_clamp=self._observed_clamp(model_for_budget),
+                    density_milli=self._observed_density(model_for_budget),
                 )
             snapshot = budget_snapshot
             boundary = SurfaceBoundary(

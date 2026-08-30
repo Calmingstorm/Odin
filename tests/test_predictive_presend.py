@@ -169,6 +169,69 @@ class TestPredictiveDescentContract:
         assert runner._predictive_presend_descent(st, broken, _serving()) == 0
         assert st.messages == before
 
+    def test_image_overage_continues_past_a_character_noop_rung(self):
+        """Images can keep a request over the token window while its character
+        count is already below rung one. That rung is consumed but must not
+        terminate descent before a lower rung can shrink replay."""
+        from src.llm.context_compressor import estimate_message_chars
+
+        runner = _runner()
+        snapshot = resolve_context_budget("gpt-5.6-sol", utilization=60)
+        history = _dense_history(50, 10_000)
+        protected_images = [
+            {
+                "type": "image",
+                "source": {"type": "base64", "media_type": "image/png", "data": "a"},
+            }
+            for _ in range(300)
+        ]
+        st = _state(
+            history
+            + [
+                {"role": "developer", "content": "preamble"},
+                {"role": "user", "content": protected_images},
+            ]
+        )
+        before = estimate_message_chars(st.messages)
+        assert before < snapshot.ladder[0]
+        assert runner._believed_within_effective_budget(st.messages, snapshot, _serving()) is False
+
+        consumed = runner._predictive_presend_descent(st, snapshot, _serving())
+
+        assert consumed == 2
+        reports = st._trajectory.context_recoveries
+        assert reports[0]["compressed_chars"] == reports[0]["original_chars"]
+        assert reports[1]["compressed_chars"] < reports[1]["original_chars"]
+        assert estimate_message_chars(st.messages) < before
+
+    def test_enlarging_compactor_result_is_never_adopted(self, monkeypatch):
+        """Continuing past equality must not weaken the separate monotonic
+        adoption guard for an actually enlarging result."""
+        import src.llm.context_compressor as cc
+
+        runner = _runner()
+        snapshot = SimpleNamespace(
+            ladder=(100, 50),
+            base_source="floor",
+            effective_budget=1,
+            density_milli=2500,
+        )
+        original = _dense_history(4, 100)
+        st = _state(original)
+        runner._believed_within_effective_budget = lambda *_a, **_k: False
+
+        def enlarge(messages, *, target_chars, boundary=None):
+            return messages + [{"role": "user", "content": "larger"}], {
+                "original_chars": 100,
+                "compressed_chars": 101,
+                "target_chars": target_chars,
+            }
+
+        monkeypatch.setattr(cc, "emergency_compress_for_window", enlarge)
+        consumed = runner._predictive_presend_descent(st, snapshot, _serving())
+        assert consumed == 1
+        assert st.messages is original
+
     def test_exhausted_ladder_still_sends_the_smallest_result(self):
         runner = _runner()
         snapshot = resolve_context_budget(
@@ -195,6 +258,92 @@ class TestSharedLadder:
         remaining = snapshot.ladder[consumed:]
         assert len(remaining) == len(snapshot.ladder) - consumed
         assert all(r not in remaining for r in snapshot.ladder[:consumed])
+
+
+class TestPhysicalSharedLadder:
+    async def test_chat_only_rung_spent_predictively_is_not_rearmed_on_rejection(self):
+        """Drive the physical chat attempt loop. Prediction has already spent
+        its only rung, so a provider rejection must fail after exactly one
+        wire attempt rather than reusing that rung post-rejection."""
+        from tests.test_chat_loop_recovery import (
+            _ENVELOPE,
+            _chat_state,
+            _Gateway,
+            _history,
+            _overflow,
+            _runner,
+        )
+
+        async def always_overflow(_n, _messages):
+            raise _overflow()
+
+        gateway = _Gateway(always_overflow)
+        runner = _runner(gateway)
+        runner._predictive_presend_descent = lambda *_a, **_k: 1
+        snapshot = resolve_context_budget(
+            "gpt-5.6-sol", utilization=60, density_milli=FIELD_DENSITY_MILLI
+        )
+        assert len(snapshot.ladder) == 1
+        state = _chat_state(_history(60, 20_000) + _ENVELOPE)
+
+        kind, _ = await runner._call_llm(state, budget_snapshot=snapshot)
+
+        assert kind == "done"
+        assert len(gateway.calls) == 1
+        assert not any(
+            row.get("trigger") == "overflow" for row in state._trajectory.context_recoveries
+        )
+
+    async def test_loop_only_rung_spent_predictively_is_not_rearmed_on_rejection(self):
+        """The autonomous loop's physical attempt loop obeys the same single
+        total ladder contract as chat."""
+        from src.llm.context_compressor import SurfaceBoundary
+        from tests.test_chat_loop_recovery import _Gateway, _overflow, _runner
+
+        calls = {"count": 0}
+
+        class Client(SimpleNamespace):
+            async def chat_with_tools(self, **_kwargs):
+                calls["count"] += 1
+                raise _overflow()
+
+        client = Client(model="gpt-5.6-sol", reasoning_effort="xhigh")
+        gateway = _Gateway(None)
+        gateway.client = client
+        gateway.codex_client = client
+        runner = _runner(gateway)
+        runner._predictive_presend_descent = lambda *_a, **_k: 1
+        async def finish(*_args, **_kwargs):
+            return "failed"
+
+        runner._finish_loop = finish
+        snapshot = resolve_context_budget(
+            "gpt-5.6-sol", utilization=60, density_milli=FIELD_DENSITY_MILLI
+        )
+        assert len(snapshot.ladder) == 1
+        state = SimpleNamespace(
+            messages=_dense_history(60, 20_000)
+            + [{"role": "user", "content": "GOAL: finish"}],
+            system_prompt="sys",
+            tools=[],
+            _boundary=SurfaceBoundary(request_start=60, envelope_len=1),
+            _char_latch=None,
+            context_recoveries=[],
+            _iteration_index=0,
+            _trajectory=None,
+            _loop_details=[],
+            _trace=None,
+            _loop_id="L",
+            channel_id_str="c",
+            prompt="finish",
+            user_id="u",
+        )
+
+        kind, _ = await runner._call_loop_llm(state, budget_snapshot=snapshot)
+
+        assert kind == "done"
+        assert calls["count"] == 1
+        assert not any(row.get("trigger") == "overflow" for row in state.context_recoveries)
 
 
 class TestBeliefFormation:
@@ -259,6 +408,49 @@ class TestAgentSurfaceParity:
         assert all(r["trigger"] == "predictive" for r in agent.context_recoveries)
         assert agent.context_char_ceiling is None, "prediction must never latch"
 
+    def test_agent_continues_past_a_noop_rung_and_adopts_the_next_shrink(
+        self, monkeypatch
+    ):
+        """The agent copy of predictive descent must not stop merely because
+        one rung is above the current character count."""
+        import src.llm.context_compressor as cc
+        from src.agents.manager import AgentInfo, _predictive_presend_descent
+
+        agent = AgentInfo(
+            id="a1", label="t", goal="g", channel_id="c1", requester_id="u1", requester_name="u"
+        )
+        original = [{"role": "user", "content": "payload"}]
+        smaller = [{"role": "user", "content": "p"}]
+        agent.messages = original
+        calls = {"count": 0}
+
+        def scripted(messages, *, target_chars):
+            calls["count"] += 1
+            if calls["count"] == 1:
+                return messages, {
+                    "original_chars": 7,
+                    "compressed_chars": 7,
+                    "target_chars": target_chars,
+                }
+            return smaller, {
+                "original_chars": 7,
+                "compressed_chars": 1,
+                "target_chars": target_chars,
+            }
+
+        monkeypatch.setattr(cc, "emergency_compress_for_window", scripted)
+        import src.agents.manager as manager
+
+        monkeypatch.setattr(manager, "_believed_within_effective_budget", lambda *_a: False)
+        consumed = _predictive_presend_descent(
+            agent,
+            SimpleNamespace(base_source="floor", effective_budget=1, density_milli=2500),
+            (10, 1),
+        )
+        assert consumed == 2
+        assert calls["count"] == 2
+        assert agent.messages is smaller
+
     def test_agent_persisted_snapshot_yields_unknown_belief(self):
         from src.agents.manager import _believed_within_effective_budget
 
@@ -267,27 +459,53 @@ class TestAgentSurfaceParity:
 
 
 class TestLoopSurfaceParity:
-    def test_loop_state_descends_through_the_shared_helper(self):
-        """The loop surface uses the same runner helpers, so its boundary
-        shape must be accepted by them."""
+    def test_loop_state_descends_through_the_shared_helper(self, monkeypatch):
+        """The production loop dataclass carries only ``_boundary``; predictive
+        compaction must consume that exact surface declaration rather than a
+        chat-shaped getattr fallback that silently protects the wrong region."""
+        import src.llm.context_compressor as cc
         from src.llm.context_compressor import SurfaceBoundary
 
+        seen_boundaries = []
+        real_compress = cc.emergency_compress_for_window
+
+        def capture_boundary(*args, **kwargs):
+            seen_boundaries.append(kwargs.get("boundary"))
+            return real_compress(*args, **kwargs)
+
+        monkeypatch.setattr(cc, "emergency_compress_for_window", capture_boundary)
         runner = _runner()
         snapshot = resolve_context_budget(
             "gpt-5.6-sol", utilization=60, density_milli=FIELD_DENSITY_MILLI
         )
-        st = SimpleNamespace(
-            messages=_dense_history(60, 20_000),
-            context_recoveries=[],
+        from src.discord.tool_loop import _LoopTurn
+
+        st = _LoopTurn(
+            prompt="goal",
+            channel=object(),
+            user_id="u",
+            policy=SimpleNamespace(),
+            msg_proxy=SimpleNamespace(),
+            requester_name="u",
+            _loop_id="L",
+            _trace=None,
             _trajectory=None,
+            _result_store_cap=10,
+            messages=_dense_history(60, 20_000),
+            system_prompt="sys",
+            tools=[],
+            tool_timeout=1,
+            channel_id_str="c",
+            loop_cap=1,
             _boundary=SurfaceBoundary(request_start=58, elided_replay=0, envelope_len=1),
-            _boundary_request_start=58,
-            _boundary_elided_replay=0,
-            _boundary_envelope_len=1,
-            _char_latch=None,
         )
+        # Production _LoopTurn intentionally has only _boundary, not chat's
+        # _boundary_request_start/_boundary_elided_replay compatibility shape.
+        assert not hasattr(st, "_boundary_request_start")
+        declared_boundary = st._boundary
         consumed = runner._predictive_presend_descent(st, snapshot, _serving())
         assert consumed >= 1
+        assert seen_boundaries and seen_boundaries[0] is declared_boundary
         assert st._char_latch is None
 
 
@@ -304,6 +522,11 @@ class TestApiProvenanceCoexistence:
         assert clamped_and_calibrated.clamp_applied is True
         assert clamped_and_calibrated.density_source == "calibrated"
         assert clamped_and_calibrated.density_milli == FIELD_DENSITY_MILLI
+
+    def test_supplied_default_value_still_reports_calibrated_origin(self):
+        snap = resolve_context_budget("gpt-5.6-sol", density_milli=2500)
+        assert snap.density_milli == 2500
+        assert snap.density_source == "calibrated"
 
     def test_uncalibrated_reports_default_source(self):
         snap = resolve_context_budget("gpt-5.6-sol", utilization=40, observed_clamp=300_000)
