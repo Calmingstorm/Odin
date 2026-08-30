@@ -898,6 +898,73 @@ class TestStdioProbeCasualtyRespawn:
         finally:
             await conn.disconnect()
 
+    async def test_direct_handshake_close_before_publication_is_rejected(self, monkeypatch):
+        """The final publication fence also owns the ordinary one-process
+        path, not only compatibility respawns.  A close latch may fire after
+        initialize completes while the child return code still lags behind.
+        """
+        conn = _stdio("legacy")
+
+        class ClosingAfterInitializeTransport:
+            def __init__(self):
+                self.closed_fired = False
+                self.returncode = None
+                self.methods: list[str] = []
+
+            @property
+            def available(self):
+                return not self.closed_fired
+
+            async def start(self):
+                return None
+
+            async def send(self, message):
+                method = message["method"]
+                self.methods.append(method)
+                if method == "server/discover":
+                    conn._on_stdio_message(  # noqa: SLF001
+                        proto.build_error_response(
+                            message["id"], proto.ERROR_METHOD_NOT_FOUND, "legacy server",
+                        )
+                    )
+                elif method == "initialize":
+                    conn._on_stdio_message(  # noqa: SLF001
+                        {
+                            "jsonrpc": "2.0",
+                            "id": message["id"],
+                            "result": {
+                                "protocolVersion": "2025-06-18",
+                                "capabilities": {},
+                                "serverInfo": {"name": "direct-close", "version": "1"},
+                            },
+                        }
+                    )
+                elif method == "notifications/initialized":
+                    self.closed_fired = True
+                    conn._on_stdio_transport_closed(  # type: ignore[arg-type]  # noqa: SLF001
+                        self, "direct-path stdout closed during handshake",
+                    )
+
+            async def shutdown(self):
+                return None
+
+        transport = ClosingAfterInitializeTransport()
+        monkeypatch.setattr(conn, "_new_stdio_transport", lambda: transport)
+
+        try:
+            with pytest.raises(MCPConnectError, match="direct-path stdout closed during handshake"):
+                await conn.connect()
+            assert transport.methods == [
+                "server/discover",
+                "initialize",
+                "notifications/initialized",
+            ]
+            assert transport.available is False
+            assert transport.returncode is None
+            assert conn.connected is False
+        finally:
+            await conn.disconnect()
+
     async def test_non_eof_probe_failure_no_respawn(self, monkeypatch):
         spawns = self._count_spawns(monkeypatch)
         conn = _stdio("oversized-on-discover")
