@@ -357,13 +357,21 @@ def _make_evidence_recorder(observer):
     ):
         try:
             if isinstance(response, dict):
+                # Accepted-response provenance is authoritative. A non-Codex
+                # provider may use a Codex-looking model slug and expose token
+                # counts; neither makes it Codex window evidence.
+                if response.get("provider") != "codex":
+                    return
                 from types import SimpleNamespace
 
                 response = SimpleNamespace(
                     account_key=response.get("account_key"),
                     server_input_tokens=response.get("server_input_tokens"),
+                    provenance_provider=response.get("provider"),
                     provenance_model=response.get("model"),
                 )
+            elif getattr(response, "provenance_provider", None) != "codex":
+                return
             await observer.record_rescue(
                 overflow=overflow,
                 response=response,

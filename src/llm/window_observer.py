@@ -127,11 +127,7 @@ def derive_sample_density(
     an image/envelope-dominated request). None means UNKNOWN, and callers
     must never read it as agreement.
     """
-    from .context_budget import (
-        FIXED_ENVELOPE_RESERVE_TOKENS,
-        IMAGE_TOKEN_SURCHARGE,
-        clamp_density_milli,
-    )
+    from .context_budget import FIXED_ENVELOPE_RESERVE_TOKENS, IMAGE_TOKEN_SURCHARGE
 
     if not _positive_int(server_input_tokens):
         return None
@@ -139,16 +135,23 @@ def derive_sample_density(
         return None
     if not isinstance(images_sent, int) or isinstance(images_sent, bool):
         return None
+    if images_sent < 0:
+        return None
     if chars_sent < _MIN_OBSERVABLE_CHARS:
         return None
     content_tokens = (
         int(server_input_tokens)
         - FIXED_ENVELOPE_RESERVE_TOKENS
-        - max(0, images_sent) * IMAGE_TOKEN_SURCHARGE
+        - images_sent * IMAGE_TOKEN_SURCHARGE
     )
     if content_tokens < _MIN_OBSERVABLE_CONTENT_TOKENS:
         return None
-    return clamp_density_milli(chars_sent * 1000 // content_tokens)
+    # RAW positive attribution. Do not apply the EMA/admission band here:
+    # forensic qualification needs to preserve an observed value below 400
+    # so it can veto a false clamp. ``record_density`` alone bands the value
+    # before publishing it to future admission snapshots.
+    raw = chars_sent * 1000 // content_tokens
+    return raw if raw > 0 else None
 
 
 def _empty_model_record() -> dict:
@@ -529,27 +532,33 @@ class WindowObserver:
             if observed is None:
                 return
             prior = self._density_milli.get(canonical)
+            banded_observed = clamp_density_milli(observed)
             if prior is None:
-                self._density_milli[canonical] = observed
+                self._density_milli[canonical] = banded_observed
                 log.info(
                     "context density calibrated for %s: %d millichars/token "
-                    "(%d chars, %d images, %d server tokens)",
+                    "(%d chars, %d images, %d server tokens; raw=%d)",
                     canonical,
-                    observed,
+                    banded_observed,
                     chars_sent,
                     images_sent,
                     server_input_tokens,
+                    observed,
                 )
                 return
             # Asymmetric EMA. Moving DOWN (denser content than believed) is
             # the safety direction and reacts fast; moving UP relaxes slowly
             # so one sparse turn cannot erase a dense lesson.
-            recip = _DENSITY_ALPHA_DOWN_RECIP if observed < prior else _DENSITY_ALPHA_UP_RECIP
-            updated = prior + (observed - prior) // recip
-            if updated == prior and observed != prior:
+            recip = (
+                _DENSITY_ALPHA_DOWN_RECIP
+                if banded_observed < prior
+                else _DENSITY_ALPHA_UP_RECIP
+            )
+            updated = prior + (banded_observed - prior) // recip
+            if updated == prior and banded_observed != prior:
                 # Integer division stalls within one step of the target; take
                 # the single-unit step so convergence cannot deadlock.
-                updated = prior + (1 if observed > prior else -1)
+                updated = prior + (1 if banded_observed > prior else -1)
             self._density_milli[canonical] = clamp_density_milli(updated)
         except Exception:
             log.exception("record_density failed; sample discarded")
@@ -560,6 +569,7 @@ class WindowObserver:
     def _clamp_qualifies(
         rejected_attempt: object,
         *,
+        rejected_tokens: int | None,
         accepted_chars: object,
         accepted_images: object,
         accepted_tokens: int,
@@ -572,10 +582,12 @@ class WindowObserver:
         original defect surviving in a narrower band — and a cold observer is
         the normal state after every restart.
 
-        So the rescue must also survive POST-HOC consistency. The retry that
-        the server accepted carries its own authoritative token count, giving
-        a raw sample density for this very workload. Re-run the rejected
-        payload's fit verdict against that fresh evidence:
+        So the rescue must also survive POST-HOC consistency. When the
+        rejection carries its own authoritative input-token echo, that direct
+        fact decides whether the rejected payload fit the frozen budget. When
+        it does not, the retry that the server accepted supplies a raw density
+        sample for this workload; re-run the rejected payload's fit verdict
+        against that fresh evidence:
 
             qualification = min(assumed density, accepted sample density)
             posthoc       = estimate(rejected chars/images, qualification)
@@ -595,23 +607,57 @@ class WindowObserver:
         still believed within under the corrected density can clamp then. One
         extra overflow costs less than a false 24-hour capability claim.
         """
-        from .context_budget import estimate_request_tokens
+        from .context_budget import (
+            RejectedAttemptFacts,
+            clamp_density_milli,
+            estimate_request_tokens,
+            estimate_request_tokens_forensic,
+        )
 
-        if rejected_attempt is None:
+        # This is a durable-capability decision, not a convenience API:
+        # accept only the exact frozen facts type produced by the send path.
+        if not isinstance(rejected_attempt, RejectedAttemptFacts):
             return False
-        believed = getattr(rejected_attempt, "believed_within", None)
-        if believed is not True:
+        facts = rejected_attempt
+        if facts.believed_within is not True:
             return False
-        assumed = getattr(rejected_attempt, "density_milli", None)
-        rejected_chars = getattr(rejected_attempt, "chars", None)
-        rejected_images = getattr(rejected_attempt, "images", None)
-        budget = getattr(rejected_attempt, "effective_budget", None)
-        if not _positive_int(assumed) or not _positive_int(budget):
+        if (
+            isinstance(facts.chars, bool)
+            or not isinstance(facts.chars, int)
+            or facts.chars < 0
+            or isinstance(facts.images, bool)
+            or not isinstance(facts.images, int)
+            or facts.images < 0
+            or not _positive_int(facts.density_milli)
+            or clamp_density_milli(facts.density_milli) != facts.density_milli
+            or not _positive_int(facts.estimated_tokens)
+            or not _positive_int(facts.effective_budget)
+        ):
             return False
-        if not isinstance(rejected_chars, int) or isinstance(rejected_chars, bool):
+
+        # The redundant verdict fields are an integrity check, not alternate
+        # authorities. Recompute exactly as admission did and reject any
+        # contradictory object rather than duck-typing it into evidence.
+        expected = estimate_request_tokens(
+            facts.chars,
+            facts.images,
+            density_milli=facts.density_milli,
+        )
+        if facts.estimated_tokens != expected:
             return False
-        if not isinstance(rejected_images, int) or isinstance(rejected_images, bool):
+        if facts.believed_within is not (expected <= facts.effective_budget):
             return False
+
+        # A rejection-side server echo is direct evidence about the rejected
+        # payload itself. If it says the request exceeded the frozen believed
+        # budget, no density estimate may rehabilitate it into shrink evidence.
+        if rejected_tokens is not None:
+            return rejected_tokens <= facts.effective_budget
+
+        # Older/ordinary rejections carry no usage echo. Fall back to the
+        # accepted retry's raw workload density. Raw is load-bearing here:
+        # applying the [400,2500] EMA/admission band can turn a true 100-milli
+        # contradiction into a false clamp.
         accepted_density = derive_sample_density(
             chars_sent=accepted_chars,
             images_sent=accepted_images,
@@ -619,11 +665,13 @@ class WindowObserver:
         )
         if accepted_density is None:
             return False
-        qualification_density = min(int(assumed), accepted_density)
-        posthoc = estimate_request_tokens(
-            rejected_chars, rejected_images, density_milli=qualification_density
+        qualification_density = min(facts.density_milli, accepted_density)
+        posthoc = estimate_request_tokens_forensic(
+            facts.chars,
+            facts.images,
+            density_milli=qualification_density,
         )
-        return posthoc <= int(budget)
+        return posthoc <= facts.effective_budget
 
     async def record_rescue(
         self,
@@ -700,6 +748,7 @@ class WindowObserver:
                     and accept_tokens is not None
                     and self._clamp_qualifies(
                         rejected_attempt,
+                        rejected_tokens=reject_tokens,
                         accepted_chars=accepted_chars,
                         accepted_images=accepted_images,
                         accepted_tokens=accept_tokens,

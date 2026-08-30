@@ -22,6 +22,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import ContextCompressionConfig
 from src.llm import window_observer as wo
+from src.llm.context_budget import resolve_context_budget
 from src.llm.errors import LLMRequestError
 from src.llm.window_observer import WindowObserver, WindowObserverMutationError
 
@@ -56,7 +57,7 @@ def _observer(tmp_path) -> WindowObserver:
 
 
 def _overflow(
-    *, tokens=930_001, key=ACCT_A, model="gpt-5.6-sol", code="context_length_exceeded"
+    *, tokens=900_001, key=ACCT_A, model="gpt-5.6-sol", code="context_length_exceeded"
 ) -> LLMRequestError:
     return LLMRequestError(
         "overflow",
@@ -87,7 +88,7 @@ class TestStoreLifecycle:
         again = _observer(tmp_path)
         assert again.active_clamp("gpt-5.6-sol") == 408_004
         record = again.view()["accounts"][ACCT_A]["models"]["gpt-5.6-sol"]
-        assert record["lowest_rejection_bound"] == 930_001
+        assert record["lowest_rejection_bound"] == 900_001
         assert record["highest_accepted_input"] == 408_004
         assert record["overflow_occurrences"] == 1
         # No stray temp files behind the atomic replacement.
@@ -170,7 +171,7 @@ class TestClampQualification:
         )
         assert obs.active_clamp("gpt-5.6-sol") is None
         view = obs.view()["accounts"]
-        assert view[ACCT_A]["models"]["gpt-5.6-sol"]["lowest_rejection_bound"] == 930_001
+        assert view[ACCT_A]["models"]["gpt-5.6-sol"]["lowest_rejection_bound"] == 900_001
         assert view[ACCT_B]["models"]["gpt-5.6-sol"]["highest_accepted_input"] == 408_004
 
     async def test_missing_acceptance_usage_records_occurrence_only(self, tmp_path):
@@ -520,7 +521,7 @@ class TestManualClear:
         assert obs.active_clamp("gpt-5.6-sol") == 420_000
         record = obs.view()["accounts"][ACCT_A]["models"]["gpt-5.6-sol"]
         assert record["clamp"] is None
-        assert record["lowest_rejection_bound"] == 930_001
+        assert record["lowest_rejection_bound"] == 900_001
 
     async def test_failed_clear_is_truthful_and_retains_state(self, tmp_path, monkeypatch):
         obs = _observer(tmp_path)
@@ -581,7 +582,7 @@ class TestSurfaceGuardArms:
         def active_clamp(self, model):
             raise RuntimeError("observer wedged")
 
-        async def record_rescue(self, *, overflow, response):
+        async def record_rescue(self, **kwargs):
             raise RuntimeError("observer wedged")
 
     def test_chat_clamp_lookup_survives_a_broken_observer(self):
@@ -601,7 +602,10 @@ class TestSurfaceGuardArms:
         from src.discord.native_tools.agents_tasks import _make_evidence_recorder
 
         recorder = _make_evidence_recorder(self._BrokenObserver())
-        await recorder(_overflow(), {"text": "ok"})
+        await recorder(
+            _overflow(),
+            {"text": "ok", "provider": "codex", "model": "gpt-5.6-sol"},
+        )
 
 
 class TestResolverIntegration:
@@ -941,6 +945,7 @@ class TestAgentSurfaceHooks:
             "tool_calls": [],
             "server_input_tokens": 408_004,
             "account_key": ACCT_A,
+            "provider": "codex",
             "model": "gpt-5.6-sol",
         }
         # Belief unknown (the adapter's default) records history but cannot
@@ -955,6 +960,23 @@ class TestAgentSurfaceHooks:
         # The same pair WITH a qualifying belief forms the clamp.
         await recorder(_overflow(), payload, _rejected_facts(), 100_000, 0)
         assert obs.active_clamp("gpt-5.6-sol") == 408_004
+
+    async def test_evidence_recorder_rejects_non_codex_response_provenance(self, tmp_path):
+        """A Codex-looking model slug is not Codex transport evidence."""
+        from src.discord.native_tools.agents_tasks import _make_evidence_recorder
+
+        obs = _observer(tmp_path)
+        payload = {
+            "server_input_tokens": 250_000,
+            "account_key": ACCT_A,
+            "provider": "ollama",
+            "model": "gpt-5.6-sol",
+        }
+        await _make_evidence_recorder(obs)(
+            _overflow(tokens=None), payload, _rejected_facts(), 100_000, 0
+        )
+        assert obs.view()["accounts"] == {}
+        assert obs.active_clamp("gpt-5.6-sol") is None
 
     def test_recorder_for_absent_observer_is_none(self):
         from src.discord.native_tools.agents_tasks import _make_evidence_recorder
@@ -988,7 +1010,7 @@ class TestAgentSurfaceHooks:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise overflow
-            return {"text": "done", "tool_calls": []}
+            return {"text": "done", "tool_calls": [], "provider": "codex"}
 
         response = await _call_llm_with_recovery(
             agent,
@@ -996,9 +1018,15 @@ class TestAgentSurfaceHooks:
             "sys",
             [],
             rescue_ladder=(120_000,),
+            generation_state={
+                "plan": {
+                    "is_codex": True,
+                    "snapshot": resolve_context_budget("gpt-5.6-sol"),
+                }
+            },
             evidence_recorder=recorder,
         )
-        assert response == {"text": "done", "tool_calls": []}
+        assert response == {"text": "done", "tool_calls": [], "provider": "codex"}
         assert len(recorded) == 1
         assert recorded[0][0] is overflow
         assert recorded[0][1] is response
@@ -1162,7 +1190,7 @@ class TestContextWindowsApi:
         await high.record_rescue(
             rejected_attempt=_rejected_facts(),
             **ACCEPTED_SAMPLE,
-            overflow=_overflow(),
+            overflow=_overflow(tokens=500_000),
             response=_acceptance(tokens=1_000_000),
         )
         app = _api_app(high)

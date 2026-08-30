@@ -605,7 +605,7 @@ class TestRecoveryLoopIntegration:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise overflow
-            return {"text": "done", "tool_calls": []}
+            return {"text": "done", "tool_calls": [], "provider": "codex"}
 
         async def recorder(err, response, facts=None, acc_chars=None, acc_images=None):
             recorded.append((err, facts))
@@ -617,16 +617,15 @@ class TestRecoveryLoopIntegration:
         out = await _call_llm_with_recovery(
             agent, cb, "sys", [], generation_state=state, evidence_recorder=recorder
         )
-        assert out == {"text": "done", "tool_calls": []}
+        assert out == {"text": "done", "tool_calls": [], "provider": "codex"}
         assert len(recorded) == 1
         err, facts = recorded[0]
         assert err is overflow
         assert facts is not None and facts.believed_within is True
 
-    async def test_predicted_rejection_pairs_a_false_belief(self):
-        """The defect's signature: a payload we EXPECTED to be refused must
-        carry a False belief, so its rescue can never qualify a clamp — this is
-        the exact pairing that wrongly clamped terra at 288,499."""
+    async def test_non_codex_plan_never_publishes_attempt_evidence(self):
+        """Frozen provider provenance, not a Codex-looking model or overflow,
+        decides whether agent rescue evidence may reach the observer."""
         from src.agents.manager import AgentInfo, _call_llm_with_recovery
         from src.llm.errors import LLMRequestError
 
@@ -651,14 +650,14 @@ class TestRecoveryLoopIntegration:
             calls["n"] += 1
             if calls["n"] == 1:
                 raise overflow
-            return {"text": "done", "tool_calls": []}
+            return {"text": "done", "tool_calls": [], "provider": "codex"}
 
         async def recorder(err, response, facts=None, acc_chars=None, acc_images=None):
             recorded.append((err, facts))
 
-        # Predictive descent is disabled here (is_codex False) to ISOLATE the
-        # pairing: with descent on, a payload compacted until it is believed to
-        # fit would correctly report True, which is a different contract.
+        # The frozen plan is non-Codex even though the model slug, rejection,
+        # and accepted response all look Codex-shaped. No facts or recorder
+        # call may be published from this generation.
         snapshot = resolve_context_budget(
             "gpt-5.6-sol", utilization=60, density_milli=FIELD_DENSITY_MILLI
         )
@@ -666,9 +665,56 @@ class TestRecoveryLoopIntegration:
         out = await _call_llm_with_recovery(
             agent, cb, "sys", [], generation_state=state, evidence_recorder=recorder
         )
-        assert out == {"text": "done", "tool_calls": []}
-        assert len(recorded) == 1
-        assert recorded[0][1] is not None and recorded[0][1].believed_within is False
+        assert out == {"text": "done", "tool_calls": [], "provider": "codex"}
+        assert recorded == []
+
+    async def test_codex_plan_rejects_non_codex_accepted_response_evidence(self):
+        """Both frozen plan and accepted response provenance must be Codex."""
+        from src.agents.manager import AgentInfo, _call_llm_with_recovery
+        from src.llm.errors import LLMRequestError
+
+        agent = AgentInfo(
+            id="a1", label="t", goal="g", channel_id="c1", requester_id="u1", requester_name="u"
+        )
+        agent.messages = [{"role": "user", "content": "task"}] + [
+            {"role": "assistant", "content": "[Tool result: x]\n" + "y" * 20_000}
+            for _ in range(30)
+        ]
+        overflow = LLMRequestError(
+            "context overflow",
+            provider="codex",
+            model="gpt-5.6-sol",
+            code="context_length_exceeded",
+            account_key="a" * 32,
+        )
+        calls = {"n": 0}
+        recorded = []
+
+        async def cb(messages, system_prompt, tools, generation_state=None):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise overflow
+            return {
+                "text": "done",
+                "tool_calls": [],
+                "provider": "ollama",
+                "model": "gpt-5.6-sol",
+            }
+
+        async def recorder(*args):
+            recorded.append(args)
+
+        snapshot = resolve_context_budget("gpt-5.6-sol", utilization=60)
+        out = await _call_llm_with_recovery(
+            agent,
+            cb,
+            "sys",
+            [],
+            generation_state={"plan": {"snapshot": snapshot, "is_codex": True}},
+            evidence_recorder=recorder,
+        )
+        assert out["provider"] == "ollama"
+        assert recorded == []
 
     async def test_ladder_spent_predicting_is_not_re_armed_after_a_rejection(self):
         """One TOTAL ladder. If prediction spent every rung and the provider

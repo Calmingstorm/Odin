@@ -1455,12 +1455,16 @@ def _measure_payload(messages: list[dict]) -> tuple[int, int]:
     return estimate_message_chars(messages), estimate_message_images(messages)
 
 
-def _attempt_facts(messages: list[dict], snapshot) -> object | None:
+def _attempt_facts(
+    messages: list[dict], snapshot, *, is_codex: bool
+) -> object | None:
     """Freeze everything this agent attempt's fit verdict rests on, or None.
 
     One structured unit rather than a loose bool beside loose numbers, so the
     verdict and its evidence cannot drift apart before clamp qualification.
     """
+    if is_codex is not True:
+        return None
     if snapshot is None or getattr(snapshot, "base_source", None) == "persisted":
         return None
     effective = getattr(snapshot, "effective_budget", 0)
@@ -1656,7 +1660,9 @@ async def _call_llm_with_recovery(
         # attempt sends. Recomputed every pass, so a rescue-compacted retry
         # carries its own belief rather than inheriting the rejected one.
         attempt_chars, attempt_images = _measure_payload(agent.messages)
-        attempt_facts = _attempt_facts(agent.messages, _plan_snapshot)
+        attempt_facts = _attempt_facts(
+            agent.messages, _plan_snapshot, is_codex=_is_codex
+        )
         try:
             response = await asyncio.wait_for(
                 iteration_callback(
@@ -1675,7 +1681,16 @@ async def _call_llm_with_recovery(
             if pending_ceiling is not None:
                 # The rescue rung is now server-accepted evidence.
                 agent.context_char_ceiling = pending_ceiling
-                if evidence_recorder is not None and last_overflow is not None:
+                accepted_is_codex = (
+                    _is_codex
+                    and isinstance(response, dict)
+                    and response.get("provider") == "codex"
+                )
+                if (
+                    evidence_recorder is not None
+                    and last_overflow is not None
+                    and accepted_is_codex
+                ):
                     try:
                         # Phase 5: the overflow→acceptance pair feeds the
                         # window observer. Total — evidence never fails the

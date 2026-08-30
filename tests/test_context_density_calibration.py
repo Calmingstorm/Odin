@@ -24,6 +24,7 @@ from src.llm.context_budget import (
     MIN_DENSITY_MILLI,
     clamp_density_milli,
     estimate_request_tokens,
+    estimate_request_tokens_forensic,
     resolve_context_budget,
 )
 from src.llm.context_compressor import estimate_message_images
@@ -68,7 +69,7 @@ def _observer(tmp_path) -> WindowObserver:
     return WindowObserver(tmp_path / "context_windows.json")
 
 
-def _overflow(*, tokens=930_001, key=ACCT_A, model="gpt-5.6-sol", code="context_length_exceeded"):
+def _overflow(*, tokens=None, key=ACCT_A, model="gpt-5.6-sol", code="context_length_exceeded"):
     return SimpleNamespace(code=code, server_input_tokens=tokens, account_key=key, model=model)
 
 
@@ -133,6 +134,13 @@ class TestRequestEstimation:
         assert estimate_request_tokens(2500, 0, density_milli=2500) == envelope + 1000
         assert estimate_request_tokens(2501, 0, density_milli=2500) == envelope + 1001
         assert estimate_request_tokens(1, 0, density_milli=2500) == envelope + 1
+
+    @pytest.mark.parametrize("bad_density", (True, 0, -1, 1.5, "100"))
+    def test_forensic_estimator_rejects_nonpositive_or_nonintegral_density(self, bad_density):
+        with pytest.raises(ValueError, match="positive integer"):
+            estimate_request_tokens_forensic(
+                100_000, 0, density_milli=bad_density
+            )
 
     def test_images_are_charged_because_characters_cannot_see_them(self):
         envelope = estimate_request_tokens(0, 0)
@@ -339,12 +347,38 @@ class TestDensityCalibration:
                 "images_sent": 0,
                 "server_input_tokens": 684_031,
             },  # bool is not a count
+            {
+                "chars_sent": 100_000,
+                "images_sent": -1,
+                "server_input_tokens": 684_031,
+            },  # negative image count is not a payload shape
         ],
     )
     def test_unusable_samples_record_no_observation(self, tmp_path, kwargs):
         obs = _observer(tmp_path)
         obs.record_density(model="gpt-5.6-sol", **kwargs)
         assert obs.density_for("gpt-5.6-sol") is None
+
+    def test_subfloor_sample_seeds_at_floor_and_ema_uses_banded_value(self, tmp_path):
+        obs = _observer(tmp_path)
+        obs.record_density(
+            model="gpt-5.6-sol",
+            chars_sent=100_000,
+            images_sent=0,
+            server_input_tokens=1_042_000,  # raw density 100
+        )
+        assert obs.density_for("gpt-5.6-sol") == MIN_DENSITY_MILLI
+
+        # A corrupt prior below the storage band cannot drag a subsequent EMA
+        # below the floor; storage applies the band after every update too.
+        obs._density_milli["gpt-5.6-sol"] = 100
+        obs.record_density(
+            model="gpt-5.6-sol",
+            chars_sent=FIELD_CHARS,
+            images_sent=0,
+            server_input_tokens=FIELD_TOKENS,
+        )
+        assert obs.density_for("gpt-5.6-sol") == MIN_DENSITY_MILLI
 
     def test_non_codex_model_names_do_not_calibrate(self, tmp_path):
         obs = _observer(tmp_path)
@@ -813,6 +847,62 @@ class TestPostHocQualification:
         )
         assert obs.active_clamp("gpt-5.6-sol") is None
 
+    async def test_subfloor_raw_density_vetoes_without_weakening_admission(self, tmp_path):
+        """Forensics preserves a true 100-milli sample while admission stays
+        banded at 400. Both halves are load-bearing: clipping either the
+        sample or the forensic estimator recreates the false clamp."""
+        obs = _observer(tmp_path)
+        facts = _rejected_facts(chars=100_000, density=2500, believed=True)
+        # 100K accepted chars over one million attributed text tokens => 100.
+        accepted_tokens = 1_042_000
+        assert estimate_request_tokens(100_000, 0, density_milli=100) == 292_000
+        assert (
+            estimate_request_tokens_forensic(100_000, 0, density_milli=100)
+            == 1_042_000
+        )
+        await obs.record_rescue(
+            overflow=_overflow(tokens=None),
+            response=_acceptance(tokens=accepted_tokens),
+            rejected_attempt=facts,
+            accepted_chars=100_000,
+            accepted_images=0,
+        )
+        assert obs.active_clamp("gpt-5.6-sol") is None
+        # EMA/admission stores only the bounded value despite raw forensics.
+        obs.record_density(
+            model="gpt-5.6-sol",
+            chars_sent=100_000,
+            images_sent=0,
+            server_input_tokens=accepted_tokens,
+        )
+        assert obs.density_for("gpt-5.6-sol") == MIN_DENSITY_MILLI
+
+    async def test_rejection_usage_echo_is_authoritative(self, tmp_path):
+        """The rejected request's own server usage dominates retry estimates."""
+        # A sparse retry would otherwise agree and clamp. Direct rejection
+        # usage over the frozen budget vetoes it.
+        veto = _observer(tmp_path / "veto")
+        await veto.record_rescue(
+            overflow=_overflow(tokens=1_042_000),
+            response=_acceptance(tokens=100_000),
+            rejected_attempt=_rejected_facts(chars=100_000, believed=True),
+            accepted_chars=900_000,
+            accepted_images=0,
+        )
+        assert veto.active_clamp("gpt-5.6-sol") is None
+
+        # Direct proof that the rejected request fit still permits a genuine
+        # shrink clamp; the accepted retry may have an unusable sample.
+        fit = _observer(tmp_path / "fit")
+        await fit.record_rescue(
+            overflow=_overflow(tokens=200_000),
+            response=_acceptance(tokens=250_000),
+            rejected_attempt=_rejected_facts(chars=100_000, believed=True),
+            accepted_chars=None,
+            accepted_images=None,
+        )
+        assert fit.active_clamp("gpt-5.6-sol") == 250_000
+
     async def test_stale_calibration_is_also_vetoed(self, tmp_path):
         """Same payload at the stale 2289 calibration — still believed within,
         still vetoed by the acceptance evidence."""
@@ -944,41 +1034,117 @@ class TestPostHocQualification:
             derive_sample_density(chars_sent=100, images_sent=0, server_input_tokens=FIELD_TOKENS)
             is None
         )
-
-    async def test_malformed_facts_cannot_clamp(self, tmp_path):
-        """Structured facts are still untrusted input: anything malformed
-        leaves consistency unknown, and unknown never clamps."""
-        obs = _observer(tmp_path)
-        for bad in (
-            SimpleNamespace(
-                believed_within=True, density_milli=0, chars=1, images=0, effective_budget=921_601
-            ),
-            SimpleNamespace(
-                believed_within=True, density_milli=2500, chars=1, images=0, effective_budget=0
-            ),
-            SimpleNamespace(
-                believed_within=True,
-                density_milli=2500,
-                chars="lots",
-                images=0,
-                effective_budget=921_601,
-            ),
-            SimpleNamespace(
-                believed_within=True,
-                density_milli=2500,
-                chars=1,
-                images=True,
-                effective_budget=921_601,
-            ),
-        ):
-            await obs.record_rescue(
-                overflow=_overflow(),
-                response=_acceptance(tokens=300_000),
-                rejected_attempt=bad,
-                accepted_chars=100_000,
-                accepted_images=0,
+        # Hostile-but-integral echoes that floor to zero are unusable, not a
+        # density value that can raise inside forensic qualification.
+        assert (
+            derive_sample_density(
+                chars_sent=32_000,
+                images_sent=0,
+                server_input_tokens=100_000_000,
             )
-            assert obs.active_clamp("gpt-5.6-sol") is None
+            is None
+        )
+        assert (
+            derive_sample_density(
+                chars_sent=32_000,
+                images_sent=-1,
+                server_input_tokens=100_000,
+            )
+            is None
+        )
+
+    async def test_authoritative_rejection_cannot_bypass_contradictory_belief(self, tmp_path):
+        """Direct server usage is authoritative only after the frozen prior
+        verdict proves internally consistent."""
+        from src.llm.context_budget import RejectedAttemptFacts
+
+        obs = _observer(tmp_path)
+        facts = RejectedAttemptFacts(
+            chars=1_000_000,
+            images=0,
+            density_milli=2500,
+            estimated_tokens=442_000,
+            effective_budget=300_000,
+            believed_within=True,  # impossible: 442K > 300K
+        )
+        await obs.record_rescue(
+            overflow=_overflow(tokens=200_000),
+            response=_acceptance(tokens=250_000),
+            rejected_attempt=facts,
+            accepted_chars=100_000,
+            accepted_images=0,
+        )
+        assert obs.active_clamp("gpt-5.6-sol") is None
+
+    @pytest.mark.parametrize(
+        "bad",
+        (
+            SimpleNamespace(
+                believed_within=True,
+                density_milli=2500,
+                chars=100_000,
+                images=0,
+                estimated_tokens=82_000,
+                effective_budget=921_601,
+            ),
+            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
+            .RejectedAttemptFacts(
+                chars=100_000,
+                images=0,
+                density_milli=100,  # impossible production/admission density
+                estimated_tokens=292_000,
+                effective_budget=921_601,
+                believed_within=True,
+            ),
+            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
+            .RejectedAttemptFacts(
+                chars=-1,
+                images=0,
+                density_milli=2500,
+                estimated_tokens=42_000,
+                effective_budget=921_601,
+                believed_within=True,
+            ),
+            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
+            .RejectedAttemptFacts(
+                chars=100_000,
+                images=-1,
+                density_milli=2500,
+                estimated_tokens=82_000,
+                effective_budget=921_601,
+                believed_within=True,
+            ),
+            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
+            .RejectedAttemptFacts(
+                chars=100_000,
+                images=0,
+                density_milli=2500,
+                estimated_tokens=82_001,  # contradicts recomputation
+                effective_budget=921_601,
+                believed_within=True,
+            ),
+            __import__("src.llm.context_budget", fromlist=["RejectedAttemptFacts"])
+            .RejectedAttemptFacts(
+                chars=100_000,
+                images=0,
+                density_milli=2500,
+                estimated_tokens=82_000,
+                effective_budget=50_000,
+                believed_within=True,  # contradicts estimate > budget
+            ),
+        ),
+    )
+    async def test_malformed_or_contradictory_facts_cannot_clamp(self, tmp_path, bad):
+        """Only exact, internally consistent frozen facts can assert capacity."""
+        obs = _observer(tmp_path)
+        await obs.record_rescue(
+            overflow=_overflow(tokens=None),
+            response=_acceptance(tokens=300_000),
+            rejected_attempt=bad,
+            accepted_chars=100_000,
+            accepted_images=0,
+        )
+        assert obs.active_clamp("gpt-5.6-sol") is None
 
     def test_chat_attempt_facts_are_total_and_gated(self):
         """Fact capture mirrors the belief helper's guards: non-Codex serving,
@@ -1010,8 +1176,18 @@ class TestPostHocQualification:
         from src.agents.manager import _attempt_facts
 
         snapshot = resolve_context_budget("gpt-5.6-sol")
-        assert _attempt_facts([], SimpleNamespace(base_source="persisted")) is None
-        assert _attempt_facts([], SimpleNamespace(base_source="floor", effective_budget=0)) is None
-        assert _attempt_facts(None, snapshot) is None
-        facts = _attempt_facts([{"role": "user", "content": "x" * 100}], snapshot)
+        assert _attempt_facts([], snapshot, is_codex=False) is None
+        assert (
+            _attempt_facts([], SimpleNamespace(base_source="persisted"), is_codex=True) is None
+        )
+        assert (
+            _attempt_facts(
+                [], SimpleNamespace(base_source="floor", effective_budget=0), is_codex=True
+            )
+            is None
+        )
+        assert _attempt_facts(None, snapshot, is_codex=True) is None
+        facts = _attempt_facts(
+            [{"role": "user", "content": "x" * 100}], snapshot, is_codex=True
+        )
         assert facts is not None and facts.believed_within is True

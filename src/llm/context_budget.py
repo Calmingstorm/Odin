@@ -175,13 +175,21 @@ def clamp_density_milli(value: object) -> int:
     return max(MIN_DENSITY_MILLI, min(MAX_DENSITY_MILLI, value))
 
 
+def _estimate_request_tokens_at_density(chars: int, images: int, density_milli: int) -> int:
+    """Shared exact estimator after the caller has selected density policy."""
+    safe_chars = max(0, chars)
+    safe_images = max(0, images)
+    char_tokens = -(-safe_chars * 1000 // density_milli)  # ceil(chars * 1000 / density)
+    return FIXED_ENVELOPE_RESERVE_TOKENS + char_tokens + safe_images * IMAGE_TOKEN_SURCHARGE
+
+
 def estimate_request_tokens(
     chars: int,
     images: int = 0,
     *,
     density_milli: int = DEFAULT_DENSITY_MILLI,
 ) -> int:
-    """Estimate the server-side input tokens for a payload of this shape.
+    """Estimate input tokens for ADMISSION using the safe density band.
 
     ``chars`` is the compactable character measure; ``images`` counts
     wire-real image blocks, which carry real tokens and almost no characters
@@ -189,15 +197,40 @@ def estimate_request_tokens(
     the comparison this feeds is against the physical window, which the
     envelope also consumes.
 
+    Admission deliberately clamps density to ``[400, 2500]``. A pathological
+    usage echo must never feed an absurd predictive target into the rescue
+    ladder. For forensic re-checks of a payload that was already sent, use
+    ``estimate_request_tokens_forensic`` instead: clipping there can erase the
+    very contradiction that must veto a false durable clamp.
+
     CEIL division on the character term: a one-token excess must never round
     down into "within", because that misclassification is exactly what
     manufactures a false belief and, downstream, a false clamp.
     """
-    safe_chars = max(0, chars)
-    safe_images = max(0, images)
-    density = clamp_density_milli(density_milli)
-    char_tokens = -(-safe_chars * 1000 // density)  # ceil(chars * 1000 / density)
-    return FIXED_ENVELOPE_RESERVE_TOKENS + char_tokens + safe_images * IMAGE_TOKEN_SURCHARGE
+    return _estimate_request_tokens_at_density(
+        chars, images, clamp_density_milli(density_milli)
+    )
+
+
+def estimate_request_tokens_forensic(
+    chars: int,
+    images: int = 0,
+    *,
+    density_milli: int,
+) -> int:
+    """Re-estimate an ALREADY-SENT payload at an unbanded raw density.
+
+    This route is intentionally separate from admission. It accepts only a
+    positive, non-boolean integer density and preserves it exactly, including
+    values below the EMA/admission floor. Callers use it only to ask whether
+    fresh server evidence disproves a prior fit belief; it must never size a
+    request or a rescue rung.
+    """
+    if isinstance(density_milli, bool) or not isinstance(density_milli, int):
+        raise ValueError("forensic density must be a positive integer")
+    if density_milli <= 0:
+        raise ValueError("forensic density must be a positive integer")
+    return _estimate_request_tokens_at_density(chars, images, density_milli)
 
 
 def snapshot_for_codex_config(
