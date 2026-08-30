@@ -58,6 +58,23 @@ STORE_VERSION = 1
 CLAMP_TTL = timedelta(hours=24)
 DEFAULT_STORE_PATH = Path("data/context_windows.json")
 
+#: Density calibration is EPHEMERAL workload evidence, not durable capability
+#: evidence: it lives in memory only and never enters the version-1 store
+#: shape. Persisting it would demand expiry/reset semantics and a schema
+#: migration to describe something a restart can safely relearn in one turn.
+#:
+#: Asymmetric EMA (settled with Odin): dense evidence must bite on the NEXT
+#: turn, while ordinary prose must not erase the lesson just as fast. Weights
+#: are integer reciprocals so the update stays exact.
+_DENSITY_ALPHA_DOWN_RECIP = 2  # α = 1/2  — react fast toward denser content
+_DENSITY_ALPHA_UP_RECIP = 16  # α = 1/16 — relax slowly back toward sparse
+
+#: An observation is only meaningful once enough NON-image, non-envelope
+#: material is present to attribute. Image-only or envelope-dominated
+#: requests must never pin text density to the floor.
+_MIN_OBSERVABLE_CONTENT_TOKENS = 32_000
+_MIN_OBSERVABLE_CHARS = 32_000
+
 #: Evidence for three pool accounts across a handful of models is a few KB;
 #: anything near this cap is not our file.
 _MAX_STORE_BYTES = 4 * 1024 * 1024
@@ -207,6 +224,11 @@ class WindowObserver:
         # composition root installs the production pool-backed provider.
         self._eligible_account_keys = eligible_account_keys
         self._state: dict = {"version": STORE_VERSION, "accounts": {}}
+        # Ephemeral per-canonical-model density calibration (millichars per
+        # token). Shared across accounts: density is model/request-shape
+        # behavior, so account-scoping would relearn the same lesson after
+        # every rotation. Never persisted, never in ``view()``.
+        self._density_milli: dict[str, int] = {}
         try:
             self._load_initial()
         except Exception:
@@ -411,14 +433,126 @@ class WindowObserver:
             log.exception("account_clamps failed; serving no management rows")
             return []
 
+    # ── density calibration (ephemeral) ────────────────────────────────
+
+    def density_for(self, model: str | None) -> int | None:
+        """Calibrated millichars/token for ``model``, or None if uncalibrated.
+
+        Synchronous, disk-free and total — safe inside budget resolution.
+        """
+        try:
+            canonical = canonical_codex_model(model)
+            if not canonical:
+                return None
+            return self._density_milli.get(canonical)
+        except Exception:
+            log.exception("density_for failed; treating as uncalibrated")
+            return None
+
+    def density_snapshot(self) -> dict[str, int]:
+        """Ephemeral calibration view for the API.
+
+        Deliberately separate from ``view()``: density must never enter the
+        durable version-1 store shape.
+        """
+        try:
+            return dict(self._density_milli)
+        except Exception:
+            log.exception("density_snapshot failed")
+            return {}
+
+    def record_density(
+        self,
+        *,
+        model: str | None,
+        chars_sent: int,
+        images_sent: int,
+        server_input_tokens: object,
+    ) -> None:
+        """Fold one accepted request's measured density into the model's EMA.
+
+        Attribution removes the fixed envelope and the image surcharge so the
+        remainder describes TEXT density, the only thing a character measure
+        can predict. Total: any unusable sample is silently skipped — a
+        calibration miss must never disturb a request that already succeeded.
+        """
+        try:
+            from .context_budget import (
+                FIXED_ENVELOPE_RESERVE_TOKENS,
+                IMAGE_TOKEN_SURCHARGE,
+                clamp_density_milli,
+            )
+
+            canonical = canonical_codex_model(model)
+            if not canonical or not _positive_int(server_input_tokens):
+                return
+            if not isinstance(chars_sent, int) or isinstance(chars_sent, bool):
+                return
+            if not isinstance(images_sent, int) or isinstance(images_sent, bool):
+                return
+            if chars_sent < _MIN_OBSERVABLE_CHARS:
+                return
+            content_tokens = (
+                int(server_input_tokens)
+                - FIXED_ENVELOPE_RESERVE_TOKENS
+                - max(0, images_sent) * IMAGE_TOKEN_SURCHARGE
+            )
+            if content_tokens < _MIN_OBSERVABLE_CONTENT_TOKENS:
+                return
+            observed = clamp_density_milli(chars_sent * 1000 // content_tokens)
+            prior = self._density_milli.get(canonical)
+            if prior is None:
+                self._density_milli[canonical] = observed
+                log.info(
+                    "context density calibrated for %s: %d millichars/token "
+                    "(%d chars, %d images, %d server tokens)",
+                    canonical,
+                    observed,
+                    chars_sent,
+                    images_sent,
+                    server_input_tokens,
+                )
+                return
+            # Asymmetric EMA. Moving DOWN (denser content than believed) is
+            # the safety direction and reacts fast; moving UP relaxes slowly
+            # so one sparse turn cannot erase a dense lesson.
+            recip = _DENSITY_ALPHA_DOWN_RECIP if observed < prior else _DENSITY_ALPHA_UP_RECIP
+            updated = prior + (observed - prior) // recip
+            if updated == prior and observed != prior:
+                # Integer division stalls within one step of the target; take
+                # the single-unit step so convergence cannot deadlock.
+                updated = prior + (1 if observed > prior else -1)
+            self._density_milli[canonical] = clamp_density_milli(updated)
+        except Exception:
+            log.exception("record_density failed; sample discarded")
+
     # ── evidence intake ───────────────────────────────────────────────
 
-    async def record_rescue(self, *, overflow: object, response: object) -> None:
+    async def record_rescue(
+        self,
+        *,
+        overflow: object,
+        response: object,
+        rejected_attempt_believed_within_effective_budget: bool | None,
+    ) -> None:
         """Record one overflow→compressed-retry-acceptance pair.
 
         ``overflow`` is the structural overflow error (phase-2 stamped);
         ``response`` is the SAME logical request's successful retry. Total:
         every failure logs and forfeits the observation.
+
+        ``rejected_attempt_believed_within_effective_budget`` qualifies the
+        CLAMP and nothing else. A clamp asserts "the served window shrank",
+        which only follows when the payload we sent was believed to FIT the
+        believed window and the server refused it anyway. A rejection we
+        already expected (dense content our character measure underestimated)
+        proves nothing about the window, so it must rescue WITHOUT clamping —
+        this is the defect that clamped terra at 288,499 against a 917,506
+        floor. Only an exact ``True`` qualifies; ``False`` and ``None``
+        (unknown, e.g. a resumed generation whose belief was never persisted)
+        still record bounds and history, but can never create or tighten a
+        clamp. The keyword is REQUIRED so a forgotten adapter cannot silently
+        restore unconditional clamping.
         """
         try:
             if getattr(overflow, "code", None) != "context_length_exceeded":
@@ -463,6 +597,9 @@ class WindowObserver:
                     and reject_model
                     and reject_model == accept_model
                     and accept_tokens is not None
+                    # Identity comparison, not truthiness: only an exact True
+                    # asserts the rejected attempt was believed to fit.
+                    and rejected_attempt_believed_within_effective_budget is True
                 ):
                     record = self._record_for(state, reject_key, reject_model)
                     record["clamp"] = self._merged_clamp(record.get("clamp"), accept_tokens, now)
