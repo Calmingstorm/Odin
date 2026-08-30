@@ -1373,6 +1373,33 @@ class TestWorkloadIsolation:
         assert obs.density_for(a, "gpt-5.6-sol") is None
         assert obs.density_for(b, "gpt-5.6-sol") == FIELD_DENSITY_MILLI
 
+    @pytest.mark.parametrize(
+        ("scope", "state"),
+        (
+            (_scope("chat", "discord:c1:turn-1"), _chat_st_stub("turn-1")),
+            (_scope("loop", "loop-1"), SimpleNamespace(_loop_id="loop-1")),
+        ),
+    )
+    def test_tool_loop_release_removes_chat_and_loop_calibration(
+        self, tmp_path, scope, state
+    ):
+        """The terminal runner hook must release the observer entry itself.
+
+        Call-site tests alone stay green if ``_release_workload`` becomes a
+        no-op, leaving chat and loop calibration resident until eviction.
+        """
+        from src.discord.tool_loop import ToolLoopRunner
+
+        obs = _observer(tmp_path)
+        self._dense(obs, scope)
+        assert obs.density_for(scope, "gpt-5.6-sol") == FIELD_DENSITY_MILLI
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._window_observer = obs
+        runner._release_workload(state)
+
+        assert obs.density_for(scope, "gpt-5.6-sol") is None
+
     def test_eviction_is_bounded_and_only_returns_workloads_to_prior(self, tmp_path):
         from src.llm.window_observer import _MAX_WORKLOAD_SCOPES
 
