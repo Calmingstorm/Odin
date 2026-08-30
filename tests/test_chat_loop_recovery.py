@@ -837,8 +837,8 @@ class TestResumeIdentityReconstruction:
         )
         runner = _runner(gw)
 
-        async def record(overflow, response, believed_within=None):
-            recorded.append((overflow, response, believed_within))
+        async def record(overflow, response, facts=None, accepted_chars=None, accepted_images=None):
+            recorded.append((overflow, response, facts))
 
         runner._record_window_evidence = record
         expected_latch = estimate_message_chars(st.messages)
@@ -846,15 +846,15 @@ class TestResumeIdentityReconstruction:
         assert kind == "ok"
         assert st._char_latch == expected_latch
         assert len(recorded) == 1
-        overflow, accepted, believed = recorded[0]
+        overflow, accepted, facts = recorded[0]
         assert overflow.code == "context_length_exceeded"
         assert overflow.account_key == account
         assert overflow.server_input_tokens == 272_000
         assert accepted is response
-        # A RESUMED generation never persisted the belief that governed the
-        # rejected attempt, so it stays unknown and cannot qualify a clamp —
+        # A RESUMED generation never persisted the facts that governed the
+        # rejected attempt, so they stay unknown and cannot qualify a clamp —
         # the no-codec-v5 contract.
-        assert believed is None
+        assert facts is None
         assert st._gen_identity is None and st._rescue_passes == 0
 
     async def test_missing_frozen_provider_ends_honestly(self):
@@ -1041,9 +1041,7 @@ class TestChatLatchEnforcement:
             ]
         )
         st._char_latch = 50_000
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is False
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is False
         assert st._trajectory.context_recoveries[-1]["fits"] is False
 
     def test_chat_latch_enforced_without_compressor_at_iteration_zero(self):
@@ -1066,13 +1064,9 @@ class TestChatLatchEnforcement:
             lambda *a, **k: (_ for _ in ()).throw(RuntimeError("policy failed")),
         )
         st = _chat_state(_ENVELOPE)
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is True
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is True
         st._char_latch = 50_000
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is False
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is False
 
     def test_already_fitting_latch_is_noop(self):
         gw = _Gateway(None)
@@ -1080,9 +1074,7 @@ class TestChatLatchEnforcement:
         st = _chat_state(_ENVELOPE)
         st._char_latch = 50_000
         before = list(st.messages)
-        assert runner._maybe_compress(
-            st, gw.client, SimpleNamespace(openai_codex=None)
-        ) is True
+        assert runner._maybe_compress(st, gw.client, SimpleNamespace(openai_codex=None)) is True
         assert st.messages == before
         assert st._trajectory.context_recoveries == []
 

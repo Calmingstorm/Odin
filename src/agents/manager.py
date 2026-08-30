@@ -1455,6 +1455,36 @@ def _measure_payload(messages: list[dict]) -> tuple[int, int]:
     return estimate_message_chars(messages), estimate_message_images(messages)
 
 
+def _attempt_facts(messages: list[dict], snapshot) -> object | None:
+    """Freeze everything this agent attempt's fit verdict rests on, or None.
+
+    One structured unit rather than a loose bool beside loose numbers, so the
+    verdict and its evidence cannot drift apart before clamp qualification.
+    """
+    if snapshot is None or getattr(snapshot, "base_source", None) == "persisted":
+        return None
+    effective = getattr(snapshot, "effective_budget", 0)
+    if not isinstance(effective, int) or effective <= 0:
+        return None
+    try:
+        from ..llm.context_budget import RejectedAttemptFacts, estimate_request_tokens
+
+        density = getattr(snapshot, "density_milli", 2500)
+        chars, images = _measure_payload(messages)
+        estimated = estimate_request_tokens(chars, images, density_milli=density)
+        return RejectedAttemptFacts(
+            chars=chars,
+            images=images,
+            density_milli=density,
+            estimated_tokens=estimated,
+            effective_budget=effective,
+            believed_within=estimated <= effective,
+        )
+    except Exception:
+        log.exception("attempt fact capture failed; recording belief as unknown")
+        return None
+
+
 def _believed_within_effective_budget(messages: list[dict], snapshot) -> bool | None:
     """Whether THIS payload is believed to fit the believed physical window.
 
@@ -1589,7 +1619,7 @@ async def _call_llm_with_recovery(
     # Belief about the attempt that was actually REJECTED — paired with the
     # overflow it belongs to, never reconstructed later from messages that
     # rescue has already mutated.
-    last_overflow_belief: bool | None = None
+    last_overflow_facts: object | None = None
 
     _plan = generation_state.get("plan")
     _plan_snapshot = _plan.get("snapshot") if isinstance(_plan, dict) else None
@@ -1626,7 +1656,7 @@ async def _call_llm_with_recovery(
         # attempt sends. Recomputed every pass, so a rescue-compacted retry
         # carries its own belief rather than inheriting the rejected one.
         attempt_chars, attempt_images = _measure_payload(agent.messages)
-        attempt_belief = _believed_within_effective_budget(agent.messages, _plan_snapshot)
+        attempt_facts = _attempt_facts(agent.messages, _plan_snapshot)
         try:
             response = await asyncio.wait_for(
                 iteration_callback(
@@ -1652,7 +1682,13 @@ async def _call_llm_with_recovery(
                         # iteration that just succeeded. The belief carried
                         # here is the REJECTED attempt's, which is what
                         # qualifies (or disqualifies) a window clamp.
-                        await evidence_recorder(last_overflow, response, last_overflow_belief)
+                        await evidence_recorder(
+                            last_overflow,
+                            response,
+                            last_overflow_facts,
+                            attempt_chars,
+                            attempt_images,
+                        )
                     except Exception:
                         log.exception("agent window-evidence recording failed (non-fatal)")
             return response
@@ -1711,7 +1747,7 @@ async def _call_llm_with_recovery(
                     if report["fits"]:
                         agent.messages = compressed
                         last_overflow = exc
-                        last_overflow_belief = attempt_belief
+                        last_overflow_facts = attempt_facts
                         # Latch candidate: held until the retry actually
                         # succeeds (the provider is the authority on
                         # survivable size).

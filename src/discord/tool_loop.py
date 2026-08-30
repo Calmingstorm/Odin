@@ -1031,7 +1031,12 @@ class ToolLoopRunner:
             return None
 
     async def _record_window_evidence(
-        self, overflow: object, response: object, believed_within: bool | None = None
+        self,
+        overflow: object,
+        response: object,
+        rejected_attempt: object = None,
+        accepted_chars: object = None,
+        accepted_images: object = None,
     ) -> None:
         """Feed one rescue's overflow→acceptance pair to the observer.
 
@@ -1046,7 +1051,9 @@ class ToolLoopRunner:
             await observer.record_rescue(
                 overflow=overflow,
                 response=response,
-                rejected_attempt_believed_within_effective_budget=believed_within,
+                rejected_attempt=rejected_attempt,
+                accepted_chars=accepted_chars,
+                accepted_images=accepted_images,
             )
         except Exception:
             log.exception("window-evidence recording failed (non-fatal)")
@@ -1086,6 +1093,46 @@ class ToolLoopRunner:
             )
         except Exception:
             log.exception("density calibration failed (non-fatal)")
+
+    @staticmethod
+    def _attempt_facts(
+        messages: list[dict], snapshot: object, serving_identity: object
+    ) -> object | None:
+        """Freeze everything this attempt's fit verdict rests on, or None.
+
+        One structured unit rather than a loose bool beside loose numbers, so
+        the verdict and the evidence behind it cannot drift apart between
+        capture and clamp qualification.
+        """
+        if snapshot is None or not getattr(serving_identity, "is_codex", False):
+            return None
+        if getattr(snapshot, "base_source", None) == "persisted":
+            return None
+        effective = getattr(snapshot, "effective_budget", 0)
+        if not isinstance(effective, int) or effective <= 0:
+            return None
+        try:
+            from ..llm.context_budget import RejectedAttemptFacts, estimate_request_tokens
+            from ..llm.context_compressor import (
+                estimate_message_chars,
+                estimate_message_images,
+            )
+
+            density = getattr(snapshot, "density_milli", DEFAULT_DENSITY_MILLI)
+            chars = estimate_message_chars(messages)
+            images = estimate_message_images(messages)
+            estimated = estimate_request_tokens(chars, images, density_milli=density)
+            return RejectedAttemptFacts(
+                chars=chars,
+                images=images,
+                density_milli=density,
+                estimated_tokens=estimated,
+                effective_budget=effective,
+                believed_within=estimated <= effective,
+            )
+        except Exception:
+            log.exception("attempt fact capture failed; recording belief as unknown")
+            return None
 
     @staticmethod
     def _believed_within_effective_budget(
@@ -1522,9 +1569,9 @@ class ToolLoopRunner:
         _pending_latch: int | None = None
         _rescued_this_call = False
         _last_overflow: BaseException | None = None
-        # Belief about the attempt the provider actually REJECTED, captured
-        # before that attempt and paired with its overflow.
-        _last_overflow_belief: bool | None = None
+        # Frozen facts for the attempt the provider actually REJECTED,
+        # captured before that attempt and paired with its own overflow.
+        _last_overflow_facts: object | None = None
         if st._gen_identity and st._rescue_passes:
             # Resume reconstructs the pending rejection from durable attempt
             # facts. The already-compressed payload is the acceptance
@@ -1550,7 +1597,7 @@ class ToolLoopRunner:
                     # recomputed after every compaction, so a rescued retry
                     # never inherits the rejected attempt's belief.
                     _attempt_chars, _attempt_images = self._measure_payload(st.messages)
-                    _attempt_belief = self._believed_within_effective_budget(
+                    _attempt_facts = self._attempt_facts(
                         st.messages, _snapshot, serving_identity
                     )
                     try:
@@ -1575,7 +1622,11 @@ class ToolLoopRunner:
                             # facts and rung phase reset for the next one.
                             st._char_latch = _pending_latch
                             await self._record_window_evidence(
-                                _last_overflow, llm_resp, _last_overflow_belief
+                                _last_overflow,
+                                llm_resp,
+                                _last_overflow_facts,
+                                accepted_chars=_attempt_chars,
+                                accepted_images=_attempt_images,
                             )
                         if st._gen_identity is not None or st._rescue_passes:
                             st._gen_identity = None
@@ -1612,7 +1663,7 @@ class ToolLoopRunner:
                         st._rescue_passes += 1
                         _rescued_this_call = True
                         _last_overflow = overflow_exc
-                        _last_overflow_belief = _attempt_belief
+                        _last_overflow_facts = _attempt_facts
                         if report.get("boundary_request_start") is not None:
                             st._boundary_request_start = report["boundary_request_start"]
                             st._boundary_elided_replay = report["boundary_elided_replay"]
@@ -2929,7 +2980,7 @@ class ToolLoopRunner:
         rescue_passes = 0
         pending_latch: int | None = None
         last_overflow: BaseException | None = None
-        last_overflow_belief: bool | None = None
+        last_overflow_facts: object | None = None
 
         try:
             # Pre-admission fast-fail, same contract as the chat path — and
@@ -2939,9 +2990,7 @@ class ToolLoopRunner:
             # run_autonomous(). Frozen: the captured client, not live state.
             while True:
                 attempt_chars, attempt_images = self._measure_payload(st.messages)
-                attempt_belief = self._believed_within_effective_budget(
-                    st.messages, _snapshot, serving_identity
-                )
+                attempt_facts = self._attempt_facts(st.messages, _snapshot, serving_identity)
                 try:
                     preflight_incompatible_effort(
                         serving_identity.client,
@@ -2966,7 +3015,11 @@ class ToolLoopRunner:
                         # Server-accepted evidence, per the settled latch rule.
                         st._char_latch = pending_latch
                         await self._record_window_evidence(
-                            last_overflow, response, last_overflow_belief
+                            last_overflow,
+                            response,
+                            last_overflow_facts,
+                            accepted_chars=attempt_chars,
+                            accepted_images=attempt_images,
                         )
                     break
                 except Exception as overflow_exc:
@@ -3009,7 +3062,7 @@ class ToolLoopRunner:
                         )
                     pending_latch = report["compressed_chars"]
                     last_overflow = overflow_exc
-                    last_overflow_belief = attempt_belief
+                    last_overflow_facts = attempt_facts
                     if generation_deadline - time.monotonic() <= 0:
                         # Same rule as chat: recovery deadlines bound waiting,
                         # not an admitted stream — never start a request

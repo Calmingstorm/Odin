@@ -144,6 +144,25 @@ class ContextBudgetSnapshot:
     density_source: str = "default"  # "default" | "calibrated"
 
 
+@dataclass(frozen=True)
+class RejectedAttemptFacts:
+    """Everything the physical-fit verdict for ONE sent payload rested on.
+
+    Carried as a single frozen unit rather than separate boolean and numeric
+    arguments, which could disagree with each other. Captured immediately
+    before the provider attempt and paired with the overflow that attempt
+    produced — never recomputed afterward from messages rescue has already
+    mutated.
+    """
+
+    chars: int
+    images: int
+    density_milli: int
+    estimated_tokens: int
+    effective_budget: int
+    believed_within: bool
+
+
 def clamp_density_milli(value: object) -> int:
     """Coerce any candidate density into the safe calibration band.
 

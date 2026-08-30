@@ -112,6 +112,45 @@ def _positive_int(value: object) -> TypeGuard[int]:
     return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
+def derive_sample_density(
+    *, chars_sent: object, images_sent: object, server_input_tokens: object
+) -> int | None:
+    """Raw observed millichars/token for ONE measured request, or None.
+
+    The single attribution authority, shared by EMA calibration and by
+    forensic clamp qualification. Attribution removes the fixed envelope and
+    the image surcharge so the remainder describes TEXT density — the only
+    thing a character measure can predict.
+
+    Returns None whenever the sample cannot support an honest observation
+    (missing/!positive usage echo, non-integer counts, too little text, or
+    an image/envelope-dominated request). None means UNKNOWN, and callers
+    must never read it as agreement.
+    """
+    from .context_budget import (
+        FIXED_ENVELOPE_RESERVE_TOKENS,
+        IMAGE_TOKEN_SURCHARGE,
+        clamp_density_milli,
+    )
+
+    if not _positive_int(server_input_tokens):
+        return None
+    if not isinstance(chars_sent, int) or isinstance(chars_sent, bool):
+        return None
+    if not isinstance(images_sent, int) or isinstance(images_sent, bool):
+        return None
+    if chars_sent < _MIN_OBSERVABLE_CHARS:
+        return None
+    content_tokens = (
+        int(server_input_tokens)
+        - FIXED_ENVELOPE_RESERVE_TOKENS
+        - max(0, images_sent) * IMAGE_TOKEN_SURCHARGE
+    )
+    if content_tokens < _MIN_OBSERVABLE_CONTENT_TOKENS:
+        return None
+    return clamp_density_milli(chars_sent * 1000 // content_tokens)
+
+
 def _empty_model_record() -> dict:
     return {
         "highest_accepted_input": None,
@@ -477,29 +516,18 @@ class WindowObserver:
         calibration miss must never disturb a request that already succeeded.
         """
         try:
-            from .context_budget import (
-                FIXED_ENVELOPE_RESERVE_TOKENS,
-                IMAGE_TOKEN_SURCHARGE,
-                clamp_density_milli,
-            )
+            from .context_budget import clamp_density_milli
 
             canonical = canonical_codex_model(model)
-            if not canonical or not _positive_int(server_input_tokens):
+            if not canonical:
                 return
-            if not isinstance(chars_sent, int) or isinstance(chars_sent, bool):
-                return
-            if not isinstance(images_sent, int) or isinstance(images_sent, bool):
-                return
-            if chars_sent < _MIN_OBSERVABLE_CHARS:
-                return
-            content_tokens = (
-                int(server_input_tokens)
-                - FIXED_ENVELOPE_RESERVE_TOKENS
-                - max(0, images_sent) * IMAGE_TOKEN_SURCHARGE
+            observed = derive_sample_density(
+                chars_sent=chars_sent,
+                images_sent=images_sent,
+                server_input_tokens=server_input_tokens,
             )
-            if content_tokens < _MIN_OBSERVABLE_CONTENT_TOKENS:
+            if observed is None:
                 return
-            observed = clamp_density_milli(chars_sent * 1000 // content_tokens)
             prior = self._density_milli.get(canonical)
             if prior is None:
                 self._density_milli[canonical] = observed
@@ -528,12 +556,83 @@ class WindowObserver:
 
     # ── evidence intake ───────────────────────────────────────────────
 
+    @staticmethod
+    def _clamp_qualifies(
+        rejected_attempt: object,
+        *,
+        accepted_chars: object,
+        accepted_images: object,
+        accepted_tokens: int,
+    ) -> bool:
+        """Whether this rescue is affirmative evidence that the window shrank.
+
+        Prior belief alone is not enough: belief rests on a density estimate,
+        and a COLD or stale estimate can call a dense payload "within" and
+        then read its inevitable rejection as capability evidence. That is the
+        original defect surviving in a narrower band — and a cold observer is
+        the normal state after every restart.
+
+        So the rescue must also survive POST-HOC consistency. The retry that
+        the server accepted carries its own authoritative token count, giving
+        a raw sample density for this very workload. Re-run the rejected
+        payload's fit verdict against that fresh evidence:
+
+            qualification = min(assumed density, accepted sample density)
+            posthoc       = estimate(rejected chars/images, qualification)
+            qualifies     ⇔ posthoc still fits the believed budget
+
+        ``min`` is load-bearing: post-hoc evidence is a VETO, never permission
+        to make the rejected payload look safer than it did when sent, so a
+        sparse accepted retry cannot rehabilitate a doomed one. The raw sample
+        is used rather than the smoothed EMA — smoothing is right for future
+        admission, wrong for forensics about this specific rescue.
+
+        An unusable accepted sample leaves consistency UNKNOWN, and unknown
+        never clamps: clamp evidence must be affirmative, and the absence of
+        contradiction is not proof that capacity moved. When a real shrink
+        coincides with newly discovered density the clamp is withheld too —
+        calibration protects the next request, and a later rejection that is
+        still believed within under the corrected density can clamp then. One
+        extra overflow costs less than a false 24-hour capability claim.
+        """
+        from .context_budget import estimate_request_tokens
+
+        if rejected_attempt is None:
+            return False
+        believed = getattr(rejected_attempt, "believed_within", None)
+        if believed is not True:
+            return False
+        assumed = getattr(rejected_attempt, "density_milli", None)
+        rejected_chars = getattr(rejected_attempt, "chars", None)
+        rejected_images = getattr(rejected_attempt, "images", None)
+        budget = getattr(rejected_attempt, "effective_budget", None)
+        if not _positive_int(assumed) or not _positive_int(budget):
+            return False
+        if not isinstance(rejected_chars, int) or isinstance(rejected_chars, bool):
+            return False
+        if not isinstance(rejected_images, int) or isinstance(rejected_images, bool):
+            return False
+        accepted_density = derive_sample_density(
+            chars_sent=accepted_chars,
+            images_sent=accepted_images,
+            server_input_tokens=accepted_tokens,
+        )
+        if accepted_density is None:
+            return False
+        qualification_density = min(int(assumed), accepted_density)
+        posthoc = estimate_request_tokens(
+            rejected_chars, rejected_images, density_milli=qualification_density
+        )
+        return posthoc <= int(budget)
+
     async def record_rescue(
         self,
         *,
         overflow: object,
         response: object,
-        rejected_attempt_believed_within_effective_budget: bool | None,
+        rejected_attempt: object = None,
+        accepted_chars: object = None,
+        accepted_images: object = None,
     ) -> None:
         """Record one overflow→compressed-retry-acceptance pair.
 
@@ -541,18 +640,20 @@ class WindowObserver:
         ``response`` is the SAME logical request's successful retry. Total:
         every failure logs and forfeits the observation.
 
-        ``rejected_attempt_believed_within_effective_budget`` qualifies the
-        CLAMP and nothing else. A clamp asserts "the served window shrank",
-        which only follows when the payload we sent was believed to FIT the
-        believed window and the server refused it anyway. A rejection we
-        already expected (dense content our character measure underestimated)
-        proves nothing about the window, so it must rescue WITHOUT clamping —
-        this is the defect that clamped terra at 288,499 against a 917,506
-        floor. Only an exact ``True`` qualifies; ``False`` and ``None``
-        (unknown, e.g. a resumed generation whose belief was never persisted)
-        still record bounds and history, but can never create or tighten a
-        clamp. The keyword is REQUIRED so a forgotten adapter cannot silently
-        restore unconditional clamping.
+        ``rejected_attempt`` is the frozen ``RejectedAttemptFacts`` for the
+        payload the provider actually refused, and ``accepted_chars`` /
+        ``accepted_images`` measure the retry it accepted. Together they
+        qualify the CLAMP and nothing else — bounds, overflow counts and
+        acceptance high-water marks record regardless.
+
+        A clamp asserts "the served window shrank". That follows only when the
+        rejected payload was believed to FIT and STILL looks like it should
+        have fit once the acceptance's own density evidence is applied (see
+        ``_clamp_qualifies``). A rejection explained by density — the terra
+        case that clamped 288,499 against a 917,506 floor — proves nothing
+        about capacity and must rescue without clamping. Absent facts (a
+        resumed generation never persisted them) mean unknown, and unknown
+        never clamps.
         """
         try:
             if getattr(overflow, "code", None) != "context_length_exceeded":
@@ -597,9 +698,12 @@ class WindowObserver:
                     and reject_model
                     and reject_model == accept_model
                     and accept_tokens is not None
-                    # Identity comparison, not truthiness: only an exact True
-                    # asserts the rejected attempt was believed to fit.
-                    and rejected_attempt_believed_within_effective_budget is True
+                    and self._clamp_qualifies(
+                        rejected_attempt,
+                        accepted_chars=accepted_chars,
+                        accepted_images=accepted_images,
+                        accepted_tokens=accept_tokens,
+                    )
                 ):
                     record = self._record_for(state, reject_key, reject_model)
                     record["clamp"] = self._merged_clamp(record.get("clamp"), accept_tokens, now)

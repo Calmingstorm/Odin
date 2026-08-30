@@ -313,6 +313,7 @@ class TestPhysicalSharedLadder:
         gateway.codex_client = client
         runner = _runner(gateway)
         runner._predictive_presend_descent = lambda *_a, **_k: 1
+
         async def finish(*_args, **_kwargs):
             return "failed"
 
@@ -322,8 +323,7 @@ class TestPhysicalSharedLadder:
         )
         assert len(snapshot.ladder) == 1
         state = SimpleNamespace(
-            messages=_dense_history(60, 20_000)
-            + [{"role": "user", "content": "GOAL: finish"}],
+            messages=_dense_history(60, 20_000) + [{"role": "user", "content": "GOAL: finish"}],
             system_prompt="sys",
             tools=[],
             _boundary=SurfaceBoundary(request_start=60, envelope_len=1),
@@ -408,9 +408,7 @@ class TestAgentSurfaceParity:
         assert all(r["trigger"] == "predictive" for r in agent.context_recoveries)
         assert agent.context_char_ceiling is None, "prediction must never latch"
 
-    def test_agent_continues_past_a_noop_rung_and_adopts_the_next_shrink(
-        self, monkeypatch
-    ):
+    def test_agent_continues_past_a_noop_rung_and_adopts_the_next_shrink(self, monkeypatch):
         """The agent copy of predictive descent must not stop merely because
         one rung is above the current character count."""
         import src.llm.context_compressor as cc
@@ -609,8 +607,8 @@ class TestRecoveryLoopIntegration:
                 raise overflow
             return {"text": "done", "tool_calls": []}
 
-        async def recorder(err, response, believed_within=None):
-            recorded.append((err, believed_within))
+        async def recorder(err, response, facts=None, acc_chars=None, acc_images=None):
+            recorded.append((err, facts))
 
         # Uncalibrated snapshot: ~600K chars estimates well under sol's window,
         # so prediction does NOT fire and the full ladder remains for rescue.
@@ -621,9 +619,9 @@ class TestRecoveryLoopIntegration:
         )
         assert out == {"text": "done", "tool_calls": []}
         assert len(recorded) == 1
-        err, believed = recorded[0]
+        err, facts = recorded[0]
         assert err is overflow
-        assert believed is True
+        assert facts is not None and facts.believed_within is True
 
     async def test_predicted_rejection_pairs_a_false_belief(self):
         """The defect's signature: a payload we EXPECTED to be refused must
@@ -655,8 +653,8 @@ class TestRecoveryLoopIntegration:
                 raise overflow
             return {"text": "done", "tool_calls": []}
 
-        async def recorder(err, response, believed_within=None):
-            recorded.append((err, believed_within))
+        async def recorder(err, response, facts=None, acc_chars=None, acc_images=None):
+            recorded.append((err, facts))
 
         # Predictive descent is disabled here (is_codex False) to ISOLATE the
         # pairing: with descent on, a payload compacted until it is believed to
@@ -670,7 +668,7 @@ class TestRecoveryLoopIntegration:
         )
         assert out == {"text": "done", "tool_calls": []}
         assert len(recorded) == 1
-        assert recorded[0][1] is False
+        assert recorded[0][1] is not None and recorded[0][1].believed_within is False
 
     async def test_ladder_spent_predicting_is_not_re_armed_after_a_rejection(self):
         """One TOTAL ladder. If prediction spent every rung and the provider

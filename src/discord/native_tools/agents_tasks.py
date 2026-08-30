@@ -352,7 +352,9 @@ def _make_evidence_recorder(observer):
     if observer is None:
         return None
 
-    async def recorder(overflow, response, believed_within=None):
+    async def recorder(
+        overflow, response, rejected_attempt=None, accepted_chars=None, accepted_images=None
+    ):
         try:
             if isinstance(response, dict):
                 from types import SimpleNamespace
@@ -365,7 +367,9 @@ def _make_evidence_recorder(observer):
             await observer.record_rescue(
                 overflow=overflow,
                 response=response,
-                rejected_attempt_believed_within_effective_budget=believed_within,
+                rejected_attempt=rejected_attempt,
+                accepted_chars=accepted_chars,
+                accepted_images=accepted_images,
             )
         except Exception:
             log.exception("agent window-evidence recording failed (non-fatal)")
