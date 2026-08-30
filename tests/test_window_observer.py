@@ -981,6 +981,55 @@ def _api_app(
 
 
 class TestContextWindowsApi:
+    async def test_density_provenance_coexists_with_clamp_provenance(self, tmp_path):
+        """Both can be true at once: a clamped model that is also calibrated
+        must report BOTH, and the runtime target must consume the calibration
+        while the configured target stays on the uncalibrated default."""
+        obs = _observer(tmp_path)
+        await obs.record_rescue(
+            rejected_attempt_believed_within_effective_budget=True,
+            overflow=_overflow(),
+            response=_acceptance(tokens=300_000),
+        )
+        obs.record_density(
+            model="gpt-5.6-sol", chars_sent=391_046, images_sent=0, server_input_tokens=684_031
+        )
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        sol = body["models"]["gpt-5.6-sol"]
+        assert sol["provenance"] == "temporary learned clamp"
+        assert sol["density_source"] == "calibrated"
+        assert sol["density_milli"] == 609
+        assert sol["configured"]["density_source"] == "default"
+        assert sol["effective"]["primary_chars"] < sol["configured"]["primary_chars"]
+
+    async def test_a_model_known_only_to_density_still_appears(self, tmp_path):
+        """Census completeness: a calibrated-but-never-clamped model outside
+        the static registry must still be described."""
+        obs = _observer(tmp_path)
+        obs._density_milli["gpt-5.9-experimental"] = 800
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            body = await (await c.get("/api/context/windows")).json()
+        assert "gpt-5.9-experimental" in body["models"]
+        assert body["models"]["gpt-5.9-experimental"]["density_source"] == "calibrated"
+
+    async def test_broken_density_snapshot_serves_uncalibrated_targets(self, tmp_path):
+        """A calibration failure must degrade to the default, never 500."""
+        obs = _observer(tmp_path)
+
+        def _boom():
+            raise RuntimeError("density down")
+
+        obs.density_snapshot = _boom
+        app = _api_app(obs)
+        async with TestClient(TestServer(app)) as c:
+            resp = await c.get("/api/context/windows")
+            body = await resp.json()
+        assert resp.status == 200
+        assert body["models"]["gpt-5.6-sol"]["density_source"] == "default"
+
     async def test_get_serves_floors_overrides_clamps_and_both_resolutions(self, tmp_path):
         obs = _observer(tmp_path)
         await obs.record_rescue(

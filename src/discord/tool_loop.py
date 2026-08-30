@@ -32,7 +32,7 @@ import unicodedata
 from collections.abc import Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Literal
+from typing import TYPE_CHECKING, Any, Literal
 
 import discord
 
@@ -1109,7 +1109,7 @@ class ToolLoopRunner:
             return None
 
     def _predictive_presend_descent(
-        self, st: object, snapshot: object, serving_identity: object
+        self, st: Any, snapshot: object, serving_identity: object
     ) -> int:
         """Descend rescue rungs BEFORE sending a payload believed not to fit.
 
