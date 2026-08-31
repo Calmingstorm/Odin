@@ -964,3 +964,49 @@ class TestEffectClassification:
             assert second._conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 4
         finally:
             second.close()
+
+
+def test_migrated_store_can_record_new_intent_with_physical_column_order(tmp_path):
+    """ALTER TABLE appends effect_class; inserts must name logical columns."""
+    import sqlite3
+
+    from src.tools.effect_classifier import ToolEffectClass
+
+    db_dir = tmp_path / "legacy-new-write"
+    db_dir.mkdir()
+    db = db_dir / "turns.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript(_legacy_turns_ddl_without_payload_digest())
+    conn.close()
+
+    migrated = TurnStateStore(db, blob_dir=db_dir / "blobs")
+    try:
+        lease = _admit(
+            migrated,
+            TurnKey(source="discord", channel_id="new-c", message_id="new-m"),
+        )
+        migrated.record_intents_sync(
+            lease,
+            7,
+            [{
+                "tool_call_id": "new-call",
+                "tool_name": "wait_for_agents",
+                "tool_input": {"agent_ids": ["a"]},
+                "effect_class": ToolEffectClass.EFFECT_FREE_OBSERVATION,
+            }],
+            iteration=9,
+        )
+        row = migrated._conn.execute(
+            "SELECT source, channel_id, message_id, turn_generation, "
+            "generation_seq, tool_call_id, state, tool_name, effect_class, "
+            "iteration, result, created_at, updated_at FROM operations"
+        ).fetchone()
+        assert row[:10] == (
+            "discord", "new-c", "new-m", lease.generation, 7, "new-call",
+            OpState.PREPARED, "wait_for_agents",
+            ToolEffectClass.EFFECT_FREE_OBSERVATION, 9,
+        )
+        assert row[10] is None
+        assert row[11] > 0 and row[12] > 0
+    finally:
+        migrated.close()

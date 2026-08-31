@@ -627,7 +627,11 @@ class TurnStateStore:
                 try:
                     for intent in intents:
                         cur = conn.execute(
-                            "INSERT INTO operations "
+                            "INSERT INTO operations ("
+                            "source, channel_id, message_id, turn_generation, "
+                            "generation_seq, tool_call_id, state, tool_name, "
+                            "effect_class, iteration, effect_fingerprint, result, "
+                            "created_at, updated_at) "
                             "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? "
                             f"WHERE {self._TURN_FENCE}",
                             [lease.key.source, lease.key.channel_id,
