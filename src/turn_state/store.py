@@ -252,7 +252,7 @@ class TurnStateStore:
             if swept["turns"] or swept["ops"]:
                 log.warning(
                     "Turn-state boot sweep: %d stale ACTIVE turn(s) suspended, "
-                    "%d in-flight op(s) marked OUTCOME_UNKNOWN",
+                    "%d in-flight op(s) settled by effect class",
                     swept["turns"], swept["ops"],
                 )
         except Exception:
@@ -1032,7 +1032,8 @@ class TurnStateStore:
         restart inside the lease TTL used to strand rows ACTIVE forever —
         review blocker #4, PR #242). Their PREPARED/RUNNING ops become
         OUTCOME_UNKNOWN (we cannot know whether the external effect
-        happened — never rerun)."""
+        happened — never rerun). Effect-free observations instead settle as
+        definite non-effect failures."""
         return self._sweep_active_sync(only_expired=False)
 
     def sweep_expired_active_sync(self) -> dict:

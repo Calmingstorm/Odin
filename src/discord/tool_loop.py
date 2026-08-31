@@ -2594,8 +2594,8 @@ class ToolLoopRunner:
         except TimeoutError:
             error_msg = f"Tool '{block.name}' timed out after {t}s"
             # WI-3 (interrupted): wait_for cancelled _run_one_tool before its
-            # own settle — the external effect may or may not have applied.
-            # OUTCOME_UNKNOWN via the no-downgrade settle, never rerun.
+            # own settle. The persisted effect class decides whether this is a
+            # definite non-effect failure or an unknown external outcome.
             try:
                 await st.durability.after_tool_interrupted(block, error_msg)
             except Exception:
