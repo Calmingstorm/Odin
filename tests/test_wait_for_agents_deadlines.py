@@ -36,3 +36,11 @@ def test_invalid_handler_timeout_preserves_outer_fallback():
     assert wait_for_agents_wrapper_timeout(
         "wait_for_agents", {"timeout": "bad"}, 91, grace_seconds=15
     ) == 91
+
+
+def test_truthy_non_mapping_input_preserves_outer_fallback():
+    for malformed in (["not", "an", "object"], "wrong-shape"):
+        assert wait_for_agents_handler_deadline(malformed) is None
+        assert wait_for_agents_wrapper_timeout(
+            "wait_for_agents", malformed, 91, grace_seconds=15
+        ) == 91

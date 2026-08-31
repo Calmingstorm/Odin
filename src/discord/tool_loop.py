@@ -2609,7 +2609,7 @@ class ToolLoopRunner:
                     tool_input=_scrub_tool_input_for_storage(block.name, block.input),
                     approved=True,
                     result_summary=error_msg,
-                    execution_time_ms=int(tool_timeout * 1000),
+                    execution_time_ms=int(t * 1000),
                     error=error_msg,
                 )
             except Exception:

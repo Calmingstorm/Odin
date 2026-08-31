@@ -16,7 +16,9 @@ def wait_for_agents_handler_deadline(tool_input: dict | None) -> float | None:
     handler contract. Invalid and non-finite values stay on the caller's normal
     fallback so the handler itself can report the input error.
     """
-    raw = (tool_input or {}).get("timeout", WAIT_FOR_AGENTS_DEFAULT_SECONDS)
+    if not isinstance(tool_input, dict):
+        return None
+    raw = tool_input.get("timeout", WAIT_FOR_AGENTS_DEFAULT_SECONDS)
     try:
         deadline = float(raw)
     except (TypeError, ValueError):
