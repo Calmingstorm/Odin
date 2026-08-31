@@ -1010,3 +1010,55 @@ def test_migrated_store_can_record_new_intent_with_physical_column_order(tmp_pat
         assert row[11] > 0 and row[12] > 0
     finally:
         migrated.close()
+
+
+def test_empty_effect_free_classifier_migration_is_noop(monkeypatch, tmp_path):
+    import sqlite3
+
+    import src.turn_state.store as store_module
+
+    db_dir = tmp_path / "empty-effect-classifier"
+    db_dir.mkdir()
+    db = db_dir / "turns.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript(_legacy_turns_ddl_without_payload_digest())
+    conn.execute(
+        "INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ["discord", "c", "m", "g", 0, "call", OpState.OUTCOME_UNKNOWN,
+         "wait_for_agents", 1, "fp", None, 1.0, 1.0],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(store_module, "effect_free_observation_tools", frozenset)
+
+    migrated = TurnStateStore(db, blob_dir=db_dir / "blobs")
+    try:
+        assert migrated.legacy_effect_free_reconciled == 0
+        assert migrated._conn.execute(
+            "SELECT state FROM operations"
+        ).fetchone()[0] == OpState.OUTCOME_UNKNOWN
+    finally:
+        migrated.close()
+
+
+def test_effect_aware_uncertain_settle_rejects_missing_and_tolerates_race(store):
+    lease = _admit(store)
+    with pytest.raises(StaleTurnError):
+        store.settle_op_sync(
+            lease, 0, "missing", state=OpState.OUTCOME_UNKNOWN,
+            result_text="interrupted",
+        )
+    store.settle_interrupted_sync(lease, 0, "missing", result_text="interrupted")
+
+
+def test_effect_aware_uncertain_settle_wraps_sqlite_error(store, monkeypatch):
+    from src.turn_state import TurnStateUnavailableError
+
+    lease = _admit(store)
+    store.record_intents_sync(
+        lease, 0, [{"tool_call_id": "c", "tool_name": "run_command", "tool_input": {}}]
+    )
+    store.mark_running_sync(lease, 0, "c")
+    monkeypatch.setattr(store, "_op_where", lambda _lease: ("missing_column=?", ["x"]))
+    with pytest.raises(TurnStateUnavailableError, match="ledger write failed"):
+        store.settle_interrupted_sync(lease, 0, "c", result_text="interrupted")
