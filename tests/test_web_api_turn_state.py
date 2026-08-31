@@ -48,6 +48,9 @@ TURN_KEYS = {
     "outcome_unknown_operations",
     "manual_resolution_operations",
     "more_attention_evidence",
+    "more_diagnostic_evidence",
+    "expired_lease",
+    "requires_attention",
 }
 OP_KEYS = {
     "state",
@@ -327,20 +330,34 @@ class TestTurnsAvailability:
         _assert_envelope(body, "available", {"configured_enabled", "limit"})
         assert set(body["data"]) == {
             "counts", "turns", "truncated", "omitted_turns",
-            "omitted_attention_turns",
+            "omitted_attention_turns", "diagnostics",
         }
         counts = body["data"]["counts"]
         assert counts["active"] == 2
         assert counts["suspended"] == 1
-        assert counts["attention_required"] == 2
+        assert counts["expired_active"] == 1
+        assert counts["attention_required"] == 3
         assert counts["outcome_unknown_operations"] == 1
+        assert counts["outcome_unknown_turns"] == 1
         assert counts["manual_resolution_operations"] == 1
+        assert body["data"]["diagnostics"]["outcome_unknown"] == {
+            "operations": 1,
+            "turns": 1,
+            "by_tool": [{"tool_name": "run_command", "operations": 1}],
+            "tools_truncated": False,
+            "omitted_tools": 0,
+        }
 
         turns = {t["message_id"]: t for t in body["data"]["turns"]}
         assert set(turns) == {"m-active", "m-expired", "m-susp", "m-term"}
         # Expired lease renders AS-IS: status untouched, expiry fact carried.
         assert turns["m-expired"]["status"] == "ACTIVE"
         assert turns["m-expired"]["lease_expires_at"] < now
+        assert turns["m-expired"]["expired_lease"] is True
+        assert turns["m-expired"]["requires_attention"] is True
+        assert turns["m-active"]["requires_attention"] is False
+        assert turns["m-susp"]["requires_attention"] is True
+        assert turns["m-term"]["requires_attention"] is True
         assert turns["m-active"]["has_checkpoint"] is True
         assert turns["m-expired"]["has_checkpoint"] is False
         op_states = {op["state"] for op in turns["m-active"]["operations"]}
@@ -441,13 +458,14 @@ class TestCoherentSnapshotAndAttentionEvidence:
         [turn] = read_turn_snapshot(store.db_path, 10)["turns"]
         assert len(turn["operations"]) == observer._MAX_OPS_PER_TURN
         assert all(op["state"] != "PREPARED" for op in turn["operations"])
-        assert turn["attention_operations_count"] == 75
+        assert turn["attention_operations_count"] == 37
         assert turn["outcome_unknown_operations"] == 38
         assert turn["manual_resolution_operations"] == 37
-        assert turn["more_attention_evidence"] is True
+        assert turn["more_attention_evidence"] is False
+        assert turn["more_diagnostic_evidence"] is True
         assert turn["operations_truncated"] is True
 
-    def test_attention_turns_own_page_before_newer_healthy_posture(self, tmp_path):
+    def test_terminal_unknowns_are_diagnostics_not_attention_rows(self, tmp_path):
         store = _store(tmp_path)
         now = time.time()
         for seq in range(5):
@@ -456,13 +474,14 @@ class TestCoherentSnapshotAndAttentionEvidence:
                 message_id=f"healthy-{seq}",
                 status="ACTIVE",
                 created_at=now + seq,
+                lease_expires_at=now + 600,
             )
         for seq in range(3):
-            message_id = f"attention-{seq}"
+            message_id = f"historical-{seq}"
             _seed_turn(
                 store.db_path,
                 message_id=message_id,
-                status="TERMINAL_FAILED",
+                status="TERMINAL_COMPLETED",
                 created_at=now - 100 - seq,
             )
             _seed_op(
@@ -474,10 +493,37 @@ class TestCoherentSnapshotAndAttentionEvidence:
 
         snapshot = read_turn_snapshot(store.db_path, 2)
         assert [turn["message_id"] for turn in snapshot["turns"]] == [
-            "attention-0", "attention-1",
+            "healthy-4", "healthy-3",
         ]
+        assert snapshot["counts"]["attention_required"] == 0
+        assert snapshot["counts"]["outcome_unknown_operations"] == 3
+        assert snapshot["diagnostics"]["outcome_unknown"]["turns"] == 3
         assert snapshot["truncated"] is True
-        assert snapshot["omitted_turns"] == 6
+        assert snapshot["omitted_turns"] == 3
+        assert snapshot["omitted_attention_turns"] == 0
+
+    def test_manual_terminal_rows_own_page_and_attention_omission_is_exact(self, tmp_path):
+        store = _store(tmp_path)
+        now = time.time()
+        for seq in range(3):
+            message_id = f"manual-{seq}"
+            _seed_turn(
+                store.db_path,
+                message_id=message_id,
+                status="TERMINAL_FAILED",
+                created_at=now - seq,
+            )
+            _seed_op(
+                store.db_path,
+                message_id=message_id,
+                state="MANUAL_RESOLUTION_REQUIRED",
+                seq=seq + 1,
+            )
+        snapshot = read_turn_snapshot(store.db_path, 2)
+        assert [turn["message_id"] for turn in snapshot["turns"]] == [
+            "manual-0", "manual-1",
+        ]
+        assert snapshot["counts"]["attention_required"] == 3
         assert snapshot["omitted_attention_turns"] == 1
 
 

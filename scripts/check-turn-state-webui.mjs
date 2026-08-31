@@ -52,9 +52,13 @@ function turnsEnvelope(turns = []) {
     schema_version: 1, availability: 'available', observed_at: 'display-only',
     configured_enabled: true, limit: 100,
     data: {
-      counts: { active: 3, suspended: 1, attention_required: 2,
-                outcome_unknown_operations: 1, manual_resolution_operations: 1 },
-      truncated: false, turns,
+      counts: { active: 3, suspended: 1, expired_active: 1, attention_required: 3,
+                outcome_unknown_operations: 1, outcome_unknown_turns: 1,
+                manual_resolution_operations: 1 },
+      diagnostics: { outcome_unknown: { operations: 1, turns: 1,
+        by_tool: [{ tool_name: 'run_command', operations: 1 }],
+        tools_truncated: false, omitted_tools: 0 } },
+      omitted_turns: 0, omitted_attention_turns: 0, truncated: false, turns,
     },
   };
 }
@@ -99,30 +103,33 @@ async function renderState(state) {
   }));
 }
 
-// Priority: wire order deliberately scrambled; OUTCOME_UNKNOWN must lead,
-// then manual resolution, expired lease, suspended, healthy active. A terminal
-// row without visible attention evidence must never be mislabeled Active.
+// Priority: actionable state leads. OUTCOME_UNKNOWN on a healthy active row
+// remains visible evidence but cannot outrank manual, expired, or suspended
+// recovery posture and never labels the row as Attention by itself.
 {
   const turns = [
     turnFixture('healthy'),
     turnFixture('terminal', { status: 'TERMINAL_FAILED' }),
-    turnFixture('suspended', { status: 'SUSPENDED' }),
-    turnFixture('unknown', { operations: [{ state: 'OUTCOME_UNKNOWN', tool_name: 'run_command', tool_call_id: 'a', iteration: 1, created_at: 0, updated_at: 0 }] }),
-    turnFixture('expired', { lease_expires_at: fakeNow / 1000 - 120 }),
-    turnFixture('manual', { status: 'TERMINAL_FAILED', operations: [{ state: 'MANUAL_RESOLUTION_REQUIRED', tool_name: 'write_file', tool_call_id: 'b', iteration: 2, created_at: 0, updated_at: 0 }] }),
+    turnFixture('suspended', { status: 'SUSPENDED', requires_attention: true }),
+    turnFixture('diagnostic-only', { operations: [{ state: 'OUTCOME_UNKNOWN', tool_name: 'run_command', tool_call_id: 'a', iteration: 1, created_at: 0, updated_at: 0 }] }),
+    turnFixture('expired', { lease_expires_at: fakeNow / 1000 - 120, expired_lease: true, requires_attention: true }),
+    turnFixture('manual', { status: 'TERMINAL_FAILED', requires_attention: true, operations: [{ state: 'MANUAL_RESOLUTION_REQUIRED', tool_name: 'write_file', tool_call_id: 'b', iteration: 2, created_at: 0, updated_at: 0 }] }),
   ];
   globalThis.fetch = async (path) => path.startsWith('/api/turn-state/turns')
     ? response(turnsEnvelope(turns)) : response(breakersEnvelope());
   const state = setupPage();
   await state.fetchTurns();
   assert.deepEqual(state.sortedTurns.value.map(t => t.message_id),
-    ['unknown', 'manual', 'expired', 'suspended', 'healthy', 'terminal'],
-    'rendering priority order broken');
-  assert.equal(state.priorityBadge(state.sortedTurns.value[0]).label, 'Outcome unknown');
+    ['manual', 'expired', 'suspended', 'healthy', 'diagnostic-only', 'terminal'],
+    'actionable recovery priority order broken');
+  assert.equal(state.priorityBadge(state.sortedTurns.value[0]).label, 'Manual resolution required');
   assert.equal(state.priorityBadge(turns[1]).label, 'Terminal',
     'terminal posture was mislabeled Active');
-  assert.equal(state.sortedTurns.value[2].status, 'ACTIVE',
-    'expired lease reclassified the durable status');
+  assert.equal(state.priorityBadge(turns[3]).label, 'Active',
+    'historical OUTCOME_UNKNOWN incorrectly became current Attention');
+  const html = await renderState(state);
+  assert.match(html, /Historical diagnostics/);
+  assert.match(html, /Diagnostic only; not counted as Attention/);
 }
 
 // Failure retention: both independently loaded sections keep last-good data
@@ -265,5 +272,5 @@ async function renderState(state) {
   }
 }
 
-console.log('turn-state-webui: priority, named retention, deterministic cooldown, lifecycle, and read-only contracts pinned');
+console.log('turn-state-webui: actionable priority, diagnostic split, retention, cooldown, lifecycle, and read-only contracts pinned');
 process.exit(0);
