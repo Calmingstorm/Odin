@@ -166,6 +166,134 @@ class TestPersistentFacts:
         assert summary["coverage"]["oldest_covered_at"] is None
 
 
+class TestDurationTruthfulness:
+    async def test_nonpositive_duration_is_unavailable_without_rewriting_facts(
+        self, tmp_path
+    ):
+        rollup = make_rollup(tmp_path)
+        record = turn_record(
+            "duration-unknown",
+            iterations=[{
+                "iteration": 1,
+                "provider": "codex",
+                "model": "sol",
+                "input_token_provenance": "provider_reported",
+                "server_input_tokens": 12,
+                "output_token_provenance": "provider_reported",
+                "server_output_tokens": 3,
+                "duration_ms": 0,
+            }],
+        )
+        record["total_duration_ms"] = 0
+        await rollup.observe_trajectory(record, "turn")
+
+        summary = await rollup.summary("all")
+        assert summary["work"]["recorded_processing_ms"] is None
+        assert summary["work"]["recorded_processing_samples"] == 0
+        assert summary["activity"][0]["duration_ms"] is None
+        assert summary["activity"][0]["duration_samples"] == 0
+        assert summary["serving"][0]["duration_ms"] is None
+        assert summary["serving"][0]["duration_samples"] == 0
+
+        # The append-only evidence remains exactly what the source supplied.
+        with rollup._connect() as conn:
+            assert conn.execute(
+                "SELECT duration_ms FROM turn_facts"
+            ).fetchone()[0] == 0
+            assert conn.execute(
+                "SELECT duration_ms FROM generation_facts"
+            ).fetchone()[0] == 0
+
+    async def test_mixed_recorded_and_unknown_durations_exclude_unknown_samples(
+        self, tmp_path
+    ):
+        rollup = make_rollup(tmp_path)
+        unknown = turn_record(
+            "duration-missing",
+            iterations=[{
+                "iteration": 1,
+                "provider": "codex",
+                "model": "sol",
+                "duration_ms": 0,
+            }],
+        )
+        unknown["total_duration_ms"] = 0
+        measured = turn_record(
+            "duration-recorded",
+            iterations=[{
+                "iteration": 1,
+                "provider": "codex",
+                "model": "sol",
+                "duration_ms": 600,
+            }],
+        )
+        measured["total_duration_ms"] = 900
+        await rollup.observe_trajectory(unknown, "turn")
+        await rollup.observe_trajectory(measured, "turn")
+
+        with rollup._connect() as conn:
+            for raw in (
+                json.dumps({
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "tool_name": "read_file",
+                    "execution_time_ms": 0,
+                    "_hmac": "duration-unknown",
+                }).encode(),
+                json.dumps({
+                    "timestamp": datetime.now(UTC).isoformat(),
+                    "tool_name": "read_file",
+                    "execution_time_ms": 80,
+                    "_hmac": "duration-recorded",
+                }).encode(),
+            ):
+                fact = rollup._tool_fact(raw)
+                assert fact is not None
+                conn.execute("INSERT INTO tool_facts VALUES(?,?,?,?,?,?)", fact)
+            conn.commit()
+
+        summary = await rollup.summary("all")
+        assert summary["work"]["recorded_processing_ms"] == 900
+        assert summary["work"]["recorded_processing_samples"] == 1
+        assert summary["activity"][0]["duration_ms"] == 900
+        assert summary["activity"][0]["duration_samples"] == 1
+        assert summary["serving"][0]["duration_ms"] == 600
+        assert summary["serving"][0]["duration_samples"] == 1
+        assert summary["tools"][0]["duration_ms"] == 80
+        assert summary["tools"][0]["duration_samples"] == 1
+        assert summary["tools"][0]["avg_duration_ms"] == 80
+
+    async def test_other_tool_bucket_averages_only_recorded_samples(self, tmp_path):
+        rollup = make_rollup(tmp_path)
+        with rollup._connect() as conn:
+            for index in range(14):
+                for suffix, duration in (("missing", 0), ("recorded", index + 1)):
+                    conn.execute(
+                        "INSERT INTO tool_facts VALUES(?,?,?,?,?,?)",
+                        (
+                            f"audit:{index}:{suffix}",
+                            float(index + 1),
+                            f"tool_{index}",
+                            "tool_execution",
+                            duration,
+                            0,
+                        ),
+                    )
+            conn.commit()
+
+        summary = await rollup.summary("all")
+        other = summary["tools"][-1]
+        assert other["tool_name"] == "Other"
+        assert other["executions"] == 4
+        assert other["duration_samples"] == 2
+        assert other["duration_ms"] > 0
+        assert other["avg_duration_ms"] == round(
+            other["duration_ms"] / other["duration_samples"]
+        )
+        assert other["avg_duration_ms"] != round(
+            other["duration_ms"] / other["executions"]
+        )
+
+
 class TestObserverIsolation:
     async def test_saver_writes_source_even_when_observer_raises(self, tmp_path):
         class Broken:

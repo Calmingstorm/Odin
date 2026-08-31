@@ -829,8 +829,15 @@ class UsageRollup:
         args: tuple = () if since is None else (since,)
         with closing(self._ro_connect()) as conn:
             conn.execute("BEGIN")
+            # Historical writers used zero for missing timing. Preserve the
+            # append-only facts byte-for-byte and interpret only positive values
+            # as recorded evidence at query time. There is no durable duration
+            # provenance bit, so zero cannot honestly be presented as elapsed
+            # work or included in an average.
             turn = conn.execute(
-                f"""SELECT COUNT(*) turns, COALESCE(SUM(duration_ms),0) duration_ms,
+                f"""SELECT COUNT(*) turns,
+                    SUM(CASE WHEN duration_ms > 0 THEN duration_ms END) duration_ms,
+                    COUNT(CASE WHEN duration_ms > 0 THEN 1 END) duration_samples,
                     COALESCE(SUM(iteration_count),0) iterations,
                     COALESCE(SUM(is_error),0) errors
                     FROM turn_facts{where}""",
@@ -853,7 +860,8 @@ class UsageRollup:
             ).fetchall()
             activity = conn.execute(
                 f"""SELECT surface, outcome, COUNT(*) count,
-                    COALESCE(SUM(duration_ms),0) duration_ms
+                    SUM(CASE WHEN duration_ms > 0 THEN duration_ms END) duration_ms,
+                    COUNT(CASE WHEN duration_ms > 0 THEN 1 END) duration_samples
                     FROM turn_facts{where} GROUP BY surface, outcome
                     ORDER BY count DESC""",
                 args,
@@ -869,7 +877,8 @@ class UsageRollup:
                 f"""SELECT g.provider, g.model, g.effort, COUNT(*) generations,
                     COALESCE(SUM(g.input_tokens),0) input_tokens,
                     COALESCE(SUM(g.output_tokens),0) output_tokens,
-                    COALESCE(SUM(g.duration_ms),0) duration_ms,
+                    SUM(CASE WHEN g.duration_ms > 0 THEN g.duration_ms END) duration_ms,
+                    COUNT(CASE WHEN g.duration_ms > 0 THEN 1 END) duration_samples,
                     COALESCE(SUM(t.is_error),0) terminal_error_turns
                     FROM generation_facts g JOIN turn_facts t ON t.fact_id=g.turn_fact_id
                     {('WHERE g.occurred_at >= ?' if since is not None else '')}
@@ -879,7 +888,8 @@ class UsageRollup:
             ).fetchall()
             tools_all = conn.execute(
                 f"""SELECT tool_name, COUNT(*) executions, COALESCE(SUM(is_error),0) errors,
-                    COALESCE(SUM(duration_ms),0) duration_ms
+                    SUM(CASE WHEN duration_ms > 0 THEN duration_ms END) duration_ms,
+                    COUNT(CASE WHEN duration_ms > 0 THEN 1 END) duration_samples
                     FROM tool_facts{where} GROUP BY tool_name
                     ORDER BY executions DESC""",
                 args,
@@ -902,20 +912,31 @@ class UsageRollup:
         top_tools = [dict(row) for row in tools_all[:12]]
         if len(tools_all) > 12:
             rest = tools_all[12:]
+            duration_samples = sum(int(r["duration_samples"] or 0) for r in rest)
             top_tools.append(
                 {
                     "tool_name": "Other",
                     "executions": sum(int(r["executions"]) for r in rest),
                     "errors": sum(int(r["errors"]) for r in rest),
-                    "duration_ms": sum(int(r["duration_ms"]) for r in rest),
+                    "duration_ms": (
+                        sum(int(r["duration_ms"] or 0) for r in rest)
+                        if duration_samples
+                        else None
+                    ),
+                    "duration_samples": duration_samples,
                 }
             )
         for row in top_tools:
             count = int(row["executions"] or 0)
+            duration_samples = int(row["duration_samples"] or 0)
             row["error_rate_percent"] = (
                 round(int(row["errors"] or 0) / count * 100, 1) if count else 0
             )
-            row["avg_duration_ms"] = round(int(row["duration_ms"] or 0) / count) if count else 0
+            row["avg_duration_ms"] = (
+                round(int(row["duration_ms"]) / duration_samples)
+                if row["duration_ms"] is not None and duration_samples
+                else None
+            )
 
         complete = meta.get("backfill_complete") == "1" and self._source_scan_errors == 0
         return {
@@ -937,7 +958,10 @@ class UsageRollup:
             "work": {
                 "settled_turns": int(turn["turns"] or 0),
                 "accepted_generations": int(generations or 0),
-                "recorded_processing_ms": int(turn["duration_ms"] or 0),
+                "recorded_processing_ms": (
+                    int(turn["duration_ms"]) if turn["duration_ms"] is not None else None
+                ),
+                "recorded_processing_samples": int(turn["duration_samples"] or 0),
                 "iterations": int(turn["iterations"] or 0),
                 "explicit_error_turns": int(turn["errors"] or 0),
                 "input_tokens": self._token_totals(input_rows),

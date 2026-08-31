@@ -3,8 +3,9 @@ import { api } from '../api.js';
 import { fmtNum } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
 
-function fmtDuration(ms) {
-  const value = Number(ms || 0);
+export function fmtDuration(ms) {
+  const value = Number(ms);
+  if (!Number.isFinite(value) || value <= 0) return '—';
   if (value < 1000) return `${Math.round(value)} ms`;
   if (value < 60000) return `${(value / 1000).toFixed(1)} s`;
   if (value < 3600000) return `${(value / 60000).toFixed(1)} min`;
@@ -62,14 +63,14 @@ export default {
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ fmtNum(work.accepted_generations) }}</div><div class="text-xs text-slate-400 mt-1">Accepted generations</div></div>
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ tokenLabel(work.input_tokens) }}</div><div class="text-xs text-slate-400 mt-1">Input processed</div></div>
             <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ tokenLabel(work.output_tokens) }}</div><div class="text-xs text-slate-400 mt-1">Output generated</div></div>
-            <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white">{{ fmtDuration(work.recorded_processing_ms) }}</div><div class="text-xs text-slate-400 mt-1">Recorded processing</div></div>
+            <div class="hm-card stat-card text-center"><div class="text-2xl font-bold text-white" :title="work.recorded_processing_ms == null ? 'Not recorded' : null">{{ fmtDuration(work.recorded_processing_ms) }}</div><div class="text-xs text-slate-400 mt-1">Recorded processing</div></div>
           </div>
           <div class="hm-card mb-5 text-xs text-slate-400" v-if="work.input_tokens">
             Input provenance: {{ fmtNum(work.input_tokens.provider_reported) }} provider-reported ·
             {{ fmtNum(work.input_tokens.estimated) }} current estimates ·
             {{ fmtNum(work.input_tokens.legacy_estimated) }} legacy estimates ·
             {{ work.input_tokens.provider_reported_percent }}% reported coverage.
-            Recorded processing is summed operation time, not wall-clock uptime.
+            Recorded processing is summed operation time, not wall-clock uptime. A dash means timing was not recorded; unavailable samples are excluded.
           </div>
         </section>
 
@@ -93,7 +94,7 @@ export default {
             <div class="table-responsive"><table class="w-full text-sm">
               <thead><tr class="text-left text-slate-400"><th>Surface</th><th>Outcome</th><th class="text-right">Turns</th><th class="text-right">Processing</th></tr></thead>
               <tbody><tr v-for="row in data.activity || []" :key="row.surface + ':' + row.outcome" class="border-t border-slate-700">
-                <td class="py-2">{{ row.surface }}</td><td>{{ row.outcome }}</td><td class="text-right">{{ fmtNum(row.count) }}</td><td class="text-right">{{ fmtDuration(row.duration_ms) }}</td>
+                <td class="py-2">{{ row.surface }}</td><td>{{ row.outcome }}</td><td class="text-right">{{ fmtNum(row.count) }}</td><td class="text-right" :title="row.duration_ms == null ? 'Not recorded' : null">{{ fmtDuration(row.duration_ms) }}</td>
               </tr><tr v-if="!(data.activity || []).length"><td colspan="4" class="py-4 text-center text-slate-500">No activity yet</td></tr></tbody>
             </table></div>
           </section>
@@ -101,10 +102,10 @@ export default {
           <section class="hm-card" aria-labelledby="usage-serve-heading">
             <h3 id="usage-serve-heading" class="text-sm font-semibold text-slate-300 mb-3">What served it</h3>
             <div class="table-responsive"><table class="w-full text-sm">
-              <thead><tr class="text-left text-slate-400"><th>Provider / model</th><th>Effort</th><th class="text-right">Generations</th><th class="text-right">Input</th><th class="text-right">Output</th></tr></thead>
+              <thead><tr class="text-left text-slate-400"><th>Provider / model</th><th>Effort</th><th class="text-right">Generations</th><th class="text-right">Input</th><th class="text-right">Output</th><th class="text-right">Processing</th></tr></thead>
               <tbody><tr v-for="row in data.serving || []" :key="row.provider + ':' + row.model + ':' + row.effort" class="border-t border-slate-700">
-                <td class="py-2"><span class="text-slate-500">{{ row.provider }}</span><br><span class="font-mono text-xs">{{ row.model }}</span></td><td>{{ row.effort || 'n/a' }}</td><td class="text-right">{{ fmtNum(row.generations) }}</td><td class="text-right">{{ fmtNum(row.input_tokens) }}</td><td class="text-right">{{ fmtNum(row.output_tokens) }}</td>
-              </tr><tr v-if="!(data.serving || []).length"><td colspan="5" class="py-4 text-center text-slate-500">No generations yet</td></tr></tbody>
+                <td class="py-2"><span class="text-slate-500">{{ row.provider }}</span><br><span class="font-mono text-xs">{{ row.model }}</span></td><td>{{ row.effort || 'n/a' }}</td><td class="text-right">{{ fmtNum(row.generations) }}</td><td class="text-right">{{ fmtNum(row.input_tokens) }}</td><td class="text-right">{{ fmtNum(row.output_tokens) }}</td><td class="text-right" :title="row.duration_ms == null ? 'Not recorded' : null">{{ fmtDuration(row.duration_ms) }}</td>
+              </tr><tr v-if="!(data.serving || []).length"><td colspan="6" class="py-4 text-center text-slate-500">No generations yet</td></tr></tbody>
             </table></div>
           </section>
         </div>
@@ -114,7 +115,7 @@ export default {
           <div class="table-responsive"><table class="w-full text-sm">
             <thead><tr class="text-left text-slate-400"><th>Tool</th><th class="text-right">Executions</th><th class="text-right">Errors</th><th class="text-right">Error rate</th><th class="text-right">Average time</th></tr></thead>
             <tbody><tr v-for="row in data.tools || []" :key="row.tool_name" class="border-t border-slate-700">
-              <td class="py-2 font-mono text-xs">{{ row.tool_name }}</td><td class="text-right">{{ fmtNum(row.executions) }}</td><td class="text-right">{{ fmtNum(row.errors) }}</td><td class="text-right">{{ row.error_rate_percent }}%</td><td class="text-right">{{ fmtDuration(row.avg_duration_ms) }}</td>
+              <td class="py-2 font-mono text-xs">{{ row.tool_name }}</td><td class="text-right">{{ fmtNum(row.executions) }}</td><td class="text-right">{{ fmtNum(row.errors) }}</td><td class="text-right">{{ row.error_rate_percent }}%</td><td class="text-right" :title="row.avg_duration_ms == null ? 'Not recorded' : null">{{ fmtDuration(row.avg_duration_ms) }}</td>
             </tr><tr v-if="!(data.tools || []).length"><td colspan="5" class="py-4 text-center text-slate-500">No audited tool executions yet</td></tr></tbody>
           </table></div>
         </section>

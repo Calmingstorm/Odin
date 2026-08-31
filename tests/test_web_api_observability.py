@@ -228,6 +228,29 @@ class TestMiscStats:
                 assert (await (await c.get("/api/usage")).json())["c"] == 2
                 assert (await (await c.get("/api/subsystems/status")).json())["s"] == 1
 
+    async def test_usage_duration_unavailability_survives_json_api_boundary(self):
+        bot = _bot()
+        bot.usage_rollup.summary = AsyncMock(return_value={
+            "available": True,
+            "work": {
+                "recorded_processing_ms": None,
+                "recorded_processing_samples": 0,
+            },
+            "activity": [{"duration_ms": None, "duration_samples": 0}],
+            "serving": [{"duration_ms": None, "duration_samples": 0}],
+            "tools": [{"avg_duration_ms": None, "duration_samples": 0}],
+        })
+        async with TestClient(TestServer(_app(obs.register_usage_cost, bot=bot))) as c:
+            response = await c.get("/api/usage?range=all")
+            body = await response.json()
+
+        assert response.status == 200
+        assert body["work"]["recorded_processing_ms"] is None
+        assert body["activity"][0]["duration_ms"] is None
+        assert body["serving"][0]["duration_ms"] is None
+        assert body["tools"][0]["avg_duration_ms"] is None
+        bot.usage_rollup.summary.assert_awaited_once_with("all")
+
     async def test_subsystem_status_exposes_server_computed_failure_age(self):
         from src.health.subsystem_guard import SubsystemGuard
 
