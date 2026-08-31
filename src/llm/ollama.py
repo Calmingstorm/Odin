@@ -298,11 +298,19 @@ class OllamaClient(LLMProvider):
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
 
-        input_tokens = data.get("prompt_eval_count", 0) or 0
-        output_tokens = data.get("eval_count", 0) or 0
-        if not input_tokens:
+        raw_input_tokens = data.get("prompt_eval_count")
+        raw_output_tokens = data.get("eval_count")
+        server_input_tokens = (
+            raw_input_tokens if type(raw_input_tokens) is int and raw_input_tokens >= 0 else None
+        )
+        server_output_tokens = (
+            raw_output_tokens if type(raw_output_tokens) is int and raw_output_tokens >= 0 else None
+        )
+        input_tokens = server_input_tokens
+        output_tokens = server_output_tokens
+        if input_tokens is None:
             input_tokens = estimate_tokens(text) * 3
-        if not output_tokens:
+        if output_tokens is None:
             output_tokens = estimate_tokens(text)
 
         return LLMResponse(
@@ -311,6 +319,14 @@ class OllamaClient(LLMProvider):
             stop_reason=stop_reason,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
+            server_input_tokens=server_input_tokens,
+            server_output_tokens=server_output_tokens,
+            input_token_provenance=(
+                "provider_reported" if server_input_tokens is not None else "estimated_legacy_4char"
+            ),
+            output_token_provenance=(
+                "provider_reported" if server_output_tokens is not None else "estimated_text_v1"
+            ),
         )
 
     async def health_check(self) -> dict:

@@ -49,6 +49,15 @@ class LLMResponse:
     # estimate above — the observer refuses estimates; ``input_tokens`` keeps
     # its historical estimate meaning untouched.
     server_input_tokens: int | None = None
+    # Server-authoritative accepted output, when the provider reports it.
+    # Kept separate from ``output_tokens``, whose historical meaning includes
+    # estimates on providers that do not echo usage.
+    server_output_tokens: int | None = None
+    # Explicit provenance for the normalized estimate fields.  Empty keeps old
+    # provider/test construction source-compatible and resolves to unknown.
+    estimated_input_tokens: int | None = None
+    input_token_provenance: str = ""
+    output_token_provenance: str = ""
     # Opaque installation-local key of the account that served THIS attempt
     # (HMAC over the stable non-secret account id — never a raw identifier).
     # None when no stable account identity or key material exists; such

@@ -344,6 +344,7 @@ class AgentInfo:
     # persisted, never config — dies with the agent.
     context_char_ceiling: int | None = None
     context_recoveries: list[dict] = field(default_factory=list)
+    _accepted_usage_facts: dict = field(default_factory=dict, repr=False)
     # Snapshotted at spawn — a live config change never shortens (or extends)
     # an already-running agent's deadline or per-call budget.
     iteration_timeout: float = ITERATION_CB_TIMEOUT
@@ -1279,6 +1280,9 @@ async def _run_agent(
             agent.last_provider = response.get("provider", "") or ""
             agent.last_model = response.get("model", "") or ""
             agent.last_reasoning_effort = response.get("reasoning_effort")
+            usage_facts = agent._accepted_usage_facts
+            agent._accepted_usage_facts = {}
+            usage_response = {**response, **usage_facts}
 
             text = response.get("text", "")
             tool_calls = response.get("tool_calls", [])
@@ -1295,6 +1299,13 @@ async def _run_agent(
                     iteration=iteration + 1,
                     llm_text=text,
                     duration_ms=int((time.time() - iter_start) * 1000),
+                    input_tokens=usage_response.get("input_tokens", 0) or 0,
+                    output_tokens=usage_response.get("output_tokens", 0) or 0,
+                    server_input_tokens=usage_response.get("server_input_tokens"),
+                    server_output_tokens=usage_response.get("server_output_tokens"),
+                    estimated_input_tokens=usage_response.get("estimated_input_tokens"),
+                    input_token_provenance=usage_response.get("input_token_provenance", ""),
+                    output_token_provenance=usage_response.get("output_token_provenance", ""),
                     provider=response.get("provider", ""),
                     model=response.get("model", ""),
                     reasoning_effort=response.get("reasoning_effort"),
@@ -1333,6 +1344,13 @@ async def _run_agent(
                         tool_results=iter_tool_results,
                         llm_text=text,
                         duration_ms=int((time.time() - iter_start) * 1000),
+                        input_tokens=usage_response.get("input_tokens", 0) or 0,
+                        output_tokens=usage_response.get("output_tokens", 0) or 0,
+                        server_input_tokens=usage_response.get("server_input_tokens"),
+                        server_output_tokens=usage_response.get("server_output_tokens"),
+                        estimated_input_tokens=usage_response.get("estimated_input_tokens"),
+                        input_token_provenance=usage_response.get("input_token_provenance", ""),
+                        output_token_provenance=usage_response.get("output_token_provenance", ""),
                         provider=response.get("provider", ""),
                         model=response.get("model", ""),
                         reasoning_effort=response.get("reasoning_effort"),
@@ -1403,6 +1421,13 @@ async def _run_agent(
                 tool_results=iter_tool_results,
                 llm_text=text,
                 duration_ms=int((time.time() - iter_start) * 1000),
+                input_tokens=usage_response.get("input_tokens", 0) or 0,
+                output_tokens=usage_response.get("output_tokens", 0) or 0,
+                server_input_tokens=usage_response.get("server_input_tokens"),
+                server_output_tokens=usage_response.get("server_output_tokens"),
+                estimated_input_tokens=usage_response.get("estimated_input_tokens"),
+                input_token_provenance=usage_response.get("input_token_provenance", ""),
+                output_token_provenance=usage_response.get("output_token_provenance", ""),
                 provider=response.get("provider", ""),
                 model=response.get("model", ""),
                 reasoning_effort=response.get("reasoning_effort"),
@@ -1739,6 +1764,26 @@ async def _call_llm_with_recovery(
                 ),
                 timeout=attempt_budget,
             )
+            try:
+                from ..usage.provenance import accepted_usage_fields
+
+                usage = accepted_usage_fields(
+                    response,
+                    chars_sent=attempt_chars,
+                    images_sent=attempt_images,
+                    snapshot=_plan_snapshot,
+                )
+                if isinstance(response, dict) and any(
+                    value is not None
+                    for key, value in usage.items()
+                    if key.endswith("_tokens")
+                ):
+                    # Private metadata preserves the callback's public response
+                    # shape. The manager consumes it when persisting the
+                    # trajectory; callers and tests never see synthetic keys.
+                    agent._accepted_usage_facts = usage
+            except Exception:
+                log.exception("agent usage capture failed (non-fatal)")
             if density_recorder is not None:
                 try:
                     density_recorder(response, attempt_chars, attempt_images)

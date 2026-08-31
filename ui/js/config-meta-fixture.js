@@ -160,9 +160,9 @@ const FIELD_OVERRIDES = {
     activation_policy: 'Explicitly apply the configured limit after reviewing worst-case tree breadth.',
   },
   'usage.directory': {
-    apply_mode: 'activation_required',
-    description: 'Target for durable usage history; currently no durable store is active.',
-    activation_policy: 'Validate the path and explicitly enable durable usage history.',
+    apply_mode: 'restart',
+    description: 'Directory containing the persistent Usage & Activity rollup.',
+    restart_reason: 'The SQLite store and background indexer bind this path at startup.',
   },
   'slack.forward_alerts': {
     apply_mode: 'activation_required',

@@ -1712,6 +1712,14 @@ class ToolLoopRunner:
                             cancel_event=st._cancel,
                             on_wait=_on_wait,
                         )
+                        from ..usage.provenance import apply_accepted_usage
+
+                        apply_accepted_usage(
+                            llm_resp,
+                            chars_sent=_attempt_chars,
+                            images_sent=_attempt_images,
+                            snapshot=_snapshot,
+                        )
                         self._record_density(
                             st, llm_resp, _attempt_chars, _attempt_images, serving_identity
                         )
@@ -1871,6 +1879,7 @@ class ToolLoopRunner:
             final_response=text,
             tools_used=st.tools_used_in_loop,
             trace=st.trace,
+            observe_usage=False,
         )
         self._clear_active(st)
         if self._on_turn_suspended is not None and st.durability.lease is not None:
@@ -1923,6 +1932,11 @@ class ToolLoopRunner:
                 llm_text=llm_resp.text or "",
                 input_tokens=llm_resp.input_tokens,
                 output_tokens=llm_resp.output_tokens,
+                server_input_tokens=getattr(llm_resp, "server_input_tokens", None),
+                server_output_tokens=getattr(llm_resp, "server_output_tokens", None),
+                estimated_input_tokens=getattr(llm_resp, "estimated_input_tokens", None),
+                input_token_provenance=getattr(llm_resp, "input_token_provenance", "") or "",
+                output_token_provenance=getattr(llm_resp, "output_token_provenance", "") or "",
                 # Execution provenance from the response — the only source
                 # that survives gateway routing, retries, and live reloads.
                 # Missing provenance stays empty (unknown), never guessed.
@@ -3126,6 +3140,14 @@ class ToolLoopRunner:
                     )
                     if cancel_event is not None and cancel_event.is_set():
                         raise asyncio.CancelledError
+                    from ..usage.provenance import apply_accepted_usage
+
+                    apply_accepted_usage(
+                        response,
+                        chars_sent=attempt_chars,
+                        images_sent=attempt_images,
+                        snapshot=_snapshot,
+                    )
                     self._record_density(
                         st, response, attempt_chars, attempt_images, serving_identity
                     )
@@ -3242,6 +3264,15 @@ class ToolLoopRunner:
                     llm_text=response.text or "",
                     input_tokens=getattr(response, "input_tokens", 0) or 0,
                     output_tokens=getattr(response, "output_tokens", 0) or 0,
+                    server_input_tokens=getattr(response, "server_input_tokens", None),
+                    server_output_tokens=getattr(response, "server_output_tokens", None),
+                    estimated_input_tokens=getattr(response, "estimated_input_tokens", None),
+                    input_token_provenance=(
+                        getattr(response, "input_token_provenance", "") or ""
+                    ),
+                    output_token_provenance=(
+                        getattr(response, "output_token_provenance", "") or ""
+                    ),
                     # Execution provenance from the response — the only source
                     # that survives gateway routing, retries, and live reloads.
                     # Missing provenance stays empty (unknown), never guessed.

@@ -151,3 +151,49 @@ class TestFindByLoopId:
         ) + "\n")
         assert len(await saver.find_by_loop_id("a", limit=2)) == 2
         assert await saver.find_by_loop_id("") == []
+
+
+@pytest.mark.asyncio
+async def test_usage_settled_marker_distinguishes_terminal_from_checkpoint(tmp_path):
+    import json
+
+    from src.trajectories.saver import TrajectorySaver, TrajectoryTurn
+
+    saver = TrajectorySaver(str(tmp_path))
+    await saver.save(TrajectoryTurn(message_id="settled"))
+    await saver.save(TrajectoryTurn(message_id="suspended"), observe_usage=False)
+    rows = [json.loads(line) for line in next(tmp_path.glob("*.jsonl")).read_text().splitlines()]
+    assert rows[0]["usage_settled"] is True
+    assert rows[1]["usage_settled"] is False
+
+
+@pytest.mark.asyncio
+async def test_terminal_save_notifies_usage_observer_after_persistence(tmp_path):
+    from src.trajectories.saver import TrajectorySaver, TrajectoryTurn
+
+    seen = []
+
+    class Observer:
+        def schedule_trajectory(self, record, kind):
+            seen.append((record, kind, list(tmp_path.glob("*.jsonl"))))
+
+    saver = TrajectorySaver(str(tmp_path), usage_observer=Observer())
+    await saver.save(TrajectoryTurn(message_id="observed"))
+    assert seen[0][0]["message_id"] == "observed"
+    assert seen[0][0]["usage_settled"] is True
+    assert seen[0][1] == "turn"
+    assert seen[0][2]
+
+
+@pytest.mark.asyncio
+async def test_usage_observer_failure_never_fails_turn_save(tmp_path):
+    from src.trajectories.saver import TrajectorySaver, TrajectoryTurn
+
+    class Observer:
+        def schedule_trajectory(self, record, kind):
+            raise RuntimeError("observer down")
+
+    saver = TrajectorySaver(str(tmp_path))
+    saver.set_usage_observer(Observer())
+    path = await saver.save(TrajectoryTurn(message_id="safe"))
+    assert path.exists()

@@ -107,6 +107,7 @@ class OdinBot(commands.Bot):
         self.loop_agent_bridge = services.loop_agent_bridge
         self.loop_reflection_gate = services.loop_reflection_gate
         self.cost_tracker = services.cost_tracker
+        self.usage_rollup = services.usage_rollup
         self.subsystem_guard = services.subsystem_guard
         self.diff_tracker = services.diff_tracker
         self.context_compressor = services.context_compressor
@@ -262,6 +263,13 @@ class OdinBot(commands.Bot):
                 log.info("Loaded extension %s", ext)
             except commands.ExtensionError:
                 log.exception("Failed to load extension %s", ext)
+
+        # Usage backfill is supervised and bounded; start() returns before any
+        # trajectory or audit source scan, so upgrades never delay readiness.
+        try:
+            await self.usage_rollup.start()
+        except Exception:
+            log.exception("Usage backfill startup failed (non-fatal)")
 
         # MCP: adopt desired state and launch supervised reconciliation.
         # Network/process probes remain in background supervisors; optional

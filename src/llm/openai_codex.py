@@ -249,18 +249,22 @@ class CodexStreamError(RuntimeError):
         )
 
 
+def _usage_token_from_field(usage: object, field: str) -> int | None:
+    if not isinstance(usage, dict):
+        return None
+    value = usage.get(field)
+    if type(value) is not int or value < 0:
+        return None
+    return value
+
+
 def _server_input_tokens_from_usage(usage: object) -> int | None:
     """Strictly parse the server's accepted-input count from a usage object.
 
     Absent, malformed, boolean, negative, or non-integer ⇒ ``None``. The
     observer never substitutes the client estimate for this value.
     """
-    if not isinstance(usage, dict):
-        return None
-    value = usage.get("input_tokens")
-    if type(value) is not int or value < 0:
-        return None
-    return value
+    return _usage_token_from_field(usage, "input_tokens")
 
 
 def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
@@ -758,6 +762,9 @@ class CodexChatClient:
             output_chars += len(tc.name) + len(json.dumps(tc.input))
         result.input_tokens = input_tokens
         result.output_tokens = estimate_tokens("x" * output_chars) if output_chars else 0
+        result.estimated_input_tokens = input_tokens
+        result.input_token_provenance = "estimated_legacy_4char"
+        result.output_token_provenance = "estimated_text_v1"
         result.provenance_provider = "codex"
         result.provenance_model = resolved_model
         result.provenance_reasoning_effort = effort or None
@@ -1056,6 +1063,7 @@ class CodexChatClient:
         text_parts: list[str] = []
         tool_calls: list[ToolCall] = []
         server_input_tokens: int | None = None
+        server_output_tokens: int | None = None
         incomplete = False
 
         # Track in-progress function calls by output_index
@@ -1182,9 +1190,9 @@ class CodexChatClient:
                 # Server-authoritative accepted input from the usage echo —
                 # strictly parsed; the client estimate is a separate field
                 # and is never substituted for this one.
-                server_input_tokens = _server_input_tokens_from_usage(
-                    response_obj.get("usage")
-                )
+                usage = response_obj.get("usage")
+                server_input_tokens = _server_input_tokens_from_usage(usage)
+                server_output_tokens = _usage_token_from_field(usage, "output_tokens")
                 output = response_obj.get("output", [])
                 for item in output:
                     item_type = item.get("type", "")
@@ -1228,6 +1236,7 @@ class CodexChatClient:
             tool_calls=tool_calls,
             stop_reason=stop_reason,
             server_input_tokens=server_input_tokens,
+            server_output_tokens=server_output_tokens,
         )
 
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> str:

@@ -211,6 +211,7 @@ class TurnRecorder:
         final_response: str = "",
         tools_used: list[str] | None = None,
         trace=None,
+        observe_usage: bool = True,
     ) -> None:
         """Persist the turn trajectory as JSONL. Non-fatal on error."""
         if self._trajectory_saver is None:
@@ -231,7 +232,10 @@ class TurnRecorder:
             # Aggregate token counts from iterations
             trajectory.total_input_tokens = sum(it.input_tokens for it in trajectory.iterations)
             trajectory.total_output_tokens = sum(it.output_tokens for it in trajectory.iterations)
-            await self._trajectory_saver.save(trajectory)
+            if observe_usage:
+                await self._trajectory_saver.save(trajectory)
+            else:
+                await self._trajectory_saver.save(trajectory, observe_usage=False)
         except Exception:
             log.exception("TrajectorySaver.save failed (non-fatal)")
 

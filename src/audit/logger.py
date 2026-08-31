@@ -192,6 +192,14 @@ class AuditLogger:
                 opened.append((handle, stat))
         return opened
 
+    async def open_read_snapshot(self) -> list[tuple[BinaryIO, os.stat_result]]:
+        """Return inode-deduplicated read descriptors for retained generations.
+
+        Callers own and must close the descriptors.  This is a read-only
+        observer seam; it never signs, appends, or mutates the HMAC chain.
+        """
+        return await self._open_read_snapshot()
+
     async def _collect_matches(self, predicate: Callable[[dict], bool], limit: int) -> list[dict]:
         """Return up to *limit* matching entries, most-recent first.
 

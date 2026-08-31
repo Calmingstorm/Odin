@@ -151,3 +151,14 @@ class TestAuxiliaryFlatHandle:
         sentinel = object()
         bot.llm_gateway.auxiliary_llm_client = sentinel
         assert bot.auxiliary_llm_client is sentinel
+
+
+def test_usage_rollup_wired_to_real_savers_and_paths(tmp_path):
+    """Production composition owns one rollup and both post-save observers."""
+    bot = make_bot(fake_llm=FakeLLM([]))
+    rollup = bot.usage_rollup
+    assert bot.trajectory_saver.usage_observer is rollup
+    assert bot.agent_trajectory_saver.usage_observer is rollup
+    assert rollup.trajectory_directory == bot.trajectory_saver.directory
+    assert rollup.agent_trajectory_directory == bot.agent_trajectory_saver.directory
+    assert rollup.audit is bot.audit

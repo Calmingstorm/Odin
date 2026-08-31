@@ -42,6 +42,7 @@ class TestChatIterationProvenance:
         assert it.provider == "codex"
         assert it.model == "gpt-5.6-sol"
         assert it.reasoning_effort == "xhigh"
+        assert it.server_input_tokens is None
 
     async def test_missing_provenance_stays_unknown(self):
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
@@ -117,3 +118,52 @@ def test_chat_iteration_stamps_frozen_context_budget_snapshot():
     assert row.context_density_milli == 609
     assert row.context_density_source == "calibrated"
     assert row.context_primary_chars == st._generation_budget_snapshot.primary_chars
+
+
+async def test_chat_iteration_persists_accepted_usage_provenance():
+    runner = ToolLoopRunner.__new__(ToolLoopRunner)
+    st = _chat_st()
+    resp = LLMResponse(
+        text="hi",
+        input_tokens=999,
+        output_tokens=8,
+        server_input_tokens=321,
+        server_output_tokens=7,
+        estimated_input_tokens=456,
+        input_token_provenance="provider_reported",
+        output_token_provenance="provider_reported",
+    )
+    await runner._check_stuck_and_record(st, resp)
+    row = st._trajectory.iterations[-1]
+    assert row.server_input_tokens == 321
+    assert row.server_output_tokens == 7
+    assert row.estimated_input_tokens == 456
+    assert row.input_token_provenance == "provider_reported"
+    assert row.output_token_provenance == "provider_reported"
+
+
+def test_loop_iteration_persists_accepted_usage_provenance():
+    runner = ToolLoopRunner.__new__(ToolLoopRunner)
+    st = SimpleNamespace(_trajectory=_turn(), final_text="", completed_naturally=False)
+    resp = LLMResponse(
+        text="done",
+        input_tokens=999,
+        output_tokens=8,
+        server_input_tokens=321,
+        estimated_input_tokens=456,
+        input_token_provenance="provider_reported",
+        output_token_provenance="estimated_text_v1",
+    )
+    runner._record_loop_iteration(st, resp, 1)
+    row = st._trajectory.iterations[-1]
+    assert row.server_input_tokens == 321
+    assert row.estimated_input_tokens == 456
+    assert row.input_token_provenance == "provider_reported"
+    assert row.output_token_provenance == "estimated_text_v1"
+
+
+def test_usage_capture_failure_is_declared_nonfatal_at_both_generation_sites():
+    import inspect
+
+    source = inspect.getsource(ToolLoopRunner)
+    assert source.count('apply_accepted_usage(') == 2

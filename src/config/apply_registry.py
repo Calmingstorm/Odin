@@ -508,9 +508,9 @@ FIELDS: dict[str, FieldSpec] = {
         ),
     ),
     "usage.directory": FieldSpec(
-        apply_mode="activation_required",
-        description="Target for durable usage history; no durable store is active today.",
-        activation_policy="Validate the path and explicitly enable durable usage history.",
+        apply_mode="restart",
+        description="Directory containing the persistent Usage & Activity rollup.",
+        restart_reason="The SQLite store and background indexer bind this path at startup.",
     ),
     "slack.forward_alerts": FieldSpec(
         apply_mode="activation_required",
