@@ -1085,3 +1085,22 @@ def test_blob_load_missing_and_digest_mismatch_fail_closed(store):
     (store._blob_dir / claimed).write_bytes(b"different bytes")
     with pytest.raises(TurnStateUnavailableError, match="blob digest mismatch"):
         store.load_blob_sync("blob:" + claimed)
+
+
+def test_effect_aware_unknown_settle_stale_owner_is_fenced(store):
+    import dataclasses
+
+    lease = _admit(store)
+    store.record_intents_sync(
+        lease, 0, [{"tool_call_id": "c", "tool_name": "run_command", "tool_input": {}}]
+    )
+    stale = dataclasses.replace(lease)
+    store.checkpoint_sync(lease, {"revision": 1}, progressed=True)
+    with pytest.raises(StaleTurnError):
+        store.settle_op_sync(
+            stale, 0, "c", state=OpState.OUTCOME_UNKNOWN,
+            result_text="interrupted",
+        )
+    assert store._conn.execute(
+        "SELECT state FROM operations WHERE tool_call_id='c'"
+    ).fetchone()[0] == OpState.PREPARED

@@ -39,7 +39,10 @@ def test_invalid_handler_timeout_preserves_outer_fallback():
 
 
 def test_truthy_non_mapping_input_preserves_outer_fallback():
-    for malformed in (["not", "an", "object"], "wrong-shape"):
+    for malformed in (
+        ["not", "an", "object"], "wrong-shape",
+        {"timeout": float("inf")}, {"timeout": -1},
+    ):
         assert wait_for_agents_handler_deadline(malformed) is None
         assert wait_for_agents_wrapper_timeout(
             "wait_for_agents", malformed, 91, grace_seconds=15
