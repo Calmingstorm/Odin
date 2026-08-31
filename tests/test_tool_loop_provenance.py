@@ -195,6 +195,27 @@ class TestWaitForAgentsWrapperGrace:
         assert result == {"content": "snapshot"}
         assert observed["timeout"] == 57
 
+    async def test_chat_wrapper_preserves_truthy_non_mapping_input_path(self, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._run_one_tool = AsyncMock(return_value={"content": "input error"})
+        block = SimpleNamespace(name="wait_for_agents", input=["bad"], id="call")
+        observed = {}
+
+        async def capture(awaitable, timeout):
+            observed["timeout"] = timeout
+            return await awaitable
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        result = await runner._run_one_tool_with_timeout(SimpleNamespace(), block, 91)
+        assert result == {"content": "input error"}
+        assert observed["timeout"] == 91
+
     async def test_loop_wrapper_uses_handler_deadline_plus_native_grace(self, monkeypatch):
         import asyncio
         from types import SimpleNamespace

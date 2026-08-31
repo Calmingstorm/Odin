@@ -2087,3 +2087,46 @@ class TestNestedWaitForAgentsGrace:
         )
         assert agent.state == AgentState.COMPLETED
         assert 72 in observed
+
+
+class TestNestedMalformedWaitInput:
+    async def test_truthy_non_mapping_input_reaches_callback_under_fallback(self, monkeypatch):
+        agent = AgentInfo(
+            id="wait-malformed", label="test", goal="test",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        agent.messages = [{"role": "user", "content": "test"}]
+        calls = 0
+
+        async def iter_cb(msgs, sys, tools, generation_state=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [{"name": "wait_for_agents", "input": ["bad"]}],
+                    "stop_reason": "tool_use",
+                }
+            return {"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
+
+        seen = []
+
+        async def tool_cb(name, inp):
+            seen.append(inp)
+            return "input error"
+
+        observed = []
+        real_wait_for = asyncio.wait_for
+
+        async def capture(awaitable, timeout):
+            observed.append(timeout)
+            return await real_wait_for(awaitable, timeout=timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        await _run_agent(
+            agent, "sys", [], iter_cb, tool_cb,
+            tool_timeouts={"wait_for_agents": 91},
+        )
+        assert agent.state == AgentState.COMPLETED
+        assert seen == [["bad"]]
+        assert 91 in observed
