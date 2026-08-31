@@ -78,12 +78,14 @@ export default {
           No settled usage history in this range.
         </div>
 
-        <section v-if="(data.activity_over_time || []).length" class="hm-card mb-4" aria-labelledby="usage-time-heading">
+        <section v-if="(data.activity_over_time || []).length" class="hm-card min-w-0 mb-4" aria-labelledby="usage-time-heading">
           <h3 id="usage-time-heading" class="text-sm font-semibold text-slate-300 mb-3">Activity over time</h3>
-          <div class="flex items-end gap-1 h-28" role="img" aria-label="Daily settled turns by surface">
-            <div v-for="row in data.activity_over_time" :key="row.bucket + ':' + row.surface"
-                 class="flex-1 min-w-2 bg-amber-700/70 rounded-t" :style="activityBar(row.count)"
-                 :title="row.bucket + ' · ' + row.surface + ': ' + row.count"></div>
+          <div class="usage-activity-scroll w-full min-w-0 max-w-full overflow-x-auto">
+            <div class="usage-activity-track flex items-end gap-1 h-28 min-w-full" :style="activityTrackStyle" role="img" aria-label="Daily settled turns by surface">
+              <div v-for="row in data.activity_over_time" :key="row.bucket + ':' + row.surface"
+                   class="flex-1 min-w-0 bg-amber-700/70 rounded-t" :style="activityBar(row.count)"
+                   :title="row.bucket + ' · ' + row.surface + ': ' + row.count"></div>
+            </div>
           </div>
           <p class="text-xs text-slate-500 mt-2">Daily settled work units by recorded surface. Hover a bar for its value.</p>
         </section>
@@ -150,6 +152,13 @@ export default {
     ];
     const work = computed(() => data.value.work || {});
     const activityMax = computed(() => Math.max(1, ...(data.value.activity_over_time || []).map((row) => Number(row.count || 0))));
+    // Keep each daily/surface value legible without letting hundreds of bars
+    // establish the page's intrinsic width. A five-pixel slot leaves one
+    // pixel for the bar beside the existing four-pixel gap; the track, not
+    // every flex item, owns that minimum and scrolls inside its card.
+    const activityTrackStyle = computed(() => ({
+      minWidth: `max(100%, ${(data.value.activity_over_time || []).length * 5}px)`,
+    }));
     const activityBar = (count) => ({ height: `${Math.max(4, Math.round(Number(count || 0) / activityMax.value * 100))}%` });
     const isStale = computed(() => hasData.value && clock.value - receivedAt.value > 30000);
 
@@ -189,6 +198,6 @@ export default {
       clockTimer = null;
     }
     onMounted(arm); onActivated(arm); onDeactivated(disarm); onUnmounted(disarm);
-    return { data, work, loading, error, hasData, range, ranges, isStale, fmtNum, fmtDuration, tokenLabel, activityBar, selectRange, retry };
+    return { data, work, loading, error, hasData, range, ranges, isStale, fmtNum, fmtDuration, tokenLabel, activityTrackStyle, activityBar, selectRange, retry };
   },
 };
