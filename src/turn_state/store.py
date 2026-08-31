@@ -50,6 +50,11 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..odin_log import get_logger
+from ..tools.effect_classifier import (
+    ToolEffectClass,
+    effect_free_observation_tools,
+    normalize_effect_class,
+)
 
 log = get_logger("turn_state")
 
@@ -187,6 +192,7 @@ CREATE TABLE IF NOT EXISTS operations (
     tool_call_id TEXT NOT NULL,
     state TEXT NOT NULL,
     tool_name TEXT NOT NULL,
+    effect_class TEXT NOT NULL DEFAULT 'EXTERNAL_EFFECT_CAPABLE',
     iteration INTEGER,
     effect_fingerprint TEXT,
     result TEXT,
@@ -219,6 +225,7 @@ class TurnStateStore:
         self._blob_dir = Path(blob_dir) if blob_dir else Path(self.db_path).parent / "blobs"
         self._write_lock = threading.Lock()
         self._conn: sqlite3.Connection | None = None
+        self.legacy_effect_free_reconciled = 0
         try:
             # Checkpoints carry the model transcript (user content, tool
             # arguments) — secret-adjacent material. Everything here is
@@ -232,8 +239,13 @@ class TurnStateStore:
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("PRAGMA busy_timeout=30000")
             conn.executescript(_DDL)
-            self._migrate_schema_sync(conn)
+            self.legacy_effect_free_reconciled = self._migrate_schema_sync(conn)
             conn.commit()
+            log.info(
+                "Turn-state legacy migration reconciled %d effect-free "
+                "OUTCOME_UNKNOWN operation(s)",
+                self.legacy_effect_free_reconciled,
+            )
             self._restrict_db_modes()
             self._conn = conn
             swept = self._boot_sweep_sync()
@@ -251,16 +263,20 @@ class TurnStateStore:
             self._conn = None
 
     @staticmethod
-    def _migrate_schema_sync(conn: sqlite3.Connection) -> None:
-        """Add integrity metadata to stores created before round 6.
+    def _migrate_schema_sync(conn: sqlite3.Connection) -> int:
+        """Bring older stores forward and reconcile provably effect-free waits.
 
-        Existing payloads are checksummed once at the migration boundary.
-        Every subsequent payload write updates payload + digest in the same
-        fenced SQL statement, so out-of-band same-type mutation cannot re-arm
-        consumed guards or inflate retry/iteration caps undetected.
+        The reconciliation is intentionally rerun on every open rather than
+        hidden behind a one-shot version bit.  A crash after adding the column
+        but before updating legacy rows therefore resumes safely.  Only tool
+        names in the explicit code-owned observation classifier qualify;
+        unknown tools and command timeouts remain external-effect-capable.
+
+        Returns the real number of legacy OUTCOME_UNKNOWN rows reconciled by
+        this open.  Rows are retained as forensic history.
         """
-        columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
-        if "payload_digest" not in columns:
+        turn_columns = {row[1] for row in conn.execute("PRAGMA table_info(turns)")}
+        if "payload_digest" not in turn_columns:
             conn.execute("ALTER TABLE turns ADD COLUMN payload_digest TEXT")
         rows = conn.execute(
             "SELECT source, channel_id, message_id, payload FROM turns "
@@ -278,6 +294,42 @@ class TurnStateStore:
                     payload_text,
                 ],
             )
+
+        op_columns = {row[1] for row in conn.execute("PRAGMA table_info(operations)")}
+        if "effect_class" not in op_columns:
+            conn.execute(
+                "ALTER TABLE operations ADD COLUMN effect_class TEXT NOT NULL "
+                "DEFAULT 'EXTERNAL_EFFECT_CAPABLE'"
+            )
+
+        names = sorted(effect_free_observation_tools())
+        if not names:
+            return 0
+        marks = ",".join("?" for _ in names)
+        now = time.time()
+        reconciled = conn.execute(
+            f"UPDATE operations SET effect_class=?, state=?, updated_at=? "
+            f"WHERE tool_name IN ({marks}) AND state=?",
+            [
+                ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                OpState.RECONCILED_NOT_APPLIED,
+                now,
+                *names,
+                OpState.OUTCOME_UNKNOWN,
+            ],
+        ).rowcount
+        # Persist the class on other historical rows too, so a PREPARED/RUNNING
+        # row swept later uses the same effect-aware settlement as new traffic.
+        conn.execute(
+            f"UPDATE operations SET effect_class=? "
+            f"WHERE tool_name IN ({marks}) AND effect_class<>?",
+            [
+                ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                *names,
+                ToolEffectClass.EFFECT_FREE_OBSERVATION,
+            ],
+        )
+        return reconciled
 
     def _restrict_db_modes(self) -> None:
         """0600 on the database and its WAL/SHM sidecars (best-effort — the
@@ -576,13 +628,14 @@ class TurnStateStore:
                     for intent in intents:
                         cur = conn.execute(
                             "INSERT INTO operations "
-                            "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,? "
+                            "SELECT ?,?,?,?,?,?,?,?,?,?,?,?,?,? "
                             f"WHERE {self._TURN_FENCE}",
                             [lease.key.source, lease.key.channel_id,
                              lease.key.message_id, lease.generation,
                              generation_seq, str(intent["tool_call_id"]),
                              OpState.PREPARED,
-                             str(intent.get("tool_name") or "unknown"), iteration,
+                             str(intent.get("tool_name") or "unknown"),
+                             normalize_effect_class(intent.get("effect_class")), iteration,
                              effect_fingerprint(
                                  str(intent.get("tool_name") or ""),
                                  intent.get("tool_input") or {},
@@ -629,10 +682,15 @@ class TurnStateStore:
         # rule: ambiguous outcomes stop, never rerun).
         if state not in (OpState.APPLIED, OpState.DEFINITELY_FAILED, OpState.OUTCOME_UNKNOWN):
             raise ValueError(f"settle_op_sync: invalid terminal state {state}")
-        self._set_op_state(
-            lease, generation_seq, tool_call_id, state, result_text,
-            legal_sources=(OpState.PREPARED, OpState.RUNNING),
-        )
+        if state == OpState.OUTCOME_UNKNOWN:
+            self._settle_uncertain_op(
+                lease, generation_seq, tool_call_id, result_text=result_text
+            )
+        else:
+            self._set_op_state(
+                lease, generation_seq, tool_call_id, state, result_text,
+                legal_sources=(OpState.PREPARED, OpState.RUNNING),
+            )
 
     def settle_interrupted_sync(
         self,
@@ -648,12 +706,60 @@ class TurnStateStore:
         boundary: it never downgrades an already-settled row, and a missing
         row (e.g. a parse-error call that had no intent) is tolerated.
         """
-        self._set_op_state(
-            lease, generation_seq, tool_call_id, OpState.OUTCOME_UNKNOWN,
-            result_text,
-            legal_sources=(OpState.PREPARED, OpState.RUNNING),
+        self._settle_uncertain_op(
+            lease,
+            generation_seq,
+            tool_call_id,
+            result_text=result_text,
             tolerate_missing=True,
         )
+
+    def _settle_uncertain_op(
+        self,
+        lease: TurnLease,
+        generation_seq: int,
+        tool_call_id: str,
+        *,
+        result_text: str | None,
+        tolerate_missing: bool = False,
+    ) -> None:
+        """Settle an interrupted execution according to its persisted class.
+
+        Effect-free observation is a definite non-effect failure; every other
+        or unknown class remains OUTCOME_UNKNOWN.  The persisted intent, not a
+        live registry lookup or risk level, is authoritative at this boundary.
+        """
+        conn = self._require()
+        where, params = self._op_where(lease)
+        try:
+            with self._write_lock:
+                cur = conn.execute(
+                    f"UPDATE operations SET state=CASE WHEN effect_class=? THEN ? "
+                    f"ELSE ? END, result=?, updated_at=? WHERE {where} "
+                    f"AND generation_seq=? AND tool_call_id=? "
+                    f"AND state IN (?, ?) AND {self._TURN_FENCE}",
+                    [
+                        ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                        OpState.DEFINITELY_FAILED,
+                        OpState.OUTCOME_UNKNOWN,
+                        result_text,
+                        time.time(),
+                        *params,
+                        generation_seq,
+                        tool_call_id,
+                        OpState.PREPARED,
+                        OpState.RUNNING,
+                        *self._fence_params(lease),
+                    ],
+                )
+                conn.commit()
+        except sqlite3.Error as exc:
+            raise TurnStateUnavailableError(f"ledger write failed: {exc}") from exc
+        if cur.rowcount != 1 and not tolerate_missing:
+            raise StaleTurnError(
+                f"op {tool_call_id} gen_seq {generation_seq}: no legally-"
+                f"transitionable row under the current fence"
+            )
 
     def _set_op_state(
         self,
@@ -744,7 +850,7 @@ class TurnStateStore:
             self.reject_resumable_sync(key, "checkpoint payload unreadable")
             return None
         ops = self._conn.execute(
-            "SELECT generation_seq, tool_call_id, state, tool_name, result "
+            "SELECT generation_seq, tool_call_id, state, tool_name, effect_class, result "
             "FROM operations WHERE source=? AND channel_id=? AND message_id=? "
             "AND turn_generation=? ORDER BY generation_seq, tool_call_id",
             [key.source, key.channel_id, key.message_id, row[0]],
@@ -766,7 +872,7 @@ class TurnStateStore:
             "suspended_at": row[14],
             "operations": [
                 {"generation_seq": o[0], "tool_call_id": o[1], "state": o[2],
-                 "tool_name": o[3], "result": o[4]}
+                 "tool_name": o[3], "effect_class": o[4], "result": o[5]}
                 for o in ops
             ],
         }
@@ -834,10 +940,11 @@ class TurnStateStore:
                 cur = conn.execute(
                     "UPDATE operations SET state=?, updated_at=? "
                     "WHERE source=? AND channel_id=? AND message_id=? "
-                    "AND turn_generation=? AND state=?",
+                    "AND turn_generation=? AND state=? AND effect_class=?",
                     [OpState.MANUAL_RESOLUTION_REQUIRED, time.time(),
                      key.source, key.channel_id, key.message_id, generation,
-                     OpState.OUTCOME_UNKNOWN],
+                     OpState.OUTCOME_UNKNOWN,
+                     ToolEffectClass.EXTERNAL_EFFECT_CAPABLE],
                 )
                 conn.commit()
             return cur.rowcount
@@ -953,11 +1060,14 @@ class TurnStateStore:
             ops = 0
             for source, channel_id, message_id, generation in stale:
                 cur = conn.execute(
-                    "UPDATE operations SET state=?, updated_at=? "
+                    "UPDATE operations SET state=CASE WHEN effect_class=? THEN ? "
+                    "ELSE ? END, updated_at=? "
                     "WHERE source=? AND channel_id=? AND message_id=? "
                     "AND turn_generation=? AND state IN (?, ?)",
-                    [OpState.OUTCOME_UNKNOWN, now, source, channel_id, message_id,
-                     generation, OpState.PREPARED, OpState.RUNNING],
+                    [ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                     OpState.DEFINITELY_FAILED, OpState.OUTCOME_UNKNOWN,
+                     now, source, channel_id, message_id, generation,
+                     OpState.PREPARED, OpState.RUNNING],
                 )
                 ops += cur.rowcount
                 conn.execute(

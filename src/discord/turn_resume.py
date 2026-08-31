@@ -35,6 +35,7 @@ from collections.abc import Callable
 from typing import Any
 
 from ..odin_log import get_logger
+from ..tools.effect_classifier import ToolEffectClass
 from ..turn_state.codec import compute_content_digest, restore_field_values
 from ..turn_state.durability import TurnDurability
 from ..turn_state.store import OpState, TurnKey, TurnStateStore, TurnStatus
@@ -302,6 +303,7 @@ class TurnResumeManager:
         return [
             op for op in (row.get("operations") or [])
             if op.get("state") in blocked_states
+            and op.get("effect_class") != ToolEffectClass.EFFECT_FREE_OBSERVATION
         ]
 
     async def try_explicit_resume(self, message: Any):
@@ -562,6 +564,11 @@ class TurnResumeManager:
                 content = (
                     "[Interrupted before execution — this call never ran; "
                     "re-issue it if still needed.]"
+                )
+            elif op.get("effect_class") == ToolEffectClass.EFFECT_FREE_OBSERVATION:
+                content = (
+                    "[Interrupted observation — no external effect was left "
+                    "unresolved; repeat the observation if it is still needed.]"
                 )
             else:
                 content = (
