@@ -1062,3 +1062,26 @@ def test_effect_aware_uncertain_settle_wraps_sqlite_error(store, monkeypatch):
     monkeypatch.setattr(store, "_op_where", lambda _lease: ("missing_column=?", ["x"]))
     with pytest.raises(TurnStateUnavailableError, match="ledger write failed"):
         store.settle_interrupted_sync(lease, 0, "c", result_text="interrupted")
+
+
+def test_closed_store_fail_closed_and_sweeps_noop(store):
+    from src.turn_state import TurnStateUnavailableError
+
+    store.close()
+    assert store.available is False
+    with pytest.raises(TurnStateUnavailableError, match="not available"):
+        store._require()
+    assert store.sweep_expired_active_sync() == {}
+    assert store.ttl_sweep_sync() == {}
+
+
+def test_blob_load_missing_and_digest_mismatch_fail_closed(store):
+    from src.turn_state import TurnStateUnavailableError
+
+    with pytest.raises(TurnStateUnavailableError, match="blob read failed"):
+        store.load_blob_sync("blob:" + "a" * 64)
+
+    claimed = "b" * 64
+    (store._blob_dir / claimed).write_bytes(b"different bytes")
+    with pytest.raises(TurnStateUnavailableError, match="blob digest mismatch"):
+        store.load_blob_sync("blob:" + claimed)
