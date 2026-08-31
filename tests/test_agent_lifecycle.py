@@ -2041,3 +2041,49 @@ def test_periodic_removal_releases_calibration_even_if_delayed_cleanup_is_cancel
     assert [(s.surface_kind, s.workload_id) for s in observer.released] == [
         ("agent", "done-agent")
     ]
+
+
+class TestNestedWaitForAgentsGrace:
+    async def test_nested_wait_uses_handler_deadline_plus_thirty(self, monkeypatch):
+        agent = AgentInfo(
+            id="wait-grace", label="test", goal="test",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        agent.messages = [{"role": "user", "content": "test"}]
+        calls = 0
+
+        async def iter_cb(msgs, sys, tools, generation_state=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [{
+                        "name": "wait_for_agents",
+                        "input": {"agent_ids": ["child"], "timeout": 42},
+                    }],
+                    "stop_reason": "tool_use",
+                }
+            return {"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
+
+        async def tool_cb(name, inp):
+            return "**child** (`child`): running [iterations=4]\n(no output)"
+
+        observed = []
+        real_wait_for = asyncio.wait_for
+
+        async def capture(awaitable, timeout):
+            observed.append(timeout)
+            return await real_wait_for(awaitable, timeout=timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        await _run_agent(
+            agent,
+            "sys",
+            [],
+            iter_cb,
+            tool_cb,
+            tool_timeouts={"wait_for_agents": 300},
+        )
+        assert agent.state == AgentState.COMPLETED
+        assert 72 in observed

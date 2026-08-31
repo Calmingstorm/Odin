@@ -254,3 +254,57 @@ class TestWaitResultTextPairing:
             [{"tool_use_id": "call-y", "content": "other"}],
         )
         assert out == ""
+
+
+def agent_wait_call(timeout=0.01):
+    return tool_call_response(("wait_for_agents", {"agent_ids": ["child"], "timeout": timeout}))
+
+
+class TestAgentWaitProgressSnapshots:
+    async def test_iteration_progress_changes_fingerprint_and_avoids_false_stuck(self, monkeypatch):
+        """The de-raced handler returns progress-bearing running snapshots.
+
+        Changing iteration counts are real semantic progress, so repeated
+        model-chosen waits must remain legal. There is deliberately no
+        automatic re-arm in this path.
+        """
+        import asyncio
+
+        bot, fake = build(
+            [agent_wait_call() for _ in range(4)] + [text_response("collected naturally")]
+        )
+        snapshots = iter(
+            f"**child** (`child`): running [iterations={n}]\n(no output)"
+            for n in range(1, 5)
+        )
+
+        async def native_dispatch(name, inp, **kwargs):
+            assert name == "wait_for_agents"
+            await asyncio.sleep(0)
+            return next(snapshots), SimpleNamespace(rebuild_system_prompt=False)
+
+        from types import SimpleNamespace
+
+        monkeypatch.setattr(bot.native_tools, "dispatch", native_dispatch)
+        text, _, is_error, _, _ = await run_loop(bot, FakeMessage("collect child"))
+        assert text == "collected naturally"
+        assert is_error is False
+        assert len(fake.calls) == 5
+        assert not any("still running with no new results" in d for d in _developer_texts(fake))
+
+    async def test_frozen_running_snapshot_keeps_existing_guard(self, monkeypatch):
+        from types import SimpleNamespace
+
+        bot, fake = build([agent_wait_call() for _ in range(5)])
+        frozen = "**child** (`child`): running [iterations=4]\n(no output)"
+
+        async def dispatch(*args, **kwargs):
+            return frozen, SimpleNamespace(rebuild_system_prompt=False)
+
+        dispatch_mock = AsyncMock(side_effect=dispatch)
+        monkeypatch.setattr(bot.native_tools, "dispatch", dispatch_mock)
+        text, _, is_error, _, _ = await run_loop(bot, FakeMessage("collect child"))
+        assert is_error is True
+        assert "no observable progress" in text
+        assert dispatch_mock.await_count == 4
+        assert any("still running with no new results" in d for d in _developer_texts(fake))

@@ -36,6 +36,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import discord
 
+from ..agents.wait_deadlines import (
+    WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+    wait_for_agents_wrapper_timeout,
+)
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
 from ..llm.context_budget import (
@@ -2576,6 +2580,12 @@ class ToolLoopRunner:
         """Per-tool timeout wrapper around _run_one_tool (the old
         `_run_tool_with_timeout` closure)."""
         t = 3660 if block.name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
+        t = wait_for_agents_wrapper_timeout(
+            block.name,
+            block.input,
+            t,
+            grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+        )
         try:
             return await asyncio.wait_for(
                 self._run_one_tool(st, block),
@@ -3320,6 +3330,12 @@ class ToolLoopRunner:
         error = None
         try:
             _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else st.tool_timeout
+            _t = wait_for_agents_wrapper_timeout(
+                tool_name,
+                tool_input,
+                _t,
+                grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+            )
             dispatch = self.dispatch_loop_tool(
                 tool_name,
                 tool_input,

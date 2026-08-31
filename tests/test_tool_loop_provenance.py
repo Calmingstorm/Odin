@@ -167,3 +167,67 @@ def test_usage_capture_failure_is_declared_nonfatal_at_both_generation_sites():
 
     source = inspect.getsource(ToolLoopRunner)
     assert source.count('apply_accepted_usage(') == 2
+
+
+class TestWaitForAgentsWrapperGrace:
+    async def test_chat_wrapper_uses_handler_deadline_plus_native_grace(self, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._run_one_tool = AsyncMock(return_value={"content": "snapshot"})
+        block = SimpleNamespace(
+            name="wait_for_agents",
+            input={"agent_ids": ["a"], "timeout": 42},
+            id="call",
+        )
+        observed = {}
+
+        async def capture(awaitable, timeout):
+            observed["timeout"] = timeout
+            return await awaitable
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        result = await runner._run_one_tool_with_timeout(SimpleNamespace(), block, 300)
+        assert result == {"content": "snapshot"}
+        assert observed["timeout"] == 57
+
+    async def test_loop_wrapper_uses_handler_deadline_plus_native_grace(self, monkeypatch):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        runner._native_tools = SimpleNamespace(handles=lambda _name: True)
+        runner.dispatch_loop_tool = AsyncMock(return_value="snapshot")
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        block = SimpleNamespace(
+            name="wait_for_agents",
+            input={"agent_ids": ["a"], "timeout": 42},
+            id="call",
+            parse_error=None,
+        )
+        st = SimpleNamespace(
+            tool_timeout=300,
+            msg_proxy=object(),
+            user_id="u",
+            system_prompt="",
+            channel=object(),
+            requester_name="u",
+            channel_id_str="c",
+        )
+        observed = {}
+
+        async def capture(awaitable, timeout):
+            observed["timeout"] = timeout
+            return await awaitable
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        result = await runner._run_one_loop_tool(st, block)
+        assert result["content"] == "snapshot"
+        assert observed["timeout"] == 57

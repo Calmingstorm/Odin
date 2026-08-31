@@ -23,6 +23,10 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..tools.result_validator import ToolResult
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
+from .wait_deadlines import (
+    WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
+    wait_for_agents_wrapper_timeout,
+)
 
 log = get_logger("agents")
 
@@ -1373,8 +1377,17 @@ async def _run_agent(
                 )
 
                 tool_timeout: float = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
-                # Cap at the POSITIVE remainder so the deadline holds inside
-                # a long tool call — never floored to a bonus second.
+                # A nested wait has its own handler deadline. Give it room to
+                # collect and render the progress snapshot before retaining the
+                # lifetime-capped outer backstop for a genuinely wedged handler.
+                tool_timeout = wait_for_agents_wrapper_timeout(
+                    tool_name,
+                    tool_input,
+                    tool_timeout,
+                    grace_seconds=WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
+                )
+                # Cap at the POSITIVE remainder so the lifetime deadline holds
+                # inside a long tool call — never floored to a bonus second.
                 tool_timeout = min(tool_timeout, lifetime_left)
                 try:
                     raw_result = await asyncio.wait_for(
