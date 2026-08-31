@@ -780,3 +780,327 @@ def _legacy_turns_ddl_without_payload_digest() -> str:
                      generation_seq, tool_call_id)
     );
     """
+
+
+class TestEffectClassification:
+    def test_interrupted_observation_is_definitely_failed(self, store):
+        from src.tools.effect_classifier import ToolEffectClass
+
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease,
+            0,
+            [{
+                "tool_call_id": "wait",
+                "tool_name": "wait_for_agents",
+                "tool_input": {"agent_ids": ["a"]},
+                "effect_class": ToolEffectClass.EFFECT_FREE_OBSERVATION,
+            }],
+        )
+        store.mark_running_sync(lease, 0, "wait")
+        store.settle_interrupted_sync(lease, 0, "wait", result_text="outer timeout")
+        assert store._conn.execute(
+            "SELECT effect_class, state FROM operations"
+        ).fetchone() == (
+            ToolEffectClass.EFFECT_FREE_OBSERVATION,
+            OpState.DEFINITELY_FAILED,
+        )
+
+    def test_unknown_effect_class_fails_closed(self, store):
+        from src.tools.effect_classifier import ToolEffectClass
+
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease,
+            0,
+            [{
+                "tool_call_id": "unknown",
+                "tool_name": "future_dynamic_tool",
+                "tool_input": {},
+                "effect_class": "NOT_A_REAL_CLASS",
+            }],
+        )
+        store.mark_running_sync(lease, 0, "unknown")
+        store.settle_interrupted_sync(lease, 0, "unknown", result_text="outer timeout")
+        assert store._conn.execute(
+            "SELECT effect_class, state FROM operations"
+        ).fetchone() == (
+            ToolEffectClass.EXTERNAL_EFFECT_CAPABLE,
+            OpState.OUTCOME_UNKNOWN,
+        )
+
+    def test_sweep_is_effect_aware(self, tmp_path):
+        from src.tools.effect_classifier import ToolEffectClass
+
+        db = tmp_path / "effect-sweep.sqlite3"
+        s = TurnStateStore(db, blob_dir=tmp_path / "effect-blobs")
+        lease = _admit(s)
+        s.record_intents_sync(
+            lease,
+            0,
+            [
+                {
+                    "tool_call_id": "wait",
+                    "tool_name": "wait_for_agents",
+                    "tool_input": {},
+                    "effect_class": ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                },
+                {
+                    "tool_call_id": "command",
+                    "tool_name": "run_command",
+                    "tool_input": {},
+                    "effect_class": ToolEffectClass.EXTERNAL_EFFECT_CAPABLE,
+                },
+            ],
+        )
+        s.mark_running_sync(lease, 0, "wait")
+        s.mark_running_sync(lease, 0, "command")
+        s.close()
+
+        reopened = TurnStateStore(db, blob_dir=tmp_path / "effect-blobs")
+        try:
+            assert dict(reopened._conn.execute(
+                "SELECT tool_call_id, state FROM operations"
+            ).fetchall()) == {
+                "wait": OpState.DEFINITELY_FAILED,
+                "command": OpState.OUTCOME_UNKNOWN,
+            }
+        finally:
+            reopened.close()
+
+    def test_manual_promotion_leaves_effect_free_unknown_alone(self, store):
+        from src.tools.effect_classifier import ToolEffectClass
+
+        lease = _admit(store)
+        store.record_intents_sync(
+            lease,
+            0,
+            [
+                {
+                    "tool_call_id": "wait",
+                    "tool_name": "wait_for_agents",
+                    "tool_input": {},
+                    "effect_class": ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                },
+                {
+                    "tool_call_id": "command",
+                    "tool_name": "run_command",
+                    "tool_input": {},
+                    "effect_class": ToolEffectClass.EXTERNAL_EFFECT_CAPABLE,
+                },
+            ],
+        )
+        store._conn.execute("UPDATE operations SET state=?", [OpState.OUTCOME_UNKNOWN])
+        store._conn.commit()
+        assert store.mark_ops_manual_sync(KEY, lease.generation) == 1
+        assert dict(store._conn.execute(
+            "SELECT tool_call_id, state FROM operations"
+        ).fetchall()) == {
+            "wait": OpState.OUTCOME_UNKNOWN,
+            "command": OpState.MANUAL_RESOLUTION_REQUIRED,
+        }
+
+    def test_legacy_reconciliation_is_exact_idempotent_and_non_destructive(self, tmp_path):
+        import sqlite3
+
+        from src.tools.effect_classifier import ToolEffectClass
+
+        db_dir = tmp_path / "legacy-effects"
+        db_dir.mkdir()
+        db = db_dir / "turns.sqlite3"
+        conn = sqlite3.connect(db)
+        conn.executescript(_legacy_turns_ddl_without_payload_digest())
+        for call_id, tool_name, state in (
+            ("wait-unknown", "wait_for_agents", OpState.OUTCOME_UNKNOWN),
+            ("wait-applied", "wait_for_agents", OpState.APPLIED),
+            ("command-unknown", "run_command", OpState.OUTCOME_UNKNOWN),
+            ("dynamic-unknown", "future_tool", OpState.OUTCOME_UNKNOWN),
+        ):
+            conn.execute(
+                "INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                ["discord", "c", "m", "g", 0, call_id, state, tool_name,
+                 1, "fp", None, 1.0, 1.0],
+            )
+        conn.commit()
+        conn.close()
+
+        first = TurnStateStore(db, blob_dir=db_dir / "blobs")
+        try:
+            assert first.legacy_effect_free_reconciled == 1
+            rows = {
+                row[0]: row[1:]
+                for row in first._conn.execute(
+                    "SELECT tool_call_id, tool_name, effect_class, state "
+                    "FROM operations"
+                )
+            }
+            assert rows["wait-unknown"] == (
+                "wait_for_agents",
+                ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                OpState.RECONCILED_NOT_APPLIED,
+            )
+            assert rows["wait-applied"] == (
+                "wait_for_agents",
+                ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                OpState.APPLIED,
+            )
+            assert rows["command-unknown"] == (
+                "run_command",
+                ToolEffectClass.EXTERNAL_EFFECT_CAPABLE,
+                OpState.OUTCOME_UNKNOWN,
+            )
+            assert rows["dynamic-unknown"] == (
+                "future_tool",
+                ToolEffectClass.EXTERNAL_EFFECT_CAPABLE,
+                OpState.OUTCOME_UNKNOWN,
+            )
+            assert first._conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 4
+        finally:
+            first.close()
+
+        second = TurnStateStore(db, blob_dir=db_dir / "blobs")
+        try:
+            assert second.legacy_effect_free_reconciled == 0
+            assert second._conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 4
+        finally:
+            second.close()
+
+
+def test_migrated_store_can_record_new_intent_with_physical_column_order(tmp_path):
+    """ALTER TABLE appends effect_class; inserts must name logical columns."""
+    import sqlite3
+
+    from src.tools.effect_classifier import ToolEffectClass
+
+    db_dir = tmp_path / "legacy-new-write"
+    db_dir.mkdir()
+    db = db_dir / "turns.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript(_legacy_turns_ddl_without_payload_digest())
+    conn.close()
+
+    migrated = TurnStateStore(db, blob_dir=db_dir / "blobs")
+    try:
+        lease = _admit(
+            migrated,
+            TurnKey(source="discord", channel_id="new-c", message_id="new-m"),
+        )
+        migrated.record_intents_sync(
+            lease,
+            7,
+            [{
+                "tool_call_id": "new-call",
+                "tool_name": "wait_for_agents",
+                "tool_input": {"agent_ids": ["a"]},
+                "effect_class": ToolEffectClass.EFFECT_FREE_OBSERVATION,
+            }],
+            iteration=9,
+        )
+        row = migrated._conn.execute(
+            "SELECT source, channel_id, message_id, turn_generation, "
+            "generation_seq, tool_call_id, state, tool_name, effect_class, "
+            "iteration, result, created_at, updated_at FROM operations"
+        ).fetchone()
+        assert row[:10] == (
+            "discord", "new-c", "new-m", lease.generation, 7, "new-call",
+            OpState.PREPARED, "wait_for_agents",
+            ToolEffectClass.EFFECT_FREE_OBSERVATION, 9,
+        )
+        assert row[10] is None
+        assert row[11] > 0 and row[12] > 0
+    finally:
+        migrated.close()
+
+
+def test_empty_effect_free_classifier_migration_is_noop(monkeypatch, tmp_path):
+    import sqlite3
+
+    import src.turn_state.store as store_module
+
+    db_dir = tmp_path / "empty-effect-classifier"
+    db_dir.mkdir()
+    db = db_dir / "turns.sqlite3"
+    conn = sqlite3.connect(db)
+    conn.executescript(_legacy_turns_ddl_without_payload_digest())
+    conn.execute(
+        "INSERT INTO operations VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+        ["discord", "c", "m", "g", 0, "call", OpState.OUTCOME_UNKNOWN,
+         "wait_for_agents", 1, "fp", None, 1.0, 1.0],
+    )
+    conn.commit()
+    conn.close()
+    monkeypatch.setattr(store_module, "effect_free_observation_tools", frozenset)
+
+    migrated = TurnStateStore(db, blob_dir=db_dir / "blobs")
+    try:
+        assert migrated.legacy_effect_free_reconciled == 0
+        assert migrated._conn.execute(
+            "SELECT state FROM operations"
+        ).fetchone()[0] == OpState.OUTCOME_UNKNOWN
+    finally:
+        migrated.close()
+
+
+def test_effect_aware_uncertain_settle_rejects_missing_and_tolerates_race(store):
+    lease = _admit(store)
+    with pytest.raises(StaleTurnError):
+        store.settle_op_sync(
+            lease, 0, "missing", state=OpState.OUTCOME_UNKNOWN,
+            result_text="interrupted",
+        )
+    store.settle_interrupted_sync(lease, 0, "missing", result_text="interrupted")
+
+
+def test_effect_aware_uncertain_settle_wraps_sqlite_error(store, monkeypatch):
+    from src.turn_state import TurnStateUnavailableError
+
+    lease = _admit(store)
+    store.record_intents_sync(
+        lease, 0, [{"tool_call_id": "c", "tool_name": "run_command", "tool_input": {}}]
+    )
+    store.mark_running_sync(lease, 0, "c")
+    monkeypatch.setattr(store, "_op_where", lambda _lease: ("missing_column=?", ["x"]))
+    with pytest.raises(TurnStateUnavailableError, match="ledger write failed"):
+        store.settle_interrupted_sync(lease, 0, "c", result_text="interrupted")
+
+
+def test_closed_store_fail_closed_and_sweeps_noop(store):
+    from src.turn_state import TurnStateUnavailableError
+
+    store.close()
+    assert store.available is False
+    with pytest.raises(TurnStateUnavailableError, match="not available"):
+        store._require()
+    assert store.sweep_expired_active_sync() == {}
+    assert store.ttl_sweep_sync() == {}
+
+
+def test_blob_load_missing_and_digest_mismatch_fail_closed(store):
+    from src.turn_state import TurnStateUnavailableError
+
+    with pytest.raises(TurnStateUnavailableError, match="blob read failed"):
+        store.load_blob_sync("blob:" + "a" * 64)
+
+    claimed = "b" * 64
+    (store._blob_dir / claimed).write_bytes(b"different bytes")
+    with pytest.raises(TurnStateUnavailableError, match="blob digest mismatch"):
+        store.load_blob_sync("blob:" + claimed)
+
+
+def test_effect_aware_unknown_settle_stale_owner_is_fenced(store):
+    import dataclasses
+
+    lease = _admit(store)
+    store.record_intents_sync(
+        lease, 0, [{"tool_call_id": "c", "tool_name": "run_command", "tool_input": {}}]
+    )
+    stale = dataclasses.replace(lease)
+    store.checkpoint_sync(lease, {"revision": 1}, progressed=True)
+    with pytest.raises(StaleTurnError):
+        store.settle_op_sync(
+            stale, 0, "c", state=OpState.OUTCOME_UNKNOWN,
+            result_text="interrupted",
+        )
+    assert store._conn.execute(
+        "SELECT state FROM operations WHERE tool_call_id='c'"
+    ).fetchone()[0] == OpState.PREPARED

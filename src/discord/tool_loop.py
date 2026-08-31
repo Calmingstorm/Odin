@@ -36,6 +36,10 @@ from typing import TYPE_CHECKING, Any, Literal
 
 import discord
 
+from ..agents.wait_deadlines import (
+    WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+    wait_for_agents_wrapper_timeout,
+)
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
 from ..llm.context_budget import (
@@ -2576,6 +2580,12 @@ class ToolLoopRunner:
         """Per-tool timeout wrapper around _run_one_tool (the old
         `_run_tool_with_timeout` closure)."""
         t = 3660 if block.name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
+        t = wait_for_agents_wrapper_timeout(
+            block.name,
+            block.input,
+            t,
+            grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+        )
         try:
             return await asyncio.wait_for(
                 self._run_one_tool(st, block),
@@ -2584,8 +2594,8 @@ class ToolLoopRunner:
         except TimeoutError:
             error_msg = f"Tool '{block.name}' timed out after {t}s"
             # WI-3 (interrupted): wait_for cancelled _run_one_tool before its
-            # own settle — the external effect may or may not have applied.
-            # OUTCOME_UNKNOWN via the no-downgrade settle, never rerun.
+            # own settle. The persisted effect class decides whether this is a
+            # definite non-effect failure or an unknown external outcome.
             try:
                 await st.durability.after_tool_interrupted(block, error_msg)
             except Exception:
@@ -2599,7 +2609,7 @@ class ToolLoopRunner:
                     tool_input=_scrub_tool_input_for_storage(block.name, block.input),
                     approved=True,
                     result_summary=error_msg,
-                    execution_time_ms=int(tool_timeout * 1000),
+                    execution_time_ms=int(t * 1000),
                     error=error_msg,
                 )
             except Exception:
@@ -3320,6 +3330,12 @@ class ToolLoopRunner:
         error = None
         try:
             _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else st.tool_timeout
+            _t = wait_for_agents_wrapper_timeout(
+                tool_name,
+                tool_input,
+                _t,
+                grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
+            )
             dispatch = self.dispatch_loop_tool(
                 tool_name,
                 tool_input,

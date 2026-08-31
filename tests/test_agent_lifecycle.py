@@ -1033,6 +1033,145 @@ class TestWaitForAgentsWithStates:
         results = await mgr.wait_for_agents(["w2"], timeout=0.1, poll_interval=0.05)
         assert results["w2"]["status"] == "running"
 
+    async def test_wait_owns_terminal_snapshot_across_registry_cleanup(self):
+        mgr = AgentManager()
+        finished = AgentInfo(
+            id="finished", label="first", goal="finish first",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        finished.created_at = time.time() - 8.04
+        finished.transition(AgentState.READY)
+        finished.iteration_count = 3
+        finished.tools_used = ["read_file"]
+        finished.result = "preserved result"
+        finished.context_char_ceiling = 1234
+        finished.context_recoveries = [{"phase": "overflow", "detail": {"attempt": 1}}]
+        finished.transition(AgentState.COMPLETED, "done")
+        finished.ended_at = finished.created_at + 8.04
+
+        running = AgentInfo(
+            id="running", label="second", goal="keep running",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        running.transition(AgentState.READY)
+        running.iteration_count = 7
+        mgr._agents.update({finished.id: finished, running.id: running})
+
+        first_poll = asyncio.Event()
+        release_poll = asyncio.Event()
+        sleep_calls = 0
+
+        async def controlled_sleep(delay):
+            nonlocal sleep_calls
+            sleep_calls += 1
+            first_poll.set()
+            await release_poll.wait()
+
+        fake_now = [time.time()]
+
+        with (
+            patch("src.agents.manager.asyncio.sleep", side_effect=controlled_sleep),
+            patch("src.agents.manager.time.time", side_effect=lambda: fake_now[0]),
+            patch("src.agents.manager.CLEANUP_DELAY", 0),
+        ):
+            waiter = asyncio.create_task(
+                mgr.wait_for_agents(
+                    [finished.id, running.id, "never-existed"],
+                    timeout=30,
+                    poll_interval=1,
+                )
+            )
+            await asyncio.wait_for(first_poll.wait(), timeout=1)
+
+            # Cleanup remains independent of the in-flight waiter: no lease,
+            # lifetime extension, global cache, or retention-policy change.
+            assert await mgr.cleanup() == 1
+            assert finished.id not in mgr._agents
+            assert mgr.get_results(finished.id) is None
+
+            # Prove the captured dictionary is immutable with respect to later
+            # mutations of the removed AgentInfo object.
+            finished.result = "mutated after capture"
+            finished.iteration_count = 99
+            finished.tools_used.append("run_command")
+            finished.context_recoveries[0]["detail"]["attempt"] = 99
+
+            # Cross the wait deadline while B remains live. Final collection
+            # must combine A's immutable terminal snapshot with B's current
+            # running snapshot.
+            fake_now[0] += 31
+            release_poll.set()
+            results = await asyncio.wait_for(waiter, timeout=1)
+
+        assert sleep_calls == 1
+        assert results[finished.id] == {
+            "id": "finished",
+            "label": "first",
+            "status": "completed",
+            "state": "completed",
+            "result": "preserved result",
+            "error": "",
+            "iteration_count": 3,
+            "tools_used": ["read_file"],
+            "runtime_seconds": 8.0,
+            "goal": "finish first",
+            "recovery_attempts": 0,
+            "context_char_ceiling": 1234,
+            "context_recoveries": [
+                {"phase": "overflow", "detail": {"attempt": 1}}
+            ],
+            "state_history": finished._sm.history_as_dicts(),
+            "depth": 0,
+            "parent_id": None,
+            "children_ids": [],
+        }
+        assert results[running.id]["status"] == "running"
+        assert results[running.id]["result"] == ""
+        assert results[running.id]["iteration_count"] == 7
+        assert results["never-existed"] == {
+            "id": "never-existed",
+            "status": "not_found",
+            "error": "Agent 'never-existed' not found.",
+        }
+        assert mgr.get_results(finished.id) is None
+
+    async def test_wait_does_not_requery_captured_terminal_id(self):
+        mgr = AgentManager()
+        finished = AgentInfo(
+            id="captured", label="done", goal="done",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        finished.transition(AgentState.READY)
+        finished.result = "terminal output"
+        finished.transition(AgentState.COMPLETED)
+        finished.ended_at = time.time()
+        mgr._agents[finished.id] = finished
+
+        with patch.object(mgr, "get_results", wraps=mgr.get_results) as get_results:
+            results = await mgr.wait_for_agents([finished.id], timeout=1)
+
+        assert results[finished.id]["result"] == "terminal output"
+        get_results.assert_not_called()
+
+    async def test_wait_serialization_matches_direct_get_results(self):
+        mgr = AgentManager()
+        finished = AgentInfo(
+            id="same-schema", label="done", goal="done",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        finished.transition(AgentState.READY)
+        finished.result = "same output"
+        finished.iteration_count = 2
+        finished.tools_used = ["read_file", "run_command"]
+        finished.transition(AgentState.COMPLETED)
+        finished.ended_at = time.time()
+        mgr._agents[finished.id] = finished
+
+        direct = mgr.get_results(finished.id)
+        waited = await mgr.wait_for_agents([finished.id], timeout=1)
+
+        assert waited[finished.id] == direct
+
 
 # ---------------------------------------------------------------------------
 # spawn_group with state machine
@@ -2041,3 +2180,92 @@ def test_periodic_removal_releases_calibration_even_if_delayed_cleanup_is_cancel
     assert [(s.surface_kind, s.workload_id) for s in observer.released] == [
         ("agent", "done-agent")
     ]
+
+
+class TestNestedWaitForAgentsGrace:
+    async def test_nested_wait_uses_handler_deadline_plus_thirty(self, monkeypatch):
+        agent = AgentInfo(
+            id="wait-grace", label="test", goal="test",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        agent.messages = [{"role": "user", "content": "test"}]
+        calls = 0
+
+        async def iter_cb(msgs, sys, tools, generation_state=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [{
+                        "name": "wait_for_agents",
+                        "input": {"agent_ids": ["child"], "timeout": 42},
+                    }],
+                    "stop_reason": "tool_use",
+                }
+            return {"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
+
+        async def tool_cb(name, inp):
+            return "**child** (`child`): running [iterations=4]\n(no output)"
+
+        observed = []
+        real_wait_for = asyncio.wait_for
+
+        async def capture(awaitable, timeout):
+            observed.append(timeout)
+            return await real_wait_for(awaitable, timeout=timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        await _run_agent(
+            agent,
+            "sys",
+            [],
+            iter_cb,
+            tool_cb,
+            tool_timeouts={"wait_for_agents": 300},
+        )
+        assert agent.state == AgentState.COMPLETED
+        assert 72 in observed
+
+
+class TestNestedMalformedWaitInput:
+    async def test_truthy_non_mapping_input_reaches_callback_under_fallback(self, monkeypatch):
+        agent = AgentInfo(
+            id="wait-malformed", label="test", goal="test",
+            channel_id="c1", requester_id="u1", requester_name="user",
+        )
+        agent.messages = [{"role": "user", "content": "test"}]
+        calls = 0
+
+        async def iter_cb(msgs, sys, tools, generation_state=None):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                return {
+                    "text": "",
+                    "tool_calls": [{"name": "wait_for_agents", "input": ["bad"]}],
+                    "stop_reason": "tool_use",
+                }
+            return {"text": "done", "tool_calls": [], "stop_reason": "end_turn"}
+
+        seen = []
+
+        async def tool_cb(name, inp):
+            seen.append(inp)
+            return "input error"
+
+        observed = []
+        real_wait_for = asyncio.wait_for
+
+        async def capture(awaitable, timeout):
+            observed.append(timeout)
+            return await real_wait_for(awaitable, timeout=timeout)
+
+        monkeypatch.setattr(asyncio, "wait_for", capture)
+        await _run_agent(
+            agent, "sys", [], iter_cb, tool_cb,
+            tool_timeouts={"wait_for_agents": 91},
+        )
+        assert agent.state == AgentState.COMPLETED
+        assert seen == [["bad"]]
+        assert 91 in observed

@@ -40,6 +40,7 @@ import time
 from typing import Any
 
 from ..odin_log import get_logger
+from ..tools.effect_classifier import classify_tool_effect
 from .codec import compute_content_digest, scrub_stored_tool_input, snapshot_chat_turn
 from .store import (
     OpState,
@@ -325,6 +326,7 @@ class TurnDurability:
                 "tool_call_id": tc.id,
                 "tool_name": tc.name,
                 "tool_input": scrub_stored_tool_input(tc.name, tc.input),
+                "effect_class": classify_tool_effect(tc.name, tc.input),
             }
             for tc in executable
         ]
@@ -367,9 +369,11 @@ class TurnDurability:
         )
 
     async def after_tool_interrupted(self, block, result_text: str) -> None:
-        """WI-3 for a wait_for-cancelled execution: OUTCOME_UNKNOWN via the
-        no-downgrade guarded settle (it may race the tool's own settle at
-        the cancellation boundary; an already-settled row wins)."""
+        """WI-3 for a wait_for-cancelled execution, settled by effect class.
+
+        The guarded store transition may race the tool's own settle at the
+        cancellation boundary; an already-settled row wins.
+        """
         if not self.enabled:
             return
         assert self._store is not None and self._lease is not None

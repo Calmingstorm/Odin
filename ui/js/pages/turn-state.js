@@ -1,10 +1,8 @@
 /**
- * Odin Management UI — Turn State (deep-dive W3, read-only v1)
+ * Odin Management UI — Turn State (read-only recovery posture)
  *
- * Operational posture over durable turns and model capacity breakers.
- * Strictly observational: no resume, resolve, retry, reject, sweep, or
- * delete controls exist here. Two independently loaded sections — one
- * endpoint failing must never blank the other.
+ * Actionable recovery state leads. Historical OUTCOME_UNKNOWN evidence is a
+ * bounded diagnostic, not a permanent operator task. No mutation controls.
  */
 import { api, ws } from '../api.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
@@ -16,20 +14,17 @@ export function elapsedMs(nowMs, receivedAtMs) {
   return Math.max(0, nowMs - receivedAtMs);
 }
 
-// Rendering priority (settled design): external-effect uncertainty first.
 function turnPriority(turn, nowSeconds) {
   const states = new Set((turn.operations || []).map(op => op.state));
-  if (states.has('OUTCOME_UNKNOWN')) return 0;
-  if (states.has('MANUAL_RESOLUTION_REQUIRED')) return 1;
-  if (turn.status === 'ACTIVE' && turn.lease_expires_at
-      && turn.lease_expires_at < nowSeconds) return 2;
-  if (turn.status === 'SUSPENDED') return 3;
-  if (turn.status === 'ACTIVE') return 4;
-  return 5;
+  if (states.has('MANUAL_RESOLUTION_REQUIRED')) return 0;
+  if (turn.expired_lease || (turn.status === 'ACTIVE'
+      && (!turn.lease_expires_at || turn.lease_expires_at < nowSeconds))) return 1;
+  if (turn.status === 'SUSPENDED') return 2;
+  if (turn.status === 'ACTIVE') return 3;
+  return 4;
 }
 
 const PRIORITY_BADGES = [
-  { label: 'Outcome unknown', cls: 'badge-danger' },
   { label: 'Manual resolution required', cls: 'badge-danger' },
   { label: 'Lease expired', cls: 'badge-warning' },
   { label: 'Suspended', cls: 'badge-warning' },
@@ -49,15 +44,16 @@ export default {
         </div>
       </div>
       <p class="text-xs text-gray-500 mb-4">
-        Read-only posture over durable chat turns and model capacity breakers.
-        Rows with uncertain external effects surface first; nothing here can
-        resume, resolve, or delete anything.
+        Read-only current recovery posture. Historical interrupted-effect evidence
+        remains available below as diagnostics, not operator work.
       </p>
 
-      <!-- Durable turns -->
       <div class="hm-card mb-4">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
-          <h2 class="text-sm font-semibold text-gray-300">Durable turns</h2>
+          <div>
+            <h2 class="text-sm font-semibold text-gray-300">Current posture</h2>
+            <p class="text-xs text-gray-600 mt-1">Active work, suspended recovery, expired leases, and effects requiring a human.</p>
+          </div>
           <span v-if="turnsStale" class="text-xs text-amber-500">stale — last success {{ turnsAgeSeconds }}s ago</span>
         </div>
 
@@ -73,26 +69,26 @@ export default {
           <div class="ts-count-row mb-3">
             <div class="ts-count"><span class="ts-count-value">{{ turnsData.counts.active }}</span><span class="ts-count-label">Active</span></div>
             <div class="ts-count"><span class="ts-count-value">{{ turnsData.counts.suspended }}</span><span class="ts-count-label">Suspended</span></div>
-            <div class="ts-count" :class="{ 'ts-count-alert': turnsData.counts.attention_required > 0 }">
-              <span class="ts-count-value">{{ turnsData.counts.attention_required }}</span><span class="ts-count-label">Attention</span>
-            </div>
-            <div class="ts-count" :class="{ 'ts-count-alert': turnsData.counts.outcome_unknown_operations > 0 }">
-              <span class="ts-count-value">{{ turnsData.counts.outcome_unknown_operations }}</span><span class="ts-count-label">Outcome unknown ops</span>
+            <div class="ts-count" :class="{ 'ts-count-alert': turnsData.counts.expired_active > 0 }">
+              <span class="ts-count-value">{{ turnsData.counts.expired_active }}</span><span class="ts-count-label">Expired leases</span>
             </div>
             <div class="ts-count" :class="{ 'ts-count-alert': turnsData.counts.manual_resolution_operations > 0 }">
-              <span class="ts-count-value">{{ turnsData.counts.manual_resolution_operations }}</span><span class="ts-count-label">Manual resolution ops</span>
+              <span class="ts-count-value">{{ turnsData.counts.manual_resolution_operations }}</span><span class="ts-count-label">Manual effects</span>
+            </div>
+            <div class="ts-count" :class="{ 'ts-count-alert': turnsData.counts.attention_required > 0 }">
+              <span class="ts-count-value">{{ turnsData.counts.attention_required }}</span><span class="ts-count-label">Attention</span>
             </div>
           </div>
 
           <div v-if="sortedTurns.length === 0" class="text-xs text-gray-500">
-            No active, suspended, or attention-carrying turns.
+            No active, suspended, or manual-resolution turns.
           </div>
           <div v-else class="space-y-2">
             <div v-if="turnsData.truncated" class="text-xs text-amber-500">
-              Showing {{ sortedTurns.length }} prioritized matching turns —
-              {{ turnsData.omitted_turns }} older match{{ turnsData.omitted_turns === 1 ? '' : 'es' }} omitted.
+              Showing {{ sortedTurns.length }} prioritized posture rows —
+              {{ turnsData.omitted_turns }} older row{{ turnsData.omitted_turns === 1 ? '' : 's' }} omitted.
               <span v-if="turnsData.omitted_attention_turns > 0" role="alert">
-                {{ turnsData.omitted_attention_turns }} omitted turn{{ turnsData.omitted_attention_turns === 1 ? '' : 's' }} still carry unresolved-effect evidence.
+                {{ turnsData.omitted_attention_turns }} omitted row{{ turnsData.omitted_attention_turns === 1 ? '' : 's' }} still require attention.
               </span>
             </div>
             <div v-for="t in sortedTurns" :key="t.source + ':' + t.channel_id + ':' + t.message_id"
@@ -106,19 +102,44 @@ export default {
                 <span class="text-xs text-gray-600 ts-turn-age">{{ ageLabel(t.last_progress_at) }}</span>
               </div>
               <div v-if="priorityOf(t) === 0" class="ts-turn-warning" role="alert">
-                An external effect may or may not have applied — verify before repeating it.
+                A human owns verification of an unresolved external effect.
+              </div>
+              <div v-else-if="priorityOf(t) === 1" class="ts-turn-warning" role="alert">
+                The active owner lease is missing or expired; recovery should sweep or resume this turn.
               </div>
               <div v-if="t.operations.length" class="ts-op-list">
                 <span v-for="op in t.operations" :key="op.tool_call_id" class="ts-op"
-                      :class="{ 'ts-op-alert': op.state === 'OUTCOME_UNKNOWN' || op.state === 'MANUAL_RESOLUTION_REQUIRED' }">
+                      :class="{ 'ts-op-alert': op.state === 'MANUAL_RESOLUTION_REQUIRED' }">
                   {{ op.tool_name }} · {{ op.state }}<template v-if="op.iteration !== null"> · iter {{ op.iteration }}</template>
                 </span>
                 <span v-if="t.more_attention_evidence" class="text-xs text-amber-500" role="alert">
-                  …{{ t.attention_operations_count - t.operations.filter(op => op.state === 'OUTCOME_UNKNOWN' || op.state === 'MANUAL_RESOLUTION_REQUIRED').length }} more unresolved-effect operation{{ t.attention_operations_count - t.operations.filter(op => op.state === 'OUTCOME_UNKNOWN' || op.state === 'MANUAL_RESOLUTION_REQUIRED').length === 1 ? '' : 's' }}
+                  …more manual-resolution evidence retained in the ledger
                 </span>
-                <span v-else-if="t.operations_truncated" class="text-xs text-gray-500">…more pending operations</span>
+                <span v-else-if="t.operations_truncated" class="text-xs text-gray-500">…more operation evidence</span>
               </div>
             </div>
+          </div>
+
+          <div class="ts-diagnostics mt-4">
+            <div class="flex items-center justify-between flex-wrap gap-2">
+              <div>
+                <h3 class="text-sm font-semibold text-gray-400">Historical diagnostics</h3>
+                <p class="text-xs text-gray-600 mt-1">Retained ambiguous-effect evidence. Diagnostic only; not counted as Attention.</p>
+              </div>
+              <div class="flex items-center gap-3 text-xs text-gray-500">
+                <span>{{ turnsData.diagnostics.outcome_unknown.operations }} unknown operation{{ turnsData.diagnostics.outcome_unknown.operations === 1 ? '' : 's' }}</span>
+                <span>{{ turnsData.diagnostics.outcome_unknown.turns }} turn{{ turnsData.diagnostics.outcome_unknown.turns === 1 ? '' : 's' }}</span>
+              </div>
+            </div>
+            <div v-if="turnsData.diagnostics.outcome_unknown.by_tool.length" class="ts-op-list mt-2">
+              <span v-for="row in turnsData.diagnostics.outcome_unknown.by_tool" :key="row.tool_name" class="ts-op">
+                {{ row.tool_name }} · {{ row.operations }}
+              </span>
+              <span v-if="turnsData.diagnostics.outcome_unknown.tools_truncated" class="text-xs text-gray-500">
+                …{{ turnsData.diagnostics.outcome_unknown.omitted_tools }} more tool{{ turnsData.diagnostics.outcome_unknown.omitted_tools === 1 ? '' : 's' }}
+              </span>
+            </div>
+            <p v-else class="text-xs text-gray-600 mt-2">No historical unknown-effect evidence.</p>
           </div>
         </template>
         <div v-else class="space-y-2">
@@ -126,7 +147,6 @@ export default {
         </div>
       </div>
 
-      <!-- Capacity breakers -->
       <div class="hm-card">
         <div class="flex items-center justify-between mb-3 flex-wrap gap-2">
           <h2 class="text-sm font-semibold text-gray-300">Model capacity breakers</h2>
@@ -153,7 +173,7 @@ export default {
               <thead><tr>
                 <th>Provider</th><th>Model</th><th>State</th>
                 <th class="text-right">Failed generations</th>
-                <th class="text-right">Opens</th>
+                <th class="text-right">Consecutive opens</th>
                 <th class="text-right">Cooldown</th>
               </tr></thead>
               <tbody>
@@ -188,11 +208,8 @@ export default {
     const breakersLoading = ref(false);
     const breakersReceivedAt = ref(0);
 
-    // Staleness and countdowns tick from CLIENT receipt time of the last
-    // successful response — server timestamps are provenance, never clocks.
     const nowTick = ref(Date.now());
     let tickTimer = null;
-
     let turnsEpoch = 0;
     let breakersEpoch = 0;
 
@@ -208,7 +225,6 @@ export default {
         turnsReceivedAt.value = Date.now();
       } catch (e) {
         if (epoch !== turnsEpoch) return;
-        // Retain last-good posture; name the failure beside it.
         turnsError.value = e.message || 'Turn-state read failed';
         if (e.status === 503) turnsAvailability.value = 'unavailable';
       }
@@ -233,10 +249,7 @@ export default {
       if (epoch === breakersEpoch) breakersLoading.value = false;
     }
 
-    function refreshAll() {
-      fetchTurns();
-      fetchBreakers();
-    }
+    function refreshAll() { fetchTurns(); fetchBreakers(); }
 
     const turnsStale = computed(() =>
       turnsData.value !== null && elapsedMs(nowTick.value, turnsReceivedAt.value) > STALE_AFTER_MS);
@@ -248,19 +261,12 @@ export default {
     const breakersAgeSeconds = computed(() =>
       Math.round(elapsedMs(nowTick.value, breakersReceivedAt.value) / 1000));
 
-    function priorityOf(turn) {
-      return turnPriority(turn, nowTick.value / 1000);
-    }
-
-    function priorityBadge(turn) {
-      return PRIORITY_BADGES[priorityOf(turn)];
-    }
-
+    function priorityOf(turn) { return turnPriority(turn, nowTick.value / 1000); }
+    function priorityBadge(turn) { return PRIORITY_BADGES[priorityOf(turn)]; }
     const sortedTurns = computed(() => {
       const rows = [...(turnsData.value?.turns || [])];
       const now = nowTick.value / 1000;
-      return rows.sort((a, b) =>
-        turnPriority(a, now) - turnPriority(b, now)
+      return rows.sort((a, b) => turnPriority(a, now) - turnPriority(b, now)
         || (b.last_progress_at || 0) - (a.last_progress_at || 0));
     });
 
@@ -272,9 +278,6 @@ export default {
 
     function cooldownLabel(b) {
       if (b.state === 'closed') return '—';
-      // Countdown decrements client-side from the value received; reaching
-      // zero changes COPY only — probing appears solely when the server
-      // reports an actually-held probe slot.
       const elapsed = elapsedMs(nowTick.value, breakersReceivedAt.value) / 1000;
       const remaining = Math.max(0, (b.cooldown_remaining_seconds || 0) - elapsed);
       if (remaining > 0) return `${Math.ceil(remaining)}s`;
@@ -290,12 +293,9 @@ export default {
       return `${Math.round(minutes / 60)}h ago`;
     }
 
-    // Freshness rules (settled): fetch on mount/activation, poll every 10s
-    // while active, refetch on WS reconnect, stop entirely on deactivation.
     let pollTimer = null;
     let unsubReconnected = null;
     let armed = false;
-
     function arm() {
       if (armed) return;
       armed = true;
@@ -304,7 +304,6 @@ export default {
       tickTimer = setInterval(() => { nowTick.value = Date.now(); }, 1000);
       unsubReconnected = ws.onReconnected(refreshAll);
     }
-
     function disarm() {
       if (!armed) return;
       armed = false;

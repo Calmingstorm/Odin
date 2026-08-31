@@ -71,6 +71,13 @@ def _turn(message_id: str, now: float, **extra) -> dict:
         "has_checkpoint": False,
         "operations": [],
         "operations_truncated": False,
+        "attention_operations_count": 0,
+        "outcome_unknown_operations": 0,
+        "manual_resolution_operations": 0,
+        "more_attention_evidence": False,
+        "more_diagnostic_evidence": False,
+        "expired_lease": False,
+        "requires_attention": False,
     }
     row.update(extra)
     return row
@@ -87,6 +94,9 @@ def _api_fixture(path: str) -> dict:
                 "terminal-manual",
                 now,
                 status="TERMINAL_FAILED",
+                requires_attention=True,
+                attention_operations_count=1,
+                manual_resolution_operations=1,
                 operations=[
                     {
                         "state": "MANUAL_RESOLUTION_REQUIRED",
@@ -99,8 +109,9 @@ def _api_fixture(path: str) -> dict:
                 ],
             ),
             _turn(
-                "outcome-unknown",
+                "diagnostic-only",
                 now,
+                outcome_unknown_operations=1,
                 operations=[
                     {
                         "state": "OUTCOME_UNKNOWN",
@@ -123,12 +134,25 @@ def _api_fixture(path: str) -> dict:
                 "counts": {
                     "active": 2,
                     "suspended": 0,
-                    "attention_required": 2,
+                    "expired_active": 0,
+                    "attention_required": 1,
                     "outcome_unknown_operations": 1,
+                    "outcome_unknown_turns": 1,
                     "manual_resolution_operations": 1,
+                },
+                "diagnostics": {
+                    "outcome_unknown": {
+                        "operations": 1,
+                        "turns": 1,
+                        "by_tool": [{"tool_name": "run_command", "operations": 1}],
+                        "tools_truncated": False,
+                        "omitted_tools": 0,
+                    }
                 },
                 "turns": turns,
                 "truncated": False,
+                "omitted_turns": 0,
+                "omitted_attention_turns": 0,
             },
         }
     if path == "/api/turn-state/capacity-breakers":
@@ -199,8 +223,12 @@ def test_turn_state_committed_dist_render_contract(committed_dist_server, width,
             page.wait_for_selector(".ts-turn-row")
 
             first = page.locator(".ts-turn-row").first
-            assert first.locator(".badge").inner_text() == "Outcome unknown"
-            assert "verify before repeating it" in first.inner_text()
+            assert first.locator(".badge").inner_text() == "Manual resolution required"
+            assert "human owns verification" in first.inner_text()
+            assert "Historical diagnostics" in page.locator("#panel-turn-state").inner_text()
+            assert "Diagnostic only; not counted as Attention" in page.locator(
+                "#panel-turn-state"
+            ).inner_text()
             assert page.locator("#panel-turn-state button").all_inner_texts() == ["Refresh"]
             assert page.locator("body").evaluate(
                 "body => body.scrollWidth <= document.documentElement.clientWidth"

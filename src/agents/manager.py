@@ -13,6 +13,7 @@ import time
 import uuid
 from collections import deque
 from collections.abc import Awaitable, Callable
+from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Protocol
@@ -23,6 +24,10 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
 from ..tools.result_validator import ToolResult
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
+from .wait_deadlines import (
+    WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
+    wait_for_agents_wrapper_timeout,
+)
 
 log = get_logger("agents")
 
@@ -742,12 +747,9 @@ class AgentManager:
             return f"Kill signal sent to agent '{agent.label}'."
         return f"Kill signal sent to agent '{agent.label}' and {len(killed_ids) - 1} descendant(s)."
 
-    def get_results(self, agent_id: str) -> dict | None:
-        """Get structured results of an agent."""
-        agent = self._agents.get(agent_id)
-        if not agent:
-            return None
-
+    @staticmethod
+    def _serialize_result(agent: AgentInfo) -> dict:
+        """Serialize an already-owned agent reference without a registry lookup."""
         runtime = (agent.ended_at or time.time()) - agent.created_at
         return {
             "id": agent.id,
@@ -757,14 +759,14 @@ class AgentManager:
             "result": agent.result,
             "error": agent.error,
             "iteration_count": agent.iteration_count,
-            "tools_used": agent.tools_used,
+            "tools_used": list(agent.tools_used),
             "runtime_seconds": round(runtime, 1),
             "goal": agent.goal,
             "recovery_attempts": agent.recovery_attempts,
             **(
                 {
                     "context_char_ceiling": agent.context_char_ceiling,
-                    "context_recoveries": list(agent.context_recoveries),
+                    "context_recoveries": deepcopy(agent.context_recoveries),
                 }
                 if agent.context_recoveries
                 else {}
@@ -774,6 +776,13 @@ class AgentManager:
             "parent_id": agent.parent_id,
             "children_ids": list(agent.children_ids),
         }
+
+    def get_results(self, agent_id: str) -> dict | None:
+        """Get structured results of an agent retained in the live registry."""
+        agent = self._agents.get(agent_id)
+        if not agent:
+            return None
+        return self._serialize_result(agent)
 
     def get_children(self, agent_id: str) -> builtins.list[dict]:
         """Get results of all direct children of an agent."""
@@ -836,25 +845,36 @@ class AgentManager:
             return {}
 
         deadline = time.time() + timeout
-        while time.time() < deadline:
-            all_done = True
-            for aid in agent_ids:
+        captured: dict[str, dict] = {}
+        pending = set(agent_ids)
+        while True:
+            # Once this wait observes a terminal outcome, that snapshot belongs
+            # to the wait. Registry cleanup must not retroactively erase it.
+            any_active = False
+            for aid in tuple(pending):
                 agent = self._agents.get(aid)
                 if agent is None:
                     continue
-                if agent._sm.is_active:
-                    all_done = False
-                    break
-            if all_done:
+                if agent._sm.is_terminal:
+                    captured[aid] = self._serialize_result(agent)
+                    pending.remove(aid)
+                elif agent._sm.is_active:
+                    any_active = True
+
+            if not any_active:
                 break
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
             await asyncio.sleep(min(poll_interval, remaining))
 
-        # Collect results
+        # Captured terminal observations are never re-queried. Resolve only
+        # still-pending IDs against the live registry at the deadline.
         results: dict[str, dict] = {}
         for aid in agent_ids:
+            if aid in captured:
+                results[aid] = captured[aid]
+                continue
             r = self.get_results(aid)
             if r:
                 results[aid] = r
@@ -1373,8 +1393,17 @@ async def _run_agent(
                 )
 
                 tool_timeout: float = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
-                # Cap at the POSITIVE remainder so the deadline holds inside
-                # a long tool call — never floored to a bonus second.
+                # A nested wait has its own handler deadline. Give it room to
+                # collect and render the progress snapshot before retaining the
+                # lifetime-capped outer backstop for a genuinely wedged handler.
+                tool_timeout = wait_for_agents_wrapper_timeout(
+                    tool_name,
+                    tool_input,
+                    tool_timeout,
+                    grace_seconds=WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
+                )
+                # Cap at the POSITIVE remainder so the lifetime deadline holds
+                # inside a long tool call — never floored to a bonus second.
                 tool_timeout = min(tool_timeout, lifetime_left)
                 try:
                     raw_result = await asyncio.wait_for(
