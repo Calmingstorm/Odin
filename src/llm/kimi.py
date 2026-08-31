@@ -356,6 +356,8 @@ class KimiClient(LLMProvider):
         resp.provenance_provider = "kimi"
         resp.provenance_model = resolved_model
         resp.provenance_reasoning_effort = None  # no effort concept
+        # _parse_response strictly distinguishes absent/malformed usage from
+        # provider truth; zero remains a valid reported value.
         return resp
 
     def _parse_response(self, data: dict) -> LLMResponse:
@@ -388,15 +390,25 @@ class KimiClient(LLMProvider):
         stop_reason = "tool_use" if finish_reason == "tool_calls" or tool_calls else "end_turn"
 
         usage = data.get("usage", {})
-        input_tokens = usage.get("prompt_tokens", 0)
-        output_tokens = usage.get("completion_tokens", 0)
+        raw_input = usage.get("prompt_tokens") if isinstance(usage, dict) else None
+        raw_output = usage.get("completion_tokens") if isinstance(usage, dict) else None
+        server_input = raw_input if type(raw_input) is int and raw_input >= 0 else None
+        server_output = raw_output if type(raw_output) is int and raw_output >= 0 else None
 
         return LLMResponse(
             text=text,
             tool_calls=tool_calls,
             stop_reason=stop_reason,
-            input_tokens=input_tokens,
-            output_tokens=output_tokens,
+            input_tokens=server_input or 0,
+            output_tokens=server_output or 0,
+            server_input_tokens=server_input,
+            server_output_tokens=server_output,
+            input_token_provenance=(
+                "provider_reported" if server_input is not None else "unknown"
+            ),
+            output_token_provenance=(
+                "provider_reported" if server_output is not None else "unknown"
+            ),
         )
 
     async def health_check(self) -> dict:

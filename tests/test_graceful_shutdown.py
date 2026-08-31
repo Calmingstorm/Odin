@@ -358,3 +358,28 @@ class TestUnprovenCleanupEscalation:
             or "cleanup could not be verified" in r.getMessage().lower()
             for r in caplog.records
         )
+
+
+@pytest.mark.asyncio
+async def test_shutdown_stops_usage_rollup():
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.discord.wiring import shutdown_services
+
+    usage = SimpleNamespace(stop=AsyncMock())
+    await shutdown_services(SimpleNamespace(usage_rollup=usage))
+    usage.stop.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_shutdown_usage_failure_is_nonfatal(caplog):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from src.discord.wiring import shutdown_services
+
+    usage = SimpleNamespace(stop=AsyncMock(side_effect=RuntimeError("down")))
+    with caplog.at_level("ERROR"):
+        await shutdown_services(SimpleNamespace(usage_rollup=usage))
+    assert "Error stopping usage_rollup" in caplog.text

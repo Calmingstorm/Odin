@@ -57,6 +57,13 @@ class ToolIteration:
     context_density_milli: int | None = None
     context_density_source: str = ""
     context_primary_chars: int | None = None
+    # Usage & Activity provenance.  These are facts of the accepted physical
+    # request; older rows omit them and are classified legacy_estimated.
+    server_input_tokens: int | None = None
+    server_output_tokens: int | None = None
+    estimated_input_tokens: int | None = None
+    input_token_provenance: str = ""
+    output_token_provenance: str = ""
 
 
 def stored_tool_results(
@@ -222,12 +229,21 @@ class TrajectorySaver:
     Writes are async via aiofiles to avoid blocking the event loop.
     """
 
-    def __init__(self, directory: str = DEFAULT_TRAJECTORY_DIR) -> None:
+    def __init__(
+        self,
+        directory: str = DEFAULT_TRAJECTORY_DIR,
+        *,
+        usage_observer=None,
+    ) -> None:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self._count = 0
+        self.usage_observer = usage_observer
 
-    async def save(self, turn: TrajectoryTurn) -> Path:
+    def set_usage_observer(self, observer) -> None:
+        self.usage_observer = observer
+
+    async def save(self, turn: TrajectoryTurn, *, observe_usage: bool = True) -> Path:
         now = datetime.now(UTC)
         if not turn.timestamp:
             turn.timestamp = now.isoformat()
@@ -235,6 +251,9 @@ class TrajectorySaver:
         filename = _trajectory_filename(now)
         filepath = self.directory / filename
         data = turn.to_dict()
+        # Backfill must distinguish a suspended/checkpoint snapshot from a
+        # settled work unit. This additive marker does not alter the turn codec.
+        data["usage_settled"] = bool(observe_usage)
         line = json.dumps(data, default=str, ensure_ascii=False) + "\n"
 
         try:
@@ -242,6 +261,14 @@ class TrajectorySaver:
                 await f.write(line)
             self._count += 1
             log.debug("Trajectory saved: msg=%s channel=%s", turn.message_id, turn.channel_id)
+            # Additive observer AFTER the source artifact is durable.  It never
+            # delays settlement; the resumable backfill repairs a missed task.
+            observer = self.usage_observer
+            if observer is not None and observe_usage:
+                try:
+                    observer.schedule_trajectory(data, "turn")
+                except Exception:
+                    log.debug("Usage observer scheduling failed (non-fatal)", exc_info=True)
         except Exception as e:
             log.error("Failed to save trajectory: %s", e)
             raise

@@ -444,10 +444,13 @@ class TestFieldRecord:
         assert record["effective"] is None
         assert record["apply_state"] == "unknown"
 
-    def test_dormant_field_is_never_reported_applied(self):
-        record = build_field_record("usage.directory", "./data/usage")
-        assert record["apply_state"] == "dormant"
-        assert record["activation_policy"]
+    def test_usage_directory_is_restart_bound(self):
+        record = build_field_record(
+            "usage.directory", "./data/usage", boot_value="./data/usage", has_boot=True
+        )
+        assert record["apply_state"] == "applied"
+        assert record["apply_mode"] == "restart"
+        assert record["restart_reason"]
 
     def test_consumers_survive_to_the_record(self):
         record = build_field_record("timezone", "UTC")
@@ -634,10 +637,15 @@ class TestEffectiveIsNeverGuessed:
         assert record["effective"] == 5
         assert record["apply_state"] == "applied"
 
-    def test_a_gated_field_reports_no_effective_value(self):
-        record = build_field_record("usage.directory", "./data/usage")
-        assert record["effective"] is None
-        assert record["apply_state"] == "dormant"
+    def test_usage_directory_reports_boot_effective_value(self):
+        record = build_field_record(
+            "usage.directory",
+            "/srv/new-usage",
+            boot_value="/srv/boot-usage",
+            has_boot=True,
+        )
+        assert record["effective"] == "/srv/boot-usage"
+        assert record["apply_state"] == "pending_restart"
 
     def test_a_handler_applied_field_reports_no_effective_value(self):
         """Whether the named handler has run is not visible from config."""
@@ -830,8 +838,8 @@ class TestMetaPayload:
             "applied", "pending_restart", "dormant", "invalid", "drift", "unknown",
         }
         assert sum(counts.values()) == len(payload["fields"])
-        assert counts["dormant"] == 1
-        assert counts["unknown"] == 2
+        assert counts["dormant"] == 0
+        assert counts["unknown"] == 3
 
     def test_boot_snapshot_makes_pending_restart_visible(self):
         payload = build_meta_payload(
@@ -879,12 +887,12 @@ class TestPlainLanguageEffects:
     drift in meaning, so they are pinned verbatim.
     """
 
-    def test_a_gated_field_says_current_behavior_is_kept(self):
-        record = build_field_record("usage.directory", "./x")
-        assert record["save_effect"] == (
-            "Saving records your choice, but Odin continues using current "
-            "behavior until you apply it explicitly."
+    def test_usage_directory_says_restart_required(self):
+        record = build_field_record(
+            "usage.directory", "./x", boot_value="./data/usage", has_boot=True
         )
+        assert "restart" in record["save_effect"].lower()
+        assert record["runtime_effect"] == record["restart_reason"]
 
     def test_restart_fields_carry_their_reason_as_runtime_effect(self):
         record = build_field_record("sessions.max_history", 50)
@@ -954,11 +962,8 @@ class TestPlainLanguageEffects:
             assert len(fence) == 1, path
             assert fence[0].apply_mode == "restart", path
             assert "captured" in fence[0].detail, path
-            if path == "usage.directory":
-                assert spec.apply_mode == "activation_required"
-            else:
-                assert spec.apply_mode == "restart", path
-                assert spec.restart_reason, path
+            assert spec.apply_mode == "restart", path
+            assert spec.restart_reason, path
 
     @pytest.mark.parametrize(
         "path",

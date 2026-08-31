@@ -51,6 +51,8 @@ def _bot():
     ex.bulkheads.get_all_metrics.return_value = {"b": 1}
     bot.cost_tracker.get_totals.return_value = {"c": 1}
     bot.cost_tracker.get_summary.return_value = {"c": 2}
+    bot.usage_rollup.totals = AsyncMock(return_value={"available": True, "c": 1})
+    bot.usage_rollup.summary = AsyncMock(return_value={"available": True, "c": 2})
     bot.compression_stats.as_dict.return_value = {"comp": 1}
     bot.services = None
     bot.subsystem_guard.get_status.return_value = {"s": 1}
@@ -124,7 +126,7 @@ class TestBulkheadsAndAggregates:
         bot.config.observability.prompt_budget_accounting = False
         async with TestClient(TestServer(_app(obs.register_aggregates, bot=bot))) as c:
             assert (await c.get("/api/observability/context")).status == 503
-        bot.cost_tracker = None
+        bot.usage_rollup = None
         async with TestClient(TestServer(_app(obs.register_aggregates, bot=bot))) as c:
             assert (await c.get("/api/usage/totals")).status == 503
 
@@ -226,6 +228,29 @@ class TestMiscStats:
                 assert (await (await c.get("/api/usage")).json())["c"] == 2
                 assert (await (await c.get("/api/subsystems/status")).json())["s"] == 1
 
+    async def test_usage_duration_unavailability_survives_json_api_boundary(self):
+        bot = _bot()
+        bot.usage_rollup.summary = AsyncMock(return_value={
+            "available": True,
+            "work": {
+                "recorded_processing_ms": None,
+                "recorded_processing_samples": 0,
+            },
+            "activity": [{"duration_ms": None, "duration_samples": 0}],
+            "serving": [{"duration_ms": None, "duration_samples": 0}],
+            "tools": [{"avg_duration_ms": None, "duration_samples": 0}],
+        })
+        async with TestClient(TestServer(_app(obs.register_usage_cost, bot=bot))) as c:
+            response = await c.get("/api/usage?range=all")
+            body = await response.json()
+
+        assert response.status == 200
+        assert body["work"]["recorded_processing_ms"] is None
+        assert body["activity"][0]["duration_ms"] is None
+        assert body["serving"][0]["duration_ms"] is None
+        assert body["tools"][0]["avg_duration_ms"] is None
+        bot.usage_rollup.summary.assert_awaited_once_with("all")
+
     async def test_subsystem_status_exposes_server_computed_failure_age(self):
         from src.health.subsystem_guard import SubsystemGuard
 
@@ -258,7 +283,7 @@ class TestMiscStats:
     async def test_misc_unavailable_503(self):
         bot = _bot()
         bot.compression_stats = None
-        bot.cost_tracker = None
+        bot.usage_rollup = None
         bot.subsystem_guard = None
         regs = (obs.register_compression_stats, obs.register_usage_cost, obs.register_degradation)
         async with TestClient(TestServer(_app(*regs, bot=bot))) as c:

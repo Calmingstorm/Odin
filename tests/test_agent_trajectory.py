@@ -11,6 +11,8 @@ import time
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
+
 from src.agents.manager import (
     AgentInfo,
     AgentManager,
@@ -1304,3 +1306,50 @@ class TestSpawnPolicySerialization:
         d = AgentTrajectoryTurn(agent_id="a1").to_dict()
         assert d["iteration_timeout"] is None
         assert d["max_lifetime"] is None
+
+
+@pytest.mark.asyncio
+async def test_usage_observer_receives_persisted_agent_record(tmp_path):
+    from src.agents.trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
+
+    seen = []
+
+    class Observer:
+        def schedule_trajectory(self, record, kind):
+            seen.append((record, kind))
+
+    saver = AgentTrajectorySaver(str(tmp_path), usage_observer=Observer())
+    turn = AgentTrajectoryTurn(
+        agent_id="agent-observed",
+        label="observed",
+        goal="goal",
+        channel_id="c",
+        requester_id="u",
+        requester_name="user",
+    )
+    turn.final_state = "completed"
+    await saver.save(turn)
+    assert seen[0][1] == "agent"
+    assert seen[0][0]["agent_id"] == "agent-observed"
+
+
+@pytest.mark.asyncio
+async def test_usage_observer_failure_cannot_fail_agent_save(tmp_path):
+    from src.agents.trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
+
+    class Observer:
+        def schedule_trajectory(self, record, kind):
+            raise RuntimeError("observer down")
+
+    saver = AgentTrajectorySaver(str(tmp_path))
+    saver.set_usage_observer(Observer())
+    turn = AgentTrajectoryTurn(
+        agent_id="agent-safe",
+        label="safe",
+        goal="goal",
+        channel_id="c",
+        requester_id="u",
+        requester_name="user",
+    )
+    path = await saver.save(turn)
+    assert path.exists()

@@ -55,6 +55,7 @@ from ..tools.process_manager import ProcessCleanupError
 from ..tools.workspace import DEFAULT_MEMORY_PATH
 from ..trajectories.saver import TrajectorySaver
 from ..turn_state import TurnStateStore
+from ..usage import UsageRollup
 from .channel_config import ChannelConfigManager
 from .channel_logger import ChannelLogger
 from .channel_state import ChannelStateRegistry
@@ -121,6 +122,7 @@ class BotServices:
     loop_agent_bridge: LoopAgentBridge
     loop_reflection_gate: LoopReflectionGate
     cost_tracker: CostTracker
+    usage_rollup: UsageRollup
     subsystem_guard: SubsystemGuard
     diff_tracker: DiffTracker
     context_compressor: object | None
@@ -396,7 +398,19 @@ def build_services(
         scheduler=scheduler,
     )
 
-    # Cost tracking — always on, near-zero overhead.
+    # Persistent Usage & Activity rollup. Construction is total: an absent
+    # store self-creates; an unwritable/broken store disables only statistics.
+    usage_rollup = UsageRollup(
+        config.usage.directory,
+        trajectory_directory=str(trajectory_saver.directory),
+        agent_trajectory_directory=str(agent_trajectory_saver.directory),
+        audit=audit,
+    )
+    trajectory_saver.set_usage_observer(usage_rollup)
+    agent_trajectory_saver.set_usage_observer(usage_rollup)
+
+    # Cost tracking remains the hot-process Prometheus accumulator; persistent
+    # WebUI history is served by usage_rollup.
     cost_tracker = CostTracker()
 
     # Stuck-loop tracker — instantiated per-iteration in the tool loop, but
@@ -589,6 +603,7 @@ def build_services(
         loop_agent_bridge=loop_agent_bridge,
         loop_reflection_gate=loop_reflection_gate,
         cost_tracker=cost_tracker,
+        usage_rollup=usage_rollup,
         subsystem_guard=subsystem_guard,
         diff_tracker=diff_tracker,
         context_compressor=context_compressor,
@@ -1054,6 +1069,13 @@ async def shutdown_services(bot) -> None:
             await mcp_manager.shutdown()
         except Exception:
             log.exception("Error stopping mcp_manager")
+
+    usage_rollup = getattr(bot, "usage_rollup", None)
+    if usage_rollup is not None:
+        try:
+            await usage_rollup.stop()
+        except Exception:
+            log.exception("Error stopping usage_rollup")
 
     health_server = getattr(bot, "health_server", None)
     if health_server is not None:

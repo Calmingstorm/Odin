@@ -241,10 +241,13 @@ def register_aggregates(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/usage/totals")
     async def get_usage_totals(_request: web.Request) -> web.Response:
-        tracker = getattr(bot, "cost_tracker", None)
-        if tracker is None:
-            return web.json_response({"error": "cost tracking not available"}, status=503)
-        return web.json_response(tracker.get_totals())
+        rollup = getattr(bot, "usage_rollup", None)
+        if rollup is None:
+            return web.json_response(
+                {"available": False, "reason": "usage history not enabled"}, status=503
+            )
+        data = await rollup.totals()
+        return web.json_response(data, status=200 if data.get("available") else 503)
 
 
 def register_audit_log(routes: web.RouteTableDef, bot) -> None:
@@ -475,11 +478,14 @@ def register_usage_cost(routes: web.RouteTableDef, bot) -> None:
     # ------------------------------------------------------------------
 
     @routes.get("/api/usage")
-    async def get_usage(_request: web.Request) -> web.Response:
-        tracker = getattr(bot, "cost_tracker", None)
-        if tracker is None:
-            return web.json_response({"error": "cost tracking not available"}, status=503)
-        return web.json_response(tracker.get_summary())
+    async def get_usage(request: web.Request) -> web.Response:
+        rollup = getattr(bot, "usage_rollup", None)
+        if rollup is None:
+            return web.json_response(
+                {"available": False, "reason": "usage history not enabled"}, status=503
+            )
+        data = await rollup.summary(request.query.get("range", "7d"))
+        return web.json_response(data, status=200 if data.get("available") else 503)
 
 
 def register_degradation(routes: web.RouteTableDef, bot) -> None:

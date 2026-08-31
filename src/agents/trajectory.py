@@ -70,6 +70,13 @@ class AgentTrajectoryTurn:
         tool_results: list[dict] | None = None,
         llm_text: str = "",
         duration_ms: int = 0,
+        input_tokens: int = 0,
+        output_tokens: int = 0,
+        server_input_tokens: int | None = None,
+        server_output_tokens: int | None = None,
+        estimated_input_tokens: int | None = None,
+        input_token_provenance: str = "",
+        output_token_provenance: str = "",
         provider: str = "",
         model: str = "",
         reasoning_effort: str | None = None,
@@ -83,6 +90,13 @@ class AgentTrajectoryTurn:
             tool_results=tool_results or [],
             llm_text=llm_text,
             duration_ms=duration_ms,
+            input_tokens=input_tokens,
+            output_tokens=output_tokens,
+            server_input_tokens=server_input_tokens,
+            server_output_tokens=server_output_tokens,
+            estimated_input_tokens=estimated_input_tokens,
+            input_token_provenance=input_token_provenance,
+            output_token_provenance=output_token_provenance,
             provider=provider,
             model=model,
             reasoning_effort=reasoning_effort,
@@ -162,10 +176,19 @@ class AgentTrajectorySaver:
     Writes are async via aiofiles to avoid blocking the event loop.
     """
 
-    def __init__(self, directory: str = DEFAULT_AGENT_TRAJECTORY_DIR) -> None:
+    def __init__(
+        self,
+        directory: str = DEFAULT_AGENT_TRAJECTORY_DIR,
+        *,
+        usage_observer=None,
+    ) -> None:
         self.directory = Path(directory)
         self.directory.mkdir(parents=True, exist_ok=True)
         self._count = 0
+        self.usage_observer = usage_observer
+
+    def set_usage_observer(self, observer) -> None:
+        self.usage_observer = observer
 
     async def save(self, turn: AgentTrajectoryTurn) -> Path:
         now = datetime.now(UTC)
@@ -185,6 +208,12 @@ class AgentTrajectorySaver:
                 "Agent trajectory saved: agent=%s label=%s state=%s",
                 turn.agent_id, turn.label, turn.final_state,
             )
+            observer = self.usage_observer
+            if observer is not None:
+                try:
+                    observer.schedule_trajectory(data, "agent")
+                except Exception:
+                    log.debug("Usage observer scheduling failed (non-fatal)", exc_info=True)
         except Exception as e:
             log.error("Failed to save agent trajectory: %s", e)
             raise

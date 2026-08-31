@@ -12,7 +12,7 @@ export const TABS = [
     { id: 'audit', label: 'Audit', component: AuditPage },
     { id: 'sessions', label: 'Sessions', component: SessionsPage },
     { id: 'traces', label: 'Traces', component: TracesPage },
-    { id: 'usage', label: 'Usage', component: UsagePage },
+    { id: 'usage', label: 'Usage & Activity', component: UsagePage },
 ];
 
 export default {

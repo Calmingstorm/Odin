@@ -970,7 +970,13 @@ class AgentTaskTools:
                 "stop_reason": resp.stop_reason,
                 # Phase 5: server acceptance evidence rides the callback dict
                 # so a rescued iteration can qualify a window clamp.
+                "input_tokens": getattr(resp, "input_tokens", 0) or 0,
+                "output_tokens": getattr(resp, "output_tokens", 0) or 0,
                 "server_input_tokens": getattr(resp, "server_input_tokens", None),
+                "server_output_tokens": getattr(resp, "server_output_tokens", None),
+                "estimated_input_tokens": getattr(resp, "estimated_input_tokens", None),
+                "input_token_provenance": getattr(resp, "input_token_provenance", "") or "",
+                "output_token_provenance": getattr(resp, "output_token_provenance", "") or "",
                 "account_key": getattr(resp, "account_key", None),
                 **_provenance_stamp(resp, client),
             }
@@ -1335,7 +1341,13 @@ class AgentTaskTools:
                         {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
                     ],
                     "stop_reason": resp.stop_reason or "end_turn",
+                    "input_tokens": getattr(resp, "input_tokens", 0) or 0,
+                    "output_tokens": getattr(resp, "output_tokens", 0) or 0,
                     "server_input_tokens": getattr(resp, "server_input_tokens", None),
+                    "server_output_tokens": getattr(resp, "server_output_tokens", None),
+                    "estimated_input_tokens": getattr(resp, "estimated_input_tokens", None),
+                    "input_token_provenance": getattr(resp, "input_token_provenance", "") or "",
+                    "output_token_provenance": getattr(resp, "output_token_provenance", "") or "",
                     "account_key": getattr(resp, "account_key", None),
                     **_provenance_stamp(resp, client),
                 }
