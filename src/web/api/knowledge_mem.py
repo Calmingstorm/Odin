@@ -16,6 +16,7 @@ from aiohttp import web
 
 from ...json_store import StoreCorruptError
 from ...odin_log import get_logger
+from ...search.errors import InvalidSearchQuery
 from ..api_common import (
     _MAX_CONTENT_LEN,
     _MAX_NAME_LEN,
@@ -94,7 +95,13 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
             limit = _safe_int_param(request, "limit", 10, hi=50)
         except ValueError:
             return web.json_response({"error": "limit must be an integer"}, status=400)
-        results = await store.search_hybrid(query, embedder=bot.embedder, limit=limit)
+        try:
+            results = await store.search_hybrid(query, embedder=bot.embedder, limit=limit)
+        except InvalidSearchQuery:
+            return web.json_response({"error": "invalid query"}, status=400)
+        except Exception:
+            log.exception("Knowledge search failed")
+            return web.json_response({"error": "search failed"}, status=500)
         return web.json_response(results)
 
     @routes.get("/api/knowledge/{source}/chunks")

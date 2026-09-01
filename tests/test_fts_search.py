@@ -9,7 +9,10 @@ from __future__ import annotations
 import os
 import tempfile
 
-from src.search.fts import _FTS5_KEYWORDS, FullTextIndex, _prepare_query
+import pytest
+
+from src.search.errors import InvalidSearchQuery, SearchExecutionError
+from src.search.fts import FullTextIndex, _prepare_query
 
 # ---------------------------------------------------------------------------
 # _prepare_query
@@ -22,17 +25,13 @@ class TestPrepareQuery:
     def test_whitespace_only(self):
         assert _prepare_query("   ") == ""
 
-    def test_simple_terms(self):
-        assert _prepare_query("hello world") == "hello world"
+    def test_quotes_each_term(self):
+        assert _prepare_query("hello world") == '"hello" "world"'
 
-    def test_quotes_special_chars(self):
-        """FTS5 special chars trigger quoting."""
-        result = _prepare_query("status[0]")
-        assert result.startswith('"')
-        assert result.endswith('"')
+    def test_quotes_punctuation_terms_without_changing_and_semantics(self):
+        assert _prepare_query("error.log recovered") == '"error.log" "recovered"'
 
     def test_quotes_ip_address(self):
-        """IP addresses contain dots, which trigger quoting."""
         result = _prepare_query("192.168.1.1")
         assert result == '"192.168.1.1"'
 
@@ -41,43 +40,14 @@ class TestPrepareQuery:
         assert result == '"/var/log/syslog"'
 
     def test_escapes_internal_quotes(self):
-        result = _prepare_query('say "hello"')
-        assert '""' in result  # Internal quotes escaped
+        assert _prepare_query('say "hello"') == '"say" """hello"""'
 
-    def test_reserved_keyword_AND(self):  # noqa: N802 — established public name; rename is an API change
-        result = _prepare_query("this AND that")
-        assert '"AND"' in result
+    def test_reserved_words_are_literals(self):
+        assert _prepare_query("this AND that") == '"this" "AND" "that"'
 
-    def test_reserved_keyword_OR(self):  # noqa: N802 — established public name; rename is an API change
-        result = _prepare_query("this OR that")
-        assert '"OR"' in result
-
-    def test_reserved_keyword_NOT(self):  # noqa: N802 — established public name; rename is an API change
-        result = _prepare_query("NOT error")
-        assert '"NOT"' in result
-
-    def test_reserved_keyword_NEAR(self):  # noqa: N802 — established public name; rename is an API change
-        result = _prepare_query("NEAR match")
-        assert '"NEAR"' in result
-
-    def test_reserved_keyword_TO(self):  # noqa: N802 — established public name; rename is an API change
-        result = _prepare_query("from TO end")
-        assert '"TO"' in result
-
-    def test_mixed_normal_and_keyword(self):
-        result = _prepare_query("error AND warning")
-        assert '"AND"' in result
-        assert "error" in result
-        assert "warning" in result
-
-    def test_case_insensitive_keywords(self):
-        result = _prepare_query("error and warning")
-        assert '"and"' in result
-
-    def test_all_fts5_keywords_frozenset(self):
-        assert isinstance(_FTS5_KEYWORDS, frozenset)
-        assert "AND" in _FTS5_KEYWORDS
-        assert "OR" in _FTS5_KEYWORDS
+    def test_control_character_is_invalid(self):
+        with pytest.raises(InvalidSearchQuery, match="invalid query"):
+            _prepare_query("bad\x00query")
 
 
 # ---------------------------------------------------------------------------
@@ -103,11 +73,14 @@ class TestFullTextIndexInit:
         idx = FullTextIndex("/nonexistent/dir/test.db")
         assert idx.available is False
 
-    def test_unavailable_returns_empty(self):
+    def test_unavailable_search_is_explicit_failure(self):
         idx = FullTextIndex("/nonexistent/dir/test.db")
-        assert idx.search_sessions("test") == []
-        assert idx.search_knowledge("test") == []
-        assert idx.search_channel_logs("test") == []
+        with pytest.raises(SearchExecutionError, match="unavailable"):
+            idx.search_sessions("test")
+        with pytest.raises(SearchExecutionError, match="unavailable"):
+            idx.search_knowledge("test")
+        with pytest.raises(SearchExecutionError, match="unavailable"):
+            idx.search_channel_logs("test")
 
 
 # ---------------------------------------------------------------------------
@@ -134,6 +107,23 @@ class TestSessionIndex:
         self.idx.index_session("s1", "hello world", "ch1", 1000.0)
         results = self.idx.search_sessions("nonexistent")
         assert results == []
+
+    @pytest.mark.parametrize("term", ["don't", "C++", "foo,bar", "a=b", "hello!"])
+    def test_punctuation_terms_return_real_results(self, term):
+        self.idx.index_session("s1", f"prefix {term} suffix", "ch1", 1000.0)
+        assert [r["doc_id"] for r in self.idx.search_sessions(term)] == ["s1"]
+
+    def test_dotted_multi_term_query_is_implicit_and_not_phrase(self):
+        self.idx.index_session(
+            "s1", "error.log appeared many unrelated words before recovered", "ch1", 1000.0
+        )
+        results = self.idx.search_sessions("error.log recovered")
+        assert [r["doc_id"] for r in results] == ["s1"]
+
+    def test_control_character_surfaces_invalid_query(self):
+        self.idx.index_session("s1", "bad query", "ch1", 1000.0)
+        with pytest.raises(InvalidSearchQuery, match="invalid query"):
+            self.idx.search_sessions("bad\x00query")
 
     def test_search_with_channel_filter(self):
         self.idx.index_session("s1", "error in production", "ch1", 1000.0)
@@ -196,6 +186,11 @@ class TestKnowledgeIndex:
         self.idx.index_knowledge_chunk("k1", "something else", "src.md", 0)
         results = self.idx.search_knowledge("nonexistent")
         assert results == []
+
+    @pytest.mark.parametrize("term", ["don't", "C++", "foo,bar", "a=b", "hello!"])
+    def test_punctuation_terms_return_real_results(self, term):
+        self.idx.index_knowledge_chunk("k1", f"prefix {term} suffix", "src.md", 0)
+        assert [r["chunk_id"] for r in self.idx.search_knowledge(term)] == ["k1"]
 
     def test_search_limit(self):
         for i in range(10):
@@ -285,6 +280,16 @@ class TestChannelLogIndex:
         self.idx.index_channel_messages(msgs)
         results = self.idx.search_channel_logs("error", channel_id="ch1")
         assert len(results) == 1
+
+    @pytest.mark.parametrize("term", ["don't", "C++", "foo,bar", "a=b", "hello!"])
+    def test_punctuation_terms_return_real_results(self, term):
+        self.idx.index_channel_messages([{
+            "content": f"prefix {term} suffix",
+            "author": "user",
+            "channel_id": "ch1",
+            "ts": 1.0,
+        }])
+        assert len(self.idx.search_channel_logs(term)) == 1
 
     def test_clear_channel_logs(self):
         msgs = [{"content": "hello world", "author": "user", "channel_id": "ch1", "ts": 1.0}]

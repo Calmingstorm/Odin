@@ -5,19 +5,13 @@ Two tables: session_fts (archived conversations) and knowledge_fts (ingested doc
 """
 from __future__ import annotations
 
-import re
 import sqlite3
 import threading
 
 from ..odin_log import get_logger
+from .errors import SearchExecutionError, validate_search_query
 
 log = get_logger("search.fts")
-
-# Characters that have special meaning in FTS5 query syntax
-_FTS5_SPECIAL = re.compile(r'[*"{}()\[\]:^~]')
-
-# FTS5 keywords that cause "no such column" errors when used as bare terms
-_FTS5_KEYWORDS = frozenset({"AND", "OR", "NOT", "NEAR", "TO"})
 
 
 class FullTextIndex:
@@ -104,42 +98,38 @@ class FullTextIndex:
         self, query: str, limit: int = 20, channel_id: str | None = None,
     ) -> list[dict]:
         if not self._conn:
-            return []
+            raise SearchExecutionError("full-text search is unavailable")
         fts_query = _prepare_query(query)
         if not fts_query:
             return []
-        try:
-            if channel_id:
-                rows = self._conn.execute(
-                    "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
-                    "channel_id, last_active, bm25(session_fts) as rank "
-                    "FROM session_fts WHERE session_fts MATCH ? "
-                    "AND channel_id = ? "
-                    "ORDER BY rank LIMIT ?",
-                    (fts_query, channel_id, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
-                    "channel_id, last_active, bm25(session_fts) as rank "
-                    "FROM session_fts WHERE session_fts MATCH ? "
-                    "ORDER BY rank LIMIT ?",
-                    (fts_query, limit),
-                ).fetchall()
-            return [
-                {
-                    "doc_id": r[0],
-                    "content": r[1],
-                    "channel_id": r[2],
-                    "timestamp": float(r[3]) if r[3] else 0.0,
-                    "type": "fts",
-                    "rank": r[4],
-                }
-                for r in rows
-            ]
-        except Exception as e:
-            log.warning("FTS session search failed: %s", e)
-            return []
+        if channel_id:
+            rows = self._conn.execute(
+                "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
+                "channel_id, last_active, bm25(session_fts) as rank "
+                "FROM session_fts WHERE session_fts MATCH ? "
+                "AND channel_id = ? "
+                "ORDER BY rank LIMIT ?",
+                (fts_query, channel_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT doc_id, snippet(session_fts, 1, '>>>', '<<<', '...', 64), "
+                "channel_id, last_active, bm25(session_fts) as rank "
+                "FROM session_fts WHERE session_fts MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
+        return [
+            {
+                "doc_id": r[0],
+                "content": r[1],
+                "channel_id": r[2],
+                "timestamp": float(r[3]) if r[3] else 0.0,
+                "type": "fts",
+                "rank": r[4],
+            }
+            for r in rows
+        ]
 
     def has_session(self, doc_id: str) -> bool:
         if not self._conn:
@@ -174,32 +164,28 @@ class FullTextIndex:
 
     def search_knowledge(self, query: str, limit: int = 20) -> list[dict]:
         if not self._conn:
-            return []
+            raise SearchExecutionError("full-text search is unavailable")
         fts_query = _prepare_query(query)
         if not fts_query:
             return []
-        try:
-            rows = self._conn.execute(
-                "SELECT chunk_id, snippet(knowledge_fts, 1, '>>>', '<<<', '...', 64), "
-                "source, chunk_index, bm25(knowledge_fts) as rank "
-                "FROM knowledge_fts WHERE knowledge_fts MATCH ? "
-                "ORDER BY rank LIMIT ?",
-                (fts_query, limit),
-            ).fetchall()
-            return [
-                {
-                    "chunk_id": r[0],
-                    "content": r[1],
-                    "source": r[2],
-                    "chunk_index": int(r[3]) if r[3] else 0,
-                    "type": "fts",
-                    "rank": r[4],
-                }
-                for r in rows
-            ]
-        except Exception as e:
-            log.warning("FTS knowledge search failed: %s", e)
-            return []
+        rows = self._conn.execute(
+            "SELECT chunk_id, snippet(knowledge_fts, 1, '>>>', '<<<', '...', 64), "
+            "source, chunk_index, bm25(knowledge_fts) as rank "
+            "FROM knowledge_fts WHERE knowledge_fts MATCH ? "
+            "ORDER BY rank LIMIT ?",
+            (fts_query, limit),
+        ).fetchall()
+        return [
+            {
+                "chunk_id": r[0],
+                "content": r[1],
+                "source": r[2],
+                "chunk_index": int(r[3]) if r[3] else 0,
+                "type": "fts",
+                "rank": r[4],
+            }
+            for r in rows
+        ]
 
     def delete_knowledge_source(self, source: str) -> int:
         if not self._conn:
@@ -283,65 +269,53 @@ class FullTextIndex:
         Returns dicts with content, author, channel_id, timestamp, type="channel".
         """
         if not self._conn:
-            return []
+            raise SearchExecutionError("full-text search is unavailable")
         fts_query = _prepare_query(query)
         if not fts_query:
             return []
-        try:
-            if channel_id:
-                rows = self._conn.execute(
-                    "SELECT snippet(channel_log_fts, 0, '>>>', '<<<', '...', 64), "
-                    "author, channel_id, timestamp, bm25(channel_log_fts) as rank "
-                    "FROM channel_log_fts WHERE channel_log_fts MATCH ? "
-                    "AND channel_id = ? "
-                    "ORDER BY rank LIMIT ?",
-                    (fts_query, channel_id, limit),
-                ).fetchall()
-            else:
-                rows = self._conn.execute(
-                    "SELECT snippet(channel_log_fts, 0, '>>>', '<<<', '...', 64), "
-                    "author, channel_id, timestamp, bm25(channel_log_fts) as rank "
-                    "FROM channel_log_fts WHERE channel_log_fts MATCH ? "
-                    "ORDER BY rank LIMIT ?",
-                    (fts_query, limit),
-                ).fetchall()
-            return [
-                {
-                    "content": r[0],
-                    "author": r[1],
-                    "channel_id": r[2],
-                    "timestamp": float(r[3]) if r[3] else 0.0,
-                    "type": "channel",
-                    "rank": r[4],
-                }
-                for r in rows
-            ]
-        except Exception as e:
-            log.warning("FTS channel log search failed: %s", e)
-            return []
+        if channel_id:
+            rows = self._conn.execute(
+                "SELECT snippet(channel_log_fts, 0, '>>>', '<<<', '...', 64), "
+                "author, channel_id, timestamp, bm25(channel_log_fts) as rank "
+                "FROM channel_log_fts WHERE channel_log_fts MATCH ? "
+                "AND channel_id = ? "
+                "ORDER BY rank LIMIT ?",
+                (fts_query, channel_id, limit),
+            ).fetchall()
+        else:
+            rows = self._conn.execute(
+                "SELECT snippet(channel_log_fts, 0, '>>>', '<<<', '...', 64), "
+                "author, channel_id, timestamp, bm25(channel_log_fts) as rank "
+                "FROM channel_log_fts WHERE channel_log_fts MATCH ? "
+                "ORDER BY rank LIMIT ?",
+                (fts_query, limit),
+            ).fetchall()
+        return [
+            {
+                "content": r[0],
+                "author": r[1],
+                "channel_id": r[2],
+                "timestamp": float(r[3]) if r[3] else 0.0,
+                "type": "channel",
+                "rank": r[4],
+            }
+            for r in rows
+        ]
 
 
 def _prepare_query(raw: str) -> str:
-    """Prepare a raw query string for FTS5 MATCH.
+    """Quote each whitespace-delimited term for literal FTS5 implicit-AND search.
 
-    - Wraps in quotes if it contains FTS5 special characters (for literal matching)
-    - Handles IP addresses, PromQL expressions, error codes, etc.
-    - Quotes individual terms that are FTS5 reserved keywords (AND, OR, NOT, NEAR, TO)
+    Advanced FTS5 syntax is deliberately unsupported. Quoting terms separately
+    preserves the ordinary multi-term AND semantics without converting the whole
+    query into an adjacent phrase.
     """
+    validate_search_query(raw)
     raw = raw.strip()
     if not raw:
         return ""
-    # If query contains special chars, hyphens, or looks like an IP/path, quote for literal match
-    if _FTS5_SPECIAL.search(raw) or "." in raw or "/" in raw or "-" in raw:
-        escaped = raw.replace('"', '""')
-        return f'"{escaped}"'
-    # Quote individual terms that are FTS5 reserved keywords to prevent
-    # "no such column" errors (e.g. "to" being treated as a column reference)
-    terms = raw.split()
-    escaped_terms = []
-    for term in terms:
-        if term.upper() in _FTS5_KEYWORDS:
-            escaped_terms.append(f'"{term}"')
-        else:
-            escaped_terms.append(term)
-    return " ".join(escaped_terms)
+    quoted = []
+    for term in raw.split():
+        escaped = term.replace('"', '""')
+        quoted.append(f'"{escaped}"')
+    return " ".join(quoted)

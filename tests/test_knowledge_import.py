@@ -4,7 +4,7 @@ from __future__ import annotations
 import os
 import tempfile
 from pathlib import Path
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 from aiohttp import web
@@ -22,6 +22,7 @@ from src.knowledge.importer import (
     ImportResult,
 )
 from src.knowledge.store import KnowledgeStore
+from src.search.errors import InvalidSearchQuery
 
 try:
     import fitz  # noqa: F401 — availability probe for the [pdf] extra
@@ -782,6 +783,27 @@ class TestImportBatch:
 
 
 class TestToolHandler:
+    async def test_search_knowledge_tool_reports_invalid_query_and_failure(self):
+        from src.discord.background_task import _execute_tool
+
+        executor = MagicMock()
+        skill_mgr = MagicMock()
+        skill_mgr.has_skill.return_value = False
+        store = MagicMock()
+        store.search_hybrid = AsyncMock(side_effect=InvalidSearchQuery("invalid query"))
+        result = await _execute_tool(
+            "search_knowledge", {"query": "bad\x00query"}, executor, skill_mgr,
+            store, object(), "test-user",
+        )
+        assert "Invalid query" in result
+
+        store.search_hybrid = AsyncMock(side_effect=RuntimeError("database failure"))
+        result = await _execute_tool(
+            "search_knowledge", {"query": "valid"}, executor, skill_mgr,
+            store, object(), "test-user",
+        )
+        assert "Search failed" in result
+
     async def test_bulk_ingest_tool_routing(self):
         from src.discord.background_task import _execute_tool
 

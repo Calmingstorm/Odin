@@ -10,6 +10,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.discord.native_tools.knowledge import KnowledgeTools
+from src.search.errors import InvalidSearchQuery
 
 
 def _tools(store=None, sessions=None, audit=None):
@@ -47,6 +48,18 @@ class TestSearchHistory:
         out = await _tools(sessions=s)._handle_search_history({"query": "q"})
         assert "Found 1 result(s)" in out and "(user)" in out
 
+    async def test_invalid_query_is_explicit(self):
+        s = MagicMock()
+        s.search_history = AsyncMock(side_effect=InvalidSearchQuery("invalid query"))
+        out = await _tools(sessions=s)._handle_search_history({"query": "bad\x00query"})
+        assert "Invalid query" in out
+
+    async def test_search_failure_is_explicit(self):
+        s = MagicMock()
+        s.search_history = AsyncMock(side_effect=RuntimeError("database failure"))
+        out = await _tools(sessions=s)._handle_search_history({"query": "q"})
+        assert "Search failed" in out
+
 
 class TestSearchKnowledge:
     async def test_store_unavailable(self):
@@ -66,6 +79,18 @@ class TestSearchKnowledge:
         ])
         out = await _tools(store=s)._handle_search_knowledge({"query": "q"})
         assert "[doc.md]" in out and "score: 0.9" in out
+
+    async def test_invalid_query_is_explicit(self):
+        s = _store()
+        s.search_hybrid = AsyncMock(side_effect=InvalidSearchQuery("invalid query"))
+        out = await _tools(store=s)._handle_search_knowledge({"query": "bad\x00query"})
+        assert "Invalid query" in out
+
+    async def test_search_failure_is_explicit(self):
+        s = _store()
+        s.search_hybrid = AsyncMock(side_effect=RuntimeError("database failure"))
+        out = await _tools(store=s)._handle_search_knowledge({"query": "q"})
+        assert "Search failed" in out
 
 
 class TestIngest:

@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import Config
+from src.search.errors import InvalidSearchQuery
 from src.web.api.sessions_chat import (
     register_agent_trajectories,
     register_chat,
@@ -120,6 +121,22 @@ class TestSessionsCrud:
             assert (await c.get("/api/sessions/search")).status == 400  # no q
             s = await (await c.get("/api/sessions/search?q=hi&after=1&before=2")).json()
             assert s["count"] == 1
+
+    async def test_search_invalid_query_and_failure_are_distinct(self):
+        bot = _bot()
+        bot.sessions.search_history = AsyncMock(
+            side_effect=InvalidSearchQuery("invalid query")
+        )
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            r = await c.get("/api/sessions/search?q=bad")
+            assert r.status == 400
+            assert (await r.json()) == {"error": "invalid query"}
+
+        bot.sessions.search_history = AsyncMock(side_effect=RuntimeError("database failure"))
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            r = await c.get("/api/sessions/search?q=valid")
+            assert r.status == 500
+            assert (await r.json()) == {"error": "search failed"}
 
     async def test_get_export_delete(self):
         bot = _bot()

@@ -15,6 +15,7 @@ from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
 from ..relevance import rank as relevance_rank
 from ..relevance import score as relevance_score
+from ..search.errors import validate_search_query
 
 if TYPE_CHECKING:
     from ..learning.reflector import ConversationReflector
@@ -1353,6 +1354,7 @@ class SessionManager:
         - after: only messages with timestamp >= after (epoch seconds)
         - before: only messages with timestamp <= before (epoch seconds)
         """
+        validate_search_query(query)
         query_lower = query.lower()
         results: list[dict] = []
 
@@ -1414,64 +1416,61 @@ class SessionManager:
         if len(results) >= limit:
             return results[:limit]
 
-        # Step 3: hybrid search (FTS5 + semantic) fills remaining slots
+        # Step 3: hybrid search (FTS5 + semantic) fills remaining slots.
+        # Backend failures propagate to the caller rather than masquerading as
+        # a keyword-only result set.
         if len(results) < limit and self._vector_store:
-            try:
-                hybrid_results = await self._vector_store.search_hybrid(
-                    query, self._embedder, limit=limit,
-                )
-                seen = {(r["channel_id"], r.get("timestamp", 0)) for r in results}
-                for hr in hybrid_results:
-                    if channel_id and hr.get("channel_id") != channel_id:
-                        continue
-                    ts = hr.get("timestamp", 0)
-                    if not _ts_ok(ts):
-                        continue
-                    # Reset content stays purged from the semantic index too.
-                    if ts <= self._reset_epochs.get(hr.get("channel_id", ""), 0.0):
-                        continue
-                    key = (hr["channel_id"], ts)
-                    if key not in seen:
-                        results.append(hr)
-                        seen.add(key)
-                        if len(results) >= limit:
-                            break
-            except Exception as e:
-                log.warning("Hybrid search failed, returning keyword-only results: %s", e)
+            hybrid_results = await self._vector_store.search_hybrid(
+                query, self._embedder, limit=limit,
+            )
+            seen = {(r["channel_id"], r.get("timestamp", 0)) for r in results}
+            for hr in hybrid_results:
+                if channel_id and hr.get("channel_id") != channel_id:
+                    continue
+                ts = hr.get("timestamp", 0)
+                if not _ts_ok(ts):
+                    continue
+                # Reset content stays purged from the semantic index too.
+                if ts <= self._reset_epochs.get(hr.get("channel_id", ""), 0.0):
+                    continue
+                key = (hr["channel_id"], ts)
+                if key not in seen:
+                    results.append(hr)
+                    seen.add(key)
+                    if len(results) >= limit:
+                        break
 
-        # Step 4: channel log search (full channel history from all users)
+        # Step 4: channel log search (full channel history from all users).
+        # An FTS execution failure is not equivalent to an empty result set.
         if len(results) < limit and self._channel_logger:
-            try:
-                remaining = limit - len(results)
-                fts = self._fts_index
-                channel_results = []
-                if fts and hasattr(fts, "search_channel_logs"):
-                    channel_results = fts.search_channel_logs(
-                        query, limit=remaining, channel_id=channel_id,
-                    )
-                if not channel_results and hasattr(self._channel_logger, "search"):
-                    channel_results = await asyncio.to_thread(
-                        self._channel_logger.search, query, remaining,
-                    )
-                seen = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
-                for cr in channel_results:
-                    ts = cr.get("timestamp", 0)
-                    if not _ts_ok(ts):
-                        continue
-                    cr_cid = cr.get("channel_id", "")
-                    if channel_id and cr_cid != channel_id:
-                        continue
-                    # Reset content stays purged from channel-log search too.
-                    if ts <= self._reset_epochs.get(cr_cid, 0.0):
-                        continue
-                    key = (cr_cid, ts)
-                    if key not in seen:
-                        results.append(cr)
-                        seen.add(key)
-                        if len(results) >= limit:
-                            break
-            except Exception as e:
-                log.warning("Channel log search failed: %s", e)
+            remaining = limit - len(results)
+            fts = self._fts_index
+            channel_results = []
+            if fts and hasattr(fts, "search_channel_logs"):
+                channel_results = fts.search_channel_logs(
+                    query, limit=remaining, channel_id=channel_id,
+                )
+            if not channel_results and hasattr(self._channel_logger, "search"):
+                channel_results = await asyncio.to_thread(
+                    self._channel_logger.search, query, remaining,
+                )
+            seen = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
+            for cr in channel_results:
+                ts = cr.get("timestamp", 0)
+                if not _ts_ok(ts):
+                    continue
+                cr_cid = cr.get("channel_id", "")
+                if channel_id and cr_cid != channel_id:
+                    continue
+                # Reset content stays purged from channel-log search too.
+                if ts <= self._reset_epochs.get(cr_cid, 0.0):
+                    continue
+                key = (cr_cid, ts)
+                if key not in seen:
+                    results.append(cr)
+                    seen.add(key)
+                    if len(results) >= limit:
+                        break
 
         return results
 

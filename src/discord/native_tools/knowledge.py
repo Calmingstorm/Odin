@@ -12,6 +12,7 @@ from collections.abc import Callable
 
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
+from ...search.errors import InvalidSearchQuery
 
 log = get_logger("discord")
 
@@ -34,7 +35,13 @@ class KnowledgeTools:
         if not query:
             return "A search query is required."
 
-        results = await self.sessions.search_history(query, limit=limit)
+        try:
+            results = await self.sessions.search_history(query, limit=limit)
+        except InvalidSearchQuery:
+            return "Invalid query: unsupported control character."
+        except Exception:
+            log.exception("History search failed")
+            return "Search failed while searching conversation history."
         if not results:
             return f"No past conversations found matching '{query}'."
 
@@ -59,7 +66,15 @@ class KnowledgeTools:
         if not query:
             return "A search query is required."
 
-        results = await self._knowledge_store.search_hybrid(query, self._embedder, limit=limit)
+        try:
+            results = await self._knowledge_store.search_hybrid(
+                query, self._embedder, limit=limit
+            )
+        except InvalidSearchQuery:
+            return "Invalid query: unsupported control character."
+        except Exception:
+            log.exception("Knowledge search failed")
+            return "Search failed while searching the knowledge base."
         if not results:
             return (
                 f"No knowledge base results for '{query}'. "

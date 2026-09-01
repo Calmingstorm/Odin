@@ -19,6 +19,7 @@ import discord
 from ..audit.diff_tracker import DIFF_TOOLS, DiffTracker
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from ..search.errors import InvalidSearchQuery
 from ..tools.executor import _ERROR_RESULT_PREFIXES
 from ..tools.result_validator import ToolResult
 from ..tools.risk_classifier import classify_tool
@@ -487,10 +488,20 @@ async def _execute_tool(
     if tool_name == "search_knowledge" and knowledge_store and embedder:
         query = tool_input.get("query", "")
         limit = min(tool_input.get("limit", 5), 10)
-        results = await knowledge_store.search(query, embedder, limit=limit)
+        try:
+            results = await knowledge_store.search_hybrid(query, embedder, limit=limit)
+        except InvalidSearchQuery:
+            return "Invalid query: unsupported control character."
+        except Exception:
+            log.exception("Background knowledge search failed")
+            return "Search failed while searching the knowledge base."
         if not results:
             return f"No results for '{query}'."
-        lines = [f"[{r['source']}] (score: {r['score']}): {r['content'][:200]}" for r in results]
+        lines = [
+            f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
+            f"{r['content'][:200]}"
+            for r in results
+        ]
         return "\n".join(lines)
 
     if tool_name == "list_knowledge" and knowledge_store:
