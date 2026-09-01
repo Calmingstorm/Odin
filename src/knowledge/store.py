@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+from ..search.errors import SearchExecutionError, validate_search_query
 from ..search.hybrid import reciprocal_rank_fusion
 from ..search.sqlite_vec import load_extension, serialize_vector
 
@@ -310,25 +311,24 @@ class KnowledgeStore:
     ) -> list[dict]:
         """Semantic search across the knowledge base.
 
-        Returns list of dicts with: content, source, score, chunk_index.
+        Returns list of dicts with: chunk_id, content, source, score, chunk_index.
         """
-        if not self.available or not self._has_vec or not embedder:
-            return []
+        validate_search_query(query)
+        if not self.available:
+            raise SearchExecutionError("search failed: knowledge store is unavailable")
+        if not self._has_vec or not embedder:
+            raise SearchExecutionError("search failed: semantic knowledge search is unavailable")
 
         vector = await embedder.embed(query)
         if vector is None:
-            return []
+            raise SearchExecutionError("search failed: query embedding was unavailable")
 
-        try:
-            vec_bytes = serialize_vector(vector)
-            # Over-fetch candidates: the KNN k-cap and the >0.8 distance filter
-            # compound, so fetching exactly `limit` rows often returns far fewer
-            # (or none) after filtering. Fetch a wider pool, then trim to `limit`.
-            candidate_k = max(limit * 4, 20)
-            rows = await asyncio.to_thread(self._search_vec_sync, vec_bytes, candidate_k)
-        except Exception as e:
-            log.warning("Knowledge search failed: %s", e)
-            return []
+        vec_bytes = serialize_vector(vector)
+        # Over-fetch candidates: the KNN k-cap and the >0.8 distance filter
+        # compound, so fetching exactly `limit` rows often returns far fewer
+        # (or none) after filtering. Fetch a wider pool, then trim to `limit`.
+        candidate_k = max(limit * 4, 20)
+        rows = await asyncio.to_thread(self._search_vec_sync, vec_bytes, candidate_k)
 
         out = []
         for row in rows:
@@ -337,6 +337,7 @@ class KnowledgeStore:
             if distance > 0.8:
                 continue
             out.append({
+                "chunk_id": str(row[0]),
                 "content": row[2],
                 "source": row[3],
                 "score": round(1 - distance, 3),  # Convert to similarity
@@ -344,6 +345,28 @@ class KnowledgeStore:
             })
 
         return out[:limit]
+
+    def _search_literal_sync(self, query: str, limit: int) -> list[dict]:
+        """Literal implicit-AND fallback over stored chunks when FTS is not injected."""
+        terms = query.split()
+        if not terms:
+            return []
+        clauses = " AND ".join("instr(lower(content), lower(?)) > 0" for _ in terms)
+        rows = self._conn.execute(  # type: ignore[union-attr]
+            "SELECT chunk_id, content, source, chunk_index FROM knowledge_chunks "
+            f"WHERE {clauses} ORDER BY ingested_at DESC, chunk_index LIMIT ?",
+            (*terms, limit),
+        ).fetchall()
+        return [
+            {
+                "chunk_id": str(row[0]),
+                "content": row[1],
+                "source": row[2],
+                "chunk_index": row[3],
+                "type": "literal",
+            }
+            for row in rows
+        ]
 
     def _search_vec_sync(self, vec_bytes: bytes, limit: int) -> list:
         """Execute vector similarity search (sync, for use with asyncio.to_thread)."""
@@ -509,22 +532,26 @@ class KnowledgeStore:
 
         Works in FTS-only mode when embedder is None or vector search unavailable.
         """
+        validate_search_query(query)
+        if not self.available:
+            raise SearchExecutionError("search failed: knowledge store is unavailable")
+
         semantic_results = []
-        if embedder:
+        searched = False
+        if embedder and self._has_vec:
             semantic_results = await self.search(query, embedder, limit=limit * 2)
+            searched = True
         fts_results = []
         if self._fts:
             fts_results = await asyncio.to_thread(
                 self._fts.search_knowledge, query, limit * 2,
             )
+            searched = True
 
+        if not searched:
+            return await asyncio.to_thread(self._search_literal_sync, query, limit)
         if not semantic_results and not fts_results:
             return []
-
-        # Normalize semantic results to use chunk_id
-        for r in semantic_results:
-            if "chunk_id" not in r:
-                r["chunk_id"] = f"{r.get('source', '')}_{r.get('chunk_index', 0)}"
 
         return reciprocal_rank_fusion(
             semantic_results, fts_results, id_key="chunk_id", limit=limit,

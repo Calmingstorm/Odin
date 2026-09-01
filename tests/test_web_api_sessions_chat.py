@@ -13,6 +13,7 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import Config
+from src.search.errors import InvalidSearchQuery, validate_search_query
 from src.web.api.sessions_chat import (
     register_agent_trajectories,
     register_chat,
@@ -120,6 +121,39 @@ class TestSessionsCrud:
             assert (await c.get("/api/sessions/search")).status == 400  # no q
             s = await (await c.get("/api/sessions/search?q=hi&after=1&before=2")).json()
             assert s["count"] == 1
+
+    async def test_surrogate_query_is_400_at_route_boundary(self):
+        bot = _bot()
+
+        async def search_with_real_validation(query, **_kwargs):
+            validate_search_query(query)
+            return []
+
+        bot.sessions.search_history = AsyncMock(side_effect=search_with_real_validation)
+        routes = web.RouteTableDef()
+        register_sessions(routes, bot)
+        handler = next(
+            route.handler for route in routes if route.handler.__name__ == "search_sessions"
+        )
+        response = await handler(SimpleNamespace(query={"q": "\ud800"}))
+        assert response.status == 400
+        assert response.text == '{"error": "invalid query"}'
+
+    async def test_search_invalid_query_and_failure_are_distinct(self):
+        bot = _bot()
+        bot.sessions.search_history = AsyncMock(
+            side_effect=InvalidSearchQuery("invalid query")
+        )
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            r = await c.get("/api/sessions/search?q=bad")
+            assert r.status == 400
+            assert (await r.json()) == {"error": "invalid query"}
+
+        bot.sessions.search_history = AsyncMock(side_effect=RuntimeError("database failure"))
+        async with TestClient(TestServer(_app(register_sessions, bot=bot))) as c:
+            r = await c.get("/api/sessions/search?q=valid")
+            assert r.status == 500
+            assert (await r.json()) == {"error": "search failed"}
 
     async def test_get_export_delete(self):
         bot = _bot()

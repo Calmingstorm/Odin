@@ -14,6 +14,7 @@ import uuid
 from aiohttp import web
 
 from ...odin_log import get_logger
+from ...search.errors import InvalidSearchQuery
 from ..api_common import (
     _SESSION_ID_RE,
     _safe_filename,
@@ -260,10 +261,16 @@ def register_sessions(routes: web.RouteTableDef, bot) -> None:
                 before = float(request.query["before"])
             except ValueError:
                 pass
-        results = await bot.sessions.search_history(
-            query, limit=limit, channel_id=channel_id,
-            user_id=user_id, after=after, before=before,
-        )
+        try:
+            results = await bot.sessions.search_history(
+                query, limit=limit, channel_id=channel_id,
+                user_id=user_id, after=after, before=before,
+            )
+        except InvalidSearchQuery:
+            return web.json_response({"error": "invalid query"}, status=400)
+        except Exception:
+            log.exception("Session search failed")
+            return web.json_response({"error": "search failed"}, status=500)
         return web.json_response({"query": query, "results": results, "count": len(results)})
 
     def _check_session_access(request: web.Request, channel_id: str) -> web.Response | None:

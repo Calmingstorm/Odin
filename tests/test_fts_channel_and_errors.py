@@ -77,11 +77,14 @@ class TestErrorBranches:
         idx._conn.close()   # every subsequent sqlite op raises → caught by except arms
 
         assert idx.index_session("s2", "x", "c1", 1.0) is False
-        assert idx.search_sessions("content") == []
+        with pytest.raises(Exception, match="closed database"):
+            idx.search_sessions("content")
         assert idx.index_knowledge_chunk("k2", "x", "s", 0) is False
-        assert idx.search_knowledge("content") == []
+        with pytest.raises(Exception, match="closed database"):
+            idx.search_knowledge("content")
         assert idx.delete_knowledge_source("src") == 0
         assert idx.index_channel_messages([
             {"content": "x", "author": "a", "channel_id": "c", "ts": 1.0}]) == 0
-        assert idx.search_channel_logs("x") == []
+        with pytest.raises(Exception, match="closed database"):
+            idx.search_channel_logs("x")
         assert idx.clear_channel_logs() is False

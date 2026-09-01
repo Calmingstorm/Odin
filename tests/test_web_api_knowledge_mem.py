@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
@@ -16,6 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from src.knowledge.store import KnowledgeStore
 from src.learning.reflector import ConversationReflector
+from src.search.errors import InvalidSearchQuery, validate_search_query
 from src.web.api.knowledge_mem import (
     register_knowledge,
     register_learned_context,
@@ -110,6 +113,36 @@ class TestKnowledgeCrud:
             assert (await c.get("/api/knowledge/search?q=")).status == 400
             # a non-integer limit gracefully falls back to the default (no 400)
             assert (await c.get("/api/knowledge/search?q=x&limit=notanint")).status == 200
+
+    async def test_surrogate_query_is_400_at_route_boundary(self, kbot):
+        async def search_with_real_validation(query, **_kwargs):
+            validate_search_query(query)
+            return []
+
+        kbot.knowledge.search_hybrid = AsyncMock(side_effect=search_with_real_validation)
+        routes = web.RouteTableDef()
+        register_knowledge(routes, kbot)
+        handler = next(
+            route.handler for route in routes if route.handler.__name__ == "search_knowledge"
+        )
+        response = await handler(SimpleNamespace(query={"q": "\ud800"}))
+        assert response.status == 400
+        assert response.text == '{"error": "invalid query"}'
+
+    async def test_search_invalid_query_and_failure_are_distinct(self, kbot):
+        kbot.knowledge.search_hybrid = AsyncMock(
+            side_effect=InvalidSearchQuery("invalid query")
+        )
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            r = await c.get("/api/knowledge/search?q=bad")
+            assert r.status == 400
+            assert (await r.json()) == {"error": "invalid query"}
+
+        kbot.knowledge.search_hybrid = AsyncMock(side_effect=RuntimeError("database failure"))
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            r = await c.get("/api/knowledge/search?q=valid")
+            assert r.status == 500
+            assert (await r.json()) == {"error": "search failed"}
 
     async def test_chunks(self, kbot):
         async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:

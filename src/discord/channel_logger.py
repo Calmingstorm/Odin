@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+from ..search.errors import validate_search_query
 
 if TYPE_CHECKING:
     from ..search.fts import FullTextIndex
@@ -144,6 +145,7 @@ class ChannelLogger:
         Returns dicts with content, author, channel_id, timestamp, type="channel".
         Reads files in reverse (newest messages first) for better relevance.
         """
+        validate_search_query(query)
         results: list[dict] = []
         query_lower = query.lower()
         if not query_lower:

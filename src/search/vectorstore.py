@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+from .errors import SearchExecutionError, validate_search_query
 from .hybrid import reciprocal_rank_fusion
 from .sqlite_vec import load_extension, serialize_vector
 
@@ -153,19 +154,18 @@ class SessionVectorStore:
 
     async def search(self, query: str, embedder: LocalEmbedder, limit: int = 10) -> list[dict]:
         """Semantic search across archived sessions."""
-        if not self.available or not self._has_vec:
-            return []
+        validate_search_query(query)
+        if not self.available:
+            raise SearchExecutionError("search failed: session store is unavailable")
+        if not self._has_vec:
+            raise SearchExecutionError("search failed: semantic session search is unavailable")
 
         vector = await embedder.embed(query)
         if vector is None:
-            return []
+            raise SearchExecutionError("search failed: query embedding was unavailable")
 
-        try:
-            vec_bytes = serialize_vector(vector)
-            rows = await asyncio.to_thread(self._search_vec_sync, vec_bytes, limit)
-        except Exception as e:
-            log.warning("Session vector search failed: %s", e)
-            return []
+        vec_bytes = serialize_vector(vector)
+        rows = await asyncio.to_thread(self._search_vec_sync, vec_bytes, limit)
 
         out = []
         for row in rows:
@@ -174,6 +174,7 @@ class SessionVectorStore:
             if distance > 0.8:
                 continue
             out.append({
+                "doc_id": str(row[0]),
                 "type": "semantic",
                 "content": row[2][:500],
                 "timestamp": float(row[4]),
@@ -260,23 +261,24 @@ class SessionVectorStore:
 
         Works in FTS-only mode when embedder is None or vector search unavailable.
         """
+        validate_search_query(query)
         semantic_results = []
+        searched = False
         if embedder and self._has_vec:
             semantic_results = await self.search(query, embedder, limit=limit * 2)
+            searched = True
 
         fts_results = []
         if self._fts:
             fts_results = await asyncio.to_thread(
                 self._fts.search_sessions, query, limit * 2,
             )
+            searched = True
 
+        if not searched:
+            raise SearchExecutionError("search failed: no session search backend is available")
         if not semantic_results and not fts_results:
             return []
-
-        # Normalize both to use doc_id as the merge key
-        for r in semantic_results:
-            if "doc_id" not in r:
-                r["doc_id"] = f"{r.get('channel_id', '')}_{r.get('timestamp', 0)}"
 
         return reciprocal_rank_fusion(
             semantic_results, fts_results, id_key="doc_id", limit=limit,

@@ -5,6 +5,9 @@ custom id_key, k parameter, empty inputs, and single-list passthrough.
 """
 from __future__ import annotations
 
+import pytest
+
+from src.search.errors import SearchInvariantError
 from src.search.hybrid import reciprocal_rank_fusion
 
 # ---------------------------------------------------------------------------
@@ -127,11 +130,22 @@ class TestCustomIdKey:
         result = reciprocal_rank_fusion(items, id_key="chunk_id")
         assert result[0]["chunk_id"] == "c1"
 
-    def test_missing_id_key_uses_rank(self):
-        """When id_key is not present, items should still be processed."""
-        items = [{"text": "x"}, {"text": "y"}]
-        result = reciprocal_rank_fusion(items, id_key="missing_key")
-        assert len(result) == 2
+    def test_missing_id_key_is_invariant_violation(self):
+        items = [{"text": "x"}]
+        with pytest.raises(SearchInvariantError, match="missing required identity"):
+            reciprocal_rank_fusion(items, id_key="missing_key")
+
+    def test_hash_chunk_id_fuses_and_sums_rrf(self):
+        chunk_id = "a1b2c3d4e5f6_0"
+        semantic = [{"chunk_id": chunk_id, "source": "guide.md", "content": "semantic"}]
+        fts = [{"chunk_id": chunk_id, "source": "guide.md", "content": "fts"}]
+        result = reciprocal_rank_fusion(semantic, fts, id_key="chunk_id")
+        assert result == [{
+            "chunk_id": chunk_id,
+            "source": "guide.md",
+            "content": "semantic",
+            "rrf_score": round(2 / 61, 6),
+        }]
 
 
 # ---------------------------------------------------------------------------
