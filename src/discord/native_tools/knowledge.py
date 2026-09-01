@@ -38,7 +38,7 @@ class KnowledgeTools:
         try:
             results = await self.sessions.search_history(query, limit=limit)
         except InvalidSearchQuery:
-            return "Invalid query: unsupported control character."
+            return "Invalid query: unsupported character."
         except Exception:
             log.exception("History search failed")
             return "Search failed while searching conversation history."
@@ -71,7 +71,7 @@ class KnowledgeTools:
                 query, self._embedder, limit=limit
             )
         except InvalidSearchQuery:
-            return "Invalid query: unsupported control character."
+            return "Invalid query: unsupported character."
         except Exception:
             log.exception("Knowledge search failed")
             return "Search failed while searching the knowledge base."

@@ -10,7 +10,7 @@ from __future__ import annotations
 from unittest.mock import AsyncMock, MagicMock, patch
 
 from src.discord.native_tools.knowledge import KnowledgeTools
-from src.search.errors import InvalidSearchQuery
+from src.search.errors import validate_search_query
 
 
 def _tools(store=None, sessions=None, audit=None):
@@ -28,6 +28,11 @@ def _store():
     s.ingest = AsyncMock(return_value=3)
     s.delete_source_async = AsyncMock(return_value=2)
     return s
+
+
+async def _search_with_real_validation(query, *_args, **_kwargs):
+    validate_search_query(query)
+    return []
 
 
 class TestSearchHistory:
@@ -48,10 +53,10 @@ class TestSearchHistory:
         out = await _tools(sessions=s)._handle_search_history({"query": "q"})
         assert "Found 1 result(s)" in out and "(user)" in out
 
-    async def test_invalid_query_is_explicit(self):
+    async def test_surrogate_query_is_invalid_at_native_boundary(self):
         s = MagicMock()
-        s.search_history = AsyncMock(side_effect=InvalidSearchQuery("invalid query"))
-        out = await _tools(sessions=s)._handle_search_history({"query": "bad\x00query"})
+        s.search_history = AsyncMock(side_effect=_search_with_real_validation)
+        out = await _tools(sessions=s)._handle_search_history({"query": "\ud800"})
         assert "Invalid query" in out
 
     async def test_search_failure_is_explicit(self):
@@ -80,10 +85,10 @@ class TestSearchKnowledge:
         out = await _tools(store=s)._handle_search_knowledge({"query": "q"})
         assert "[doc.md]" in out and "score: 0.9" in out
 
-    async def test_invalid_query_is_explicit(self):
+    async def test_surrogate_query_is_invalid_at_native_boundary(self):
         s = _store()
-        s.search_hybrid = AsyncMock(side_effect=InvalidSearchQuery("invalid query"))
-        out = await _tools(store=s)._handle_search_knowledge({"query": "bad\x00query"})
+        s.search_hybrid = AsyncMock(side_effect=_search_with_real_validation)
+        out = await _tools(store=s)._handle_search_knowledge({"query": "\ud800"})
         assert "Invalid query" in out
 
     async def test_search_failure_is_explicit(self):

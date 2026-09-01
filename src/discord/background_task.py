@@ -491,7 +491,7 @@ async def _execute_tool(
         try:
             results = await knowledge_store.search_hybrid(query, embedder, limit=limit)
         except InvalidSearchQuery:
-            return "Invalid query: unsupported control character."
+            return "Invalid query: unsupported character."
         except Exception:
             log.exception("Background knowledge search failed")
             return "Search failed while searching the knowledge base."

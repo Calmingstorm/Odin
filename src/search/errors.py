@@ -16,6 +16,10 @@ class SearchInvariantError(RuntimeError):
 
 
 def validate_search_query(query: str) -> None:
-    """Reject input containing NUL, which SQLite text values cannot represent safely."""
+    """Reject text that cannot be represented safely as SQLite UTF-8 input."""
     if "\x00" in query:
-        raise InvalidSearchQuery("invalid query: unsupported control character")
+        raise InvalidSearchQuery("invalid query: unsupported character")
+    try:
+        query.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise InvalidSearchQuery("invalid query: text is not valid UTF-8") from exc

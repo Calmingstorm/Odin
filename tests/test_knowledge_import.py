@@ -22,7 +22,7 @@ from src.knowledge.importer import (
     ImportResult,
 )
 from src.knowledge.store import KnowledgeStore
-from src.search.errors import InvalidSearchQuery
+from src.search.errors import validate_search_query
 
 try:
     import fitz  # noqa: F401 — availability probe for the [pdf] extra
@@ -790,9 +790,14 @@ class TestToolHandler:
         skill_mgr = MagicMock()
         skill_mgr.has_skill.return_value = False
         store = MagicMock()
-        store.search_hybrid = AsyncMock(side_effect=InvalidSearchQuery("invalid query"))
+
+        async def search_with_real_validation(query, *_args, **_kwargs):
+            validate_search_query(query)
+            return []
+
+        store.search_hybrid = AsyncMock(side_effect=search_with_real_validation)
         result = await _execute_tool(
-            "search_knowledge", {"query": "bad\x00query"}, executor, skill_mgr,
+            "search_knowledge", {"query": "\ud800"}, executor, skill_mgr,
             store, object(), "test-user",
         )
         assert "Invalid query" in result

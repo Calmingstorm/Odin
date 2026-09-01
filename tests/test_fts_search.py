@@ -49,6 +49,10 @@ class TestPrepareQuery:
         with pytest.raises(InvalidSearchQuery, match="invalid query"):
             _prepare_query("bad\x00query")
 
+    def test_non_utf8_text_is_invalid(self):
+        with pytest.raises(InvalidSearchQuery, match="invalid query"):
+            _prepare_query("\ud800")
+
 
 # ---------------------------------------------------------------------------
 # FullTextIndex initialization
