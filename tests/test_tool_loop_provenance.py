@@ -185,13 +185,16 @@ class TestWaitForAgentsWrapperGrace:
             id="call",
         )
         observed = {}
+        real_wait = asyncio.wait
 
-        async def capture(awaitable, timeout):
+        async def capture(fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
             observed["timeout"] = timeout
-            return await awaitable
+            return await real_wait(fs, timeout=timeout, return_when=return_when)
 
-        monkeypatch.setattr(asyncio, "wait_for", capture)
-        result = await runner._run_one_tool_with_timeout(SimpleNamespace(), block, 300)
+        monkeypatch.setattr(asyncio, "wait", capture)
+        result = await runner._run_one_tool_with_timeout(
+            SimpleNamespace(_cancel=asyncio.Event()), block, 300
+        )
         assert result == {"content": "snapshot"}
         assert observed["timeout"] == 57
 
@@ -206,13 +209,16 @@ class TestWaitForAgentsWrapperGrace:
         runner._run_one_tool = AsyncMock(return_value={"content": "input error"})
         block = SimpleNamespace(name="wait_for_agents", input=["bad"], id="call")
         observed = {}
+        real_wait = asyncio.wait
 
-        async def capture(awaitable, timeout):
+        async def capture(fs, *, timeout=None, return_when=asyncio.ALL_COMPLETED):
             observed["timeout"] = timeout
-            return await awaitable
+            return await real_wait(fs, timeout=timeout, return_when=return_when)
 
-        monkeypatch.setattr(asyncio, "wait_for", capture)
-        result = await runner._run_one_tool_with_timeout(SimpleNamespace(), block, 91)
+        monkeypatch.setattr(asyncio, "wait", capture)
+        result = await runner._run_one_tool_with_timeout(
+            SimpleNamespace(_cancel=asyncio.Event()), block, 91
+        )
         assert result == {"content": "input error"}
         assert observed["timeout"] == 91
 
@@ -252,3 +258,110 @@ class TestWaitForAgentsWrapperGrace:
         result = await runner._run_one_loop_tool(st, block)
         assert result["content"] == "snapshot"
         assert observed["timeout"] == 57
+
+
+class TestInflightStopWrapperEdgeCoverage:
+    async def test_effect_free_wrapper_timeout_cancels_tool_and_returns_timeout(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def block(*_args):
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        runner._run_one_tool = block
+        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        durability = SimpleNamespace(after_tool_interrupted=AsyncMock())
+        st = SimpleNamespace(
+            _cancel=asyncio.Event(),
+            durability=durability,
+            message=SimpleNamespace(
+                author=SimpleNamespace(id=1),
+                channel=SimpleNamespace(id=2),
+            ),
+        )
+        block_info = SimpleNamespace(
+            name="read_file", input={"host": "h", "path": "/x"}, id="call"
+        )
+
+        result = await runner._run_one_tool_with_timeout(st, block_info, 0.01)
+
+        assert started.is_set() and cancelled.is_set()
+        assert "timed out" in result["content"]
+        durability.after_tool_interrupted.assert_awaited_once()
+        runner._audit.log_execution.assert_awaited_once()
+
+    async def test_outer_cancellation_reaps_effect_free_tool(self):
+        import asyncio
+        from types import SimpleNamespace
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def block(*_args):
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        runner._run_one_tool = block
+        st = SimpleNamespace(_cancel=asyncio.Event())
+        block_info = SimpleNamespace(
+            name="read_file", input={"host": "h", "path": "/x"}, id="call"
+        )
+        task = asyncio.create_task(runner._run_one_tool_with_timeout(st, block_info, 30))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+        assert cancelled.is_set()
+
+    async def test_cancelled_observation_ledger_failure_propagates(self):
+        import asyncio
+        from types import SimpleNamespace
+        from unittest.mock import AsyncMock
+
+        from src.discord.tool_loop import ToolLoopRunner
+
+        runner = ToolLoopRunner.__new__(ToolLoopRunner)
+        started = asyncio.Event()
+
+        async def block(*_args):
+            started.set()
+            await asyncio.sleep(3600)
+
+        runner._run_one_tool = block
+        durability = SimpleNamespace(
+            after_tool_interrupted=AsyncMock(side_effect=RuntimeError("ledger down"))
+        )
+        st = SimpleNamespace(_cancel=asyncio.Event(), durability=durability)
+        block_info = SimpleNamespace(
+            name="read_file", input={"host": "h", "path": "/x"}, id="call"
+        )
+        task = asyncio.create_task(runner._run_one_tool_with_timeout(st, block_info, 30))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        st._cancel.set()
+        try:
+            await task
+        except RuntimeError as exc:
+            assert str(exc) == "ledger down"
+        else:
+            raise AssertionError("ledger failure did not propagate")

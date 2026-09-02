@@ -106,6 +106,7 @@ class LoopAgentBridge:
         evidence_recorder=None,
         density_recorder=None,
         density_recorder_factory=None,
+        turn_id: str | None = None,
     ) -> list[str]:
         """Spawn agents for a loop iteration.
 
@@ -228,6 +229,7 @@ class LoopAgentBridge:
                     if density_recorder_factory is not None
                     else density_recorder
                 ),
+                turn_id=turn_id,
             )
 
             if not agent_id.startswith("Error"):

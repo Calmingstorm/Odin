@@ -123,8 +123,15 @@ class TestHostAndFile:
 
     async def test_read_file(self, tmp_path):
         c = _ctx(tmp_path)
-        assert await c.read_file("srv", "/tmp/x.txt") == "tool output"
-        assert "Access denied" in await c.read_file("srv", "/opt/odin/.env")  # denied path
+        assert await c.read_file("srv", "/tmp/x.txt", lines=25, start_line=101) == "tool output"
+        c._executor.execute.assert_awaited_once_with(
+            "read_file",
+            {"host": "srv", "path": "/tmp/x.txt", "lines": 25, "start_line": 101},
+        )
+        assert "Access denied" in await c.read_file(
+            "srv", "/opt/odin/.env", lines=25, start_line=101
+        )  # denied path fence remains before execution
+        assert c._executor.execute.await_count == 1
 
 
 # --------------------------------------------------------------------------- #

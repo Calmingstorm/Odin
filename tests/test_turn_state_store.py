@@ -913,6 +913,7 @@ class TestEffectClassification:
         for call_id, tool_name, state in (
             ("wait-unknown", "wait_for_agents", OpState.OUTCOME_UNKNOWN),
             ("wait-applied", "wait_for_agents", OpState.APPLIED),
+            ("read-unknown", "read_file", OpState.OUTCOME_UNKNOWN),
             ("command-unknown", "run_command", OpState.OUTCOME_UNKNOWN),
             ("dynamic-unknown", "future_tool", OpState.OUTCOME_UNKNOWN),
         ):
@@ -926,7 +927,7 @@ class TestEffectClassification:
 
         first = TurnStateStore(db, blob_dir=db_dir / "blobs")
         try:
-            assert first.legacy_effect_free_reconciled == 1
+            assert first.legacy_effect_free_reconciled == 2
             rows = {
                 row[0]: row[1:]
                 for row in first._conn.execute(
@@ -944,6 +945,11 @@ class TestEffectClassification:
                 ToolEffectClass.EFFECT_FREE_OBSERVATION,
                 OpState.APPLIED,
             )
+            assert rows["read-unknown"] == (
+                "read_file",
+                ToolEffectClass.EFFECT_FREE_OBSERVATION,
+                OpState.RECONCILED_NOT_APPLIED,
+            )
             assert rows["command-unknown"] == (
                 "run_command",
                 ToolEffectClass.EXTERNAL_EFFECT_CAPABLE,
@@ -954,14 +960,14 @@ class TestEffectClassification:
                 ToolEffectClass.EXTERNAL_EFFECT_CAPABLE,
                 OpState.OUTCOME_UNKNOWN,
             )
-            assert first._conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 4
+            assert first._conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 5
         finally:
             first.close()
 
         second = TurnStateStore(db, blob_dir=db_dir / "blobs")
         try:
             assert second.legacy_effect_free_reconciled == 0
-            assert second._conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 4
+            assert second._conn.execute("SELECT COUNT(*) FROM operations").fetchone()[0] == 5
         finally:
             second.close()
 

@@ -300,6 +300,75 @@ class TestCancellationBranches:
         (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_CANCELLED
 
+    async def test_cancelled_mixed_batch_settles_without_unknown(self, tmp_path):
+        import asyncio
+
+        from src.llm.types import LLMResponse, ToolCall
+
+        batch = LLMResponse(
+            text="",
+            tool_calls=[
+                ToolCall(id="read", name="read_file", input={"host": "h", "path": "/x"}),
+                ToolCall(id="cmd", name="run_command", input={"host": "h", "command": "x"}),
+            ],
+            stop_reason="tool_use",
+        )
+        bot, fake, store = build_with_store([batch], tmp_path)
+        read_started = asyncio.Event()
+        cmd_started = asyncio.Event()
+        cmd_release = asyncio.Event()
+
+        async def execute(tool_name, tool_input, *, user_id=None):
+            if tool_name == "read_file":
+                read_started.set()
+                await asyncio.sleep(3600)
+            cmd_started.set()
+            await cmd_release.wait()
+            return ToolResult(output="applied", tool_name=tool_name)
+
+        bot.tool_executor.execute = execute
+        msg = FakeMessage("go")
+        task = asyncio.create_task(run_loop(bot, msg))
+        await asyncio.wait_for(read_started.wait(), timeout=1)
+        await asyncio.wait_for(cmd_started.wait(), timeout=1)
+        bot.channel_state.cancel_events[str(msg.channel.id)].set()
+        await asyncio.sleep(0.05)
+        assert not task.done()  # effect-capable sibling must finish naturally
+        cmd_release.set()
+
+        text, *_ = await asyncio.wait_for(task, timeout=1)
+        assert text.startswith("Task stopped by user.")
+        states = {call_id: state for call_id, state, _result in op_rows(store)}
+        assert states == {"cmd": OpState.APPLIED, "read": OpState.DEFINITELY_FAILED}
+        assert OpState.OUTCOME_UNKNOWN not in states.values()
+
+    async def test_stop_preempted_observation_is_definitely_failed(self, tmp_path):
+        import asyncio
+
+        bot, fake, store = build_with_store(
+            [tool_call_response(("read_file", {"host": "h", "path": "/tmp/x"}))],
+            tmp_path,
+        )
+        started = asyncio.Event()
+
+        async def blocking_read(tool_name, tool_input, *, user_id=None):
+            started.set()
+            await asyncio.sleep(3600)
+
+        bot.tool_executor.execute = blocking_read
+        msg = FakeMessage("go")
+        task = asyncio.create_task(run_loop(bot, msg))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        bot.channel_state.cancel_events[str(msg.channel.id)].set()
+
+        text, *_ = await asyncio.wait_for(task, timeout=1)
+        assert text.startswith("Task stopped by user.")
+        op = op_rows(store)[0]
+        assert op[1] == OpState.DEFINITELY_FAILED
+        assert "cancelled by /stop before any effect" in op[2]
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.TERMINAL_CANCELLED
+
     async def test_task_cancel_with_failing_settle_still_propagates(self, tmp_path):
         import asyncio
         from unittest.mock import AsyncMock, patch

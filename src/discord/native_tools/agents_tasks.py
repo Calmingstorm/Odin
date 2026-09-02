@@ -1037,6 +1037,7 @@ class AgentTaskTools:
         )
         max_lifetime = getattr(agents_cfg, "max_lifetime_seconds", 14400) if agents_cfg else 14400
 
+        message_turn_id = str(getattr(message, "id", "") or "") or None
         agent_id = self._agent_manager.spawn(
             label=label,
             goal=goal,
@@ -1063,6 +1064,7 @@ class AgentTaskTools:
             max_lifetime=max_lifetime,
             model_override=model_override,
             reasoning_effort_override=effort_override,
+            turn_id=message_turn_id,
             context_compression_enabled=bool(self._get_context_compressor()),
             max_context_chars=self._get_context_compressor().resolved_max_context_chars
             if self._get_context_compressor()
@@ -1376,6 +1378,7 @@ class AgentTaskTools:
             channel_id=channel_id,
             requester_id=loop_info.requester_id,
             requester_name=loop_info.requester_name,
+            turn_id=str(getattr(message, "id", "") or "") or None,
             iteration_callback=_make_iteration_cb(None, None),
             iteration_callback_factory=_make_iteration_cb,
             tool_executor_callback=_tool_cb,

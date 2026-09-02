@@ -16,8 +16,10 @@ class ToolEffectClass:
 
 
 # Inclusion requires auditing the handler's complete behavior, including
-# cancellation.  Keep this intentionally small and code-owned.
-_EFFECT_FREE_OBSERVATION_TOOLS = frozenset({"wait_for_agents"})
+# cancellation. Keep this intentionally small and code-owned. read_file's
+# subprocess/SSH layers reap their owned process tree when cancellation lands;
+# the handler performs no write or state transition.
+_EFFECT_FREE_OBSERVATION_TOOLS = frozenset({"wait_for_agents", "read_file"})
 
 
 def classify_tool_effect(tool_name: str, tool_input: dict | None = None) -> str:

@@ -54,6 +54,7 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
+from ..tools.effect_classifier import ToolEffectClass, classify_tool_effect
 from ..tools.output_streamer import current_call_id as _current_call_id
 from ..turn_state import LedgerIntentError
 from ..turn_state.durability import TurnDurability
@@ -495,6 +496,8 @@ class ToolLoopDeps:
     # MCP control plane (mcp_dispatch seam). None keeps MCP branches inert
     # for direct test constructions; wiring always passes the real manager.
     mcp_manager: MCPManager | None = None
+    # Exact cleanup target for agents spawned by a cancelled main turn.
+    kill_agents_for_turn: Callable[[str], list[str]] = lambda _turn_id: []
 
 
 class ToolLoopRunner:
@@ -513,6 +516,7 @@ class ToolLoopRunner:
         self._completion_classifier = deps.completion_classifier
         self._native_tools = deps.native_tools
         self._mcp_manager = deps.mcp_manager
+        self._kill_agents_for_turn = deps.kill_agents_for_turn
         self._tool_executor = deps.tool_executor
         self._permissions = deps.permissions
         self._skill_manager = deps.skill_manager
@@ -1342,15 +1346,23 @@ class ToolLoopRunner:
         # shared event) so terminal settlement records TERMINAL_CANCELLED —
         # a cancelled turn must never look resumable or completed.
         st.durability.mark_cancelled()
-        self._clear_active(st)
+        killed = self._kill_agents_for_turn(st._trajectory.message_id)
         suffix = ""
         if st._pending_validations or st._validation_required:
             suffix = " Pending post-action validation was not run."
         tools_note = (
             f" Tools used: {', '.join(st.tools_used_in_loop)}." if st.tools_used_in_loop else ""
         )
+        agents_note = (
+            f" Sent cancellation to {len(killed)} agent(s) spawned by this turn."
+            if killed
+            else ""
+        )
+        text = f"Task stopped by user.{tools_note}{agents_note}{suffix}"
+        self._channel_state.finish_stop(st._ch_id, st._req_id, text)
+        self._clear_active(st)
         return (
-            f"Task stopped by user.{tools_note}{suffix}",
+            text,
             False,
             False,
             st.tools_used_in_loop,
@@ -2577,8 +2589,7 @@ class ToolLoopRunner:
             log.warning("Audit log failed for %s: %s", tool_name, audit_err)
 
     async def _run_one_tool_with_timeout(self, st: _ChatTurn, block, tool_timeout) -> dict:
-        """Per-tool timeout wrapper around _run_one_tool (the old
-        `_run_tool_with_timeout` closure)."""
+        """Run one tool with timeout and safe in-flight /stop preemption."""
         t = 3660 if block.name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
         t = wait_for_agents_wrapper_timeout(
             block.name,
@@ -2586,11 +2597,52 @@ class ToolLoopRunner:
             t,
             grace_seconds=WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
         )
+        tool_task = asyncio.create_task(self._run_one_tool(st, block))
+        cancel_task: asyncio.Task | None = None
+        effect_free = classify_tool_effect(block.name, block.input) == (
+            ToolEffectClass.EFFECT_FREE_OBSERVATION
+        )
         try:
-            return await asyncio.wait_for(
-                self._run_one_tool(st, block),
-                timeout=t,
-            )
+            if effect_free:
+                cancel_task = asyncio.create_task(st._cancel.wait())
+                done, _pending = await asyncio.wait(
+                    {tool_task, cancel_task},
+                    timeout=t,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                if tool_task in done:
+                    # Completion wins a simultaneous race: the tool's own WI-3
+                    # settlement is authoritative and must not be rewritten as
+                    # an interruption merely because /stop arrived in the same
+                    # event-loop turn.
+                    return await tool_task
+                if cancel_task in done and st._cancel.is_set():
+                    tool_task.cancel()
+                    await asyncio.gather(tool_task, return_exceptions=True)
+                    error_msg = f"Tool '{block.name}' cancelled by /stop before any effect."
+                    try:
+                        await st.durability.after_tool_interrupted(block, error_msg)
+                    except Exception:
+                        # The same fail-closed rule as ordinary WI-3: never
+                        # finish a cancelled turn while its op remains RUNNING.
+                        log.exception("Ledger settle failed for cancelled %s", block.name)
+                        raise
+                    return {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": error_msg,
+                    }
+                tool_task.cancel()
+                await asyncio.gather(tool_task, return_exceptions=True)
+                raise TimeoutError
+            return await asyncio.wait_for(tool_task, timeout=t)
+        except asyncio.CancelledError:
+            # asyncio.wait() does not cancel its children when this wrapper is
+            # cancelled. The old wait_for-only path did; preserve that
+            # cleanup guarantee for shutdown and outer task cancellation.
+            tool_task.cancel()
+            await asyncio.gather(tool_task, return_exceptions=True)
+            raise
         except TimeoutError:
             error_msg = f"Tool '{block.name}' timed out after {t}s"
             # WI-3 (interrupted): wait_for cancelled _run_one_tool before its
@@ -2619,6 +2671,10 @@ class ToolLoopRunner:
                 "tool_use_id": block.id,
                 "content": error_msg,
             }
+        finally:
+            if cancel_task is not None:
+                cancel_task.cancel()
+                await asyncio.gather(cancel_task, return_exceptions=True)
 
     async def _execute_tool_calls(self, st: _ChatTurn, tool_calls) -> list:
         """Run all tool calls concurrently with per-tool timeout; append the

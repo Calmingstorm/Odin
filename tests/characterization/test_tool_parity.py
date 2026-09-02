@@ -56,7 +56,7 @@ EXPECTED_TOOL_HASHES = {
     "run_command": "2b146575d0ff5c16",
     "run_script": "61132f018a660518",
     "run_command_multi": "f4666ed522cdd0b4",
-    "read_file": "fe043b1283771975",
+    "read_file": "115fd7d490e830fb",
     "write_file": "8e409827499b2a64",
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",

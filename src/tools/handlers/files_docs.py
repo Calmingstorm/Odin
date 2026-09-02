@@ -18,29 +18,124 @@ from .deps import HandlerBase
 # Hard cap on a URL-fetched PDF so a huge or hostile body can't exhaust memory.
 _ANALYZE_PDF_MAX_BYTES = 50 * 1024 * 1024  # 50 MiB
 
+# Keep read_file below both the SSH text transport's 16K head+tail cap and
+# the tool-result validator's 12K cap. The handler, not a downstream
+# truncator, decides the last complete source line returned.
+_READ_FILE_BODY_MAX_CHARS = 10_500
+_READ_FILE_RESULT_MAX_CHARS = 11_500
+
 
 class FilesDocsTools(HandlerBase):
-    async def _handle_read_file(self, inp: dict) -> str:
+    async def _handle_read_file(self, inp: dict) -> str | tuple[str, int]:
         path = inp.get("path")
         host = inp.get("host")
         if not path:
             return "Error: 'path' is required for read_file."
+        if not isinstance(path, str) or not path.startswith("/"):
+            return f"Error: read_file requires an absolute path, got {path!r}."
         if not host:
             return "Error: 'host' is required for read_file."
-        try:
-            # Clamped to 1..1000, not just an upper bound. GNU head reads a
-            # NEGATIVE -n as "all but the last N", so lines=-2 silently
-            # returned the whole file minus two lines, and lines=0 returned
-            # nothing at all — neither is what a caller asking for N lines
-            # means (adversarial review).
-            lines = max(1, min(int(inp.get("lines", 200)), 1000))
-        except (TypeError, ValueError, OverflowError):
-            lines = 200
-        safe_path = shlex.quote(path)
-        return await self._run_on_host(
-            host,
-            f"head -n {lines} {safe_path}",
+
+        raw_lines = inp.get("lines", 200)
+        # Validate here as well as in the JSON schema: skills and internal
+        # callers can invoke handlers without schema validation.
+        if type(raw_lines) is not int or raw_lines <= 0:  # bool is not a count
+            return "Error: 'lines' must be a positive integer count (maximum 1000)."
+        if raw_lines > 1000:
+            return "Error: 'lines' must not exceed 1000."
+        lines = raw_lines
+
+        raw_start = inp.get("start_line", 1)
+        if type(raw_start) is not int or raw_start <= 0:  # bool is not a line number
+            return "Error: 'start_line' must be a positive one-based integer."
+        if raw_start > 2**53 - 1:
+            return "Error: 'start_line' must not exceed 9007199254740991."
+        start_line = raw_start
+        start_label = f"n{start_line}"
+
+        # Bound output at the SOURCE. _run_on_host eventually passes through
+        # ssh._truncate_output(), whose 16K head+tail splice would destroy the
+        # contiguity and interval guarantees of a selected range. This awk
+        # program emits only a contiguous prefix of the requested range, with
+        # true one-based source numbers and an explicit continuation cursor.
+        # It also probes one following record so a full-count result can say
+        # whether more source lines exist.
+        awk_program = r"""BEGIN {
+    used = 0
+    selected = 0
+    returned = 0
+    last_returned = 0
+    continuation = 0
+    oversize_line = 0
+}
+NR < start { next }
+selected >= count { continuation = NR; exit }
+{
+    selected++
+    prefix = sprintf("%.0f: ", NR)
+    line = prefix $0
+    separator = (returned > 0 ? "\n" : "")
+    needed = length(separator) + length(line)
+    if (used + needed > budget) {
+        if (returned == 0) {
+            oversize_line = NR
+            exit
+        }
+        continuation = NR
+        exit
+    }
+    if (returned > 0) printf "\n"
+    printf "%s", line
+    used += needed
+    returned++
+    last_returned = NR
+}
+END {
+    if (returned > 0) printf "\n\n"
+    if (oversize_line > 0) {
+        printf "Error: source line %.0f exceeds the read_file output budget; " \
+            "no lines returned.", oversize_line
+    } else if (returned == 0) {
+        printf "[returned empty range starting at start_line=%s]", substr(start_label, 2)
+    } else if (continuation > 0) {
+        printf "[returned %.0f-%.0f, continue at start_line=%.0f]", \
+            start, last_returned, continuation
+    } else {
+        printf "[returned %.0f-%.0f]", start, last_returned
+    }
+}"""
+        safe_path = shlex.quote(str(path))
+        command = (
+            f"awk -v start={start_line} -v start_label={shlex.quote(start_label)} "
+            f"-v count={lines} -v budget={_READ_FILE_BODY_MAX_CHARS} "
+            f"{shlex.quote(awk_program)} < {safe_path}"
         )
+        raw = await self._run_on_host(host, command)
+        is_tuple = isinstance(raw, tuple)
+        if is_tuple:
+            text, code = str(raw[0]), int(raw[1])
+        else:
+            text, code = str(raw), None
+        # The generic transport's defensive 16K truncator keeps head+tail.
+        # Never expose that splice as a read_file range; turn any unexpected
+        # overrun into a bounded handler-owned failure instead.
+        if "... (output truncated) ..." in text:
+            return "Error: read_file transport output exceeded its handler budget.", 1
+        if len(text) > _READ_FILE_RESULT_MAX_CHARS:
+            text = (
+                text[:_READ_FILE_RESULT_MAX_CHARS]
+                + "\n[read_file error truncated by handler output budget]"
+            )
+            return text, 1
+        # The source-budget guard is a handler failure even though awk itself
+        # completed normally. Preserve a typed nonzero result through the
+        # executor rather than letting an "Error:" string ride exit code 0.
+        if code == 0 and text.startswith("Error: source line "):
+            return text, 1
+        if is_tuple:
+            assert code is not None
+            return text, code
+        return text
 
     async def _handle_write_file(self, inp: dict) -> str | tuple[str, int]:
         path = inp.get("path")
