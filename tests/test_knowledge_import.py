@@ -133,7 +133,7 @@ class TestImportDirectory:
                 results = await importer.import_directory(tmpdir)
                 assert len(results) == 1
                 assert results[0].status == "ok"
-                assert results[0].source == "readme.md"
+                assert results[0].source == md.resolve().as_uri()
                 assert results[0].chunks > 0
         finally:
             _cleanup(store)
@@ -160,7 +160,7 @@ class TestImportDirectory:
                 results = await importer.import_directory(tmpdir)
                 assert len(results) == 1
                 assert results[0].status == "ok"
-                assert "docs/api/endpoints.md" in results[0].source
+                assert results[0].source == (subdir / "endpoints.md").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -172,7 +172,7 @@ class TestImportDirectory:
                 (Path(tmpdir) / "b.txt").write_text("text file")
                 results = await importer.import_directory(tmpdir, pattern="**/*.txt")
                 assert len(results) == 1
-                assert results[0].source == "b.txt"
+                assert results[0].source == (Path(tmpdir) / "b.txt").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -184,8 +184,8 @@ class TestImportDirectory:
                 (Path(tmpdir) / "doc.md").write_text("valid doc")
                 results = await importer.import_directory(tmpdir, pattern="*")
                 sources = [r.source for r in results]
-                assert "doc.md" in sources
-                assert "binary.exe" not in sources
+                assert (Path(tmpdir) / "doc.md").resolve().as_uri() in sources
+                assert all("binary.exe" not in source for source in sources)
         finally:
             _cleanup(store)
 
@@ -197,8 +197,8 @@ class TestImportDirectory:
                 (Path(tmpdir) / "content.md").write_text("real content")
                 results = await importer.import_directory(tmpdir)
                 statuses = {r.source: r.status for r in results}
-                assert statuses.get("empty.md") == "skipped"
-                assert statuses.get("content.md") == "ok"
+                assert statuses.get((Path(tmpdir) / "empty.md").resolve().as_uri()) == "skipped"
+                assert statuses.get((Path(tmpdir) / "content.md").resolve().as_uri()) == "ok"
         finally:
             _cleanup(store)
 
@@ -253,7 +253,7 @@ class TestImportDirectory:
                 sub.mkdir()
                 (sub / "file.md").write_text("content")
                 results = await importer.import_directory(tmpdir)
-                assert results[0].source == "subdir/file.md"
+                assert results[0].source == (sub / "file.md").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -266,7 +266,135 @@ class TestImportDirectory:
                 results = await importer.import_directory(tmpdir, pattern="*")
                 ok_sources = {r.source for r in results if r.status == "ok"}
                 for ext in [".md", ".txt", ".rst", ".yaml", ".json", ".toml"]:
-                    assert f"file{ext}" in ok_sources
+                    assert (Path(tmpdir) / f"file{ext}").resolve().as_uri() in ok_sources
+        finally:
+            _cleanup(store)
+
+
+class TestLocalFileIntegrity:
+    async def test_invalid_utf8_is_failed_without_ingestion(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "invalid.md"
+                path.write_bytes(b"valid\n\xff\xfe")
+                result = await importer.import_file(str(path))
+                assert result.status == "error"
+                assert "invalid UTF-8" in result.error
+                assert store.list_sources() == []
+        finally:
+            _cleanup(store)
+
+    async def test_single_file_import_is_first_class(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "one.md"
+                path.write_text("single-file content", encoding="utf-8")
+                result = await importer.import_file(str(path))
+                assert result.status == "ok"
+                assert result.source == path.resolve().as_uri()
+                assert store.get_source_content(result.source) == "single-file content"
+        finally:
+            _cleanup(store)
+
+    async def test_directory_base_does_not_change_source_identity(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                outer = Path(tmpdir) / "a"
+                inner = outer / "b"
+                inner.mkdir(parents=True)
+                path = inner / "doc.md"
+                path.write_text("stable identity content", encoding="utf-8")
+
+                first = await importer.import_directory(str(outer))
+                second = await importer.import_directory(str(inner))
+
+                canonical = path.resolve().as_uri()
+                assert first[0].source == canonical
+                assert second[0].source == canonical
+                assert [entry["source"] for entry in store.list_sources()] == [canonical]
+        finally:
+            _cleanup(store)
+
+    async def test_exact_legacy_source_is_migrated_to_canonical_identity(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "legacy migration content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "ok"
+                assert result.source == canonical
+                assert store.get_source_content("docs/doc.md") is None
+                assert store.get_source_content(canonical) == content
+        finally:
+            _cleanup(store)
+
+    async def test_migrated_source_accepts_later_content_updates(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                path.write_text("original content", encoding="utf-8")
+                await store.ingest("original content", "docs/doc.md", dedup=False)
+                migrated = await importer.import_file(str(path))
+                assert migrated.status == "ok"
+
+                path.write_text("updated content", encoding="utf-8")
+                updated = await importer.import_file(str(path))
+
+                assert updated.status == "ok"
+                assert store.get_source_content("docs/doc.md") is None
+                assert store.get_source_content(path.resolve().as_uri()) == "updated content"
+        finally:
+            _cleanup(store)
+
+    async def test_changed_legacy_source_conflicts_without_duplicate(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                path.write_text("new content", encoding="utf-8")
+                await store.ingest("old content", "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert "legacy source conflict" in result.error
+                assert store.get_source_content("docs/doc.md") == "old content"
+                assert store.get_source_content(path.resolve().as_uri()) is None
+        finally:
+            _cleanup(store)
+
+    async def test_ambiguous_legacy_sources_conflict_without_duplicate(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "ambiguous content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "doc.md", dedup=False)
+                await store.ingest(content, "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert "2 have matching content" in result.error
+                assert store.get_source_content(path.resolve().as_uri()) is None
+                assert {entry["source"] for entry in store.list_sources()} == {
+                    "doc.md", "docs/doc.md",
+                }
         finally:
             _cleanup(store)
 
@@ -531,6 +659,53 @@ class TestImportWebUrl:
         finally:
             _cleanup(store)
 
+    async def test_invalid_declared_text_encoding_is_failed(self):
+        importer, store = _make_importer()
+        try:
+            from src.tools.safe_fetch import SafeFetchResponse
+
+            response = SafeFetchResponse(
+                status=200,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                body=b"valid\n\xff",
+                content_type="text/plain; charset=utf-8",
+                url="https://example.com/invalid.txt",
+            )
+
+            async def mock_fetch(url, **kwargs):
+                return response
+
+            with patch("src.tools.safe_fetch.safe_fetch", mock_fetch):
+                result = await importer.import_web_url(response.url)
+            assert result.status == "error"
+            assert "without data loss" in result.error
+            assert store.list_sources() == []
+        finally:
+            _cleanup(store)
+
+    async def test_declared_non_utf8_charset_is_supported_strictly(self):
+        importer, store = _make_importer()
+        try:
+            from src.tools.safe_fetch import SafeFetchResponse
+
+            response = SafeFetchResponse(
+                status=200,
+                headers={"Content-Type": "text/plain; charset=latin-1"},
+                body="café knowledge".encode("latin-1"),
+                content_type="text/plain; charset=latin-1",
+                url="https://example.com/latin1.txt",
+            )
+
+            async def mock_fetch(url, **kwargs):
+                return response
+
+            with patch("src.tools.safe_fetch.safe_fetch", mock_fetch):
+                result = await importer.import_web_url(response.url)
+            assert result.status == "ok"
+            assert store.get_source_content(response.url) == "café knowledge"
+        finally:
+            _cleanup(store)
+
     async def test_custom_source(self):
         importer, store = _make_importer()
         try:
@@ -641,6 +816,29 @@ class TestImportBatch:
         finally:
             _cleanup(store)
 
+    async def test_file_type(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "doc.md"
+                path.write_text("batch file import content", encoding="utf-8")
+                batch = await importer.import_batch([
+                    {"type": "file", "path": str(path)},
+                ])
+                assert batch.succeeded == 1
+                assert batch.results[0]["source"] == path.resolve().as_uri()
+        finally:
+            _cleanup(store)
+
+    async def test_file_missing_path(self):
+        importer, store = _make_importer()
+        try:
+            batch = await importer.import_batch([{"type": "file"}])
+            assert batch.failed == 1
+            assert "path is required" in batch.results[0]["error"]
+        finally:
+            _cleanup(store)
+
     async def test_directory_missing_path(self):
         importer, store = _make_importer()
         try:
@@ -738,7 +936,7 @@ class TestImportBatch:
                     {"type": "directory", "path": tmpdir, "pattern": "*.txt"},
                 ])
                 assert batch.succeeded == 1
-                assert batch.results[0]["source"] == "b.txt"
+                assert batch.results[0]["source"] == (Path(tmpdir) / "b.txt").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -1057,7 +1255,7 @@ class TestToolDefinition:
         from src.tools.registry import TOOLS
         tool = next(t for t in TOOLS if t["name"] == "bulk_ingest_knowledge")
         item_schema = tool["input_schema"]["properties"]["items"]["items"]
-        assert item_schema["properties"]["type"]["enum"] == ["directory", "pdf", "url"]
+        assert item_schema["properties"]["type"]["enum"] == ["directory", "file", "pdf", "url"]
 
     def test_tool_has_description(self):
         from src.tools.registry import TOOLS
