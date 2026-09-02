@@ -47,8 +47,8 @@ class ChannelStateRegistry:
         # Per-channel cancellation for /stop command
         self.cancel_events: dict[str, asyncio.Event] = {}
         self.active_requests: dict[str, str] = {}
-        # Per-channel completion signal for the currently owned /stop. The
-        # slash command waits on this before reporting what actually happened.
+        # Per-channel completion signal for an owned /stop. Created lazily by
+        # request_stop so set_active_request remains event-loop agnostic.
         self.stop_results: dict[str, asyncio.Future[str]] = {}
         # Pending file attachments from skills — per-channel to avoid cross-channel leaks
         self.pending_files: dict[str, list[tuple[bytes, str]]] = {}
@@ -93,7 +93,6 @@ class ChannelStateRegistry:
         old = self.stop_results.pop(channel_id, None)
         if old is not None and not old.done():
             old.set_result("The previous task ended before the stop request settled.")
-        self.stop_results[channel_id] = asyncio.get_running_loop().create_future()
 
     def request_stop(
         self, channel_id: str

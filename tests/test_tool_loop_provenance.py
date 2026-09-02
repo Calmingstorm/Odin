@@ -292,7 +292,9 @@ class TestInflightStopWrapperEdgeCoverage:
             ),
         )
         block_info = SimpleNamespace(
-            name="read_file", input={"host": "h", "path": "/x"}, id="call"
+            name="wait_for_agents",
+            input={"agent_ids": ["a"], "timeout": "invalid"},
+            id="call",
         )
 
         result = await runner._run_one_tool_with_timeout(st, block_info, 0.01)
@@ -323,7 +325,7 @@ class TestInflightStopWrapperEdgeCoverage:
         runner._run_one_tool = block
         st = SimpleNamespace(_cancel=asyncio.Event())
         block_info = SimpleNamespace(
-            name="read_file", input={"host": "h", "path": "/x"}, id="call"
+            name="wait_for_agents", input={"agent_ids": ["a"]}, id="call"
         )
         task = asyncio.create_task(runner._run_one_tool_with_timeout(st, block_info, 30))
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -354,7 +356,7 @@ class TestInflightStopWrapperEdgeCoverage:
         )
         st = SimpleNamespace(_cancel=asyncio.Event(), durability=durability)
         block_info = SimpleNamespace(
-            name="read_file", input={"host": "h", "path": "/x"}, id="call"
+            name="wait_for_agents", input={"agent_ids": ["a"]}, id="call"
         )
         task = asyncio.create_task(runner._run_one_tool_with_timeout(st, block_info, 30))
         await asyncio.wait_for(started.wait(), timeout=1)

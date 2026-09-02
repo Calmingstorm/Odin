@@ -308,7 +308,7 @@ class TestCancellationBranches:
         batch = LLMResponse(
             text="",
             tool_calls=[
-                ToolCall(id="read", name="read_file", input={"host": "h", "path": "/x"}),
+                ToolCall(id="wait", name="wait_for_agents", input={"agent_ids": ["a"]}),
                 ToolCall(id="cmd", name="run_command", input={"host": "h", "command": "x"}),
             ],
             stop_reason="tool_use",
@@ -318,14 +318,16 @@ class TestCancellationBranches:
         cmd_started = asyncio.Event()
         cmd_release = asyncio.Event()
 
+        async def wait_dispatch(*_args, **_kwargs):
+            read_started.set()
+            await asyncio.sleep(3600)
+
         async def execute(tool_name, tool_input, *, user_id=None):
-            if tool_name == "read_file":
-                read_started.set()
-                await asyncio.sleep(3600)
             cmd_started.set()
             await cmd_release.wait()
             return ToolResult(output="applied", tool_name=tool_name)
 
+        bot.native_tools.dispatch = wait_dispatch
         bot.tool_executor.execute = execute
         msg = FakeMessage("go")
         task = asyncio.create_task(run_loop(bot, msg))
@@ -339,23 +341,23 @@ class TestCancellationBranches:
         text, *_ = await asyncio.wait_for(task, timeout=1)
         assert text.startswith("Task stopped by user.")
         states = {call_id: state for call_id, state, _result in op_rows(store)}
-        assert states == {"cmd": OpState.APPLIED, "read": OpState.DEFINITELY_FAILED}
+        assert states == {"cmd": OpState.APPLIED, "wait": OpState.DEFINITELY_FAILED}
         assert OpState.OUTCOME_UNKNOWN not in states.values()
 
     async def test_stop_preempted_observation_is_definitely_failed(self, tmp_path):
         import asyncio
 
         bot, fake, store = build_with_store(
-            [tool_call_response(("read_file", {"host": "h", "path": "/tmp/x"}))],
+            [tool_call_response(("wait_for_agents", {"agent_ids": ["a"]}))],
             tmp_path,
         )
         started = asyncio.Event()
 
-        async def blocking_read(tool_name, tool_input, *, user_id=None):
+        async def blocking_wait(*_args, **_kwargs):
             started.set()
             await asyncio.sleep(3600)
 
-        bot.tool_executor.execute = blocking_read
+        bot.native_tools.dispatch = blocking_wait
         msg = FakeMessage("go")
         task = asyncio.create_task(run_loop(bot, msg))
         await asyncio.wait_for(started.wait(), timeout=1)

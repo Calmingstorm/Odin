@@ -107,14 +107,36 @@ async def test_read_error_is_bounded_by_handler(tmp_path):
     assert "characters omitted" not in result.output
 
 
-async def test_generic_transport_splice_is_never_exposed_as_a_file_range(tmp_path):
+async def test_transport_marker_literal_in_file_content_is_not_rejected(tmp_path):
+    target = tmp_path / "marker.txt"
+    target.write_text(
+        "before\n... (output truncated) ...\nafter\nlast\n",
+        encoding="utf-8",
+    )
+
+    result = await _read(_executor(), target, start_line=1, lines=3)
+
+    assert result.ok
+    assert result.output == (
+        "1: before\n2: ... (output truncated) ...\n3: after\n\n"
+        "[returned 1-3, continue at start_line=4]"
+    )
+    assert result.truncated is False
+
+
+async def test_overbudget_transport_output_is_bounded_by_handler(tmp_path):
     executor = _executor()
+    transported = (
+        ("h" * 8_000)
+        + "\n\n... (output truncated) ...\n\n"
+        + ("t" * 8_000)
+    )
     executor.files_docs_tools._run_on_host = AsyncMock(
-        return_value=("head\n\n... (output truncated) ...\n\ntail", 1)
+        return_value=(transported, 1)
     )
 
     result = await _read(executor, tmp_path / "missing", lines=2)
 
     assert result.ok is False
-    assert result.output == "Error: read_file transport output exceeded its handler budget."
-    assert "tail" not in result.output
+    assert len(result.output) < 12_000
+    assert result.output.endswith("[read_file error truncated by handler output budget]")

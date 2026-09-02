@@ -70,15 +70,15 @@ async def test_stop_reports_no_active_task():
 async def test_clear_active_ignores_stale_request_owner():
     state = ChannelStateRegistry()
     state.set_active_request("42", "old")
-    old_waiter = state.stop_results["42"]
-    state.set_active_request("42", "new")
-    new_waiter = state.stop_results["42"]
+    old_request, old_waiter = state.request_stop("42")
+    assert old_request == "old"
 
+    state.set_active_request("42", "new")
     assert old_waiter.result() == "The previous task ended before the stop request settled."
+    assert "42" not in state.stop_results
+
     state.clear_active_request("42", "old")
     assert state.active_requests["42"] == "new"
-    assert state.stop_results["42"] is new_waiter
-    assert not new_waiter.done()
 
     state.clear_active_request("42", "new")
     assert "42" not in state.active_requests
@@ -91,8 +91,7 @@ async def test_request_stop_does_not_set_stale_event_without_owner():
     assert "42" not in state.cancel_events
 
     state.set_active_request("42", "req")
-    # Exercise the defensive waiter-reconstruction path as well.
-    state.stop_results.pop("42")
+    assert "42" not in state.stop_results
     request_id, waiter = state.request_stop("42")
     assert request_id == "req"
     assert waiter is state.stop_results["42"]
@@ -102,7 +101,8 @@ async def test_request_stop_does_not_set_stale_event_without_owner():
 async def test_finish_stop_ignores_stale_owner_and_completed_waiter():
     state = ChannelStateRegistry()
     state.set_active_request("42", "req")
-    waiter = state.stop_results["42"]
+    request_id, waiter = state.request_stop("42")
+    assert request_id == "req"
 
     state.finish_stop("42", "other", "wrong")
     assert not waiter.done()
@@ -114,7 +114,9 @@ async def test_finish_stop_ignores_stale_owner_and_completed_waiter():
 async def test_cleanup_releases_stale_active_and_orphan_waiters():
     state = ChannelStateRegistry()
     state.set_active_request("active", "req")
-    active_waiter = state.stop_results["active"]
+    request_id, active_waiter = state.request_stop("active")
+    assert request_id == "req"
+    state.cancel_events["active"].clear()
     state.stop_results["orphan"] = asyncio.get_running_loop().create_future()
     orphan_waiter = state.stop_results["orphan"]
 

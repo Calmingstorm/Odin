@@ -10,6 +10,7 @@ baseline behavior (RFC-001 §8.1).
 from __future__ import annotations
 
 import asyncio
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -566,7 +567,7 @@ class TestLoopTermination:
         started = asyncio.Event()
         cancelled = asyncio.Event()
 
-        async def blocking_read(name, tool_input, user_id=None):
+        async def blocking_wait(*_args, **_kwargs):
             started.set()
             try:
                 await asyncio.sleep(3600)
@@ -575,10 +576,10 @@ class TestLoopTermination:
                 raise
 
         fake = FakeLLM(
-            [tool_call_response(("read_file", {"host": "h", "path": "/tmp/x"}))]
+            [tool_call_response(("wait_for_agents", {"agent_ids": ["a"]}))]
         )
         bot = make_bot(fake_llm=fake)
-        bot.tool_executor.execute = blocking_read
+        bot.native_tools.dispatch = blocking_wait
         msg = FakeMessage("go")
         task = asyncio.create_task(run_loop(bot, msg))
         await asyncio.wait_for(started.wait(), timeout=1)
@@ -588,7 +589,7 @@ class TestLoopTermination:
         assert cancelled.is_set()
         assert text.startswith("Task stopped by user.")
         assert is_error is False
-        assert tools_used == ["read_file"]
+        assert tools_used == ["wait_for_agents"]
 
     async def test_stop_kills_only_agents_linked_to_this_turn(self):
         fake = FakeLLM([tool_call_response(("read_file", {"host": "h", "path": "/x"}))])
@@ -611,16 +612,16 @@ class TestLoopTermination:
         started = asyncio.Event()
         release = asyncio.Event()
 
-        async def completing_read(name, tool_input, user_id=None):
+        async def completing_wait(*_args, **_kwargs):
             started.set()
             await release.wait()
-            return ToolResult(output="complete", tool_name=name)
+            return "complete", SimpleNamespace(rebuild_system_prompt=False)
 
         fake = FakeLLM(
-            [tool_call_response(("read_file", {"host": "h", "path": "/tmp/x"}))]
+            [tool_call_response(("wait_for_agents", {"agent_ids": ["a"]}))]
         )
         bot = make_bot(fake_llm=fake)
-        bot.tool_executor.execute = completing_read
+        bot.native_tools.dispatch = completing_wait
         msg = FakeMessage("go")
         task = asyncio.create_task(run_loop(bot, msg))
         await asyncio.wait_for(started.wait(), timeout=1)

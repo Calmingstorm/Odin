@@ -117,10 +117,10 @@ END {
         else:
             text, code = str(raw), None
         # The generic transport's defensive 16K truncator keeps head+tail.
-        # Never expose that splice as a read_file range; turn any unexpected
-        # overrun into a bounded handler-owned failure instead.
-        if "... (output truncated) ..." in text:
-            return "Error: read_file transport output exceeded its handler budget.", 1
+        # Never infer transport truncation from payload content: a source file
+        # may legitimately contain the transport marker literal. The source
+        # program is already bounded below this threshold, so only the actual
+        # returned length is a trustworthy overrun signal here.
         if len(text) > _READ_FILE_RESULT_MAX_CHARS:
             text = (
                 text[:_READ_FILE_RESULT_MAX_CHARS]
