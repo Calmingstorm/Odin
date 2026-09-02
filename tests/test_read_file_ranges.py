@@ -1,6 +1,8 @@
 """End-to-end range and output-budget pins for read_file."""
 from __future__ import annotations
 
+import hashlib
+import json
 from unittest.mock import AsyncMock
 
 from src.config.schema import ToolHost, ToolsConfig
@@ -140,3 +142,198 @@ async def test_overbudget_transport_output_is_bounded_by_handler(tmp_path):
     assert result.ok is False
     assert len(result.output) < 12_000
     assert result.output.endswith("[read_file error truncated by handler output budget]")
+
+_RAW_HEADER = "<<<ODIN_READ_FILE_RAW_V1 "
+_RAW_SEPARATOR = ">>>\n<<<ODIN_READ_FILE_RAW_CONTENT_V1>>>\n"
+_RAW_END = "<<<ODIN_READ_FILE_RAW_END_V1>>>"
+
+
+def _split_raw(output: str) -> tuple[dict, bytes]:
+    header, framed = output[len(_RAW_HEADER):].split(_RAW_SEPARATOR, 1)
+    metadata = json.loads(header)
+    encoded = framed.encode("utf-8")
+    content_bytes = metadata["content_bytes"]
+    content = encoded[:content_bytes]
+    assert encoded[content_bytes:] == _RAW_END.encode("ascii")
+    return metadata, content
+
+
+async def test_raw_mode_returns_framed_byte_faithful_content(tmp_path):
+    target = tmp_path / "raw.txt"
+    source = b"alpha\r\nbeta\r\ngamma\r\n"
+    target.write_bytes(source)
+
+    result = await _read(_executor(), target, start_line=1, lines=2, raw=True)
+    metadata, content = _split_raw(result.output)
+
+    assert result.ok
+    assert metadata == {
+        "requested_start_line": 1,
+        "requested_lines": 2,
+        "returned_start_line": 1,
+        "returned_end_line": 2,
+        "truncated": True,
+        "continue_at_start_line": 3,
+        "content_encoding": "utf-8",
+        "content_bytes": len(b"alpha\r\nbeta\r\n"),
+        "content_redacted": False,
+    }
+    assert content == b"alpha\r\nbeta\r\n"
+    assert b"1: " not in content
+
+
+async def test_raw_mode_preserves_missing_final_newline(tmp_path):
+    target = tmp_path / "raw-no-newline.txt"
+    source = b"one\ntwo"
+    target.write_bytes(source)
+
+    result = await _read(_executor(), target, raw=True)
+    metadata, content = _split_raw(result.output)
+
+    assert metadata["truncated"] is False
+    assert metadata["continue_at_start_line"] is None
+    assert metadata["content_bytes"] == len(source)
+    assert content == source
+
+
+async def test_raw_mode_machine_content_hash_matches_source(tmp_path):
+    target = tmp_path / "raw-hash.txt"
+    source = b"first\r\nsecond\nthird-without-final-newline"
+    target.write_bytes(source)
+
+    result = await _read(_executor(), target, raw=True)
+    metadata, content = _split_raw(result.output)
+
+    assert metadata["truncated"] is False
+    assert hashlib.sha256(content).digest() == hashlib.sha256(source).digest()
+
+
+async def test_raw_mode_rejects_non_utf8_content(tmp_path):
+    target = tmp_path / "raw-non-utf8.bin"
+    target.write_bytes(b"\xff\xfe\x00ordinary-source-bytes\n")
+
+    result = await _read(_executor(), target, raw=True)
+
+    assert result.ok is False
+    assert result.output == "Error: read_file raw mode requires UTF-8 text content."
+
+
+async def test_raw_mode_redacts_before_framing_and_updates_length(tmp_path):
+    target = tmp_path / "raw-secret.txt"
+    target.write_bytes(b"before password=do-not-reveal after\n")
+
+    result = await _read(_executor(), target, raw=True)
+    metadata, content = _split_raw(result.output)
+
+    assert result.ok
+    assert content == b"before [REDACTED] after\n"
+    assert metadata["content_redacted"] is True
+    assert metadata["content_bytes"] == len(content)
+
+
+async def test_raw_frame_survives_outer_secret_scrubber(tmp_path):
+    from src.llm.secret_scrubber import scrub_output_secrets
+
+    target = tmp_path / "raw.txt"
+    target.write_bytes(b"ordinary UTF-8 source\n")
+    result = await _read(_executor(), target, raw=True)
+
+    assert scrub_output_secrets(result.output) == result.output
+
+
+async def test_raw_mode_rejects_invalid_internal_transport_envelope(tmp_path):
+    executor = _executor()
+    executor.files_docs_tools._run_on_host = AsyncMock(
+        return_value=("not-base64\nODIN_READ_FILE_RAW_META_V1\t1\t2\t1\t1\t-\t3\n", 0)
+    )
+
+    result = await _read(executor, tmp_path / "ignored", raw=True)
+
+    assert result.ok is False
+    assert result.output == "Error: read_file raw transport returned an invalid envelope."
+
+
+async def test_raw_mode_empty_range_is_explicit_and_unambiguous(tmp_path):
+    target = tmp_path / "raw-empty.txt"
+    target.write_bytes(b"one\n")
+
+    result = await _read(_executor(), target, start_line=9, raw=True)
+    metadata, content = _split_raw(result.output)
+
+    assert metadata == {
+        "requested_start_line": 9,
+        "requested_lines": 200,
+        "returned_start_line": None,
+        "returned_end_line": None,
+        "truncated": False,
+        "continue_at_start_line": None,
+        "content_encoding": "utf-8",
+        "content_bytes": 0,
+        "content_redacted": False,
+    }
+    assert content == b""
+
+
+async def test_raw_mode_content_may_contain_markers(tmp_path):
+    target = tmp_path / "raw-markers.txt"
+    source = (
+        b"... (output truncated) ...\n"
+        b"<<<ODIN_READ_FILE_RAW_CONTENT_V1>>>\n"
+        b"<<<ODIN_READ_FILE_RAW_END_V1>>>\n"
+    )
+    target.write_bytes(source)
+
+    result = await _read(_executor(), target, raw=True)
+    metadata, content = _split_raw(result.output)
+
+    assert result.ok
+    assert metadata["content_bytes"] == len(source)
+    assert content == source
+
+
+async def test_raw_budget_is_contiguous_and_signals_continuation(tmp_path):
+    target = tmp_path / "raw-large.txt"
+    source_lines = [f"raw-{i}-".encode() + (b"x" * 180) + b"\n" for i in range(1, 301)]
+    target.write_bytes(b"".join(source_lines))
+
+    first = await _read(_executor(), target, start_line=80, lines=200, raw=True)
+    metadata, content = _split_raw(first.output)
+
+    assert first.ok
+    assert len(first.output) < 12_000
+    assert "characters omitted" not in first.output
+    assert metadata["truncated"] is True
+    assert metadata["returned_start_line"] == 80
+    assert metadata["returned_end_line"] < 279
+    assert metadata["continue_at_start_line"] == metadata["returned_end_line"] + 1
+    expected = b"".join(source_lines[79:metadata["returned_end_line"]])
+    assert content == expected
+
+    second = await _read(
+        _executor(), target,
+        start_line=metadata["continue_at_start_line"], lines=200, raw=True,
+    )
+    second_metadata, second_content = _split_raw(second.output)
+    assert second_metadata["returned_start_line"] == metadata["continue_at_start_line"]
+    assert second_content.startswith(source_lines[metadata["continue_at_start_line"] - 1])
+
+
+async def test_raw_mode_one_oversize_source_line_fails_without_envelope(tmp_path):
+    target = tmp_path / "raw-wide.txt"
+    target.write_bytes((b"z" * 30_000) + b"\nafter\n")
+
+    result = await _read(_executor(), target, raw=True)
+
+    assert result.ok is False
+    assert result.output == (
+        "Error: source line 1 exceeds the read_file output budget; no lines returned."
+    )
+    assert "characters omitted" not in result.output
+
+
+async def test_raw_mode_validation_rejects_non_boolean(tmp_path):
+    executor = _executor()
+    for value in (0, 1, "true", None):
+        result = await _read(executor, tmp_path / "x", raw=value)
+        assert result.ok is False
+        assert result.output == "Error: 'raw' must be a boolean."

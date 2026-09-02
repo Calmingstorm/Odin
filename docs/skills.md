@@ -49,7 +49,7 @@ The `context` parameter passed to `execute()` provides:
 
 ### Command Execution
 - `run_on_host(alias, cmd)` → `str` — Run shell command via SSH
-- `read_file(host, path, lines=200, start_line=1)` → `str` — Read a contiguous, source-numbered file range
+- `read_file(host, path, lines=200, start_line=1, raw=False)` → `str` — Read a contiguous file range; use `raw=True` for byte-faithful UTF-8 text in a length-framed metadata envelope
 
 ### Tool Execution
 - `execute_tool(name, input)` → `str` — Call read-only tools (http_probe, search_knowledge, browser_read_page, etc.)

@@ -204,8 +204,9 @@ class SkillContext:
         path: str,
         lines: int = 200,
         start_line: int = 1,
+        raw: bool = False,
     ) -> str:
-        """Read a source-numbered file range from a managed host."""
+        """Read a contiguous file range, optionally as raw source content."""
         if is_path_denied(path):
             self._log.warning("Skill attempted to read denied path: %s", path)
             return f"Access denied: '{path}' is a restricted path."
@@ -217,6 +218,7 @@ class SkillContext:
                     "path": path,
                     "lines": lines,
                     "start_line": start_line,
+                    "raw": raw,
                 },
             )
         )

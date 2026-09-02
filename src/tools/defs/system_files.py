@@ -96,10 +96,12 @@ TOOLS_SECTION: list[dict] = [
         "name": "read_file",
         "is_core": True,
         "description": (
-            "Returns a contiguous, source-numbered range from a file on a managed host. "
-            "start_line is one-based; lines is a count (default 200, max 1000). Large ranges "
-            "end with an explicit continuation cursor rather than head+tail truncation. Lines are "
-            "prefixed with their true source-line numbers. To "
+            "Returns a contiguous range from a file on a managed host. start_line is "
+            "one-based; lines is a count (default 200, max 1000). Numbered output is the "
+            "default. Set raw=true for byte-faithful UTF-8 text in a length-framed metadata "
+            "envelope carrying the exact interval, truncation state, content byte count, and "
+            "continuation cursor. Consume only the framed source content. "
+            "Large ranges never use head+tail truncation. To "
             "write, use write_file. For multi-file analysis, use claude_code with "
             "allow_edits=false."
         ),
@@ -125,6 +127,13 @@ TOOLS_SECTION: list[dict] = [
                     "minimum": 1,
                     "maximum": 1000,
                     "description": "Number of lines to read (default 200, max 1000)",
+                },
+                "raw": {
+                    "type": "boolean",
+                    "description": (
+                        "Return byte-faithful UTF-8 text in a length-framed metadata envelope "
+                        "with explicit truncation/cursor state (default false)"
+                    ),
                 },
             },
             "required": ["host", "path"],

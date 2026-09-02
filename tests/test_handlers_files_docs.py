@@ -101,6 +101,8 @@ class TestReadFile:
             ({"start_line": 0}, "'start_line' must be a positive"),
             ({"start_line": False}, "'start_line' must be a positive"),
             ({"start_line": 2**53}, "'start_line' must not exceed"),
+            ({"raw": 1}, "'raw' must be a boolean"),
+            ({"raw": "true"}, "'raw' must be a boolean"),
         ):
             t = _tools()
             out = await t._handle_read_file({"path": "/etc/x", "host": "h", **inp})
@@ -116,6 +118,7 @@ class TestReadFile:
         assert "-v count=200" in command
         assert "-v budget=10500" in command
         assert "returned %.0f-%.0f, continue at start_line=%.0f" in command
+        assert "ODIN_READ_FILE_RAW_CONTENT_V1" not in command
 
         await t._handle_read_file(
             {"path": "/tmp/name with spaces", "host": "h", "start_line": 41, "lines": 17}
@@ -124,6 +127,17 @@ class TestReadFile:
         assert "-v start=41" in command
         assert "-v start_label=n41" in command
         assert "-v count=17" in command
+        assert "< '/tmp/name with spaces'" in command
+
+        await t._handle_read_file(
+            {"path": "/tmp/name with spaces", "host": "h", "raw": True}
+        )
+        command = t._run_on_host.call_args.args[1]
+        assert "LC_ALL=C awk" in command
+        assert "ODIN_READ_FILE_RAW_META_V1" in command
+        assert "base64 <" in command
+        assert "tr -d" in command
+        assert "-v count=200" in command
         assert "< '/tmp/name with spaces'" in command
 
 
