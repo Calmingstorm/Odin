@@ -1,6 +1,7 @@
 """End-to-end range and output-budget pins for read_file."""
 from __future__ import annotations
 
+import base64
 import hashlib
 import json
 from unittest.mock import AsyncMock
@@ -337,3 +338,59 @@ async def test_raw_mode_validation_rejects_non_boolean(tmp_path):
         result = await _read(executor, tmp_path / "x", raw=value)
         assert result.ok is False
         assert result.output == "Error: 'raw' must be a boolean."
+
+
+async def test_raw_mode_rejects_unparsable_oversize_line_number(tmp_path):
+    """A malformed ERROR envelope must not surface a bogus line number."""
+    executor = _executor()
+    executor.files_docs_tools._run_on_host = AsyncMock(return_value=("ERROR\tnot-a-number", 0))
+
+    result = await _read(executor, tmp_path / "ignored", raw=True)
+
+    assert result.ok is False
+    assert result.output == "Error: read_file raw transport returned an invalid envelope."
+
+
+async def test_raw_mode_accepts_metadata_only_envelope_without_leading_body(tmp_path):
+    """A zero-byte range arrives as a bare metadata line with no content line."""
+    executor = _executor()
+    executor.files_docs_tools._run_on_host = AsyncMock(
+        return_value=("ODIN_READ_FILE_RAW_META_V1\t1\t5\t-\t-\t-\t0", 0)
+    )
+
+    result = await _read(executor, tmp_path / "ignored", raw=True)
+
+    assert result.ok is True
+    header = json.loads(
+        result.output.split("\n", 1)[0][len("<<<ODIN_READ_FILE_RAW_V1 ") : -len(">>>")]
+    )
+    assert header["content_bytes"] == 0
+    assert header["returned_start_line"] is None
+    assert header["truncated"] is False
+
+
+async def test_raw_mode_rejects_metadata_with_wrong_field_count(tmp_path):
+    """A truncated metadata line must fail rather than be parsed positionally."""
+    executor = _executor()
+    executor.files_docs_tools._run_on_host = AsyncMock(
+        return_value=("aGk=\nODIN_READ_FILE_RAW_META_V1\t1\t5\t1\t1", 0)
+    )
+
+    result = await _read(executor, tmp_path / "ignored", raw=True)
+
+    assert result.ok is False
+    assert result.output == "Error: read_file raw transport returned an invalid envelope."
+
+
+async def test_raw_mode_rejects_declared_length_mismatch(tmp_path):
+    """A declared byte count that disagrees with the payload is never trusted."""
+    executor = _executor()
+    encoded = base64.b64encode(b"hello").decode()
+    executor.files_docs_tools._run_on_host = AsyncMock(
+        return_value=(f"{encoded}\nODIN_READ_FILE_RAW_META_V1\t1\t5\t1\t1\t-\t99", 0)
+    )
+
+    result = await _read(executor, tmp_path / "ignored", raw=True)
+
+    assert result.ok is False
+    assert result.output == "Error: read_file raw transport returned an invalid envelope."
