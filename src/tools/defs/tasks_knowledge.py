@@ -147,8 +147,9 @@ TOOLS_SECTION: list[dict] = [
         "name": "bulk_ingest_knowledge",
         "description": (
             "Bulk-import documents into the knowledge base. Accepts a list of items: "
-            "directories of markdown/text files, PDF URLs, or web page URLs. "
-            "Each item needs a type ('directory', 'pdf', or 'url') plus type-specific params."
+            "directories or individual markdown/text files, PDF URLs, or web page URLs. "
+            "Each item needs a type ('directory', 'file', 'pdf', or 'url') plus type-specific "
+            "params."
         ),
         "input_schema": {
             "type": "object",
@@ -158,13 +159,16 @@ TOOLS_SECTION: list[dict] = [
                     "description": (
                         "Import jobs. Each object needs 'type' plus: "
                         "directory → 'path' (+ optional 'pattern', default '**/*.md'); "
-                        "pdf → 'url' (+ optional 'source'); "
+                        "file → 'path'; pdf → 'url' (+ optional 'source'); "
                         "url → 'url' (+ optional 'source')"
                     ),
                     "items": {
                         "type": "object",
                         "properties": {
-                            "type": {"type": "string", "enum": ["directory", "pdf", "url"]},
+                            "type": {
+                                "type": "string",
+                                "enum": ["directory", "file", "pdf", "url"],
+                            },
                             "path": {"type": "string"},
                             "url": {"type": "string"},
                             "source": {"type": "string"},
