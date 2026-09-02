@@ -85,7 +85,7 @@ EXPECTED_TOOL_HASHES = {
     "list_tasks": "a81136a21dc48a2b",
     "cancel_task": "aaffe5a4cdfa32e0",
     "search_knowledge": "3e5555a61c0509da",
-    "ingest_document": "7948555f8b9053c6",
+    "ingest_document": "14ece56caaf4fcd2",
     "bulk_ingest_knowledge": "0427db261b28cd7e",
     "list_knowledge": "4ea7f4f545878fdc",
     "delete_knowledge": "73268085bef06627",

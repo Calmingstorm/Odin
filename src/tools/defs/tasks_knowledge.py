@@ -119,10 +119,11 @@ TOOLS_SECTION: list[dict] = [
         "name": "ingest_document",
         "description": (
             "Ingests a document into the knowledge base (chunked + embedded for search). "
-            "Re-ingesting same source replaces previous. For host files, call read_file with "
-            "raw=true first, and ingest only the framed UTF-8 source content; exclude the "
-            "metadata envelope, end marker, and continuation cursor. "
-            "Follow the cursor when present. Search with search_knowledge."
+            "Re-ingesting same source replaces previous. For host files, use one complete, "
+            "untruncated read_file raw=true response and ingest only its framed UTF-8 source "
+            "content; exclude the metadata envelope, end marker, and continuation cursor; "
+            "files too large for one raw read are not ingestible through this tool. Search with "
+            "search_knowledge."
         ),
         "input_schema": {
             "type": "object",
