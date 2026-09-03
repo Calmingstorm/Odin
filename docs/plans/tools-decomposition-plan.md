@@ -10,7 +10,7 @@ Predecessors: RFC-001 (client.py), RFC-002 (facade retirement, native_tools doma
 
 ## 2. Inventory (verified against master @ 7263c03)
 
-- **74 tools** in the `TOOLS` list (exact ordered names captured in the P0 contract). **Order is behavior**: `get_tool_definitions()` feeds the tool catalog → prompt assembly; reordering changes prompts.
+- **73 tools** in the `TOOLS` list (exact ordered names captured in the P0 contract). **Order is behavior**: `get_tool_definitions()` feeds the tool catalog → prompt assembly; reordering changes prompts.
 - **Two-tier dispatch** (`tool_loop.py:871`): `native_tools.handles(name)` → native table in `src/discord/native_tools/registry.py` (36 registered natives + 10 skill tools special-cased + user skills by name), else → `ToolExecutor.execute()`.
 - **28 executor-routed tools**, dispatched via `getattr(self, f"_handle_{tool_name}")` — string reflection, the pattern RFC-002 banned on the Discord side.
 - `execute()` is a **middleware pipeline** around the handlers: contextvars → RBAC `check_permission` → risk classification → timeout → `_try_tool` → recovery (hint/skip/retry, `UNSAFE_TO_RETRY`) → mutation annotation → result validation → `ToolResult` assembly. This pipeline is NOT moving.
@@ -23,9 +23,8 @@ Predecessors: RFC-001 (client.py), RFC-002 (facade retirement, native_tools doma
 2. `executor.py` → middleware core + `src/tools/handlers/` domain modules. Core keeps: `execute()` pipeline, `_try_tool`, recovery, metrics, RBAC/governor/host-access wiring, SSH plumbing (`_exec_command`, `_run_on_host`, `_govern_command`, `_resolve_host`), contextvars, bulkheads. Handlers move to domain owners reached through an **explicit dispatch table of the native_tools shape** — `name → (owner_key, attr)` — with the handler **resolved via `getattr(owner, attr)` at CALL time, never pre-bound at `__init__`** (R1 blocker #1: pre-binding captures originals and breaks the `executor._handle_x = fake` patch seam — the RFC-003 `process_web_chat` failure mode). During migration waves an assertion verifies `getattr(self, f"_handle_{name}")` resolves to the same function the table resolves. The f-string `getattr` dispatch is retired and contract-banned only in the final phase.
 3. Handler domains (verbatim moves; ~28 handlers + their private helpers):
    - `system.py`: run_command, run_script, run_command_multi, manage_process
-   - `files_docs.py`: read_file, write_file, analyze_pdf
+   - `files_docs.py`: read_file, apply_patch, analyze_pdf
    - `browser_web.py`: browser_read_page/read_table/click/fill/evaluate, web_search, fetch_url, http_probe
-   - `coding.py`: claude_code (+ stream-JSON parser)
    - `state.py`: memory_manage, manage_list (+ their persistence helpers)
    - `devops.py`: git_ops, kubectl, docker_ops, terraform_ops
    - `comms.py`: email_send/search/read/list_recent, issue_tracker
@@ -53,7 +52,7 @@ Predecessors: RFC-001 (client.py), RFC-002 (facade retirement, native_tools doma
 - **P4**: handler wave 1 — `system.py` + `files_docs.py` (SSH plumbing seam proven first).
 - **P5**: handler wave 2 — `browser_web.py` + `coding.py` + `devops.py`.
 - **P6**: handler wave 3 — `state.py` (memory/list locks reviewed in isolation) + `comms.py` + `validation.py`; core slim-down.
-- **P7**: retire the f-string fallback; contract bans `_handle_`-string spellings outside the core — **the ban scan is AST/token-aware, not raw grep** (re-review advisory: must not flag fixture names, comments, or the intentional compat assertion in its removal phase); production startup assertions (R1 advisory #5: `len(TOOLS)==74`, no duplicate names, table keys == expected executor-routed set); final metrics; docs; soak deploy + two-battery protocol — round-2 MUST include the negative-path battery: unknown tool, RBAC-denied, host-access-denied run_command, tiny-timeout, nonzero exit, run_command_multi mixed success/failure, memory round-trip, skill CRUD+invoke, http_probe redirect safety, validate_action (R1 advisory #10). Sign-off report.
+- **P7**: retire the f-string fallback; contract bans `_handle_`-string spellings outside the core — **the ban scan is AST/token-aware, not raw grep** (re-review advisory: must not flag fixture names, comments, or the intentional compat assertion in its removal phase); production startup assertions (R1 advisory #5: `len(TOOLS)==73`, no duplicate names, table keys == expected executor-routed set); final metrics; docs; soak deploy + two-battery protocol — round-2 MUST include the negative-path battery: unknown tool, RBAC-denied, host-access-denied run_command, tiny-timeout, nonzero exit, run_command_multi mixed success/failure, memory round-trip, skill CRUD+invoke, http_probe redirect safety, validate_action (R1 advisory #10). Sign-off report.
 
 ## 6. Size targets & quality gates
 
@@ -86,7 +85,7 @@ Every phase is one revertable merge commit on the campaign branch; campaign→ma
 
 **Quality**: `src/tools/` package + touched native files at **ZERO ruff findings** (~230 pre-existing findings resolved campaign-wide, incl. 7 verified StrEnum conversions); suite 6,079 → **6,12x green** throughout (+40 P0 contracts and wave additions); every phase PR CI-gated, new=0 at every step.
 
-**Declared deviations from R1**: (1) the production startup assertion pins INVARIANTS (no duplicate tool names; every table entry resolves on its owner at construction) rather than the literal `len(TOOLS)==74` — a hardcoded count in prod would fail the next legitimate tool addition in the wrong place; the 74-count/order pin lives in the characterization contract where changing it is a reviewed edit. (2) The historical executor-instance patch seam was RETAINED via `__dict__`-override precedence instead of re-pointing the 13+ existing patch sites — strictly better than the planned re-pointing (zero churn on patchers, both seams live).
+**Declared deviations from R1**: (1) the production startup assertion pins INVARIANTS (no duplicate tool names; every table entry resolves on its owner at construction) rather than the literal `len(TOOLS)==73` — a hardcoded count in prod would fail the next legitimate tool addition in the wrong place; the 73-count/order pin lives in the characterization contract where changing it is a reviewed edit. (2) The historical executor-instance patch seam was RETAINED via `__dict__`-override precedence instead of re-pointing the 13+ existing patch sites — strictly better than the planned re-pointing (zero churn on patchers, both seams live).
 
 ## R1 amendment log (Odin plan review, 2026-07-05)
 

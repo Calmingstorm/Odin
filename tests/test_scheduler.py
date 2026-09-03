@@ -103,7 +103,7 @@ class TestSchedulerAdd:
     async def test_add_check_disallowed_tool_raises(self, tmp_path):
         s = _make_scheduler(tmp_path)
         with pytest.raises(ValueError, match="not allowed"):
-            await s.add("bad tool", "check", "chan1", cron="* * * * *", tool_name="write_file")
+            await s.add("bad tool", "check", "chan1", cron="* * * * *", tool_name="apply_patch")
 
     async def test_add_workflow_missing_steps_raises(self, tmp_path):
         s = _make_scheduler(tmp_path)
@@ -522,7 +522,7 @@ class TestSchedulerUpdate:
             cron="0 * * * *", tool_name="run_command", tool_input={"command": "df -h"},
         )
         with pytest.raises(ValueError, match="not allowed"):
-            await s.update(sched["id"], tool_name="write_file")
+            await s.update(sched["id"], tool_name="apply_patch")
 
     async def test_update_workflow_invalid_steps_raises(self, tmp_path):
         s = _make_scheduler(tmp_path)

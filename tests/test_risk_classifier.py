@@ -513,12 +513,8 @@ class TestClassifyToolStatic:
         a = classify_tool("read_file", {"host": "web1", "path": "/etc/config"})
         assert a.level == RiskLevel.LOW
 
-    def test_write_file_medium(self):
-        a = classify_tool("write_file", {"host": "web1", "path": "/tmp/f", "content": "x"})
-        assert a.level == RiskLevel.MEDIUM
-
-    def test_claude_code_high(self):
-        a = classify_tool("claude_code", {"prompt": "fix bug", "working_directory": "/app"})
+    def test_apply_patch_high(self):
+        a = classify_tool("apply_patch", {"host": "web1", "root": "/tmp", "patch_text": "patch"})
         assert a.level == RiskLevel.HIGH
 
     def test_search_knowledge_low(self):
@@ -569,7 +565,7 @@ class TestToolRiskMap:
             assert _TOOL_RISK_MAP[tool] == RiskLevel.LOW
 
     def test_execution_tools_are_high(self):
-        exec_tools = ["run_script", "claude_code"]
+        exec_tools = ["run_script", "apply_patch"]
         for tool in exec_tools:
             assert _TOOL_RISK_MAP[tool] == RiskLevel.HIGH
 

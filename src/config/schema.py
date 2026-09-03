@@ -246,9 +246,6 @@ class ToolsConfig(BaseModel):
     hosts: dict[str, ToolHost] = Field(default_factory=dict)
     command_timeout_seconds: int = 300
     tool_timeouts: dict[str, int] = Field(default_factory=dict)
-    claude_code_host: str = ""
-    claude_code_user: str = ""
-    claude_code_dir: str = "/opt/odin"
     skill_allowed_urls: list[str] = Field(default_factory=list)
     # Operator-disabled built-in tools (config-gated visibility): a disabled
     # tool is absent from the model catalog on every surface and rejected at

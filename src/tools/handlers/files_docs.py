@@ -1,4 +1,4 @@
-"""Files & documents handler domain — read_file, write_file, analyze_pdf
+"""Files & documents handler domain — read_file, apply_patch, analyze_pdf
 (RFC-004 P4, wave 1).
 
 Bodies moved VERBATIM from executor.py; the only mechanical adjustment is
@@ -12,8 +12,8 @@ from __future__ import annotations
 import base64
 import binascii
 import json
-import posixpath
 import shlex
+from pathlib import Path
 
 from ...llm.secret_scrubber import scrub_output_secrets
 from .deps import HandlerBase
@@ -213,21 +213,21 @@ END {
                 # allowed a local attacker to pre-create a sidecar between
                 # mktemp and the first redirect.
                 "metadata=$(mktemp) || exit 1; "
-                "body=$(mktemp) || { rm -f -- \"$metadata\"; exit 1; }; "
-                "encoded=$(mktemp) || { rm -f -- \"$metadata\" \"$body\"; exit 1; }; "
-                "trap 'rm -f -- \"$metadata\" \"$body\" \"$encoded\"' EXIT; "
-                "chmod 600 -- \"$metadata\" \"$body\" \"$encoded\" || exit 1; "
+                'body=$(mktemp) || { rm -f -- "$metadata"; exit 1; }; '
+                'encoded=$(mktemp) || { rm -f -- "$metadata" "$body"; exit 1; }; '
+                'trap \'rm -f -- "$metadata" "$body" "$encoded"\' EXIT; '
+                'chmod 600 -- "$metadata" "$body" "$encoded" || exit 1; '
                 f"final_newline=$(tail -c 1 < {safe_path} 2>/dev/null | wc -l); "
                 f"LC_ALL=C awk -v start={start_line} "
                 f"-v start_label={shlex.quote(start_label)} "
                 f"-v count={lines} -v budget={_READ_FILE_RAW_BODY_MAX_BYTES} "
-                f"-v final_newline=\"$final_newline\" "
-                "-v metadata=\"$metadata\" "
-                f"{shlex.quote(raw_awk_program)} < {safe_path} > \"$body\"; "
+                f'-v final_newline="$final_newline" '
+                '-v metadata="$metadata" '
+                f'{shlex.quote(raw_awk_program)} < {safe_path} > "$body"; '
                 "status=$?; "
-                "if [ $status -ne 0 ]; then cat -- \"$metadata\"; "
-                "rm -f -- \"$body\"; exit $status; fi; "
-                "base64 < \"$body\" > \"$encoded\"; status=$?; "
+                'if [ $status -ne 0 ]; then cat -- "$metadata"; '
+                'rm -f -- "$body"; exit $status; fi; '
+                'base64 < "$body" > "$encoded"; status=$?; '
                 "if [ $status -ne 0 ]; then exit $status; fi; "
                 "tr -d '\\r\\n' < \"$encoded\"; status=$?; "
                 "printf '\\n'; cat -- \"$metadata\"; exit $status"
@@ -331,53 +331,88 @@ END {
             return text, code
         return text
 
-    async def _handle_write_file(self, inp: dict) -> str | tuple[str, int]:
-        path = inp.get("path")
-        content = inp.get("content")
+    async def _handle_apply_patch(self, inp: dict) -> str | tuple[str, int]:
         host = inp.get("host")
-        if not path:
-            return "Error: 'path' is required for write_file."
-        if content is None:
-            return "Error: 'content' is required for write_file."
+        root = inp.get("root")
+        patch_text = inp.get("patch_text")
         if not host:
-            return "Error: 'host' is required for write_file."
-        # The schema documents this path as absolute, but nothing enforced it,
-        # so a relative path silently resolved against Odin's install directory
-        # and wrote there (PR #239 round-10 review, reproduced). Rejecting is
-        # better than quietly redirecting into the workspace: a write whose
-        # destination the caller did not choose is its own hazard, and no
-        # documented capability is lost.
-        if not str(path).startswith("/"):
-            return (
-                f"Error: write_file requires an absolute path, got {path!r}. "
-                "A relative path would resolve against Odin's working directory "
-                "rather than where you intend.",
-                1,
-            )
-        path = str(path)
-        safe_path = shlex.quote(path)
-        # Compute and quote the parent as its own shell argument. Embedding a
-        # quoted path in ``$(dirname ...)`` and then leaving the substitution
-        # unquoted word-splits a parent containing spaces; ``mkdir`` can create
-        # those extra relative words in Odin's inherited install cwd even though
-        # the requested file path itself is absolute (PR #239 final review,
-        # reproduced). Remote managed hosts are POSIX, matching the absolute-path
-        # contract above.
-        safe_parent = shlex.quote(posixpath.dirname(path) or "/")
-        # Govern the write before executing — write_file reaches the filesystem
-        # via _run_on_host, which does NOT itself govern. Check a representative
-        # redirect-to-path command so policy (e.g. writes to sensitive targets)
-        # applies here as it does for run_command.
-        allowed, denial, _ = self._govern_command(f"write_file > {safe_path}", host)
+            return "Error: 'host' is required for apply_patch.", 1
+        if not isinstance(root, str) or not root.startswith("/"):
+            return "Error: 'root' must be an absolute path for apply_patch.", 1
+        if not isinstance(patch_text, str):
+            return "Error: 'patch_text' is required for apply_patch.", 1
+
+        from ..apply_patch import PatchError, parse_patch
+
+        try:
+            plan = parse_patch(patch_text)
+        except PatchError as exc:
+            return f"Error: invalid apply_patch envelope: {exc}", 1
+
+        resolved = self._resolve_host(host)
+        if not resolved:
+            return f"Unknown or disallowed host: {host}", 1
+
+        # The governor sees a representative write command before any staged
+        # payload reaches the host. The patch itself is transported as base64,
+        # never interpolated as shell syntax.
+        allowed, denial, _ = self._govern_command(f"apply_patch --root {shlex.quote(root)}", host)
         if not allowed:
-            return denial
-        # Base64-encode content to avoid shell injection via heredoc delimiter
-        encoded = shlex.quote(base64.b64encode(content.encode()).decode())
-        cmd = (
-            f"mkdir -p -- {safe_parent} && "
-            f"printf %s {encoded} | base64 -d > {safe_path}"
+            return denial, 1
+
+        runner = Path(__file__).resolve().parents[1] / "apply_patch.py"
+        plan_json = json.dumps(plan, ensure_ascii=True, separators=(",", ":"))
+        wrapper = (
+            runner.read_text(encoding="utf-8")
+            + "\nimport json\nimport sys as _sys\n"
+            + "try:\n"
+            + "    _plan = json.loads(_sys.stdin.read())\n"
+            + "    _changed = apply_plan(_sys.argv[1], _plan)\n"
+            + "    _result = {'ok': True, 'changed': _changed}\n"
+            + "except PatchRollbackError as _exc:\n"
+            + "    _result = {'ok': False, 'error': str(_exc), 'rollback_failed': True, "
+            + "'rollback_failures': _exc.failures}\n"
+            + "except BaseException as _exc:\n"
+            + "    _result = {'ok': False, 'error': f'{type(_exc).__name__}: {_exc}', "
+            + "'rollback_failed': False}\n"
+            + "print(json.dumps(_result, ensure_ascii=True, separators=(',', ':')))\n"
         )
-        return await self._run_on_host(host, cmd)
+        runner_b64 = base64.b64encode(wrapper.encode("utf-8")).decode("ascii")
+        plan_b64 = base64.b64encode(plan_json.encode("utf-8")).decode("ascii")
+        safe_root = shlex.quote(root)
+        command = (
+            "runner=$(mktemp) || exit 1; "
+            'plan=$(mktemp) || { rm -f -- "$runner"; exit 1; }; '
+            'trap \'rm -f -- "$runner" "$plan"\' EXIT; '
+            'chmod 600 -- "$runner" "$plan" || exit 1; '
+            f'printf %s {shlex.quote(runner_b64)} | base64 -d > "$runner" || exit 1; '
+            f'printf %s {shlex.quote(plan_b64)} | base64 -d > "$plan" || exit 1; '
+            f'python3 "$runner" {safe_root} < "$plan"'
+        )
+        raw = await self._run_on_host(host, command)
+        if isinstance(raw, tuple):
+            text, code = str(raw[0]), int(raw[1])
+        else:
+            text, code = str(raw), 1
+        if code != 0:
+            return text, code
+        try:
+            result = json.loads(text)
+        except (json.JSONDecodeError, TypeError):
+            return "Error: apply_patch host returned an invalid result envelope.", 1
+        if not isinstance(result, dict) or result.get("ok") is not True:
+            error = (
+                result.get("error", "unknown host-side failure")
+                if isinstance(result, dict)
+                else "invalid result"
+            )
+            if isinstance(result, dict) and result.get("rollback_failed") is True:
+                return f"Error: apply_patch rollback failed; manual recovery required: {error}", 1
+            return f"Error: apply_patch failed without changing the final file set: {error}", 1
+        changed = result.get("changed")
+        if not isinstance(changed, list) or not all(isinstance(item, str) for item in changed):
+            return "Error: apply_patch host returned an invalid result envelope.", 1
+        return "Applied patch successfully:\n" + "\n".join(f"- {item}" for item in changed), 0
 
     @staticmethod
     def _parse_page_range(pages: str, total: int) -> list[int]:

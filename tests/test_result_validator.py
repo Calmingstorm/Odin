@@ -60,9 +60,6 @@ class TestToolSchemasRegistry:
     def test_unknown_tool_gets_default(self):
         assert "nonexistent_tool_xyz" not in TOOL_SCHEMAS
 
-    def test_write_file_is_empty_ok(self):
-        assert TOOL_SCHEMAS["write_file"].allow_empty is True
-
     def test_manage_process_expects_json(self):
         assert TOOL_SCHEMAS["manage_process"].expect_json is True
 
@@ -163,11 +160,6 @@ class TestValidateEmptyHandling:
         outcome = validate_tool_result("run_command", "   \n  ")
         assert "empty_result_replaced" in outcome.violations
         assert outcome.normalized == _EMPTY_RESULT_PLACEHOLDER
-
-    def test_empty_allowed_for_write_file(self):
-        outcome = validate_tool_result("write_file", "")
-        assert outcome.valid is True
-        assert outcome.normalized == ""
 
     def test_empty_allowed_for_browser_click(self):
         outcome = validate_tool_result("browser_click", "")
@@ -432,7 +424,7 @@ class TestSchemaOverride:
 
     def test_explicit_schema_overrides_registry(self):
         schema = ToolResultSchema(allow_empty=False)
-        outcome = validate_tool_result("write_file", "", schema=schema)
+        outcome = validate_tool_result("apply_patch", "", schema=schema)
         assert "empty_result_replaced" in outcome.violations
 
 

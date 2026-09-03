@@ -216,51 +216,6 @@ TOOLS_SECTION: list[dict] = [
             "required": ["url"],
         },
     },
-    # --- Claude Code ---
-    {
-        "name": "claude_code",
-        "is_core": True,
-        "description": (
-            "Deep reasoning agent for complex multi-step tasks (3+ tool calls): code generation, "
-            "repo analysis, debugging, building/deploying. Runs an entire chain in one session. "
-            "Results as text + files on disk. With allow_edits=true, appends 'FILES ON DISK: ...' "
-            "manifest.\n"
-            "NOT for: single files (read_file/write_file) or single commands (run_command)."
-        ),
-        "input_schema": {
-            "type": "object",
-            "properties": {
-                "host": {
-                    "type": "string",
-                    "description": "Host alias (defaults to claude_code_host from config)",
-                },
-                "working_directory": {
-                    "type": "string",
-                    "description": "Absolute path to the repo/directory (e.g. '/root/project/')",
-                },
-                "prompt": {
-                    "type": "string",
-                    "description": (
-                        "Detailed prompt: specify files, functions, and expected behavior"
-                    ),
-                },
-                "allow_edits": {
-                    "type": "boolean",
-                    "description": (
-                        "true = can edit/write files (non-root). false (default) = read-only "
-                        "analysis."
-                    ),
-                },
-                "allowed_tools": {
-                    "type": "string",
-                    "description": (
-                        "Restrict tools — space-separated (e.g. 'Read Grep Glob'). Default: all."
-                    ),
-                },
-            },
-            "required": ["working_directory", "prompt"],
-        },
-    },
     # --- Permissions ---
     {
         "name": "set_permission",

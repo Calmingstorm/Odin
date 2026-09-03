@@ -1061,33 +1061,6 @@ FIELDS: dict[str, FieldSpec] = {
             ),
         ),
     ),
-    "tools.claude_code_dir": FieldSpec(
-        apply_mode="live_read",
-        description="Working directory advertised for the coding tool.",
-    ),
-    "tools.claude_code_host": FieldSpec(
-        apply_mode="restart",
-        description="Host the coding tool runs on.",
-        restart_reason="Execution reads the host from the tool executor's "
-        "boot configuration, even though the tool's visibility updates live.",
-        consumers=(
-            Consumer(
-                "Tool visibility",
-                "live_read",
-                "An empty value hides the tool; the catalogue refreshes on save.",
-            ),
-            Consumer(
-                "Execution",
-                "restart",
-                "The executor resolves the host from the configuration it was built with.",
-            ),
-        ),
-    ),
-    "tools.claude_code_user": FieldSpec(
-        apply_mode="restart",
-        description="User the coding tool runs as.",
-        restart_reason="The executor resolves this from the configuration it was built with.",
-    ),
     "tools.command_timeout_seconds": FieldSpec(
         apply_mode="restart",
         unit="seconds",

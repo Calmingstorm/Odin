@@ -206,11 +206,11 @@ class TestCollectToolsUsed:
             ]),
             ToolIteration(iteration=1, tool_calls=[
                 {"name": "run_command"},
-                {"name": "write_file"},
+                {"name": "apply_patch"},
             ]),
         ]
         result = _collect_tools_used(its)
-        assert result == ["run_command", "read_file", "write_file"]
+        assert result == ["run_command", "read_file", "apply_patch"]
 
     def test_missing_name_key(self):
         its = [ToolIteration(iteration=0, tool_calls=[{"input": {}}])]

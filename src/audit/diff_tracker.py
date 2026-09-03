@@ -18,7 +18,7 @@ log = get_logger("diff_tracker")
 
 MAX_DIFF_CHARS = 4000
 
-DIFF_TOOLS: frozenset[str] = frozenset({"write_file"})
+DIFF_TOOLS: frozenset[str] = frozenset()
 
 
 def compute_unified_diff(
@@ -58,12 +58,8 @@ def compute_dict_diff(
 
 
 def extract_file_target(tool_name: str, tool_input: dict) -> tuple[str, str] | None:
-    """Return ``(host, path)`` for tools with a known file target, else ``None``."""
-    if tool_name == "write_file":
-        host = tool_input.get("host", "")
-        path = tool_input.get("path", "")
-        if host and path:
-            return host, path
+    """No current built-in exposes a single whole-file before/after target."""
+    del tool_name, tool_input
     return None
 
 
@@ -112,19 +108,12 @@ class DiffTracker:
     ) -> str | None:
         """Compute the before→after diff for a completed tool execution.
 
-        For ``write_file``, the "after" is taken from ``tool_input["content"]``
-        since we know exactly what was written.
         """
         if snapshot_key is None:
             return None
 
-        before = self._snapshots.pop(snapshot_key, "")
+        self._snapshots.pop(snapshot_key, "")
 
-        if tool_name == "write_file":
-            after = tool_input.get("content", "")
-            label = tool_input.get("path", "file")
-            diff = compute_unified_diff(before, after, label=label)
-            return diff if diff else None
 
         return None
 

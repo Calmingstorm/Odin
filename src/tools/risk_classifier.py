@@ -150,7 +150,7 @@ _TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "memory_manage": RiskLevel.LOW,
     "manage_list": RiskLevel.LOW,
     # Medium — writes data
-    "write_file": RiskLevel.MEDIUM,
+    "apply_patch": RiskLevel.HIGH,
     "browser_click": RiskLevel.MEDIUM,
     "browser_fill": RiskLevel.MEDIUM,
     "browser_evaluate": RiskLevel.MEDIUM,
@@ -163,7 +163,6 @@ _TOOL_RISK_MAP: dict[str, RiskLevel] = {
     "ingest_knowledge": RiskLevel.MEDIUM,
     # High — arbitrary code execution
     "run_script": RiskLevel.HIGH,
-    "claude_code": RiskLevel.HIGH,
     "run_command_multi": RiskLevel.HIGH,
 }
 

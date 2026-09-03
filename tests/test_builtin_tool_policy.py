@@ -133,11 +133,6 @@ class TestCatalogFiltering:
         assert "terraform_ops" not in names
         assert "mcp_x_probe" in names
 
-    def test_configured_filters_still_apply_when_switch_on(self):
-        # claude_code has no host configured -> hidden even though enabled.
-        config = _cfg([])
-        names = [t["name"] for t in _catalog(config).merged_definitions(cache_result=False)]
-        assert "claude_code" not in names
 
 
 class TestDispatchRejection:
@@ -303,9 +298,8 @@ class TestToolsManagementRoutes:
         assert set(names) == set(BUILTIN_TOOL_NAMES)
         by_name = {t["name"]: t for t in body["tools"]}
         assert by_name["run_command"]["state"] == "available"
-        # claude_code has no host in this config -> unavailable, switch on.
-        assert by_name["claude_code"]["state"] == "unavailable"
-        assert by_name["claude_code"]["enabled"] is True
+        assert by_name["apply_patch"]["state"] == "available"
+        assert by_name["apply_patch"]["enabled"] is True
 
     async def test_toggle_round_trip_persists_and_hides(self, tools_api):
         client, bot, config_path = tools_api

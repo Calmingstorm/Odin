@@ -24,8 +24,8 @@ class TestToolsConfigToolTimeouts:
         assert config.tool_timeouts == {}
 
     def test_custom_values(self):
-        config = ToolsConfig(tool_timeouts={"claude_code": 600, "read_file": 30})
-        assert config.tool_timeouts == {"claude_code": 600, "read_file": 30}
+        config = ToolsConfig(tool_timeouts={"apply_patch": 600, "read_file": 30})
+        assert config.tool_timeouts == {"apply_patch": 600, "read_file": 30}
 
     def test_tool_timeout_seconds_aliases_command_timeout_seconds(self):
         """tool_timeout_seconds is preserved as a Heimdall-compat property.
@@ -61,26 +61,26 @@ class TestGetToolTimeout:
     def test_override_returns_custom(self):
         config = ToolsConfig(
             command_timeout_seconds=300,
-            tool_timeouts={"claude_code": 600},
+            tool_timeouts={"apply_patch": 600},
         )
-        assert config.get_tool_timeout("claude_code") == 600
+        assert config.get_tool_timeout("apply_patch") == 600
 
     def test_non_overridden_returns_default(self):
         config = ToolsConfig(
             command_timeout_seconds=300,
-            tool_timeouts={"claude_code": 600},
+            tool_timeouts={"apply_patch": 600},
         )
         assert config.get_tool_timeout("read_file") == 300
 
     def test_multiple_overrides(self):
         config = ToolsConfig(
             command_timeout_seconds=300,
-            tool_timeouts={"claude_code": 600, "read_file": 30, "run_script": 120},
+            tool_timeouts={"apply_patch": 600, "read_file": 30, "run_script": 120},
         )
-        assert config.get_tool_timeout("claude_code") == 600
+        assert config.get_tool_timeout("apply_patch") == 600
         assert config.get_tool_timeout("read_file") == 30
         assert config.get_tool_timeout("run_script") == 120
-        assert config.get_tool_timeout("write_file") == 300
+        assert config.get_tool_timeout("http_probe") == 300
 
     def test_custom_default(self):
         config = ToolsConfig(command_timeout_seconds=60)
@@ -157,14 +157,14 @@ class TestExecutorPerToolTimeout:
             await asyncio.sleep(100)
             return "ok"
 
-        executor._handle_write_file = slow_handler
+        executor._handle_apply_patch = slow_handler
 
         def close_and_raise(coro, *, timeout=None):
             coro.close()
             raise TimeoutError
 
         with patch("asyncio.wait_for", side_effect=close_and_raise):
-            result = await executor.execute("write_file", {})
+            result = await executor.execute("apply_patch", {})
             assert "timed out after 300s" in str(result)
 
     async def test_metrics_recorded_on_timeout(self, executor):
@@ -330,17 +330,17 @@ class TestConfigYAMLCompat:
         assert config.get_tool_timeout("any") == 300
 
     def test_tools_config_with_tool_timeouts(self):
-        config = ToolsConfig(tool_timeouts={"claude_code": 600, "run_script": 120})
-        assert config.get_tool_timeout("claude_code") == 600
+        config = ToolsConfig(tool_timeouts={"apply_patch": 600, "run_script": 120})
+        assert config.get_tool_timeout("apply_patch") == 600
         assert config.get_tool_timeout("run_script") == 120
         assert config.get_tool_timeout("run_command") == 900
 
     def test_full_config_with_tool_timeouts(self):
         config = Config(
             discord={"token": "test"},
-            tools={"tool_timeouts": {"claude_code": 600}},
+            tools={"tool_timeouts": {"apply_patch": 600}},
         )
-        assert config.tools.get_tool_timeout("claude_code") == 600
+        assert config.tools.get_tool_timeout("apply_patch") == 600
         assert config.tools.get_tool_timeout("run_command") == 900
 
     def test_full_config_without_tool_timeouts(self):
@@ -348,9 +348,9 @@ class TestConfigYAMLCompat:
         assert config.tools.tool_timeouts == {}
 
     def test_model_dump_includes_tool_timeouts(self):
-        config = ToolsConfig(tool_timeouts={"claude_code": 600})
+        config = ToolsConfig(tool_timeouts={"apply_patch": 600})
         dumped = config.model_dump()
-        assert dumped["tool_timeouts"] == {"claude_code": 600}
+        assert dumped["tool_timeouts"] == {"apply_patch": 600}
 
 
 # ---------------------------------------------------------------------------
@@ -427,7 +427,7 @@ class TestToolTimeoutsAPI:
         bot = MagicMock()
         bot.config = Config(
             discord={"token": "test"},
-            tools={"tool_timeouts": {"claude_code": 600}, "command_timeout_seconds": 300},
+            tools={"tool_timeouts": {"apply_patch": 600}, "command_timeout_seconds": 300},
         )
         return bot
 
@@ -439,7 +439,7 @@ class TestToolTimeoutsAPI:
             assert resp.status == 200
             data = await resp.json()
             assert data["default_timeout"] == 300
-            assert data["overrides"] == {"claude_code": 600}
+            assert data["overrides"] == {"apply_patch": 600}
 
     async def test_set_overrides(self):
         from aiohttp.test_utils import TestClient, TestServer
@@ -505,7 +505,7 @@ class TestToolTimeoutsAPI:
             assert resp.status == 200
             data = await resp.json()
             tool_map = {t["name"]: t for t in data}
-            assert tool_map["claude_code"]["timeout"] == 600
+            assert tool_map["apply_patch"]["timeout"] == 600
             assert tool_map["run_command"]["timeout"] == 900
 
 
@@ -518,7 +518,7 @@ class TestExecutorConfigIntegration:
         from src.tools.executor import ToolExecutor
         config = ToolsConfig(
             command_timeout_seconds=300,
-            tool_timeouts={"run_command": 60, "claude_code": 600},
+            tool_timeouts={"run_command": 60, "apply_patch": 600},
         )
         executor = ToolExecutor(config=config)
 

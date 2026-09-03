@@ -81,8 +81,7 @@ def register_commands(bot) -> None:
         await interaction.response.send_message(
             "**Usage**\n"
             "All backends are subscription-based (free).\n"
-            "Codex: ChatGPT subscription\n"
-            "Claude Code: Max subscription"
+            "Codex: ChatGPT subscription"
         )
 
     @bot.tree.command(name="stop", description="Stop Odin's current task in this channel")

@@ -142,7 +142,6 @@ class PromptBuilder:
             context=self.context_loader.context,
             hosts=self.cached_hosts_map(),
             tz=config.timezone,
-            claude_code_dir=config.tools.claude_code_dir,
             personality_preset=p_cfg.preset if p_cfg else "odin",
             personality_name=p_cfg.custom_name if p_cfg else "",
             personality_identity=p_cfg.custom_identity if p_cfg else "",

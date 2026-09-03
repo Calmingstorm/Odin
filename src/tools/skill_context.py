@@ -449,7 +449,7 @@ class SkillContext:
         """Execute a safe built-in tool by name. Returns the tool's output string.
 
         Only tools listed in SKILL_SAFE_TOOLS are allowed. Destructive
-        tools (run_command, write_file, etc.) are blocked from skill context.
+        tools (run_command, apply_patch, etc.) are blocked from skill context.
         """
         if tool_name not in SKILL_SAFE_TOOLS:
             self._log.warning("Skill attempted blocked tool: %s", tool_name)

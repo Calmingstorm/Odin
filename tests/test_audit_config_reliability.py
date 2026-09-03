@@ -35,7 +35,7 @@ async def test_logged_tool_input_is_capped(tmp_path):
     logger = AuditLogger(str(tmp_path / "audit.jsonl"), tool_input_cap=200)
     await logger.log_execution(
         user_id="u", user_name="U", channel_id="c",
-        tool_name="write_file", tool_input={"content": "y" * 50_000},
+        tool_name="apply_patch", tool_input={"content": "y" * 50_000},
         approved=True, result_summary="ok", execution_time_ms=1,
     )
     line = (tmp_path / "audit.jsonl").read_text().strip()

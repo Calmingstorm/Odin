@@ -389,7 +389,7 @@ async def _run_command(executor, command: str) -> tuple[int, str]:
 
     Deliberately not `_exec_command`: since round 8 the workspace is opt-in at
     the call site, because that shared primitive also backs git_ops, docker,
-    terraform, kubectl, claude_code and PDF host reads, whose cwd semantics
+    terraform, kubectl, apply_patch and PDF host reads, whose cwd semantics
     must not change. Testing the primitive would therefore no longer prove
     that the tool Odin actually calls gets the workspace — removing
     `use_workspace=True` from the run_command handler has to fail these tests.
@@ -2054,7 +2054,7 @@ def test_wiring_hardcoded_state_paths_are_all_covered(tmp_path: Path) -> None:
 
 # The route-classification test above covers where processes are SPAWNED. This
 # covers who ASKS for one, which is the axis Odin's round-10 review found twice
-# (validate_action and write_file both reached the install cwd through the
+# (validate_action and apply_patch both reached the install cwd through the
 # shared helpers). A call site is either a raw user-command route that opts
 # into the workspace, or it must say why it does not.
 _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
@@ -2071,10 +2071,9 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     ("src/tools/handlers/devops.py", "_handle_kubectl"): "fixed kubectl argv",
     ("src/tools/handlers/devops.py", "_handle_docker_ops"): "docker build context is caller-given",
     ("src/tools/handlers/devops.py", "_handle_terraform_ops"): "terraform working_dir is explicit",
-    ("src/tools/handlers/coding.py", "_handle_claude_code"): "claude_code has its own cwd config",
     ("src/tools/handlers/browser_web.py", "_handle_http_probe"): "fixed curl argv",
     ("src/tools/handlers/files_docs.py", "_handle_read_file"): "reads a caller-given path",
-    ("src/tools/handlers/files_docs.py", "_handle_write_file"): "absolute path enforced",
+    ("src/tools/handlers/files_docs.py", "_handle_apply_patch"): "explicit absolute root enforced",
 
     # analyze_pdf and analyze_image no longer appear here: they read host
     # binaries through ssh.read_binary_file, not the text command pipeline,
@@ -2141,7 +2140,7 @@ def _command_call_sites() -> dict[tuple[str, str], list[str]]:
 def test_every_command_caller_is_classified() -> None:
     """Round-10 regression, both blockers of that shape at once.
 
-    validate_action and write_file each reached Odin's install directory
+    validate_action and apply_patch each reached Odin's install directory
     through these shared helpers because nobody had decided what they were.
     Adding a new call site now fails until it is classified, and flipping an
     existing one's opt-in fails too.
@@ -2207,49 +2206,6 @@ async def test_validate_action_fails_closed_on_an_invalid_workspace(
     assert not (fake_install / "should-not-run").exists()
     assert not (workspace_leaked := (tmp_path / "should-not-run")).exists(), workspace_leaked
     assert result is not None
-
-
-@pytest.mark.parametrize("relative", ["notes.md", "./notes.md", "data/notes.md"])
-async def test_write_file_rejects_relative_paths(
-    fake_install: Path, workspace: Path, monkeypatch: pytest.MonkeyPatch, relative: str
-) -> None:
-    """Round-10 blocker 4, reproduced by Odin: the schema documents an absolute
-    path but nothing enforced it, so a relative one wrote into the install."""
-    monkeypatch.chdir(fake_install)
-    executor = _executor_with_workspace(workspace, fake_install)
-
-    result = await executor.execute("write_file", {
-        "host": "localhost", "path": relative, "content": "x",
-    })
-    assert not result.ok
-    assert "absolute path" in str(result.output)
-    assert not (fake_install / relative).exists(), "nothing may be written to the install"
-
-
-async def test_write_file_still_accepts_absolute_paths(
-    fake_install: Path,
-    workspace: Path,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    """The documented capability is untouched, including spaces in the path.
-
-    The old ``mkdir -p $(dirname <quoted path>)`` still word-split dirname's
-    output. An absolute ``.../intended parent/file`` therefore created a
-    relative ``parent`` directory in the inherited install cwd and then failed
-    the intended write — another fixed-shape route touching the install.
-    """
-    monkeypatch.chdir(fake_install)
-    executor = _executor_with_workspace(workspace, fake_install)
-    target = tmp_path / "intended parent" / "written file.txt"
-    result = await executor.execute("write_file", {
-        "host": "localhost", "path": str(target), "content": "hello",
-    })
-    assert result.ok, result.output
-    assert target.read_text(encoding="utf-8") == "hello"
-    assert not (fake_install / "parent").exists(), (
-        "an absolute write must not create word-split relative directories in the install"
-    )
 
 
 def test_aliased_config_protects_both_the_alias_and_the_target(tmp_path: Path) -> None:

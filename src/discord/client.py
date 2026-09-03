@@ -199,10 +199,6 @@ class OdinBot(commands.Bot):
             )
         else:
             log.info("Configured hosts: %s", ", ".join(cfg.tools.hosts.keys()))
-        if not cfg.tools.claude_code_host:
-            log.info(
-                "claude_code_host not set — claude -p code generation requires a configured host"
-            )
         if cfg.openai_codex.enabled and not self.llm_gateway.codex_client:
             log.warning(
                 "Codex enabled but not configured — session compaction and learning "

@@ -102,7 +102,7 @@ The current release registers 74 built-in tools. The registry is assembled from 
 
 | Area | Tools |
 |---|---|
-| Shell and files | `run_command`, `run_script`, `run_command_multi`, `read_file`, `write_file`, `generate_file`, `post_file`, `manage_process` |
+| Shell and files | `run_command`, `run_script`, `run_command_multi`, `read_file`, `apply_patch`, `generate_file`, `post_file`, `manage_process` |
 | Infrastructure | `git_ops`, `docker_ops`, `kubectl`, `terraform_ops`, `http_probe`, `validate_action` |
 | Scheduling and workflows | `schedule_task`, schedule management, delegated tasks, autonomous loops |
 | Agents | spawn, message, inspect, wait for, collect, and terminate agents |

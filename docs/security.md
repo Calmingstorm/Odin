@@ -90,7 +90,7 @@ Patterns detected: Discord tokens, API keys, Bearer tokens, SSH private keys, AW
 Skills run in-process as trusted plugins (not sandboxed). Mitigations:
 - **Admin-only creation** by default
 - **AST validation** — no code executes during `create_skill` validation
-- **Safe tool allowlist** — skills cannot call `run_command`, `write_file`, etc. directly
+- **Safe tool allowlist** — skills cannot call `run_command`, `apply_patch`, etc. directly
 - **Blocked file paths** — cannot read `.env`, SSH keys, credentials
 - **Blocked URLs** — localhost, private IPs blocked unless whitelisted
 - **Resource limits** — 120s timeout, 50 tool calls, 20 HTTP requests

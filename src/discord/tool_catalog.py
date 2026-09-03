@@ -39,8 +39,8 @@ class ToolCatalog:
         """Merge built-in and skill tool definitions, deduplicating by name.
 
         Built-in tools take priority over skills with the same name.
-        Tools requiring unconfigured backends are excluded (e.g. claude_code
-        without claude_code_host). Cached — invalidated on skill create/edit/delete.
+        Tools requiring unconfigured backends are excluded. Cached — invalidated
+        on skill create/edit/delete.
         """
         if self.cached is not None:
             return self.cached
@@ -95,8 +95,6 @@ class ToolCatalog:
         if config is None:
             config = self.get_config()
         hidden: set[str] = set()
-        if not config.tools.claude_code_host:
-            hidden.add("claude_code")
         if not getattr(config, "email", None) or not config.email.enabled:
             hidden.update({"email_send", "email_search", "email_read", "email_list_recent"})
         # issue_tracker returns "not configured" for every call unless enabled,

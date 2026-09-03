@@ -9,7 +9,7 @@ import { computed, onMounted, ref } from 'vue';
 
 /** Category mapping for tools — groups tools by functional area */
 const TOOL_CATEGORIES = [
-  { id: 'system', label: 'System & Commands', icon: 'terminal', match: n => /^(run_command|run_script|read_file|write_file|list_directory|search_files|manage_process|file_|post_file)/.test(n) },
+  { id: 'system', label: 'System & Commands', icon: 'terminal', match: n => /^(run_command|run_script|read_file|apply_patch|list_directory|search_files|manage_process|file_|post_file)/.test(n) },
   { id: 'devops', label: 'DevOps & Infrastructure', icon: 'server', match: n => /^(git_ops|docker_ops|kubectl|terraform_ops|http_probe)/.test(n) },
   { id: 'agents', label: 'Agents & Orchestration', icon: 'bot', match: n => /^(spawn_agent|send_to_agent|wait_for_agents|get_agent_results|kill_agent|list_agents|spawn_loop_agents|collect_loop_agents)/.test(n) },
   { id: 'workflow', label: 'Workflows & Tasks', icon: 'workflow', match: n => /^(delegate_task|cancel_task|list_tasks|schedule_|start_loop|stop_loop|list_loops|delete_schedule|list_schedules|update_schedule|parse_time)/.test(n) },
@@ -18,7 +18,7 @@ const TOOL_CATEGORIES = [
   { id: 'discord', label: 'Discord & Admin', icon: 'message', match: n => /^(send_|add_reaction|create_poll|purge_|discord_|embed_|read_channel|set_permission)/.test(n) },
   { id: 'skills', label: 'Skills', icon: 'puzzle', match: n => /^(create_skill|edit_skill|delete_skill|enable_skill|disable_skill|install_skill|export_skill|skill_status|invoke_skill|list_skills)/.test(n) },
   { id: 'memory', label: 'Memory & State', icon: 'brain', match: n => /^(memory_manage|list_manage)/.test(n) },
-  { id: 'ai', label: 'AI & Generation', icon: 'sparkles', match: n => /^(generate_|analyze_|claude_|vision_|comfyui_)/.test(n) },
+  { id: 'ai', label: 'AI & Generation', icon: 'sparkles', match: n => /^(generate_|analyze_|vision_|comfyui_)/.test(n) },
   { id: 'integrations', label: 'Integrations', icon: 'link', match: n => /^(issue_tracker|slack_|grafana_|mcp_)/.test(n) },
   { id: 'other', label: 'Other Tools', icon: 'wrench', match: () => true },
 ];

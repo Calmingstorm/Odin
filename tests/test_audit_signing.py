@@ -216,7 +216,7 @@ class TestVerifyEntry:
 
     def test_entry_with_diff(self):
         signer = AuditSigner("key")
-        entry = {"tool_name": "write_file", "diff": "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new"}
+        entry = {"tool_name": "apply_patch", "diff": "--- a\n+++ b\n@@ -1 +1 @@\n-old\n+new"}
         signer.sign(entry)
         verifier = AuditSigner("key")
         assert verifier.verify_entry(entry, GENESIS_HASH)
@@ -535,7 +535,7 @@ class TestAuditLoggerSigning:
         logger = AuditLogger(path=str(p), hmac_key="secret")
         await logger.log_execution(
             user_id="u1", user_name="test", channel_id="c1",
-            tool_name="write_file", tool_input={"path": "/tmp/x"},
+            tool_name="apply_patch", tool_input={"path": "/tmp/x"},
             approved=True, result_summary="ok", execution_time_ms=10,
             diff="--- a\n+++ b\n-old\n+new",
         )
@@ -964,7 +964,7 @@ class TestEdgeCases:
         logger = AuditLogger(path=str(p), hmac_key="key")
         await logger.log_execution(
             user_id="u1", user_name="test", channel_id="c1",
-            tool_name="write_file", tool_input={},
+            tool_name="apply_patch", tool_input={},
             approved=True, result_summary="ok", execution_time_ms=1,
             diff="some diff",
         )

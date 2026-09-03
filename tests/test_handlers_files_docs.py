@@ -1,13 +1,12 @@
 """Coverage for src/tools/handlers/files_docs.py (RFC-006 P6).
 
-read_file / write_file run shell over _run_on_host (AsyncMock — no host touched);
+read_file / apply_patch run shell over _run_on_host (AsyncMock — no host touched);
 _parse_page_range is pure logic; analyze_pdf's fitz (PyMuPDF, not installed here)
 is injected as a fake module and aiohttp is faked, so no PDF library, network, or
 SSH is required.
 """
 from __future__ import annotations
 
-import base64
 import sys
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -143,28 +142,6 @@ class TestReadFile:
         assert "$metadata.encoded" not in command
         assert "-v count=200" in command
         assert "< '/tmp/name with spaces'" in command
-
-
-class TestWriteFile:
-    async def test_validation(self):
-        assert "'path' is required" in await _tools()._handle_write_file(
-            {"host": "h", "content": "c"})
-        assert "'content' is required" in await _tools()._handle_write_file(
-            {"path": "/p", "host": "h"})
-        assert "'host' is required" in await _tools()._handle_write_file(
-            {"path": "/p", "content": "c"})
-
-    async def test_governor_denies(self):
-        t = _tools(govern=(False, "DENIED: sensitive path", None))
-        out = await t._handle_write_file({"path": "/etc/passwd", "host": "h", "content": "x"})
-        assert out == "DENIED: sensitive path"
-
-    async def test_success_encodes_content(self):
-        t = _tools()
-        out = await t._handle_write_file({"path": "/tmp/f", "host": "h", "content": "hello"})
-        assert out == "file contents"
-        # content is base64-encoded into the command
-        assert base64.b64encode(b"hello").decode() in t._run_on_host.call_args.args[1]
 
 
 class TestParsePageRange:

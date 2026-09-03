@@ -10,7 +10,6 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 import discord
-from src.audit.diff_tracker import DiffTracker
 from src.odin.planner import PlanValidationError
 from src.tools.skill_context import SkillContext
 
@@ -29,37 +28,6 @@ class _FakeExecutor:
         if isinstance(self._raw, Exception):
             raise self._raw
         return self._raw
-
-
-class TestTS0002DiffTrackerBeforeSnapshot:
-    """TS-0002: every overwrite used to snapshot '' because the executor's
-    (output, exit_code) tuple hit .startswith() and the AttributeError was
-    silently swallowed."""
-
-    async def _capture(self, raw):
-        tracker = DiffTracker()
-        key = await tracker.capture_before(
-            "write_file", {"host": "server", "path": "/tmp/f.txt", "content": "new"},
-            _FakeExecutor(raw),
-        )
-        assert key is not None
-        return tracker._snapshots[key]
-
-    @pytest.mark.asyncio
-    async def test_success_tuple_records_real_content(self):
-        assert await self._capture(("the old file body\n", 0)) == "the old file body\n"
-
-    @pytest.mark.asyncio
-    async def test_host_denial_string_records_empty(self):
-        assert await self._capture("Unknown or disallowed host: nope") == ""
-
-    @pytest.mark.asyncio
-    async def test_transport_failure_tuple_records_empty(self):
-        assert await self._capture(("Command failed (exit 255):\nssh: boom", 255)) == ""
-
-    @pytest.mark.asyncio
-    async def test_executor_exception_records_empty(self):
-        assert await self._capture(RuntimeError("ssh pool down")) == ""
 
 
 class TestTS0004SkillRunOnHostContract:

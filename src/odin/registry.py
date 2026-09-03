@@ -31,14 +31,13 @@ class ToolRegistry:
     @classmethod
     def with_defaults(cls) -> ToolRegistry:
         """Return a registry pre-loaded with built-in tools."""
-        from src.odin.tools.file_ops import ListDirTool, ReadFileTool, WriteFileTool
+        from src.odin.tools.file_ops import ListDirTool, ReadFileTool
         from src.odin.tools.http import HttpRequestTool
         from src.odin.tools.shell import ShellTool
 
         reg = cls()
         reg.register("shell", ShellTool)
         reg.register("read_file", ReadFileTool)
-        reg.register("write_file", WriteFileTool)
         reg.register("list_dir", ListDirTool)
         reg.register("http_request", HttpRequestTool)
         return reg

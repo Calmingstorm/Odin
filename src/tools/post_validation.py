@@ -667,7 +667,7 @@ _MUTATION_TOOL_ACTIONS: dict[str, frozenset[str]] = {
 }
 
 # Tools that are a mutation on every call, regardless of arguments.
-_ALWAYS_MUTATING_TOOLS: frozenset[str] = frozenset({"email_send"})
+_ALWAYS_MUTATING_TOOLS: frozenset[str] = frozenset({"email_send", "apply_patch"})
 
 _VALIDATION_HINT = (
     "\n\n[post-action] Operational mutation detected ({reason}). "
@@ -702,12 +702,6 @@ def detect_mutation(tool_name: str, tool_input: dict) -> MutationDetection:
         command = tool_input.get("script", "")
     elif tool_name == "run_command_multi":
         command = tool_input.get("command", "")
-    elif tool_name == "write_file":
-        path = tool_input.get("path", "")
-        if any(
-            p in path for p in ("/etc/", "/opt/", "nginx", "apache", "systemd", ".service", ".conf")
-        ):
-            return MutationDetection(True, f"config write: {path}")
 
     if command:
         for pattern, reason in _MUTATION_PATTERNS:

@@ -338,7 +338,7 @@ class TestPermissionManagerEdgeCases:
         pm = PermissionManager({}, default_tier="user")
         tools = [
             {"name": "run_command"},   # no longer user-tier (shell execution)
-            {"name": "write_file"},
+            {"name": "apply_patch"},
             {"name": "search_knowledge"},
             {"name": "delete_everything"},
             {"name": "web_search"},
@@ -448,11 +448,6 @@ class TestDiffTrackerEdgeCases:
         result = compute_dict_diff({"a": 1}, {"a": 2})
         assert "-" in result and "+" in result
 
-    def test_extract_file_target_write_file(self):
-        from src.audit.diff_tracker import extract_file_target
-        result = extract_file_target("write_file", {"host": "h", "path": "/tmp/f"})
-        assert result == ("h", "/tmp/f")
-
     def test_extract_file_target_other_tool(self):
         from src.audit.diff_tracker import extract_file_target
         result = extract_file_target("run_command", {"host": "h", "command": "ls"})
@@ -462,7 +457,7 @@ class TestDiffTrackerEdgeCases:
         from src.audit.diff_tracker import DiffTracker
         tracker = DiffTracker()
         tracker._snapshots["h:/tmp/f"] = "old content"
-        tracker.compute_diff("write_file", {"content": "new", "path": "/tmp/f"}, "h:/tmp/f")
+        tracker.compute_diff("apply_patch", {}, "h:/tmp/f")
         assert "h:/tmp/f" not in tracker._snapshots
 
 
@@ -506,7 +501,7 @@ class TestModuleIntegration:
         from src.audit.diff_tracker import (
             DIFF_TOOLS,
         )
-        assert "write_file" in DIFF_TOOLS
+        assert DIFF_TOOLS == frozenset()
 
     def test_safe_int_param_exported(self):
         from src.web.api import _safe_int_param

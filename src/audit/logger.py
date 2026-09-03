@@ -19,7 +19,7 @@ log = get_logger("audit")
 
 
 DEFAULT_RESULT_CAP = 4000
-# Max serialized size of a single entry's tool_input. A full write_file payload
+# Max serialized size of a single entry's tool_input. A full patch payload
 # was stored uncapped (68 KB lines observed); oversized inputs are replaced with
 # a truncation marker so one big call can't bloat the log.
 DEFAULT_TOOL_INPUT_CAP = 4000

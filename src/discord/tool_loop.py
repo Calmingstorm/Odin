@@ -140,8 +140,6 @@ def _serving_identity_for(gateway, config=None, fallback_client=None) -> LLMServ
     )
 
 
-_LONG_TIMEOUT_TOOL_SET = frozenset({"claude_code"})
-
 
 def _clean_fragment(s: str) -> str:
     """Normalize an exception-derived fragment for logs/trajectory storage:
@@ -2612,7 +2610,7 @@ class ToolLoopRunner:
 
     async def _run_one_tool_with_timeout(self, st: _ChatTurn, block, tool_timeout) -> dict:
         """Run one tool with timeout and safe in-flight /stop preemption."""
-        t = 3660 if block.name in _LONG_TIMEOUT_TOOL_SET else tool_timeout
+        t = tool_timeout
         t = wait_for_agents_wrapper_timeout(
             block.name,
             block.input,
@@ -3407,7 +3405,7 @@ class ToolLoopRunner:
         t0 = time.monotonic()
         error = None
         try:
-            _t = 3660 if tool_name in _LONG_TIMEOUT_TOOL_SET else st.tool_timeout
+            _t = st.tool_timeout
             _t = wait_for_agents_wrapper_timeout(
                 tool_name,
                 tool_input,
