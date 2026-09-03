@@ -213,6 +213,15 @@ class TestKnowledgeIndex:
         self.idx.index_knowledge_chunk("k1", "content", "src.md", 0)
         assert self.idx.has_knowledge_chunk("k1") is True
 
+    def test_delete_exact_knowledge_chunks(self):
+        self.idx.index_knowledge_chunk("k1", "one", "src.md", 0)
+        self.idx.index_knowledge_chunk("k2", "two", "src.md", 1)
+        self.idx.index_knowledge_chunk("k3", "three", "other.md", 0)
+        assert self.idx.delete_knowledge_chunks({"k1", "k2"}) == 2
+        assert not self.idx.has_knowledge_chunk("k1")
+        assert not self.idx.has_knowledge_chunk("k2")
+        assert self.idx.has_knowledge_chunk("k3")
+
     def test_delete_knowledge_source(self):
         self.idx.index_knowledge_chunk("k1", "content a", "src.md", 0)
         self.idx.index_knowledge_chunk("k2", "content b", "src.md", 1)

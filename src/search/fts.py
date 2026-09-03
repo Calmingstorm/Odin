@@ -148,15 +148,21 @@ class FullTextIndex:
             return False
         try:
             with self._write_lock:
-                self._conn.execute(
-                    "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
-                )
-                self._conn.execute(
-                    "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) "
-                    "VALUES (?, ?, ?, ?)",
-                    (chunk_id, content, source, str(chunk_index)),
-                )
-                self._conn.commit()
+                try:
+                    self._conn.execute(
+                        "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) "
+                        "VALUES (?, ?, ?, ?)",
+                        (chunk_id, content, source, str(chunk_index)),
+                    )
+                    self._conn.commit()
+                except Exception:
+                    # DELETE + INSERT is one logical replacement. Do not leave
+                    # the DELETE pending for a later writer to commit.
+                    self._conn.rollback()
+                    raise
             return True
         except Exception as e:
             log.error("FTS knowledge index failed for %s: %s", chunk_id, e)
@@ -187,16 +193,41 @@ class FullTextIndex:
             for r in rows
         ]
 
+    def delete_knowledge_chunks(self, chunk_ids: set[str]) -> int:
+        """Delete exactly the named knowledge chunks and commit the change."""
+        if not self._conn or not chunk_ids:
+            return 0
+        try:
+            with self._write_lock:
+                try:
+                    placeholders = ",".join("?" for _ in chunk_ids)
+                    cursor = self._conn.execute(
+                        f"DELETE FROM knowledge_fts WHERE chunk_id IN ({placeholders})",
+                        tuple(chunk_ids),
+                    )
+                    self._conn.commit()
+                    return cursor.rowcount
+                except Exception:
+                    self._conn.rollback()
+                    raise
+        except Exception as exc:
+            log.error("FTS knowledge chunk delete failed: %s", exc)
+            return 0
+
     def delete_knowledge_source(self, source: str) -> int:
         if not self._conn:
             return 0
         try:
             with self._write_lock:
-                cursor = self._conn.execute(
-                    "DELETE FROM knowledge_fts WHERE source = ?", (source,),
-                )
-                self._conn.commit()
-                rowcount = cursor.rowcount
+                try:
+                    cursor = self._conn.execute(
+                        "DELETE FROM knowledge_fts WHERE source = ?", (source,),
+                    )
+                    self._conn.commit()
+                    rowcount = cursor.rowcount
+                except Exception:
+                    self._conn.rollback()
+                    raise
             return rowcount
         except Exception as e:
             log.error("FTS knowledge delete failed for '%s': %s", source, e)
@@ -227,6 +258,24 @@ class FullTextIndex:
             "SELECT 1 FROM knowledge_fts WHERE chunk_id = ? LIMIT 1", (chunk_id,),
         ).fetchone()
         return row is not None
+
+    def get_knowledge_source_rows(
+        self, source: str,
+    ) -> list[tuple[str, str, int]] | None:
+        """Return durable rows for *source*, or ``None`` if unreadable."""
+        if not self._conn:
+            return None
+        try:
+            with self._write_lock:
+                rows = self._conn.execute(
+                    "SELECT chunk_id, content, chunk_index FROM knowledge_fts "
+                    "WHERE source = ? ORDER BY chunk_id",
+                    (source,),
+                ).fetchall()
+            return [(str(row[0]), str(row[1]), int(row[2])) for row in rows]
+        except Exception as exc:
+            log.error("FTS knowledge verification failed for '%s': %s", source, exc)
+            return None
 
     # --- Channel log methods ---
 

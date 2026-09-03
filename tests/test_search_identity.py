@@ -52,7 +52,8 @@ async def test_knowledge_hash_chunk_id_fuses_both_lists_with_summed_score(tmp_pa
 
     results = await store.search_hybrid("needle", embedder, limit=5)
 
-    expected_id = f"{hashlib.md5(source.encode()).hexdigest()[:8]}_0"
+    content_hash = KnowledgeStore._content_hash("needle body")[:12]
+    expected_id = f"{hashlib.md5(source.encode()).hexdigest()[:8]}_0_{content_hash}"
     assert expected_id != f"{source}_0"
     assert len(results) == 1
     assert results[0]["chunk_id"] == expected_id

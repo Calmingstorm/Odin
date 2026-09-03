@@ -501,6 +501,7 @@ class TestLocalFileIntegrity:
         }]
         store._chunk_text.return_value = ["copy failure content"]
         store.ingest = AsyncMock(return_value=0)
+        store.source_is_durable_async = AsyncMock(return_value=False)
         store.delete_source_async = AsyncMock(return_value=0)
         importer = BulkImporter(store)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -509,7 +510,8 @@ class TestLocalFileIntegrity:
             path.write_text("copy failure content", encoding="utf-8")
             result = await importer.import_file(str(path))
         assert result.status == "error"
-        assert "indexed 0/1 chunks; canonical copy retained" in result.error
+        assert "indexed 0/1 durably verified chunks" in result.error
+        assert "canonical copy retained" in result.error
         store.delete_source_async.assert_not_called()
 
     async def test_failed_legacy_delete_retains_canonical_copy(self):
@@ -520,6 +522,7 @@ class TestLocalFileIntegrity:
         }]
         store._chunk_text.return_value = ["delete failure content"]
         store.ingest = AsyncMock(return_value=1)
+        store.source_is_durable_async = AsyncMock(return_value=True)
         store.delete_source_confirmed_async = AsyncMock(return_value=0)
         importer = BulkImporter(store)
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -529,8 +532,116 @@ class TestLocalFileIntegrity:
             result = await importer.import_file(str(path))
         assert result.status == "error"
         assert "canonical copy retained" in result.error
-        store.delete_source_confirmed_async.assert_awaited_once_with("docs/doc.md")
+        content_hash = KnowledgeStore._content_hash("delete failure content")
+        store.delete_source_confirmed_async.assert_awaited_once_with(
+            "docs/doc.md",
+            survivor_source=result.source,
+            survivor_expected_chunks=1,
+            survivor_content_hash=content_hash,
+            expected_source_hash=content_hash,
+        )
         store.delete_source_async.assert_not_called()
+
+    async def test_failed_canonical_fts_create_keeps_searchable_legacy_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "canonical FTS create failure keeps legacy searchable"
+                path.write_text(content, encoding="utf-8")
+                legacy = "docs/doc.md"
+                canonical = path.resolve().as_uri()
+                assert await store.ingest(content, legacy, dedup=False) == 1
+                real_index = fts.index_knowledge_chunk
+
+                def fail_canonical_index(chunk_id, chunk, source, chunk_index):
+                    if source == canonical:
+                        return False
+                    return real_index(chunk_id, chunk, source, chunk_index)
+
+                with patch.object(
+                    fts, "index_knowledge_chunk", side_effect=fail_canonical_index,
+                ):
+                    result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content(canonical) is None  # canonical DB
+                assert not fts.has_knowledge_source(canonical)  # canonical FTS
+                assert store.get_source_content(legacy) == content  # legacy DB
+                assert fts.has_knowledge_source(legacy)  # legacy FTS
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_confirmed_delete_rechecks_survivor_under_write_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            try:
+                legacy = "docs/doc.md"
+                canonical = (base / "docs" / "doc.md").resolve().as_uri()
+                assert await store.ingest("legacy", legacy, dedup=False) == 1
+                assert await store.ingest("canonical", canonical, dedup=False) == 1
+                assert fts.delete_knowledge_source(canonical) == 1
+
+                removed = await store.delete_source_confirmed_async(
+                    legacy,
+                    survivor_source=canonical,
+                    survivor_expected_chunks=1,
+                )
+
+                assert removed == 0
+                assert store.get_source_content(legacy) == "legacy"
+                assert fts.has_knowledge_source(legacy)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_migration_refuses_changed_legacy_source_under_store_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                original = "original legacy migration content"
+                changed = "changed legacy content after candidate selection"
+                path.write_text(original, encoding="utf-8")
+                legacy = "docs/doc.md"
+                canonical = path.resolve().as_uri()
+                assert await store.ingest(original, legacy, dedup=False) == 1
+                real_confirmed_delete = store.delete_source_confirmed_async
+
+                async def change_then_delete(source, **kwargs):
+                    assert await store.ingest(changed, legacy, dedup=False) == 1
+                    return await real_confirmed_delete(source, **kwargs)
+
+                with patch.object(
+                    store,
+                    "delete_source_confirmed_async",
+                    side_effect=change_then_delete,
+                ):
+                    result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert store.get_source_content(canonical) == original
+                assert fts.has_knowledge_source(canonical)
+                assert store.get_source_content(legacy) == changed
+                assert fts.has_knowledge_source(legacy)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
 
     async def test_partial_fts_delete_cannot_erase_canonical_copy(self):
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -587,7 +698,7 @@ class TestLocalFileIntegrity:
                 ]
                 real_confirmed_delete = store.delete_source_confirmed
 
-                def fail_after_fts_delete(source):
+                def fail_after_fts_delete(source, **kwargs):
                     real_delete = fts.delete_knowledge_source
 
                     def delete_fts_then_fail_knowledge_db(delete_source):
@@ -604,7 +715,7 @@ class TestLocalFileIntegrity:
                         "delete_knowledge_source",
                         side_effect=delete_fts_then_fail_knowledge_db,
                     ):
-                        return real_confirmed_delete(source)
+                        return real_confirmed_delete(source, **kwargs)
 
                 with patch.object(
                     store, "delete_source_confirmed", side_effect=fail_after_fts_delete,
@@ -1341,6 +1452,26 @@ class TestToolHandler:
             store, object(), "test-user",
         )
         assert "Search failed" in result
+
+    async def test_ingest_document_tool_reports_zero_as_failure(self):
+        from src.discord.background_task import _execute_tool
+
+        executor = MagicMock()
+        skill_mgr = MagicMock()
+        skill_mgr.has_skill.return_value = False
+        store = MagicMock()
+        store.ingest = AsyncMock(return_value=0)
+
+        result = await _execute_tool(
+            "ingest_document",
+            {"source": "doc.md", "content": "body"},
+            executor,
+            skill_mgr,
+            store,
+            object(),
+            "test-user",
+        )
+        assert result == "Failed to ingest 'doc.md' durably."
 
     async def test_bulk_ingest_tool_routing(self):
         from src.discord.background_task import _execute_tool

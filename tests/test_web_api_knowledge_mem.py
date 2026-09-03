@@ -92,6 +92,18 @@ class TestKnowledgeCrud:
             assert r.status == 200 and (await r.json())["chunks_removed"] >= 1
             assert (await c.delete("/api/knowledge/doc.md")).status == 404
 
+    async def test_ingest_and_reingest_report_durability_failure(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            kbot.knowledge.ingest = AsyncMock(return_value=0)
+            r = await _ingest(c, "doc.md", "body")
+            assert r.status == 500
+            assert await r.json() == {"error": "document was not durably ingested"}
+
+            kbot.knowledge.get_source_content = lambda source: "body"
+            r = await c.post("/api/knowledge/doc.md/reingest")
+            assert r.status == 500
+            assert await r.json() == {"error": "document was not durably reingested"}
+
     async def test_ingest_validation(self, kbot):
         async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
             assert (await c.post("/api/knowledge", json={})).status == 400  # no source/content

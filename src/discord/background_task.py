@@ -483,6 +483,8 @@ async def _execute_tool(
             embedder=embedder,
             uploader=requester,
         )
+        if count <= 0:
+            return f"Failed to ingest '{source}' durably."
         return f"Ingested '{source}' ({count} chunks)."
 
     if tool_name == "search_knowledge" and knowledge_store and embedder:

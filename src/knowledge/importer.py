@@ -197,6 +197,12 @@ class BulkImporter:
                 chunks = await self._store.ingest(
                     content, source_name, embedder=self._embedder, uploader=uploader,
                 )
+                if chunks <= 0:
+                    return ImportResult(
+                        source=source_name,
+                        status="error",
+                        error="document was not durably stored in both DB and FTS",
+                    )
                 return ImportResult(source=source_name, status="ok", chunks=chunks)
 
             # Every BulkImporter shares this migration lock.  Re-check after
@@ -210,6 +216,12 @@ class BulkImporter:
                     chunks = await self._store.ingest(
                         content, source_name, embedder=self._embedder, uploader=uploader,
                     )
+                    if chunks <= 0:
+                        return ImportResult(
+                            source=source_name,
+                            status="error",
+                            error="document was not durably stored in both DB and FTS",
+                        )
                     return ImportResult(source=source_name, status="ok", chunks=chunks)
 
                 # Store the canonical copy first, then remove the uniquely
@@ -223,7 +235,16 @@ class BulkImporter:
                     uploader=uploader,
                     dedup=False,
                 )
-                if chunks != expected_chunks:
+                content_hash = hashlib.sha256(
+                    content.strip().lower().encode("utf-8")
+                ).hexdigest()
+                canonical_durable = await self._store.source_is_durable_async(
+                    source_name,
+                    expected_chunks,
+                    require_fts=True,
+                    expected_content_hash=content_hash,
+                )
+                if chunks != expected_chunks or not canonical_durable:
                     # Even an incomplete replacement remains the safety copy:
                     # it cannot be removed before legacy deletion is confirmed
                     # in both the DB and FTS stores.
@@ -232,10 +253,17 @@ class BulkImporter:
                         status="error",
                         error=(
                             f"legacy migration from '{legacy_source}' failed: indexed "
-                            f"{chunks}/{expected_chunks} chunks; canonical copy retained"
+                            f"{chunks}/{expected_chunks} durably verified chunks; "
+                            "canonical copy retained"
                         ),
                     )
-                removed = await self._store.delete_source_confirmed_async(legacy_source)
+                removed = await self._store.delete_source_confirmed_async(
+                    legacy_source,
+                    survivor_source=source_name,
+                    survivor_expected_chunks=expected_chunks,
+                    survivor_content_hash=content_hash,
+                    expected_source_hash=content_hash,
+                )
                 if removed <= 0:
                     # The replacement is the safety anchor. A DB/FTS partial
                     # delete must never trigger a compensating delete that can
@@ -368,6 +396,12 @@ class BulkImporter:
             chunks = await self._store.ingest(
                 content, src, embedder=self._embedder, uploader=uploader,
             )
+            if chunks <= 0:
+                return ImportResult(
+                    source=src,
+                    status="error",
+                    error="document was not durably stored in both DB and FTS",
+                )
             return ImportResult(source=src, status="ok", chunks=chunks)
         finally:
             doc.close()
@@ -426,6 +460,12 @@ class BulkImporter:
             chunks = await self._store.ingest(
                 content, src, embedder=self._embedder, uploader=uploader,
             )
+            if chunks <= 0:
+                return ImportResult(
+                    source=src,
+                    status="error",
+                    error="document was not durably stored in both DB and FTS",
+                )
             return ImportResult(source=src, status="ok", chunks=chunks)
         except Exception as e:
             return ImportResult(source=src, status="error", error=str(e))

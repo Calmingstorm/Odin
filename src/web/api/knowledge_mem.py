@@ -58,6 +58,10 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
             if err:
                 return web.json_response({"error": err}, status=400)
         chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-api")
+        if chunks <= 0:
+            return web.json_response(
+                {"error": "document was not durably ingested"}, status=500,
+            )
         return web.json_response({"source": source, "chunks": chunks}, status=201)
 
     @routes.delete("/api/knowledge/{source}")
@@ -81,6 +85,10 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
         if content is None:
             return web.json_response({"error": "source not found"}, status=404)
         chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-reingest")
+        if chunks <= 0:
+            return web.json_response(
+                {"error": "document was not durably reingested"}, status=500,
+            )
         return web.json_response({"source": source, "chunks": chunks})
 
     @routes.get("/api/knowledge/search")
@@ -195,6 +203,10 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
                 {"error": "version has no content snapshot (delete version)"}, status=400
             )
         chunks = await store.restore_version(source, version, embedder=bot.embedder)
+        if chunks <= 0:
+            return web.json_response(
+                {"error": "version was not durably restored"}, status=500,
+            )
         return web.json_response(
             {"status": "restored", "source": source, "version": version, "chunks": chunks}
         )
