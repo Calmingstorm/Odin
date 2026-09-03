@@ -98,7 +98,7 @@ The provider can be changed through configuration or the web interface. The Code
 
 ## Built-in tools
 
-The current release registers 74 built-in tools. The registry is assembled from ordered definition modules under `src/tools/defs/`; tests pin the catalog order and prevent duplicate names.
+The current release registers 73 built-in tools, 23 of them core tools. The registry is assembled from ordered definition modules under `src/tools/defs/`; tests pin the catalog order and prevent duplicate names.
 
 | Area | Tools |
 |---|---|
