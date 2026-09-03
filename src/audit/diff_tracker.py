@@ -61,11 +61,11 @@ class DiffTracker:
     def __init__(self) -> None:
         self._snapshots: dict[str, str] = {}
 
-    async def capture_before(self, *args, **kwargs) -> None:
+    async def capture_before(self, *args, **kwargs) -> str | None:
         del args, kwargs
         return None
 
-    def compute_diff(self, *args, **kwargs) -> None:
+    def compute_diff(self, *args, **kwargs) -> str | None:
         del kwargs
         if len(args) >= 3 and args[2] is not None:
             self._snapshots.pop(args[2], None)
