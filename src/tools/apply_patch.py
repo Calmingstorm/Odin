@@ -798,25 +798,27 @@ def apply_plan(
                     ):
                         raise PatchError(f"source changed during commit: {item['path']}")
 
-                stage = item.get("stage")
-                if stage is not None:
+                commit_stage = item.get("stage")
+                if commit_stage is not None:
                     try:
                         rename_noreplace(
-                            stage["name"],
+                            commit_stage["name"],
                             destination["name"],
-                            src_dir_fd=stage["parent_fd"],
+                            src_dir_fd=commit_stage["parent_fd"],
                             dst_dir_fd=destination["parent_fd"],
                         )
                     finally:
-                        stage["named"] = not _entry_missing(stage["parent_fd"], stage["name"])
+                        commit_stage["named"] = not _entry_missing(
+                            commit_stage["parent_fd"], commit_stage["name"]
+                        )
                     if not _same_inode_as_fd(
-                        destination["parent_fd"], destination["name"], stage["fd"]
+                        destination["parent_fd"], destination["name"], commit_stage["fd"]
                     ):
                         raise PatchError(
                             "destination changed during commit: "
                             f"{item.get('move_to') or item['path']}"
                         )
-                    os.fchmod(stage["fd"], item["mode"])
+                    os.fchmod(commit_stage["fd"], item["mode"])
         except BaseException as original:
             rollback_failures: list[str] = []
             for item in reversed(committed):
@@ -852,10 +854,10 @@ def apply_plan(
         if not preserve_artifacts:
             _cleanup_named([item["recovery"] for item in prepared if item.get("recovery")] + stages)
         for item in prepared:
-            snapshot = item.get("snapshot")
-            if snapshot is not None:
+            final_snapshot = item.get("snapshot")
+            if final_snapshot is not None:
                 try:
-                    os.close(snapshot["fd"])
+                    os.close(final_snapshot["fd"])
                 except OSError:
                     pass
         for stage in stages:
