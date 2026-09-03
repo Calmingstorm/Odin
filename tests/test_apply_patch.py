@@ -84,27 +84,25 @@ def test_apply_add_update_move_delete_transaction(tmp_path):
     assert not list(tmp_path.glob(".odin-patch-*"))
 
 
-def test_staging_files_are_private_and_unpredictable(tmp_path, monkeypatch):
+def test_staging_files_are_private_and_unpredictable(tmp_path):
     target = tmp_path / "a.txt"
     target.write_text("old\n")
     seen: list[tuple[str, int]] = []
-    real_replace = os.replace
+    from src.tools.apply_patch import _rename_noreplace
 
-    def inspect_replace(source, destination):
-        source_path = Path(source)
-        seen.append((source_path.name, source_path.stat().st_mode & 0o777))
-        real_replace(source, destination)
+    def inspect_rename(source, destination, **kwargs):
+        source_info = os.stat(source, dir_fd=kwargs["src_dir_fd"], follow_symlinks=False)
+        if str(source).startswith(".odin-patch-"):
+            seen.append((str(source), source_info.st_mode & 0o777))
+        _rename_noreplace(source, destination, **kwargs)
 
     apply_plan(
         str(tmp_path),
         parse_patch(_patch("*** Update File: a.txt\n@@\n-old\n+new")),
-        replace=inspect_replace,
+        rename_noreplace=inspect_rename,
     )
     assert seen and all(mode == 0o600 for _name, mode in seen)
-    assert all(
-        name.startswith(".odin-patch-") and len(name) > len(".odin-patch-stage-")
-        for name, _ in seen
-    )
+    assert all(name.startswith(".odin-patch-") and len(name) > 40 for name, _ in seen)
 
 
 def test_commit_failure_rolls_back_every_committed_path(tmp_path):
@@ -112,16 +110,17 @@ def test_commit_failure_rolls_back_every_committed_path(tmp_path):
     second = tmp_path / "second.txt"
     first.write_text("old-one\n")
     second.write_text("old-two\n")
-    real_replace = os.replace
-    writes = 0
+    from src.tools.apply_patch import _rename_noreplace
 
-    def fail_second_commit(source, destination):
-        nonlocal writes
-        if Path(source).name.startswith(".odin-patch-stage-"):
-            writes += 1
-            if writes == 2:
+    publishes = 0
+
+    def fail_second_publish(source, destination, **kwargs):
+        nonlocal publishes
+        if str(source).startswith(".odin-patch-stage-"):
+            publishes += 1
+            if publishes == 2:
                 raise OSError("injected commit failure")
-        real_replace(source, destination)
+        _rename_noreplace(source, destination, **kwargs)
 
     plan = parse_patch(
         _patch(
@@ -130,29 +129,30 @@ def test_commit_failure_rolls_back_every_committed_path(tmp_path):
         )
     )
     with pytest.raises(PatchError, match="rollback completed"):
-        apply_plan(str(tmp_path), plan, replace=fail_second_commit)
+        apply_plan(str(tmp_path), plan, rename_noreplace=fail_second_publish)
     assert first.read_text() == "old-one\n"
     assert second.read_text() == "old-two\n"
+    assert not list(tmp_path.glob(".odin-patch-*"))
 
 
-def test_rollback_failure_is_explicit(tmp_path):
+def test_rollback_failure_is_explicit_and_retains_private_artifact(tmp_path):
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("old-one\n")
     second.write_text("old-two\n")
-    real_replace = os.replace
-    stage_writes = 0
+    from src.tools.apply_patch import _rename_noreplace
 
-    def fail_commit_and_restore(source, destination):
-        nonlocal stage_writes
-        name = Path(source).name
-        if name.startswith(".odin-patch-stage-"):
-            stage_writes += 1
-            if stage_writes == 2:
+    publishes = 0
+
+    def fail_commit_and_restore(source, destination, **kwargs):
+        nonlocal publishes
+        if str(source).startswith(".odin-patch-stage-"):
+            publishes += 1
+            if publishes == 2:
                 raise OSError("injected commit failure")
-        if name.startswith(".odin-patch-backup-"):
+        if str(source).startswith(".odin-patch-recovery-"):
             raise OSError("injected rollback failure")
-        real_replace(source, destination)
+        _rename_noreplace(source, destination, **kwargs)
 
     plan = parse_patch(
         _patch(
@@ -160,9 +160,13 @@ def test_rollback_failure_is_explicit(tmp_path):
             "*** Update File: second.txt\n@@\n-old-two\n+new-two"
         )
     )
-    with pytest.raises(PatchRollbackError, match="rollback also failed") as caught:
-        apply_plan(str(tmp_path), plan, replace=fail_commit_and_restore)
-    assert caught.value.failures
+    with pytest.raises(PatchRollbackError) as caught:
+        apply_plan(str(tmp_path), plan, rename_noreplace=fail_commit_and_restore)
+    artifacts = [Path(path) for path in caught.value.recovery_artifacts]
+    assert artifacts
+    assert all(path.exists() and path.stat().st_mode & 0o777 == 0o600 for path in artifacts)
+    for path in artifacts:
+        path.unlink()
 
 
 def test_symlink_component_refused(tmp_path):
@@ -173,9 +177,87 @@ def test_symlink_component_refused(tmp_path):
     root.mkdir()
     (root / "link").symlink_to(outside, target_is_directory=True)
     plan = parse_patch(_patch("*** Update File: link/x.txt\n@@\n-old\n+new"))
-    with pytest.raises(PatchError, match="symlink path component"):
+    with pytest.raises(PatchError, match="symlink"):
         apply_plan(str(root), plan)
     assert (outside / "x.txt").read_text() == "old\n"
+
+
+def test_failure_after_source_move_restores_deleted_file(tmp_path):
+    target = tmp_path / "deleted.txt"
+    target.write_text("original\n")
+    from src.tools.apply_patch import _rename_noreplace
+
+    def move_then_raise(source, destination, **kwargs):
+        _rename_noreplace(source, destination, **kwargs)
+        if str(destination).startswith(".odin-patch-recovery-"):
+            raise OSError("injected post-effect source move failure")
+
+    plan = parse_patch(_patch("*** Delete File: deleted.txt"))
+    with pytest.raises(PatchError, match="rollback completed"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=move_then_raise)
+    assert target.read_text() == "original\n"
+    assert not list(tmp_path.glob(".odin-patch-*"))
+
+
+def test_failure_after_publish_restores_original(tmp_path):
+    target = tmp_path / "updated.txt"
+    target.write_text("old\n")
+    from src.tools.apply_patch import _rename_noreplace
+
+    def publish_then_raise(source, destination, **kwargs):
+        _rename_noreplace(source, destination, **kwargs)
+        if str(source).startswith(".odin-patch-stage-"):
+            raise OSError("injected post-effect publish failure")
+
+    plan = parse_patch(_patch("*** Update File: updated.txt\n@@\n-old\n+new"))
+    with pytest.raises(PatchError, match="rollback completed"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=publish_then_raise)
+    assert target.read_text() == "old\n"
+    assert not list(tmp_path.glob(".odin-patch-*"))
+
+
+def test_destination_created_during_commit_is_not_overwritten(tmp_path):
+    destination = tmp_path / "created.txt"
+    from src.tools.apply_patch import _rename_noreplace
+
+    def race_publish(source, destination_name, **kwargs):
+        if str(source).startswith(".odin-patch-stage-"):
+            destination.write_text("concurrent\n")
+        _rename_noreplace(source, destination_name, **kwargs)
+
+    plan = parse_patch(_patch("*** Add File: created.txt\n+patch"))
+    with pytest.raises(PatchError, match="rollback completed"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=race_publish)
+    assert destination.read_text() == "concurrent\n"
+    assert not list(tmp_path.glob(".odin-patch-*"))
+
+
+def test_source_parent_swap_cannot_redirect_update_outside_root(tmp_path):
+    root = tmp_path / "root"
+    root.mkdir()
+    held = root / "held"
+    held.mkdir()
+    (held / "a.txt").write_text("inside\n")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    outside_target = outside / "a.txt"
+    outside_target.write_text("outside\n")
+    from src.tools.apply_patch import _rename_noreplace
+
+    swapped = False
+
+    def swap_parent_then_rename(source, destination, **kwargs):
+        nonlocal swapped
+        if not swapped and str(source).startswith(".odin-patch-stage-"):
+            held.rename(root / "original-held")
+            held.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(_patch("*** Update File: held/a.txt\n@@\n-inside\n+updated"))
+    apply_plan(str(root), plan, rename_noreplace=swap_parent_then_rename)
+    assert outside_target.read_text() == "outside\n"
+    assert (root / "original-held" / "a.txt").read_text() == "updated\n"
 
 
 @pytest.mark.asyncio
@@ -228,24 +310,3 @@ def test_ambiguous_context_is_refused(tmp_path):
     with pytest.raises(PatchError, match="ambiguous"):
         apply_plan(str(tmp_path), plan)
     assert target.read_text() == "repeat\nrepeat\n"
-
-
-def test_failed_delete_after_update_restores_update_from_private_snapshot(tmp_path):
-    update = tmp_path / "update.txt"
-    delete = tmp_path / "delete.txt"
-    update.write_text("old\n")
-    delete.write_text("delete-me\n")
-    real_unlink = os.unlink
-
-    def fail_delete(path):
-        if Path(path) == delete:
-            raise OSError("injected delete failure")
-        real_unlink(path)
-
-    plan = parse_patch(
-        _patch("*** Update File: update.txt\n@@\n-old\n+new\n*** Delete File: delete.txt")
-    )
-    with pytest.raises(PatchError, match="rollback completed"):
-        apply_plan(str(tmp_path), plan, unlink=fail_delete)
-    assert update.read_text() == "old\n"
-    assert delete.read_text() == "delete-me\n"

@@ -11,10 +11,10 @@ files, then commits or rolls every changed path back.
 from __future__ import annotations
 
 import os
+import secrets
 import stat
-import tempfile
 from collections.abc import Callable
-from pathlib import Path, PurePosixPath
+from pathlib import PurePosixPath
 from typing import Any
 
 BEGIN_PATCH = "*** Begin Patch"
@@ -33,10 +33,21 @@ class PatchError(ValueError):
 class PatchRollbackError(PatchError):
     """A commit failed and one or more rollback operations also failed."""
 
-    def __init__(self, original: BaseException, failures: list[str]) -> None:
-        super().__init__(f"commit failed ({original}); rollback also failed: {'; '.join(failures)}")
+    def __init__(
+        self,
+        original: BaseException,
+        failures: list[str],
+        recovery_artifacts: list[str] | None = None,
+    ) -> None:
+        artifacts = recovery_artifacts or []
+        suffix = f"; recovery artifacts retained: {', '.join(artifacts)}" if artifacts else ""
+        super().__init__(
+            f"commit failed ({original}); rollback or cleanup also failed: "
+            f"{'; '.join(failures)}{suffix}"
+        )
         self.original = original
         self.failures = failures
+        self.recovery_artifacts = artifacts
 
 
 def _relative_path(raw: object) -> str:
@@ -272,246 +283,584 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
     return result
 
 
-def _target(root: Path, relative: str) -> Path:
-    candidate = root.joinpath(*PurePosixPath(relative).parts)
-    current = root
-    for part in PurePosixPath(relative).parts[:-1]:
-        current = current / part
-        if current.exists() or current.is_symlink():
-            info = os.lstat(current)
-            if stat.S_ISLNK(info.st_mode):
-                raise PatchError(f"symlink path component is not allowed: {relative}")
-            if not stat.S_ISDIR(info.st_mode):
-                raise PatchError(f"non-directory path component: {relative}")
-    parent = candidate.parent
-    if not parent.is_dir():
-        raise PatchError(f"parent directory does not exist: {relative}")
-    resolved_parent = parent.resolve(strict=True)
+class _DirectoryRegistry:
+    """Open and retain root-relative directories without following symlinks."""
+
+    def __init__(self, root_value: object) -> None:
+        if (
+            not isinstance(root_value, str)
+            or not root_value.startswith("/")
+            or "\x00" in root_value
+        ):
+            raise PatchError("root must be an absolute path")
+        flags = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
+        try:
+            root_fd = os.open(root_value, flags)
+        except OSError as exc:
+            raise PatchError(
+                f"root must be an existing non-symlink directory: {type(exc).__name__}: {exc}"
+            ) from exc
+        self.root_value = root_value.rstrip("/") or "/"
+        self._fds: dict[tuple[str, ...], int] = {(): root_fd}
+        self._flags = flags
+
+    def parent(self, relative: str) -> tuple[int, str, str]:
+        parts = PurePosixPath(relative).parts
+        prefix: tuple[str, ...] = ()
+        for part in parts[:-1]:
+            child_prefix = (*prefix, part)
+            if child_prefix not in self._fds:
+                try:
+                    fd = os.open(part, self._flags, dir_fd=self._fds[prefix])
+                except OSError as exc:
+                    raise PatchError(
+                        f"parent directory is missing, not a directory, or a symlink: {relative}"
+                    ) from exc
+                self._fds[child_prefix] = fd
+            prefix = child_prefix
+        return self._fds[prefix], parts[-1], "/".join(parts[:-1])
+
+    def display(self, parent_label: str, name: str) -> str:
+        relative = f"{parent_label}/{name}" if parent_label else name
+        return f"{self.root_value}/{relative}" if self.root_value != "/" else f"/{relative}"
+
+    def close(self) -> None:
+        for fd in reversed(list(self._fds.values())):
+            try:
+                os.close(fd)
+            except OSError:
+                pass
+        self._fds.clear()
+
+
+def _fingerprint(info: os.stat_result) -> tuple[int, int, int, int, int, int, int, int]:
+    return (
+        info.st_dev,
+        info.st_ino,
+        info.st_size,
+        info.st_mtime_ns,
+        info.st_ctime_ns,
+        stat.S_IMODE(info.st_mode),
+        info.st_uid,
+        info.st_gid,
+    )
+
+
+def _read_fd(fd: int) -> bytes:
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while True:
+        chunk = os.read(fd, 1024 * 1024)
+        if not chunk:
+            break
+        chunks.append(chunk)
+    return b"".join(chunks)
+
+
+def _open_regular_at(parent_fd: int, name: str, relative: str) -> dict[str, Any]:
     try:
-        resolved_parent.relative_to(root)
-    except ValueError as exc:
-        raise PatchError(f"path escapes root: {relative}") from exc
-    return candidate
+        fd = os.open(name, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW, dir_fd=parent_fd)
+    except FileNotFoundError:
+        raise PatchError(f"file does not exist: {relative}") from None
+    except OSError as exc:
+        raise PatchError(f"target must be a regular non-symlink file: {relative}") from exc
+    try:
+        before = os.fstat(fd)
+        if not stat.S_ISREG(before.st_mode):
+            raise PatchError(f"target must be a regular non-symlink file: {relative}")
+        data = _read_fd(fd)
+        after = os.fstat(fd)
+        if _fingerprint(before) != _fingerprint(after):
+            raise PatchError(f"source changed while it was being read: {relative}")
+        return {
+            "fd": fd,
+            "data": data,
+            "fingerprint": _fingerprint(after),
+            "mode": stat.S_IMODE(after.st_mode),
+            "uid": after.st_uid,
+            "gid": after.st_gid,
+        }
+    except BaseException:
+        os.close(fd)
+        raise
 
 
-def _private_temp(parent: Path, data: bytes, prefix: str) -> Path:
-    fd, raw_path = tempfile.mkstemp(prefix=prefix, dir=parent)
-    path = Path(raw_path)
+def _entry_info(parent_fd: int, name: str) -> os.stat_result | None:
+    try:
+        return os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+    except FileNotFoundError:
+        return None
+
+
+def _entry_missing(parent_fd: int, name: str) -> bool:
+    return _entry_info(parent_fd, name) is None
+
+
+def _same_inode_as_fd(parent_fd: int, name: str, fd: int) -> bool:
+    current = _entry_info(parent_fd, name)
+    if current is None:
+        return False
+    try:
+        expected = os.fstat(fd)
+    except OSError:
+        return False
+    return (
+        stat.S_ISREG(current.st_mode)
+        and current.st_dev == expected.st_dev
+        and current.st_ino == expected.st_ino
+    )
+
+
+def _path_matches_snapshot(
+    parent_fd: int,
+    name: str,
+    snapshot: dict[str, Any],
+) -> bool:
+    if not _same_inode_as_fd(parent_fd, name, snapshot["fd"]):
+        return False
+    try:
+        before = os.fstat(snapshot["fd"])
+        data = _read_fd(snapshot["fd"])
+        after = os.fstat(snapshot["fd"])
+    except OSError:
+        return False
+    return (
+        _fingerprint(before) == _fingerprint(after) == snapshot["fingerprint"]
+        and data == snapshot["data"]
+    )
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    view = memoryview(data)
+    offset = 0
+    while offset < len(view):
+        written = os.write(fd, view[offset:])
+        if written <= 0:
+            raise OSError("short write while staging patch content")
+        offset += written
+
+
+def _private_temp(
+    directories: _DirectoryRegistry,
+    parent_fd: int,
+    parent_label: str,
+    data: bytes,
+    uid: int,
+    gid: int,
+) -> dict[str, Any]:
+    """Create one unpredictable named stage, independently forced to mode 0600."""
+    fd = -1
+    name = ""
+    for _ in range(128):
+        name = f".odin-patch-stage-{secrets.token_hex(16)}"
+        try:
+            fd = os.open(
+                name,
+                os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC | os.O_NOFOLLOW,
+                0o600,
+                dir_fd=parent_fd,
+            )
+            break
+        except FileExistsError:
+            continue
+    if fd < 0:
+        raise PatchError("could not allocate an unpredictable private staging file")
+
+    label = directories.display(parent_label, name)
     try:
         os.fchmod(fd, 0o600)
-        with os.fdopen(fd, "wb") as stream:
-            stream.write(data)
-            stream.flush()
-            os.fsync(stream.fileno())
-    except BaseException:
+        _write_all(fd, data)
+        os.fsync(fd)
+        current = os.fstat(fd)
+        if (current.st_uid, current.st_gid) != (uid, gid):
+            os.fchown(fd, uid, gid)
+        # chown may clear mode bits; the named stage remains exactly 0600.
+        os.fchmod(fd, 0o600)
+    except BaseException as original:
         try:
             os.close(fd)
         except OSError:
             pass
         try:
-            path.unlink()
-        except OSError:
-            pass
+            os.unlink(name, dir_fd=parent_fd)
+        except OSError as cleanup_exc:
+            raise PatchRollbackError(
+                original,
+                [f"private staging artifact could not be removed: {label}: {cleanup_exc}"],
+                [label],
+            ) from original
         raise
-    return path
+    return {
+        "fd": fd,
+        "parent_fd": parent_fd,
+        "name": name,
+        "label": label,
+        "named": True,
+    }
 
 
-def _regular_file(path: Path, relative: str) -> os.stat_result:
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError as exc:
-        raise PatchError(f"file does not exist: {relative}") from exc
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise PatchError(f"target must be a regular file, not a symlink: {relative}")
-    return info
+def _new_recovery_slot(
+    directories: _DirectoryRegistry,
+    parent_fd: int,
+    parent_label: str,
+) -> dict[str, Any]:
+    for _ in range(128):
+        name = f".odin-patch-recovery-{secrets.token_hex(16)}"
+        if _entry_missing(parent_fd, name):
+            return {
+                "parent_fd": parent_fd,
+                "name": name,
+                "label": directories.display(parent_label, name),
+                "named": False,
+            }
+    raise PatchError("could not allocate an unpredictable recovery name")
+
+
+def _rename_noreplace(
+    source: str,
+    destination: str,
+    *,
+    src_dir_fd: int,
+    dst_dir_fd: int,
+) -> None:
+    """Linux renameat2(RENAME_NOREPLACE), with no unsafe emulation fallback."""
+    import ctypes
+    import errno
+
+    libc = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(libc, "renameat2", None)
+    if renameat2 is None:
+        raise PatchError("apply_patch requires renameat2(RENAME_NOREPLACE) on the target host")
+    renameat2.argtypes = [
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    ]
+    renameat2.restype = ctypes.c_int
+    result = renameat2(
+        src_dir_fd,
+        os.fsencode(source),
+        dst_dir_fd,
+        os.fsencode(destination),
+        1,
+    )
+    if result != 0:
+        code = ctypes.get_errno()
+        if code in {errno.ENOSYS, errno.EINVAL, errno.ENOTSUP}:
+            raise PatchError(
+                "target filesystem lacks the atomic no-replace rename required by apply_patch"
+            )
+        raise OSError(code, os.strerror(code), destination)
+
+
+def _remove_named(artifact: dict[str, Any]) -> None:
+    if not artifact.get("named"):
+        return
+    os.unlink(artifact["name"], dir_fd=artifact["parent_fd"])
+    artifact["named"] = False
+
+
+def _artifact_exists(artifact: dict[str, Any]) -> bool:
+    return bool(
+        artifact.get("named") and not _entry_missing(artifact["parent_fd"], artifact["name"])
+    )
+
+
+def _artifact_paths(prepared: list[dict[str, Any]], stages: list[dict[str, Any]]) -> list[str]:
+    paths: list[str] = []
+    for item in prepared:
+        slot = item.get("recovery")
+        if slot is not None and _artifact_exists(slot):
+            info = _entry_info(slot["parent_fd"], slot["name"])
+            if info is not None and stat.S_ISREG(info.st_mode):
+                os.chmod(slot["name"], 0o600, dir_fd=slot["parent_fd"], follow_symlinks=False)
+                paths.append(slot["label"])
+    for stage in stages:
+        if _artifact_exists(stage):
+            info = _entry_info(stage["parent_fd"], stage["name"])
+            if info is not None and stat.S_ISREG(info.st_mode):
+                os.chmod(stage["name"], 0o600, dir_fd=stage["parent_fd"], follow_symlinks=False)
+                paths.append(stage["label"])
+    return paths
+
+
+def _cleanup_named(artifacts: list[dict[str, Any]]) -> list[str]:
+    failures: list[str] = []
+    for artifact in artifacts:
+        if not artifact.get("named"):
+            continue
+        try:
+            _remove_named(artifact)
+        except OSError as exc:
+            failures.append(f"{artifact['label']}: {type(exc).__name__}: {exc}")
+    return failures
+
+
+def _rollback_record(
+    item: dict[str, Any],
+    *,
+    rename_noreplace: Callable[..., None],
+) -> list[str]:
+    failures: list[str] = []
+
+    def fail(label: str, detail: BaseException | str) -> None:
+        text = detail if isinstance(detail, str) else f"{type(detail).__name__}: {detail}"
+        failures.append(f"{item['path']} ({label}): {text}")
+
+    destination = item["destination"]
+    stage = item.get("stage")
+    if stage is not None and not stage.get("named"):
+        try:
+            if _same_inode_as_fd(destination["parent_fd"], destination["name"], stage["fd"]):
+                os.unlink(destination["name"], dir_fd=destination["parent_fd"])
+                stage["named"] = False
+            elif not _entry_missing(destination["parent_fd"], destination["name"]):
+                fail("destination", "refused to delete a destination not published by this patch")
+        except BaseException as exc:
+            fail("destination", exc)
+
+    snapshot = item.get("snapshot")
+    if snapshot is not None:
+        source = item["source"]
+        recovery = item.get("recovery")
+        try:
+            if _same_inode_as_fd(source["parent_fd"], source["name"], snapshot["fd"]):
+                os.fchmod(snapshot["fd"], snapshot["mode"])
+                if recovery is not None:
+                    recovery["named"] = False
+            elif (
+                recovery is not None
+                and recovery.get("named")
+                and _entry_missing(source["parent_fd"], source["name"])
+            ):
+                os.fchmod(snapshot["fd"], snapshot["mode"])
+                rename_noreplace(
+                    recovery["name"],
+                    source["name"],
+                    src_dir_fd=recovery["parent_fd"],
+                    dst_dir_fd=source["parent_fd"],
+                )
+                recovery["named"] = False
+            else:
+                fail("source", "could not restore source without overwriting an external change")
+        except BaseException as exc:
+            fail("source", exc)
+
+    return failures
 
 
 def apply_plan(
     root_value: object,
     plan: object,
     *,
-    replace: Callable[
-        [
-            str | bytes | os.PathLike[str] | os.PathLike[bytes],
-            str | bytes | os.PathLike[str] | os.PathLike[bytes],
-        ],
-        None,
-    ] = os.replace,
-    unlink: Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes]], None] = os.unlink,
-    chmod: Callable[[str | bytes | os.PathLike[str] | os.PathLike[bytes], int], None] = os.chmod,
-    chown: Callable[
-        [str | bytes | os.PathLike[str] | os.PathLike[bytes], int, int], None
-    ] = os.chown,
+    rename_noreplace: Callable[..., None] = _rename_noreplace,
 ) -> list[str]:
-    """Validate, stage, and transactionally apply a transported patch plan."""
-    if not isinstance(root_value, str) or not root_value.startswith("/") or "\x00" in root_value:
-        raise PatchError("root must be an absolute path")
-    root = Path(root_value)
-    if root.is_symlink() or not root.is_dir():
-        raise PatchError("root must be an existing non-symlink directory")
-    root = root.resolve(strict=True)
+    """Validate, privately stage, and apply a compensating multi-file transaction."""
     operations = _validated_plan(plan)
-
+    directories = _DirectoryRegistry(root_value)
     prepared: list[dict[str, Any]] = []
-    # Semantic phase: resolve every path, snapshot every source, derive every
-    # output, and reject stale/ambiguous context before creating any temp file.
-    for op in operations:
-        action = op["action"]
-        relative = op["path"]
-        source_path = _target(root, relative)
-        if action == "add":
-            if source_path.exists() or source_path.is_symlink():
-                raise PatchError(f"Add File target already exists: {relative}")
-            content = op["content"].encode("utf-8", errors="strict")
-            prepared.append(
-                {
-                    **op,
-                    "source": source_path,
-                    "destination": source_path,
-                    "new": content,
-                    "old": None,
-                    "mode": 0o644,
-                    "uid": os.geteuid(),
-                    "gid": os.getegid(),
-                }
-            )
-            continue
-
-        info = _regular_file(source_path, relative)
-        old = source_path.read_bytes()
-        if action == "delete":
-            prepared.append(
-                {
-                    **op,
-                    "source": source_path,
-                    "destination": None,
-                    "new": None,
-                    "old": old,
-                    "mode": stat.S_IMODE(info.st_mode),
-                    "uid": info.st_uid,
-                    "gid": info.st_gid,
-                }
-            )
-            continue
-
-        try:
-            source_text = old.decode("utf-8", errors="strict")
-        except UnicodeDecodeError as exc:
-            raise PatchError(f"Update File requires UTF-8 text: {relative}") from exc
-        new = _apply_hunks(relative, source_text, op["hunks"]).encode("utf-8")
-        destination = source_path
-        if op["move_to"] is not None:
-            destination = _target(root, op["move_to"])
-            if destination.exists() or destination.is_symlink():
-                raise PatchError(f"Move to target already exists: {op['move_to']}")
-        prepared.append(
-            {
-                **op,
-                "source": source_path,
-                "destination": destination,
-                "new": new,
-                "old": old,
-                "mode": stat.S_IMODE(info.st_mode),
-                "uid": info.st_uid,
-                "gid": info.st_gid,
-            }
-        )
-
-    staged: list[Path] = []
-    backups: dict[Path, Path] = {}
+    stages: list[dict[str, Any]] = []
+    preserve_artifacts = False
     try:
-        for item in prepared:
-            if item["old"] is not None:
-                backup = _private_temp(item["source"].parent, item["old"], ".odin-patch-backup-")
-                chown(backup, item["uid"], item["gid"])
-                backups[item["source"]] = backup
-                staged.append(backup)
-            if item["new"] is not None:
-                temp = _private_temp(item["destination"].parent, item["new"], ".odin-patch-stage-")
-                chown(temp, item["uid"], item["gid"])
-                item["stage"] = temp
-                staged.append(temp)
+        # Semantic phase: hold parent/source descriptors, snapshot every source,
+        # and derive every output before creating a stage or changing a target.
+        for op in operations:
+            source_parent_fd, source_name, source_parent_label = directories.parent(op["path"])
+            source = {
+                "parent_fd": source_parent_fd,
+                "name": source_name,
+                "parent_label": source_parent_label,
+            }
+            action = op["action"]
+            if action == "add":
+                if not _entry_missing(source_parent_fd, source_name):
+                    raise PatchError(f"Add File target already exists: {op['path']}")
+                prepared.append(
+                    {
+                        **op,
+                        "source": source,
+                        "destination": source,
+                        "snapshot": None,
+                        "new": op["content"].encode("utf-8", errors="strict"),
+                        "mode": 0o644,
+                        "uid": os.geteuid(),
+                        "gid": os.getegid(),
+                    }
+                )
+                continue
 
-        # Recheck every precondition after staging. A concurrent edit during
-        # semantic planning must not be overwritten on stale context.
+            snapshot = _open_regular_at(source_parent_fd, source_name, op["path"])
+            if action == "delete":
+                new = None
+                destination = None
+            else:
+                try:
+                    source_text = snapshot["data"].decode("utf-8", errors="strict")
+                except UnicodeDecodeError as exc:
+                    raise PatchError(f"Update File requires UTF-8 text: {op['path']}") from exc
+                new = _apply_hunks(op["path"], source_text, op["hunks"]).encode("utf-8")
+                destination = source
+                if op["move_to"] is not None:
+                    destination_parent_fd, destination_name, destination_parent_label = (
+                        directories.parent(op["move_to"])
+                    )
+                    destination = {
+                        "parent_fd": destination_parent_fd,
+                        "name": destination_name,
+                        "parent_label": destination_parent_label,
+                    }
+                    if not _entry_missing(destination_parent_fd, destination_name):
+                        raise PatchError(f"Move to target already exists: {op['move_to']}")
+            prepared.append(
+                {
+                    **op,
+                    "source": source,
+                    "destination": destination,
+                    "snapshot": snapshot,
+                    "new": new,
+                    "mode": snapshot["mode"],
+                    "uid": snapshot["uid"],
+                    "gid": snapshot["gid"],
+                }
+            )
+
+        # Staging phase: every new-content artifact is O_EXCL, unpredictable,
+        # and forced to mode 0600 independent of the target process umask.
+        for item in prepared:
+            if item["new"] is None:
+                continue
+            destination = item["destination"]
+            stage = _private_temp(
+                directories,
+                destination["parent_fd"],
+                destination["parent_label"],
+                item["new"],
+                item["uid"],
+                item["gid"],
+            )
+            item["stage"] = stage
+            stages.append(stage)
+
+        # Whole-plan validation is repeated after staging, still before any
+        # target is changed. Commit repeats each condition around its effect.
         for item in prepared:
             source = item["source"]
-            if item["old"] is None:
-                if source.exists() or source.is_symlink():
+            snapshot = item["snapshot"]
+            if snapshot is None:
+                if not _entry_missing(source["parent_fd"], source["name"]):
                     raise PatchError(f"target changed while staging: {item['path']}")
-            elif not source.is_file() or source.is_symlink() or source.read_bytes() != item["old"]:
+            elif not _path_matches_snapshot(source["parent_fd"], source["name"], snapshot):
                 raise PatchError(f"source changed while staging: {item['path']}")
             destination = item["destination"]
-            if (
-                destination is not None
-                and destination != source
-                and (destination.exists() or destination.is_symlink())
-            ):
-                raise PatchError(f"destination changed while staging: {item['move_to']}")
+            if destination is not None and destination is not source:
+                if not _entry_missing(destination["parent_fd"], destination["name"]):
+                    raise PatchError(f"destination changed while staging: {item['move_to']}")
 
         committed: list[dict[str, Any]] = []
         try:
             for item in prepared:
-                action = item["action"]
                 source = item["source"]
+                snapshot = item["snapshot"]
                 destination = item["destination"]
-                if action == "delete":
-                    unlink(source)
-                    committed.append({"kind": "delete", "item": item})
-                elif action == "add":
-                    record = {"kind": "add", "item": item}
-                    replace(item["stage"], destination)
-                    committed.append(record)
-                    chmod(destination, item["mode"])
-                elif destination == source:
-                    record = {"kind": "update", "item": item}
-                    replace(item["stage"], source)
-                    committed.append(record)
-                    chmod(source, item["mode"])
-                else:
-                    record = {"kind": "move", "item": item, "source_removed": False}
-                    replace(item["stage"], destination)
-                    committed.append(record)
-                    chmod(destination, item["mode"])
-                    unlink(source)
-                    record["source_removed"] = True
+                if snapshot is None:
+                    if not _entry_missing(source["parent_fd"], source["name"]):
+                        raise PatchError(f"target changed before commit: {item['path']}")
+                elif not _path_matches_snapshot(source["parent_fd"], source["name"], snapshot):
+                    raise PatchError(f"source changed before commit: {item['path']}")
+                if destination is not None and destination is not source:
+                    if not _entry_missing(destination["parent_fd"], destination["name"]):
+                        raise PatchError(f"destination changed before commit: {item['move_to']}")
+
+                # Register before the first effect. A failure-injection wrapper
+                # may raise after a successful syscall; rollback inspects disk.
+                committed.append(item)
+                if snapshot is not None:
+                    recovery = _new_recovery_slot(
+                        directories, source["parent_fd"], source["parent_label"]
+                    )
+                    item["recovery"] = recovery
+                    os.fchmod(snapshot["fd"], 0o600)
+                    try:
+                        rename_noreplace(
+                            source["name"],
+                            recovery["name"],
+                            src_dir_fd=source["parent_fd"],
+                            dst_dir_fd=recovery["parent_fd"],
+                        )
+                    finally:
+                        recovery["named"] = not _entry_missing(
+                            recovery["parent_fd"], recovery["name"]
+                        )
+                    if not _same_inode_as_fd(
+                        recovery["parent_fd"], recovery["name"], snapshot["fd"]
+                    ):
+                        raise PatchError(f"source changed during commit: {item['path']}")
+
+                stage = item.get("stage")
+                if stage is not None:
+                    try:
+                        rename_noreplace(
+                            stage["name"],
+                            destination["name"],
+                            src_dir_fd=stage["parent_fd"],
+                            dst_dir_fd=destination["parent_fd"],
+                        )
+                    finally:
+                        stage["named"] = not _entry_missing(stage["parent_fd"], stage["name"])
+                    if not _same_inode_as_fd(
+                        destination["parent_fd"], destination["name"], stage["fd"]
+                    ):
+                        raise PatchError(
+                            "destination changed during commit: "
+                            f"{item.get('move_to') or item['path']}"
+                        )
+                    os.fchmod(stage["fd"], item["mode"])
         except BaseException as original:
             rollback_failures: list[str] = []
-            for record in reversed(committed):
-                item = record["item"]
-                source = item["source"]
-                destination = item["destination"]
-                try:
-                    if record["kind"] == "add":
-                        unlink(destination)
-                    elif record["kind"] in {"update", "delete"}:
-                        replace(backups[source], source)
-                        chmod(source, item["mode"])
-                    else:
-                        if destination.exists() or destination.is_symlink():
-                            unlink(destination)
-                        if record["source_removed"]:
-                            replace(backups[source], source)
-                            chmod(source, item["mode"])
-                except BaseException as rollback_exc:
-                    rollback_failures.append(
-                        f"{item['path']}: {type(rollback_exc).__name__}: {rollback_exc}"
-                    )
+            for item in reversed(committed):
+                rollback_failures.extend(_rollback_record(item, rename_noreplace=rename_noreplace))
             if rollback_failures:
-                raise PatchRollbackError(original, rollback_failures) from original
+                preserve_artifacts = True
+                artifacts = _artifact_paths(prepared, stages)
+                raise PatchRollbackError(original, rollback_failures, artifacts) from original
+            cleanup_failures = _cleanup_named(stages)
+            if cleanup_failures:
+                preserve_artifacts = True
+                artifacts = _artifact_paths(prepared, stages)
+                raise PatchRollbackError(original, cleanup_failures, artifacts) from original
             raise PatchError(
                 f"commit failed; rollback completed: {type(original).__name__}: {original}"
             ) from original
 
+        recovery_slots = [item["recovery"] for item in prepared if item.get("recovery")]
+        cleanup_failures = _cleanup_named(recovery_slots + stages)
+        if cleanup_failures:
+            preserve_artifacts = True
+            artifacts = _artifact_paths(prepared, stages)
+            raise PatchRollbackError(
+                PatchError("patch committed but private-artifact cleanup failed"),
+                cleanup_failures,
+                artifacts,
+            )
         return [
             item["path"] if item.get("move_to") is None else f"{item['path']} -> {item['move_to']}"
             for item in prepared
         ]
     finally:
-        for path in staged:
+        if not preserve_artifacts:
+            _cleanup_named([item["recovery"] for item in prepared if item.get("recovery")] + stages)
+        for item in prepared:
+            snapshot = item.get("snapshot")
+            if snapshot is not None:
+                try:
+                    os.close(snapshot["fd"])
+                except OSError:
+                    pass
+        for stage in stages:
             try:
-                path.unlink()
-            except FileNotFoundError:
-                pass
+                os.close(stage["fd"])
             except OSError:
                 pass
+        directories.close()
