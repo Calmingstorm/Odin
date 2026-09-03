@@ -76,3 +76,45 @@ def test_report_is_immutable_and_json_shaped(tmp_path):
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         report.loaded = ()  # type: ignore[misc]
+
+
+def test_stat_and_read_failures_are_skipped_with_reasons(tmp_path, monkeypatch):
+    from pathlib import Path
+
+    (tmp_path / "ok.md").write_text("fine")
+    (tmp_path / "nostat.md").write_text("x")
+    (tmp_path / "noread.md").write_text("y")
+    real_stat, real_read = Path.stat, Path.read_text
+
+    def flaky_stat(self, *a, **k):
+        if self.name == "nostat.md":
+            raise PermissionError("stat denied")
+        return real_stat(self, *a, **k)
+
+    def flaky_read(self, *a, **k):
+        if self.name == "noread.md":
+            raise OSError("read denied")
+        return real_read(self, *a, **k)
+
+    monkeypatch.setattr(Path, "stat", flaky_stat)
+    monkeypatch.setattr(Path, "read_text", flaky_read)
+    report = ContextLoader(str(tmp_path)).load_report()
+    assert report.loaded == ("ok.md",)
+    assert dict(report.skipped) == {
+        "nostat.md": "stat failed: PermissionError",
+        "noread.md": "read failed: OSError",
+    }
+    assert report.total_bytes == 4
+
+
+def test_total_cap_skips_every_remaining_file_with_the_cap_reason(tmp_path):
+    from src.context.loader import MAX_CONTEXT_TOTAL_BYTES
+
+    chunk = "x" * (MAX_CONTEXT_FILE_BYTES - 1024)
+    for name in ("a.md", "b.md", "c.md", "d.md", "e.md", "f.md"):
+        (tmp_path / name).write_text(chunk)
+    report = ContextLoader(str(tmp_path)).load_report()
+    assert 0 < report.total_bytes <= MAX_CONTEXT_TOTAL_BYTES
+    assert report.loaded == ("a.md", "b.md", "c.md", "d.md")
+    assert [name for name, _ in report.skipped] == ["e.md", "f.md"]
+    assert all("total cap" in reason for _, reason in report.skipped)

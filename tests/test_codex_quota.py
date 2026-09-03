@@ -398,3 +398,19 @@ async def test_tool_stream_parses_cache_attribution_from_usage_details():
         completed["response"]["usage"]["input_tokens_details"] = details
         result = await client._read_tool_stream(_FakeResp([_sse(completed)]))
         assert result.cached_tokens is None and result.cache_write_tokens is None
+
+
+def test_display_name_falls_back_when_the_record_cannot_be_read(tmp_path, monkeypatch):
+    pool = _pool(tmp_path, monkeypatch, ["TOVDC"])
+    assert pool.account_display_name(0) == "TOVDC"
+    assert pool.account_display_name(7) == "account 8"  # out of range → slot name
+    pool._accounts[0]._load = lambda: (_ for _ in ()).throw(OSError("unreadable"))
+    assert pool.account_display_name(0) == "account 1"
+
+
+def test_empty_pool_describes_nothing_and_views_no_current(tmp_path, monkeypatch):
+    monkeypatch.setattr("src.llm.account_key.DEFAULT_KEY_PATH", tmp_path / "k.secret")
+    pool = CodexAuthPool(str(tmp_path / "missing.json"))
+    assert pool.describe_accounts() == []
+    view = pool.quota_view()
+    assert view.current_key is None and view.current is None and view.others == ()
