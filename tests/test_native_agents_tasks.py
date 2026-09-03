@@ -505,6 +505,7 @@ class TestAgentReasoningEffortCallback:
         stored = await saver.find_by_agent_id(agent_id)
         assert stored["iterations"][0]["cached_tokens"] == 800
         assert stored["iterations"][0]["cache_write_tokens"] == 100
+        manager._remove_agent(agent_id, source="test")
 
     async def test_loop_agent_real_path_persists_cache_attribution(self, tmp_path):
         client = _FakeEffortClient()
@@ -540,6 +541,7 @@ class TestAgentReasoningEffortCallback:
         stored = await saver.find_by_agent_id(agent_id)
         assert stored["iterations"][0]["cached_tokens"] == 800
         assert stored["iterations"][0]["cache_write_tokens"] == 100
+        manager._remove_agent(agent_id, source="test")
 
 
 class TestAgentModelCallback:
