@@ -226,3 +226,28 @@ def test_ingest_stores_cache_attribution_and_summary_reports_subsets(tmp_path):
     assert cache == {"cached_tokens": 800, "cache_write_tokens": 100, "generations_reported": 1}
     # cache never inflates the totals
     assert summary["work"]["input_tokens"]["total"] == 1500
+
+
+def test_migration_failure_leaves_the_open_connection_rolled_back(tmp_path, monkeypatch):
+    """Pinned on the SAME connection: without an explicit ROLLBACK the
+    transaction would still be open with the ALTER pending."""
+    directory = _v1_store(tmp_path)
+    real = rollup_module._require_columns
+
+    def flaky(conn, table, expected):
+        if expected is rollup_module._GENERATION_COLUMNS_V2:
+            raise UsageSchemaError("injected")
+        return real(conn, table, expected)
+
+    monkeypatch.setattr(rollup_module, "_require_columns", flaky)
+    conn = sqlite3.connect(directory / "usage.sqlite3", timeout=0.1)
+    try:
+        with pytest.raises(UsageSchemaError, match="injected"):
+            UsageRollup._migrate_existing(conn, {"usage_meta", "generation_facts"})
+        assert conn.in_transaction is False
+        cols = [row[1] for row in conn.execute("PRAGMA table_info(generation_facts)")]
+        assert "cached_tokens" not in cols
+        version = conn.execute("SELECT value FROM usage_meta WHERE key='schema_version'").fetchone()
+        assert version == ("1",)
+    finally:
+        conn.close()

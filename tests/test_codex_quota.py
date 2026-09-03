@@ -350,3 +350,51 @@ async def test_headers_recorded_before_status_handling_on_429(monkeypatch):
 
 async def _fake_error_body(_content):
     return b'{"error": {"message": "slow down"}}', False
+
+
+# --------------------------------------------------------------------------
+# guards that the snapshot shape alone cannot witness
+# --------------------------------------------------------------------------
+
+def test_header_reduction_keeps_only_allowlisted_names():
+    from src.llm.codex_quota import _lower_headers
+
+    reduced = _lower_headers(_headers(**{"X-Codex-Unknown-Thing": "1", "Set-Cookie": "s"}))
+    assert set(reduced) <= QUOTA_HEADER_ALLOWLIST
+    assert "x-codex-unknown-thing" not in reduced and "set-cookie" not in reduced
+    # duplicates keep the first value; bytes values decode; non-text dropped
+    reduced = _lower_headers(
+        [
+            ("x-codex-plan-type", b"team"),
+            ("X-CODEX-PLAN-TYPE", "other"),
+            ("x-codex-active-limit", None),
+        ]
+    )
+    assert reduced == {"x-codex-plan-type": "team"}
+
+
+@pytest.mark.asyncio
+async def test_tool_stream_parses_cache_attribution_from_usage_details():
+    from tests.test_openai_codex_client import _FakeResp, _sse
+
+    completed = {
+        "type": "response.completed",
+        "response": {
+            "output": [{"type": "message", "content": [{"text": "hi"}]}],
+            "usage": {
+                "input_tokens": 1000,
+                "output_tokens": 5,
+                "input_tokens_details": {"cached_tokens": 800, "cache_write_tokens": 100},
+            },
+        },
+    }
+    client = CodexChatClient(SimpleNamespace(), "m")
+    result = await client._read_tool_stream(_FakeResp([_sse(completed)]))
+    assert (result.cached_tokens, result.cache_write_tokens) == (800, 100)
+    assert result.server_input_tokens == 1000
+
+    # absent / malformed details ⇒ None, never zero
+    for details in (None, {}, {"cached_tokens": -1}, {"cached_tokens": True}, "junk"):
+        completed["response"]["usage"]["input_tokens_details"] = details
+        result = await client._read_tool_stream(_FakeResp([_sse(completed)]))
+        assert result.cached_tokens is None and result.cache_write_tokens is None
