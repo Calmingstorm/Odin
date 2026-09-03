@@ -640,7 +640,9 @@ class ToolLoopRunner:
         same guard envelope as a fresh one. The iteration loop starts from
         ``st.iteration`` — the restored transcript already contains every
         earlier generation."""
-        self._channel_state.set_active_request(st._ch_id, st._req_id)
+        st._cancel = self._channel_state.set_active_request(
+            st._ch_id, st._req_id, st._cancel
+        )
         set_turn(
             turn_id=st._trajectory.message_id or None,
             source=st._trajectory.source,
@@ -655,9 +657,28 @@ class ToolLoopRunner:
             # Terminal bookkeeping (best-effort; a suspension already settled
             # itself and this no-ops). Cancellation is terminal by design —
             # a cancelled turn never becomes resumable.
-            await st.durability.settle_terminal(
-                cancelled=st._cancel.is_set(), is_error=bool(result[2])
+            cancelled = bool(getattr(st.durability, "cancelled", False)) or st._cancel.is_set()
+            terminal_confirmed = await st.durability.settle_terminal(
+                cancelled=cancelled, is_error=bool(result[2])
             )
+            if cancelled:
+                # _stopped computes the result and cancels this turn's agents,
+                # but the slash waiter must remain asleep until the durable
+                # TERMINAL_CANCELLED write has completed. On a write failure,
+                # report that failure instead of publishing a false success.
+                stop_result = result[0] if terminal_confirmed else (
+                    "The task stopped, but its durable cancellation record "
+                    "could not be confirmed."
+                )
+                if terminal_confirmed:
+                    self._channel_state.finish_stop(st._ch_id, st._req_id, stop_result)
+                self._channel_state.clear_active_request(
+                    st._ch_id,
+                    st._req_id,
+                    resolve_stop_waiter=terminal_confirmed,
+                )
+                if not terminal_confirmed:
+                    result = (stop_result, *result[1:])
             return result
         except asyncio.CancelledError:
             # Cancellation is not an error turn: release channel ownership
@@ -983,9 +1004,12 @@ class ToolLoopRunner:
 
         # Per-request cancellation via /stop command
         _ch_id = str(message.channel.id)
-        _cancel = self._channel_state.cancel_events.setdefault(_ch_id, asyncio.Event())
-        _req_id = req_hash
-        self._channel_state.set_active_request(_ch_id, _req_id)
+        # Active ownership must be unique per turn. ``req_hash`` is only
+        # content-derived debug provenance and collides for repeated messages.
+        _req_id = str(_trajectory.message_id or req_hash)
+        _cancel = self._channel_state.set_active_request(
+            _ch_id, _req_id, asyncio.Event()
+        )
 
         # Durable-turn admission: Discord chat turns only, resolved the same
         # way the trajectory source is (web/API turns share this runner via
@@ -1359,8 +1383,6 @@ class ToolLoopRunner:
             else ""
         )
         text = f"Task stopped by user.{tools_note}{agents_note}{suffix}"
-        self._channel_state.finish_stop(st._ch_id, st._req_id, text)
-        self._clear_active(st)
         return (
             text,
             False,

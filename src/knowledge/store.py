@@ -510,6 +510,113 @@ class KnowledgeStore:
             log.error("Failed to delete source '%s': %s", source, e)
         return 0
 
+    def delete_source_confirmed(self, source: str) -> int:
+        """Delete *source* only after confirming FTS removal.
+
+        This is the migration-safe deletion path. FTS is removed and checked
+        first, while the source of truth still exists in ``knowledge_chunks``.
+        The DB rows are committed only after that check passes, then both
+        stores are checked again. Any partial failure returns zero; callers
+        must retain the replacement document.
+        """
+        if not self.available or self._fts is None or not self._fts.available:
+            log.error(
+                "Confirmed delete refused for '%s': DB and FTS must both be available",
+                source,
+            )
+            return 0
+        conn = self._conn
+        assert conn is not None
+        rows = conn.execute(
+            "SELECT chunk_id, content, chunk_index FROM knowledge_chunks "
+            "WHERE source = ? ORDER BY chunk_index",
+            (source,),
+        ).fetchall()
+        if not rows:
+            return 0
+
+        try:
+            if self._fts:
+                fts_rows = self._fts.count_knowledge_source(source)
+                if fts_rows != len(rows):
+                    log.error(
+                        "Confirmed delete refused for '%s': DB/FTS count mismatch (%d/%d)",
+                        source,
+                        len(rows),
+                        fts_rows,
+                    )
+                    return 0
+                removed_fts = self._fts.delete_knowledge_source(source)
+                fts_remains = self._fts.has_knowledge_source(source)
+                if removed_fts != fts_rows or fts_remains:
+                    # delete_knowledge_source may commit and then report/fail;
+                    # restore from the still-authoritative DB snapshot before
+                    # refusing the migration.
+                    if not fts_remains:
+                        for chunk_id, content, chunk_index in rows:
+                            self._fts.index_knowledge_chunk(
+                                chunk_id, content, source, int(chunk_index),
+                            )
+                    log.error(
+                        "Confirmed delete refused for '%s': FTS removal was not durable",
+                        source,
+                    )
+                    return 0
+
+            if self._has_vec:
+                for chunk_id, _content, _index in rows:
+                    conn.execute(
+                        "DELETE FROM knowledge_vec WHERE chunk_id = ?", (chunk_id,),
+                    )
+            conn.execute("DELETE FROM knowledge_chunks WHERE source = ?", (source,))
+            conn.commit()
+
+            db_remains = conn.execute(
+                "SELECT 1 FROM knowledge_chunks WHERE source = ? LIMIT 1", (source,),
+            ).fetchone()
+            fts_remains = bool(
+                self._fts and self._fts.has_knowledge_source(source)
+            )
+            if db_remains or fts_remains:
+                log.error(
+                    "Confirmed delete failed for '%s': db_remains=%s fts_remains=%s",
+                    source,
+                    bool(db_remains),
+                    fts_remains,
+                )
+                return 0
+            log.info("Confirmed deletion of %d chunks for source '%s'", len(rows), source)
+            return len(rows)
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # If FTS was committed first but the DB deletion failed, restore
+            # its searchable rows from the still-authoritative DB snapshot.
+            db_remains = False
+            try:
+                db_remains = conn.execute(
+                    "SELECT 1 FROM knowledge_chunks WHERE source = ? LIMIT 1", (source,),
+                ).fetchone() is not None
+            except Exception:
+                pass
+            fts_missing = bool(
+                self._fts and not self._fts.has_knowledge_source(source)
+            )
+            if db_remains and fts_missing and self._fts:
+                for chunk_id, content, chunk_index in rows:
+                    self._fts.index_knowledge_chunk(
+                        chunk_id, content, source, int(chunk_index),
+                    )
+            log.error("Confirmed delete failed for source '%s': %s", source, exc)
+            return 0
+
+    async def delete_source_confirmed_async(self, source: str) -> int:
+        """Run migration-safe confirmed deletion under the async write lock."""
+        async with self._write_lock:
+            return await asyncio.to_thread(self.delete_source_confirmed, source)
+
     async def delete_source_async(self, source: str) -> int:
         """Delete a source under the write lock, off the event loop.
 

@@ -137,6 +137,10 @@ class TestReadFile:
         assert "ODIN_READ_FILE_RAW_META_V1" in command
         assert "base64 <" in command
         assert "tr -d" in command
+        assert command.count("$(mktemp)") == 3
+        assert 'chmod 600 -- "$metadata" "$body" "$encoded"' in command
+        assert "$metadata.body" not in command
+        assert "$metadata.encoded" not in command
         assert "-v count=200" in command
         assert "< '/tmp/name with spaces'" in command
 

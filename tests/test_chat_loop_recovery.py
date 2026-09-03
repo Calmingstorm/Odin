@@ -1330,8 +1330,8 @@ def _census_runner(gw, *, config=None, recorder=None):
         prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
         tool_catalog=SimpleNamespace(merged_definitions=lambda: []),
         channel_state=SimpleNamespace(
-            set_active_request=lambda ch, req: None,
-            clear_active_request=lambda ch, req: cleared.append((ch, req)),
+            set_active_request=lambda ch, req, event=None: event,
+            clear_active_request=lambda ch, req, **kw: cleared.append((ch, req)),
         ),
         channel_config=SimpleNamespace(),
         delivery=SimpleNamespace(set_status=_set_status),

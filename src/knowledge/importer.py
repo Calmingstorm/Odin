@@ -224,24 +224,28 @@ class BulkImporter:
                     dedup=False,
                 )
                 if chunks != expected_chunks:
-                    await self._store.delete_source_async(source_name)
+                    # Even an incomplete replacement remains the safety copy:
+                    # it cannot be removed before legacy deletion is confirmed
+                    # in both the DB and FTS stores.
                     return ImportResult(
                         source=source_name,
                         status="error",
                         error=(
                             f"legacy migration from '{legacy_source}' failed: indexed "
-                            f"{chunks}/{expected_chunks} chunks"
+                            f"{chunks}/{expected_chunks} chunks; canonical copy retained"
                         ),
                     )
-                removed = await self._store.delete_source_async(legacy_source)
+                removed = await self._store.delete_source_confirmed_async(legacy_source)
                 if removed <= 0:
-                    await self._store.delete_source_async(source_name)
+                    # The replacement is the safety anchor. A DB/FTS partial
+                    # delete must never trigger a compensating delete that can
+                    # erase both identities.
                     return ImportResult(
                         source=source_name,
                         status="error",
                         error=(
                             f"legacy migration from '{legacy_source}' failed; "
-                            "canonical copy removed"
+                            "canonical copy retained"
                         ),
                     )
                 return ImportResult(source=source_name, status="ok", chunks=chunks)

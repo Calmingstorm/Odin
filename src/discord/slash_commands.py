@@ -101,6 +101,7 @@ def register_commands(bot) -> None:
             try:
                 result = await asyncio.wait_for(asyncio.shield(waiter), timeout=10.0)
             except TimeoutError:
+                bot.channel_state.expire_stop_waiter(channel_id, _request_id, waiter)
                 result = (
                     "Stop requested, but the in-flight operation could not be "
                     "safely interrupted yet."

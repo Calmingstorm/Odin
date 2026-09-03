@@ -9,8 +9,12 @@ fail-closed halt when durability dies mid-turn.
 
 from __future__ import annotations
 
+import asyncio
+import threading
+
 import pytest
 
+from src.discord.tool_loop import CHAT_POLICY
 from src.llm.errors import LLMCapacityError
 from src.llm.recovery import RecoveryPolicy
 from src.tools.result_validator import ToolResult
@@ -267,30 +271,27 @@ class TestFailClosed:
 
 class TestCancellationBranches:
     async def test_stop_before_first_iteration_is_terminal_cancelled(self, tmp_path):
-        import asyncio
-
         bot, fake, store = build_with_store([text_response("never")], tmp_path)
         msg = FakeMessage("go")
-        evt = bot.channel_state.cancel_events.setdefault(
-            str(msg.channel.id), asyncio.Event()
+        st = await bot.tool_loop._prepare_chat_turn(
+            msg,
+            [{"role": "user", "content": msg.content}],
+            None,
+            None,
+            CHAT_POLICY,
         )
-        evt.set()
-        text, *_ = await run_loop(bot, msg)
+        st._cancel.set()
+        text, *_ = await bot.tool_loop._run_with_guards(st)
         assert text.startswith("Task stopped by user.")
         (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_CANCELLED
 
     async def test_stop_during_recovery_wait_is_graceful(self, tmp_path):
-        import asyncio
-
         bot, fake, store = build_with_store([], tmp_path)
         msg = FakeMessage("go")
-        evt = bot.channel_state.cancel_events.setdefault(
-            str(msg.channel.id), asyncio.Event()
-        )
 
         def capacity_and_stop():
-            evt.set()  # /stop lands while the recovery wait begins
+            bot.channel_state.cancel_events[str(msg.channel.id)].set()
             raise LLMCapacityError("overloaded", retry_after=5.0)
 
         fake.responses.append(capacity_and_stop)
@@ -344,6 +345,51 @@ class TestCancellationBranches:
         assert states == {"cmd": OpState.APPLIED, "wait": OpState.DEFINITELY_FAILED}
         assert OpState.OUTCOME_UNKNOWN not in states.values()
 
+    async def test_stop_waiter_wakes_only_after_terminal_cancel_commit(self, tmp_path):
+        bot, fake, store = build_with_store(
+            [tool_call_response(("wait_for_agents", {"agent_ids": ["a"]}))],
+            tmp_path,
+        )
+        started = asyncio.Event()
+        finish_started = threading.Event()
+        finish_release = threading.Event()
+        real_finish = store.finish_sync
+
+        async def blocking_wait(*_args, **_kwargs):
+            started.set()
+            await asyncio.sleep(3600)
+
+        def delayed_finish(lease, status=TurnStatus.TERMINAL_COMPLETED):
+            finish_started.set()
+            if not finish_release.wait(timeout=5):
+                raise TimeoutError("test did not release terminal commit")
+            return real_finish(lease, status)
+
+        bot.native_tools.dispatch = blocking_wait
+        store.finish_sync = delayed_finish
+        msg = FakeMessage("go")
+        task = asyncio.create_task(run_loop(bot, msg))
+        try:
+            await asyncio.wait_for(started.wait(), timeout=1)
+            request_id, waiter = bot.channel_state.request_stop(str(msg.channel.id))
+            assert request_id
+            assert await asyncio.to_thread(finish_started.wait, 1)
+            assert not waiter.done()
+            (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+            assert status == TurnStatus.ACTIVE
+
+            finish_release.set()
+            text, *_ = await asyncio.wait_for(task, timeout=1)
+            assert text.startswith("Task stopped by user.")
+            assert waiter.result().startswith("Task stopped by user.")
+            (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+            assert status == TurnStatus.TERMINAL_CANCELLED
+        finally:
+            finish_release.set()
+            if not task.done():
+                task.cancel()
+                await asyncio.gather(task, return_exceptions=True)
+
     async def test_stop_preempted_observation_is_definitely_failed(self, tmp_path):
         import asyncio
 
@@ -370,6 +416,34 @@ class TestCancellationBranches:
         assert "cancelled by /stop before any effect" in op[2]
         (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
         assert status == TurnStatus.TERMINAL_CANCELLED
+
+    async def test_failed_terminal_cancel_does_not_publish_stop_success(self, tmp_path):
+        from unittest.mock import AsyncMock, patch
+
+        from src.turn_state.durability import TurnDurability
+
+        bot, fake, store = build_with_store([text_response("never")], tmp_path)
+        msg = FakeMessage("go")
+        st = await bot.tool_loop._prepare_chat_turn(
+            msg,
+            [{"role": "user", "content": msg.content}],
+            None,
+            None,
+            CHAT_POLICY,
+        )
+        request_id, waiter = bot.channel_state.request_stop(str(msg.channel.id))
+        assert request_id
+        with patch.object(
+            TurnDurability, "settle_terminal", AsyncMock(return_value=False),
+        ):
+            text, *_ = await bot.tool_loop._run_with_guards(st)
+
+        assert "could not be confirmed" in text
+        assert not waiter.done()
+        assert str(msg.channel.id) not in bot.channel_state.active_requests
+        (status,) = store._conn.execute("SELECT status FROM turns").fetchone()
+        assert status == TurnStatus.ACTIVE
+        waiter.cancel()
 
     async def test_task_cancel_with_failing_settle_still_propagates(self, tmp_path):
         import asyncio

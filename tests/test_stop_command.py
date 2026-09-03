@@ -58,6 +58,19 @@ async def test_stop_reports_settled_result():
     )
 
 
+async def test_expire_stop_waiter_removes_request_owned_alias():
+    state = ChannelStateRegistry()
+    state.set_active_request("42", "req")
+    request_id, waiter = state.request_stop("42")
+
+    state.expire_stop_waiter("42", request_id, waiter)
+
+    assert ("42", "req") not in state._stop_waiters
+    assert "42" not in state.stop_results
+    assert not waiter.done()
+    waiter.cancel()
+
+
 async def test_stop_reports_no_active_task():
     bot = _bot()
     interaction = _Interaction()
@@ -69,20 +82,47 @@ async def test_stop_reports_no_active_task():
 
 async def test_clear_active_ignores_stale_request_owner():
     state = ChannelStateRegistry()
-    state.set_active_request("42", "old")
+    old_event = state.set_active_request("42", "old")
     old_request, old_waiter = state.request_stop("42")
     assert old_request == "old"
+    assert old_event.is_set()
 
-    state.set_active_request("42", "new")
-    assert old_waiter.result() == "The previous task ended before the stop request settled."
+    new_event = state.set_active_request("42", "new")
+    assert not old_waiter.done()
     assert "42" not in state.stop_results
+    assert new_event is state.cancel_events["42"]
+    assert new_event is not old_event
+    assert not new_event.is_set()
+    assert old_event.is_set()
 
+    state.finish_stop("42", "old", "old durably cancelled")
+    assert old_waiter.result() == "old durably cancelled"
     state.clear_active_request("42", "old")
     assert state.active_requests["42"] == "new"
 
     state.clear_active_request("42", "new")
     assert "42" not in state.active_requests
     assert "42" not in state.stop_results
+
+
+async def test_replacing_owner_does_not_revoke_old_stop_or_misdirect_new_stop():
+    state = ChannelStateRegistry()
+    old_event = state.set_active_request("42", "old")
+    old_request, old_waiter = state.request_stop("42")
+    assert old_request == "old"
+
+    new_event = state.set_active_request("42", "new")
+    new_request, new_waiter = state.request_stop("42")
+    assert new_request == "new"
+    assert old_event.is_set()
+    assert new_event.is_set()
+    assert old_waiter is not new_waiter
+
+    state.finish_stop("42", "old", "old settled")
+    assert old_waiter.result() == "old settled"
+    assert not new_waiter.done()
+    state.finish_stop("42", "new", "new settled")
+    assert new_waiter.result() == "new settled"
 
 
 async def test_request_stop_does_not_set_stale_event_without_owner():

@@ -440,11 +440,12 @@ class TurnDurability:
     def mark_cancelled(self) -> None:
         self.cancelled = True
 
-    async def settle_terminal(self, *, cancelled: bool, is_error: bool) -> None:
-        """Best-effort terminal bookkeeping after the turn's reply exists.
+    async def settle_terminal(self, *, cancelled: bool, is_error: bool) -> bool:
+        """Best-effort terminal bookkeeping; return whether it was confirmed.
 
-        No further external effect follows, so a failure here must not
-        destroy an already-computed reply — log and move on.
+        A caller may have computed a reply already, but a truthful /stop
+        acknowledgement is not published until this confirms the durable
+        ``TERMINAL_CANCELLED`` transition.
         """
         self._stop_heartbeats()  # unconditionally — every turn exit lands here
         if not self.enabled:
@@ -453,19 +454,22 @@ class TurnDurability:
             # no SQLite transition was needed.
             if not self.suspended:
                 self.settled = True
-            return
+            return True
         if cancelled or self.cancelled:
             status = TurnStatus.TERMINAL_CANCELLED
         elif is_error:
             status = TurnStatus.TERMINAL_FAILED
         else:
             status = TurnStatus.TERMINAL_COMPLETED
+        confirmed = False
         try:
             assert self._store is not None and self._lease is not None
             await asyncio.to_thread(self._store.finish_sync, self._lease, status)
+            confirmed = True
         except Exception:
             log.exception("Turn terminal bookkeeping failed (non-fatal)")
         self.settled = True
+        return confirmed
 
 
 def _code_version() -> str:

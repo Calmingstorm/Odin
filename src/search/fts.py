@@ -202,6 +202,24 @@ class FullTextIndex:
             log.error("FTS knowledge delete failed for '%s': %s", source, e)
             return 0
 
+    def count_knowledge_source(self, source: str) -> int:
+        """Return the durable FTS row count for *source*."""
+        if not self._conn:
+            return 0
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM knowledge_fts WHERE source = ?", (source,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def has_knowledge_source(self, source: str) -> bool:
+        """Return whether any durable FTS row still names *source*."""
+        if not self._conn:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM knowledge_fts WHERE source = ? LIMIT 1", (source,),
+        ).fetchone()
+        return row is not None
+
     def has_knowledge_chunk(self, chunk_id: str) -> bool:
         if not self._conn:
             return False

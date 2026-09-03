@@ -23,6 +23,7 @@ from src.knowledge.importer import (
 )
 from src.knowledge.store import KnowledgeStore
 from src.search.errors import validate_search_query
+from src.search.fts import FullTextIndex
 
 try:
     import fitz  # noqa: F401 — availability probe for the [pdf] extra
@@ -409,10 +410,13 @@ class TestLocalFileIntegrity:
             _cleanup(store)
 
     async def test_exact_legacy_source_is_migrated_to_canonical_identity(self):
-        importer, store = _make_importer()
-        try:
-            with tempfile.TemporaryDirectory() as tmpdir:
-                path = Path(tmpdir) / "docs" / "doc.md"
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
                 path.parent.mkdir()
                 content = "legacy migration content"
                 path.write_text(content, encoding="utf-8")
@@ -425,8 +429,12 @@ class TestLocalFileIntegrity:
                 assert result.source == canonical
                 assert store.get_source_content("docs/doc.md") is None
                 assert store.get_source_content(canonical) == content
-        finally:
-            _cleanup(store)
+                assert not fts.has_knowledge_source("docs/doc.md")
+                assert fts.has_knowledge_source(canonical)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
 
     async def test_migration_recheck_uses_existing_canonical_source(self):
         importer, store = _make_importer()
@@ -485,7 +493,7 @@ class TestLocalFileIntegrity:
         finally:
             _cleanup(store)
 
-    async def test_failed_migration_copy_removes_partial_canonical(self):
+    async def test_failed_migration_copy_retains_partial_canonical(self):
         store = MagicMock()
         store.list_sources.return_value = [{
             "source": "docs/doc.md",
@@ -501,10 +509,10 @@ class TestLocalFileIntegrity:
             path.write_text("copy failure content", encoding="utf-8")
             result = await importer.import_file(str(path))
         assert result.status == "error"
-        assert "indexed 0/1 chunks" in result.error
-        store.delete_source_async.assert_awaited_once_with(path.resolve().as_uri())
+        assert "indexed 0/1 chunks; canonical copy retained" in result.error
+        store.delete_source_async.assert_not_called()
 
-    async def test_failed_legacy_delete_rolls_back_canonical_copy(self):
+    async def test_failed_legacy_delete_retains_canonical_copy(self):
         store = MagicMock()
         store.list_sources.return_value = [{
             "source": "docs/doc.md",
@@ -512,7 +520,7 @@ class TestLocalFileIntegrity:
         }]
         store._chunk_text.return_value = ["delete failure content"]
         store.ingest = AsyncMock(return_value=1)
-        store.delete_source_async = AsyncMock(side_effect=[0, 1])
+        store.delete_source_confirmed_async = AsyncMock(return_value=0)
         importer = BulkImporter(store)
         with tempfile.TemporaryDirectory() as tmpdir:
             path = Path(tmpdir) / "docs" / "doc.md"
@@ -520,14 +528,128 @@ class TestLocalFileIntegrity:
             path.write_text("delete failure content", encoding="utf-8")
             result = await importer.import_file(str(path))
         assert result.status == "error"
-        assert "canonical copy removed" in result.error
-        assert store.delete_source_async.await_args_list[1].args == (path.resolve().as_uri(),)
+        assert "canonical copy retained" in result.error
+        store.delete_source_confirmed_async.assert_awaited_once_with("docs/doc.md")
+        store.delete_source_async.assert_not_called()
 
-    async def test_migrated_source_accepts_later_content_updates(self):
+    async def test_partial_fts_delete_cannot_erase_canonical_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "partial FTS migration content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+                real_delete = fts.delete_knowledge_source
+
+                def delete_fts_then_fail(source):
+                    real_delete(source)
+                    raise RuntimeError("simulated failure after FTS commit")
+
+                with patch.object(
+                    fts, "delete_knowledge_source", side_effect=delete_fts_then_fail,
+                ):
+                    result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content(canonical) == content
+                assert store.get_source_content("docs/doc.md") == content
+                assert fts.has_knowledge_source(canonical)
+                assert fts.has_knowledge_source("docs/doc.md")
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_db_delete_failure_restores_fts_and_retains_canonical_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "DB failure migration content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+                legacy_ids = [
+                    row[0] for row in store._conn.execute(
+                        "SELECT chunk_id FROM knowledge_chunks WHERE source = ?",
+                        ("docs/doc.md",),
+                    ).fetchall()
+                ]
+                real_confirmed_delete = store.delete_source_confirmed
+
+                def fail_after_fts_delete(source):
+                    real_delete = fts.delete_knowledge_source
+
+                    def delete_fts_then_fail_knowledge_db(delete_source):
+                        real_delete(delete_source)
+                        store._conn.execute(
+                            "CREATE TRIGGER fail_legacy_delete BEFORE DELETE ON knowledge_chunks "
+                            "WHEN OLD.source = 'docs/doc.md' "
+                            "BEGIN SELECT RAISE(ABORT, 'simulated DB delete failure'); END"
+                        )
+                        store._conn.commit()
+
+                    with patch.object(
+                        fts,
+                        "delete_knowledge_source",
+                        side_effect=delete_fts_then_fail_knowledge_db,
+                    ):
+                        return real_confirmed_delete(source)
+
+                with patch.object(
+                    store, "delete_source_confirmed", side_effect=fail_after_fts_delete,
+                ):
+                    result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content(canonical) == content
+                assert store.get_source_content("docs/doc.md") == content
+                assert all(fts.has_knowledge_chunk(chunk_id) for chunk_id in legacy_ids)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_legacy_migration_without_fts_retains_both_sources(self):
         importer, store = _make_importer()
         try:
             with tempfile.TemporaryDirectory() as tmpdir:
                 path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "migration requires FTS confirmation"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content("docs/doc.md") == content
+                assert store.get_source_content(canonical) == content
+        finally:
+            _cleanup(store)
+
+    async def test_migrated_source_accepts_later_content_updates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
                 path.parent.mkdir()
                 path.write_text("original content", encoding="utf-8")
                 await store.ingest("original content", "docs/doc.md", dedup=False)
@@ -540,8 +662,10 @@ class TestLocalFileIntegrity:
                 assert updated.status == "ok"
                 assert store.get_source_content("docs/doc.md") is None
                 assert store.get_source_content(path.resolve().as_uri()) == "updated content"
-        finally:
-            _cleanup(store)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
 
     async def test_changed_legacy_source_conflicts_without_duplicate(self):
         importer, store = _make_importer()

@@ -4,6 +4,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import os
 from unittest.mock import AsyncMock
 
 from src.config.schema import ToolHost, ToolsConfig
@@ -157,6 +158,38 @@ def _split_raw(output: str) -> tuple[dict, bytes]:
     content = encoded[:content_bytes]
     assert encoded[content_bytes:] == _RAW_END.encode("ascii")
     return metadata, content
+
+
+async def test_raw_mode_temp_artifacts_are_private_and_unpredictable(tmp_path, monkeypatch):
+    target = tmp_path / "raw-private.txt"
+    target.write_bytes(b"private source bytes\n")
+    observed = tmp_path / "observed-modes.txt"
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    shim_dir = tmp_path / "shim"
+    shim_dir.mkdir()
+    shim = shim_dir / "base64"
+    shim.write_text(
+        "#!/bin/sh\n"
+        f"for p in \"$TMPDIR\"/*; do stat -c '%a %n' \"$p\"; "
+        f"done > {observed}\n"
+        "exec /usr/bin/base64 \"$@\"\n",
+        encoding="utf-8",
+    )
+    shim.chmod(0o755)
+    monkeypatch.setenv("PATH", f"{shim_dir}:{os.environ['PATH']}")
+    monkeypatch.setenv("TMPDIR", str(artifacts))
+
+    old_umask = os.umask(0o022)
+    try:
+        result = await _read(_executor(), target, raw=True)
+    finally:
+        os.umask(old_umask)
+
+    assert result.ok
+    modes = [line.split(" ", 1)[0] for line in observed.read_text().splitlines()]
+    assert len(modes) == 3
+    assert modes == ["600", "600", "600"]
 
 
 async def test_raw_mode_returns_framed_byte_faithful_content(tmp_path):

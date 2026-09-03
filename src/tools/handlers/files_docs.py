@@ -208,22 +208,28 @@ END {
             # line. The source bytes live only in a private temporary file, so
             # the text-only host transport never decodes or rewrites them.
             command = (
+                # Every artifact is independently and atomically allocated.
+                # Predictable suffixes both inherited the service umask and
+                # allowed a local attacker to pre-create a sidecar between
+                # mktemp and the first redirect.
                 "metadata=$(mktemp) || exit 1; "
-                "trap 'rm -f -- \"$metadata\" \"$metadata.body\" "
-                "\"$metadata.encoded\"' EXIT; "
+                "body=$(mktemp) || { rm -f -- \"$metadata\"; exit 1; }; "
+                "encoded=$(mktemp) || { rm -f -- \"$metadata\" \"$body\"; exit 1; }; "
+                "trap 'rm -f -- \"$metadata\" \"$body\" \"$encoded\"' EXIT; "
+                "chmod 600 -- \"$metadata\" \"$body\" \"$encoded\" || exit 1; "
                 f"final_newline=$(tail -c 1 < {safe_path} 2>/dev/null | wc -l); "
                 f"LC_ALL=C awk -v start={start_line} "
                 f"-v start_label={shlex.quote(start_label)} "
                 f"-v count={lines} -v budget={_READ_FILE_RAW_BODY_MAX_BYTES} "
                 f"-v final_newline=\"$final_newline\" "
                 "-v metadata=\"$metadata\" "
-                f"{shlex.quote(raw_awk_program)} < {safe_path} > \"$metadata.body\"; "
+                f"{shlex.quote(raw_awk_program)} < {safe_path} > \"$body\"; "
                 "status=$?; "
                 "if [ $status -ne 0 ]; then cat -- \"$metadata\"; "
-                "rm -f -- \"$metadata.body\"; exit $status; fi; "
-                "base64 < \"$metadata.body\" > \"$metadata.encoded\"; status=$?; "
+                "rm -f -- \"$body\"; exit $status; fi; "
+                "base64 < \"$body\" > \"$encoded\"; status=$?; "
                 "if [ $status -ne 0 ]; then exit $status; fi; "
-                "tr -d '\\r\\n' < \"$metadata.encoded\"; status=$?; "
+                "tr -d '\\r\\n' < \"$encoded\"; status=$?; "
                 "printf '\\n'; cat -- \"$metadata\"; exit $status"
             )
         else:
