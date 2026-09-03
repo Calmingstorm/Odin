@@ -407,7 +407,19 @@ END {
                 else "invalid result"
             )
             if isinstance(result, dict) and result.get("rollback_failed") is True:
-                return f"Error: apply_patch rollback failed; manual recovery required: {error}", 1
+                artifacts = result.get("recovery_artifacts")
+                retained = (
+                    " Retained private recovery artifacts: " + ", ".join(artifacts)
+                    if isinstance(artifacts, list)
+                    and artifacts
+                    and all(isinstance(path, str) for path in artifacts)
+                    else ""
+                )
+                return (
+                    "Error: apply_patch rollback failed; manual recovery required: "
+                    f"{error}.{retained}",
+                    1,
+                )
             return f"Error: apply_patch failed without changing the final file set: {error}", 1
         changed = result.get("changed")
         if not isinstance(changed, list) or not all(isinstance(item, str) for item in changed):

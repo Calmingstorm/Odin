@@ -5,6 +5,7 @@ _parse_page_range is pure logic; analyze_pdf's fitz (PyMuPDF, not installed here
 is injected as a fake module and aiohttp is faked, so no PDF library, network, or
 SSH is required.
 """
+
 from __future__ import annotations
 
 import sys
@@ -14,8 +15,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from src.tools.handlers.files_docs import FilesDocsTools
 
 
-def _tools(run_ret="file contents", govern=(True, "", None),
-           resolve=("1.2.3.4", "root", "linux"), exec_ret=(0, "")):
+def _tools(
+    run_ret="file contents",
+    govern=(True, "", None),
+    resolve=("1.2.3.4", "root", "linux"),
+    exec_ret=(0, ""),
+):
     t = FilesDocsTools.__new__(FilesDocsTools)
     t._run_on_host = AsyncMock(return_value=run_ret)
     t._govern_command = MagicMock(return_value=govern)
@@ -24,9 +29,7 @@ def _tools(run_ret="file contents", govern=(True, "", None),
     # analyze_pdf reads host binaries directly (not via the text pipeline), so
     # it needs the ssh paths config exposes.
     t._deps = SimpleNamespace(
-        config=lambda: SimpleNamespace(
-            ssh_key_path="/dev/null", ssh_known_hosts_path="/dev/null"
-        )
+        config=lambda: SimpleNamespace(ssh_key_path="/dev/null", ssh_known_hosts_path="/dev/null")
     )
     return t
 
@@ -49,6 +52,7 @@ def _fake_fitz(pages=None, error=None):
         if error:
             raise error
         return _FakeDoc(pages if pages is not None else ["page one text"])
+
     return SimpleNamespace(open=_open)
 
 
@@ -128,9 +132,7 @@ class TestReadFile:
         assert "-v count=17" in command
         assert "< '/tmp/name with spaces'" in command
 
-        await t._handle_read_file(
-            {"path": "/tmp/name with spaces", "host": "h", "raw": True}
-        )
+        await t._handle_read_file({"path": "/tmp/name with spaces", "host": "h", "raw": True})
         command = t._run_on_host.call_args.args[1]
         assert "LC_ALL=C awk" in command
         assert "ODIN_READ_FILE_RAW_META_V1" in command
@@ -149,8 +151,8 @@ class TestParsePageRange:
         f = FilesDocsTools._parse_page_range
         assert f("2-4", 10) == [1, 2, 3]
         assert f("3", 10) == [2]
-        assert f("99", 10) == list(range(10))       # out of range → all
-        assert f("a-b", 10) == list(range(10))       # unparseable range → all
+        assert f("99", 10) == list(range(10))  # out of range → all
+        assert f("a-b", 10) == list(range(10))  # unparseable range → all
         assert f("notanint", 10) == list(range(10))  # unparseable single → all
 
 
@@ -161,18 +163,18 @@ class TestAnalyzePdf:
         # "blocked URL" message. fitz is imported before the fetch, so fake it.
         from src.tools.safe_fetch import BlockedAddressError
 
-        assert _failed(
-            await _tools()._handle_analyze_pdf({"url": "ftp://x"}), "http://"
-        )
+        assert _failed(await _tools()._handle_analyze_pdf({"url": "ftp://x"}), "http://")
 
         async def _blocked(url, **kw):
             raise BlockedAddressError("blocked")
 
         # Pass the pre-flight (public URL) so the block is raised by safe_fetch
         # itself (e.g. a redirect hop to a private address).
-        with patch.dict(sys.modules, {"fitz": _fake_fitz()}), \
-             patch("src.tools.url_safety.is_url_blocked", return_value=False), \
-             patch("src.tools.safe_fetch.safe_fetch", _blocked):
+        with (
+            patch.dict(sys.modules, {"fitz": _fake_fitz()}),
+            patch("src.tools.url_safety.is_url_blocked", return_value=False),
+            patch("src.tools.safe_fetch.safe_fetch", _blocked),
+        ):
             assert _failed(
                 await _tools()._handle_analyze_pdf({"url": "http://example.com/x"}),
                 "blocked URL",
@@ -195,6 +197,7 @@ class TestAnalyzePdf:
         def _ff(status=200, body=b"%PDF fake"):
             async def _f(url, **kw):
                 return SafeFetchResponse(status, {}, body, "application/pdf", url, "")
+
             return _f
 
         async def _raise(url, **kw):
@@ -205,11 +208,14 @@ class TestAnalyzePdf:
                 out = await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"})
                 assert "Page 1" in out and "hello pdf" in out
             with patch("src.tools.safe_fetch.safe_fetch", _ff(404)):
-                assert _failed(await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"}), "HTTP 404")
+                assert _failed(
+                    await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"}), "HTTP 404"
+                )
             with patch("src.tools.safe_fetch.safe_fetch", _raise):
-                assert _failed(await _tools()._handle_analyze_pdf(
-                    {"url": "http://ok/doc.pdf"}), "Failed to fetch PDF")
+                assert _failed(
+                    await _tools()._handle_analyze_pdf({"url": "http://ok/doc.pdf"}),
+                    "Failed to fetch PDF",
+                )
 
             from src.tools.safe_fetch import ResponseTooLargeError
 
@@ -246,9 +252,7 @@ class TestAnalyzePdf:
     async def test_host_path_errors(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz()}):
             assert _failed(
-                await _tools(resolve=None)._handle_analyze_pdf(
-                    {"host": "h", "path": "/p"}
-                ),
+                await _tools(resolve=None)._handle_analyze_pdf({"host": "h", "path": "/p"}),
                 "Unknown or disallowed host",
             )
             with _binary(error="denied"):
@@ -262,31 +266,30 @@ class TestAnalyzePdf:
             assert _failed(await _tools()._handle_analyze_pdf({}), "Provide either")
 
     async def test_open_failure(self):
-        with patch.dict(
-            sys.modules, {"fitz": _fake_fitz(error=RuntimeError("bad pdf"))}
-        ), _binary(b"garbage"):
+        with (
+            patch.dict(sys.modules, {"fitz": _fake_fitz(error=RuntimeError("bad pdf"))}),
+            _binary(b"garbage"),
+        ):
             assert _failed(
                 await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"}),
                 "Failed to open PDF",
             )
 
     async def test_page_selection_and_empty(self):
-        with patch.dict(
-            sys.modules, {"fitz": _fake_fitz(pages=["one", "two", "three"])}
-        ), _binary():
-            out = await _tools()._handle_analyze_pdf(
-                {"host": "s", "path": "/p", "pages": "2"})
+        with (
+            patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["one", "two", "three"])}),
+            _binary(),
+        ):
+            out = await _tools()._handle_analyze_pdf({"host": "s", "path": "/p", "pages": "2"})
             assert "Page 2" in out and "two" in out and "Page 1" not in out
         # a 0-page doc yields no parts → empty result → the no-text fallback
         with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=[])}), _binary():
-            out = await _tools()._handle_analyze_pdf(
-                {"host": "s", "path": "/p"})
+            out = await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"})
             assert "no extractable text" in out
 
     async def test_truncation(self):
         with patch.dict(sys.modules, {"fitz": _fake_fitz(pages=["x" * 13000])}), _binary():
-            out = await _tools()._handle_analyze_pdf(
-                {"host": "s", "path": "/p"})
+            out = await _tools()._handle_analyze_pdf({"host": "s", "path": "/p"})
             assert "truncated" in out
 
 
@@ -297,6 +300,7 @@ def _binary(data: bytes = b"%PDF fake", error: str = ""):
     pipeline, which truncates at 16,000 chars — so anything over ~12KB arrived
     corrupt. It now reads raw bytes, and these tests fake that path instead.
     """
+
     async def _read(address, path, **kwargs):
         return (None, error) if error else (data, "")
 
@@ -339,3 +343,42 @@ async def test_analyze_pdf_degrades_cleanly_without_pymupdf(monkeypatch):
     assert _failed(result, "PDF support unavailable")
     message = result[0]
     assert "pdf" in message and "install" in message.lower(), "must name the remedy"
+
+
+class TestApplyPatchHandlerTransport:
+    async def test_patch_payload_is_base64_transport_and_private(self):
+        t = _tools(run_ret=(' {"ok":true,"changed":["a.txt"]} ', 0))
+        secret_line = "payload-never-literal-in-shell"
+        patch = f"*** Begin Patch\n*** Add File: a.txt\n+{secret_line}\n*** End Patch\n"
+        result = await t._handle_apply_patch({"host": "h", "root": "/repo", "patch_text": patch})
+        assert result[1] == 0
+        command = t._run_on_host.call_args.args[1]
+        assert secret_line not in command
+        assert command.count("$(mktemp)") == 2
+        assert 'chmod 600 -- "$runner" "$plan"' in command
+        assert "base64 -d" in command
+        assert 'python3 "$runner" /repo < "$plan"' in command
+
+    async def test_invalid_host_result_envelopes_fail_closed(self):
+        patch = "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n"
+        for response in (("not-json", 0), ('{"ok":true,"changed":"a.txt"}', 0), ("no", 7)):
+            t = _tools(run_ret=response)
+            result = await t._handle_apply_patch(
+                {"host": "h", "root": "/repo", "patch_text": patch}
+            )
+            assert result[1] != 0
+
+    async def test_rollback_failure_reports_retained_artifacts(self):
+        t = _tools(
+            run_ret=(
+                '{"ok":false,"error":"rollback failed","rollback_failed":true,'
+                '"rollback_failures":["x"],'
+                '"recovery_artifacts":["/repo/.odin-patch-recovery-abc"]}',
+                0,
+            )
+        )
+        patch = "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n"
+        result = await t._handle_apply_patch({"host": "h", "root": "/repo", "patch_text": patch})
+        assert result[1] == 1
+        assert "manual recovery required" in result[0]
+        assert "/repo/.odin-patch-recovery-abc" in result[0]
