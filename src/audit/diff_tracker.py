@@ -3,18 +3,10 @@
 Records unified diffs in audit log entries so operators can see exactly what
 changed, not just that a tool ran.
 """
+
 from __future__ import annotations
 
 import difflib
-import shlex
-from typing import TYPE_CHECKING
-
-from ..odin_log import get_logger
-
-if TYPE_CHECKING:
-    from ..tools.executor import ToolExecutor
-
-log = get_logger("diff_tracker")
 
 MAX_DIFF_CHARS = 4000
 
@@ -64,57 +56,19 @@ def extract_file_target(tool_name: str, tool_input: dict) -> tuple[str, str] | N
 
 
 class DiffTracker:
-    """Captures file snapshots before tool execution and computes diffs after."""
+    """Compatibility no-op: no current built-in has one whole-file target."""
 
     def __init__(self) -> None:
         self._snapshots: dict[str, str] = {}
 
-    async def capture_before(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        executor: ToolExecutor,
-    ) -> str | None:
-        """Read the current file content before a write. Returns a snapshot key or ``None``."""
-        target = extract_file_target(tool_name, tool_input)
-        if target is None:
-            return None
+    async def capture_before(self, *args, **kwargs) -> None:
+        del args, kwargs
+        return None
 
-        host, path = target
-        safe_path = shlex.quote(path)
-        try:
-            # _run_on_host returns (output, exit_code) for resolved hosts and a
-            # bare denial string for unknown ones (TS-0002 — treating the tuple
-            # as str raised AttributeError on every snapshot, silently recording
-            # "" as the before-content of every overwrite).
-            raw = await executor._run_on_host(host, f"cat {safe_path} 2>/dev/null || true")
-            if isinstance(raw, tuple):
-                output, code = raw
-                content = output if code == 0 else ""
-            else:
-                content = ""  # host-denial message; nothing readable
-        except Exception:
-            content = ""
-
-        key = f"{host}:{path}"
-        self._snapshots[key] = content
-        return key
-
-    def compute_diff(
-        self,
-        tool_name: str,
-        tool_input: dict,
-        snapshot_key: str | None,
-    ) -> str | None:
-        """Compute the before→after diff for a completed tool execution.
-
-        """
-        if snapshot_key is None:
-            return None
-
-        self._snapshots.pop(snapshot_key, "")
-
-
+    def compute_diff(self, *args, **kwargs) -> None:
+        del kwargs
+        if len(args) >= 3 and args[2] is not None:
+            self._snapshots.pop(args[2], None)
         return None
 
     def clear(self) -> None:
