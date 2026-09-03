@@ -983,12 +983,6 @@
   "percent": 64.18,
   "statements": 67
  },
- "src/tools/handlers/coding.py": {
-  "covered": 138,
-  "missing": 0,
-  "percent": 100.0,
-  "statements": 138
- },
  "src/tools/handlers/comms.py": {
   "covered": 52,
   "missing": 58,
