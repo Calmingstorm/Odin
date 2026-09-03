@@ -5,6 +5,7 @@ from __future__ import annotations
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
+from src.agents.manager import AgentManager
 from src.context.loader import ContextReloadReport
 from src.discord.slash_commands import (
     MESSAGE_LIMIT,
@@ -15,7 +16,9 @@ from src.discord.slash_commands import (
     render_status,
     render_usage,
 )
+from src.health.subsystem_guard import SubsystemGuard
 from src.llm.codex_quota import CodexQuotaTracker
+from src.tools.autonomous_loop import LoopManager
 
 NOW = 1_700_000_000.0
 
@@ -172,6 +175,22 @@ def test_render_quota_current_then_others_never_raw_identity():
     assert "cur" not in text.replace("(current)", "") and "oth" not in text
 
 
+def test_render_quota_normalizes_and_escapes_operator_labels():
+    tracker = CodexQuotaTracker(clock=lambda: NOW)
+    tracker.record_headers("cur", {"x-codex-primary-used-percent": "1"})
+    tracker.record_headers("oth", {"x-codex-primary-used-percent": "2"})
+    view = tracker.view(current_key="cur")
+    lines = render_quota(
+        view,
+        {"cur": "  **Ops**\n@everyone `quota`  ", "oth": "<@123> [other] <https://x>"},
+        NOW,
+    )
+    text = "\n".join(lines)
+    assert "\n@everyone" not in text and "@everyone" not in text
+    assert "\\*\\*Ops\\*\\*" in text and "\\`quota\\`" in text
+    assert "<@123>" not in text and "@\u200b" in text and "\\<https://x\\>" in text
+
+
 def test_render_status_shows_fallback_and_states():
     facts = {
         "version": "3.88.0",
@@ -205,10 +224,11 @@ def test_collect_status_degrades_every_field_to_unknown():
 
 
 def test_collect_status_uses_serving_identity_and_guard():
-    guard = SimpleNamespace(
-        is_available=lambda name: name != "llm_kimi",
-        is_usable=lambda name: name != "llm_ollama",
-    )
+    guard = SubsystemGuard()
+    for name in ("llm_codex", "llm_ollama", "llm_kimi"):
+        guard.register(name)
+    guard.mark_degraded("llm_ollama", "test")
+    guard.mark_unavailable("llm_kimi", "test")
     gateway = SimpleNamespace(
         capture_serving_identity=lambda: SimpleNamespace(
             provider="codex", model="gpt-5.6-sol", reasoning_effort="high"
@@ -226,9 +246,15 @@ def test_collect_status_uses_serving_identity_and_guard():
         latency=0.05,
         start_time=0.0,
         tool_catalog=SimpleNamespace(merged_definitions=lambda: [{}] * 7),
-        agent_manager=SimpleNamespace(active_count=lambda: 1),
-        loop_manager=SimpleNamespace(active_count=lambda: 4),
+        agent_manager=AgentManager(),
+        loop_manager=LoopManager(),
     )
+    bot.agent_manager._agents = {
+        "running": SimpleNamespace(_sm=SimpleNamespace(is_active=True)),
+    }
+    bot.loop_manager._loops = {
+        f"loop-{i}": SimpleNamespace(status="running") for i in range(4)
+    }
     facts = collect_status(bot)
     assert facts["providers"] == {
         "codex": "live, breaker half-open",

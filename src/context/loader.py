@@ -188,4 +188,3 @@ class ContextLoader:
 
 def _bounded(reason: str) -> str:
     return reason if len(reason) <= _REASON_LIMIT else reason[: _REASON_LIMIT - 1] + "…"
-

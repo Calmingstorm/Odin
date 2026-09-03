@@ -582,11 +582,61 @@ def test_missing_or_ambiguous_chain_refuses_without_mutation(tmp_path):
     missing = _STACKED.replace("@@     def method(self):", "@@     def absent(self):")
     with pytest.raises(PatchError, match="context mismatch"):
         apply_plan(str(tmp_path), parse_patch(_patch(missing)))
-    # first anchor must still be unique from the cursor
-    ambiguous_first = _STACKED.replace("@@ class Beta:", "@@     def method(self):")
+    # More than one complete monotonic anchor-chain + body match is ambiguous.
+    ambiguous_first = _STACKED.replace(
+        "@@ class Beta:\n@@     def method(self):",
+        "@@     def method(self):\n@@         x = 1",
+    )
     with pytest.raises(PatchError, match="ambiguous"):
         apply_plan(str(tmp_path), parse_patch(_patch(ambiguous_first)))
     assert (tmp_path / "mod.py").read_text() == _TWO_CLASSES
+
+
+def test_chain_does_not_jump_from_first_nested_target_to_later_matching_body(tmp_path):
+    original = (
+        "class A:\n"
+        "def f(self):\n"
+        "    return other\n"
+        "\n"
+        "class B:\n"
+        "def f(self):\n"
+        "    return x\n"
+    )
+    target = tmp_path / "nested.py"
+    target.write_text(original)
+    patch = _patch(
+        "*** Update File: nested.py\n"
+        "@@ class A:\n"
+        "@@ def f(self):\n"
+        "-    return x\n"
+        "+    return changed"
+    )
+
+    with pytest.raises(PatchError, match="ambiguous"):
+        apply_plan(str(tmp_path), parse_patch(patch))
+    assert target.read_text() == original
+
+
+def test_chain_rejects_duplicate_complete_body_matches_without_mutation(tmp_path):
+    original = (
+        "class A:\n"
+        "    def f(self):\n"
+        "        return x\n"
+        "        return x\n"
+    )
+    target = tmp_path / "duplicate.py"
+    target.write_text(original)
+    patch = _patch(
+        "*** Update File: duplicate.py\n"
+        "@@ class A:\n"
+        "@@     def f(self):\n"
+        "-        return x\n"
+        "+        return changed"
+    )
+
+    with pytest.raises(PatchError, match="ambiguous"):
+        apply_plan(str(tmp_path), parse_patch(patch))
+    assert target.read_text() == original
 
 
 def test_ordinary_hunks_stay_separate_and_bare_marker_opens_its_own_hunk():
@@ -614,6 +664,8 @@ def test_empty_hunk_errors_name_the_patch_line():
     too_many = "".join(f"@@ a{i}\n" for i in range(9)) + "-x\n+y"
     with pytest.raises(PatchError, match="more than 8 @@ anchors"):
         parse_patch(_patch("*** Update File: a\n" + too_many))
+    with pytest.raises(PatchError, match="control character.*patch line 3"):
+        parse_patch(_patch("*** Update File: a\n@@ anchor\tname\n-x\n+y"))
 
 
 @pytest.mark.parametrize(
@@ -623,6 +675,7 @@ def test_empty_hunk_errors_name_the_patch_line():
         {"anchors": "not-a-list", "lines": ["-x", "+y"]},
         {"anchors": [""], "lines": ["-x", "+y"]},
         {"anchors": ["bad\x01"], "lines": ["-x", "+y"]},
+        {"anchors": ["bad\tanchor"], "lines": ["-x", "+y"]},
         {"anchors": [f"a{i}" for i in range(9)], "lines": ["-x", "+y"]},
     ],
 )

@@ -17,6 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
+from src.agents.loop_bridge import LoopAgentBridge
+from src.agents.manager import AgentManager
+from src.agents.trajectory import AgentTrajectorySaver
 from src.config.schema import ContextCompressionConfig, OpenAICodexConfig
 from src.discord.background_task import MAX_STEPS
 from src.discord.native_tools.agents_tasks import (
@@ -369,6 +372,9 @@ class _FakeEffortClient:
         effort = effort if effort is not None else self.reasoning_effort
         return SimpleNamespace(
             text="hi", tool_calls=[], stop_reason="end_turn",
+            input_tokens=1000, output_tokens=5,
+            server_input_tokens=1000, server_output_tokens=5,
+            cached_tokens=800, cache_write_tokens=100,
             provenance_provider="codex",
             provenance_model=kw.get("model") or self.model,
             provenance_reasoning_effort=effort or None,
@@ -395,6 +401,8 @@ class TestAgentReasoningEffortCallback:
         assert out["reasoning_effort"] == "low"
         assert out["provider"] == "codex"
         assert out["model"] == "gpt-5.5"
+        assert out["cached_tokens"] == 800
+        assert out["cache_write_tokens"] == 100
 
     async def test_callback_inherits_when_unset(self):
         client = _FakeEffortClient()
@@ -472,6 +480,66 @@ class TestAgentReasoningEffortCallback:
         out = await cb([{"role": "user", "content": "x"}], "sys", [], generation_state={})
         assert client.captured["reasoning_effort"] == "medium"
         assert out["reasoning_effort"] == "medium"
+        assert out["cached_tokens"] == 800
+        assert out["cache_write_tokens"] == 100
+
+    async def test_direct_agent_real_path_persists_cache_attribution(self, tmp_path):
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(
+            agent_reasoning_effort="medium", agent_model=None, model="gpt-5.5"
+        )
+        manager = AgentManager()
+        saver = AgentTrajectorySaver(directory=str(tmp_path))
+        t = _tools(
+            get_config=lambda: cfg,
+            llm_gateway=_fake_gateway(client),
+            agent_manager=manager,
+            agent_trajectory_saver=saver,
+        )
+
+        result = await t._handle_spawn_agent(_message(), {"label": "cache", "goal": "finish"})
+        assert "spawned" in result.lower()
+        agent_id = next(iter(manager._agents))
+        await manager._agents[agent_id]._task
+        stored = await saver.find_by_agent_id(agent_id)
+        assert stored["iterations"][0]["cached_tokens"] == 800
+        assert stored["iterations"][0]["cache_write_tokens"] == 100
+
+    async def test_loop_agent_real_path_persists_cache_attribution(self, tmp_path):
+        client = _FakeEffortClient()
+        cfg = _cfg()
+        cfg.openai_codex = SimpleNamespace(
+            agent_reasoning_effort="medium", agent_model=None, model="gpt-5.5"
+        )
+        manager = AgentManager()
+        saver = AgentTrajectorySaver(directory=str(tmp_path))
+        bridge = LoopAgentBridge(manager, saver)
+        loop_manager = MagicMock()
+        loop_manager._loops = {
+            "L1": SimpleNamespace(
+                status="running", requester_id="1", requester_name="u",
+                goal="loop goal", iteration_count=1,
+            )
+        }
+        t = _tools(
+            get_config=lambda: cfg,
+            llm_gateway=_fake_gateway(client),
+            agent_manager=manager,
+            agent_trajectory_saver=saver,
+            loop_manager=loop_manager,
+            loop_agent_bridge=bridge,
+        )
+
+        result = await t._handle_spawn_loop_agents(
+            _message(), {"loop_id": "L1", "tasks": [{"label": "cache", "goal": "finish"}]}
+        )
+        assert "spawned" in result.lower()
+        agent_id = bridge.get_loop_agent_ids("L1")[0]
+        await manager._agents[agent_id]._task
+        stored = await saver.find_by_agent_id(agent_id)
+        assert stored["iterations"][0]["cached_tokens"] == 800
+        assert stored["iterations"][0]["cache_write_tokens"] == 100
 
 
 class TestAgentModelCallback:

@@ -160,6 +160,11 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                         raise PatchError(
                             f"Update File {path}: empty @@ anchor at patch line {index + 1}"
                         )
+                    if any(ord(ch) < 32 for ch in anchor):
+                        raise PatchError(
+                            f"Update File {path}: control character in @@ anchor at patch line "
+                            f"{index + 1}"
+                        )
                     if len(anchors) >= MAX_HUNK_ANCHORS:
                         raise PatchError(
                             f"Update File {path}: more than {MAX_HUNK_ANCHORS} @@ anchors "
@@ -300,11 +305,85 @@ def _find_unique(sequence: list[str], pattern: list[str], start: int, label: str
     return matches[0]
 
 
-def _find_first(sequence: list[str], pattern: list[str], start: int, label: str) -> int:
-    for idx in range(start, len(sequence) - len(pattern) + 1):
-        if sequence[idx : idx + len(pattern)] == pattern:
-            return idx
-    raise PatchError(f"context mismatch in {label}")
+def _matching_positions(sequence: list[str], pattern: list[str], start: int) -> list[int]:
+    """Return every exact occurrence of *pattern* at or after *start*."""
+    return [
+        idx
+        for idx in range(start, len(sequence) - len(pattern) + 1)
+        if sequence[idx : idx + len(pattern)] == pattern
+    ]
+
+
+def _find_unique_chain_body(
+    sequence: list[str],
+    anchors: list[str],
+    body: list[str],
+    start: int,
+    label: str,
+) -> int:
+    """Resolve exactly one complete monotonic anchor-chain + old-body match.
+
+    Counting complete tuples, rather than choosing the first later anchor or
+    body, prevents a plausible prefix from redirecting an edit into a later
+    nested or repeated target. Search stops after the second match because only
+    the zero/one/many distinction matters.
+    """
+    positions = [_matching_positions(sequence, [anchor], start) for anchor in anchors]
+    if any(not found for found in positions):
+        raise PatchError(f"context mismatch in {label}")
+
+    # Count monotonic prefixes ending at every anchor occurrence, saturated at
+    # two. This enumerates the complete chains without exponential recursion
+    # on a file full of repeated lines.
+    counts = [1] * len(positions[0])
+    for layer_index in range(1, len(positions)):
+        previous_positions = positions[layer_index - 1]
+        current_positions = positions[layer_index]
+        next_counts: list[int] = []
+        previous_index = 0
+        prefix_count = 0
+        for current in current_positions:
+            while (
+                previous_index < len(previous_positions)
+                and previous_positions[previous_index] < current
+            ):
+                prefix_count = min(2, prefix_count + counts[previous_index])
+                previous_index += 1
+            next_counts.append(prefix_count)
+        counts = next_counts
+
+    final_positions = positions[-1]
+    complete_count = 0
+    unique_at: int | None = None
+    if body:
+        final_index = 0
+        prefix_count = 0
+        for body_at in _matching_positions(sequence, body, start):
+            while final_index < len(final_positions) and final_positions[final_index] <= body_at:
+                prefix_count = min(2, prefix_count + counts[final_index])
+                final_index += 1
+            if prefix_count:
+                complete_count = min(2, complete_count + prefix_count)
+                unique_at = body_at
+            if complete_count > 1:
+                break
+    else:
+        for anchor_at, count in zip(final_positions, counts, strict=True):
+            if count:
+                complete_count = min(2, complete_count + count)
+                unique_at = anchor_at
+            if complete_count > 1:
+                break
+
+    if complete_count == 0:
+        raise PatchError(f"context mismatch in {label}")
+    if complete_count != 1:
+        raise PatchError(
+            f"context is ambiguous in {label}; the anchor chain and hunk body "
+            "have multiple complete matches"
+        )
+    assert unique_at is not None
+    return unique_at
 
 
 def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
@@ -314,26 +393,15 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
     cursor = 0
     for hunk in hunks:
         anchors = hunk["anchors"]
-        chained = len(anchors) > 1
-        if anchors:
-            # The first anchor must be unique from the cursor (unchanged rule).
-            # Further anchors NAVIGATE: each is the first occurrence after the
-            # previous one, which is what "@@ class X / @@ def y()" means in
-            # the dialect the model is taught.  A chain therefore pins one
-            # deterministic site, and the body is matched from there.
-            anchor_at = _find_unique(lines, [anchors[0]], cursor, path)
-            for anchor in anchors[1:]:
-                anchor_at = _find_first(lines, [anchor], anchor_at + 1, path)
-            cursor = anchor_at
         old_lines = [line[1:] for line in hunk["lines"] if line[0] in " -"]
         new_lines = [line[1:] for line in hunk["lines"] if line[0] in " +"]
-        if old_lines:
-            if chained:
-                at = _find_first(lines, old_lines, cursor, path)
-            else:
-                at = _find_unique(lines, old_lines, cursor, path)
+        if len(anchors) > 1:
+            at = _find_unique_chain_body(lines, anchors, old_lines, cursor, path)
         elif anchors:
-            at = cursor
+            anchor_at = _find_unique(lines, [anchors[0]], cursor, path)
+            at = _find_unique(lines, old_lines, anchor_at, path) if old_lines else anchor_at
+        elif old_lines:
+            at = _find_unique(lines, old_lines, cursor, path)
         else:
             at = len(lines)
         lines[at : at + len(old_lines)] = new_lines

@@ -16,7 +16,9 @@ from __future__ import annotations
 
 import asyncio
 import math
+import re
 import time
+import unicodedata
 from typing import Literal
 
 import discord
@@ -99,9 +101,9 @@ def _provider_state(bot, name: str) -> str:
     state = "live"
     if guard is not None:
         try:
-            if not guard.is_available(f"llm_{name}"):
+            if not guard.is_usable(f"llm_{name}"):
                 state = "unavailable"
-            elif not guard.is_usable(f"llm_{name}"):
+            elif not guard.is_available(f"llm_{name}"):
                 state = "degraded"
         except Exception:
             state = "live"
@@ -135,7 +137,7 @@ def collect_status(bot) -> dict:
     def _count(owner: str) -> int | None:
         manager = getattr(bot, owner, None)
         try:
-            return int(manager.active_count()) if manager is not None else None
+            return int(manager.active_count) if manager is not None else None
         except Exception:
             return None
 
@@ -252,9 +254,25 @@ def _short_window(snapshot) -> str:
     return f"{_fmt_percent(primary)}/{_fmt_percent(secondary)}"
 
 
+def _display_label(value: object, fallback: str) -> str:
+    """Normalize untrusted operator labels and neutralize Discord markup."""
+    raw = value if isinstance(value, str) else fallback
+    normalized = unicodedata.normalize("NFKC", raw)
+    normalized = "".join(
+        " " if unicodedata.category(ch).startswith("C") else ch for ch in normalized
+    )
+    normalized = " ".join(normalized.split())[:40] or fallback
+    # escape_mentions handles @everyone/@here; neutralizing every remaining @
+    # also keeps numeric user/role mention syntax inert.
+    normalized = discord.utils.escape_mentions(normalized.replace("@", "@\u200b"))
+    normalized = discord.utils.escape_markdown(normalized)
+    # Discord still recognizes angle-bracket autolinks after escape_markdown.
+    return re.sub(r"(?<!\\)([<>])", r"\\\1", normalized)
+
+
 def render_quota(view, labels: dict[str, str], now: float) -> list[str]:
     """Lines for the current account first, then other accounts last-seen."""
-    current_label = labels.get(view.current_key or "", "current account")
+    current_label = _display_label(labels.get(view.current_key or ""), "current account")
     lines: list[str] = []
     snapshot = view.current
     if snapshot is None:
@@ -288,7 +306,7 @@ def render_quota(view, labels: dict[str, str], now: float) -> list[str]:
     if view.others:
         others = []
         for other in view.others:
-            label = labels.get(other.account_key, "another account")
+            label = _display_label(labels.get(other.account_key), "another account")
             others.append(
                 f"{label} {_short_window(other)} ({_fmt_duration(now - other.observed_at)} ago)"
             )
