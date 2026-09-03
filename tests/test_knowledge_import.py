@@ -23,6 +23,8 @@ from src.knowledge.importer import (
 )
 from src.knowledge.store import KnowledgeStore
 from src.search.errors import validate_search_query
+from src.search.fts import FullTextIndex
+from src.tools.result_validator import ToolResult
 
 try:
     import fitz  # noqa: F401 — availability probe for the [pdf] extra
@@ -133,7 +135,7 @@ class TestImportDirectory:
                 results = await importer.import_directory(tmpdir)
                 assert len(results) == 1
                 assert results[0].status == "ok"
-                assert results[0].source == "readme.md"
+                assert results[0].source == md.resolve().as_uri()
                 assert results[0].chunks > 0
         finally:
             _cleanup(store)
@@ -160,7 +162,7 @@ class TestImportDirectory:
                 results = await importer.import_directory(tmpdir)
                 assert len(results) == 1
                 assert results[0].status == "ok"
-                assert "docs/api/endpoints.md" in results[0].source
+                assert results[0].source == (subdir / "endpoints.md").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -172,7 +174,7 @@ class TestImportDirectory:
                 (Path(tmpdir) / "b.txt").write_text("text file")
                 results = await importer.import_directory(tmpdir, pattern="**/*.txt")
                 assert len(results) == 1
-                assert results[0].source == "b.txt"
+                assert results[0].source == (Path(tmpdir) / "b.txt").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -184,8 +186,8 @@ class TestImportDirectory:
                 (Path(tmpdir) / "doc.md").write_text("valid doc")
                 results = await importer.import_directory(tmpdir, pattern="*")
                 sources = [r.source for r in results]
-                assert "doc.md" in sources
-                assert "binary.exe" not in sources
+                assert (Path(tmpdir) / "doc.md").resolve().as_uri() in sources
+                assert all("binary.exe" not in source for source in sources)
         finally:
             _cleanup(store)
 
@@ -197,8 +199,8 @@ class TestImportDirectory:
                 (Path(tmpdir) / "content.md").write_text("real content")
                 results = await importer.import_directory(tmpdir)
                 statuses = {r.source: r.status for r in results}
-                assert statuses.get("empty.md") == "skipped"
-                assert statuses.get("content.md") == "ok"
+                assert statuses.get((Path(tmpdir) / "empty.md").resolve().as_uri()) == "skipped"
+                assert statuses.get((Path(tmpdir) / "content.md").resolve().as_uri()) == "ok"
         finally:
             _cleanup(store)
 
@@ -253,7 +255,7 @@ class TestImportDirectory:
                 sub.mkdir()
                 (sub / "file.md").write_text("content")
                 results = await importer.import_directory(tmpdir)
-                assert results[0].source == "subdir/file.md"
+                assert results[0].source == (sub / "file.md").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -266,7 +268,554 @@ class TestImportDirectory:
                 results = await importer.import_directory(tmpdir, pattern="*")
                 ok_sources = {r.source for r in results if r.status == "ok"}
                 for ext in [".md", ".txt", ".rst", ".yaml", ".json", ".toml"]:
-                    assert f"file{ext}" in ok_sources
+                    assert (Path(tmpdir) / f"file{ext}").resolve().as_uri() in ok_sources
+        finally:
+            _cleanup(store)
+
+
+    async def test_matched_entry_that_is_not_a_file_is_ignored(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "ignored.md"
+                path.write_text("ignored", encoding="utf-8")
+                with patch.object(Path, "is_file", return_value=False):
+                    results = await importer.import_directory(tmpdir)
+                assert results == []
+        finally:
+            _cleanup(store)
+
+    async def test_matched_directory_entry_removed_before_read(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "vanished.md"
+                path.write_text("temporary", encoding="utf-8")
+                original = Path.is_file
+
+                def remove_after_match(candidate):
+                    matched = original(candidate)
+                    if candidate == path.resolve() and matched:
+                        candidate.unlink()
+                    return matched
+
+                with patch.object(Path, "is_file", remove_after_match):
+                    results = await importer.import_directory(tmpdir)
+                assert len(results) == 1
+                assert results[0].status == "error"
+                assert "No such file" in results[0].error
+        finally:
+            _cleanup(store)
+
+
+class TestLocalFileIntegrity:
+    async def test_invalid_utf8_is_failed_without_ingestion(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "invalid.md"
+                path.write_bytes(b"valid\n\xff\xfe")
+                result = await importer.import_file(str(path))
+                assert result.status == "error"
+                assert "invalid UTF-8" in result.error
+                assert store.list_sources() == []
+        finally:
+            _cleanup(store)
+
+    def test_legacy_source_rejects_absolute_and_traversal_names(self):
+        path = Path("/tmp/project/docs/doc.md")
+        assert not BulkImporter._legacy_source_matches_path("", path)
+        assert not BulkImporter._legacy_source_matches_path("/tmp/project/docs/doc.md", path)
+        assert not BulkImporter._legacy_source_matches_path("../docs/doc.md", path)
+        assert not BulkImporter._legacy_source_matches_path("https://example.com/doc.md", path)
+
+    async def test_single_file_missing_and_outside_safe_roots(self):
+        importer, store = _make_importer()
+        try:
+            missing = await importer.import_file("/tmp/definitely-missing-odin-import.md")
+            assert missing.status == "error"
+            assert missing.error == "file not found"
+
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "outside.md"
+                path.write_text("outside", encoding="utf-8")
+                with patch("src.knowledge.importer.SAFE_IMPORT_ROOTS", ("/opt/odin",)):
+                    outside = await importer.import_file(str(path))
+                assert outside.status == "error"
+                assert "not in allowed import roots" in outside.error
+        finally:
+            _cleanup(store)
+
+    async def test_single_file_rejects_unsupported_extension(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "binary.bin"
+                path.write_bytes(b"not really binary")
+                result = await importer.import_file(str(path))
+                assert result.status == "skipped"
+                assert "unsupported file extension" in result.error
+                assert store.list_sources() == []
+        finally:
+            _cleanup(store)
+
+    async def test_file_growth_during_read_hits_size_fence(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "growing.md"
+                path.write_text("small", encoding="utf-8")
+                with patch.object(
+                    BulkImporter,
+                    "_read_file_bytes",
+                    return_value=b"x" * (MAX_FILE_BYTES + 1),
+                ):
+                    result = await importer.import_file(str(path))
+                assert result.status == "skipped"
+                assert "more than" in result.error
+                assert store.list_sources() == []
+        finally:
+            _cleanup(store)
+
+    async def test_single_file_import_is_first_class(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "one.md"
+                path.write_text("single-file content", encoding="utf-8")
+                result = await importer.import_file(str(path))
+                assert result.status == "ok"
+                assert result.source == path.resolve().as_uri()
+                assert store.get_source_content(result.source) == "single-file content"
+        finally:
+            _cleanup(store)
+
+    async def test_directory_base_does_not_change_source_identity(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                outer = Path(tmpdir) / "a"
+                inner = outer / "b"
+                inner.mkdir(parents=True)
+                path = inner / "doc.md"
+                path.write_text("stable identity content", encoding="utf-8")
+
+                first = await importer.import_directory(str(outer))
+                second = await importer.import_directory(str(inner))
+
+                canonical = path.resolve().as_uri()
+                assert first[0].source == canonical
+                assert second[0].source == canonical
+                assert [entry["source"] for entry in store.list_sources()] == [canonical]
+        finally:
+            _cleanup(store)
+
+    async def test_exact_legacy_source_is_migrated_to_canonical_identity(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "legacy migration content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "ok"
+                assert result.source == canonical
+                assert store.get_source_content("docs/doc.md") is None
+                assert store.get_source_content(canonical) == content
+                assert not fts.has_knowledge_source("docs/doc.md")
+                assert fts.has_knowledge_source(canonical)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_migration_recheck_uses_existing_canonical_source(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "raced migration content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+                original = importer._legacy_source_for
+                calls = 0
+
+                def migrate_then_observe_canonical(*args):
+                    nonlocal calls
+                    calls += 1
+                    if calls == 1:
+                        return original(*args)
+                    store.delete_source("docs/doc.md")
+                    store._conn.execute(
+                        "UPDATE knowledge_chunks SET source = ? WHERE source = ?",
+                        (path.resolve().as_uri(), "docs/doc.md"),
+                    )
+                    return None, None
+
+                # Simulate a concurrent importer completing migration between
+                # the optimistic check and admission to the shared lock.
+                with patch.object(importer, "_legacy_source_for", side_effect=[
+                    ("docs/doc.md", None), (None, None),
+                ]):
+                    await store.ingest(content, path.resolve().as_uri(), dedup=False)
+                    store.delete_source("docs/doc.md")
+                    result = await importer.import_file(str(path))
+
+                assert result.status == "ok"
+                assert store.get_source_content(path.resolve().as_uri()) == content
+        finally:
+            _cleanup(store)
+
+    async def test_migration_recheck_reports_new_conflict(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "raced conflict content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+                with patch.object(importer, "_legacy_source_for", side_effect=[
+                    ("docs/doc.md", None), (None, "legacy source conflict after lock"),
+                ]):
+                    result = await importer.import_file(str(path))
+                assert result.status == "error"
+                assert result.error == "legacy source conflict after lock"
+                assert store.get_source_content(path.resolve().as_uri()) is None
+        finally:
+            _cleanup(store)
+
+    async def test_failed_migration_copy_retains_partial_canonical(self):
+        store = MagicMock()
+        store.list_sources.return_value = [{
+            "source": "docs/doc.md",
+            "content_hash": KnowledgeStore._content_hash("copy failure content"),
+        }]
+        store._chunk_text.return_value = ["copy failure content"]
+        store.ingest = AsyncMock(return_value=0)
+        store.source_is_durable_async = AsyncMock(return_value=False)
+        store.delete_source_async = AsyncMock(return_value=0)
+        importer = BulkImporter(store)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "docs" / "doc.md"
+            path.parent.mkdir()
+            path.write_text("copy failure content", encoding="utf-8")
+            result = await importer.import_file(str(path))
+        assert result.status == "error"
+        assert "indexed 0/1 durably verified chunks" in result.error
+        assert "canonical copy retained" in result.error
+        store.delete_source_async.assert_not_called()
+
+    async def test_failed_legacy_delete_retains_canonical_copy(self):
+        store = MagicMock()
+        store.list_sources.return_value = [{
+            "source": "docs/doc.md",
+            "content_hash": KnowledgeStore._content_hash("delete failure content"),
+        }]
+        store._chunk_text.return_value = ["delete failure content"]
+        store.ingest = AsyncMock(return_value=1)
+        store.source_is_durable_async = AsyncMock(return_value=True)
+        store.delete_source_confirmed_async = AsyncMock(return_value=0)
+        importer = BulkImporter(store)
+        with tempfile.TemporaryDirectory() as tmpdir:
+            path = Path(tmpdir) / "docs" / "doc.md"
+            path.parent.mkdir()
+            path.write_text("delete failure content", encoding="utf-8")
+            result = await importer.import_file(str(path))
+        assert result.status == "error"
+        assert "canonical copy retained" in result.error
+        content_hash = KnowledgeStore._content_hash("delete failure content")
+        store.delete_source_confirmed_async.assert_awaited_once_with(
+            "docs/doc.md",
+            survivor_source=result.source,
+            survivor_expected_chunks=1,
+            survivor_content_hash=content_hash,
+            expected_source_hash=content_hash,
+        )
+        store.delete_source_async.assert_not_called()
+
+    async def test_failed_canonical_fts_create_keeps_searchable_legacy_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "canonical FTS create failure keeps legacy searchable"
+                path.write_text(content, encoding="utf-8")
+                legacy = "docs/doc.md"
+                canonical = path.resolve().as_uri()
+                assert await store.ingest(content, legacy, dedup=False) == 1
+                real_index = fts.index_knowledge_chunk
+
+                def fail_canonical_index(chunk_id, chunk, source, chunk_index):
+                    if source == canonical:
+                        return False
+                    return real_index(chunk_id, chunk, source, chunk_index)
+
+                with patch.object(
+                    fts, "index_knowledge_chunk", side_effect=fail_canonical_index,
+                ):
+                    result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content(canonical) is None  # canonical DB
+                assert not fts.has_knowledge_source(canonical)  # canonical FTS
+                assert store.get_source_content(legacy) == content  # legacy DB
+                assert fts.has_knowledge_source(legacy)  # legacy FTS
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_confirmed_delete_rechecks_survivor_under_write_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            try:
+                legacy = "docs/doc.md"
+                canonical = (base / "docs" / "doc.md").resolve().as_uri()
+                assert await store.ingest("legacy", legacy, dedup=False) == 1
+                assert await store.ingest("canonical", canonical, dedup=False) == 1
+                assert fts.delete_knowledge_source(canonical) == 1
+
+                removed = await store.delete_source_confirmed_async(
+                    legacy,
+                    survivor_source=canonical,
+                    survivor_expected_chunks=1,
+                )
+
+                assert removed == 0
+                assert store.get_source_content(legacy) == "legacy"
+                assert fts.has_knowledge_source(legacy)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_migration_refuses_changed_legacy_source_under_store_lock(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                original = "original legacy migration content"
+                changed = "changed legacy content after candidate selection"
+                path.write_text(original, encoding="utf-8")
+                legacy = "docs/doc.md"
+                canonical = path.resolve().as_uri()
+                assert await store.ingest(original, legacy, dedup=False) == 1
+                real_confirmed_delete = store.delete_source_confirmed_async
+
+                async def change_then_delete(source, **kwargs):
+                    assert await store.ingest(changed, legacy, dedup=False) == 1
+                    return await real_confirmed_delete(source, **kwargs)
+
+                with patch.object(
+                    store,
+                    "delete_source_confirmed_async",
+                    side_effect=change_then_delete,
+                ):
+                    result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert store.get_source_content(canonical) == original
+                assert fts.has_knowledge_source(canonical)
+                assert store.get_source_content(legacy) == changed
+                assert fts.has_knowledge_source(legacy)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_partial_fts_delete_cannot_erase_canonical_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "partial FTS migration content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+                real_delete = fts.delete_knowledge_source
+
+                def delete_fts_then_fail(source):
+                    real_delete(source)
+                    raise RuntimeError("simulated failure after FTS commit")
+
+                with patch.object(
+                    fts, "delete_knowledge_source", side_effect=delete_fts_then_fail,
+                ):
+                    result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content(canonical) == content
+                assert store.get_source_content("docs/doc.md") == content
+                assert fts.has_knowledge_source(canonical)
+                assert fts.has_knowledge_source("docs/doc.md")
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_db_delete_failure_restores_fts_and_retains_canonical_copy(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "DB failure migration content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+                legacy_ids = [
+                    row[0] for row in store._conn.execute(
+                        "SELECT chunk_id FROM knowledge_chunks WHERE source = ?",
+                        ("docs/doc.md",),
+                    ).fetchall()
+                ]
+                real_confirmed_delete = store.delete_source_confirmed
+
+                def fail_after_fts_delete(source, **kwargs):
+                    real_delete = fts.delete_knowledge_source
+
+                    def delete_fts_then_fail_knowledge_db(delete_source):
+                        real_delete(delete_source)
+                        store._conn.execute(
+                            "CREATE TRIGGER fail_legacy_delete BEFORE DELETE ON knowledge_chunks "
+                            "WHEN OLD.source = 'docs/doc.md' "
+                            "BEGIN SELECT RAISE(ABORT, 'simulated DB delete failure'); END"
+                        )
+                        store._conn.commit()
+
+                    with patch.object(
+                        fts,
+                        "delete_knowledge_source",
+                        side_effect=delete_fts_then_fail_knowledge_db,
+                    ):
+                        return real_confirmed_delete(source, **kwargs)
+
+                with patch.object(
+                    store, "delete_source_confirmed", side_effect=fail_after_fts_delete,
+                ):
+                    result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content(canonical) == content
+                assert store.get_source_content("docs/doc.md") == content
+                assert all(fts.has_knowledge_chunk(chunk_id) for chunk_id in legacy_ids)
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_legacy_migration_without_fts_retains_both_sources(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "migration requires FTS confirmation"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                canonical = path.resolve().as_uri()
+                assert result.status == "error"
+                assert "canonical copy retained" in result.error
+                assert store.get_source_content("docs/doc.md") == content
+                assert store.get_source_content(canonical) == content
+        finally:
+            _cleanup(store)
+
+    async def test_migrated_source_accepts_later_content_updates(self):
+        with tempfile.TemporaryDirectory() as tmpdir:
+            base = Path(tmpdir)
+            fts = FullTextIndex(str(base / "fts.db"))
+            store = KnowledgeStore(str(base / "knowledge.db"), fts_index=fts)
+            importer = BulkImporter(store)
+            try:
+                path = base / "docs" / "doc.md"
+                path.parent.mkdir()
+                path.write_text("original content", encoding="utf-8")
+                await store.ingest("original content", "docs/doc.md", dedup=False)
+                migrated = await importer.import_file(str(path))
+                assert migrated.status == "ok"
+
+                path.write_text("updated content", encoding="utf-8")
+                updated = await importer.import_file(str(path))
+
+                assert updated.status == "ok"
+                assert store.get_source_content("docs/doc.md") is None
+                assert store.get_source_content(path.resolve().as_uri()) == "updated content"
+            finally:
+                store.close()
+                if fts._conn is not None:
+                    fts._conn.close()
+
+    async def test_changed_legacy_source_conflicts_without_duplicate(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                path.write_text("new content", encoding="utf-8")
+                await store.ingest("old content", "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert "legacy source conflict" in result.error
+                assert store.get_source_content("docs/doc.md") == "old content"
+                assert store.get_source_content(path.resolve().as_uri()) is None
+        finally:
+            _cleanup(store)
+
+    async def test_ambiguous_legacy_sources_conflict_without_duplicate(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "docs" / "doc.md"
+                path.parent.mkdir()
+                content = "ambiguous content"
+                path.write_text(content, encoding="utf-8")
+                await store.ingest(content, "doc.md", dedup=False)
+                await store.ingest(content, "docs/doc.md", dedup=False)
+
+                result = await importer.import_file(str(path))
+
+                assert result.status == "error"
+                assert "2 have matching content" in result.error
+                assert store.get_source_content(path.resolve().as_uri()) is None
+                assert {entry["source"] for entry in store.list_sources()} == {
+                    "doc.md", "docs/doc.md",
+                }
         finally:
             _cleanup(store)
 
@@ -531,6 +1080,67 @@ class TestImportWebUrl:
         finally:
             _cleanup(store)
 
+    async def test_invalid_declared_text_encoding_is_failed(self):
+        importer, store = _make_importer()
+        try:
+            from src.tools.safe_fetch import SafeFetchResponse
+
+            response = SafeFetchResponse(
+                status=200,
+                headers={"Content-Type": "text/plain; charset=utf-8"},
+                body=b"valid\n\xff",
+                content_type="text/plain; charset=utf-8",
+                url="https://example.com/invalid.txt",
+            )
+
+            async def mock_fetch(url, **kwargs):
+                return response
+
+            with patch("src.tools.safe_fetch.safe_fetch", mock_fetch):
+                result = await importer.import_web_url(response.url)
+            assert result.status == "error"
+            assert "without data loss" in result.error
+            assert store.list_sources() == []
+        finally:
+            _cleanup(store)
+
+    async def test_declared_non_utf8_charset_is_supported_strictly(self):
+        importer, store = _make_importer()
+        try:
+            from src.tools.safe_fetch import SafeFetchResponse
+
+            response = SafeFetchResponse(
+                status=200,
+                headers={"Content-Type": "text/plain; charset=latin-1"},
+                body="café knowledge".encode("latin-1"),
+                content_type="text/plain; charset=latin-1",
+                url="https://example.com/latin1.txt",
+            )
+
+            async def mock_fetch(url, **kwargs):
+                return response
+
+            with patch("src.tools.safe_fetch.safe_fetch", mock_fetch):
+                result = await importer.import_web_url(response.url)
+            assert result.status == "ok"
+            assert store.get_source_content(response.url) == "café knowledge"
+        finally:
+            _cleanup(store)
+
+    async def test_store_failure_is_reported(self):
+        store = MagicMock()
+        store.ingest = AsyncMock(side_effect=RuntimeError("index failed"))
+        importer = BulkImporter(store)
+        response = _mock_aiohttp_response(
+            status=200,
+            text_data="valid web content",
+            headers={"Content-Type": "text/plain; charset=utf-8"},
+        )
+        with patch("src.tools.safe_fetch.safe_fetch", response):
+            result = await importer.import_web_url("https://example.com/fail")
+        assert result.status == "error"
+        assert result.error == "index failed"
+
     async def test_custom_source(self):
         importer, store = _make_importer()
         try:
@@ -641,6 +1251,29 @@ class TestImportBatch:
         finally:
             _cleanup(store)
 
+    async def test_file_type(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                path = Path(tmpdir) / "doc.md"
+                path.write_text("batch file import content", encoding="utf-8")
+                batch = await importer.import_batch([
+                    {"type": "file", "path": str(path)},
+                ])
+                assert batch.succeeded == 1
+                assert batch.results[0]["source"] == path.resolve().as_uri()
+        finally:
+            _cleanup(store)
+
+    async def test_file_missing_path(self):
+        importer, store = _make_importer()
+        try:
+            batch = await importer.import_batch([{"type": "file"}])
+            assert batch.failed == 1
+            assert "path is required" in batch.results[0]["error"]
+        finally:
+            _cleanup(store)
+
     async def test_directory_missing_path(self):
         importer, store = _make_importer()
         try:
@@ -714,6 +1347,18 @@ class TestImportBatch:
         finally:
             _cleanup(store)
 
+    async def test_skipped_result_is_counted(self):
+        importer, store = _make_importer()
+        try:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                batch = await importer.import_batch([
+                    {"type": "directory", "path": tmpdir},
+                ])
+                assert batch.skipped == 1
+                assert batch.results[0]["status"] == "skipped"
+        finally:
+            _cleanup(store)
+
     async def test_counts_accumulate(self):
         importer, store = _make_importer()
         try:
@@ -738,7 +1383,7 @@ class TestImportBatch:
                     {"type": "directory", "path": tmpdir, "pattern": "*.txt"},
                 ])
                 assert batch.succeeded == 1
-                assert batch.results[0]["source"] == "b.txt"
+                assert batch.results[0]["source"] == (Path(tmpdir) / "b.txt").resolve().as_uri()
         finally:
             _cleanup(store)
 
@@ -808,6 +1453,29 @@ class TestToolHandler:
             store, object(), "test-user",
         )
         assert "Search failed" in result
+
+    async def test_ingest_document_tool_reports_zero_as_failure(self):
+        from src.discord.background_task import _execute_tool
+
+        executor = MagicMock()
+        skill_mgr = MagicMock()
+        skill_mgr.has_skill.return_value = False
+        store = MagicMock()
+        store.ingest = AsyncMock(return_value=0)
+
+        result = await _execute_tool(
+            "ingest_document",
+            {"source": "doc.md", "content": "body"},
+            executor,
+            skill_mgr,
+            store,
+            object(),
+            "test-user",
+        )
+        assert isinstance(result, ToolResult)
+        assert result.ok is False
+        assert result.error == "Failed to ingest 'doc.md' durably."
+        assert str(result) == result.error
 
     async def test_bulk_ingest_tool_routing(self):
         from src.discord.background_task import _execute_tool
@@ -1057,7 +1725,7 @@ class TestToolDefinition:
         from src.tools.registry import TOOLS
         tool = next(t for t in TOOLS if t["name"] == "bulk_ingest_knowledge")
         item_schema = tool["input_schema"]["properties"]["items"]["items"]
-        assert item_schema["properties"]["type"]["enum"] == ["directory", "pdf", "url"]
+        assert item_schema["properties"]["type"]["enum"] == ["directory", "file", "pdf", "url"]
 
     def test_tool_has_description(self):
         from src.tools.registry import TOOLS

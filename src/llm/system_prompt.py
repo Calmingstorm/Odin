@@ -85,7 +85,7 @@ Scheduling timezone: {timezone_name}
 
 ## Tool Routing
 Match the task shape to the right tool:
-- **Read a file** → `read_file`. Never use run_command with inline Python to read files.
+- **Read a file** → `read_file`. Use its one-based `start_line` plus `lines` count for contiguous ranges and follow the returned continuation cursor. Numbered output is the interactive default; use `raw=true` for ingestion, hashing, or exact copying, and consume only its framed UTF-8 source content—not the metadata or end marker. Never use run_command with inline Python to read files.
 - **Multi-file code review, PR review, complex analysis** → `claude_code`. Holds its own context, avoids reread spirals.
 - **Single host state check or shell command** → `run_command`.
 - **Multi-step shell work, scripts, heredocs** → `run_script`.

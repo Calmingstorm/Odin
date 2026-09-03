@@ -9,7 +9,9 @@ baseline behavior (RFC-001 §8.1).
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -560,6 +562,106 @@ class TestLoopTermination:
         # Active-request bookkeeping cleaned up
         assert "99" not in bot.channel_state.active_requests
         assert not bot.channel_state.cancel_events["99"].is_set()
+
+    async def test_stop_preempts_inflight_effect_free_tool(self):
+        started = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocking_wait(*_args, **_kwargs):
+            started.set()
+            try:
+                await asyncio.sleep(3600)
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        fake = FakeLLM(
+            [tool_call_response(("wait_for_agents", {"agent_ids": ["a"]}))]
+        )
+        bot = make_bot(fake_llm=fake)
+        bot.native_tools.dispatch = blocking_wait
+        msg = FakeMessage("go")
+        task = asyncio.create_task(run_loop(bot, msg))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        bot.channel_state.cancel_events["99"].set()
+
+        text, _, is_error, tools_used, _ = await asyncio.wait_for(task, timeout=1)
+        assert cancelled.is_set()
+        assert text.startswith("Task stopped by user.")
+        assert is_error is False
+        assert tools_used == ["wait_for_agents"]
+
+    async def test_stop_kills_only_agents_linked_to_this_turn(self):
+        fake = FakeLLM([tool_call_response(("read_file", {"host": "h", "path": "/x"}))])
+        bot = make_bot(fake_llm=fake)
+        msg = FakeMessage("go", id=987654)
+
+        async def cancel_read(name, tool_input, user_id=None):
+            bot.channel_state.cancel_events["99"].set()
+            return ToolResult(output="done", tool_name=name)
+
+        bot.tool_executor.execute = cancel_read
+        # _stopped is synchronous; use a plain callable mock.
+        bot.tool_loop._kill_agents_for_turn = MagicMock(return_value=["a1", "a2"])
+
+        text, *_ = await run_loop(bot, msg)
+        bot.tool_loop._kill_agents_for_turn.assert_called_once_with("987654")
+        assert "Sent cancellation to 2 agent(s) spawned by this turn" in text
+
+    async def test_completed_observation_wins_simultaneous_stop_race(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+
+        async def completing_wait(*_args, **_kwargs):
+            started.set()
+            await release.wait()
+            return "complete", SimpleNamespace(rebuild_system_prompt=False)
+
+        fake = FakeLLM(
+            [tool_call_response(("wait_for_agents", {"agent_ids": ["a"]}))]
+        )
+        bot = make_bot(fake_llm=fake)
+        bot.native_tools.dispatch = completing_wait
+        msg = FakeMessage("go")
+        task = asyncio.create_task(run_loop(bot, msg))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        release.set()
+        bot.channel_state.cancel_events["99"].set()
+
+        text, *_ = await asyncio.wait_for(task, timeout=1)
+        assert text.startswith("Task stopped by user.")
+
+    async def test_stop_does_not_preempt_inflight_effect_capable_tool(self):
+        started = asyncio.Event()
+        release = asyncio.Event()
+        cancelled = asyncio.Event()
+
+        async def blocking_command(name, tool_input, user_id=None):
+            started.set()
+            try:
+                await release.wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+            return ToolResult(output="done", tool_name=name)
+
+        fake = FakeLLM(
+            [tool_call_response(("run_command", {"host": "h", "command": "x"}))]
+        )
+        bot = make_bot(fake_llm=fake)
+        bot.tool_executor.execute = blocking_command
+        msg = FakeMessage("go")
+        task = asyncio.create_task(run_loop(bot, msg))
+        await asyncio.wait_for(started.wait(), timeout=1)
+        bot.channel_state.cancel_events["99"].set()
+        await asyncio.sleep(0.05)
+
+        assert not task.done()
+        assert not cancelled.is_set()
+        release.set()
+        text, *_ = await asyncio.wait_for(task, timeout=1)
+        assert text.startswith("Task stopped by user.")
+        assert not cancelled.is_set()
 
     async def test_stop_during_tool_execution_reports_tools_used(self):
         """Cancel set while a tool executes → the after_tools checkpoint

@@ -80,6 +80,7 @@ class TestErrorBranches:
         with pytest.raises(Exception, match="closed database"):
             idx.search_sessions("content")
         assert idx.index_knowledge_chunk("k2", "x", "s", 0) is False
+        assert idx.get_knowledge_source_rows("src") is None
         with pytest.raises(Exception, match="closed database"):
             idx.search_knowledge("content")
         assert idx.delete_knowledge_source("src") == 0
@@ -88,3 +89,13 @@ class TestErrorBranches:
         with pytest.raises(Exception, match="closed database"):
             idx.search_channel_logs("x")
         assert idx.clear_channel_logs() is False
+
+
+def test_knowledge_source_probes_are_safe_without_a_connection(tmp_path):
+    """The confirmed-deletion probes must not raise when the index is closed."""
+    index = FullTextIndex(str(tmp_path / "fts.db"))
+    index._conn = None
+
+    assert index.count_knowledge_source("anything") == 0
+    assert index.has_knowledge_source("anything") is False
+    assert index.get_knowledge_source_rows("anything") is None

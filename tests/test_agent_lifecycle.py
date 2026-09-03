@@ -1123,6 +1123,7 @@ class TestWaitForAgentsWithStates:
             "state_history": finished._sm.history_as_dicts(),
             "depth": 0,
             "parent_id": None,
+            "turn_id": None,
             "children_ids": [],
         }
         assert results[running.id]["status"] == "running"
@@ -2269,3 +2270,45 @@ class TestNestedMalformedWaitInput:
         assert agent.state == AgentState.COMPLETED
         assert seen == [["bad"]]
         assert 91 in observed
+
+
+class TestTurnScopedAgentCancellation:
+    async def test_turn_link_inherits_and_kill_is_exact(self):
+        mgr = AgentManager()
+        iter_cb = AsyncMock(return_value={"text": "done", "tool_calls": []})
+        tool_cb = AsyncMock()
+
+        turn_a = mgr.spawn(
+            "a", "goal", "channel", "user", "name", iter_cb, tool_cb,
+            turn_id="turn-a",
+        )
+        child_a = mgr.spawn(
+            "child", "goal", "channel", "user", "name", iter_cb, tool_cb,
+            parent_id=turn_a, turn_id="forged-other-turn",
+        )
+        turn_b = mgr.spawn(
+            "b", "goal", "channel", "user", "name", iter_cb, tool_cb,
+            turn_id="turn-b",
+        )
+        unlinked = mgr.spawn(
+            "legacy", "goal", "channel", "user", "name", iter_cb, tool_cb,
+        )
+
+        assert mgr._agents[turn_a].turn_id == "turn-a"
+        assert mgr._agents[child_a].turn_id == "turn-a"
+        assert mgr._agents[turn_b].turn_id == "turn-b"
+        assert mgr._agents[unlinked].turn_id is None
+        assert set(mgr.kill_for_turn("turn-a")) == {turn_a, child_a}
+        assert mgr._agents[turn_a]._cancel_event.is_set()
+        assert mgr._agents[child_a]._cancel_event.is_set()
+        assert not mgr._agents[turn_b]._cancel_event.is_set()
+        assert not mgr._agents[unlinked]._cancel_event.is_set()
+        mgr.kill(turn_b)
+        mgr.kill(unlinked)
+        await asyncio.gather(
+            *(a._task for a in mgr._agents.values() if a._task is not None),
+            return_exceptions=True,
+        )
+        for cleanup in tuple(mgr._cleanup_tasks.values()):
+            cleanup.cancel()
+        await asyncio.gather(*mgr._cleanup_tasks.values(), return_exceptions=True)

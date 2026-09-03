@@ -46,7 +46,12 @@ class ChannelStateRegistry:
         self.channel_locks: dict[str, asyncio.Lock] = {}
         # Per-channel cancellation for /stop command
         self.cancel_events: dict[str, asyncio.Event] = {}
+        self._cancel_request_ids: dict[str, str] = {}
         self.active_requests: dict[str, str] = {}
+        # Per-channel completion signal for an owned /stop. Created lazily by
+        # request_stop so set_active_request remains event-loop agnostic.
+        self.stop_results: dict[str, asyncio.Future[str]] = {}
+        self._stop_waiters: dict[tuple[str, str], asyncio.Future[str]] = {}
         # Pending file attachments from skills — per-channel to avoid cross-channel leaks
         self.pending_files: dict[str, list[tuple[bytes, str]]] = {}
         # Track recently processed message IDs to prevent duplicate handling
@@ -85,18 +90,104 @@ class ChannelStateRegistry:
         ev = self.cancel_events.get(channel_id)
         return bool(ev and ev.is_set())
 
-    def set_active_request(self, channel_id: str, request_id: str) -> None:
-        self.active_requests[channel_id] = request_id
+    def set_active_request(
+        self,
+        channel_id: str,
+        request_id: str,
+        cancel_event: asyncio.Event | None = None,
+    ) -> asyncio.Event:
+        """Bind a fresh cancellation event to the new request owner.
 
-    def clear_active_request(self, channel_id: str, request_id: str) -> None:
-        """Clear the active-request marker and cancel flag — only if this
-        request still owns the channel (a newer request must not be cleared
-        by a stale one)."""
+        An existing turn retains its own Event object; replacing the channel
+        mapping must never clear that old object's already-delivered stop.
+        """
+        event = cancel_event or asyncio.Event()
+        event.clear()
+        self.cancel_events[channel_id] = event
+        self._cancel_request_ids[channel_id] = request_id
+        self.active_requests[channel_id] = request_id
+        # The public channel alias follows the new owner, but an old
+        # request's waiter remains request-owned until that request durably
+        # settles. Replacement must not publish a false terminal result.
+        self.stop_results.pop(channel_id, None)
+        return event
+
+    def request_stop(
+        self, channel_id: str
+    ) -> tuple[str, asyncio.Future[str]] | None:
+        """Atomically target the current request and set its cancel event.
+
+        No await occurs inside this method, so a terminal cleanup cannot land
+        between observing an active owner and setting a stale event that would
+        poison the next request.
+        """
+        request_id = self.active_requests.get(channel_id)
+        if request_id is None:
+            return None
+        event = self.cancel_events.get(channel_id)
+        if event is None or self._cancel_request_ids.get(channel_id) != request_id:
+            # Compatibility for owners registered without an explicit event;
+            # never borrow an event bound to another request.
+            event = asyncio.Event()
+            self.cancel_events[channel_id] = event
+            self._cancel_request_ids[channel_id] = request_id
+        key = (channel_id, request_id)
+        waiter = self._stop_waiters.get(key)
+        if waiter is None:
+            waiter = asyncio.get_running_loop().create_future()
+            self._stop_waiters[key] = waiter
+        self.stop_results[channel_id] = waiter
+        event.set()
+        return request_id, waiter
+
+    def finish_stop(self, channel_id: str, request_id: str, result: str) -> None:
+        """Publish this request's terminal /stop result to its slash waiter."""
+        waiter = self._stop_waiters.pop((channel_id, request_id), None)
+        if waiter is not None and not waiter.done():
+            waiter.set_result(result)
+        if self.stop_results.get(channel_id) is waiter:
+            self.stop_results.pop(channel_id, None)
+
+    def expire_stop_waiter(
+        self,
+        channel_id: str,
+        request_id: str,
+        waiter: asyncio.Future[str],
+    ) -> None:
+        """Drop a slash waiter after its bounded caller timeout."""
+        key = (channel_id, request_id)
+        if self._stop_waiters.get(key) is waiter:
+            self._stop_waiters.pop(key, None)
+        if self.stop_results.get(channel_id) is waiter:
+            self.stop_results.pop(channel_id, None)
+
+    def clear_active_request(
+        self,
+        channel_id: str,
+        request_id: str,
+        *,
+        resolve_stop_waiter: bool = True,
+    ) -> None:
+        """Clear request ownership only when *request_id* still owns it.
+
+        A failed durable cancellation passes ``resolve_stop_waiter=False`` so
+        the slash command reaches its bounded, truthful timeout instead of a
+        cleanup path publishing an acknowledgement without a terminal record.
+        """
         if self.active_requests.get(channel_id) == request_id:
+            waiter = self._stop_waiters.get((channel_id, request_id))
+            if resolve_stop_waiter:
+                self._stop_waiters.pop((channel_id, request_id), None)
+                if waiter is not None and not waiter.done():
+                    waiter.set_result("Task had already finished before /stop took effect.")
+                if self.stop_results.get(channel_id) is waiter:
+                    self.stop_results.pop(channel_id, None)
             self.active_requests.pop(channel_id, None)
-            ev = self.cancel_events.get(channel_id)
-            if ev is not None:
-                ev.clear()
+            if self._cancel_request_ids.get(channel_id) == request_id:
+                self._cancel_request_ids.pop(channel_id, None)
+                ev = self.cancel_events.get(channel_id)
+                if ev is not None:
+                    ev.clear()
 
     # -- message dedup -------------------------------------------------------
 
@@ -205,6 +296,7 @@ class ChannelStateRegistry:
         ]
         for cid in stale_cancel:
             del self.cancel_events[cid]
+            self._cancel_request_ids.pop(cid, None)
         stale_active = [
             cid
             for cid in self.active_requests
@@ -212,4 +304,20 @@ class ChannelStateRegistry:
             and not self.cancel_events.get(cid, asyncio.Event()).is_set()
         ]
         for cid in stale_active:
-            del self.active_requests[cid]
+            request_id = self.active_requests.get(cid)
+            if request_id is not None:
+                self.clear_active_request(cid, request_id)
+
+        # A terminal request normally removes its stop waiter through
+        # clear_active_request. This is only a bounded orphan sweep for legacy
+        # or partially initialized state with no active owner.
+        for cid in list(self.stop_results):
+            if cid not in self.active_requests and cid not in active_channels:
+                waiter = self.stop_results.pop(cid)
+                if not waiter.done():
+                    waiter.set_result("No active task in this channel.")
+        for key, waiter in list(self._stop_waiters.items()):
+            if key[0] not in self.active_requests and key[0] not in active_channels:
+                self._stop_waiters.pop(key, None)
+                if not waiter.done():
+                    waiter.set_result("No active task in this channel.")

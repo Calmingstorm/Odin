@@ -198,8 +198,15 @@ class SkillContext:
             )
         )
 
-    async def read_file(self, host: str, path: str, lines: int = 200) -> str:
-        """Read a file from a managed host. Returns file content."""
+    async def read_file(
+        self,
+        host: str,
+        path: str,
+        lines: int = 200,
+        start_line: int = 1,
+        raw: bool = False,
+    ) -> str:
+        """Read a contiguous file range, optionally as raw source content."""
         if is_path_denied(path):
             self._log.warning("Skill attempted to read denied path: %s", path)
             return f"Access denied: '{path}' is a restricted path."
@@ -210,6 +217,8 @@ class SkillContext:
                     "host": host,
                     "path": path,
                     "lines": lines,
+                    "start_line": start_line,
+                    "raw": raw,
                 },
             )
         )

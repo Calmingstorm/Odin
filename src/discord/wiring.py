@@ -851,6 +851,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             turn_store=services.turn_store,
             window_observer=services.window_observer,
             mcp_manager=services.mcp_manager,
+            kill_agents_for_turn=services.agent_manager.kill_for_turn,
         )
     )
     agent_task_tools = AgentTaskTools(

@@ -884,10 +884,13 @@ class TestLoopAgentBridge:
         t = _tools()
         t._loop_manager._loops = {"L1": self._running_loop()}
         t._loop_agent_bridge.spawn_agents_for_loop.return_value = ["ag1", "Error: bad"]
+        message = _message()
+        message.id = 5151
         out = await t._handle_spawn_loop_agents(
-            _message(), {"loop_id": "L1", "tasks": [
+            message, {"loop_id": "L1", "tasks": [
                 {"label": "a", "goal": "g"}, {"label": "b", "goal": "g"}]})
         assert "Spawned 1 agent(s): ag1" in out and "Errors: Error: bad" in out
+        assert t._loop_agent_bridge.spawn_agents_for_loop.call_args.kwargs["turn_id"] == "5151"
 
     async def test_collect_loop_agents(self):
         t = _tools()
@@ -1319,3 +1322,19 @@ class TestIntegrationFrozenProviderBreaker:
         assert response.text == "ok"
         assert calls == ["called"]
         assert registry.for_model("codex", "gpt-5.6-sol").snapshot()["state"] == "closed"
+
+
+async def test_spawn_agent_links_triggering_message_turn():
+    agent_manager = MagicMock()
+    agent_manager.spawn.return_value = "agent42"
+    deps = _deps(agent_manager=agent_manager)
+    tools = AgentTaskTools(deps)
+    message = _message()
+    message.id = 4242
+
+    result = await tools._handle_spawn_agent(
+        message, {"label": "linked", "goal": "work"}
+    )
+
+    assert not result.startswith("Error")
+    assert deps.agent_manager.spawn.call_args.kwargs["turn_id"] == "4242"

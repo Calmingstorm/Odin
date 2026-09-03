@@ -86,18 +86,63 @@ class TestReadFile:
     async def test_validation(self):
         assert "'path' is required" in await _tools()._handle_read_file({"host": "h"})
         assert "'host' is required" in await _tools()._handle_read_file({"path": "/p"})
+        assert "absolute path" in await _tools()._handle_read_file(
+            {"path": "relative.txt", "host": "h"}
+        )
 
-    async def test_success_and_bad_lines(self):
+    async def test_invalid_ranges_fail_clearly_without_executing(self):
+        for inp, fragment in (
+            ({"lines": "notanint"}, "'lines' must be a positive integer"),
+            ({"lines": 0}, "'lines' must be a positive integer"),
+            ({"lines": -2}, "'lines' must be a positive integer"),
+            ({"lines": 1001}, "'lines' must not exceed 1000"),
+            ({"lines": True}, "'lines' must be a positive integer"),
+            ({"start_line": "2"}, "'start_line' must be a positive"),
+            ({"start_line": 0}, "'start_line' must be a positive"),
+            ({"start_line": False}, "'start_line' must be a positive"),
+            ({"start_line": 2**53}, "'start_line' must not exceed"),
+            ({"raw": 1}, "'raw' must be a boolean"),
+            ({"raw": "true"}, "'raw' must be a boolean"),
+        ):
+            t = _tools()
+            out = await t._handle_read_file({"path": "/etc/x", "host": "h", **inp})
+            assert fragment in out
+            t._run_on_host.assert_not_awaited()
+
+    async def test_defaults_and_requested_range_reach_source_bounded_command(self):
         t = _tools()
-        out = await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": "notanint"})
-        assert out == "file contents"
-        assert "head -n 200" in t._run_on_host.call_args.args[1]  # bad → default 200
-        await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": 5000})
-        assert "head -n 1000" in t._run_on_host.call_args.args[1]  # clamped to 1000
-        await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": -2})
-        assert "head -n 1" in t._run_on_host.call_args.args[1]  # clamped to lower bound
-        await t._handle_read_file({"path": "/etc/x", "host": "h", "lines": float("inf")})
-        assert "head -n 200" in t._run_on_host.call_args.args[1]  # overflow → default
+        assert await t._handle_read_file({"path": "/etc/x", "host": "h"}) == "file contents"
+        command = t._run_on_host.call_args.args[1]
+        assert "-v start=1" in command
+        assert "-v start_label=n1" in command
+        assert "-v count=200" in command
+        assert "-v budget=10500" in command
+        assert "returned %.0f-%.0f, continue at start_line=%.0f" in command
+        assert "ODIN_READ_FILE_RAW_CONTENT_V1" not in command
+
+        await t._handle_read_file(
+            {"path": "/tmp/name with spaces", "host": "h", "start_line": 41, "lines": 17}
+        )
+        command = t._run_on_host.call_args.args[1]
+        assert "-v start=41" in command
+        assert "-v start_label=n41" in command
+        assert "-v count=17" in command
+        assert "< '/tmp/name with spaces'" in command
+
+        await t._handle_read_file(
+            {"path": "/tmp/name with spaces", "host": "h", "raw": True}
+        )
+        command = t._run_on_host.call_args.args[1]
+        assert "LC_ALL=C awk" in command
+        assert "ODIN_READ_FILE_RAW_META_V1" in command
+        assert "base64 <" in command
+        assert "tr -d" in command
+        assert command.count("$(mktemp)") == 3
+        assert 'chmod 600 -- "$metadata" "$body" "$encoded"' in command
+        assert "$metadata.body" not in command
+        assert "$metadata.encoded" not in command
+        assert "-v count=200" in command
+        assert "< '/tmp/name with spaces'" in command
 
 
 class TestWriteFile:

@@ -148,15 +148,21 @@ class FullTextIndex:
             return False
         try:
             with self._write_lock:
-                self._conn.execute(
-                    "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
-                )
-                self._conn.execute(
-                    "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) "
-                    "VALUES (?, ?, ?, ?)",
-                    (chunk_id, content, source, str(chunk_index)),
-                )
-                self._conn.commit()
+                try:
+                    self._conn.execute(
+                        "DELETE FROM knowledge_fts WHERE chunk_id = ?", (chunk_id,),
+                    )
+                    self._conn.execute(
+                        "INSERT INTO knowledge_fts (chunk_id, content, source, chunk_index) "
+                        "VALUES (?, ?, ?, ?)",
+                        (chunk_id, content, source, str(chunk_index)),
+                    )
+                    self._conn.commit()
+                except Exception:
+                    # DELETE + INSERT is one logical replacement. Do not leave
+                    # the DELETE pending for a later writer to commit.
+                    self._conn.rollback()
+                    raise
             return True
         except Exception as e:
             log.error("FTS knowledge index failed for %s: %s", chunk_id, e)
@@ -187,20 +193,63 @@ class FullTextIndex:
             for r in rows
         ]
 
+    def delete_knowledge_chunks(self, chunk_ids: set[str]) -> int:
+        """Delete exactly the named knowledge chunks and commit the change."""
+        if not self._conn or not chunk_ids:
+            return 0
+        try:
+            with self._write_lock:
+                try:
+                    placeholders = ",".join("?" for _ in chunk_ids)
+                    cursor = self._conn.execute(
+                        f"DELETE FROM knowledge_fts WHERE chunk_id IN ({placeholders})",
+                        tuple(chunk_ids),
+                    )
+                    self._conn.commit()
+                    return cursor.rowcount
+                except Exception:
+                    self._conn.rollback()
+                    raise
+        except Exception as exc:
+            log.error("FTS knowledge chunk delete failed: %s", exc)
+            return 0
+
     def delete_knowledge_source(self, source: str) -> int:
         if not self._conn:
             return 0
         try:
             with self._write_lock:
-                cursor = self._conn.execute(
-                    "DELETE FROM knowledge_fts WHERE source = ?", (source,),
-                )
-                self._conn.commit()
-                rowcount = cursor.rowcount
+                try:
+                    cursor = self._conn.execute(
+                        "DELETE FROM knowledge_fts WHERE source = ?", (source,),
+                    )
+                    self._conn.commit()
+                    rowcount = cursor.rowcount
+                except Exception:
+                    self._conn.rollback()
+                    raise
             return rowcount
         except Exception as e:
             log.error("FTS knowledge delete failed for '%s': %s", source, e)
             return 0
+
+    def count_knowledge_source(self, source: str) -> int:
+        """Return the durable FTS row count for *source*."""
+        if not self._conn:
+            return 0
+        row = self._conn.execute(
+            "SELECT COUNT(*) FROM knowledge_fts WHERE source = ?", (source,),
+        ).fetchone()
+        return int(row[0]) if row else 0
+
+    def has_knowledge_source(self, source: str) -> bool:
+        """Return whether any durable FTS row still names *source*."""
+        if not self._conn:
+            return False
+        row = self._conn.execute(
+            "SELECT 1 FROM knowledge_fts WHERE source = ? LIMIT 1", (source,),
+        ).fetchone()
+        return row is not None
 
     def has_knowledge_chunk(self, chunk_id: str) -> bool:
         if not self._conn:
@@ -209,6 +258,24 @@ class FullTextIndex:
             "SELECT 1 FROM knowledge_fts WHERE chunk_id = ? LIMIT 1", (chunk_id,),
         ).fetchone()
         return row is not None
+
+    def get_knowledge_source_rows(
+        self, source: str,
+    ) -> list[tuple[str, str, int]] | None:
+        """Return durable rows for *source*, or ``None`` if unreadable."""
+        if not self._conn:
+            return None
+        try:
+            with self._write_lock:
+                rows = self._conn.execute(
+                    "SELECT chunk_id, content, chunk_index FROM knowledge_fts "
+                    "WHERE source = ? ORDER BY chunk_id",
+                    (source,),
+                ).fetchall()
+            return [(str(row[0]), str(row[1]), int(row[2])) for row in rows]
+        except Exception as exc:
+            log.error("FTS knowledge verification failed for '%s': %s", source, exc)
+            return None
 
     # --- Channel log methods ---
 

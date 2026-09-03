@@ -91,11 +91,22 @@ def register_commands(bot) -> None:
             await interaction.response.send_message("Access denied.", ephemeral=True)
             return
         channel_id = str(interaction.channel_id)
-        event = bot.channel_state.cancel_events.setdefault(channel_id, asyncio.Event())
-        active = bot.channel_state.active_requests.get(channel_id)
-        if active:
-            event.set()
-            await interaction.response.send_message("Stopping current task...", ephemeral=True)
+        stop_target = bot.channel_state.request_stop(channel_id)
+        if stop_target is not None:
+            _request_id, waiter = stop_target
+            # A safe stop may need to wait for an effect-capable tool to finish.
+            # Defer before waiting so Discord's three-second interaction window
+            # does not turn a truthful acknowledgement into an expired one.
+            await interaction.response.defer(ephemeral=True)
+            try:
+                result = await asyncio.wait_for(asyncio.shield(waiter), timeout=10.0)
+            except TimeoutError:
+                bot.channel_state.expire_stop_waiter(channel_id, _request_id, waiter)
+                result = (
+                    "Stop requested, but the in-flight operation could not be "
+                    "safely interrupted yet."
+                )
+            await interaction.followup.send(result, ephemeral=True)
         else:
             await interaction.response.send_message(
                 "No active task in this channel.", ephemeral=True

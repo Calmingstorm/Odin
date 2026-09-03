@@ -387,6 +387,9 @@ class AgentInfo:
     root_id: str = ""
     depth: int = 0
     parent_id: str | None = None
+    # Originating main-turn identity. Children inherit it; channel/requester
+    # are intentionally not used because they span unrelated turns.
+    turn_id: str | None = None
     children_ids: list[str] = field(default_factory=list)
     _task: asyncio.Task | None = field(default=None, repr=False)
     _cancel_event: asyncio.Event | None = field(default=None, repr=False)
@@ -487,6 +490,7 @@ class AgentManager:
         generation_plan_provider: Callable | None = None,
         evidence_recorder: Callable | None = None,
         density_recorder: Callable | None = None,
+        turn_id: str | None = None,
     ) -> str:
         """Spawn a new agent. Returns agent_id on success, or 'Error: ...' string.
 
@@ -564,6 +568,7 @@ class AgentManager:
             channel_id=channel_id,
             requester_id=requester_id,
             requester_name=requester_name,
+            turn_id=(self._agents[parent_id].turn_id if parent_id else turn_id),
             depth=depth,
             parent_id=parent_id,
             iteration_timeout=iteration_timeout or ITERATION_CB_TIMEOUT,
@@ -719,6 +724,17 @@ class AgentManager:
         if task is not None and not task.done():
             task.cancel()
 
+    def kill_for_turn(self, turn_id: str) -> builtins.list[str]:
+        """Cancel exactly the active agents spawned by one main tool-loop turn."""
+        killed: builtins.list[str] = []
+        for agent in tuple(self._agents.values()):
+            if agent.turn_id == turn_id and agent._sm.is_active:
+                self._force_cancel(agent)
+                killed.append(agent.id)
+        if killed:
+            log.info("Killed %d agent(s) for stopped turn %s", len(killed), turn_id)
+        return killed
+
     def kill(self, agent_id: str, cascade: bool = True) -> str:
         """Cancel a running agent. If cascade=True, also kill all descendants."""
         agent = self._agents.get(agent_id)
@@ -774,6 +790,7 @@ class AgentManager:
             "state_history": agent._sm.history_as_dicts(),
             "depth": agent.depth,
             "parent_id": agent.parent_id,
+            "turn_id": agent.turn_id,
             "children_ids": list(agent.children_ids),
         }
 
@@ -916,6 +933,7 @@ class AgentManager:
         context_compression_enabled: bool = False,
         max_context_chars: int = 750000,
         keep_recent_iterations: int = 30,
+        turn_id: str | None = None,
     ) -> builtins.list[str]:
         """Spawn multiple agents at once. Returns list of agent_ids (or error strings).
 
@@ -946,6 +964,7 @@ class AgentManager:
                 context_compression_enabled=context_compression_enabled,
                 max_context_chars=max_context_chars,
                 keep_recent_iterations=keep_recent_iterations,
+                turn_id=turn_id,
             )
             ids.append(aid)
         return ids

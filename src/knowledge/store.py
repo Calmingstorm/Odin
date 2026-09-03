@@ -195,18 +195,28 @@ class KnowledgeStore:
             )
             if existing:
                 existing_source = existing[0]
-                if existing_source == source:
+                if existing_source == source and await asyncio.to_thread(
+                    self.source_is_durable, source, existing[1]
+                ):
                     log.info(
                         "Skipping ingest of '%s': content unchanged (hash=%s)",
                         source, doc_content_hash[:12],
                     )
-                    return existing[1]  # existing chunk count
-                log.info(
-                    "Skipping ingest of '%s': identical content already "
-                    "ingested as '%s' (hash=%s)",
-                    source, existing_source, doc_content_hash[:12],
+                    return existing[1]  # existing durable chunk count
+                if existing_source != source and await asyncio.to_thread(
+                    self.source_is_durable, existing_source, existing[1]
+                ):
+                    log.info(
+                        "Skipping ingest of '%s': identical content already "
+                        "ingested as '%s' (hash=%s)",
+                        source, existing_source, doc_content_hash[:12],
+                    )
+                    return 0
+                log.warning(
+                    "Ignoring non-durable duplicate source '%s' while ingesting '%s'",
+                    existing_source,
+                    source,
                 )
-                return 0
 
             # --- near-duplicate check (chunk-level overlap) ---
             chunk_hashes = [self._content_hash(c) for c in chunks]
@@ -214,16 +224,18 @@ class KnowledgeStore:
                 self._find_near_duplicate, chunk_hashes, source
             )
             if near_dup:
+                if await asyncio.to_thread(self.source_is_durable, near_dup[0]):
+                    log.warning(
+                        "Skipping ingest of '%s': %.0f%% chunk overlap with "
+                        "existing source '%s'",
+                        source, near_dup[1] * 100, near_dup[0],
+                    )
+                    return 0
                 log.warning(
-                    "Skipping ingest of '%s': %.0f%% chunk overlap with "
-                    "existing source '%s'",
-                    source, near_dup[1] * 100, near_dup[0],
+                    "Ignoring non-durable near-duplicate source '%s' while ingesting '%s'",
+                    near_dup[0],
+                    source,
                 )
-                return 0
-
-        # Capture old content for version diff
-        old_content = await asyncio.to_thread(self.get_source_content, source)
-        is_update = old_content is not None
 
         # Embed all chunks first (async, non-blocking — no DB state touched).
         vectors: list[list[float] | None] = []
@@ -240,22 +252,25 @@ class KnowledgeStore:
         # the async write lock. Pre-PR #18 this section raced itself under
         # concurrent ingest and produced silent SQLite misuse errors.
         async with self._write_lock:
-            # Remove any existing chunks for this source (blocking → offload)
-            await asyncio.to_thread(self.delete_source, source, _record_version=False)
-
-            # Batch write metadata + vectors to DB (blocking → offload)
+            # Capture the version base inside the same write admission that
+            # installs the replacement. Existing rows remain searchable until
+            # the complete replacement has been verified in DB and FTS.
+            old_content = await asyncio.to_thread(self.get_source_content, source)
+            is_update = old_content is not None
             indexed = await asyncio.to_thread(
                 self._write_chunks_sync, chunks, vectors, doc_hash_id, source,
                 now, uploader, doc_content_hash,
             )
 
-            # Record version
-            action = "update" if is_update else "create"
-            diff_summary = self._make_diff_summary(old_content, content)
-            await asyncio.to_thread(
-                self._record_version, source, doc_content_hash, content,
-                indexed, uploader, action, diff_summary,
-            )
+            # A version record is a success claim. Write it only after the
+            # complete source has been verified in every configured store.
+            if indexed == len(chunks):
+                action = "update" if is_update else "create"
+                diff_summary = self._make_diff_summary(old_content, content)
+                await asyncio.to_thread(
+                    self._record_version, source, doc_content_hash, content,
+                    indexed, uploader, action, diff_summary,
+                )
 
         log.info("Ingested '%s': %d/%d chunks indexed", source, indexed, len(chunks))
         return indexed
@@ -270,13 +285,23 @@ class KnowledgeStore:
         uploader: str,
         doc_content_hash: str = "",
     ) -> int:
-        """Write chunk metadata, FTS entries, and vectors to database (sync)."""
-        indexed = 0
+        """Install a complete DB/FTS document before retiring its old rows."""
+        conn = self._conn
+        assert conn is not None
+        old_ids = {
+            str(row[0])
+            for row in conn.execute(
+                "SELECT chunk_id FROM knowledge_chunks WHERE source = ?", (source,),
+            ).fetchall()
+        }
+        desired_rows: list[tuple[str, str, int]] = []
+        all_writes_ok = True
         for i, chunk in enumerate(chunks):
-            chunk_id = f"{doc_hash}_{i}"
+            chunk_id = f"{doc_hash}_{i}_{doc_content_hash[:12]}"
+            desired_rows.append((chunk_id, chunk, i))
             chunk_hash = self._content_hash(chunk)
             try:
-                self._conn.execute(  # type: ignore[union-attr]
+                conn.execute(
                     "INSERT OR REPLACE INTO knowledge_chunks "
                     "(chunk_id, content, source, chunk_index, total_chunks, "
                     "uploader, ingested_at, content_hash, doc_content_hash) "
@@ -284,24 +309,125 @@ class KnowledgeStore:
                     (chunk_id, chunk, source, i, len(chunks), uploader, now,
                      chunk_hash, doc_content_hash),
                 )
-                if self._fts:
-                    self._fts.index_knowledge_chunk(chunk_id, chunk, source, i)
+                if self._fts and not self._fts.index_knowledge_chunk(
+                    chunk_id, chunk, source, i,
+                ):
+                    all_writes_ok = False
+                    log.error("Failed to index chunk %d of '%s' in FTS", i, source)
                 if vectors[i] is not None:
-                    vec_bytes = serialize_vector(vectors[i])  # type: ignore[arg-type]  # guarded by is-not-None above
-                    # vec0 tables don't honor INSERT OR REPLACE (same issue as
-                    # session_vec) — delete-then-insert keeps re-ingest idempotent.
-                    self._conn.execute(  # type: ignore[union-attr]
-                        "DELETE FROM knowledge_vec WHERE chunk_id = ?", (chunk_id,)
+                    vec_bytes = serialize_vector(vectors[i])  # type: ignore[arg-type]
+                    conn.execute(
+                        "DELETE FROM knowledge_vec WHERE chunk_id = ?", (chunk_id,),
                     )
-                    self._conn.execute(  # type: ignore[union-attr]
+                    conn.execute(
                         "INSERT INTO knowledge_vec (chunk_id, embedding) VALUES (?, ?)",
                         (chunk_id, vec_bytes),
                     )
-                indexed += 1
-            except Exception as e:
-                log.error("Failed to index chunk %d of '%s': %s", i, source, e)
-        self._conn.commit()  # type: ignore[union-attr]
-        return indexed
+            except Exception as exc:
+                all_writes_ok = False
+                log.error("Failed to index chunk %d of '%s': %s", i, source, exc)
+        try:
+            if all_writes_ok:
+                conn.commit()
+            else:
+                conn.rollback()
+        except Exception as exc:
+            conn.rollback()
+            log.error("Failed to commit replacement for '%s': %s", source, exc)
+            return 0
+
+        if not all_writes_ok or not self._source_contains_rows(source, desired_rows):
+            log.error("Failed durable DB/FTS verification for '%s' after ingest", source)
+            return 0
+
+        desired_ids = {row[0] for row in desired_rows}
+        obsolete_ids = old_ids - desired_ids
+        if obsolete_ids:
+            obsolete_fts_ids: set[str] = set()
+            if self._fts:
+                obsolete_fts_ids = {
+                    chunk_id for chunk_id in obsolete_ids
+                    if self._fts.has_knowledge_chunk(chunk_id)
+                }
+                if obsolete_fts_ids:
+                    removed_fts = self._fts.delete_knowledge_chunks(obsolete_fts_ids)
+                    if removed_fts != len(obsolete_fts_ids) or any(
+                        self._fts.has_knowledge_chunk(chunk_id)
+                        for chunk_id in obsolete_fts_ids
+                    ):
+                        log.error("Failed to retire old FTS rows for '%s'", source)
+                        return 0
+            placeholders = ",".join("?" for _ in obsolete_ids)
+            try:
+                if self._has_vec:
+                    conn.execute(
+                        f"DELETE FROM knowledge_vec WHERE chunk_id IN ({placeholders})",
+                        tuple(obsolete_ids),
+                    )
+                conn.execute(
+                    f"DELETE FROM knowledge_chunks WHERE chunk_id IN ({placeholders})",
+                    tuple(obsolete_ids),
+                )
+                conn.commit()
+            except Exception as exc:
+                conn.rollback()
+                log.error("Failed to retire old DB rows for '%s': %s", source, exc)
+                return 0
+
+        if not self.source_is_durable(
+            source,
+            expected_chunks=len(chunks),
+            expected_content_hash=doc_content_hash,
+        ):
+            log.error("Final durable DB/FTS verification failed for '%s'", source)
+            return 0
+        if self._has_vec:
+            expected_vector_ids = {
+                desired_rows[i][0]
+                for i, vector in enumerate(vectors)
+                if vector is not None
+            }
+            vector_ids = {
+                str(row[0])
+                for row in conn.execute(
+                    "SELECT v.chunk_id FROM knowledge_vec v "
+                    "JOIN knowledge_chunks c ON c.chunk_id = v.chunk_id "
+                    "WHERE c.source = ?",
+                    (source,),
+                ).fetchall()
+            }
+            if vector_ids != expected_vector_ids:
+                log.error("Final vector verification failed for '%s'", source)
+                return 0
+        return len(chunks)
+
+    def _source_contains_rows(
+        self,
+        source: str,
+        expected_rows: list[tuple[str, str, int]],
+    ) -> bool:
+        """Verify expected chunk rows exist in both DB and configured FTS."""
+        if not self.available:
+            return False
+        try:
+            db_rows = self._conn.execute(  # type: ignore[union-attr]
+                "SELECT chunk_id, content, chunk_index FROM knowledge_chunks "
+                "WHERE source = ?",
+                (source,),
+            ).fetchall()
+            expected = set(expected_rows)
+            db_set = {(str(row[0]), str(row[1]), int(row[2])) for row in db_rows}
+            if not expected.issubset(db_set):
+                return False
+            if self._fts is None:
+                return True
+            if not self._fts.available:
+                return False
+            fts_rows = self._fts.get_knowledge_source_rows(source)
+            return fts_rows is not None and expected.issubset(set(fts_rows))
+        except Exception as exc:
+            log.error("Chunk-row verification failed for '%s': %s", source, exc)
+            return False
 
     async def search(
         self,
@@ -466,10 +592,67 @@ class KnowledgeStore:
         except Exception:
             return None
 
+    def source_is_durable(
+        self,
+        source: str,
+        expected_chunks: int | None = None,
+        *,
+        require_fts: bool = False,
+        expected_content_hash: str | None = None,
+    ) -> bool:
+        """Verify that *source* is complete in the DB and configured FTS store."""
+        if not self.available:
+            return False
+        try:
+            rows = self._conn.execute(  # type: ignore[union-attr]
+                "SELECT chunk_id, content, chunk_index, doc_content_hash "
+                "FROM knowledge_chunks WHERE source = ? ORDER BY chunk_id",
+                (source,),
+            ).fetchall()
+            db_rows = [(str(row[0]), str(row[1]), int(row[2])) for row in rows]
+            if not db_rows:
+                return False
+            if expected_chunks is not None and len(db_rows) != expected_chunks:
+                return False
+            if expected_content_hash is not None and any(
+                str(row[3] or "") != expected_content_hash for row in rows
+            ):
+                return False
+            if self._fts is None:
+                return not require_fts
+            if not self._fts.available:
+                return False
+            fts_rows = self._fts.get_knowledge_source_rows(source)
+            return fts_rows is not None and fts_rows == db_rows
+        except Exception as exc:
+            log.error("Durability verification failed for '%s': %s", source, exc)
+            return False
+
+    async def source_is_durable_async(
+        self,
+        source: str,
+        expected_chunks: int | None = None,
+        *,
+        require_fts: bool = False,
+        expected_content_hash: str | None = None,
+    ) -> bool:
+        """Run :meth:`source_is_durable` off the event loop."""
+        return await asyncio.to_thread(
+            self.source_is_durable,
+            source,
+            expected_chunks,
+            require_fts=require_fts,
+            expected_content_hash=expected_content_hash,
+        )
+
     def delete_source(self, source: str, *, _record_version: bool = True) -> int:
         """Delete all chunks for a document source. Returns count deleted."""
         if not self.available:
             return 0
+        if self._fts is not None:
+            return self.delete_source_confirmed(
+                source, _record_version=_record_version,
+            )
 
         try:
             # Get chunk IDs for this source
@@ -482,13 +665,10 @@ class KnowledgeStore:
             if not ids:
                 return 0
 
-            # Record version before deleting content
-            if _record_version:
-                content = self.get_source_content(source)
-                content_hash = self._content_hash(content) if content else ""
-                self._record_version(
-                    source, content_hash, None, 0, "system", "delete", "deleted",
-                )
+            # Snapshot version metadata, but do not record a successful delete
+            # until absence has been verified in every configured store.
+            content = self.get_source_content(source) if _record_version else None
+            content_hash = self._content_hash(content) if content else ""
 
             # Delete from vector table
             if self._has_vec:
@@ -501,14 +681,184 @@ class KnowledgeStore:
                 "DELETE FROM knowledge_chunks WHERE source = ?", (source,)
             )
             self._conn.commit()  # type: ignore[union-attr]
-            # Delete from FTS
-            if self._fts:
-                self._fts.delete_knowledge_source(source)
+            db_remains = self._conn.execute(  # type: ignore[union-attr]
+                "SELECT 1 FROM knowledge_chunks WHERE source = ? LIMIT 1", (source,),
+            ).fetchone()
+            if db_remains:
+                log.error("Delete failed durable DB verification for '%s'", source)
+                return 0
+            if _record_version:
+                self._record_version(
+                    source, content_hash, None, 0, "system", "delete", "deleted",
+                )
             log.info("Deleted %d chunks for source '%s'", len(ids), source)
             return len(ids)
         except Exception as e:
             log.error("Failed to delete source '%s': %s", source, e)
         return 0
+
+    def delete_source_confirmed(
+        self,
+        source: str,
+        *,
+        survivor_source: str | None = None,
+        survivor_expected_chunks: int | None = None,
+        survivor_content_hash: str | None = None,
+        expected_source_hash: str | None = None,
+        _record_version: bool = False,
+    ) -> int:
+        """Delete *source* only after confirming FTS removal.
+
+        This is the migration-safe deletion path. FTS is removed and checked
+        first, while the source of truth still exists in ``knowledge_chunks``.
+        The DB rows are committed only after that check passes, then both
+        stores are checked again. Any partial failure returns zero; callers
+        must retain the replacement document.
+        """
+        if not self.available or self._fts is None or not self._fts.available:
+            log.error(
+                "Confirmed delete refused for '%s': DB and FTS must both be available",
+                source,
+            )
+            return 0
+        conn = self._conn
+        assert conn is not None
+        rows = conn.execute(
+            "SELECT chunk_id, content, chunk_index FROM knowledge_chunks "
+            "WHERE source = ? ORDER BY chunk_index",
+            (source,),
+        ).fetchall()
+        if not rows:
+            return 0
+        content = self.get_source_content(source) if _record_version else None
+        content_hash = self._content_hash(content) if content else ""
+
+        try:
+            if survivor_source and not self.source_is_durable(
+                survivor_source,
+                expected_chunks=survivor_expected_chunks,
+                require_fts=True,
+                expected_content_hash=survivor_content_hash,
+            ):
+                log.error(
+                    "Confirmed delete refused for '%s': survivor '%s' is not durable",
+                    source,
+                    survivor_source,
+                )
+                return 0
+            if self._fts:
+                if not self.source_is_durable(
+                    source,
+                    expected_chunks=len(rows),
+                    require_fts=True,
+                    expected_content_hash=expected_source_hash,
+                ):
+                    log.error(
+                        "Confirmed delete refused for '%s': DB/FTS rows do not match",
+                        source,
+                    )
+                    return 0
+                removed_fts = self._fts.delete_knowledge_source(source)
+                fts_remains = self._fts.has_knowledge_source(source)
+                if removed_fts != len(rows) or fts_remains:
+                    # delete_knowledge_source may commit and then report/fail;
+                    # restore from the still-authoritative DB snapshot before
+                    # refusing the migration.
+                    restored = True
+                    for chunk_id, content, chunk_index in rows:
+                        restored = self._fts.index_knowledge_chunk(
+                            chunk_id, content, source, int(chunk_index),
+                        ) and restored
+                    restored = self.source_is_durable(
+                        source, expected_chunks=len(rows), require_fts=True,
+                    ) and restored
+                    log.error(
+                        "Confirmed delete refused for '%s': FTS removal was not durable; "
+                        "restore_verified=%s",
+                        source,
+                        restored,
+                    )
+                    return 0
+
+            if self._has_vec:
+                for chunk_id, _content, _index in rows:
+                    conn.execute(
+                        "DELETE FROM knowledge_vec WHERE chunk_id = ?", (chunk_id,),
+                    )
+            conn.execute("DELETE FROM knowledge_chunks WHERE source = ?", (source,))
+            conn.commit()
+
+            db_remains = conn.execute(
+                "SELECT 1 FROM knowledge_chunks WHERE source = ? LIMIT 1", (source,),
+            ).fetchone()
+            fts_remains = bool(
+                self._fts and self._fts.has_knowledge_source(source)
+            )
+            if db_remains or fts_remains:
+                log.error(
+                    "Confirmed delete failed for '%s': db_remains=%s fts_remains=%s",
+                    source,
+                    bool(db_remains),
+                    fts_remains,
+                )
+                return 0
+            if _record_version:
+                self._record_version(
+                    source, content_hash, None, 0, "system", "delete", "deleted",
+                )
+            log.info("Confirmed deletion of %d chunks for source '%s'", len(rows), source)
+            return len(rows)
+        except Exception as exc:
+            try:
+                conn.rollback()
+            except Exception:
+                pass
+            # If FTS was committed first but the DB deletion failed, restore
+            # its searchable rows from the still-authoritative DB snapshot.
+            db_remains = False
+            try:
+                db_remains = conn.execute(
+                    "SELECT 1 FROM knowledge_chunks WHERE source = ? LIMIT 1", (source,),
+                ).fetchone() is not None
+            except Exception:
+                pass
+            fts_missing = bool(
+                self._fts and not self._fts.has_knowledge_source(source)
+            )
+            if db_remains and fts_missing and self._fts:
+                restored = True
+                for chunk_id, content, chunk_index in rows:
+                    restored = self._fts.index_knowledge_chunk(
+                        chunk_id, content, source, int(chunk_index),
+                    ) and restored
+                if not restored or not self.source_is_durable(
+                    source, expected_chunks=len(rows), require_fts=True,
+                ):
+                    log.error("Failed to restore FTS rows for '%s'", source)
+            log.error("Confirmed delete failed for source '%s': %s", source, exc)
+            return 0
+
+    async def delete_source_confirmed_async(
+        self,
+        source: str,
+        *,
+        survivor_source: str | None = None,
+        survivor_expected_chunks: int | None = None,
+        survivor_content_hash: str | None = None,
+        expected_source_hash: str | None = None,
+        _record_version: bool = False,
+    ) -> int:
+        """Run migration-safe confirmed deletion under the async write lock."""
+        async with self._write_lock:
+            return await asyncio.to_thread(
+                self.delete_source_confirmed,
+                source,
+                survivor_source=survivor_source,
+                survivor_expected_chunks=survivor_expected_chunks,
+                survivor_content_hash=survivor_content_hash,
+                expected_source_hash=expected_source_hash,
+                _record_version=_record_version,
+            )
 
     async def delete_source_async(self, source: str) -> int:
         """Delete a source under the write lock, off the event loop.
@@ -574,8 +924,11 @@ class KnowledgeStore:
             if self._fts.has_knowledge_chunk(chunk_id):
                 continue
             if content:
-                self._fts.index_knowledge_chunk(chunk_id, content, source, chunk_index)
-                count += 1
+                indexed = self._fts.index_knowledge_chunk(
+                    chunk_id, content, source, chunk_index,
+                )
+                if indexed and self._fts.has_knowledge_chunk(chunk_id):
+                    count += 1
         return count
 
     # ------------------------------------------------------------------
@@ -718,6 +1071,14 @@ class KnowledgeStore:
             (keep_source,),
         ).fetchone()
         if not keep_exists:
+            return 0
+        if not self.source_is_durable(
+            keep_source, require_fts=self._fts is not None,
+        ):
+            log.error(
+                "Merge refused: survivor '%s' is not durable in DB and FTS",
+                keep_source,
+            )
             return 0
         return self.delete_source(remove_source)
 

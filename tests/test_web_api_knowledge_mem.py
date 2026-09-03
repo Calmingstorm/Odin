@@ -10,7 +10,7 @@ from __future__ import annotations
 import asyncio
 import json
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 from aiohttp import web
@@ -19,6 +19,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from src.knowledge.store import KnowledgeStore
 from src.learning.reflector import ConversationReflector
 from src.search.errors import InvalidSearchQuery, validate_search_query
+from src.search.fts import FullTextIndex
 from src.web.api.knowledge_mem import (
     register_knowledge,
     register_learned_context,
@@ -91,6 +92,18 @@ class TestKnowledgeCrud:
             r = await c.delete("/api/knowledge/doc.md")
             assert r.status == 200 and (await r.json())["chunks_removed"] >= 1
             assert (await c.delete("/api/knowledge/doc.md")).status == 404
+
+    async def test_ingest_and_reingest_report_durability_failure(self, kbot):
+        async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+            kbot.knowledge.ingest = AsyncMock(return_value=0)
+            r = await _ingest(c, "doc.md", "body")
+            assert r.status == 500
+            assert await r.json() == {"error": "document was not durably ingested"}
+
+            kbot.knowledge.get_source_content = lambda source: "body"
+            r = await c.post("/api/knowledge/doc.md/reingest")
+            assert r.status == 500
+            assert await r.json() == {"error": "document was not durably reingested"}
 
     async def test_ingest_validation(self, kbot):
         async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
@@ -198,6 +211,28 @@ class TestKnowledgeVersions:
             r = await c.get("/api/knowledge/v.md/versions/1/diff/2")
             assert r.status == 200
             assert (await c.get("/api/knowledge/v.md/versions/1/diff/999")).status == 404
+
+
+    async def test_restore_reports_durability_failure(self, kbot, tmp_path):
+        fts = FullTextIndex(str(tmp_path / "restore-fts.db"))
+        try:
+            async with TestClient(TestServer(_app(register_knowledge, bot=kbot))) as c:
+                assert (await _ingest(c, "v.md", "version body")).status == 201
+                initial_versions = len(kbot.knowledge.get_versions("v.md"))
+                kbot.knowledge._fts = fts
+
+                with patch.object(fts, "index_knowledge_chunk", return_value=False) as failed:
+                    response = await c.post("/api/knowledge/v.md/versions/1/restore")
+
+                failed.assert_called_once()
+                assert response.status == 500
+                assert await response.json() == {"error": "version was not durably restored"}
+                assert kbot.knowledge.get_source_content("v.md") == "version body"
+                assert len(kbot.knowledge.get_versions("v.md")) == initial_versions
+                assert not fts.has_knowledge_source("v.md")
+        finally:
+            if fts._conn is not None:
+                fts._conn.close()
 
 
 class TestKnowledgeImport:

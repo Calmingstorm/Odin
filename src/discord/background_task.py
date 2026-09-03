@@ -446,8 +446,8 @@ async def _execute_tool(
 ) -> str | ToolResult:
     """Execute a single tool, routing to the right handler.
 
-    The executor path returns the structured ToolResult (the caller consumes
-    .ok); every other branch returns a plain string.
+    Executor and explicit failure paths return structured ToolResult values
+    where available; the caller consumes ``.ok`` before string heuristics.
     """
     # This dispatcher has several special-cased built-ins below which never
     # enter ToolExecutor.execute(). Apply the SAME live policy at this shared
@@ -483,6 +483,14 @@ async def _execute_tool(
             embedder=embedder,
             uploader=requester,
         )
+        if count <= 0:
+            message = f"Failed to ingest '{source}' durably."
+            return ToolResult(
+                output=message,
+                ok=False,
+                error=message,
+                tool_name=tool_name,
+            )
         return f"Ingested '{source}' ({count} chunks)."
 
     if tool_name == "search_knowledge" and knowledge_store and embedder:

@@ -152,6 +152,10 @@ class TestAgentInfoNesting:
         info = _make_agent(parent_id="parent1")
         assert info.parent_id == "parent1"
 
+    def test_default_turn_id(self):
+        info = _make_agent()
+        assert info.turn_id is None
+
     def test_default_children_ids(self):
         info = _make_agent()
         assert info.children_ids == []

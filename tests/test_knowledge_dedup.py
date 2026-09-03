@@ -267,6 +267,98 @@ class TestIngestUnavailable:
             _cleanup(store)
 
 
+class TestIngestDualStoreDurability:
+    async def test_failed_fts_write_returns_zero_and_does_not_record_version(self, tmp_path):
+        from unittest.mock import patch
+
+        from src.search.fts import FullTextIndex
+
+        fts = FullTextIndex(str(tmp_path / "fts.db"))
+        store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts_index=fts)
+        try:
+            with patch.object(fts, "index_knowledge_chunk", return_value=False):
+                indexed = await store.ingest(SHORT_DOC, "doc.md", dedup=False)
+            assert indexed == 0
+            assert store.get_source_content("doc.md") is None
+            assert not fts.has_knowledge_source("doc.md")
+            assert store.get_versions("doc.md") == []
+        finally:
+            store.close()
+            if fts._conn is not None:
+                fts._conn.close()
+
+    async def test_failed_update_fts_write_preserves_old_searchable_copy(self, tmp_path):
+        from unittest.mock import patch
+
+        from src.search.fts import FullTextIndex
+
+        fts = FullTextIndex(str(tmp_path / "fts.db"))
+        store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts_index=fts)
+        try:
+            old = "old searchable knowledge body"
+            new = "new replacement knowledge body"
+            assert await store.ingest(old, "doc.md", dedup=False) == 1
+            with patch.object(fts, "index_knowledge_chunk", return_value=False):
+                assert await store.ingest(new, "doc.md", dedup=False) == 0
+            assert any(r["source"] == "doc.md" for r in fts.search_knowledge("old"))
+            assert store.get_source_content("doc.md") in {old, f"{old}\n\n{new}"}
+        finally:
+            store.close()
+            if fts._conn is not None:
+                fts._conn.close()
+
+    async def test_partial_multichunk_fts_failure_preserves_old_searchable_copy(
+        self, tmp_path,
+    ):
+        from unittest.mock import patch
+
+        from src.search.fts import FullTextIndex
+
+        fts = FullTextIndex(str(tmp_path / "fts.db"))
+        store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts_index=fts)
+        try:
+            old = "old durable sentinel"
+            new = " ".join(f"newtoken{i}" for i in range(900))
+            assert len(store._chunk_text(new)) > 1
+            assert await store.ingest(old, "doc.md", dedup=False) == 1
+            real_index = fts.index_knowledge_chunk
+            calls = 0
+
+            def fail_second(chunk_id, content, source, chunk_index):
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    return False
+                return real_index(chunk_id, content, source, chunk_index)
+
+            with patch.object(fts, "index_knowledge_chunk", side_effect=fail_second):
+                assert await store.ingest(new, "doc.md", dedup=False) == 0
+            assert any(r["source"] == "doc.md" for r in fts.search_knowledge("sentinel"))
+            assert store.get_source_content("doc.md") == old
+        finally:
+            store.close()
+            if fts._conn is not None:
+                fts._conn.close()
+
+    async def test_unchanged_ingest_repairs_missing_fts_copy(
+        self, tmp_path,
+    ):
+        from src.search.fts import FullTextIndex
+
+        fts = FullTextIndex(str(tmp_path / "fts.db"))
+        store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts_index=fts)
+        try:
+            assert await store.ingest(SHORT_DOC, "doc.md") == 1
+            assert fts.delete_knowledge_source("doc.md") == 1
+            assert await store.ingest(SHORT_DOC, "doc.md") == 1
+            assert store.get_source_content("doc.md") == SHORT_DOC
+            assert fts.has_knowledge_source("doc.md")
+        finally:
+            store.close()
+            if fts._conn is not None:
+                fts._conn.close()
+
+
 # ---------------------------------------------------------------------------
 # _find_by_doc_hash tests
 # ---------------------------------------------------------------------------
