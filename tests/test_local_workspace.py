@@ -2079,7 +2079,6 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     # binaries through ssh.read_binary_file, not the text command pipeline,
     # because base64 over that pipeline was truncated at MAX_OUTPUT_CHARS
     # (adversarial review of v3.65.1).
-    ("src/audit/diff_tracker.py", "capture_before"): "cat of a governed absolute path",
     # --- plumbing -----------------------------------------------------------
     ("src/tools/executor.py", "_run_on_host"): "CONDITIONAL",  # forwards its caller's decision
     ("src/tools/executor.py", "__init__"): "HandlerDeps lambdas forwarding **kwargs",
