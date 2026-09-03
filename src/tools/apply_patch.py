@@ -23,7 +23,7 @@ ADD_FILE = "*** Add File: "
 UPDATE_FILE = "*** Update File: "
 DELETE_FILE = "*** Delete File: "
 MOVE_TO = "*** Move to: "
-MAX_PATCH_BYTES = 512 * 1024
+MAX_PATCH_BYTES = 48 * 1024
 
 
 class PatchError(ValueError):
