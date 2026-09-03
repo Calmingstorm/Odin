@@ -43,6 +43,6 @@ def test_with_defaults():
     reg = ToolRegistry.with_defaults()
     assert reg.has("shell")
     assert reg.has("read_file")
-    assert reg.has("write_file")
+    assert not reg.has("apply_patch")  # dormant planner registry does not expose live tools
     assert reg.has("list_dir")
     assert reg.has("http_request")

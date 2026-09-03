@@ -1,4 +1,4 @@
-"""Tool definitions — run_command … write_file (slice 1/9 of the original TOOLS order).
+"""Tool definitions — run_command … apply_patch (slice 1/9 of the original TOOLS order).
 
 RFC-004 P1: verbatim positional slice. ORDER IS BEHAVIOR (the tool
 catalog feeds prompt assembly) — do not reorder, and do not move
@@ -101,9 +101,7 @@ TOOLS_SECTION: list[dict] = [
             "default. Set raw=true for byte-faithful UTF-8 text in a length-framed metadata "
             "envelope carrying the exact interval, truncation state, content byte count, and "
             "continuation cursor. Consume only the framed source content. "
-            "Large ranges never use head+tail truncation. To "
-            "write, use write_file. For multi-file analysis, use claude_code with "
-            "allow_edits=false."
+            "Large ranges never use head+tail truncation. To edit files, use apply_patch."
         ),
         "input_schema": {
             "type": "object",
@@ -140,29 +138,38 @@ TOOLS_SECTION: list[dict] = [
         },
     },
     {
-        "name": "write_file",
+        "name": "apply_patch",
         "is_core": True,
         "description": (
-            "Writes content to a file on a managed host (creates or overwrites). To read first, "
-            "use read_file. For multi-file edits, use claude_code."
+            "Applies a strict, context-checked patch to text files on a managed host. "
+            "The host, absolute root directory, and patch text are all required; every file "
+            "path inside the patch must be relative to root. Supports *** Add File, "
+            "*** Update File (optionally *** Move to), and *** Delete File sections inside "
+            "one *** Begin Patch / *** End Patch envelope. The complete envelope is "
+            "validated before any write, and multi-file application rolls back on failure. "
+            "Requires a Linux host with glibc 2.28 or newer and filesystem support for "
+            "renameat2(RENAME_NOREPLACE); no unsafe fallback is used."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "host": {
                     "type": "string",
-                    "description": "Host alias from config",
+                    "description": "Managed host alias; no default is inferred",
                 },
-                "path": {
+                "root": {
                     "type": "string",
-                    "description": "Absolute path to the file",
+                    "description": "Existing absolute root directory for all relative patch paths",
                 },
-                "content": {
+                "patch_text": {
                     "type": "string",
-                    "description": "Content to write",
+                    "description": (
+                        "Complete *** Begin Patch / *** End Patch envelope using relative "
+                        "POSIX paths"
+                    ),
                 },
             },
-            "required": ["host", "path", "content"],
+            "required": ["host", "root", "patch_text"],
         },
     },
 ]

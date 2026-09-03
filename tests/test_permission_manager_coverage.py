@@ -71,7 +71,7 @@ class TestSetTier:
 
 
 class TestToolFiltering:
-    _TOOLS = [{"name": n} for n in ("web_search", "run_command", "write_file")]
+    _TOOLS = [{"name": n} for n in ("web_search", "run_command", "apply_patch")]
 
     def test_admin_gets_everything(self, tmp_path):
         mgr = _mgr(tmp_path, {"a": "admin"})

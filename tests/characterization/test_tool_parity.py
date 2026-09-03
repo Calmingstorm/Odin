@@ -28,11 +28,11 @@ from src.tools.registry import (
     invalidate_tool_defs_cache,
 )
 
-# The exact TOOLS order on master @ 7263c03 (74 tools). A failure here means
+# The exact TOOLS order on the deliberate editor/tool cleanup (73 tools). A failure here means
 # a tool was added, removed, renamed, or REORDERED — all of which are
 # out of scope for RFC-004 and must be deliberate, reviewed changes.
 EXPECTED_TOOL_ORDER = [
-    "run_command", "run_script", "run_command_multi", "read_file", "write_file",
+    "run_command", "run_script", "run_command_multi", "read_file", "apply_patch",
     "purge_messages", "post_file", "generate_file", "schedule_task", "list_schedules",
     "update_schedule", "delete_schedule", "parse_time", "search_history", "memory_manage",
     "search_audit", "create_skill", "edit_skill", "delete_skill", "list_skills",
@@ -41,7 +41,7 @@ EXPECTED_TOOL_ORDER = [
     "ingest_document", "bulk_ingest_knowledge", "list_knowledge", "delete_knowledge",
     "browser_screenshot", "browser_read_page", "browser_read_table", "browser_click",
     "browser_fill", "browser_evaluate",
-    "web_search", "fetch_url", "claude_code", "set_permission", "analyze_pdf",
+    "web_search", "fetch_url", "set_permission", "analyze_pdf",
     "read_channel", "add_reaction", "create_poll", "manage_process", "manage_list",
     "analyze_image", "start_loop", "stop_loop", "list_loops", "spawn_agent",
     "send_to_agent", "list_agents", "kill_agent", "get_agent_results", "wait_for_agents",
@@ -56,8 +56,8 @@ EXPECTED_TOOL_HASHES = {
     "run_command": "2b146575d0ff5c16",
     "run_script": "61132f018a660518",
     "run_command_multi": "f4666ed522cdd0b4",
-    "read_file": "248ab06d30fe5f93",
-    "write_file": "8e409827499b2a64",
+    "read_file": "627d738ddf708a6d",
+    "apply_patch": "35e93ee8f7c53a2d",
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
@@ -97,7 +97,6 @@ EXPECTED_TOOL_HASHES = {
     "browser_evaluate": "10ab6fb73e39e4b0",
     "web_search": "387c3cf486568b5d",
     "fetch_url": "15aa90cb901577fa",
-    "claude_code": "1b2355262f9db20c",
     "set_permission": "c12a0a66bb423d59",
     "analyze_pdf": "7006855cb4bf0b85",
     "read_channel": "22d87d43b1ac97e2",
@@ -143,7 +142,7 @@ def _canonical_hash(tool_def: dict) -> str:
 class TestToolParity:
     def test_exact_names_and_order(self):
         actual = [t["name"] for t in TOOLS]
-        assert len(actual) == len(EXPECTED_TOOL_ORDER) == 74
+        assert len(actual) == len(EXPECTED_TOOL_ORDER) == 73
         missing = set(EXPECTED_TOOL_ORDER) - set(actual)
         added = set(actual) - set(EXPECTED_TOOL_ORDER)
         assert not missing and not added, (
@@ -177,13 +176,12 @@ class TestBackendGatedVisibility:
     the LLM keeps calling tools that can only fail. Previously untested;
     pinned during RFC-004 soak at Aaron's request (2026-07-06).
 
-    Gated groups: claude_code (needs tools.claude_code_host), the four
-    email tools (need email.enabled), issue_tracker (needs
+    Gated groups: the four email tools (need email.enabled), issue_tracker (needs
     issue_tracker.enabled), generate_image (needs a native-OpenAI or ComfyUI
     backend — hidden when neither is available).
     """
 
-    GATED = {"claude_code", "email_send", "email_search", "email_read",
+    GATED = {"email_send", "email_search", "email_read",
              "email_list_recent", "issue_tracker", "generate_image"}
 
     @staticmethod
@@ -234,14 +232,6 @@ class TestBackendGatedVisibility:
         visible = "analyze_pdf" in self._catalog_names()
         assert visible is (importlib.util.find_spec("fitz") is not None)
 
-    def test_configured_claude_code_is_visible(self):
-        names = self._catalog_names(
-            tools={
-                "claude_code_host": "localhost",
-                "hosts": {"localhost": {"address": "127.0.0.1", "ssh_user": "root", "os": "linux"}},
-            }
-        )
-        assert "claude_code" in names
 
 
 class TestRegistryMutabilitySemantics:

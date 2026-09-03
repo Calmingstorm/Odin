@@ -331,3 +331,22 @@ def test_max_concurrent_agents_default_and_bounds():
         AgentsConfig(max_concurrent_agents=0)
     with pytest.raises(ValidationError):
         AgentsConfig(max_concurrent_agents=26)
+
+
+def test_removed_claude_code_settings_are_tolerated(tmp_path):
+    from src.config.schema import load_config
+
+    path = tmp_path / "legacy.yml"
+    path.write_text(
+        "discord:\n  token: legacy\n"
+        "tools:\n"
+        "  command_timeout_seconds: 123\n"
+        "  claude_code_host: localhost\n"
+        "  claude_code_user: odin\n"
+        "  claude_code_dir: /old/project\n"
+    )
+    cfg = load_config(path)
+    assert cfg.tools.command_timeout_seconds == 123
+    assert not hasattr(cfg.tools, "claude_code_host")
+    assert not hasattr(cfg.tools, "claude_code_user")
+    assert not hasattr(cfg.tools, "claude_code_dir")

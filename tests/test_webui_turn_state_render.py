@@ -100,7 +100,7 @@ def _api_fixture(path: str) -> dict:
                 operations=[
                     {
                         "state": "MANUAL_RESOLUTION_REQUIRED",
-                        "tool_name": "write_file",
+                        "tool_name": "apply_patch",
                         "tool_call_id": "manual",
                         "iteration": 4,
                         "created_at": now,

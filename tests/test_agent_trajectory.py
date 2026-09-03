@@ -1239,7 +1239,7 @@ class TestEdgeCases:
                     "tool_calls": [
                         {"name": "run_command", "input": {"cmd": "ls"}},
                         {"name": "read_file", "input": {"path": "/tmp/x"}},
-                        {"name": "write_file", "input": {"path": "/tmp/y", "content": "z"}},
+                        {"name": "apply_patch", "input": {"path": "/tmp/y", "content": "z"}},
                     ],
                 }
             return {"text": "done", "tool_calls": []}
@@ -1258,7 +1258,7 @@ class TestEdgeCases:
         assert len(it1["tool_calls"]) == 3
         assert len(it1["tool_results"]) == 3
         assert it1["tool_calls"][0]["name"] == "run_command"
-        assert it1["tool_calls"][2]["name"] == "write_file"
+        assert it1["tool_calls"][2]["name"] == "apply_patch"
 
     async def test_saver_directory_deleted(self, tmp_path):
         d = tmp_path / "gone"

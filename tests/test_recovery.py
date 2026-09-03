@@ -1008,11 +1008,11 @@ class TestUnsafeToRetry:
     """Verify UNSAFE_TO_RETRY set correctly classifies tools."""
 
     def test_destructive_shell_tools_are_unsafe(self):
-        for tool in ("run_command", "run_script", "run_command_multi", "claude_code"):
+        for tool in ("run_command", "run_script", "run_command_multi", "apply_patch"):
             assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
 
     def test_state_mutation_tools_are_unsafe(self):
-        for tool in ("write_file", "git_ops", "memory_manage", "manage_list",
+        for tool in ("apply_patch", "git_ops", "memory_manage", "manage_list",
                       "ingest_document", "bulk_ingest_knowledge", "delete_knowledge"):
             assert tool in UNSAFE_TO_RETRY, f"{tool} should be unsafe to retry"
 
@@ -1210,8 +1210,8 @@ class TestExecutorHintAndEscalate:
             nonlocal calls
             calls += 1
             return "Command failed (exit 1):\nNo space left on device"
-        executor._handle_write_file = _handler  # write_file is in UNSAFE_TO_RETRY
-        result = await executor.execute("write_file", {"host": "x", "path": "/y", "content": "z"})
+        executor._handle_apply_patch = _handler  # apply_patch is in UNSAFE_TO_RETRY
+        result = await executor.execute("apply_patch", {"host": "x", "path": "/y", "content": "z"})
         assert calls == 1
         assert "recovery hint" in str(result).lower()
         assert "disk" in str(result).lower() or "cleanup" in str(result).lower()
@@ -1238,14 +1238,14 @@ class TestDecideRecoveryAction:
         tools.
         """
         from src.tools.recovery import RecoveryCategory, decide_recovery_action
-        d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.DISK_FULL)
+        d = decide_recovery_action(tool_name="apply_patch", category=RecoveryCategory.DISK_FULL)
         assert d.action == "hint"
         assert d.hint_text
 
     def test_retry_blocked_for_unsafe_tool(self):
         """RETRY_WITH_DELAY must be downgraded to 'skip' when tool is UNSAFE_TO_RETRY."""
         from src.tools.recovery import RecoveryCategory, decide_recovery_action
-        d = decide_recovery_action(tool_name="write_file", category=RecoveryCategory.SSH_TRANSIENT)
+        d = decide_recovery_action(tool_name="apply_patch", category=RecoveryCategory.SSH_TRANSIENT)
         assert d.action == "skip"
 
     def test_retry_allowed_for_safe_tool(self):
@@ -1290,9 +1290,9 @@ class TestClassificationPriority:
 # ====================================================================
 
 class TestExecutorUnsafeToolCategorizedFailure:
-    """Odin's core concern: a future table edit that gives write_file a
+    """Odin's core concern: a future table edit that gives apply_patch a
     RETRY_WITH_DELAY-classified failure must NOT cause the executor to
-    re-execute write_file. Guard must hold.
+    re-execute apply_patch. Guard must hold.
     """
 
     @pytest.fixture
@@ -1304,8 +1304,8 @@ class TestExecutorUnsafeToolCategorizedFailure:
 
     @pytest.mark.asyncio
     async def test_unsafe_tool_ssh_transient_is_not_retried(self, executor):
-        """write_file hitting an SSH_TRANSIENT-classified error (currently a
-        RETRY_WITH_DELAY category) must NOT be retried — write_file is in
+        """apply_patch hitting an SSH_TRANSIENT-classified error (currently a
+        RETRY_WITH_DELAY category) must NOT be retried — apply_patch is in
         UNSAFE_TO_RETRY because it may have already executed."""
         calls = 0
 
@@ -1314,12 +1314,12 @@ class TestExecutorUnsafeToolCategorizedFailure:
             calls += 1
             return "Command failed (exit 255):\nConnection refused"
 
-        executor._handle_write_file = _handler
+        executor._handle_apply_patch = _handler
         result = await executor.execute(
-            "write_file", {"host": "h", "path": "/x", "content": "y"},
+            "apply_patch", {"host": "h", "path": "/x", "content": "y"},
         )
         assert calls == 1, (
-            "write_file must NOT be retried even on transient errors — "
+            "apply_patch must NOT be retried even on transient errors — "
             "the write may have already happened on the remote."
         )
         assert "Connection refused" in str(result)
@@ -1367,7 +1367,7 @@ class TestExecutorUnsafeToolCategorizedFailure:
     @pytest.mark.asyncio
     async def test_unsafe_tool_auth_failure_hints_without_retry(self, executor):
         """The other half of Odin's ask: confirm AUTH_FAILURE → hint (not retry)
-        even though write_file is UNSAFE_TO_RETRY — safe because hinting
+        even though apply_patch is UNSAFE_TO_RETRY — safe because hinting
         never re-executes."""
         calls = 0
 
@@ -1376,9 +1376,9 @@ class TestExecutorUnsafeToolCategorizedFailure:
             calls += 1
             return "Command failed (exit 255):\nPermission denied (publickey,password)."
 
-        executor._handle_write_file = _handler
+        executor._handle_apply_patch = _handler
         result = await executor.execute(
-            "write_file", {"host": "h", "path": "/x", "content": "y"},
+            "apply_patch", {"host": "h", "path": "/x", "content": "y"},
         )
         assert calls == 1
         # Hint text must be appended without re-running the tool.

@@ -38,11 +38,11 @@ class TestGetAffordance:
         assert aff.risk == Risk.LOW
         assert aff.latency == Latency.SECONDS
 
-    def test_very_high_cost_claude_code(self):
-        aff = get_affordance("claude_code")
-        assert aff.cost == Cost.VERY_HIGH
-        assert aff.latency == Latency.MINUTES
-        assert aff.preconditions  # non-empty
+    def test_apply_patch_is_high_risk_and_bounded(self):
+        aff = get_affordance("apply_patch")
+        assert aff.cost == Cost.LOW
+        assert aff.risk == Risk.HIGH
+        assert aff.latency == Latency.SECONDS
 
     def test_critical_risk_destructive_tools(self):
         for name in ("purge_messages", "delete_knowledge", "terraform_ops"):
@@ -63,7 +63,7 @@ class TestFormatFooter:
         assert "latency=seconds" in footer
 
     def test_footer_includes_preconditions(self):
-        footer = format_affordance_footer("write_file")
+        footer = format_affordance_footer("apply_patch")
         assert "requires:" in footer
         assert "writable" in footer
 

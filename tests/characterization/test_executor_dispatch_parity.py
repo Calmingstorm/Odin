@@ -44,14 +44,14 @@ SKILL_TOOLS = frozenset({
     "list_skills", "invoke_skill",
 })
 
-# 28 tools that reach ToolExecutor.execute() — the set whose handlers the
+# 27 tools that reach ToolExecutor.execute() — the set whose handlers the
 # P4–P6 waves move to domain modules:
 EXECUTOR_ROUTED = frozenset({
-    "run_command", "run_script", "run_command_multi", "read_file", "write_file",
+    "run_command", "run_script", "run_command_multi", "read_file", "apply_patch",
     "memory_manage", "manage_list", "manage_process",
     "browser_read_page", "browser_read_table", "browser_click", "browser_fill",
     "browser_evaluate", "web_search", "fetch_url", "http_probe",
-    "analyze_pdf", "claude_code",
+    "analyze_pdf",
     "git_ops", "kubectl", "docker_ops", "terraform_ops",
     "issue_tracker", "validate_action",
     "email_send", "email_search", "email_read", "email_list_recent",
@@ -82,7 +82,7 @@ class TestDispatchPartition:
         assert not (NATIVE_REGISTERED & SKILL_TOOLS)
         assert not (NATIVE_REGISTERED & EXECUTOR_ROUTED)
         assert not (SKILL_TOOLS & EXECUTOR_ROUTED)
-        assert (len(NATIVE_REGISTERED), len(SKILL_TOOLS), len(EXECUTOR_ROUTED)) == (36, 10, 28)
+        assert (len(NATIVE_REGISTERED), len(SKILL_TOOLS), len(EXECUTOR_ROUTED)) == (36, 10, 27)
 
     def test_every_executor_tool_resolves_a_handler(self):
         ex = _executor()

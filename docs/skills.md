@@ -98,7 +98,7 @@ Skills can only call these tools via `execute_tool()`:
 
 `read_file`, `search_history`, `search_audit`, `search_knowledge`, `list_knowledge`, `list_schedules`, `list_skills`, `list_tasks`, `memory_manage`, `parse_time`, `web_search`, `fetch_url`, `http_probe`, `browser_screenshot`, `browser_read_page`, `browser_read_table`
 
-Destructive tools (`run_command`, `write_file`, etc.) are blocked. Use `run_on_host()` for shell access.
+Destructive tools (`run_command`, `apply_patch`, etc.) are blocked. Use `run_on_host()` for shell access.
 
 ## Blocked Paths
 

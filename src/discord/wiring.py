@@ -270,7 +270,7 @@ def build_services(
         enabled_tools = (
             set(streaming_cfg.tools)
             if streaming_cfg.tools
-            else {"run_command", "run_script", "claude_code"}
+            else {"run_command", "run_script"}
         )
         output_streamer = ToolOutputStreamer(
             enabled_tools=enabled_tools,

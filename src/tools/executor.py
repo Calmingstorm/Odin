@@ -14,6 +14,7 @@ from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
 from ..permissions.host_access import HostAccessManager
 from ..permissions.manager import PermissionManager
+from ..runtime_paths import runtime_install_root
 from .branch_freshness import (
     FreshnessEvent,
     FreshnessStats,
@@ -127,7 +128,7 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "run_script": ("system", "_handle_run_script"),
     "run_command_multi": ("system", "_handle_run_command_multi"),
     "read_file": ("files_docs", "_handle_read_file"),
-    "write_file": ("files_docs", "_handle_write_file"),
+    "apply_patch": ("files_docs", "_handle_apply_patch"),
     "memory_manage": ("state", "_handle_memory_manage"),
     "manage_list": ("state", "_handle_manage_list"),
     "manage_process": ("system", "_handle_manage_process"),
@@ -140,7 +141,6 @@ EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
     "fetch_url": ("browser_web", "_handle_fetch_url"),
     "http_probe": ("browser_web", "_handle_http_probe"),
     "analyze_pdf": ("files_docs", "_handle_analyze_pdf"),
-    "claude_code": ("coding", "_handle_claude_code"),
     "git_ops": ("devops", "_handle_git_ops"),
     "kubectl": ("devops", "_handle_kubectl"),
     "docker_ops": ("devops", "_handle_docker_ops"),
@@ -241,7 +241,6 @@ class ToolExecutor:
         # monkeypatches on the executor keep governing domain behavior, and
         # stateful objects are reached by identity (R1 blocker #3).
         from .handlers.browser_web import BrowserWebTools
-        from .handlers.coding import CodingTools
         from .handlers.comms import CommsTools
         from .handlers.deps import HandlerDeps
         from .handlers.devops import DevOpsTools
@@ -280,7 +279,6 @@ class ToolExecutor:
         self.system_tools = SystemTools(self._handler_deps)
         self.files_docs_tools = FilesDocsTools(self._handler_deps)
         self.browser_web_tools = BrowserWebTools(self._handler_deps)
-        self.coding_tools = CodingTools(self._handler_deps)
         self.devops_tools = DevOpsTools(self._handler_deps)
         self.state_tools = StateTools(self._handler_deps)
         self.comms_tools = CommsTools(self._handler_deps)
@@ -293,7 +291,6 @@ class ToolExecutor:
             "system": self.system_tools,
             "files_docs": self.files_docs_tools,
             "browser_web": self.browser_web_tools,
-            "coding": self.coding_tools,
             "devops": self.devops_tools,
             "state": self.state_tools,
             "comms": self.comms_tools,
@@ -355,8 +352,8 @@ class ToolExecutor:
         executor then rejected (PR #239 round-6 review).
         """
         return command_protected_roots(
-            # Install root: the package's own location (…/src/tools/executor.py).
-            Path(__file__).absolute().parents[2],
+            # Install root: one shared derivation from the running src package.
+            runtime_install_root(),
             # getattr-guarded throughout: the sanctioned __new__ patch seam
             # builds executors without __init__, so these may not exist.
             getattr(self, "_app_config", None),
@@ -856,7 +853,7 @@ class ToolExecutor:
         if is_local_address(address):
             # The workspace applies ONLY to raw user commands, and only because
             # the caller asked for it. This primitive also backs git_ops,
-            # docker, terraform, kubectl, claude_code, PDF host reads and
+            # docker, terraform, kubectl, apply_patch, PDF host reads and
             # validation probes, whose documented defaults resolve against the
             # process cwd — git_ops with `repo` omitted means ".", i.e. the
             # install repo, and silently repointing that at a scratch directory
@@ -908,7 +905,7 @@ class ToolExecutor:
         """Run a command on an aliased host.
 
         ``use_workspace`` is opt-in for the same reason as _exec_command: this
-        also backs read_file/write_file host reads, skill_context.run_on_host,
+        also backs read_file/apply_patch host work, skill_context.run_on_host,
         and the audit diff tracker, whose paths are absolute and whose cwd
         semantics must not change.
         """
@@ -948,8 +945,6 @@ class ToolExecutor:
     # --- PDF analysis ---
 
     # --- Process management ---
-
-    # --- Claude Code ---
 
     def set_builtin_policy(self, policy) -> None:
         """Inject the operator tool policy (wiring, post-bot construction)."""

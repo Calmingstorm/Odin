@@ -18,21 +18,6 @@ class ReadFileTool(BaseTool):
         return path.read_text(encoding=encoding)
 
 
-class WriteFileTool(BaseTool):
-    """Write content to a file."""
-
-    async def execute(self, params: dict[str, Any], ctx: ExecutionContext) -> Any:
-        path = Path(params["path"])
-        content = params["content"]
-        mkdir = params.get("mkdir", False)
-        mode = params.get("mode", "w")
-        if mkdir:
-            path.parent.mkdir(parents=True, exist_ok=True)
-        with open(path, mode) as f:
-            f.write(content)
-        return {"written": str(path), "bytes_written": len(content)}
-
-
 class ListDirTool(BaseTool):
     """List directory contents."""
 

@@ -46,7 +46,6 @@ class ToolResultSchema:
 # Tools whose handlers may legitimately return an empty/blank string
 _EMPTY_OK_TOOLS = frozenset(
     {
-        "write_file",
         "browser_click",
         "browser_fill",
         "add_reaction",

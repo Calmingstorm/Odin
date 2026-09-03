@@ -669,11 +669,11 @@ class TestMutationDetection:
         assert result.detected
         assert "kubernetes" in result.reason
 
-    def test_detects_config_write(self):
+    def test_detects_apply_patch(self):
         from src.tools.post_validation import detect_mutation
-        result = detect_mutation("write_file", {"path": "/etc/nginx/nginx.conf"})
+        result = detect_mutation("apply_patch", {"root": "/srv/app"})
         assert result.detected
-        assert "config write" in result.reason
+        assert "apply_patch" in result.reason
 
     def test_detects_docker_ops_compose_up(self):
         from src.tools.post_validation import detect_mutation

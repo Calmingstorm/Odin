@@ -37,7 +37,7 @@ class TestRegistryConsistency:
         bodies live on domain owners, resolved at call time)."""
         from src.tools.executor import ToolExecutor
         exe = ToolExecutor()
-        shell_tools = {"run_command", "run_script", "run_command_multi", "read_file", "write_file"}
+        shell_tools = {"run_command", "run_script", "run_command_multi", "read_file", "apply_patch"}
         for name in shell_tools:
             handler = exe._resolve_handler(name)
             assert handler is not None, f"Shell tool '{name}' does not resolve to a handler"

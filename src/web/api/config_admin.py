@@ -121,7 +121,6 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
                     features[key] = bool(raw_features[key])
 
         web_api_token = str(data.get("web_api_token", "")).strip()
-        claude_code_host = str(data.get("claude_code_host", "")).strip()
         timezone = str(data.get("timezone", "UTC")).strip() or "UTC"
 
         # Build config and env content
@@ -130,7 +129,6 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
             hosts=hosts,
             features=features,
             web_api_token=web_api_token,
-            claude_code_host=claude_code_host,
         )
         env_content = build_env(discord_token)
 

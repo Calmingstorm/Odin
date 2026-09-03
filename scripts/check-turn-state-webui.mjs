@@ -113,7 +113,7 @@ async function renderState(state) {
     turnFixture('suspended', { status: 'SUSPENDED', requires_attention: true }),
     turnFixture('diagnostic-only', { operations: [{ state: 'OUTCOME_UNKNOWN', tool_name: 'run_command', tool_call_id: 'a', iteration: 1, created_at: 0, updated_at: 0 }] }),
     turnFixture('expired', { lease_expires_at: fakeNow / 1000 - 120, expired_lease: true, requires_attention: true }),
-    turnFixture('manual', { status: 'TERMINAL_FAILED', requires_attention: true, operations: [{ state: 'MANUAL_RESOLUTION_REQUIRED', tool_name: 'write_file', tool_call_id: 'b', iteration: 2, created_at: 0, updated_at: 0 }] }),
+    turnFixture('manual', { status: 'TERMINAL_FAILED', requires_attention: true, operations: [{ state: 'MANUAL_RESOLUTION_REQUIRED', tool_name: 'apply_patch', tool_call_id: 'b', iteration: 2, created_at: 0, updated_at: 0 }] }),
   ];
   globalThis.fetch = async (path) => path.startsWith('/api/turn-state/turns')
     ? response(turnsEnvelope(turns)) : response(breakersEnvelope());

@@ -23,7 +23,6 @@ tools:
   ssh_known_hosts_path: /home/odin/.ssh/known_hosts
   command_timeout_seconds: 300   # Default per-command timeout
   tool_timeouts:                 # Per-tool overrides
-    claude_code: 3600
   hosts:
     localhost:
       address: 127.0.0.1
@@ -71,15 +70,6 @@ stay reserved: a skill or MCP tool can never shadow a disabled built-in.
 This leaf is read-only on the generic config route; the Tools management
 API (`GET /api/tools/builtins`, `POST /api/tools/builtins/{name}/enabled`)
 owns it.
-
-### Claude Code Integration
-
-```yaml
-tools:
-  claude_code_host: localhost     # Host alias for Claude Code
-  claude_code_user: odin         # SSH user
-  claude_code_dir: /opt/odin     # Working directory
-```
 
 ## LLM / Codex
 

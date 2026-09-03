@@ -109,7 +109,6 @@ def build_config(
     hosts: dict[str, dict[str, str]] | None = None,
     features: dict[str, bool] | None = None,
     web_api_token: str = "",
-    claude_code_host: str = "",
 ) -> dict[str, Any]:
     """Build a config dict from wizard answers.
 
@@ -132,8 +131,6 @@ def build_config(
     cfg["browser"]["enabled"] = features.get("browser", False)
     cfg["comfyui"]["enabled"] = features.get("comfyui", False)
 
-    if claude_code_host and claude_code_host in (hosts or {}):
-        cfg["tools"]["claude_code_host"] = claude_code_host
 
     cfg["web"]["api_token"] = web_api_token
 

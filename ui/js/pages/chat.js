@@ -36,7 +36,7 @@ function formatTime(ts) {
 /** Map tool names to category icons */
 const TOOL_ICONS = {
   run_command: 'terminal', ssh_command: 'terminal', run_script: 'terminal',
-  read_file: 'file', write_file: 'edit', list_directory: 'folder',
+  read_file: 'file', apply_patch: 'edit', list_directory: 'folder',
   search_knowledge: 'search', ingest_document: 'book',
   generate_image: 'image', analyze_image: 'eye',
   analyze_pdf: 'file', browser_screenshot: 'globe',

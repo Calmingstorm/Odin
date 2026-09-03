@@ -1056,7 +1056,7 @@ class SessionManager:
             first_line = content.split("\n", 1)[0][:120]
             if first_line:
                 snippets.append(first_line)
-            for marker in ("Tool call:", "tool_name", "run_command", "claude_code",
+            for marker in ("Tool call:", "tool_name", "run_command", "apply_patch",
                            "browser_", "schedule_", "spawn_agent"):
                 if marker in content:
                     tools_mentioned.add(marker.rstrip("_"))

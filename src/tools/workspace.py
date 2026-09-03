@@ -124,9 +124,8 @@ def _reject_overlap(
 # sessions.persist_directory WAS the workspace, accepted by every caller
 # because only audit/trajectory/memory were protected.
 #
-# Deliberately excluded: tools.claude_code_dir and email.allowed_attachment_dirs
-# are working directories for a tool and user-nominated source directories, not
-# Odin's own state; protecting them would reject legitimate configurations.
+# Deliberately excluded: email.allowed_attachment_dirs contains user-nominated
+# source directories, not Odin state; protecting it would reject legitimate configurations.
 # Paths wiring hardcodes (channel_config.json, channel_logs) sit beside
 # memory.json and are covered by its parent.
 _DECLARED_STATE_PATHS = WORKSPACE_PROTECTED_CONFIG_PATHS

@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any
 
 from ..odin_log import get_logger
+from ..runtime_paths import runtime_install_root
 
 log = get_logger("health.startup")
 
@@ -501,7 +502,7 @@ def _workspace_protected_roots(config: object = None) -> list[str]:
     shared derivation used by startup migration and executor."""
     from ..tools.workspace import command_protected_roots
 
-    return command_protected_roots(Path(__file__).absolute().parents[2], config)
+    return command_protected_roots(runtime_install_root(), config)
 
 
 def check_data_directories() -> DiagnosticResult:

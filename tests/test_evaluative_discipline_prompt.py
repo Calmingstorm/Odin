@@ -5,6 +5,7 @@ without checking that the delivered artifact actually answered the
 request. This test locks the prompt wording that's supposed to
 counteract that, so a future edit can't silently remove it.
 """
+
 from __future__ import annotations
 
 from src.discord.completion import CLASSIFIER_SYSTEM_PROMPT
@@ -17,7 +18,6 @@ class TestSystemPromptRule12:
             context="",
             hosts={"localhost": "127.0.0.1"},
             tz="UTC",
-            claude_code_dir="/opt/odin",
         )
 
     def test_evaluative_discipline_present(self):
@@ -65,3 +65,22 @@ class TestCompletionClassifierPrompt:
             "described the synthesized runbook but did not include its source"
             in CLASSIFIER_SYSTEM_PROMPT
         )
+
+
+def test_system_prompt_and_workspace_share_runtime_install_root(tmp_path, monkeypatch):
+    import src.runtime_paths as runtime_paths
+    from src.config.schema import ToolsConfig
+    from src.llm import system_prompt
+    from src.tools.executor import ToolExecutor
+
+    install_root = tmp_path / "runtime-install"
+    monkeypatch.setattr(
+        runtime_paths, "__file__", str(install_root / "src/runtime_paths.py")
+    )
+    expected = str(install_root)
+    rendered = system_prompt.build_system_prompt(context="", hosts={})
+    assert f"Your source code is at {expected}." in rendered
+    assert expected in ToolExecutor(config=ToolsConfig())._protected_roots()
+    assert "`apply_patch`" in rendered
+    assert "claude_code" not in rendered
+    assert "write_file" not in rendered

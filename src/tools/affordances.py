@@ -3,12 +3,12 @@
 The goal is to help the LLM choose between comparable tools by surfacing
 *what each call is going to cost you* in four dimensions:
 
-- **cost**: order-of-magnitude token/compute burden. `claude_code` is not
-  the same kind of expensive as `read_file`.
+- **cost**: order-of-magnitude token/compute burden. A subprocess is not
+  the same kind of expensive as an in-process lookup.
 - **risk**: what happens if the call goes wrong. `run_command` on an SSH
   host is categorically different from `web_search`.
 - **latency**: how long a typical call takes. `fetch_url` is seconds;
-  `claude_code` is minutes.
+  a long-running agent can be unbounded.
 - **preconditions**: short list of hidden requirements ("SSH key must be
   configured for <host>", "browser must be started").
 
@@ -82,7 +82,10 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ),
     # File I/O
     ("read_file", Affordance(Cost.LOW, Risk.NONE, Latency.FAST, ("path accessible by ssh user",))),
-    ("write_file", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ("path writable by ssh user",))),
+    (
+        "apply_patch",
+        Affordance(Cost.LOW, Risk.HIGH, Latency.SECONDS, ("root writable by ssh user",)),
+    ),
     # Browser
     (
         "browser_read_",
@@ -196,16 +199,6 @@ _CATEGORY_DEFAULTS: list[tuple[str, Affordance]] = [
     ),
     ("manage_process", Affordance(Cost.LOW, Risk.HIGH, Latency.FAST, ())),
     ("http_probe", Affordance(Cost.LOW, Risk.NONE, Latency.SECONDS, ())),
-    # LLM-in-tool
-    (
-        "claude_code",
-        Affordance(
-            Cost.VERY_HIGH,
-            Risk.MEDIUM,
-            Latency.MINUTES,
-            ("CLAUDE_CODE_OAUTH_TOKEN or network access to API",),
-        ),
-    ),
     # Skills
     ("create_skill", Affordance(Cost.MEDIUM, Risk.MEDIUM, Latency.FAST, ())),
     ("edit_skill", Affordance(Cost.LOW, Risk.MEDIUM, Latency.FAST, ())),
