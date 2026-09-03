@@ -74,6 +74,11 @@ class OdinBot(commands.Bot):
         self.boot_config_snapshot = config.model_dump()
         # commands.Bot already initializes self.tree (app_commands.CommandTree); do not overwrite
         self.start_time = time.monotonic()
+        # Application-command reconciliation bookkeeping: scopes ("global",
+        # "guild:<id>") already forced to the exact tree in THIS process. A
+        # reconnect's on_ready retries only failed or newly seen scopes.
+        self._synced_command_scopes: set[str] = set()
+        self._command_snapshot: list | None = None
 
         # ------------------------------------------------------------------
         # Stage 1: bot-independent services (wiring.build_services).
@@ -292,11 +297,7 @@ class OdinBot(commands.Bot):
         pruned = self.sessions.prune()
         if pruned:
             log.info("Startup: pruned %d stale sessions", pruned)
-        # Sync commands to each guild (instant) instead of global (up to 1hr)
-        for guild in self.guilds:
-            self.tree.copy_global_to(guild=guild)
-            await self.tree.sync(guild=guild)
-            log.info("Slash commands synced to guild: %s", guild.name)
+        await self._reconcile_application_commands()
         self.scheduler.start(
             self.scheduled_events._on_scheduled_task,
             self.scheduled_events._on_schedule_failure,
@@ -304,6 +305,62 @@ class OdinBot(commands.Bot):
         if self._vector_store:
             fire_and_forget(self._backfill_archives(), name="backfill_archives")
         await self.delivery.set_status(None, task_end=True)
+
+    async def on_guild_join(self, guild: discord.Guild) -> None:
+        await self._reconcile_application_commands(guilds=[guild])
+
+    async def _reconcile_application_commands(self, guilds=None) -> None:
+        """Force Discord's registered commands to match the tree exactly.
+
+        Commands are served as per-guild copies (instant) and the GLOBAL scope
+        is reconciled to EMPTY.  The previous per-guild ``copy_global_to`` +
+        ``sync(guild=)`` never touched the global scope, and ``copy_global_to``
+        is an additive merge, so removed or changed commands lingered for as
+        long as their stale global registration lived.  Syncing the tree
+        globally instead would register every command twice (Discord shows a
+        global and a guild copy side by side), so the desired state is: no
+        global commands, and each guild holding exactly the tree.
+
+        Scopes are isolated — one failed guild neither blocks the others nor
+        the rest of startup — and remembered per process so a reconnect's
+        ``on_ready`` retries only what failed or is new.
+        """
+        if self._command_snapshot is None:
+            # Taken once, before the local global mapping is cleared, and
+            # reused for guilds joined later in the process lifetime.
+            self._command_snapshot = list(self.tree.get_commands(guild=None))
+        commands_ = self._command_snapshot
+        names = sorted(cmd.name for cmd in commands_)
+        if "global" not in self._synced_command_scopes:
+            try:
+                self.tree.clear_commands(guild=None)
+                await self.tree.sync()
+                self._synced_command_scopes.add("global")
+                log.info("Slash commands reconciled: global scope cleared")
+            except Exception:
+                log.exception(
+                    "Slash-command sync failed for scope global; guild reconciliation continues"
+                )
+        for guild in (self.guilds if guilds is None else guilds):
+            scope = f"guild:{guild.id}"
+            if scope in self._synced_command_scopes:
+                continue
+            try:
+                self.tree.clear_commands(guild=guild)
+                for cmd in commands_:
+                    self.tree.add_command(cmd, guild=guild)
+                await self.tree.sync(guild=guild)
+                self._synced_command_scopes.add(scope)
+                log.info(
+                    "Slash commands reconciled for guild %s (%s): %s",
+                    guild.name, guild.id, ", ".join(names),
+                )
+            except Exception:
+                log.exception(
+                    "Slash-command sync failed for scope guild %s (%s); "
+                    "will retry on a later ready",
+                    guild.name, guild.id,
+                )
 
     async def _backfill_archives(self) -> None:
         """Backfill semantic search index and FTS5 with existing archive files."""

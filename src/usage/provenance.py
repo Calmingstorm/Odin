@@ -34,6 +34,8 @@ def accepted_usage_fields(
     """
     server_input = _nonnegative_int(_field(response, "server_input_tokens"))
     server_output = _nonnegative_int(_field(response, "server_output_tokens"))
+    cached_tokens = _nonnegative_int(_field(response, "cached_tokens"))
+    cache_write_tokens = _nonnegative_int(_field(response, "cache_write_tokens"))
 
     estimated_input: int | None = None
     density = getattr(snapshot, "density_milli", None)
@@ -91,6 +93,8 @@ def accepted_usage_fields(
         "estimated_input_tokens": estimated_input,
         "input_token_provenance": input_provenance,
         "output_token_provenance": output_provenance,
+        "cached_tokens": cached_tokens,
+        "cache_write_tokens": cache_write_tokens,
     }
 
 

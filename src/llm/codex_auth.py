@@ -11,6 +11,7 @@ from pathlib import Path
 import aiohttp
 
 from ..odin_log import get_logger
+from .codex_quota import CodexQuotaTracker
 from .errors import LLMAuthError, LLMRateLimitError
 
 log = get_logger("codex_auth")
@@ -404,6 +405,9 @@ class CodexAuthPool:
         self._accounts: list[CodexAuth] = []
         self._current_index = 0
         self._pool_lock = asyncio.Lock()
+        # Pool-owned so the primary and auxiliary clients, which share this
+        # pool by identity, contribute to ONE account-scoped quota view.
+        self.quota = CodexQuotaTracker()
         self._init_accounts()
 
     def _init_accounts(self) -> None:
@@ -506,6 +510,46 @@ class CodexAuthPool:
     @property
     def account_count(self) -> int:
         return len(self._accounts)
+
+    def account_display_name(self, index: int) -> str:
+        """Operator-assigned ``label`` from the credential record, else a slot name.
+
+        Never the email or raw account id: this string is rendered in chat.
+        """
+        try:
+            label = self._accounts[index]._load().get("label")
+        except Exception:
+            label = None
+        if isinstance(label, str) and label.strip():
+            return label.strip()[:40]
+        return f"account {index + 1}"
+
+    def describe_accounts(self) -> list[dict]:
+        """Per-slot, display-safe facts: opaque key, label, selection, health."""
+        from .account_key import opaque_account_key
+
+        rows: list[dict] = []
+        current = self._current_index % len(self._accounts) if self._accounts else -1
+        for index, auth in enumerate(self._accounts):
+            rows.append(
+                {
+                    "index": index,
+                    "key": opaque_account_key(auth.get_account_id()),
+                    "label": self.account_display_name(index),
+                    "is_current": index == current,
+                    "rate_limited": auth.is_rate_limited(),
+                    "configured": auth.is_configured(),
+                }
+            )
+        return rows
+
+    def quota_view(self):
+        """The tracker's view keyed to the CURRENT account; removed accounts drop."""
+        rows = self.describe_accounts()
+        known = [row["key"] for row in rows if row["key"]]
+        current = next((row["key"] for row in rows if row["is_current"]), None)
+        self.quota.forget_missing(known)
+        return self.quota.view(current_key=current, known_keys=known)
 
     def eligible_account_ids_snapshot(self) -> frozenset[str]:
         """Stable non-secret IDs for accounts eligible to serve right now."""

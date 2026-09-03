@@ -258,6 +258,22 @@ def _usage_token_from_field(usage: object, field: str) -> int | None:
     return value
 
 
+def _cache_tokens_from_usage(usage: object) -> tuple[int | None, int | None]:
+    """Strictly parse prompt-cache attribution from the usage echo.
+
+    The Responses API nests it under ``input_tokens_details``; absent or
+    malformed values are ``None`` (never zero) so consumers can tell "the
+    provider reported nothing" from "the provider reported no cache hit".
+    """
+    if not isinstance(usage, dict):
+        return None, None
+    details = usage.get("input_tokens_details")
+    return (
+        _usage_token_from_field(details, "cached_tokens"),
+        _usage_token_from_field(details, "cache_write_tokens"),
+    )
+
+
 def _server_input_tokens_from_usage(usage: object) -> int | None:
     """Strictly parse the server's accepted-input count from a usage object.
 
@@ -412,6 +428,18 @@ class CodexChatClient:
     # bare CodexAuth (single). The pool variants pin an account index to the
     # request so failure marking hits the account that actually served it.
     # ------------------------------------------------------------------
+
+    def _record_quota_headers(self, headers: object, account_id: str | None) -> None:
+        """Total: quota telemetry can never affect the request it rode on."""
+        tracker = getattr(self.auth, "quota", None)
+        if tracker is None:
+            return
+        try:
+            from .account_key import opaque_account_key
+
+            tracker.record_headers(opaque_account_key(account_id), headers)
+        except Exception:
+            log.debug("Codex quota header capture failed (non-fatal)", exc_info=True)
 
     async def _acquire_auth(self) -> tuple[str, str | None, int]:
         """Return (access_token, account_id, account_index) for this request."""
@@ -823,6 +851,10 @@ class CodexChatClient:
                         sock_read=self.stream_stall_timeout,
                     ),
                 ) as resp:
+                    # Quota headers ride every reply (200, 401, 429, 5xx alike).
+                    # Record them now, keyed to the account pinned for THIS
+                    # attempt, before status handling can rotate the pool.
+                    self._record_quota_headers(getattr(resp, "headers", None), account_id)
                     if resp.status == 200:
                         try:
                             result = await reader(resp)
@@ -1064,6 +1096,8 @@ class CodexChatClient:
         tool_calls: list[ToolCall] = []
         server_input_tokens: int | None = None
         server_output_tokens: int | None = None
+        cached_tokens: int | None = None
+        cache_write_tokens: int | None = None
         incomplete = False
 
         # Track in-progress function calls by output_index
@@ -1193,6 +1227,7 @@ class CodexChatClient:
                 usage = response_obj.get("usage")
                 server_input_tokens = _server_input_tokens_from_usage(usage)
                 server_output_tokens = _usage_token_from_field(usage, "output_tokens")
+                cached_tokens, cache_write_tokens = _cache_tokens_from_usage(usage)
                 output = response_obj.get("output", [])
                 for item in output:
                     item_type = item.get("type", "")
@@ -1237,6 +1272,8 @@ class CodexChatClient:
             stop_reason=stop_reason,
             server_input_tokens=server_input_tokens,
             server_output_tokens=server_output_tokens,
+            cached_tokens=cached_tokens,
+            cache_write_tokens=cache_write_tokens,
         )
 
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> str:

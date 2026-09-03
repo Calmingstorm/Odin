@@ -24,6 +24,8 @@ UPDATE_FILE = "*** Update File: "
 DELETE_FILE = "*** Delete File: "
 MOVE_TO = "*** Move to: "
 MAX_PATCH_BYTES = 48 * 1024
+MAX_HUNK_ANCHORS = 8
+PLAN_VERSION = 2
 
 
 class PatchError(ValueError):
@@ -141,12 +143,36 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
             hunks: list[dict[str, Any]] = []
             while index < end and not _operation_header(lines[index]):
                 marker = lines[index]
+                hunk_line = index + 1
                 if marker != "@@" and not marker.startswith("@@ "):
-                    raise PatchError(f"Update File {path}: expected an @@ hunk, got {marker!r}")
-                anchor = marker[3:] if marker.startswith("@@ ") else None
-                if anchor == "":
-                    raise PatchError(f"Update File {path}: empty @@ anchor")
-                index += 1
+                    raise PatchError(
+                        f"Update File {path}: expected an @@ hunk at patch line {hunk_line}, "
+                        f"got {marker!r}"
+                    )
+                # Consecutive NAMED @@ lines before the first body line form one
+                # ordered anchor chain — the dialect's "@@ class X / @@ def y()"
+                # jump to the right context.  A bare @@ always opens its own
+                # unanchored hunk.
+                anchors: list[str] = []
+                while marker.startswith("@@ "):
+                    anchor = marker[3:]
+                    if not anchor.strip():
+                        raise PatchError(
+                            f"Update File {path}: empty @@ anchor at patch line {index + 1}"
+                        )
+                    if len(anchors) >= MAX_HUNK_ANCHORS:
+                        raise PatchError(
+                            f"Update File {path}: more than {MAX_HUNK_ANCHORS} @@ anchors "
+                            f"chained at patch line {index + 1}"
+                        )
+                    anchors.append(anchor)
+                    index += 1
+                    if index < end and lines[index].startswith("@@ "):
+                        marker = lines[index]
+                        continue
+                    break
+                else:
+                    index += 1  # the bare @@ marker
                 hunk_lines: list[str] = []
                 changed = False
                 while (
@@ -157,14 +183,18 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                     line = lines[index]
                     if not line or line[0] not in " +-":
                         raise PatchError(
-                            f"Update File {path}: hunk lines must start with space, '+', or '-'"
+                            f"Update File {path}: patch line {index + 1} must start with "
+                            "space, '+', or '-'"
                         )
                     changed = changed or line[0] in "+-"
                     hunk_lines.append(line)
                     index += 1
                 if not hunk_lines or not changed:
-                    raise PatchError(f"Update File {path}: every hunk must contain a change")
-                hunks.append({"anchor": anchor, "lines": hunk_lines})
+                    raise PatchError(
+                        f"Update File {path}: the hunk introduced at patch line {hunk_line} "
+                        "contains no '+' or '-' line"
+                    )
+                hunks.append({"anchors": anchors, "lines": hunk_lines})
             if not hunks:
                 raise PatchError(f"Update File {path}: at least one @@ hunk is required")
             operations.append(
@@ -176,12 +206,16 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
 
     if not operations:
         raise PatchError("patch must contain at least one file operation")
-    return {"version": 1, "operations": operations}
+    return {"version": PLAN_VERSION, "operations": operations}
 
 
 def _validated_plan(plan: object) -> list[dict[str, Any]]:
     """Validate the transported plan independently of the model-side parser."""
-    if not isinstance(plan, dict) or set(plan) != {"version", "operations"} or plan["version"] != 1:
+    if (
+        not isinstance(plan, dict)
+        or set(plan) != {"version", "operations"}
+        or plan["version"] != PLAN_VERSION
+    ):
         raise PatchError("invalid transported patch plan")
     operations = plan["operations"]
     if not isinstance(operations, list) or not operations:
@@ -218,12 +252,21 @@ def _validated_plan(plan: object) -> list[dict[str, Any]]:
                 raise PatchError("invalid transported update hunks")
             clean_hunks: list[dict[str, Any]] = []
             for hunk in hunks:
-                if not isinstance(hunk, dict) or set(hunk) != {"anchor", "lines"}:
+                if not isinstance(hunk, dict) or set(hunk) != {"anchors", "lines"}:
                     raise PatchError("invalid transported update hunk")
-                anchor = hunk["anchor"]
+                anchors = hunk["anchors"]
                 hunk_lines = hunk["lines"]
-                if anchor is not None and not isinstance(anchor, str):
-                    raise PatchError("invalid transported hunk anchor")
+                if (
+                    not isinstance(anchors, list)
+                    or len(anchors) > MAX_HUNK_ANCHORS
+                    or not all(
+                        isinstance(anchor, str)
+                        and anchor.strip()
+                        and not any(ord(ch) < 32 for ch in anchor)
+                        for anchor in anchors
+                    )
+                ):
+                    raise PatchError("invalid transported hunk anchors")
                 if (
                     not isinstance(hunk_lines, list)
                     or not hunk_lines
@@ -233,7 +276,7 @@ def _validated_plan(plan: object) -> list[dict[str, Any]]:
                     or not any(line[0] in "+-" for line in hunk_lines)
                 ):
                     raise PatchError("invalid transported hunk lines")
-                clean_hunks.append({"anchor": anchor, "lines": hunk_lines})
+                clean_hunks.append({"anchors": list(anchors), "lines": hunk_lines})
             normalized.append(
                 {"action": action, "path": path, "move_to": move_to, "hunks": clean_hunks}
             )
@@ -257,21 +300,39 @@ def _find_unique(sequence: list[str], pattern: list[str], start: int, label: str
     return matches[0]
 
 
+def _find_first(sequence: list[str], pattern: list[str], start: int, label: str) -> int:
+    for idx in range(start, len(sequence) - len(pattern) + 1):
+        if sequence[idx : idx + len(pattern)] == pattern:
+            return idx
+    raise PatchError(f"context mismatch in {label}")
+
+
 def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
     had_final_newline = source.endswith(("\n", "\r"))
     newline = "\r\n" if "\n" in source and source.count("\r\n") == source.count("\n") else "\n"
     lines = source.splitlines()
     cursor = 0
     for hunk in hunks:
-        anchor = hunk["anchor"]
-        if anchor is not None:
-            anchor_at = _find_unique(lines, [anchor], cursor, path)
+        anchors = hunk["anchors"]
+        chained = len(anchors) > 1
+        if anchors:
+            # The first anchor must be unique from the cursor (unchanged rule).
+            # Further anchors NAVIGATE: each is the first occurrence after the
+            # previous one, which is what "@@ class X / @@ def y()" means in
+            # the dialect the model is taught.  A chain therefore pins one
+            # deterministic site, and the body is matched from there.
+            anchor_at = _find_unique(lines, [anchors[0]], cursor, path)
+            for anchor in anchors[1:]:
+                anchor_at = _find_first(lines, [anchor], anchor_at + 1, path)
             cursor = anchor_at
         old_lines = [line[1:] for line in hunk["lines"] if line[0] in " -"]
         new_lines = [line[1:] for line in hunk["lines"] if line[0] in " +"]
         if old_lines:
-            at = _find_unique(lines, old_lines, cursor, path)
-        elif anchor is not None:
+            if chained:
+                at = _find_first(lines, old_lines, cursor, path)
+            else:
+                at = _find_unique(lines, old_lines, cursor, path)
+        elif anchors:
             at = cursor
         else:
             at = len(lines)
