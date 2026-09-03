@@ -146,7 +146,9 @@ TOOLS_SECTION: list[dict] = [
             "path inside the patch must be relative to root. Supports *** Add File, "
             "*** Update File (optionally *** Move to), and *** Delete File sections inside "
             "one *** Begin Patch / *** End Patch envelope. The complete envelope is "
-            "validated before any write, and multi-file application rolls back on failure."
+            "validated before any write, and multi-file application rolls back on failure. "
+            "Requires a Linux host with glibc 2.28 or newer and filesystem support for "
+            "renameat2(RENAME_NOREPLACE); no unsafe fallback is used."
         ),
         "input_schema": {
             "type": "object",

@@ -14,6 +14,7 @@ from ..config.schema import ToolsConfig
 from ..odin_log import get_logger
 from ..permissions.host_access import HostAccessManager
 from ..permissions.manager import PermissionManager
+from ..runtime_paths import runtime_install_root
 from .branch_freshness import (
     FreshnessEvent,
     FreshnessStats,
@@ -351,8 +352,8 @@ class ToolExecutor:
         executor then rejected (PR #239 round-6 review).
         """
         return command_protected_roots(
-            # Install root: the package's own location (…/src/tools/executor.py).
-            Path(__file__).absolute().parents[2],
+            # Install root: one shared derivation from the running src package.
+            runtime_install_root(),
             # getattr-guarded throughout: the sanctioned __new__ patch seam
             # builds executors without __init__, so these may not exist.
             getattr(self, "_app_config", None),

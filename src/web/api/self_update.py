@@ -15,6 +15,7 @@ from aiohttp import web
 
 from ... import restart
 from ...odin_log import get_logger
+from ...runtime_paths import runtime_install_root
 
 log = get_logger("web.api")
 
@@ -328,7 +329,7 @@ def _live_protected_roots(bot, base: str | None) -> list[str]:
 
     memory_path = getattr(getattr(bot, "tool_executor", None), "_memory_path", None)
     return command_protected_roots(
-        Path(base).absolute() if base else Path(__file__).absolute().parents[3],
+        Path(base).absolute() if base else runtime_install_root(),
         getattr(bot, "config", None),
         memory_path=memory_path or DEFAULT_MEMORY_PATH,
     )

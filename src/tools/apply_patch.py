@@ -555,6 +555,26 @@ def _rename_noreplace(
         raise OSError(code, os.strerror(code), destination)
 
 
+def _durable_rename_noreplace(
+    source: str,
+    destination: str,
+    *,
+    src_dir_fd: int,
+    dst_dir_fd: int,
+    rename_noreplace: Callable[..., None],
+) -> None:
+    """Publish atomically, then durably persist both affected directory entries."""
+    rename_noreplace(
+        source,
+        destination,
+        src_dir_fd=src_dir_fd,
+        dst_dir_fd=dst_dir_fd,
+    )
+    os.fsync(dst_dir_fd)
+    if src_dir_fd != dst_dir_fd:
+        os.fsync(src_dir_fd)
+
+
 def _remove_named(artifact: dict[str, Any]) -> None:
     if not artifact.get("named"):
         return
@@ -636,11 +656,12 @@ def _rollback_record(
                 and _entry_missing(source["parent_fd"], source["name"])
             ):
                 os.fchmod(snapshot["fd"], snapshot["mode"])
-                rename_noreplace(
+                _durable_rename_noreplace(
                     recovery["name"],
                     source["name"],
                     src_dir_fd=recovery["parent_fd"],
                     dst_dir_fd=source["parent_fd"],
+                    rename_noreplace=rename_noreplace,
                 )
                 recovery["named"] = False
             else:
@@ -783,11 +804,12 @@ def apply_plan(
                     item["recovery"] = recovery
                     os.fchmod(snapshot["fd"], 0o600)
                     try:
-                        rename_noreplace(
+                        _durable_rename_noreplace(
                             source["name"],
                             recovery["name"],
                             src_dir_fd=source["parent_fd"],
                             dst_dir_fd=recovery["parent_fd"],
+                            rename_noreplace=rename_noreplace,
                         )
                     finally:
                         recovery["named"] = not _entry_missing(
@@ -801,11 +823,12 @@ def apply_plan(
                 commit_stage = item.get("stage")
                 if commit_stage is not None:
                     try:
-                        rename_noreplace(
+                        _durable_rename_noreplace(
                             commit_stage["name"],
                             destination["name"],
                             src_dir_fd=commit_stage["parent_fd"],
                             dst_dir_fd=destination["parent_fd"],
+                            rename_noreplace=rename_noreplace,
                         )
                     finally:
                         commit_stage["named"] = not _entry_missing(

@@ -443,3 +443,81 @@ def test_update_preserves_no_final_newline_and_crlf(tmp_path):
 def test_same_plan_cannot_claim_move_destination_twice():
     with pytest.raises(PatchError, match="more than once"):
         parse_patch(_patch("*** Update File: a\n*** Move to: b\n@@\n-x\n+y\n*** Delete File: b"))
+
+
+def test_rename_commit_fsyncs_each_affected_directory(tmp_path, monkeypatch):
+    source_dir = tmp_path / "source"
+    destination_dir = tmp_path / "destination"
+    source_dir.mkdir()
+    destination_dir.mkdir()
+    source = source_dir / "move.txt"
+    source.write_text("old\n")
+
+    from src.tools.apply_patch import _rename_noreplace
+
+    rename_fds: list[tuple[int, int, int, str, str]] = []
+    fsync_calls: list[int] = []
+    real_fsync = os.fsync
+
+    def record_fsync(fd: int) -> None:
+        fsync_calls.append(fd)
+        real_fsync(fd)
+
+    def record_rename(source_name, destination_name, **kwargs):
+        _rename_noreplace(source_name, destination_name, **kwargs)
+        src_fd = kwargs["src_dir_fd"]
+        dst_fd = kwargs["dst_dir_fd"]
+        rename_fds.append(
+            (
+                src_fd,
+                dst_fd,
+                len(fsync_calls),
+                os.path.realpath(f"/proc/self/fd/{src_fd}"),
+                os.path.realpath(f"/proc/self/fd/{dst_fd}"),
+            )
+        )
+
+    monkeypatch.setattr(os, "fsync", record_fsync)
+    apply_plan(
+        str(tmp_path),
+        parse_patch(
+            _patch(
+                "*** Update File: source/move.txt\n"
+                "*** Move to: destination/moved.txt\n"
+                "@@\n-old\n+new"
+            )
+        ),
+        rename_noreplace=record_rename,
+    )
+
+    assert rename_fds
+    for src_fd, dst_fd, before_fsync, _src_path, _dst_path in rename_fds:
+        expected = [dst_fd] if src_fd == dst_fd else [dst_fd, src_fd]
+        assert fsync_calls[before_fsync : before_fsync + len(expected)] == expected
+    fsynced_dirs = {
+        path
+        for _src_fd, _dst_fd, _before_fsync, src_path, dst_path in rename_fds
+        for path in (src_path, dst_path)
+    }
+    assert str(source_dir.resolve()) in fsynced_dirs
+    assert str(destination_dir.resolve()) in fsynced_dirs
+
+
+def test_missing_renameat2_fails_without_partial_effect(tmp_path, monkeypatch):
+    import ctypes
+
+    class LibcWithoutRenameAt2:
+        pass
+
+    monkeypatch.setattr(ctypes, "CDLL", lambda *_args, **_kwargs: LibcWithoutRenameAt2())
+    target = tmp_path / "new.txt"
+    with pytest.raises(
+        PatchError,
+        match=r"requires renameat2\(RENAME_NOREPLACE\) on the target host",
+    ):
+        apply_plan(
+            str(tmp_path),
+            parse_patch(_patch("*** Add File: new.txt\n+content")),
+        )
+    assert not target.exists()
+    assert not list(tmp_path.glob(".odin-patch-*"))

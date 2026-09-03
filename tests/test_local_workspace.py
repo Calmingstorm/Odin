@@ -591,10 +591,10 @@ def _symlinked_checkout_layout(tmp_path: Path) -> tuple[Path, Path]:
 def test_executor_passes_lexical_install_root_to_shared_derivation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import src.tools.executor as executor_module
+    import src.runtime_paths as runtime_paths
 
     workspace, checkout = _symlinked_checkout_layout(tmp_path)
-    monkeypatch.setattr(executor_module, "__file__", str(checkout / "src/tools/executor.py"))
+    monkeypatch.setattr(runtime_paths, "__file__", str(checkout / "src/runtime_paths.py"))
     executor = ToolExecutor(
         ToolsConfig(local_working_dir=str(workspace)),
         memory_path=str(tmp_path / "memory/memory.json"),
@@ -607,10 +607,11 @@ def test_startup_passes_lexical_install_root_to_shared_derivation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     import src.__main__ as entrypoint
+    import src.runtime_paths as runtime_paths
     from src.config.schema import Config
 
     workspace, checkout = _symlinked_checkout_layout(tmp_path)
-    monkeypatch.setattr(entrypoint, "__file__", str(checkout / "src/__main__.py"))
+    monkeypatch.setattr(runtime_paths, "__file__", str(checkout / "src/runtime_paths.py"))
     config = Config(
         discord={"token": "fake"},
         tools={"local_working_dir": str(workspace)},

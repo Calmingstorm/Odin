@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from functools import lru_cache
-from pathlib import Path
 from zoneinfo import ZoneInfo
+
+from ..runtime_paths import runtime_install_root
 
 
 @lru_cache(maxsize=16)
@@ -205,7 +206,7 @@ def build_system_prompt(
     personality_identity: str = "",
     personality_voice: str = "",
 ) -> str:
-    source_root = str(Path(__file__).absolute().parents[2])
+    source_root = str(runtime_install_root())
     hosts_text = "\n".join(f"- `{alias}`: {addr}" for alias, addr in hosts.items())
     local_tz = _get_zone(tz)
     tz_abbr = datetime.now(UTC).astimezone(local_tz).strftime("%Z")
