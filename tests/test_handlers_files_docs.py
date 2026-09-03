@@ -382,3 +382,59 @@ class TestApplyPatchHandlerTransport:
         assert result[1] == 1
         assert "manual recovery required" in result[0]
         assert "/repo/.odin-patch-recovery-abc" in result[0]
+
+    async def test_validation_and_preflight_fail_before_transport(self):
+        patch = "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n"
+        cases = [
+            ({"root": "/repo", "patch_text": patch}, "'host' is required"),
+            ({"host": "h", "root": "repo", "patch_text": patch}, "absolute path"),
+            ({"host": "h", "root": "/repo"}, "'patch_text' is required"),
+            ({"host": "h", "root": "/repo", "patch_text": "invalid"}, "invalid apply_patch"),
+        ]
+        for payload, expected in cases:
+            t = _tools()
+            result = await t._handle_apply_patch(payload)
+            assert result[1] == 1
+            assert expected in result[0]
+            t._run_on_host.assert_not_awaited()
+
+        t = _tools(resolve=None)
+        result = await t._handle_apply_patch({"host": "h", "root": "/repo", "patch_text": patch})
+        assert result[1] == 1
+        assert "Unknown or disallowed host" in result[0]
+        t._run_on_host.assert_not_awaited()
+
+        t = _tools(govern=(False, "blocked", None))
+        result = await t._handle_apply_patch({"host": "h", "root": "/repo", "patch_text": patch})
+        assert result == ("blocked", 1)
+        t._run_on_host.assert_not_awaited()
+
+    async def test_failure_result_arms_and_bare_transport_fail_closed(self):
+        patch = "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n"
+        for response, expected in (
+            ('{"ok":false,"error":"commit refused","rollback_failed":false}', "commit refused"),
+            (
+                ('{"ok":false,"error":"rollback failed","rollback_failed":true}', 0),
+                "manual recovery",
+            ),
+            (("bare transport failure", 0), "invalid result envelope"),
+        ):
+            t = _tools(run_ret=response)
+            result = await t._handle_apply_patch(
+                {"host": "h", "root": "/repo", "patch_text": patch}
+            )
+            assert result[1] == 1
+            assert expected in result[0]
+
+    async def test_host_wrapper_exports_recovery_artifacts(self):
+        t = _tools(run_ret=(' {"ok":true,"changed":["a.txt"]} ', 0))
+        patch = "*** Begin Patch\n*** Add File: a.txt\n+x\n*** End Patch\n"
+        await t._handle_apply_patch({"host": "h", "root": "/repo", "patch_text": patch})
+        command = t._run_on_host.call_args.args[1]
+        import base64
+        import re
+
+        encoded = re.search(r"printf %s ([A-Za-z0-9+/=]+) \| base64 -d", command)
+        assert encoded is not None
+        wrapper = base64.b64decode(encoded.group(1)).decode("utf-8")
+        assert "'recovery_artifacts': _exc.recovery_artifacts" in wrapper
