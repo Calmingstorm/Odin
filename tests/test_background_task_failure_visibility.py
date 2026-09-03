@@ -14,7 +14,7 @@ prefixes for plain-string branches.
 
 from __future__ import annotations
 
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -24,6 +24,8 @@ from src.discord.background_task import (
     create_task_id,
     run_background_task,
 )
+from src.knowledge.store import KnowledgeStore
+from src.search.fts import FullTextIndex
 from src.tools.result_validator import ToolResult
 from tests.fakes import FakeChannel
 
@@ -231,6 +233,48 @@ class TestStructuredFailureVisibility:
         assert kwargs["audit_metadata"] == metadata
         assert "opaque-background-secret" not in str(kwargs["tool_input"])
         assert kwargs["tool_input"]["password"] == "[redacted:sensitive-key]"
+
+
+    async def test_ingest_durability_failure_fails_real_background_step(self, tmp_path):
+        fts = FullTextIndex(str(tmp_path / "fts.db"))
+        store = KnowledgeStore(str(tmp_path / "knowledge.db"), fts_index=fts)
+        embedder = AsyncMock()
+        embedder.embed.return_value = None
+        executor = _FakeExecutor([])
+        task = make_task(
+            [
+                {
+                    "tool_name": "ingest_document",
+                    "tool_input": {"source": "doc.md", "content": "body"},
+                },
+                {
+                    "tool_name": "run_command",
+                    "tool_input": {"command": "must not run"},
+                },
+            ]
+        )
+
+        try:
+            with patch.object(fts, "index_knowledge_chunk", return_value=False) as failed:
+                await run_background_task(
+                    task,
+                    executor,
+                    _FakeSkillManager(),
+                    knowledge_store=store,
+                    embedder=embedder,
+                )
+
+            failed.assert_called_once()
+            assert task.status == "failed"
+            assert [result.status for result in task.results] == ["error"]
+            assert "Failed to ingest 'doc.md' durably." in task.results[0].output
+            assert executor.calls == []
+            assert store.get_source_content("doc.md") is None
+            assert store.get_versions("doc.md") == []
+        finally:
+            store.close()
+            if fts._conn is not None:
+                fts._conn.close()
 
 
 class TestStringHeuristic:

@@ -24,6 +24,7 @@ from src.knowledge.importer import (
 from src.knowledge.store import KnowledgeStore
 from src.search.errors import validate_search_query
 from src.search.fts import FullTextIndex
+from src.tools.result_validator import ToolResult
 
 try:
     import fitz  # noqa: F401 — availability probe for the [pdf] extra
@@ -1471,7 +1472,10 @@ class TestToolHandler:
             object(),
             "test-user",
         )
-        assert result == "Failed to ingest 'doc.md' durably."
+        assert isinstance(result, ToolResult)
+        assert result.ok is False
+        assert result.error == "Failed to ingest 'doc.md' durably."
+        assert str(result) == result.error
 
     async def test_bulk_ingest_tool_routing(self):
         from src.discord.background_task import _execute_tool
