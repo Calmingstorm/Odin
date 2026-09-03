@@ -310,3 +310,136 @@ def test_ambiguous_context_is_refused(tmp_path):
     with pytest.raises(PatchError, match="ambiguous"):
         apply_plan(str(tmp_path), plan)
     assert target.read_text() == "repeat\nrepeat\n"
+
+
+@pytest.mark.parametrize(
+    "text,match",
+    [
+        ("*** Begin Patch\n*** End Patch\n", "exactly framed"),
+        (_patch("*** Add File: a\\b\n+x"), "normalized relative"),
+        (_patch("*** Add File: a/\n+x"), "normalized relative"),
+        (_patch("*** Update File: a\nnot-a-hunk"), "expected an @@ hunk"),
+        (_patch("*** Update File: a\n@@\nold\n+new"), "must start"),
+    ],
+)
+def test_more_malformed_envelopes_are_refused(text, match):
+    with pytest.raises(PatchError, match=match):
+        parse_patch(text)
+
+
+def test_patch_size_and_utf8_guards():
+    from src.tools.apply_patch import MAX_PATCH_BYTES
+
+    with pytest.raises(PatchError, match="byte limit"):
+        parse_patch("x" * (MAX_PATCH_BYTES + 1))
+    with pytest.raises(PatchError, match="UTF-8"):
+        parse_patch("\ud800")
+    with pytest.raises(PatchError, match="NUL-free"):
+        parse_patch(_patch("*** Add File: a\n+x\x00y"))
+
+
+def test_transport_plan_is_revalidated_before_filesystem_access(tmp_path):
+    from src.tools.apply_patch import _validated_plan
+
+    invalid = [
+        None,
+        {"version": 2, "operations": []},
+        {"version": 1, "operations": []},
+        {"version": 1, "operations": [None]},
+        {"version": 1, "operations": [{"action": "delete", "path": "a", "extra": 1}]},
+        {"version": 1, "operations": [{"action": "add", "path": "a", "content": 1}]},
+        {
+            "version": 1,
+            "operations": [{"action": "update", "path": "a", "move_to": None, "hunks": []}],
+        },
+        {
+            "version": 1,
+            "operations": [
+                {
+                    "action": "update",
+                    "path": "a",
+                    "move_to": None,
+                    "hunks": [{"anchor": 1, "lines": ["-x", "+y"]}],
+                }
+            ],
+        },
+        {
+            "version": 1,
+            "operations": [
+                {
+                    "action": "update",
+                    "path": "a",
+                    "move_to": None,
+                    "hunks": [{"anchor": None, "lines": ["context"]}],
+                }
+            ],
+        },
+    ]
+    for plan in invalid:
+        with pytest.raises(PatchError):
+            _validated_plan(plan)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_apply_rejects_bad_roots_missing_parents_and_non_files(tmp_path):
+    plan = parse_patch(_patch("*** Add File: a.txt\n+x"))
+    for root in (None, "relative", str(tmp_path / "missing")):
+        with pytest.raises(PatchError, match="root"):
+            apply_plan(root, plan)
+
+    root_link = tmp_path / "root-link"
+    root_link.symlink_to(tmp_path, target_is_directory=True)
+    with pytest.raises(PatchError, match="root"):
+        apply_plan(str(root_link), plan)
+
+    with pytest.raises(PatchError, match="parent directory"):
+        apply_plan(str(tmp_path), parse_patch(_patch("*** Add File: missing/a\n+x")))
+
+    directory = tmp_path / "dir"
+    directory.mkdir()
+    with pytest.raises(PatchError, match="regular"):
+        apply_plan(str(tmp_path), parse_patch(_patch("*** Update File: dir\n@@\n-x\n+y")))
+
+
+def test_add_existing_move_destination_and_non_utf8_update_are_refused(tmp_path):
+    existing = tmp_path / "existing.txt"
+    existing.write_text("old\n")
+    with pytest.raises(PatchError, match="already exists"):
+        apply_plan(str(tmp_path), parse_patch(_patch("*** Add File: existing.txt\n+new")))
+
+    source = tmp_path / "source.txt"
+    source.write_text("old\n")
+    destination = tmp_path / "destination.txt"
+    destination.write_text("occupied\n")
+    with pytest.raises(PatchError, match="already exists"):
+        apply_plan(
+            str(tmp_path),
+            parse_patch(
+                _patch("*** Update File: source.txt\n*** Move to: destination.txt\n@@\n-old\n+new")
+            ),
+        )
+
+    binary = tmp_path / "binary.txt"
+    binary.write_bytes(b"\xff")
+    with pytest.raises(PatchError, match="UTF-8"):
+        apply_plan(str(tmp_path), parse_patch(_patch("*** Update File: binary.txt\n@@\n-x\n+y")))
+
+
+def test_update_preserves_no_final_newline_and_crlf(tmp_path):
+    plain = tmp_path / "plain.txt"
+    plain.write_bytes(b"old")
+    apply_plan(str(tmp_path), parse_patch(_patch("*** Update File: plain.txt\n@@\n-old\n+new")))
+    assert plain.read_bytes() == b"new"
+
+    crlf = tmp_path / "crlf.txt"
+    crlf.write_bytes(b"one\r\ntwo\r\n")
+    apply_plan(
+        str(tmp_path),
+        parse_patch(_patch("*** Update File: crlf.txt\n@@\n one\n-two\n+TWO")),
+    )
+    assert crlf.read_bytes() == b"one\r\nTWO\r\n"
+
+
+def test_same_plan_cannot_claim_move_destination_twice():
+    with pytest.raises(PatchError, match="more than once"):
+        parse_patch(_patch("*** Update File: a\n*** Move to: b\n@@\n-x\n+y\n*** Delete File: b"))
