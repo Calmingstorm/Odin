@@ -1246,8 +1246,10 @@ def apply_plan(
         ]
     except BaseException as original:
         if not preserve_artifacts:
-            artifacts = [item["recovery"] for item in prepared if item.get("recovery")] + stages
-            cleanup_failures = _cleanup_named(artifacts)
+            named_artifacts = [
+                item["recovery"] for item in prepared if item.get("recovery")
+            ] + stages
+            cleanup_failures = _cleanup_named(named_artifacts)
             directory_failures = directories.rollback_created()
             if cleanup_failures or directory_failures:
                 retained = _artifact_paths(prepared, stages)
