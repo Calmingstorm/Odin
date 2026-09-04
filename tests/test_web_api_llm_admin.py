@@ -1321,6 +1321,24 @@ class TestCodexMaxEffortPairValidation:
         gw.reload_codex_inner.assert_awaited()
 
     @pytest.mark.asyncio
+    async def test_astra_max_accepted_none_rejected(self):
+        app, bot = _app(register_provider_config)
+        gw = _gw(bot)
+        async with TestClient(TestServer(app)) as c:
+            r = await c.put(
+                "/api/llm/codex/config", json={"model": "gpt-6-astra", "reasoning_effort": "max"}
+            )
+            assert r.status == 200
+            assert bot.config.openai_codex.model == "gpt-6-astra"
+            r = await c.put("/api/llm/codex/config", json={"reasoning_effort": "none"})
+            assert r.status == 400
+            data = await r.json()
+            assert "gpt-6-astra" in data["error"] and "'none'" in data["error"]
+            assert "none" not in data["allowed"] and "max" in data["allowed"]
+        assert bot.config.openai_codex.reasoning_effort == "max"
+        gw.reload_codex_inner.assert_awaited()
+
+    @pytest.mark.asyncio
     async def test_effort_direction_rejected_with_allowed_list(self):
         app, bot = _app(register_provider_config)
         gw = _gw(bot)

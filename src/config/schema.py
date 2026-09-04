@@ -412,6 +412,11 @@ CODEX_MODEL_UNSUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     "gpt-5.5": frozenset({"max"}),
     "gpt-5.4": frozenset({"max"}),
     "gpt-5.4-mini": frozenset({"max"}),
+    # gpt-6-astra (served-but-unlisted; Personal/Pro rollout observed 2026-09-04)
+    # accepts low..max but rejects "none" per-request: 400 "Unsupported value:
+    # 'none' is not supported with the 'gpt-6-astra' model. Supported values
+    # are: 'low', 'medium', 'high', 'xhigh', 'max'".
+    "gpt-6-astra": frozenset({"none"}),
 }
 
 
@@ -462,6 +467,10 @@ def effort_incompatibility_error(model: str | None, effort: str | None) -> str |
 # it. Serving moves silently in both directions; these floors are refreshed
 # by manual probes, bounded downward at runtime only by observed clamps.
 CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
+    # gpt-6-astra: probed 2026-09-04 on the Personal/Pro account (descending
+    # free-reject ladder, usage-echo bracketing): accepted 917,534 / rejected
+    # at the 922,000 rung — the 922K class, lockstep with sol/terra/luna.
+    "gpt-6-astra": 917_534,
     "gpt-5.6-sol": 921_601,
     "gpt-5.6-terra": 917_506,
     "gpt-5.6-luna": 917_506,
