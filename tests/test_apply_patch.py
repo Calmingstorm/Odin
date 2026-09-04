@@ -392,8 +392,8 @@ def test_apply_rejects_bad_roots_missing_parents_and_non_files(tmp_path):
     with pytest.raises(PatchError, match="root"):
         apply_plan(str(root_link), plan)
 
-    with pytest.raises(PatchError, match="parent directory"):
-        apply_plan(str(tmp_path), parse_patch(_patch("*** Add File: missing/a\n+x")))
+    apply_plan(str(tmp_path), parse_patch(_patch("*** Add File: missing/a\n+x")))
+    assert (tmp_path / "missing" / "a").read_text() == "x\n"
 
     directory = tmp_path / "dir"
     directory.mkdir()
@@ -556,7 +556,8 @@ def test_parse_stacked_anchors_form_one_hunk_with_an_ordered_chain():
     assert len(hunks) == 1
     assert hunks[0]["anchors"] == ["class Beta:", "    def method(self):"]
     assert hunks[0]["lines"] == ["         x = 1", "-        return x", "+        return x + 1"]
-    assert plan["version"] == 2
+    assert hunks[0]["patch_line"] == 3
+    assert plan["version"] == 3
 
 
 def test_stacked_anchors_pick_the_site_inside_the_named_class(tmp_path):
