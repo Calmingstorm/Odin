@@ -224,6 +224,11 @@ def check_ssh_hosts(tools_config: Any) -> DiagnosticResult:
 
     ssh_key = getattr(tools_config, "ssh_key_path", "")
     known_hosts = getattr(tools_config, "ssh_known_hosts_path", "")
+    needs_legacy_trust = any(
+        getattr(host, "address", "") not in {"127.0.0.1", "localhost", "::1"}
+        and getattr(host, "trust_mode", None) not in {"pinned", "tofu", "ca"}
+        for host in hosts.values()
+    )
     issues: list[str] = []
     meta: dict[str, Any] = {"host_count": len(hosts)}
 
@@ -233,10 +238,10 @@ def check_ssh_hosts(tools_config: Any) -> DiagnosticResult:
     elif ssh_key:
         meta["ssh_key_exists"] = True
 
-    if known_hosts and not Path(known_hosts).exists():
+    if needs_legacy_trust and known_hosts and not Path(known_hosts).exists():
         issues.append(f"Known hosts file not found: {known_hosts}")
         meta["known_hosts_exists"] = False
-    elif known_hosts:
+    elif needs_legacy_trust and known_hosts:
         meta["known_hosts_exists"] = True
 
     host_names = list(hosts.keys()) if isinstance(hosts, dict) else []

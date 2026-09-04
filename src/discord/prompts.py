@@ -21,6 +21,7 @@ from __future__ import annotations
 import time
 from collections.abc import Callable
 
+from ..llm.secret_scrubber import scrub_output_secrets
 from ..llm.system_prompt import build_chat_system_prompt, build_system_prompt
 from ..odin_log import get_logger
 
@@ -38,6 +39,8 @@ class PromptBuilder:
         tool_executor,
         channel_state,
         get_codex_client: Callable,
+        host_registry=None,
+        host_access_manager=None,
     ) -> None:
         self.get_config = get_config
         self.context_loader = context_loader
@@ -46,8 +49,11 @@ class PromptBuilder:
         self.tool_executor = tool_executor
         self.channel_state = channel_state
         self.get_codex_client = get_codex_client
-        # Cached host string dict — invalidated on context reload
-        self.cached_hosts: dict[str, str] | None = None
+        self.host_registry = host_registry
+        self.host_access_manager = host_access_manager
+        # Keyed by registry generation + effective aliases. A process-wide
+        # unscoped cache leaked topology across requesters.
+        self.cached_hosts: dict[tuple[int, tuple[str, ...]], dict[str, str]] = {}
         # Cached skills list text — invalidated on skill create/edit/delete
         self.cached_skills_text: str | None = None
         # The default (no-channel) system prompt — set by rebuild_default()
@@ -58,14 +64,35 @@ class PromptBuilder:
 
     # -- caches ---------------------------------------------------------------
 
-    def cached_hosts_map(self) -> dict[str, str]:
-        """Return cached host string dict. Rebuilt on config reload."""
-        if self.cached_hosts is None:
-            self.cached_hosts = {
-                alias: f"{h.ssh_user}@{h.address}"
-                for alias, h in self.get_config().tools.hosts.items()
-            }
-        return self.cached_hosts
+    def cached_hosts_map(self, user_id: str | None = None) -> dict[str, str]:
+        """Return only the hosts effective for this requester."""
+        if self.host_registry is None:
+            hosts = self.get_config().tools.hosts
+            aliases = tuple(hosts)
+            generation = 0
+            lookup = hosts.get
+        else:
+            if user_id is not None and self.host_access_manager is not None:
+                aliases = tuple(self.host_access_manager.get_allowed_hosts(user_id))
+            else:
+                aliases = self.host_registry.active_aliases()
+            generation = self.host_registry.generation
+            lookup = self.host_registry.get
+        key = (generation, aliases)
+        cached = self.cached_hosts.get(key)
+        if cached is not None:
+            return cached
+        rendered: dict[str, str] = {}
+        for alias in aliases:
+            host = lookup(alias)
+            if host is None:
+                continue
+            description = scrub_output_secrets(str(getattr(host, "description", "")))
+            description = " ".join(description.splitlines()).strip()[:200]
+            endpoint = f"{host.ssh_user}@{host.address}"
+            rendered[alias] = f"{endpoint} — {description}" if description else endpoint
+        self.cached_hosts[key] = rendered
+        return rendered
 
     def cached_skills_list_text(self) -> str:
         """Return cached skills list text. Invalidated on skill create/edit/delete."""
@@ -104,7 +131,7 @@ class PromptBuilder:
 
     def invalidate(self) -> None:
         """Invalidate all prompt-related caches. Called on config/context reload."""
-        self.cached_hosts = None
+        self.cached_hosts.clear()
         self.cached_skills_text = None
         self.memory_cache.clear()
         if self.reflector is not None:
@@ -140,7 +167,8 @@ class PromptBuilder:
         p_cfg = config.personality if hasattr(config, "personality") else None
         prompt = build_system_prompt(
             context=self.context_loader.context,
-            hosts=self.cached_hosts_map(),
+            hosts=self.cached_hosts_map(user_id),
+            hosts_denied=user_id is not None,
             tz=config.timezone,
             personality_preset=p_cfg.preset if p_cfg else "odin",
             personality_name=p_cfg.custom_name if p_cfg else "",

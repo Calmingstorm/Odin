@@ -200,6 +200,7 @@ def _resolve_personality(
 def build_system_prompt(
     context: str,
     hosts: dict[str, str],
+    hosts_denied: bool = False,
     tz: str = "UTC",
     personality_preset: str = "odin",
     personality_name: str = "",
@@ -221,7 +222,14 @@ def build_system_prompt(
         bot_name=bot_name,
         identity=identity,
         voice=voice,
-        hosts=hosts_text or "None configured",
+        hosts=(
+            hosts_text
+            or (
+                "No hosts available to you under the current host-access policy."
+                if hosts_denied
+                else "None configured"
+            )
+        ),
         context=context or "No context files loaded.",
         current_datetime=_format_datetime(tz),
         timezone_name=tz_abbr,

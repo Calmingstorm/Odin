@@ -1108,16 +1108,14 @@ FIELDS: dict[str, FieldSpec] = {
         ),
     ),
     "tools.hosts": FieldSpec(
-        apply_mode="restart",
+        apply_mode="live_apply",
+        apply_handler="/api/hosts dedicated control plane",
         description="Named hosts commands may target.",
-        restart_reason="Both execution and the host-access fence resolve hosts "
-        "from the configuration they were built with, so a host added live is "
-        "advertised and scheduled but refused when a command runs.",
         consumers=(
             Consumer(
                 "Command execution and host access",
-                "restart",
-                "A newly added host is rejected as unknown until restart.",
+                "live_apply",
+                "The host registry publishes the committed inventory synchronously.",
             ),
             Consumer(
                 "Scheduled host digests",
@@ -1126,10 +1124,19 @@ FIELDS: dict[str, FieldSpec] = {
             ),
             Consumer(
                 "Prompt host list",
-                "activation_required",
-                "The prompt's host list is cached; POST /api/reload republishes it.",
+                "live_apply",
+                "The generation-keyed requester cache sees the new registry immediately.",
             ),
         ),
+    ),
+    "tools.default_host": FieldSpec(
+        apply_mode="live_apply",
+        apply_handler="/api/hosts dedicated control plane",
+        description="Explicit default for omitted-host system work.",
+    ),
+    "tools.allow_host_tofu": FieldSpec(
+        apply_mode="live_read",
+        description="Permit explicit, confirmed trust-on-first-use enrollment.",
     ),
     "tools.ssh_key_path": FieldSpec(
         owner="secrets",
@@ -1401,10 +1408,9 @@ def _pattern_spec(path: str) -> FieldSpec | None:
     """
     if path.startswith("tools.hosts."):
         return FieldSpec(
-            apply_mode="restart",
+            apply_mode="live_apply",
+            apply_handler="/api/hosts dedicated control plane",
             description="Connection detail for a configured host.",
-            restart_reason="Command execution and the host-access fence both "
-            "resolve hosts from the configuration they were built with.",
         )
     if path.startswith("personality.user_presets."):
         return FieldSpec(

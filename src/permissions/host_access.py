@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+from collections.abc import Callable
 from pathlib import Path
 
 from ..odin_log import get_logger
@@ -48,12 +49,14 @@ class HostAccessManager:
         self,
         path: str = "./data/host_access.json",
         available_hosts: list[str] | None = None,
+        available_hosts_provider: Callable[[], list[str] | tuple[str, ...]] | None = None,
     ) -> None:
         self._path = Path(path)
         self._lock = asyncio.Lock()
         self._users: dict[str, HostAccessEntry] = {}
         self._default_policy = HostAccessEntry()
         self._available_hosts: list[str] = available_hosts or []
+        self._available_hosts_provider = available_hosts_provider
         self._load()
 
     def _load(self) -> None:
@@ -82,10 +85,16 @@ class HostAccessManager:
 
     @property
     def available_hosts(self) -> list[str]:
+        if self._available_hosts_provider is not None:
+            return list(self._available_hosts_provider())
         return list(self._available_hosts)
 
     def set_available_hosts(self, hosts: list[str]) -> None:
         self._available_hosts = list(hosts)
+
+    def _available(self) -> list[str]:
+        """One runtime inventory read for an authorization decision."""
+        return self.available_hosts
 
     @property
     def default_policy(self) -> HostAccessEntry:
@@ -113,50 +122,41 @@ class HostAccessManager:
         _request_default_host.reset(token)
 
     def get_allowed_hosts(self, user_id: str) -> list[str]:
+        available = self._available()
         scope = _request_host_scope.get()
         has_own_entry = user_id in self._users
         if scope is not None and not has_own_entry:
-            return [h for h in scope if h in self._available_hosts]
+            return [h for h in scope if h in available]
         entry = self.get_entry(user_id)
         if entry.allowed_hosts is None:
-            base = list(self._available_hosts)
+            base = list(available)
         else:
-            base = [h for h in entry.allowed_hosts if h in self._available_hosts]
+            base = [h for h in entry.allowed_hosts if h in available]
         if scope is not None:
             base = [h for h in base if h in scope]
         return base
 
     def get_default_host(self, user_id: str) -> str:
+        available = self._available()
         scope = _request_host_scope.get()
         request_default = _request_default_host.get()
-        if request_default and request_default in self._available_hosts:
+        if request_default and request_default in available:
             effective = self.get_allowed_hosts(user_id)
             if request_default in effective:
                 return request_default
         has_own_entry = user_id in self._users
         if scope is not None and not has_own_entry:
-            valid = [h for h in scope if h in self._available_hosts]
-            return valid[0] if valid else ""
+            valid = [h for h in scope if h in available]
+            return request_default if request_default in valid else ""
         entry = self.get_entry(user_id)
-        if entry.default_host and entry.default_host in self._available_hosts:
+        if entry.default_host and entry.default_host in available:
             if scope is None or entry.default_host in scope:
                 return entry.default_host
-        allowed = self.get_allowed_hosts(user_id)
-        return allowed[0] if allowed else ""
+        return ""
 
     def is_host_allowed(self, user_id: str, host: str) -> bool:
-        scope = _request_host_scope.get()
-        has_own_entry = user_id in self._users
-        if scope is not None and not has_own_entry:
-            return host in scope and host in self._available_hosts
-        entry = self.get_entry(user_id)
-        if entry.allowed_hosts is None:
-            allowed = host in self._available_hosts
-        else:
-            allowed = host in entry.allowed_hosts and host in self._available_hosts
-        if scope is not None:
-            allowed = allowed and host in scope
-        return allowed
+        """Use the exact effective-list authority consumed by prompt rendering."""
+        return host in self.get_allowed_hosts(user_id)
 
     def has_user_entry(self, user_id: str) -> bool:
         return user_id in self._users
@@ -174,10 +174,11 @@ class HostAccessManager:
         default_host: str,
     ) -> None:
         async with self._lock:
+            available = self._available()
             if allowed_hosts is None:
                 valid_hosts = None
             else:
-                valid_hosts = [h for h in allowed_hosts if h in self._available_hosts]
+                valid_hosts = [h for h in allowed_hosts if h in available]
             if default_host and (valid_hosts is None or default_host not in valid_hosts):
                 if valid_hosts is None:
                     pass  # allow-all, any default is fine if it's a real host
@@ -185,7 +186,7 @@ class HostAccessManager:
                     default_host = valid_hosts[0]
                 else:
                     default_host = ""
-            if default_host and default_host not in self._available_hosts:
+            if default_host and default_host not in available:
                 default_host = ""
             self._users[user_id] = HostAccessEntry(
                 allowed_hosts=valid_hosts,
@@ -210,11 +211,12 @@ class HostAccessManager:
 
     async def set_default_policy(self, allowed_hosts: list[str] | None, default_host: str) -> None:
         async with self._lock:
+            available = self._available()
             if allowed_hosts is None:
                 valid_hosts = None
             else:
-                valid_hosts = [h for h in allowed_hosts if h in self._available_hosts]
-            if default_host and default_host not in self._available_hosts:
+                valid_hosts = [h for h in allowed_hosts if h in available]
+            if default_host and default_host not in available:
                 default_host = ""
             if default_host and valid_hosts is not None and default_host not in valid_hosts:
                 default_host = valid_hosts[0] if valid_hosts else ""

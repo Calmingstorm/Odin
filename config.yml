@@ -107,14 +107,27 @@ tools:
   ssh_key_path: /app/.ssh/id_ed25519
   # Customize SSH known hosts path for your deployment
   ssh_known_hosts_path: /app/.ssh/known_hosts
-  # Add hosts here, e.g.:
+  # Managed live in WebUI System → Hosts (this file remains durable truth).
+  # Existing address/ssh_user/os-only entries remain legacy-trusted through
+  # ssh_known_hosts_path. New enrollments pin public host keys per host.
+  # Add hosts here manually, e.g.:
   #   my-host:
-  #     address: 1.2.3.4
+  #     address: example.invalid
   #     ssh_user: root
+  #     os: linux
+  #     port: 22
+  #     description: "Staging build host"
+  #     enabled: true
+  # Optional explicit default for omitted-host system work. YAML order is not policy.
+  default_host: localhost
+  # Break-glass TOFU enrollment stays disabled unless explicitly enabled.
+  allow_host_tofu: false
   hosts:
     localhost:
       address: 127.0.0.1
       ssh_user: root
+      os: linux
+      description: "Local Odin workspace"
   command_timeout_seconds: 300
   tool_timeouts: {}
   audit_log_path: ./data/audit.jsonl

@@ -50,6 +50,7 @@ from ..sessions import SessionManager
 from ..tools import SkillManager, ToolExecutor
 from ..tools.autonomous_loop import LoopManager
 from ..tools.builtin_policy import BuiltinToolPolicy
+from ..tools.hosts import HostRegistry
 from ..tools.mcp import MCPManager
 from ..tools.process_manager import ProcessCleanupError
 from ..tools.workspace import DEFAULT_MEMORY_PATH
@@ -105,6 +106,7 @@ class BotServices:
     channel_config: ChannelConfigManager
     channel_logger: ChannelLogger
     browser_manager: object | None
+    host_registry: HostRegistry
     host_access_manager: HostAccessManager
     permissions: PermissionManager
     tool_executor: ToolExecutor
@@ -278,9 +280,15 @@ def build_services(
             max_chunk_chars=streaming_cfg.max_chunk_chars,
         )
 
+    host_registry = HostRegistry(
+        config.tools.hosts,
+        key_path=config.tools.ssh_key_path,
+        legacy_known_hosts_path=config.tools.ssh_known_hosts_path,
+        default_host=config.tools.default_host,
+    )
     host_access_manager = HostAccessManager(
         path="./data/host_access.json",
-        available_hosts=list(config.tools.hosts.keys()),
+        available_hosts_provider=host_registry.active_aliases,
     )
 
     # Built before ToolExecutor so it can be wired in as the RBAC gate.
@@ -299,6 +307,7 @@ def build_services(
         browser_manager=browser_manager,
         output_streamer=output_streamer,
         host_access_manager=host_access_manager,
+        host_registry=host_registry,
         email_config=getattr(config, "email", None),
         permission_manager=permissions,
     )
@@ -586,6 +595,7 @@ def build_services(
         channel_config=channel_config,
         channel_logger=channel_logger,
         browser_manager=browser_manager,
+        host_registry=host_registry,
         host_access_manager=host_access_manager,
         permissions=permissions,
         tool_executor=tool_executor,
@@ -722,6 +732,8 @@ def build_components(bot, services: BotServices) -> BotComponents:
         tool_executor=services.tool_executor,
         channel_state=services.channel_state,
         get_codex_client=lambda: llm_gateway.codex_client,
+        host_registry=services.host_registry,
+        host_access_manager=services.host_access_manager,
     )
     tool_catalog = ToolCatalog(
         get_config=lambda: bot.config,
@@ -904,6 +916,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             get_channel=lambda cid: bot.get_channel(cid),
             get_guilds=lambda: bot.guilds,
             tool_executor=services.tool_executor,
+            host_registry=services.host_registry,
             audit=services.audit,
             llm_gateway=llm_gateway,
             tool_loop=tool_loop,

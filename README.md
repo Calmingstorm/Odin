@@ -239,6 +239,15 @@ For a source installation using Codex, run `python scripts/codex_login.py --devi
 
 Odin loads `config.yml` at startup and supports `${VAR}` and `${VAR:-default}` environment substitution.
 
+Managed execution hosts remain durable under `tools.hosts` in `config.yml`, but
+administrators can add, enroll, test, edit, disable, drain, and remove them live
+from **System → Hosts**. New SSH targets use pinned public host-key material and
+must pass a non-interactive connection test before activation. Existing
+`address`/`ssh_user`/`os` entries keep legacy `known_hosts` trust without a boot
+migration or config rewrite. Host Access remains a separate authorization
+policy, and `tools.default_host` is the explicit fallback for omitted-host
+system work; mapping order is never treated as policy.
+
 Important sections include:
 
 | Section | Purpose |

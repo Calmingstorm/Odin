@@ -97,6 +97,7 @@ class OdinBot(commands.Bot):
         self.channel_config = services.channel_config
         self.channel_logger = services.channel_logger
         self.browser_manager = services.browser_manager
+        self.host_registry = services.host_registry
         self.host_access_manager = services.host_access_manager
         self.permissions = services.permissions
         self.tool_executor = services.tool_executor

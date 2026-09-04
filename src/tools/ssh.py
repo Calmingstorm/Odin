@@ -277,6 +277,9 @@ async def run_ssh_command(
     retry_max_delay: float = 10.0,
     pool: SSHConnectionPool | None = None,
     on_output: OutputCallback | None = None,
+    port: int = 22,
+    host_key_alias: str = "",
+    target_id: str = "",
 ) -> tuple[int, str]:
     """Run a command on a remote host via SSH. Returns (exit_code, output).
 
@@ -299,9 +302,14 @@ async def run_ssh_command(
             "-o",
             "StrictHostKeyChecking=yes",
             "-o",
+            "IdentitiesOnly=yes",
+            "-o",
             "ConnectTimeout=10",
             "-o",
             "BatchMode=yes",
+            "-p",
+            str(port),
+            *(["-o", f"HostKeyAlias={host_key_alias}"] if host_key_alias else []),
             f"{ssh_user}@{host}",
             command,
         ]
@@ -318,9 +326,15 @@ async def run_ssh_command(
                 # Establish a foreground, asyncio-owned master before the
                 # command. The lease survives every return/exception arm via
                 # finally; release starts the configured idle-expiry timer.
-                was_connected = pool.is_connected(host, ssh_user)
+                was_connected = pool.is_connected(host, ssh_user, target_id)
                 pool_acquired = await pool.acquire(
-                    host, ssh_key_path, known_hosts_path, ssh_user
+                    host,
+                    ssh_key_path,
+                    known_hosts_path,
+                    ssh_user,
+                    port=port,
+                    host_key_alias=host_key_alias,
+                    target_id=target_id,
                 )
                 ssh_args = pool.get_ssh_args(
                     host,
@@ -329,6 +343,9 @@ async def run_ssh_command(
                     known_hosts_path,
                     ssh_user,
                     was_connected=was_connected,
+                    port=port,
+                    host_key_alias=host_key_alias,
+                    target_id=target_id,
                 )
             # The ssh client is a direct child (no new session: killing the
             # client is sufficient — the remote side is ssh's own domain, and
@@ -353,7 +370,8 @@ async def run_ssh_command(
                 # Compatibility with a live socket inherited from the old
                 # daemonizing pool during an in-place update. New explicit
                 # masters are direct asyncio children and return immediately.
-                await pool.ensure_master_registered(host, ssh_user)
+                if not target_id:
+                    await pool.ensure_master_registered(host, ssh_user)
 
             if exit_code == 0 or not _is_ssh_transient_failure(exit_code, output):
                 return exit_code, _truncate_output(output)
@@ -392,7 +410,8 @@ async def run_ssh_command(
             if pool is not None:
                 # A legacy socket may still name a detached master; preserve
                 # its positive registration evidence until it is replaced.
-                await pool.ensure_master_registered(host, ssh_user)
+                if not target_id:
+                    await pool.ensure_master_registered(host, ssh_user)
             if attempt < max_retries - 1:
                 wait = compute_backoff(attempt, retry_base_delay, retry_max_delay)
                 log.warning(
@@ -418,7 +437,7 @@ async def run_ssh_command(
             return 1, f"SSH error: {e}"
         finally:
             if pool is not None and pool_acquired:
-                pool.release(host, ssh_user)
+                pool.release(host, ssh_user, target_id)
 
     return last_exit_code, _truncate_output(last_output)
 
@@ -438,6 +457,8 @@ async def read_binary_file(
     ssh_key_path: str = "",
     known_hosts_path: str = "",
     ssh_user: str = "root",
+    port: int = 22,
+    host_key_alias: str = "",
     timeout: int = 60,
 ) -> tuple[bytes | None, str]:
     """Read a file as BYTES from a local or remote host.
@@ -486,9 +507,14 @@ async def read_binary_file(
         "-o",
         "StrictHostKeyChecking=yes",
         "-o",
+        "IdentitiesOnly=yes",
+        "-o",
         "ConnectTimeout=10",
         "-o",
         "BatchMode=yes",
+        "-p",
+        str(port),
+        *(["-o", f"HostKeyAlias={host_key_alias}"] if host_key_alias else []),
         f"{ssh_user}@{address}",
         remote_command,
     ]

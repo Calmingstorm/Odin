@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import time
@@ -16,8 +17,22 @@ DEFAULT_CONTROL_PERSIST = 60
 DEFAULT_SOCKET_DIR = "/tmp/odin_ssh_sockets"
 
 
-def _socket_path(socket_dir: str, host: str, ssh_user: str) -> str:
-    return os.path.join(socket_dir, f"{ssh_user}@{host}")
+def _socket_path(
+    socket_dir: str,
+    host: str,
+    ssh_user: str = "",
+    target_id: str = "",
+) -> str:
+    """Socket path for a connection identity.
+
+    Legacy direct callers retain their historical path. Registry-backed calls
+    supply a stable host-generation id and get a bounded opaque path that never
+    embeds operator-controlled endpoint text.
+    """
+    if not target_id:
+        return os.path.join(socket_dir, f"{ssh_user}@{host}")
+    digest = hashlib.sha256(target_id.encode("utf-8", "replace")).hexdigest()[:32]
+    return os.path.join(socket_dir, f"host-{digest}")
 
 
 class SSHConnectionPool:
@@ -52,8 +67,8 @@ class SSHConnectionPool:
         self._total_opened: int = 0
         os.makedirs(self.socket_dir, mode=0o700, exist_ok=True)
 
-    def _key(self, host: str, ssh_user: str) -> str:
-        return f"{ssh_user}@{host}"
+    def _key(self, host: str, ssh_user: str, target_id: str = "") -> str:
+        return target_id or f"{ssh_user}@{host}"
 
     def _lock(self, key: str) -> asyncio.Lock:
         lock = self._master_locks.get(key)
@@ -62,8 +77,8 @@ class SSHConnectionPool:
             self._master_locks[key] = lock
         return lock
 
-    def get_socket_path(self, host: str, ssh_user: str) -> str:
-        return _socket_path(self.socket_dir, host, ssh_user)
+    def get_socket_path(self, host: str, ssh_user: str, target_id: str = "") -> str:
+        return _socket_path(self.socket_dir, host, ssh_user, target_id)
 
     @staticmethod
     def _base_args(
@@ -79,6 +94,8 @@ class SSHConnectionPool:
             f"UserKnownHostsFile={known_hosts_path}",
             "-o",
             "StrictHostKeyChecking=yes",
+            "-o",
+            "IdentitiesOnly=yes",
             "-o",
             "ConnectTimeout=10",
             "-o",
@@ -96,6 +113,9 @@ class SSHConnectionPool:
         ssh_user: str = "root",
         *,
         was_connected: bool | None = None,
+        port: int = 22,
+        host_key_alias: str = "",
+        target_id: str = "",
     ) -> list[str]:
         """Build SSH command args using an explicitly managed master.
 
@@ -105,11 +125,11 @@ class SSHConnectionPool:
         command the master, but it must never daemonize and create an
         unattributable fast-double-fork zombie.
         """
-        socket = self.get_socket_path(host, ssh_user)
-        key = self._key(host, ssh_user)
+        socket = self.get_socket_path(host, ssh_user, target_id)
+        key = self._key(host, ssh_user, target_id)
 
         connected = (
-            self.is_connected(host, ssh_user)
+            self.is_connected(host, ssh_user, target_id)
             if was_connected is None
             else was_connected
         )
@@ -121,6 +141,9 @@ class SSHConnectionPool:
 
         return [
             *self._base_args(ssh_key_path, known_hosts_path, socket),
+            "-p",
+            str(port),
+            *(["-o", f"HostKeyAlias={host_key_alias}"] if host_key_alias else []),
             "-o",
             "ControlMaster=auto",
             "-o",
@@ -129,9 +152,9 @@ class SSHConnectionPool:
             command,
         ]
 
-    def is_connected(self, host: str, ssh_user: str) -> bool:
+    def is_connected(self, host: str, ssh_user: str, target_id: str = "") -> bool:
         """Check if a ControlMaster socket exists for this host."""
-        socket = self.get_socket_path(host, ssh_user)
+        socket = self.get_socket_path(host, ssh_user, target_id)
         return os.path.exists(socket)
 
     def _cancel_expiry(self, key: str) -> None:
@@ -167,10 +190,14 @@ class SSHConnectionPool:
         ssh_key_path: str,
         known_hosts_path: str,
         ssh_user: str,
+        *,
+        port: int = 22,
+        host_key_alias: str = "",
+        target_id: str = "",
     ) -> bool:
         """Start a non-daemonizing ControlMaster and wait for its socket."""
-        key = self._key(host, ssh_user)
-        socket = self.get_socket_path(host, ssh_user)
+        key = self._key(host, ssh_user, target_id)
+        socket = self.get_socket_path(host, ssh_user, target_id)
         proc = self._masters.get(key)
         if proc is not None and proc.returncode is None and os.path.exists(socket):
             return True
@@ -186,6 +213,9 @@ class SSHConnectionPool:
 
         proc = await asyncio.create_subprocess_exec(
             *self._base_args(ssh_key_path, known_hosts_path, socket),
+            "-p",
+            str(port),
+            *(["-o", f"HostKeyAlias={host_key_alias}"] if host_key_alias else []),
             "-o",
             "ControlMaster=yes",
             "-o",
@@ -218,6 +248,10 @@ class SSHConnectionPool:
         ssh_key_path: str,
         known_hosts_path: str,
         ssh_user: str = "root",
+        *,
+        port: int = 22,
+        host_key_alias: str = "",
+        target_id: str = "",
     ) -> bool:
         """Acquire one active-use lease, establishing a direct master.
 
@@ -225,36 +259,42 @@ class SSHConnectionPool:
         may still execute safely: command args use ``ControlPersist=no`` and
         therefore cannot create the leaking daemonization shape.
         """
-        key = self._key(host, ssh_user)
+        key = self._key(host, ssh_user, target_id)
         async with self._lock(key):
             self._cancel_expiry(key)
             ready = await self._start_explicit_master(
-                host, ssh_key_path, known_hosts_path, ssh_user
+                host,
+                ssh_key_path,
+                known_hosts_path,
+                ssh_user,
+                port=port,
+                host_key_alias=host_key_alias,
+                target_id=target_id,
             )
             if ready:
                 self._active_leases[key] = self._active_leases.get(key, 0) + 1
             return ready
 
-    def release(self, host: str, ssh_user: str = "root") -> None:
+    def release(self, host: str, ssh_user: str = "root", target_id: str = "") -> None:
         """Release an active-use lease and arm the configured idle expiry."""
-        key = self._key(host, ssh_user)
+        key = self._key(host, ssh_user, target_id)
         active = self._active_leases.get(key, 0)
         if active <= 1:
             self._active_leases.pop(key, None)
             self._cancel_expiry(key)
             self._expiry_tasks[key] = asyncio.create_task(
-                self._expire_after_idle(host, ssh_user),
+                self._expire_after_idle(host, ssh_user, target_id),
                 name=f"ssh-master-expiry:{key}",
             )
         else:
             self._active_leases[key] = active - 1
 
-    async def _expire_after_idle(self, host: str, ssh_user: str) -> None:
-        key = self._key(host, ssh_user)
+    async def _expire_after_idle(self, host: str, ssh_user: str, target_id: str = "") -> None:
+        key = self._key(host, ssh_user, target_id)
         try:
             await asyncio.sleep(max(0, self.control_persist))
             if self._active_leases.get(key, 0) == 0:
-                await self.close_host(host, ssh_user)
+                await self.close_host(host, ssh_user, target_id)
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -343,15 +383,23 @@ class SSHConnectionPool:
 
     def get_active_hosts(self) -> list[str]:
         """Return list of host keys with active sockets."""
-        return [
-            key for key in self._connections
-            if os.path.exists(os.path.join(self.socket_dir, key))
-        ]
+        active: list[str] = []
+        for key in self._connections:
+            if "@" in key:
+                ssh_user, host = key.split("@", 1)
+                socket = _socket_path(self.socket_dir, host, ssh_user)
+            else:
+                socket = _socket_path(self.socket_dir, "", target_id=key)
+            if os.path.exists(socket):
+                active.append(key)
+        return active
 
-    async def close_host(self, host: str, ssh_user: str = "root") -> bool:
+    async def close_host(
+        self, host: str, ssh_user: str = "root", target_id: str = ""
+    ) -> bool:
         """Explicitly close and reap a ControlMaster connection."""
-        socket = self.get_socket_path(host, ssh_user)
-        key = self._key(host, ssh_user)
+        socket = self.get_socket_path(host, ssh_user, target_id)
+        key = self._key(host, ssh_user, target_id)
         async with self._lock(key):
             self._cancel_expiry(key)
             master = self._masters.pop(key, None)
@@ -402,16 +450,23 @@ class SSHConnectionPool:
                 log.info("Closed SSH connection to %s@%s", ssh_user, host)
             return had_connection
 
+    async def close_target(self, target) -> bool:
+        return await self.close_host(
+            target.address, target.ssh_user, target.runtime_key
+        )
+
     async def close_all(self) -> int:
         """Close all active ControlMaster connections. Returns count closed."""
         closed = 0
         keys = set(self._connections) | set(self._masters) | set(self._expiry_tasks)
         for key in list(keys):
-            parts = key.split("@", 1)
-            if len(parts) == 2:
-                ssh_user, host = parts
-                if await self.close_host(host, ssh_user):
-                    closed += 1
+            if "@" in key:
+                ssh_user, host = key.split("@", 1)
+                target_id = ""
+            else:
+                ssh_user, host, target_id = "invalid", "invalid", key
+            if await self.close_host(host, ssh_user, target_id):
+                closed += 1
         return closed
 
     def get_metrics(self) -> dict:
