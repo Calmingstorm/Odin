@@ -600,7 +600,7 @@ class _DirectoryRegistry:
             if target is None or (target.st_dev, target.st_ino) != expected:
                 raise PatchError(f"created parent directory changed during publish: {label}")
             return stage_fd
-        except BaseException:
+        except BaseException as original:
             if stage_fd >= 0:
                 os.close(stage_fd)
             if not published:
@@ -612,7 +612,7 @@ class _DirectoryRegistry:
                         os.fsync(parent_fd)
                 except OSError as cleanup_exc:
                     raise PatchRollbackError(
-                        PatchError(f"could not create parent directory: {label}"),
+                        original,
                         [
                             f"private staging directory {stage_label}: "
                             f"{type(cleanup_exc).__name__}: {cleanup_exc}"
