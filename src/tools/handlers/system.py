@@ -181,7 +181,7 @@ class SystemTools(HandlerBase):
             if self._host_access and self._current_user_id:
                 hosts = self._host_access.get_allowed_hosts(self._current_user_id)
             else:
-                hosts = list(self.config.hosts.keys())
+                hosts = list(self._deps.host_registry().active_aliases())
 
         # Per-host access + governor check before launching parallel tasks
         blocked_hosts = []
@@ -254,9 +254,17 @@ class SystemTools(HandlerBase):
                 return f"Unknown or disallowed host: {host}", 1
             # Periodic cleanup
             registry.cleanup()
-            result = await registry.start(host, command)
+            from ..ssh import is_local_address
+
+            if is_local_address(resolved[0]):
+                result = await registry.start(resolved[0], command)
+            else:
+                lease = self._acquire_host(host)
+                if lease is None:
+                    return f"Unknown or disallowed host: {host}", 1
+                result = await registry.start_remote(lease, command)
             if result.startswith(
-                ("Cannot start", "Failed to start", "Error:", "manage_process only")
+                ("Cannot start", "Failed to start", "Error:")
             ):
                 return result, 1
             return result, 0

@@ -226,7 +226,7 @@ TOOLS_SECTION: list[dict] = [
                     "type": "string",
                     "description": (
                         "Host alias used for any check without an explicit 'host'. "
-                        "Defaults to 'localhost'."
+                        "Uses the requester's explicit default-host policy when omitted."
                     ),
                 },
                 "grace_seconds": {

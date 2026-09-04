@@ -34,6 +34,8 @@ class ValidationTools(HandlerBase):
         bundle_name = str(inp.get("bundle_name") or "unnamed").strip()[:120]
         default_host = inp.get("default_host")
         default_host = str(default_host).strip() if default_host else None
+        if not default_host:
+            default_host = self._resolve_default_host(self._current_user_id) or None
         grace_seconds = int(inp.get("grace_seconds") or 0)
         grace_seconds = max(0, min(grace_seconds, 60))
         max_parallel = int(inp.get("max_parallel") or 12)
@@ -42,9 +44,9 @@ class ValidationTools(HandlerBase):
         governor = getattr(self, "command_governor", None)
 
         async def _exec(
-            address: str,
+            _address: str,
             command: str,
-            ssh_user: str,
+            _ssh_user: str,
             *,
             timeout: int,
             use_workspace: bool = False,
@@ -71,15 +73,33 @@ class ValidationTools(HandlerBase):
             # round 10); fixed-shape probes must keep pre-PR cwd semantics so
             # an unusable workspace cannot disable service/process/http/port
             # validation (round 11).
-            return await self._exec_command(
-                address, command, ssh_user, timeout=timeout, use_workspace=use_workspace
-            )
+            # resolve_host returns the alias in its address slot deliberately,
+            # so the generation-bound target is acquired here after the
+            # per-check governor decision.
+            alias = _address
+            lease = self._acquire_host(alias)
+            if lease is None:
+                return 1, f"unknown host alias: {alias}"
+            with lease:
+                target = lease.target
+                return await lease.run(
+                    lambda: self._exec_command(
+                        target.address,
+                        command,
+                        target.ssh_user,
+                        timeout=timeout,
+                        use_workspace=use_workspace,
+                        target=target,
+                    )
+                )
 
         report = await run_bundle(
             raw_checks,
             bundle_name=bundle_name,
             default_host=default_host,
-            resolve_host=self._resolve_host,
+            resolve_host=lambda alias: (
+                (alias, "", "") if self._resolve_host(alias) is not None else None
+            ),
             exec_command=_exec,
             grace_seconds=grace_seconds,
             max_parallel=max_parallel,

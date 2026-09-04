@@ -72,6 +72,9 @@ _user_id_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 _user_tier_ctx: contextvars.ContextVar[str | None] = contextvars.ContextVar(
     "odin_tool_user_tier", default=None
 )
+_host_lease_ctx: contextvars.ContextVar[Any | None] = contextvars.ContextVar(
+    "odin_tool_host_lease", default=None
+)
 # Request-scoped per-tool timeout, backed by a contextvar for the same reason:
 # it was previously a shared instance attribute that concurrent tool calls
 # overwrote across await points, so a 30s-timeout tool could shrink a concurrent
@@ -163,6 +166,7 @@ class ToolExecutor:
         permission_manager: PermissionManager | None = None,
         output_streamer: ToolOutputStreamer | None = None,
         host_access_manager: HostAccessManager | None = None,
+        host_registry=None,
         email_config: object | None = None,
         app_config: object | None = None,
     ) -> None:
@@ -203,6 +207,17 @@ class ToolExecutor:
         self._permission_manager = permission_manager
         self.output_streamer = output_streamer
         self._host_access = host_access_manager
+        self._compat_config_host_fallback = host_registry is None
+        if host_registry is None:
+            from .hosts import HostRegistry
+
+            host_registry = HostRegistry(
+                self.config.hosts,
+                key_path=self.config.ssh_key_path,
+                legacy_known_hosts_path=self.config.ssh_known_hosts_path,
+                default_host=self.config.default_host,
+            )
+        self.host_registry = host_registry
         self._metrics: dict[str, dict[str, int]] = {}
         self._memory_lock = asyncio.Lock()
         self._memory_corrupt_logged_at = 0.0
@@ -235,6 +250,7 @@ class ToolExecutor:
             if pool_cfg.enabled
             else None
         )
+        self.host_registry.set_retire_callback(self._retire_host_target)
         # RFC-004 P4: the narrow seam handler domains use. Every field is a
         # LATE-RESOLVING callable closing over ``self`` (the executor
         # variable) — attribute lookup happens per call, so instance/class
@@ -253,6 +269,7 @@ class ToolExecutor:
             config=lambda: self.config,
             output_streamer=lambda: self.output_streamer,
             host_access=lambda: self._host_access,
+            host_registry=lambda: self.host_registry,
             branch_freshness_enabled=lambda: self._branch_freshness_enabled,
             current_user_id=lambda: self._current_user_id,
             process_registry=lambda: self._ensure_process_registry(),
@@ -265,6 +282,7 @@ class ToolExecutor:
             issue_tracker_client=lambda: getattr(self, "_issue_tracker_client", None),
             command_governor=lambda: getattr(self, "command_governor", None),
             resolve_host=lambda alias: self._resolve_host(alias),
+            acquire_host=lambda alias: self._acquire_host(alias),
             resolve_default_host=lambda user_id: self._resolve_default_host(user_id),
             govern_command=lambda command, host=None: self._govern_command(command, host),
             exec_command=lambda *a, **k: self._exec_command(*a, **k),
@@ -319,22 +337,70 @@ class ToolExecutor:
 
     def _resolve_host(self, alias: str) -> tuple[str, str, str] | None:
         """Resolve host alias to (address, ssh_user, os). Returns None if not allowed."""
-        host = self.config.hosts.get(alias)
-        if not host:
-            return None
+        active = _host_lease_ctx.get()
+        if active is not None and active.target.alias == alias:
+            return active.target.legacy_tuple()
         if self._host_access and self._current_user_id:
             if not self._host_access.is_host_allowed(self._current_user_id, alias):
                 return None
-        return host.address, host.ssh_user, host.os
+        host = self.host_registry.get(alias, targetable_only=True)
+        if host is not None:
+            return host.legacy_tuple()
+        # Directly-constructed executors are a long-standing public/test seam:
+        # callers may replace ``executor.config`` after construction. Runtime
+        # wiring always injects a registry, so this compatibility path cannot
+        # resurrect stale config after a live control-plane publication.
+        if self._compat_config_host_fallback:
+            legacy = getattr(self.config, "hosts", {}).get(alias)
+            if legacy is not None:
+                return legacy.address, legacy.ssh_user, legacy.os
+        return None
+
+    def _acquire_host(self, alias: str):
+        """Acquire one generation-bound target after the same fence as resolve."""
+        active = _host_lease_ctx.get()
+        if active is not None and active.target.alias == alias:
+            return active.borrow()
+        if self._host_access and self._current_user_id:
+            if not self._host_access.is_host_allowed(self._current_user_id, alias):
+                return None
+        lease = self.host_registry.acquire(alias)
+        if lease is not None:
+            return lease
+        if self._compat_config_host_fallback:
+            legacy = getattr(self.config, "hosts", {}).get(alias)
+            if legacy is not None:
+                return self.host_registry.unmanaged_lease(
+                    alias, (legacy.address, legacy.ssh_user, legacy.os)
+                )
+        return None
+
+    def acquire_host_for_user(self, alias: str, user_id: str | None):
+        """Explicit-identity lease seam for native handlers."""
+        if self._host_access and user_id:
+            if not self._host_access.is_host_allowed(user_id, alias):
+                return None
+        return self.host_registry.acquire(alias)
 
     def _resolve_default_host(self, user_id: str | None) -> str:
-        """Get the default host for a user, or first configured host."""
+        """Get an explicit effective default; mapping order is never policy."""
         if self._host_access and user_id:
             default = self._host_access.get_default_host(user_id)
             if default:
                 return default
-        hosts = list(self.config.hosts.keys())
-        return hosts[0] if hosts else ""
+        configured = self.host_registry.default_host
+        if configured and (
+            not self._host_access
+            or not user_id
+            or self._host_access.is_host_allowed(user_id, configured)
+        ):
+            return configured
+        return ""
+
+    async def _retire_host_target(self, target) -> None:
+        """Close a generation's pooled transport after all leases drain."""
+        if self.ssh_pool is not None and not target.local:
+            await self.ssh_pool.close_target(target)
 
     def _protected_roots(self) -> list[str]:
         """Roots the local workspace must not overlap, derived from the RUNNING
@@ -516,8 +582,21 @@ class ToolExecutor:
 
             # Pass the RESOLVER, not a resolved string: each background spawn
             # must re-verify the workspace's mutable filesystem invariants.
-            self._process_registry = ProcessRegistry(workspace=self._ensure_local_workspace)
+            self._process_registry = ProcessRegistry(
+                workspace=self._ensure_local_workspace,
+                remote_exec=self._exec_remote_target,
+            )
         return self._process_registry
+
+    async def _exec_remote_target(self, target, command: str, timeout: int):
+        """Process-manager transport using one exact leased target."""
+        return await self._exec_command(
+            target.address,
+            command,
+            target.ssh_user,
+            timeout=timeout,
+            target=target,
+        )
 
     def check_permission(self, tool_name: str, user_id: str | None) -> str | None:
         """Check if user has permission to use the tool.
@@ -564,6 +643,48 @@ class ToolExecutor:
         return getattr(owner, entry[1], None)
 
     async def execute(
+        self, tool_name: str, tool_input: dict, *, user_id: str | None = None
+    ) -> ToolResult:
+        """Dispatch with a whole-operation lease for an explicit target."""
+        prepared = dict(tool_input or {})
+        policy = getattr(self, "_builtin_policy", None)
+        if policy is not None and policy.is_disabled(tool_name):
+            from .builtin_policy import disabled_rejection
+
+            return disabled_rejection(tool_name)
+        if tool_name in {"run_command", "run_script"} and not prepared.get("host"):
+            default = self._resolve_default_host(user_id)
+            if default:
+                prepared["host"] = default
+        alias = prepared.get("host")
+        has_instance_override = ("_handle_" + tool_name) in self.__dict__
+        if not isinstance(alias, str) or not alias or tool_name in {
+            "run_command_multi",
+            "validate_action",
+            "manage_process",
+            "http_probe",
+        } or has_instance_override:
+            return await self._execute_inner(tool_name, prepared, user_id=user_id)
+        user_token = _user_id_ctx.set(user_id)
+        lease = self._acquire_host(alias)
+        _user_id_ctx.reset(user_token)
+        if lease is None:
+            return ToolResult(
+                output=f"Unknown or disallowed host: {alias}",
+                ok=False,
+                error="host_denied",
+                tool_name=tool_name,
+            )
+        with lease:
+            lease_token = _host_lease_ctx.set(lease)
+            try:
+                return await lease.run(
+                    lambda: self._execute_inner(tool_name, prepared, user_id=user_id)
+                )
+            finally:
+                _host_lease_ctx.reset(lease_token)
+
+    async def _execute_inner(
         self, tool_name: str, tool_input: dict, *, user_id: str | None = None
     ) -> ToolResult:
         # Operator-disabled built-in (config-gated visibility): typed
@@ -701,6 +822,7 @@ class ToolExecutor:
             if m:
                 exit_code = int(m.group(1))
 
+        unknown = isinstance(raw_result, str) and "outcome_unknown=true" in raw_result
         return ToolResult(
             output=outcome.normalized,
             ok=not is_error,
@@ -713,6 +835,7 @@ class ToolExecutor:
             risk_reason=assessment.reason,
             requires_validation=mutation_detected,
             validation_reason=mutation_reason,
+            uncertain_outcome=unknown,
         )
 
     async def _try_tool(
@@ -824,7 +947,7 @@ class ToolExecutor:
         return dict(self._metrics)
 
     def _host_os(self, alias: str) -> str:
-        host = self.config.hosts.get(alias)
+        host = self.host_registry.get(alias, targetable_only=True)
         return host.os if host else "linux"
 
     async def _exec_command(
@@ -835,6 +958,7 @@ class ToolExecutor:
         timeout: int | None = None,
         on_output: OutputCallback | None = None,
         use_workspace: bool = False,
+        target=None,
     ) -> tuple[int, str]:
         """Execute a command locally or via SSH depending on host address.
 
@@ -850,6 +974,11 @@ class ToolExecutor:
         """
         if timeout is None:
             timeout = _current_tool_timeout_ctx.get() or self.config.command_timeout_seconds
+        active_lease = _host_lease_ctx.get()
+        if target is None and active_lease is not None:
+            candidate = active_lease.target
+            if candidate.address == address and candidate.ssh_user == ssh_user:
+                target = candidate
         if is_local_address(address):
             # The workspace applies ONLY to raw user commands, and only because
             # the caller asked for it. This primitive also backs git_ops,
@@ -877,13 +1006,23 @@ class ToolExecutor:
                 command, timeout=timeout, on_output=on_output, cwd=cwd
             )
         ssh_retry = self.config.ssh_retry
+        if target is not None:
+            address = target.address
+            ssh_user = target.ssh_user
         ssh_kwargs: dict[str, Any] = dict(
             host=address,
             command=command,
-            ssh_key_path=self.config.ssh_key_path,
-            known_hosts_path=self.config.ssh_known_hosts_path,
+            ssh_key_path=target.key_path if target is not None else self.config.ssh_key_path,
+            known_hosts_path=(
+                target.known_hosts_path
+                if target is not None
+                else self.config.ssh_known_hosts_path
+            ),
             timeout=timeout,
             ssh_user=ssh_user,
+            port=target.port if target is not None else 22,
+            host_key_alias=target.host_key_alias if target is not None else "",
+            target_id=target.runtime_key if target is not None else "",
             max_retries=ssh_retry.max_retries,
             retry_base_delay=ssh_retry.base_delay,
             retry_max_delay=ssh_retry.max_delay,
@@ -900,7 +1039,11 @@ class ToolExecutor:
         return await run_ssh_command(**ssh_kwargs)
 
     async def _run_on_host(
-        self, alias: str, command: str, use_workspace: bool = False
+        self,
+        alias: str,
+        command: str,
+        use_workspace: bool = False,
+        user_id: str | None = None,
     ) -> str | tuple[str, int]:
         """Run a command on an aliased host.
 
@@ -909,13 +1052,24 @@ class ToolExecutor:
         and the audit diff tracker, whose paths are absolute and whose cwd
         semantics must not change.
         """
-        resolved = self._resolve_host(alias)
-        if not resolved:
-            return f"Unknown or disallowed host: {alias}"
-        address, ssh_user, _os = resolved
-        code, output = await self._exec_command(
-            address, command, ssh_user, use_workspace=use_workspace
+        lease = (
+            self.acquire_host_for_user(alias, user_id)
+            if user_id is not None
+            else self._acquire_host(alias)
         )
+        if not lease:
+            return f"Unknown or disallowed host: {alias}"
+        with lease:
+            target = lease.target
+            code, output = await lease.run(
+                lambda: self._exec_command(
+                    target.address,
+                    command,
+                    target.ssh_user,
+                    use_workspace=use_workspace,
+                    target=target,
+                )
+            )
         if code != 0:
             return f"Command failed (exit {code}):\n{output}", code
         return output, 0

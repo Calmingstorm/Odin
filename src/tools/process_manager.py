@@ -8,24 +8,165 @@ output lines (max 500) and is auto-killed after 1 hour.
 from __future__ import annotations
 
 import asyncio
+import base64
 import ctypes
+import json
 import os
 import re
 import secrets
+import shlex
 import signal
 import time
 from collections import deque
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
 from .workspace import WorkspaceError, workspace_env
+
+if TYPE_CHECKING:
+    from .hosts import HostLease, HostTarget
 
 log = get_logger("process_manager")
 
 
 _UNKNOWN = object()  # "could not determine" — never means "absent"
+
+_REMOTE_SUPERVISOR = r'''import base64,json,os,signal,subprocess,sys,time
+root,token,encoded,lifetime=sys.argv[1:]
+os.umask(0o077)
+os.setsid()
+fifo=root+"/in"
+out_path=root+"/out"
+exit_path=root+"/exit.json"
+ready_path=root+"/ready.json"
+stdin_fd=os.open(fifo,os.O_RDWR)
+out=open(out_path,"ab",buffering=0)
+env=dict(os.environ)
+env["ODIN_REMOTE_JOB_TOKEN"]=token
+command=base64.b64decode(encoded).decode("utf-8")
+proc=subprocess.Popen(["/bin/sh","-c",command],stdin=stdin_fd,stdout=out,stderr=subprocess.STDOUT,env=env,preexec_fn=os.setpgrp)
+pid=proc.pid
+pgid=os.getpgid(pid)
+sid=os.getsid(pid)
+def start_id(value):
+    try:
+        return open("/proc/%d/stat"%value).read().rsplit(")",1)[1].split()[19]
+    except Exception:
+        return ""
+ready={"token":token,"supervisor_pid":os.getpid(),"pid":pid,"pgid":pgid,"sid":sid,"start_id":start_id(pid)}
+tmp=ready_path+".tmp"
+open(tmp,"w").write(json.dumps(ready,separators=(",",":")))
+os.replace(tmp,ready_path)
+timed_out=False
+try:
+    rc=proc.wait(timeout=int(lifetime))
+except subprocess.TimeoutExpired:
+    timed_out=True
+    rc=124
+def alive():
+    try:
+        os.killpg(pgid,0)
+        return True
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+if alive():
+    try: os.killpg(pgid,signal.SIGTERM)
+    except ProcessLookupError: pass
+    end=time.monotonic()+5
+    while alive() and time.monotonic()<end: time.sleep(.1)
+if alive():
+    try: os.killpg(pgid,signal.SIGKILL)
+    except ProcessLookupError: pass
+    end=time.monotonic()+3
+    while alive() and time.monotonic()<end: time.sleep(.1)
+try: proc.wait(timeout=1)
+except Exception: pass
+record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out}
+tmp=exit_path+".tmp"
+open(tmp,"w").write(json.dumps(record,separators=(",",":")))
+os.replace(tmp,exit_path)
+'''
+
+# ruff: noqa: E501
+_REMOTE_CONTROLLER = r'''# noqa: E501
+import base64,json,os,signal,sys,time
+root,token,op,payload,wait_s=sys.argv[1:]
+def emit(**value):
+    print(json.dumps(value,separators=(",",":")))
+def load(name):
+    try:
+        return json.load(open(root+"/"+name))
+    except Exception:
+        return None
+ready=load("ready.json")
+if not isinstance(ready,dict) or ready.get("token")!=token:
+    emit(ok=False,unknown=True,error="remote process identity is unavailable")
+    raise SystemExit(3)
+pid=int(ready["pid"]); pgid=int(ready["pgid"]); sid=int(ready["sid"])
+def start_id(value):
+    try:
+        return open("/proc/%d/stat"%value).read().rsplit(")",1)[1].split()[19]
+    except Exception:
+        return ""
+def identity():
+    try:
+        if os.getpgid(pid)!=pgid or os.getsid(pid)!=sid: return False
+        expected=ready.get("start_id","")
+        return not expected or start_id(pid)==expected
+    except (ProcessLookupError,PermissionError):
+        return False
+def group_alive():
+    try:
+        os.killpg(pgid,0); return True
+    except ProcessLookupError: return False
+    except PermissionError: return True
+if op=="status":
+    end=time.monotonic()+max(0.0,float(wait_s))
+    exit_record=load("exit.json")
+    while exit_record is None and time.monotonic()<end:
+        time.sleep(.2); exit_record=load("exit.json")
+    cursor=max(0,int(payload or "0")); data=b""; total=0
+    try:
+        with open(root+"/out","rb") as handle:
+            handle.seek(0,2); total=handle.tell(); handle.seek(min(cursor,total)); data=handle.read(16000)
+    except FileNotFoundError: pass
+    if exit_record is not None and not exit_record.get("empty",False):
+        emit(ok=False,unknown=True,error="remote process group emptiness was not verified",output=base64.b64encode(data).decode(),cursor=cursor+len(data),size=total,ready=ready)
+        raise SystemExit(4)
+    emit(ok=True,status="exited" if exit_record is not None else "running",exit=exit_record,output=base64.b64encode(data).decode(),cursor=cursor+len(data),size=total,identity=identity(),ready=ready)
+elif op=="write":
+    if load("exit.json") is not None: emit(ok=False,error="process is not running"); raise SystemExit(5)
+    if not identity(): emit(ok=False,unknown=True,error="remote process identity changed; stdin not written"); raise SystemExit(6)
+    data=base64.b64decode(payload)
+    try:
+        fd=os.open(root+"/in",os.O_WRONLY|os.O_NONBLOCK); os.write(fd,data); os.close(fd)
+    except Exception as exc: emit(ok=False,unknown=True,error="stdin delivery could not be verified: "+type(exc).__name__); raise SystemExit(7)
+    emit(ok=True,written=len(data),ready=ready)
+elif op=="kill":
+    if load("exit.json") is not None: emit(ok=True,killed=False,already_exited=True,ready=ready); raise SystemExit(0)
+    if not identity(): emit(ok=False,unknown=True,error="remote process identity changed; no signal sent"); raise SystemExit(8)
+    try: os.killpg(pgid,signal.SIGTERM)
+    except ProcessLookupError: pass
+    end=time.monotonic()+5
+    while group_alive() and time.monotonic()<end: time.sleep(.1)
+    if group_alive():
+        try: os.killpg(pgid,signal.SIGKILL)
+        except ProcessLookupError: pass
+        end=time.monotonic()+3
+        while group_alive() and time.monotonic()<end: time.sleep(.1)
+    end=time.monotonic()+2; exit_record=load("exit.json")
+    while exit_record is None and time.monotonic()<end: time.sleep(.1); exit_record=load("exit.json")
+    empty=not group_alive()
+    if not empty: emit(ok=False,unknown=True,error="remote process group still exists",ready=ready); raise SystemExit(9)
+    emit(ok=True,killed=True,empty=True,exit=exit_record,ready=ready)
+else:
+    emit(ok=False,error="invalid controller operation"); raise SystemExit(2)
+'''
 
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
@@ -1109,12 +1250,28 @@ class ProcessInfo:
     # attributable to THIS job and never confused with another
     # subsystem's direct child.
     job_token: str = ""
+    remote: bool = False
+    remote_dir: str = ""
+    remote_pid: int | None = None
+    remote_pgid: int | None = None
+    remote_sid: int | None = None
+    remote_start_id: str = ""
+    remote_token: str = ""
+    remote_cursor: int = 0
+    remote_lease: HostLease | None = field(default=None, repr=False)
+    transport_unknown: bool = False
 
 
 class ProcessRegistry:
     """Registry for background processes with full lifecycle management."""
 
-    def __init__(self, workspace: str | Callable[[], str] | None = None) -> None:
+    def __init__(
+        self,
+        workspace: str | Callable[[], str] | None = None,
+        remote_exec: Callable[
+            [HostTarget, str, int], Awaitable[tuple[int, str]]
+        ] | None = None,
+    ) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,
         # `manage_process start` stays an alternate route to the 2026-07-27
@@ -1127,6 +1284,9 @@ class ProcessRegistry:
         # round-3 review — a cached path accepted a directory later replaced
         # by a symlink into the install).
         self._workspace = workspace
+        self._remote_exec = remote_exec
+        # Public handles are namespace-separated from positive local OS PIDs.
+        self._next_remote_handle = -1
         # Kernel-backed containment for escaped descendants (round-9 #1):
         # as a child subreaper the PROCESS adopts orphans instead of PID
         # 1, so a double-fork+setsid escape stays attributable. Enabled
@@ -1161,10 +1321,7 @@ class ProcessRegistry:
         from ..tools.ssh import is_local_address
 
         if not is_local_address(host):
-            return (
-                f"manage_process only supports local execution. "
-                f"Host '{host}' is remote — use run_command or run_script for remote hosts."
-            )
+            return "Error: remote process start requires a generation-bound host lease."
 
         # Enforce concurrency limit (only count running)
         running = sum(1 for p in self._processes.values() if p.status == "running")
@@ -1225,6 +1382,85 @@ class ProcessRegistry:
         log.info("Started process PID %d: %s", pid, command[:80])
         return f"Process started (PID {pid}): {command[:120]}"
 
+    async def start_remote(self, lease, command: str) -> str:
+        """Start a detached SSH process with remote file/FIFO-backed I/O."""
+        running = sum(1 for p in self._processes.values() if p.status == "running")
+        if running >= MAX_CONCURRENT:
+            lease.release()
+            return f"Cannot start: {running} processes already running (max {MAX_CONCURRENT})."
+        if self._remote_exec is None:
+            lease.release()
+            return "Failed to start process: remote execution is unavailable"
+        token = secrets.token_hex(16)
+        encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
+        root = f"/tmp/odin-process-{token}"
+        supervisor = base64.b64encode(_REMOTE_SUPERVISOR.encode()).decode("ascii")
+        script = (
+            f"set -eu; umask 077; d={shlex.quote(root)}; mkdir -- \"$d\"; "
+            "mkfifo \"$d/in\"; "
+            f"printf %s {shlex.quote(supervisor)} | base64 -d >\"$d/supervisor.py\"; "
+            f"nohup python3 \"$d/supervisor.py\" \"$d\" {shlex.quote(token)} "
+            f"{shlex.quote(encoded)} {MAX_LIFETIME_SECONDS} "
+            "</dev/null >/dev/null 2>&1 & "
+            "i=0; while [ ! -f \"$d/ready.json\" ] && [ $i -lt 100 ]; "
+            "do sleep .1; i=$((i+1)); done; "
+            "test -f \"$d/ready.json\"; cat \"$d/ready.json\""
+        )
+        try:
+            code, output = await lease.run(
+                lambda: self._remote_exec(lease.target, script, 30)
+            )
+        except Exception as exc:
+            lease.release()
+            return (
+                "Failed to start process: SSH transport failed after dispatch; "
+                f"outcome unknown outcome_unknown=true: {exc}"
+            )
+        try:
+            ready = json.loads(output.strip().splitlines()[-1])
+            remote_pid = int(ready["pid"])
+            remote_pgid = int(ready["pgid"])
+            remote_sid = int(ready["sid"])
+            remote_start_id = str(ready["start_id"])
+            identity_ok = (
+                ready.get("token") == token
+                and remote_pid > 1
+                and remote_pgid > 1
+                and remote_sid > 1
+                and bool(remote_start_id)
+            )
+        except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
+            identity_ok = False
+        if code != 0 or not identity_ok:
+            lease.release()
+            return (
+                "Failed to start process: SSH settlement was not observed; "
+                f"outcome unknown outcome_unknown=true: {output[:500]}"
+            )
+        handle = self._next_remote_handle
+        self._next_remote_handle -= 1
+        self._processes[handle] = ProcessInfo(
+            pid=handle,
+            command=command,
+            host=lease.target.alias,
+            start_time=time.time(),
+            remote=True,
+            remote_dir=root,
+            remote_pid=remote_pid,
+            remote_pgid=remote_pgid,
+            remote_sid=remote_sid,
+            remote_start_id=remote_start_id,
+            remote_token=token,
+            remote_lease=lease,
+        )
+        from ..async_utils import fire_and_forget
+
+        fire_and_forget(
+            self._enforce_lifetime(handle, MAX_LIFETIME_SECONDS),
+            name=f"remote_process_lifetime:{handle}",
+        )
+        return f"Process started (PID {handle}): {command[:120]}"
+
     async def poll(self, pid: int, wait_seconds: float = 0.0) -> str:
         """Return recent output lines from a process.
 
@@ -1239,6 +1475,9 @@ class ProcessRegistry:
         info = self._processes.get(pid)
         if not info:
             return f"No process with PID {pid}."
+
+        if info.remote:
+            return await self._poll_remote(info, wait_seconds)
 
         # Exit detection must not depend on the watcher having PUBLISHED
         # yet (round-3 blocker #3): returncode is set at SIGCHLD reap, so a
@@ -1286,6 +1525,8 @@ class ProcessRegistry:
             return f"No process with PID {pid}."
         if info.status != "running":
             return f"Process {pid} is not running (status: {info.status})."
+        if info.remote:
+            return await self._write_remote(info, text)
         if not info.process or not info.process.stdin:
             return f"Process {pid} has no stdin."
 
@@ -1303,6 +1544,8 @@ class ProcessRegistry:
             return f"No process with PID {pid}."
         if info.status != "running":
             return f"Process {pid} already {info.status}."
+        if info.remote:
+            return await self._kill_remote(info)
 
         try:
             if info.process:
@@ -1329,7 +1572,7 @@ class ProcessRegistry:
         if not self._processes:
             return "No processes tracked."
 
-        lines = [f"{'PID':<8} {'STATUS':<12} {'UPTIME':<10} {'COMMAND'}"]
+        lines = [f"{'PID':<8} {'HOST':<16} {'STATUS':<12} {'UPTIME':<10} {'COMMAND'}"]
         lines.append("-" * 60)
         now = time.time()
         for pid, info in sorted(self._processes.items()):
@@ -1341,8 +1584,150 @@ class ProcessRegistry:
             else:
                 uptime = f"{elapsed / 3600:.1f}h"
             cmd_short = info.command[:40]
-            lines.append(f"{pid:<8} {info.status:<12} {uptime:<10} {cmd_short}")
+            lines.append(
+                f"{pid:<8} {info.host[:15]:<16} {info.status:<12} {uptime:<10} {cmd_short}"
+            )
         return "\n".join(lines)
+
+    async def _remote_call(
+        self, info: ProcessInfo, command: str, timeout: int
+    ) -> tuple[int, str]:
+        lease = info.remote_lease
+        if lease is None or self._remote_exec is None:
+            raise RuntimeError("remote process lease is unavailable")
+        remote_exec = self._remote_exec
+        try:
+            return await lease.run(
+                lambda: remote_exec(lease.target, command, timeout)
+            )
+        except Exception:
+            info.transport_unknown = True
+            raise
+
+    def _remote_controller_command(
+        self, info: ProcessInfo, operation: str, payload: str = "", wait_seconds: float = 0
+    ) -> str:
+        controller = base64.b64encode(_REMOTE_CONTROLLER.encode()).decode("ascii")
+        return (
+            f"printf %s {shlex.quote(controller)} | base64 -d | python3 - "
+            f"{shlex.quote(info.remote_dir)} {shlex.quote(info.remote_token)} "
+            f"{shlex.quote(operation)} {shlex.quote(payload)} {float(wait_seconds)!r}"
+        )
+
+    @staticmethod
+    def _parse_remote_reply(output: str) -> dict | None:
+        try:
+            value = json.loads(output.strip().splitlines()[-1])
+        except (IndexError, TypeError, ValueError, json.JSONDecodeError):
+            return None
+        return value if isinstance(value, dict) else None
+
+    async def _poll_remote(self, info: ProcessInfo, wait_seconds: float) -> str:
+        if info.status != "running" and info.remote_lease is None:
+            lines = list(info.output_buffer)[-50:]
+            return (
+                f"[PID {info.pid}] status={info.status} exit_code={info.exit_code} "
+                f"uptime={time.time() - info.start_time:.0f}s "
+                f"output_bytes={info.total_output_bytes}\n"
+                + ("".join(lines) or "(no output)")
+            )
+        deadline = max(0, min(float(wait_seconds), MAX_POLL_WAIT_SECONDS))
+        command = self._remote_controller_command(
+            info, "status", str(info.remote_cursor), deadline
+        )
+        try:
+            code, output = await self._remote_call(info, command, int(deadline) + 15)
+        except Exception as exc:
+            return (
+                f"[PID {info.pid}] status=unknown outcome_unknown=true\n"
+                f"SSH transport failed: {exc}"
+            )
+        reply = self._parse_remote_reply(output)
+        if code != 0 or reply is None or not reply.get("ok"):
+            info.transport_unknown = True
+            detail = reply.get("error", "") if reply else output[:500]
+            return f"[PID {info.pid}] status=unknown outcome_unknown=true\n{detail}"
+        try:
+            text = base64.b64decode(reply.get("output", ""), validate=True).decode(
+                "utf-8", "replace"
+            )
+        except (ValueError, TypeError):
+            info.transport_unknown = True
+            return f"[PID {info.pid}] status=unknown outcome_unknown=true\ninvalid reply"
+        info.remote_cursor = int(reply.get("cursor", info.remote_cursor))
+        info.total_output_bytes = int(reply.get("size", info.remote_cursor))
+        if text:
+            info.output_buffer.extend(text.splitlines(keepends=True))
+        if reply.get("status") == "exited":
+            exit_record = reply.get("exit") or {}
+            info.exit_code = int(exit_record.get("exit_code", 1))
+            info.status = "completed" if info.exit_code == 0 else "failed"
+            if info.remote_lease is not None:
+                info.remote_lease.release()
+                info.remote_lease = None
+        elapsed = time.time() - info.start_time
+        return (
+            f"[PID {info.pid}] status={info.status}"
+            + (f" exit_code={info.exit_code}" if info.exit_code is not None else "")
+            + f" uptime={elapsed:.0f}s output_bytes={info.remote_cursor}\n"
+            + (text or "(no new output)")
+        )
+
+    async def _write_remote(self, info: ProcessInfo, text: str) -> str:
+        encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
+        command = self._remote_controller_command(info, "write", encoded)
+        try:
+            code, output = await self._remote_call(info, command, 15)
+        except Exception as exc:
+            return (
+                f"Failed to write to PID {info.pid}: SSH transport failed; "
+                f"outcome unknown outcome_unknown=true: {exc}"
+            )
+        reply = self._parse_remote_reply(output)
+        if code != 0 or reply is None or not reply.get("ok"):
+            info.transport_unknown = True
+            detail = reply.get("error", "") if reply else output[:500]
+            return (
+                f"Failed to write to PID {info.pid}: outcome unknown "
+                f"outcome_unknown=true: {detail}"
+            )
+        return f"Wrote {len(text)} bytes to PID {info.pid}."
+
+    async def _kill_remote(self, info: ProcessInfo) -> str:
+        command = self._remote_controller_command(info, "kill")
+        try:
+            code, output = await self._remote_call(info, command, 15)
+        except Exception as exc:
+            return (
+                f"Failed to kill PID {info.pid}: SSH transport failed; "
+                f"outcome unknown outcome_unknown=true: {exc}"
+            )
+        reply = self._parse_remote_reply(output)
+        if code != 0 or reply is None or not reply.get("ok"):
+            info.transport_unknown = True
+            detail = reply.get("error", "") if reply else output[:500]
+            return (
+                f"Failed to kill PID {info.pid}: outcome unknown "
+                f"outcome_unknown=true: {detail}"
+            )
+        info.status = "failed"
+        info.exit_code = -9
+        if info.remote_lease is not None:
+            info.remote_lease.release()
+            info.remote_lease = None
+        return f"Process {info.pid} killed."
+
+    async def force_revoke_host(self, alias: str) -> dict[str, int]:
+        attempted = unknown = killed = 0
+        for info in list(self._processes.values()):
+            if info.remote and info.host == alias and info.status == "running":
+                attempted += 1
+                result = await self._kill_remote(info)
+                if result.endswith("killed."):
+                    killed += 1
+                else:
+                    unknown += 1
+        return {"attempted": attempted, "killed": killed, "unknown": unknown}
 
     async def shutdown(self) -> int:
         """Terminate all managed processes and their groups before returning.

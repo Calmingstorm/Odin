@@ -75,8 +75,9 @@ TOOLS_SECTION: list[dict] = [
         "name": "manage_process",
         "is_core": True,
         "description": (
-            "Manages background processes (start/poll/write/kill/list). "
-            "Start spawns a command, returns PID. Poll gets output. Write sends stdin. "
+            "Manages local or remote background processes (start/poll/write/kill/list). "
+            "Start spawns a detached command on the selected managed host and returns PID. "
+            "Poll gets new output; Write sends stdin; Kill verifies process-group termination. "
             "Max 20 concurrent, auto-killed after 1hr. When monitoring a "
             "long-running process (build, test suite, download), poll with "
             "wait_seconds (60 is a good default) — one call waits server-side "

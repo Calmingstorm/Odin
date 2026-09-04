@@ -31,6 +31,7 @@ from .tool_loop import _LoopMessageProxy
 if TYPE_CHECKING:
     from ..audit.logger import AuditLogger
     from ..tools.executor import ToolExecutor
+    from ..tools.hosts import HostRegistry
     from .llm_gateway import LLMGateway
     from .native_tools.agents_tasks import AgentTaskTools
     from .scheduled_report import ScheduledReportPaginationService
@@ -52,6 +53,7 @@ class ScheduledEventsDeps:
     tool_loop: ToolLoopRunner  # shared dispatch path
     agent_task_tools: AgentTaskTools  # agent result collection in workflows
     scheduled_reports: ScheduledReportPaginationService | None = None
+    host_registry: HostRegistry | None = None
 
 
 class ScheduledEventHandlers:
@@ -60,6 +62,7 @@ class ScheduledEventHandlers:
         self._get_channel = deps.get_channel
         self._get_guilds = deps.get_guilds
         self._tool_executor = deps.tool_executor
+        self._host_registry = deps.host_registry
         self._audit = deps.audit
         self._llm_gateway = deps.llm_gateway
         self._tool_loop = deps.tool_loop
@@ -136,7 +139,12 @@ class ScheduledEventHandlers:
         labels = []
 
         # Disk + memory checks on all hosts via run_command
-        for host_alias in self._get_config().tools.hosts:
+        aliases = (
+            self._host_registry.active_aliases()
+            if self._host_registry is not None
+            else self._get_config().tools.hosts
+        )
+        for host_alias in aliases:
             tasks.append(
                 self._tool_executor.execute(
                     "run_command",
@@ -317,7 +325,9 @@ class ScheduledEventHandlers:
 
                 prev_output = str(result)
 
-                if isinstance(result, ToolResult) and mcp_uncertain_outcome(result):
+                if isinstance(result, ToolResult) and (
+                    mcp_uncertain_outcome(result) or result.uncertain_outcome
+                ):
                     raise NonRetryableScheduleError(
                         f"Scheduled MCP step {tool_name} has an unknown outcome; "
                         "manual resolution is required"
@@ -431,14 +441,16 @@ class ScheduledEventHandlers:
                     req_id,
                     req_name,
                 )
-                if isinstance(result, ToolResult) and mcp_uncertain_outcome(result):
+                if isinstance(result, ToolResult) and (
+                    mcp_uncertain_outcome(result) or result.uncertain_outcome
+                ):
                     text = f"**Scheduled check outcome unknown:** {schedule['description']}\n```\n{str(result)[:1800]}\n```"  # noqa: E501
                     try:
                         await channel.send(scrub_response_secrets(text))
                     except Exception:
                         pass
                     raise NonRetryableScheduleError(
-                        "Scheduled MCP check has an unknown outcome; manual resolution is required"
+                        "Scheduled check has an unknown outcome; manual resolution is required"
                     )
                 if isinstance(result, ToolResult) and not result.ok:
                     text = f"**Scheduled check failed:** {schedule['description']}\n```\n{str(result)[:1800]}\n```"  # noqa: E501

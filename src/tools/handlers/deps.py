@@ -31,6 +31,7 @@ class HandlerDeps:
     config: Callable[[], Any]
     output_streamer: Callable[[], Any]
     host_access: Callable[[], Any]
+    host_registry: Callable[[], Any]
     branch_freshness_enabled: Callable[[], bool]
     current_user_id: Callable[[], str | None]
     process_registry: Callable[[], Any]  # lazy-inits ON the executor (web API reads it there)
@@ -44,6 +45,7 @@ class HandlerDeps:
     command_governor: Callable[[], Any]
     # method passthroughs (resolve the executor attr per call)
     resolve_host: Callable[..., Any]
+    acquire_host: Callable[..., Any]
     resolve_default_host: Callable[..., Any]
     govern_command: Callable[..., Any]
     exec_command: Callable[..., Any]  # async
@@ -64,6 +66,7 @@ class HandlerBase:
         # Method passthroughs — stable wrapper objects that resolve the
         # executor attribute at call time.
         self._resolve_host = deps.resolve_host
+        self._acquire_host = deps.acquire_host
         self._resolve_default_host = deps.resolve_default_host
         self._govern_command = deps.govern_command
         self._exec_command = deps.exec_command
@@ -82,6 +85,10 @@ class HandlerBase:
     @property
     def _host_access(self):
         return self._deps.host_access()
+
+    @property
+    def _host_registry(self):
+        return self._deps.host_registry()
 
     @property
     def _branch_freshness_enabled(self) -> bool:

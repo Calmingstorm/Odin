@@ -14,7 +14,8 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Runs a shell command on a managed host. Returns stdout/stderr (max 200 lines). On "
             "failure: 'Command failed (exit N): output'. For multi-line scripts, use run_script. "
-            "For multiple hosts, use run_command_multi."
+            "For multiple hosts, use run_command_multi. Host may be omitted only when an explicit "
+            "requester or runtime default host exists."
         ),
         "input_schema": {
             "type": "object",
@@ -30,7 +31,7 @@ TOOLS_SECTION: list[dict] = [
                     ),
                 },
             },
-            "required": ["host", "command"],
+            "required": ["command"],
         },
     },
     {
@@ -42,7 +43,8 @@ TOOLS_SECTION: list[dict] = [
             "and complex quoting. Returns stdout/stderr (max 200 lines). On failure: 'Script "
             "failed (exit N): output'. "
             "Interpreters: bash (default), python3, python, sh, node, ruby, perl. "
-            "For single commands, use run_command."
+            "For single commands, use run_command. Host may be omitted only when an explicit "
+            "requester or runtime default host exists."
         ),
         "input_schema": {
             "type": "object",
@@ -64,7 +66,7 @@ TOOLS_SECTION: list[dict] = [
                     "description": "Temp filename (default: auto-generated)",
                 },
             },
-            "required": ["host", "script"],
+            "required": ["script"],
         },
     },
     {
@@ -72,7 +74,8 @@ TOOLS_SECTION: list[dict] = [
         "is_core": True,
         "description": (
             "Runs a command on multiple hosts in parallel. Returns per-host '### "
-            "hostname\\n```\\noutput\\n```'. Pass ['all'] for all configured hosts. For one host, "
+            "hostname\\n```\\noutput\\n```'. Pass ['all'] for all hosts visible to the "
+            "requester. For one host, "
             "use run_command."
         ),
         "input_schema": {
