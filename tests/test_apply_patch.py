@@ -155,6 +155,55 @@ def test_created_parent_directories_roll_back_after_later_commit_failure(tmp_pat
     assert not list(tmp_path.rglob(".odin-patch-*"))
 
 
+def test_failure_after_parent_publish_rolls_back_the_published_directory(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    raised = False
+
+    def publish_parent_then_raise(source, destination, **kwargs):
+        nonlocal raised
+        _rename_noreplace(source, destination, **kwargs)
+        if str(source).startswith(".odin-patch-dir-") and not raised:
+            raised = True
+            raise OSError("injected post-effect parent publish failure")
+
+    plan = parse_patch(_patch("*** Add File: created/nested/file.txt\n+content"))
+    with pytest.raises(OSError, match="post-effect parent publish failure"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=publish_parent_then_raise)
+
+    assert raised is True
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_concurrent_parent_creator_is_never_owned_or_removed_by_patch(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    concurrent_fd: int | None = None
+
+    def create_destination_before_parent_publish(source, destination, **kwargs):
+        nonlocal concurrent_fd
+        if str(source).startswith(".odin-patch-dir-") and concurrent_fd is None:
+            os.mkdir(destination, dir_fd=kwargs["dst_dir_fd"])
+            concurrent_fd = os.open(
+                destination,
+                os.O_RDONLY | os.O_DIRECTORY,
+                dir_fd=kwargs["dst_dir_fd"],
+            )
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(_patch("*** Add File: concurrent/nested/file.txt\n+content"))
+    try:
+        apply_plan(str(tmp_path), plan, rename_noreplace=create_destination_before_parent_publish)
+        assert concurrent_fd is not None
+        concurrent = os.fstat(concurrent_fd)
+        current = (tmp_path / "concurrent").stat()
+        assert (current.st_dev, current.st_ino) == (concurrent.st_dev, concurrent.st_ino)
+        assert (tmp_path / "concurrent" / "nested" / "file.txt").read_text() == "content\n"
+    finally:
+        if concurrent_fd is not None:
+            os.close(concurrent_fd)
+
+
 def test_directory_rollback_preserves_external_nonempty_content(tmp_path):
     from src.tools.apply_patch import _rename_noreplace
 
