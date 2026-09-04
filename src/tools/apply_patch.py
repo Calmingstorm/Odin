@@ -556,10 +556,34 @@ class _DirectoryRegistry:
                         "name": name,
                         "label": label,
                         "expected": expected,
+                        "fd": stage_fd,
                     }
                     self._created.append(record)
+                    self._fds[child_prefix] = stage_fd
                     # A failure-injection wrapper may raise after renameat2.
                     # Persist the observed dirent before rollback removes it.
+                    os.fsync(parent_fd)
+                    raise
+
+                staged_after = os.fstat(stage_fd)
+                if (
+                    target is None
+                    and _entry_missing(parent_fd, stage_name)
+                    and staged_after.st_nlink > 0
+                ):
+                    # The staged directory was published and then moved away
+                    # before the wrapper raised. Retain its fd so rollback can
+                    # report that it cannot safely remove an unknown path.
+                    published = True
+                    record = {
+                        "parent_fd": parent_fd,
+                        "name": name,
+                        "label": label,
+                        "expected": expected,
+                        "fd": stage_fd,
+                    }
+                    self._created.append(record)
+                    self._fds[child_prefix] = stage_fd
                     os.fsync(parent_fd)
                     raise
 
@@ -580,12 +604,15 @@ class _DirectoryRegistry:
                     ) from original
                 if isinstance(original, FileExistsError):
                     try:
-                        return os.open(name, self._flags, dir_fd=parent_fd)
+                        existing_fd = os.open(name, self._flags, dir_fd=parent_fd)
                     except OSError as exc:
                         raise PatchError(
                             "parent directory is missing, not a directory, or a symlink: "
                             f"{label}"
                         ) from exc
+                    os.close(stage_fd)
+                    stage_fd = -1
+                    return existing_fd
                 raise
 
             published = True
@@ -594,14 +621,16 @@ class _DirectoryRegistry:
                 "name": name,
                 "label": label,
                 "expected": expected,
+                "fd": stage_fd,
             }
             self._created.append(record)
+            self._fds[child_prefix] = stage_fd
             target = _entry_info(parent_fd, name)
             if target is None or (target.st_dev, target.st_ino) != expected:
                 raise PatchError(f"created parent directory changed during publish: {label}")
             return stage_fd
         except BaseException as original:
-            if stage_fd >= 0:
+            if stage_fd >= 0 and not published:
                 os.close(stage_fd)
             if not published:
                 # The normal cleanup path above already removed the stage. If
@@ -631,6 +660,18 @@ class _DirectoryRegistry:
             try:
                 current = _entry_info(parent_fd, name)
                 if current is None:
+                    try:
+                        link_count = os.fstat(record["fd"]).st_nlink
+                    except OSError as exc:
+                        failures.append(
+                            f"created directory {label}: could not confirm removal: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        if link_count != 0:
+                            failures.append(
+                                f"created directory {label}: moved away from its planned path"
+                            )
                     continue
                 expected = record["expected"]
                 if (

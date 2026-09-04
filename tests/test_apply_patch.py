@@ -175,6 +175,32 @@ def test_failure_after_parent_publish_rolls_back_the_published_directory(tmp_pat
     assert list(tmp_path.iterdir()) == []
 
 
+def test_parent_moved_away_after_publish_is_reported_as_rollback_failure(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    root = tmp_path / "root"
+    root.mkdir()
+    detached = tmp_path / "detached"
+    moved = False
+
+    def move_published_parent_then_raise(source, destination, **kwargs):
+        nonlocal moved
+        _rename_noreplace(source, destination, **kwargs)
+        if str(source).startswith(".odin-patch-dir-") and not moved:
+            (root / str(destination)).rename(detached)
+            moved = True
+            raise OSError("injected detached parent failure")
+
+    plan = parse_patch(_patch("*** Add File: created/file.txt\n+content"))
+    with pytest.raises(PatchRollbackError, match="moved away from its planned path"):
+        apply_plan(str(root), plan, rename_noreplace=move_published_parent_then_raise)
+
+    assert moved is True
+    assert not (root / "created").exists()
+    assert detached.is_dir()
+    detached.rmdir()
+
+
 def test_concurrent_parent_creator_is_never_owned_or_removed_by_patch(tmp_path):
     from src.tools.apply_patch import _rename_noreplace
 
