@@ -12,13 +12,16 @@ discord:
 
 openai_codex:
   enabled: true
-  # ChatGPT-account Codex backend only supports the GPT-5 family
-  # (gpt-4o et al return "model not supported" via this auth path).
+  # ChatGPT-account Codex backend serves the GPT-5.x family and, where the
+  # account is entitled, gpt-6-astra (gpt-4o et al return "model not
+  # supported" via this auth path). Entitlement is per account: gpt-6-astra
+  # reached Personal/Pro accounts before Team accounts (2026-09-04).
   model: gpt-5.6-sol
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).
-  # "max" is gpt-5.6-family only — config load rejects a known-incompatible
-  # model/effort pair (e.g. gpt-5.5 + max) rather than 400 on every request.
+  # "max" is gpt-5.6-family-and-newer only, and gpt-6-astra rejects "none" —
+  # config load rejects a known-incompatible model/effort pair (e.g.
+  # gpt-5.5 + max, gpt-6-astra + none) rather than 400 on every request.
   reasoning_effort: xhigh
   # Effort for spawned-agent iterations only. Unset/null = inherit
   # reasoning_effort ("none" is a real effort level, not inherit). Set to

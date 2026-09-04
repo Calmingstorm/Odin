@@ -62,6 +62,8 @@ class TestRegistryFloors:
         # the fine-refinement acceptances (921,601); its window-mates proved
         # 917,506 (plan of record R2).
         assert CODEX_MODEL_INPUT_BUDGETS == {
+            # astra: probed 2026-09-04 (accepted 917,534 / rejected at 922,000)
+            "gpt-6-astra": 917_534,
             "gpt-5.6-sol": 921_601,
             "gpt-5.6-terra": 917_506,
             "gpt-5.6-luna": 917_506,
@@ -71,6 +73,12 @@ class TestRegistryFloors:
             "gpt-5.3-codex-spark": 124_001,
         }
         assert CODEX_UNKNOWN_MODEL_INPUT_BUDGET == 272_000
+
+    def test_astra_resolves_to_its_probed_floor_not_the_unknown_default(self):
+        from src.config.schema import input_budget_floor_for_model
+
+        assert input_budget_floor_for_model("gpt-6-astra") == 917_534
+        assert input_budget_floor_for_model(" gpt-6-astra ") == 917_534
 
 
 # ---------------------------------------------------------------------------

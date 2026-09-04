@@ -23,10 +23,12 @@ SPAWN_AGENT_BASE_DESC = (
 )
 SPAWN_LOOP_BASE_DESC = "Spawns agents from a loop iteration with context. Max 3/iter, 10/loop."
 SPAWN_MODEL_CLAUSE = (
-    " Set 'model' to run THIS agent on a specific Codex model — gpt-5.6-sol "
-    "(deepest reasoning, for hard/ambiguous work), gpt-5.6-terra (balanced default), "
-    "gpt-5.6-luna (fastest, for simple/mechanical work); match the tier to the task. "
-    "Omit to use the configured agent model."
+    " Set 'model' to run THIS agent on a specific Codex model — gpt-6-astra (GPT-6 "
+    "generation: the newest and strongest reasoning tier, for the hardest multi-step "
+    "work; rejects effort 'none'), gpt-5.6-sol (deepest 5.6 reasoning, for "
+    "hard/ambiguous work), gpt-5.6-terra (balanced default), gpt-5.6-luna (fastest, "
+    "for simple/mechanical work); match the tier to the task. Omit to use the "
+    "configured agent model."
 )
 # One ordered constant drives every per-spawn effort enum and clause below —
 # kept in lockstep with config.schema.CODEX_REASONING_EFFORTS by a sync test
@@ -102,7 +104,9 @@ TOOLS_SECTION: list[dict] = [
                 "model": {
                     "type": "string",
                     "description": (
-                        "Optional Codex model for this agent. gpt-5.6-sol = deepest reasoning, "
+                        "Optional Codex model for this agent. gpt-6-astra = GPT-6 generation, "
+                        "the newest and strongest reasoning tier, for the hardest multi-step "
+                        "work (rejects effort 'none'); gpt-5.6-sol = deepest 5.6 reasoning, "
                         "best for hard multi-step or ambiguous work; gpt-5.6-terra = balanced, "
                         "a solid default for most tasks; gpt-5.6-luna = fastest/cheapest, good "
                         "for simple lookups and mechanical work. Omit to inherit the configured "
@@ -216,9 +220,10 @@ TOOLS_SECTION: list[dict] = [
                             "model": {
                                 "type": "string",
                                 "description": (
-                                    "Optional Codex model for this agent: gpt-5.6-sol "
-                                    "(deepest), gpt-5.6-terra (balanced), gpt-5.6-luna "
-                                    "(fastest). Omit to inherit the configured agent model."
+                                    "Optional Codex model for this agent: gpt-6-astra (GPT-6, "
+                                    "strongest; rejects effort 'none'), gpt-5.6-sol (deepest "
+                                    "5.6), gpt-5.6-terra (balanced), gpt-5.6-luna (fastest). "
+                                    "Omit to inherit the configured agent model."
                                 ),
                             },
                             "reasoning_effort": {

@@ -76,7 +76,7 @@ owns it.
 ```yaml
 openai_codex:
   enabled: true
-  model: gpt-5.6-sol             # ChatGPT subscription path
+  model: gpt-5.6-sol             # ChatGPT subscription path; gpt-6-astra where the account is entitled
   reasoning_effort: xhigh        # none | low | medium | high | xhigh | max
   agent_reasoning_effort: auto   # spawned agents; "auto" = per-spawn choice, null = inherit
   agent_model: auto              # spawned agents; "auto" = per-spawn choice, null = inherit
@@ -107,8 +107,12 @@ migrated to auto once (a provenance marker under `data/` records it, and one
 warning names the marker); saving the compression settings afterwards makes
 any explicit value — including 750000 — stick permanently.
 
-Reasoning effort `max` is served only by the gpt-5.6 family (sol/terra/luna);
-gpt-5.5 rejects it per-request. Odin refuses a known-incompatible model/effort
+Reasoning effort `max` is served by the gpt-5.6 family (sol/terra/luna) and
+gpt-6-astra; gpt-5.5 rejects it per-request, and gpt-6-astra rejects `none`.
+Model entitlement is per ChatGPT account: gpt-6-astra rolled out to Personal/Pro
+accounts before Team accounts (2026-09-04); an account that does not serve a
+model answers "not supported when using Codex with a ChatGPT account".
+Odin refuses a known-incompatible model/effort
 pair everywhere it can be introduced — config load, the admin API, per-spawn
 agent overrides, and final request construction — naming the pair and the
 efforts that model does accept. Unknown model strings pass through unchecked
