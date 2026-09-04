@@ -409,6 +409,22 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
                 status=409,
             )
 
+        dedicated_host_fields = {"hosts", "default_host", "allow_host_tofu"}
+        requested_host_fields = (
+            dedicated_host_fields.intersection(updates.get("tools", {}))
+            if isinstance(updates.get("tools"), dict)
+            else set()
+        )
+        if requested_host_fields:
+            return web.json_response(
+                {
+                    "error": "managed-host fields are read-only on this route",
+                    "detail": "Use the Hosts management API and panel.",
+                    "fields": sorted(requested_host_fields),
+                },
+                status=409,
+            )
+
         # Block sensitive field updates
         if _contains_blocked_fields(updates, _SENSITIVE_FIELDS):
             return web.json_response(

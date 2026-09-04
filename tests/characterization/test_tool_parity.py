@@ -53,9 +53,9 @@ EXPECTED_TOOL_ORDER = [
 # sha256[:16] of each tool's canonical JSON (sort_keys, compact separators).
 # Deep-equality pin: ANY edit to a tool's schema/description flips its hash.
 EXPECTED_TOOL_HASHES = {
-    "run_command": "2b146575d0ff5c16",
-    "run_script": "61132f018a660518",
-    "run_command_multi": "f4666ed522cdd0b4",
+    "run_command": "b728134d466ebd02",
+    "run_script": "a17a100ac4ff7838",
+    "run_command_multi": "e671605db0c26dd0",
     "read_file": "627d738ddf708a6d",
     "apply_patch": "f1fe944c3bc09b9f",
     "purge_messages": "db35efc321c205b1",
@@ -104,7 +104,7 @@ EXPECTED_TOOL_HASHES = {
     "create_poll": "6fb64482c930284b",
     # Updated 2026-07-31: wait_seconds param + monitoring guidance added to
     # manage_process (deliberate schema change, PR fix/wait-polling).
-    "manage_process": "ecb65fc2b99e0d10",
+    "manage_process": "7a4baafdba163d48",
     "manage_list": "1fe50a2ac7a59952",
     "analyze_image": "8680a337769f8d09",
     "start_loop": "67faa086c9b0987f",
@@ -125,7 +125,7 @@ EXPECTED_TOOL_HASHES = {
     "http_probe": "dfc3b04b36c5e7f9",
     "issue_tracker": "4f0a793414052b40",
     "generate_image": "ad893100a9b9c478",
-    "validate_action": "199baeb4723517d7",
+    "validate_action": "225be43fe1df4a16",
     "email_send": "1282279440e34e6f",
     "email_search": "3a7584b725d1c134",
     "email_read": "c88d947b915f9cf0",

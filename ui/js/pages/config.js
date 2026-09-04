@@ -349,7 +349,17 @@ export default {
                   </div>
 
                   <div v-else class="cfgc-field-groups">
-                    <section v-for="fieldGroup in fieldGroups(section)" :key="fieldGroup.key" :class="['cfgc-field-group', { nested: fieldGroup.path }]">
+                    <div v-if="section === 'tools' && hasHostsCollection()" class="cfgc-mcp-owner">
+                      <span class="cfgc-mcp-owner-icon" aria-hidden="true"><odin-icon name="server" :size="18" /></span>
+                      <div>
+                        <strong>Managed hosts have a dedicated control plane</strong>
+                        <p>{{ hostsConfigSummary() }} Host inventory is read-only here so durable config, runtime generations, access fences, and pinned trust cannot split.</p>
+                      </div>
+                      <router-link class="btn btn-ghost text-xs" :to="{ path: '/system', query: { tab: 'hosts' } }">
+                        Open Hosts <odin-icon name="chevronRight" :size="14" />
+                      </router-link>
+                    </div>
+                    <section v-for="fieldGroup in fieldGroups(section).filter(group => section !== 'tools' || group.path !== 'tools.hosts')" :key="fieldGroup.key" :class="['cfgc-field-group', { nested: fieldGroup.path }]">
                       <header v-if="fieldGroup.path" class="cfgc-field-group-header">
                         <div>
                           <strong>{{ fieldGroup.label }}</strong>
@@ -696,6 +706,16 @@ export default {
     function sectionFields(section) {
       const prefix = `${section}.`;
       return fields.value.filter(field => field.path === section || field.path.startsWith(prefix));
+    }
+
+    function hasHostsCollection() {
+      return fields.value.some(field => field.path === 'tools.hosts' || field.path.startsWith('tools.hosts.'));
+    }
+
+    function hostsConfigSummary() {
+      const hosts = config.value?.tools?.hosts || {};
+      const count = Object.keys(hosts).length;
+      return `${count} host${count === 1 ? '' : 's'} configured.`;
     }
 
     function sectionFieldCount(section) {
@@ -1379,6 +1399,7 @@ export default {
       sectionLabel, sectionDescription, sectionFieldCount, sectionHealthCount,
       sectionApplySummary, sectionApplyDetails, sectionEntries, fieldGroups, sectionSearchHits, mcpConfigSummary,
       fieldRuntimeCopy, fieldSpecificRuntimeNote, hasHonestAction, runFieldAction,
+      hasHostsCollection, hostsConfigSummary,
       sectionChanged, fieldChanged, isSectionExpanded, toggleSection,
       discardAllDrafts,
       setFieldValue, setNumberFieldValue, numberInputValue, beginInputEdit, endTextInputEdit, endInputEdit,

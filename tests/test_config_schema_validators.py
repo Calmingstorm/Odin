@@ -350,3 +350,31 @@ def test_removed_claude_code_settings_are_tolerated(tmp_path):
     assert not hasattr(cfg.tools, "claude_code_host")
     assert not hasattr(cfg.tools, "claude_code_user")
     assert not hasattr(cfg.tools, "claude_code_dir")
+
+
+def test_legacy_host_inventory_load_is_byte_identical(tmp_path):
+    from src.config.schema import load_config
+    from src.permissions.host_access import HostAccessManager
+    from src.tools.executor import ToolExecutor
+    from src.tools.hosts import HostRegistry
+
+    path = tmp_path / "legacy-hosts.yml"
+    original = (
+        "discord:\n  token: legacy\n"
+        "tools:\n  hosts:\n"
+        "    alpha:\n      address: example.invalid\n      ssh_user: deploy\n      os: linux\n"
+        "    beta:\n      address: localhost\n      ssh_user: root\n      os: linux\n"
+    )
+    path.write_text(original)
+    cfg = load_config(path)
+    registry = HostRegistry(cfg.tools.hosts)
+    access = HostAccessManager(
+        path=str(tmp_path / "missing-host-access.json"),
+        available_hosts_provider=registry.active_aliases,
+    )
+    executor = ToolExecutor(cfg.tools, host_registry=registry, host_access_manager=access)
+
+    assert registry.active_aliases() == ("alpha", "beta")
+    assert executor._resolve_host("alpha") == ("example.invalid", "deploy", "linux")
+    assert access.get_allowed_hosts("legacy-user") == ["alpha", "beta"]
+    assert path.read_text() == original

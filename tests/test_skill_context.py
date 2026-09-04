@@ -109,11 +109,12 @@ class TestHelpers:
 # host / prometheus / file
 # --------------------------------------------------------------------------- #
 class TestHostAndFile:
-    async def test_run_on_host_tuple_and_str(self, tmp_path):
+    async def test_run_on_host_uses_executor_with_requester(self, tmp_path):
         c = _ctx(tmp_path)
-        assert await c.run_on_host("srv", "uname") == "cmd output"  # tuple → [0]
-        c._executor._run_on_host = AsyncMock(return_value="denied: unknown host")
-        assert await c.run_on_host("bad", "x") == "denied: unknown host"
+        assert await c.run_on_host("srv", "uname") == "tool output"
+        c._executor.execute.assert_awaited_once_with(
+            "run_command", {"host": "srv", "command": "uname"}, user_id=None
+        )
 
     async def test_query_prometheus(self, tmp_path):
         c = _ctx(tmp_path)
@@ -132,6 +133,7 @@ class TestHostAndFile:
                 "host": "srv", "path": "/tmp/x.txt", "lines": 25,
                 "start_line": 101, "raw": True,
             },
+            user_id=None,
         )
         assert "Access denied" in await c.read_file(
             "srv", "/opt/odin/.env", lines=25, start_line=101

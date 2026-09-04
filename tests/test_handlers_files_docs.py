@@ -25,6 +25,12 @@ def _tools(
     t._run_on_host = AsyncMock(return_value=run_ret)
     t._govern_command = MagicMock(return_value=govern)
     t._resolve_host = lambda host: resolve
+    t._acquire_host = lambda host: (
+        __import__("src.tools.hosts", fromlist=["HostRegistry"])
+        .HostRegistry.unmanaged_lease(host, resolve)
+        if resolve is not None
+        else None
+    )
     t._exec_command = AsyncMock(return_value=exec_ret)
     # analyze_pdf reads host binaries directly (not via the text pipeline), so
     # it needs the ssh paths config exposes.

@@ -665,7 +665,7 @@ class TestInvokeSkillTool:
         err = bot.scheduling_tools._validate_schedule_payload(inp)
         assert err is None
         assert inp["tool_name"] == "run_command"
-        assert inp["tool_input"] == {"host": "localhost", "command": "uname -r"}
+        assert inp["tool_input"] == {"command": "uname -r"}
 
     def test_validate_schedule_command_with_host(self):
         bot = _make_bot()

@@ -1214,6 +1214,12 @@ class TestConfigMeta:
             "tools.hosts.prod.address",
             "tools.hosts.prod.ssh_user",
             "tools.hosts.prod.os",
+            "tools.hosts.prod.port",
+            "tools.hosts.prod.description",
+            "tools.hosts.prod.enabled",
+            "tools.hosts.prod.host_id",
+            "tools.hosts.prod.trust_mode",
+            "tools.hosts.prod.host_keys",
         }
         assert all(record["structured_container_child"] for record in records.values())
         assert all(not record["structured_container"] for record in records.values())

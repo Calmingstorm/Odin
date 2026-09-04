@@ -5,6 +5,7 @@ import LogsPage from './logs.js';
 import ConfigPage from './config.js';
 import DiscordConfigPage from './discord-config.js';
 import HostAccessPage from './host-access.js';
+import HostsPage from './hosts.js';
 import ApiTokensPage from './api-tokens.js';
 import LLMConfigPage from './llm-config.js';
 import InternalsPage from './internals.js';
@@ -21,6 +22,7 @@ export const TABS = [
     { id: 'logs', label: 'Logs', component: LogsPage },
     { id: 'config', label: 'Config', component: ConfigPage },
     { id: 'discord', label: 'Discord', component: DiscordConfigPage },
+    { id: 'hosts', label: 'Hosts', component: HostsPage },
     { id: 'host-access', label: 'Host Access', component: HostAccessPage },
     { id: 'api-tokens', label: 'API Tokens', component: ApiTokensPage },
     { id: 'llm', label: 'LLM Config', component: LLMConfigPage },
