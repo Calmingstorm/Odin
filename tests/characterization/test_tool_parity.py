@@ -57,7 +57,7 @@ EXPECTED_TOOL_HASHES = {
     "run_script": "61132f018a660518",
     "run_command_multi": "f4666ed522cdd0b4",
     "read_file": "627d738ddf708a6d",
-    "apply_patch": "b24fb5ab15617aa6",
+    "apply_patch": "f1fe944c3bc09b9f",
     "purge_messages": "db35efc321c205b1",
     "post_file": "6860faab30251338",
     "generate_file": "2f4687a63e985fdd",
