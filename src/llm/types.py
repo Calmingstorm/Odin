@@ -63,6 +63,12 @@ class LLMResponse:
     # None when no stable account identity or key material exists; such
     # attempts are disqualified from account-scoped evidence.
     account_key: str | None = None
+    # Prompt-cache attribution from the provider's usage echo
+    # (``usage.input_tokens_details.cached_tokens`` / ``cache_write_tokens``),
+    # strictly parsed.  These are SUBSETS of the accepted input, never added
+    # to totals; None = the provider reported nothing (distinct from 0).
+    cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
     @property
     def is_tool_use(self) -> bool:

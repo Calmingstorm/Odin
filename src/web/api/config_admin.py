@@ -25,6 +25,7 @@ from ...config.persistence import (
     submitted_leaves,
 )
 from ...config.schema import Config
+from ...context.loader import ContextReloadReport
 from ...odin_log import get_logger
 from ...setup_wizard import (
     build_config,
@@ -542,11 +543,16 @@ def register_quick_actions(routes: web.RouteTableDef, bot) -> None:
 
     @routes.post("/api/reload")
     async def reload_config(_request: web.Request) -> web.Response:
-        bot.context_loader.reload()
+        # The same immutable report the /reload slash command renders: which
+        # files are effective now, which dropped out, and which were skipped.
+        report = bot.context_loader.reload()
         bot.prompt_builder.invalidate()
         bot.tool_catalog.invalidate()
         bot.prompt_builder.rebuild_default()
-        return web.json_response({"status": "reloaded"})
+        payload: dict = {"status": "reloaded"}
+        if isinstance(report, ContextReloadReport):
+            payload["context"] = report.to_dict()
+        return web.json_response(payload)
 
 
 async def _persist_personality(p) -> PersistOutcome:

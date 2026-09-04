@@ -64,6 +64,11 @@ class ToolIteration:
     estimated_input_tokens: int | None = None
     input_token_provenance: str = ""
     output_token_provenance: str = ""
+    # Prompt-cache attribution (subsets of the accepted input; None = the
+    # provider reported nothing, which older rows and non-Codex providers
+    # share — never zero).
+    cached_tokens: int | None = None
+    cache_write_tokens: int | None = None
 
 
 def stored_tool_results(

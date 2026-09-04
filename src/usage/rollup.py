@@ -23,12 +23,69 @@ from ..odin_log import get_logger
 
 log = get_logger("usage")
 
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
+# Declared column layouts the store is willing to operate on.  Validation
+# inspects the real table shape (PRAGMA table_info) before AND after any
+# migration — the metadata row is a claim, the table is the fact.
+_GENERATION_COLUMNS_V1: dict[str, str] = {
+    "fact_id": "TEXT",
+    "turn_fact_id": "TEXT",
+    "occurred_at": "REAL",
+    "ordinal": "INTEGER",
+    "provider": "TEXT",
+    "model": "TEXT",
+    "effort": "TEXT",
+    "input_tokens": "INTEGER",
+    "input_provenance": "TEXT",
+    "output_tokens": "INTEGER",
+    "output_provenance": "TEXT",
+    "duration_ms": "INTEGER",
+}
+_GENERATION_COLUMNS_V2: dict[str, str] = {
+    **_GENERATION_COLUMNS_V1,
+    "cached_tokens": "INTEGER",
+    "cache_write_tokens": "INTEGER",
+}
+
+
+class UsageSchemaError(RuntimeError):
+    """The on-disk usage store is not a layout this code can operate on."""
 _BACKFILL_RECORDS = 250
 _BACKFILL_BYTES = 4 * 1024 * 1024
 _BACKFILL_PAUSE_SECONDS = 0.05
 _TAIL_INTERVAL_SECONDS = 10.0
 _ALLOWED_RANGES = {"24h": 24, "7d": 24 * 7, "30d": 24 * 30, "all": None}
+
+
+def _table_columns(conn: sqlite3.Connection, table: str) -> dict[str, str]:
+    return {
+        str(row[1]): str(row[2] or "").upper()
+        for row in conn.execute(f"PRAGMA table_info({table})").fetchall()
+    }
+
+
+def _require_columns(conn: sqlite3.Connection, table: str, expected: dict[str, str]) -> None:
+    actual = _table_columns(conn, table)
+    if actual != expected:
+        missing = sorted(set(expected) - set(actual))
+        extra = sorted(set(actual) - set(expected))
+        mismatched = sorted(
+            name for name in expected if name in actual and actual[name] != expected[name]
+        )
+        raise UsageSchemaError(
+            f"{table} layout is incompatible (missing={missing}, extra={extra}, "
+            f"type_mismatch={mismatched})"
+        )
+
+
+def _stored_schema_version(conn: sqlite3.Connection) -> int | None:
+    row = conn.execute("SELECT value FROM usage_meta WHERE key='schema_version'").fetchone()
+    if row is None:
+        return None
+    text = str(row[0]).strip()
+    if not text.isdigit():
+        raise UsageSchemaError(f"malformed usage schema_version {row[0]!r}")
+    return int(text)
 
 
 def _parse_timestamp(value: object) -> float | None:
@@ -225,6 +282,19 @@ class UsageRollup:
 
     def _initialize(self) -> None:
         with self._lock, closing(self._connect()) as conn:
+            existing = {
+                row[0]
+                for row in conn.execute(
+                    "SELECT name FROM sqlite_master WHERE type='table'"
+                ).fetchall()
+            }
+            fresh = "usage_meta" not in existing and "generation_facts" not in existing
+            if not fresh:
+                # An existing store: enforce its declared version BEFORE any
+                # DDL touches it, then migrate additively inside one
+                # transaction.  Unknown layouts fail here instead of being
+                # silently blessed by CREATE TABLE IF NOT EXISTS.
+                self._migrate_existing(conn, existing)
             conn.executescript(
                 """
                 CREATE TABLE IF NOT EXISTS usage_meta (
@@ -260,6 +330,8 @@ class UsageRollup:
                     output_tokens INTEGER,
                     output_provenance TEXT NOT NULL,
                     duration_ms INTEGER NOT NULL,
+                    cached_tokens INTEGER,
+                    cache_write_tokens INTEGER,
                     FOREIGN KEY(turn_fact_id) REFERENCES turn_facts(fact_id)
                 );
                 CREATE INDEX IF NOT EXISTS idx_usage_generation_time
@@ -293,11 +365,57 @@ class UsageRollup:
                 );
                 """
             )
-            conn.execute(
-                "INSERT OR IGNORE INTO usage_meta(key, value) VALUES('schema_version', ?)",
-                (str(_SCHEMA_VERSION),),
-            )
+            if fresh:
+                conn.execute(
+                    "INSERT INTO usage_meta(key, value) VALUES('schema_version', ?)",
+                    (str(_SCHEMA_VERSION),),
+                )
             conn.commit()
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            if _stored_schema_version(conn) != _SCHEMA_VERSION:
+                raise UsageSchemaError("schema_version did not settle at the current version")
+            # Availability means writable: a store another process holds
+            # exclusively fails here (bounded by the busy timeout) instead of
+            # failing on the first ingest much later.
+            conn.execute("BEGIN IMMEDIATE")
+            conn.execute("COMMIT")
+
+    @staticmethod
+    def _migrate_existing(conn: sqlite3.Connection, existing: set[str]) -> None:
+        if "usage_meta" not in existing or "generation_facts" not in existing:
+            raise UsageSchemaError("existing usage store is missing its core tables")
+        version = _stored_schema_version(conn)
+        if version is None:
+            raise UsageSchemaError("existing usage store declares no schema_version")
+        if version < 1:
+            raise UsageSchemaError(f"unsupported usage schema_version {version}")
+        if version > _SCHEMA_VERSION:
+            raise UsageSchemaError(
+                f"usage store schema_version {version} is newer than supported {_SCHEMA_VERSION}"
+            )
+        if version == _SCHEMA_VERSION:
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            return
+        # version == 1: additive v1 → v2 under one transaction.  Any failure —
+        # a DDL error, a column that does not appear, the metadata update —
+        # rolls back both the schema change and the version advance.
+        _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V1)
+        conn.execute("BEGIN IMMEDIATE")
+        try:
+            for column in ("cached_tokens", "cache_write_tokens"):
+                conn.execute(f"ALTER TABLE generation_facts ADD COLUMN {column} INTEGER")
+            _require_columns(conn, "generation_facts", _GENERATION_COLUMNS_V2)
+            updated = conn.execute(
+                "UPDATE usage_meta SET value=? WHERE key='schema_version'",
+                (str(_SCHEMA_VERSION),),
+            ).rowcount
+            if updated != 1:
+                raise UsageSchemaError("schema_version row vanished during migration")
+            conn.execute("COMMIT")
+        except BaseException:
+            conn.execute("ROLLBACK")
+            raise
+        log.info("Usage store migrated from schema v1 to v%d", _SCHEMA_VERSION)
 
     def schedule_trajectory(self, record: dict, kind: Literal["turn", "agent"]) -> None:
         """Queue a post-persistence observer without extending settlement latency."""
@@ -377,8 +495,9 @@ class UsageRollup:
                     """INSERT OR IGNORE INTO generation_facts(
                         fact_id, turn_fact_id, occurred_at, ordinal, provider,
                         model, effort, input_tokens, input_provenance,
-                        output_tokens, output_provenance, duration_ms
-                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                        output_tokens, output_provenance, duration_ms,
+                        cached_tokens, cache_write_tokens
+                    ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         generation_id, fact_id, occurred, ordinal,
                         _bounded_text(row.get("provider") or "unknown", 80),
@@ -386,6 +505,8 @@ class UsageRollup:
                         _bounded_text(row.get("reasoning_effort"), 40) or None,
                         input_tokens, input_prov, output_tokens, output_prov,
                         _nonnegative_int(row.get("duration_ms")) or 0,
+                        _nonnegative_int(row.get("cached_tokens")),
+                        _nonnegative_int(row.get("cache_write_tokens")),
                     ),
                 )
             if owns:
@@ -858,6 +979,13 @@ class UsageRollup:
                     GROUP BY output_provenance""",
                 args,
             ).fetchall()
+            cache = conn.execute(
+                f"""SELECT COALESCE(SUM(cached_tokens),0) cached,
+                    COALESCE(SUM(cache_write_tokens),0) written,
+                    COUNT(cached_tokens) reported
+                    FROM generation_facts{where}""",
+                args,
+            ).fetchone()
             activity = conn.execute(
                 f"""SELECT surface, outcome, COUNT(*) count,
                     SUM(CASE WHEN duration_ms > 0 THEN duration_ms END) duration_ms,
@@ -966,6 +1094,15 @@ class UsageRollup:
                 "explicit_error_turns": int(turn["errors"] or 0),
                 "input_tokens": self._token_totals(input_rows),
                 "output_tokens": self._token_totals(output_rows),
+                # Prompt-cache attribution: subsets of accepted input, never
+                # added to the totals above.  Rows the provider reported
+                # nothing for (pre-v2 history, non-Codex) are excluded, not
+                # counted as zero.
+                "cache": {
+                    "cached_tokens": int(cache["cached"] or 0),
+                    "cache_write_tokens": int(cache["written"] or 0),
+                    "generations_reported": int(cache["reported"] or 0),
+                },
             },
             "activity": [dict(row) for row in activity],
             "activity_over_time": [dict(row) for row in timeline],

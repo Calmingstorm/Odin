@@ -1519,3 +1519,23 @@ async def test_generic_config_rejects_disabled_tools_leaf(_active_config):
     assert _active_config.read_text() == before_disk
     assert YAML().load(_active_config.read_text()) == YAML().load(before_disk)
     assert bot.config.tools.disabled_tools == []
+
+
+@pytest.mark.asyncio
+async def test_reload_returns_the_context_report(tmp_path):
+    """/api/reload shares the slash command's immutable loader report."""
+    from src.context.loader import ContextLoader
+
+    (tmp_path / "architecture.md").write_text("# arch")
+    app, bot = _app(register_quick_actions)
+    bot.context_loader = ContextLoader(str(tmp_path))
+    bot.context_loader.load()
+    (tmp_path / "architecture.md").unlink()
+    (tmp_path / "fresh.md").write_text("new")
+    async with TestClient(TestServer(app)) as c:
+        payload = await (await c.post("/api/reload")).json()
+    assert payload["status"] == "reloaded"
+    assert payload["context"]["loaded"] == ["fresh.md"]
+    assert payload["context"]["removed"] == ["architecture.md"]
+    assert payload["context"]["skipped"] == []
+    bot.prompt_builder.rebuild_default.assert_called_once()

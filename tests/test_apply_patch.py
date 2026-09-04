@@ -35,7 +35,7 @@ def test_parse_combined_envelope_and_relative_paths():
         (_patch("*** Add File: ../escape\n+x"), "stay beneath root"),
         (_patch("*** Add File: a\nnot-prefixed"), r"start with '\+'"),
         (_patch("*** Delete File: a\n+body"), "no body"),
-        (_patch("*** Update File: a\n@@\n same"), "contain a change"),
+        (_patch("*** Update File: a\n@@\n same"), "patch line 3 contains no"),
         (_patch("*** Update File: a\n@@\n-old\n+new\n*** Delete File: a"), "more than once"),
     ],
 )
@@ -521,3 +521,177 @@ def test_missing_renameat2_fails_without_partial_effect(tmp_path, monkeypatch):
         )
     assert not target.exists()
     assert not list(tmp_path.glob(".odin-patch-*"))
+
+
+# ---------------------------------------------------------------------------
+# Ordered anchor chains ("@@ class X" / "@@ def y()") — the dialect the model
+# is taught; previously the second @@ closed an empty hunk and was refused.
+# ---------------------------------------------------------------------------
+
+_TWO_CLASSES = (
+    "class Alpha:\n"
+    "    def method(self):\n"
+    "        x = 1\n"
+    "        return x\n"
+    "\n"
+    "class Beta:\n"
+    "    def method(self):\n"
+    "        x = 1\n"
+    "        return x\n"
+)
+
+_STACKED = (
+    "*** Update File: mod.py\n"
+    "@@ class Beta:\n"
+    "@@     def method(self):\n"
+    "         x = 1\n"
+    "-        return x\n"
+    "+        return x + 1"
+)
+
+
+def test_parse_stacked_anchors_form_one_hunk_with_an_ordered_chain():
+    plan = parse_patch(_patch(_STACKED))
+    hunks = plan["operations"][0]["hunks"]
+    assert len(hunks) == 1
+    assert hunks[0]["anchors"] == ["class Beta:", "    def method(self):"]
+    assert hunks[0]["lines"] == ["         x = 1", "-        return x", "+        return x + 1"]
+    assert plan["version"] == 2
+
+
+def test_stacked_anchors_pick_the_site_inside_the_named_class(tmp_path):
+    (tmp_path / "mod.py").write_text(_TWO_CLASSES)
+    apply_plan(str(tmp_path), parse_patch(_patch(_STACKED)))
+    text = (tmp_path / "mod.py").read_text()
+    assert text.count("return x + 1") == 1
+    assert text.index("class Beta") < text.index("return x + 1")
+    # Alpha's identical body is untouched
+    assert text.split("class Beta")[0].count("return x\n") == 1
+
+
+def test_single_anchor_keeps_the_strict_unique_rule(tmp_path):
+    (tmp_path / "mod.py").write_text(_TWO_CLASSES)
+    single = _STACKED.replace("@@ class Beta:\n", "")
+    with pytest.raises(PatchError, match="ambiguous"):
+        apply_plan(str(tmp_path), parse_patch(_patch(single)))
+    assert (tmp_path / "mod.py").read_text() == _TWO_CLASSES
+
+
+def test_missing_or_ambiguous_chain_refuses_without_mutation(tmp_path):
+    (tmp_path / "mod.py").write_text(_TWO_CLASSES)
+    missing = _STACKED.replace("@@     def method(self):", "@@     def absent(self):")
+    with pytest.raises(PatchError, match="context mismatch"):
+        apply_plan(str(tmp_path), parse_patch(_patch(missing)))
+    # More than one complete monotonic anchor-chain + body match is ambiguous.
+    ambiguous_first = _STACKED.replace(
+        "@@ class Beta:\n@@     def method(self):",
+        "@@     def method(self):\n@@         x = 1",
+    )
+    with pytest.raises(PatchError, match="ambiguous"):
+        apply_plan(str(tmp_path), parse_patch(_patch(ambiguous_first)))
+    assert (tmp_path / "mod.py").read_text() == _TWO_CLASSES
+
+
+def test_chain_does_not_jump_from_first_nested_target_to_later_matching_body(tmp_path):
+    original = (
+        "class A:\n"
+        "def f(self):\n"
+        "    return other\n"
+        "\n"
+        "class B:\n"
+        "def f(self):\n"
+        "    return x\n"
+    )
+    target = tmp_path / "nested.py"
+    target.write_text(original)
+    patch = _patch(
+        "*** Update File: nested.py\n"
+        "@@ class A:\n"
+        "@@ def f(self):\n"
+        "-    return x\n"
+        "+    return changed"
+    )
+
+    with pytest.raises(PatchError, match="ambiguous"):
+        apply_plan(str(tmp_path), parse_patch(patch))
+    assert target.read_text() == original
+
+
+def test_chain_rejects_duplicate_complete_body_matches_without_mutation(tmp_path):
+    original = (
+        "class A:\n"
+        "    def f(self):\n"
+        "        return x\n"
+        "        return x\n"
+    )
+    target = tmp_path / "duplicate.py"
+    target.write_text(original)
+    patch = _patch(
+        "*** Update File: duplicate.py\n"
+        "@@ class A:\n"
+        "@@     def f(self):\n"
+        "-        return x\n"
+        "+        return changed"
+    )
+
+    with pytest.raises(PatchError, match="ambiguous"):
+        apply_plan(str(tmp_path), parse_patch(patch))
+    assert target.read_text() == original
+
+
+def test_ordinary_hunks_stay_separate_and_bare_marker_opens_its_own_hunk():
+    body = (
+        "*** Update File: f.txt\n"
+        "@@ one\n"
+        " one\n-a\n+A\n"
+        "@@\n"
+        " two\n-b\n+B\n"
+        "@@ three\n"
+        "@@ four\n"
+        "-c\n+C"
+    )
+    hunks = parse_patch(_patch(body))["operations"][0]["hunks"]
+    assert [h["anchors"] for h in hunks] == [["one"], [], ["three", "four"]]
+
+
+def test_empty_hunk_errors_name_the_patch_line():
+    with pytest.raises(PatchError, match="hunk introduced at patch line 3 contains no"):
+        parse_patch(_patch("*** Update File: a\n@@ x\n same"))
+    with pytest.raises(PatchError, match="patch line 4 must start with"):
+        parse_patch(_patch("*** Update File: a\n@@ x\nbad"))
+    with pytest.raises(PatchError, match="empty @@ anchor at patch line 3"):
+        parse_patch(_patch("*** Update File: a\n@@  \n-x\n+y"))
+    too_many = "".join(f"@@ a{i}\n" for i in range(9)) + "-x\n+y"
+    with pytest.raises(PatchError, match="more than 8 @@ anchors"):
+        parse_patch(_patch("*** Update File: a\n" + too_many))
+    with pytest.raises(PatchError, match="control character.*patch line 3"):
+        parse_patch(_patch("*** Update File: a\n@@ anchor\tname\n-x\n+y"))
+
+
+@pytest.mark.parametrize(
+    "hunk",
+    [
+        {"anchor": "old-shape", "lines": ["-x", "+y"]},
+        {"anchors": "not-a-list", "lines": ["-x", "+y"]},
+        {"anchors": [""], "lines": ["-x", "+y"]},
+        {"anchors": ["bad\x01"], "lines": ["-x", "+y"]},
+        {"anchors": ["bad\tanchor"], "lines": ["-x", "+y"]},
+        {"anchors": [f"a{i}" for i in range(9)], "lines": ["-x", "+y"]},
+    ],
+)
+def test_transported_plan_validates_anchor_chains_independently(tmp_path, hunk):
+    plan = {
+        "version": 2,
+        "operations": [{"action": "update", "path": "a.txt", "move_to": None, "hunks": [hunk]}],
+    }
+    (tmp_path / "a.txt").write_text("x\n")
+    with pytest.raises(PatchError, match="invalid transported"):
+        apply_plan(str(tmp_path), plan)
+    assert (tmp_path / "a.txt").read_text() == "x\n"
+
+
+def test_transported_plan_requires_the_current_version(tmp_path):
+    plan = parse_patch(_patch("*** Add File: n.txt\n+n"))
+    plan["version"] = 1
+    with pytest.raises(PatchError, match="invalid transported patch plan"):
+        apply_plan(str(tmp_path), plan)
