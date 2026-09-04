@@ -155,6 +155,41 @@ def test_created_parent_directories_roll_back_after_later_commit_failure(tmp_pat
     assert not list(tmp_path.rglob(".odin-patch-*"))
 
 
+def test_directory_rollback_preserves_external_nonempty_content(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    external = tmp_path / "created" / "external.txt"
+    injected = False
+
+    def inject_external_file_then_fail(source, destination, **kwargs):
+        nonlocal injected
+        if str(source).startswith(".odin-patch-stage-") and not injected:
+            external.write_text("not-owned-by-patch\n")
+            injected = True
+            raise OSError("injected publish failure")
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(_patch("*** Add File: created/nested/file.txt\n+content"))
+    with pytest.raises(PatchRollbackError, match="Directory not empty"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=inject_external_file_then_fail)
+
+    assert external.read_text() == "not-owned-by-patch\n"
+    assert not (tmp_path / "created" / "nested").exists()
+
+
+def test_add_parent_creation_refuses_symlink_components(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    plan = parse_patch(_patch("*** Add File: link/new/deep.txt\n+content"))
+    with pytest.raises(PatchError, match="symlink"):
+        apply_plan(str(root), plan)
+    assert list(outside.iterdir()) == []
+
+
 def test_directory_creation_guard_is_load_bearing(tmp_path):
     plan = parse_patch(_patch("*** Add File: missing/nested/file.txt\n+content"))
     apply_plan(str(tmp_path), plan)
@@ -367,7 +402,10 @@ async def test_handler_rejects_context_mismatch_as_failure(tmp_path):
         },
     )
     assert result.ok is False
-    assert "context mismatch" in result.output
+    assert (
+        "context mismatch in a.txt, hunk at patch line 3, anchors [<none>]"
+        in result.output
+    )
     assert target.read_text() == "actual\n"
 
 
