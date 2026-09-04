@@ -12,7 +12,6 @@ import asyncio
 import time
 from dataclasses import replace
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
 
 import pytest
 from aiohttp import web
@@ -21,7 +20,6 @@ from aiohttp.test_utils import TestClient, TestServer
 from src.config.schema import ToolHost
 from src.tools.hosts import HostCandidate, HostRegistry, HostTrustError
 from src.web.api import hosts as hosts_api
-
 
 _HOST_ID = "06eebf65-8f6e-4c36-9acc-ce393fb34642"
 _CANDIDATE_ID = "ee2e82bc-a22f-4373-bc3a-29e9ce6b31d4"
@@ -184,7 +182,14 @@ async def test_settings_validation_save_and_persistence_failure(monkeypatch, tmp
 
     monkeypatch.setattr(hosts_api.config_persistence, "persist_config_paths_locked", persist)
     async with await _client(bot) as client:
-        for payload in ({}, {"other": True}, {"default_host": 1}, {"default_host": "missing"}, {"allow_host_tofu": "yes"}):
+        invalid_payloads = (
+            {},
+            {"other": True},
+            {"default_host": 1},
+            {"default_host": "missing"},
+            {"allow_host_tofu": "yes"},
+        )
+        for payload in invalid_payloads:
             response = await client.post("/api/hosts/settings", json=payload)
             assert response.status == 400
         response = await client.post(
@@ -198,7 +203,9 @@ async def test_settings_validation_save_and_persistence_failure(monkeypatch, tmp
     async def persist_failure(_changes):
         return RuntimeError("disk full"), False
 
-    monkeypatch.setattr(hosts_api.config_persistence, "persist_config_paths_locked", persist_failure)
+    monkeypatch.setattr(
+        hosts_api.config_persistence, "persist_config_paths_locked", persist_failure
+    )
     async with await _client(bot) as client:
         response = await client.post("/api/hosts/settings", json={"default_host": ""})
         assert response.status == 500
@@ -317,8 +324,10 @@ async def test_enabled_references_delete_and_force_revoke(monkeypatch, tmp_path)
     assert lease is not None
     async with await _client(bot) as client:
         assert (await client.post("/api/hosts/alpha/enabled", data="not-json")).status == 400
-        assert (await client.post("/api/hosts/alpha/enabled", json={"enabled": "yes"})).status == 400
-        assert (await client.post("/api/hosts/missing/enabled", json={"enabled": False})).status == 404
+        invalid = await client.post("/api/hosts/alpha/enabled", json={"enabled": "yes"})
+        assert invalid.status == 400
+        missing = await client.post("/api/hosts/missing/enabled", json={"enabled": False})
+        assert missing.status == 404
         disabled = await client.post("/api/hosts/alpha/enabled", json={"enabled": False})
         assert disabled.status == 200
         assert bot.config.tools.hosts["alpha"].enabled is False
@@ -357,7 +366,9 @@ async def test_drain_mutation_cancellation_contract():
         await release.wait()
         return "saved"
 
-    task = asyncio.create_task(hosts_api._drain_host_mutation(operation(), commit_started=asyncio.Event()))
+    task = asyncio.create_task(
+        hosts_api._drain_host_mutation(operation(), commit_started=asyncio.Event())
+    )
     await started.wait()
     task.cancel()
     with pytest.raises(asyncio.CancelledError):
@@ -366,7 +377,9 @@ async def test_drain_mutation_cancellation_contract():
     committed = asyncio.Event()
     committed.set()
     started.clear()
-    task = asyncio.create_task(hosts_api._drain_host_mutation(operation(), commit_started=committed))
+    task = asyncio.create_task(
+        hosts_api._drain_host_mutation(operation(), commit_started=committed)
+    )
     await started.wait()
     task.cancel()
     release.set()

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import json
 import re
@@ -135,9 +134,7 @@ async def test_remote_start_transport_loss_is_unknown_and_releases():
 async def test_remote_start_success_tracks_negative_handle_and_identity(no_lifetime_tasks):
     async def remote_exec(_target, command, _timeout):
         token = _start_token(command)
-        return 0, json.dumps(
-            {"token": token, "pid": 101, "pgid": 101, "sid": 99, "start_id": "77"}
-        )
+        return 0, json.dumps({"token": token, "pid": 101, "pgid": 101, "sid": 99, "start_id": "77"})
 
     lease = _Lease()
     registry = ProcessRegistry(remote_exec=remote_exec)

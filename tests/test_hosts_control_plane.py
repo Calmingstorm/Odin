@@ -17,9 +17,9 @@ from src.tools.hosts import (
     HostForceRevokedError,
     HostRegistry,
     HostTrustError,
+    control,
     deterministic_host_id,
 )
-from src.tools.hosts import control
 from src.tools.hosts.control import (
     authorized_keys_command,
     public_key_info,
@@ -148,9 +148,7 @@ async def test_remote_start_transport_loss_is_unknown():
 async def test_remote_handle_namespace_and_identity_reply():
     async def remote(_target, command, _timeout):
         token = command.split(' "$d" ', 1)[1].split()[0]
-        return 0, json.dumps(
-            {"token": token, "pid": 101, "pgid": 101, "sid": 99, "start_id": "77"}
-        )
+        return 0, json.dumps({"token": token, "pid": 101, "pgid": 101, "sid": 99, "start_id": "77"})
 
     lease = _Lease()
     registry = ProcessRegistry(remote_exec=remote)
@@ -285,7 +283,12 @@ async def test_scan_import_test_consume_and_expiry_are_hermetic(monkeypatch, tmp
         raise AssertionError(argv)
 
     monkeypatch.setattr(control, "_run_argv", fake)
-    registry = HostRegistry({}, key_path="/tmp/private", legacy_known_hosts_path="/tmp/legacy", trust_dir=tmp_path)
+    registry = HostRegistry(
+        {},
+        key_path="/tmp/private",
+        legacy_known_hosts_path="/tmp/legacy",
+        trust_dir=tmp_path,
+    )
     manager = HostEnrollmentManager(registry)
     assert await manager.scan("example.invalid", 2222) == (key,)
     candidate = await manager.prepare(
@@ -362,15 +365,21 @@ def test_scan_host_references_finds_control_plane_dependencies():
         list_users=lambda: {"7": {"allowed_hosts": ["build"], "default_host": "build"}},
     )
     token_manager = SimpleNamespace(
-        list_tokens=lambda: [{"user_id": "api", "allowed_hosts": ["build"], "default_host": "build"}]
+        list_tokens=lambda: [
+            {"user_id": "api", "allowed_hosts": ["build"], "default_host": "build"}
+        ]
     )
     config = SimpleNamespace(
-        web=SimpleNamespace(api_tokens=[SimpleNamespace(allowed_hosts=["build"], default_host="build")]),
+        web=SimpleNamespace(
+            api_tokens=[SimpleNamespace(allowed_hosts=["build"], default_host="build")]
+        ),
         tools=SimpleNamespace(
             governor=SimpleNamespace(host_overrides={"build": {}}), default_host="build"
         ),
     )
-    scheduler = SimpleNamespace(list_all=lambda: [{"host": "build", "nested": {"hosts": ["build"]}}])
+    scheduler = SimpleNamespace(
+        list_all=lambda: [{"host": "build", "nested": {"hosts": ["build"]}}]
+    )
     channel_state = SimpleNamespace(
         background_tasks={
             "run": SimpleNamespace(status="running", steps=[{"default_host": "build"}]),
