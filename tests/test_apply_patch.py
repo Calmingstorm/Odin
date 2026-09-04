@@ -84,6 +84,83 @@ def test_apply_add_update_move_delete_transaction(tmp_path):
     assert not list(tmp_path.glob(".odin-patch-*"))
 
 
+def test_add_creates_missing_parent_chain_without_replacing_existing_directories(tmp_path):
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    before = existing.stat()
+    plan = parse_patch(
+        _patch(
+            "*** Add File: existing/new/deep/file.txt\n+created\n"
+            "*** Add File: other/tree/second.txt\n+also-created"
+        )
+    )
+
+    assert apply_plan(str(tmp_path), plan) == [
+        "existing/new/deep/file.txt",
+        "other/tree/second.txt",
+    ]
+    assert (existing / "new" / "deep" / "file.txt").read_text() == "created\n"
+    assert (tmp_path / "other" / "tree" / "second.txt").read_text() == "also-created\n"
+    after = existing.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+
+
+def test_move_creates_missing_destination_parents(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("old\n")
+    plan = parse_patch(
+        _patch(
+            "*** Update File: source.txt\n"
+            "*** Move to: nested/destination/moved.txt\n"
+            "@@\n-old\n+new"
+        )
+    )
+
+    assert apply_plan(str(tmp_path), plan) == [
+        "source.txt -> nested/destination/moved.txt"
+    ]
+    assert not source.exists()
+    assert (tmp_path / "nested" / "destination" / "moved.txt").read_text() == "new\n"
+
+
+def test_created_parent_directories_roll_back_after_later_commit_failure(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    survivor = existing / "survivor.txt"
+    survivor.write_text("untouched\n")
+    publishes = 0
+
+    def fail_second_file_publish(source, destination, **kwargs):
+        nonlocal publishes
+        if str(source).startswith(".odin-patch-stage-"):
+            publishes += 1
+            if publishes == 2:
+                raise OSError("injected later operation failure")
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(
+        _patch(
+            "*** Add File: existing/new/deep/first.txt\n+first\n"
+            "*** Add File: another/new/second.txt\n+second"
+        )
+    )
+    with pytest.raises(PatchError, match="rollback completed"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=fail_second_file_publish)
+
+    assert survivor.read_text() == "untouched\n"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["existing"]
+    assert not (existing / "new").exists()
+    assert not list(tmp_path.rglob(".odin-patch-*"))
+
+
+def test_directory_creation_guard_is_load_bearing(tmp_path):
+    plan = parse_patch(_patch("*** Add File: missing/nested/file.txt\n+content"))
+    apply_plan(str(tmp_path), plan)
+    assert (tmp_path / "missing" / "nested" / "file.txt").read_text() == "content\n"
+
+
 def test_staging_files_are_private_and_unpredictable(tmp_path):
     target = tmp_path / "a.txt"
     target.write_text("old\n")
@@ -310,6 +387,68 @@ def test_ambiguous_context_is_refused(tmp_path):
     with pytest.raises(PatchError, match="ambiguous"):
         apply_plan(str(tmp_path), plan)
     assert target.read_text() == "repeat\nrepeat\n"
+
+
+@pytest.mark.parametrize(
+    "source,body,expected",
+    [
+        (
+            "actual\n",
+            "*** Update File: located.txt\n@@ section\n-expected\n+new",
+            "context mismatch in located.txt, hunk at patch line 3, anchors [@@ section]",
+        ),
+        (
+            "section\nrepeat\nrepeat\n",
+            "*** Update File: located.txt\n@@ section\n-repeat\n+new",
+            (
+                "context is ambiguous in located.txt, hunk at patch line 3, "
+                "anchors [@@ section]"
+            ),
+        ),
+    ],
+)
+def test_match_failures_name_patch_line_and_anchors(tmp_path, source, body, expected):
+    target = tmp_path / "located.txt"
+    target.write_text(source)
+    with pytest.raises(PatchError, match="mismatch|ambiguous") as caught:
+        apply_plan(str(tmp_path), parse_patch(_patch(body)))
+    assert expected in str(caught.value)
+    assert target.read_text() == source
+
+
+def test_stacked_anchor_failure_names_every_anchor(tmp_path):
+    target = tmp_path / "located.py"
+    target.write_text("class Actual:\n    def method(self):\n        return 1\n")
+    patch = _patch(
+        "*** Update File: located.py\n"
+        "@@ class Expected:\n"
+        "@@     def method(self):\n"
+        "-        return 1\n"
+        "+        return 2"
+    )
+    with pytest.raises(PatchError, match="context mismatch") as caught:
+        apply_plan(str(tmp_path), parse_patch(patch))
+    assert (
+        "located.py, hunk at patch line 3, anchors "
+        "[@@ class Expected:, @@     def method(self):]"
+    ) in str(caught.value)
+    assert target.read_text() == "class Actual:\n    def method(self):\n        return 1\n"
+
+
+def test_transported_plan_preserves_match_failure_location(tmp_path):
+    target = tmp_path / "transported.txt"
+    target.write_text("actual\n")
+    plan = parse_patch(
+        _patch("*** Update File: transported.txt\n@@ scope\n-expected\n+new")
+    )
+    assert plan["operations"][0]["hunks"][0]["patch_line"] == 3
+    with pytest.raises(PatchError) as caught:
+        apply_plan(str(tmp_path), plan)
+    assert (
+        "context mismatch in transported.txt, hunk at patch line 3, anchors [@@ scope]"
+        in str(caught.value)
+    )
+    assert target.read_text() == "actual\n"
 
 
 @pytest.mark.parametrize(
@@ -673,16 +812,22 @@ def test_empty_hunk_errors_name_the_patch_line():
     "hunk",
     [
         {"anchor": "old-shape", "lines": ["-x", "+y"]},
-        {"anchors": "not-a-list", "lines": ["-x", "+y"]},
-        {"anchors": [""], "lines": ["-x", "+y"]},
-        {"anchors": ["bad\x01"], "lines": ["-x", "+y"]},
-        {"anchors": ["bad\tanchor"], "lines": ["-x", "+y"]},
-        {"anchors": [f"a{i}" for i in range(9)], "lines": ["-x", "+y"]},
+        {"anchors": "not-a-list", "lines": ["-x", "+y"], "patch_line": 3},
+        {"anchors": [""], "lines": ["-x", "+y"], "patch_line": 3},
+        {"anchors": ["bad\x01"], "lines": ["-x", "+y"], "patch_line": 3},
+        {"anchors": ["bad\tanchor"], "lines": ["-x", "+y"], "patch_line": 3},
+        {
+            "anchors": [f"a{i}" for i in range(9)],
+            "lines": ["-x", "+y"],
+            "patch_line": 3,
+        },
+        {"anchors": [], "lines": ["-x", "+y"], "patch_line": True},
+        {"anchors": [], "lines": ["-x", "+y"], "patch_line": 0},
     ],
 )
 def test_transported_plan_validates_anchor_chains_independently(tmp_path, hunk):
     plan = {
-        "version": 2,
+        "version": 3,
         "operations": [{"action": "update", "path": "a.txt", "move_to": None, "hunks": [hunk]}],
     }
     (tmp_path / "a.txt").write_text("x\n")

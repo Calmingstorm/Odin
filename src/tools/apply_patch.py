@@ -441,7 +441,12 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
 class _DirectoryRegistry:
     """Open and retain root-relative directories without following symlinks."""
 
-    def __init__(self, root_value: object) -> None:
+    def __init__(
+        self,
+        root_value: object,
+        *,
+        rename_noreplace: Callable[..., None],
+    ) -> None:
         if (
             not isinstance(root_value, str)
             or not root_value.startswith("/")
@@ -458,6 +463,7 @@ class _DirectoryRegistry:
         self.root_value = root_value.rstrip("/") or "/"
         self._fds: dict[tuple[str, ...], int] = {(): root_fd}
         self._flags = flags
+        self._rename_noreplace = rename_noreplace
         self._created: list[dict[str, Any]] = []
 
     def parent(self, relative: str, *, create_missing: bool = False) -> tuple[int, str, str]:
@@ -510,41 +516,109 @@ class _DirectoryRegistry:
     ) -> int:
         parent_fd = self._fds[parent_prefix]
         label = "/".join(child_prefix)
-        try:
-            os.mkdir(name, 0o755, dir_fd=parent_fd)
-        except FileExistsError:
-            # A concurrent creator does not make this patch the directory's
-            # owner. Open it through the same no-follow path and never record
-            # it for rollback.
+        stage_name = ""
+        for _ in range(128):
+            stage_name = f".odin-patch-dir-{secrets.token_hex(16)}"
             try:
-                return os.open(name, self._flags, dir_fd=parent_fd)
-            except OSError as exc:
-                raise PatchError(
-                    f"parent directory is missing, not a directory, or a symlink: {label}"
-                ) from exc
-        except OSError as exc:
-            raise PatchError(f"could not create parent directory: {label}: {exc}") from exc
+                os.mkdir(stage_name, 0o700, dir_fd=parent_fd)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise PatchError("could not allocate an unpredictable private staging directory")
 
-        record: dict[str, Any] = {
-            "parent_fd": parent_fd,
-            "name": name,
-            "label": label,
-            "expected": None,
-        }
-        self._created.append(record)
+        stage_label = self.display("/".join(parent_prefix), stage_name)
+        stage_fd = -1
+        published = False
+        record: dict[str, Any] | None = None
         try:
-            created = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-            record["expected"] = (created.st_dev, created.st_ino)
-            if not stat.S_ISDIR(created.st_mode):
-                raise PatchError(f"created parent path is not a directory: {label}")
-            fd = os.open(name, self._flags, dir_fd=parent_fd)
-            opened = os.fstat(fd)
-            if (opened.st_dev, opened.st_ino) != record["expected"]:
-                os.close(fd)
-                raise PatchError(f"created parent directory changed while opening: {label}")
-            os.fsync(parent_fd)
-            return fd
+            stage_fd = os.open(stage_name, self._flags, dir_fd=parent_fd)
+            staged = os.fstat(stage_fd)
+            if not stat.S_ISDIR(staged.st_mode):
+                raise PatchError(f"private parent stage is not a directory: {stage_label}")
+            expected = (staged.st_dev, staged.st_ino)
+            os.fchmod(stage_fd, 0o755)
+            os.fsync(stage_fd)
+            try:
+                _durable_rename_noreplace(
+                    stage_name,
+                    name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    rename_noreplace=self._rename_noreplace,
+                )
+            except BaseException as original:
+                target = _entry_info(parent_fd, name)
+                if target is not None and (target.st_dev, target.st_ino) == expected:
+                    published = True
+                    record = {
+                        "parent_fd": parent_fd,
+                        "name": name,
+                        "label": label,
+                        "expected": expected,
+                    }
+                    self._created.append(record)
+                    # A failure-injection wrapper may raise after renameat2.
+                    # Persist the observed dirent before rollback removes it.
+                    os.fsync(parent_fd)
+                    raise
+
+                cleanup_failures: list[str] = []
+                try:
+                    os.rmdir(stage_name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                except OSError as cleanup_exc:
+                    cleanup_failures.append(
+                        f"private staging directory {stage_label}: "
+                        f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                    )
+                if cleanup_failures:
+                    raise PatchRollbackError(
+                        original,
+                        cleanup_failures,
+                        [stage_label],
+                    ) from original
+                if isinstance(original, FileExistsError):
+                    try:
+                        return os.open(name, self._flags, dir_fd=parent_fd)
+                    except OSError as exc:
+                        raise PatchError(
+                            "parent directory is missing, not a directory, or a symlink: "
+                            f"{label}"
+                        ) from exc
+                raise
+
+            published = True
+            record = {
+                "parent_fd": parent_fd,
+                "name": name,
+                "label": label,
+                "expected": expected,
+            }
+            self._created.append(record)
+            target = _entry_info(parent_fd, name)
+            if target is None or (target.st_dev, target.st_ino) != expected:
+                raise PatchError(f"created parent directory changed during publish: {label}")
+            return stage_fd
         except BaseException:
+            if stage_fd >= 0:
+                os.close(stage_fd)
+            if not published:
+                # The normal cleanup path above already removed the stage. If
+                # failure happened before publish was attempted, remove it here.
+                try:
+                    if not _entry_missing(parent_fd, stage_name):
+                        os.rmdir(stage_name, dir_fd=parent_fd)
+                        os.fsync(parent_fd)
+                except OSError as cleanup_exc:
+                    raise PatchRollbackError(
+                        PatchError(f"could not create parent directory: {label}"),
+                        [
+                            f"private staging directory {stage_label}: "
+                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                        ],
+                        [stage_label],
+                    ) from cleanup_exc
             raise
 
     def rollback_created(self) -> list[str]:
@@ -937,7 +1011,7 @@ def apply_plan(
 ) -> list[str]:
     """Validate, privately stage, and apply a compensating multi-file transaction."""
     operations = _validated_plan(plan)
-    directories = _DirectoryRegistry(root_value)
+    directories = _DirectoryRegistry(root_value, rename_noreplace=rename_noreplace)
     prepared: list[dict[str, Any]] = []
     stages: list[dict[str, Any]] = []
     preserve_artifacts = False
@@ -1171,7 +1245,7 @@ def apply_plan(
             for item in prepared
         ]
     except BaseException as original:
-        if not preserve_artifacts and not isinstance(original, PatchRollbackError):
+        if not preserve_artifacts:
             artifacts = [item["recovery"] for item in prepared if item.get("recovery")] + stages
             cleanup_failures = _cleanup_named(artifacts)
             directory_failures = directories.rollback_created()
