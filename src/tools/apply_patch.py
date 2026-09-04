@@ -25,7 +25,7 @@ DELETE_FILE = "*** Delete File: "
 MOVE_TO = "*** Move to: "
 MAX_PATCH_BYTES = 48 * 1024
 MAX_HUNK_ANCHORS = 8
-PLAN_VERSION = 2
+PLAN_VERSION = 3
 
 
 class PatchError(ValueError):
@@ -199,7 +199,9 @@ def parse_patch(patch_text: object) -> dict[str, Any]:
                         f"Update File {path}: the hunk introduced at patch line {hunk_line} "
                         "contains no '+' or '-' line"
                     )
-                hunks.append({"anchors": anchors, "lines": hunk_lines})
+                hunks.append(
+                    {"anchors": anchors, "lines": hunk_lines, "patch_line": hunk_line}
+                )
             if not hunks:
                 raise PatchError(f"Update File {path}: at least one @@ hunk is required")
             operations.append(
@@ -257,10 +259,15 @@ def _validated_plan(plan: object) -> list[dict[str, Any]]:
                 raise PatchError("invalid transported update hunks")
             clean_hunks: list[dict[str, Any]] = []
             for hunk in hunks:
-                if not isinstance(hunk, dict) or set(hunk) != {"anchors", "lines"}:
+                if not isinstance(hunk, dict) or set(hunk) != {
+                    "anchors",
+                    "lines",
+                    "patch_line",
+                }:
                     raise PatchError("invalid transported update hunk")
                 anchors = hunk["anchors"]
                 hunk_lines = hunk["lines"]
+                patch_line = hunk["patch_line"]
                 if (
                     not isinstance(anchors, list)
                     or len(anchors) > MAX_HUNK_ANCHORS
@@ -281,7 +288,19 @@ def _validated_plan(plan: object) -> list[dict[str, Any]]:
                     or not any(line[0] in "+-" for line in hunk_lines)
                 ):
                     raise PatchError("invalid transported hunk lines")
-                clean_hunks.append({"anchors": list(anchors), "lines": hunk_lines})
+                if (
+                    isinstance(patch_line, bool)
+                    or not isinstance(patch_line, int)
+                    or patch_line < 1
+                ):
+                    raise PatchError("invalid transported hunk patch line")
+                clean_hunks.append(
+                    {
+                        "anchors": list(anchors),
+                        "lines": hunk_lines,
+                        "patch_line": patch_line,
+                    }
+                )
             normalized.append(
                 {"action": action, "path": path, "move_to": move_to, "hunks": clean_hunks}
             )
@@ -386,6 +405,12 @@ def _find_unique_chain_body(
     return unique_at
 
 
+def _hunk_label(path: str, hunk: dict[str, Any]) -> str:
+    anchors = hunk["anchors"]
+    rendered = ", ".join(f"@@ {anchor}" for anchor in anchors) if anchors else "<none>"
+    return f"{path}, hunk at patch line {hunk['patch_line']}, anchors [{rendered}]"
+
+
 def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
     had_final_newline = source.endswith(("\n", "\r"))
     newline = "\r\n" if "\n" in source and source.count("\r\n") == source.count("\n") else "\n"
@@ -393,15 +418,16 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
     cursor = 0
     for hunk in hunks:
         anchors = hunk["anchors"]
+        label = _hunk_label(path, hunk)
         old_lines = [line[1:] for line in hunk["lines"] if line[0] in " -"]
         new_lines = [line[1:] for line in hunk["lines"] if line[0] in " +"]
         if len(anchors) > 1:
-            at = _find_unique_chain_body(lines, anchors, old_lines, cursor, path)
+            at = _find_unique_chain_body(lines, anchors, old_lines, cursor, label)
         elif anchors:
-            anchor_at = _find_unique(lines, [anchors[0]], cursor, path)
-            at = _find_unique(lines, old_lines, anchor_at, path) if old_lines else anchor_at
+            anchor_at = _find_unique(lines, [anchors[0]], cursor, label)
+            at = _find_unique(lines, old_lines, anchor_at, label) if old_lines else anchor_at
         elif old_lines:
-            at = _find_unique(lines, old_lines, cursor, path)
+            at = _find_unique(lines, old_lines, cursor, label)
         else:
             at = len(lines)
         lines[at : at + len(old_lines)] = new_lines
@@ -415,7 +441,12 @@ def _apply_hunks(path: str, source: str, hunks: list[dict[str, Any]]) -> str:
 class _DirectoryRegistry:
     """Open and retain root-relative directories without following symlinks."""
 
-    def __init__(self, root_value: object) -> None:
+    def __init__(
+        self,
+        root_value: object,
+        *,
+        rename_noreplace: Callable[..., None],
+    ) -> None:
         if (
             not isinstance(root_value, str)
             or not root_value.startswith("/")
@@ -432,8 +463,10 @@ class _DirectoryRegistry:
         self.root_value = root_value.rstrip("/") or "/"
         self._fds: dict[tuple[str, ...], int] = {(): root_fd}
         self._flags = flags
+        self._rename_noreplace = rename_noreplace
+        self._created: list[dict[str, Any]] = []
 
-    def parent(self, relative: str) -> tuple[int, str, str]:
+    def parent(self, relative: str, *, create_missing: bool = False) -> tuple[int, str, str]:
         parts = PurePosixPath(relative).parts
         prefix: tuple[str, ...] = ()
         for part in parts[:-1]:
@@ -441,6 +474,13 @@ class _DirectoryRegistry:
             if child_prefix not in self._fds:
                 try:
                     fd = os.open(part, self._flags, dir_fd=self._fds[prefix])
+                except FileNotFoundError as exc:
+                    if not create_missing:
+                        raise PatchError(
+                            "parent directory is missing, not a directory, or a symlink: "
+                            f"{relative}"
+                        ) from exc
+                    fd = self._create_directory(prefix, child_prefix, part)
                 except OSError as exc:
                     raise PatchError(
                         f"parent directory is missing, not a directory, or a symlink: {relative}"
@@ -448,6 +488,223 @@ class _DirectoryRegistry:
                 self._fds[child_prefix] = fd
             prefix = child_prefix
         return self._fds[prefix], parts[-1], "/".join(parts[:-1])
+
+    def existing_parent(self, relative: str) -> tuple[int, str, str] | None:
+        """Return an existing no-follow parent, or None after the first absent component."""
+        parts = PurePosixPath(relative).parts
+        prefix: tuple[str, ...] = ()
+        for part in parts[:-1]:
+            child_prefix = (*prefix, part)
+            if child_prefix not in self._fds:
+                try:
+                    fd = os.open(part, self._flags, dir_fd=self._fds[prefix])
+                except FileNotFoundError:
+                    return None
+                except OSError as exc:
+                    raise PatchError(
+                        f"parent directory is missing, not a directory, or a symlink: {relative}"
+                    ) from exc
+                self._fds[child_prefix] = fd
+            prefix = child_prefix
+        return self._fds[prefix], parts[-1], "/".join(parts[:-1])
+
+    def _create_directory(
+        self,
+        parent_prefix: tuple[str, ...],
+        child_prefix: tuple[str, ...],
+        name: str,
+    ) -> int:
+        parent_fd = self._fds[parent_prefix]
+        label = "/".join(child_prefix)
+        stage_name = ""
+        for _ in range(128):
+            stage_name = f".odin-patch-dir-{secrets.token_hex(16)}"
+            try:
+                os.mkdir(stage_name, 0o700, dir_fd=parent_fd)
+                break
+            except FileExistsError:
+                continue
+        else:
+            raise PatchError("could not allocate an unpredictable private staging directory")
+
+        stage_label = self.display("/".join(parent_prefix), stage_name)
+        stage_fd = -1
+        published = False
+        record: dict[str, Any] | None = None
+        try:
+            stage_fd = os.open(stage_name, self._flags, dir_fd=parent_fd)
+            staged = os.fstat(stage_fd)
+            if not stat.S_ISDIR(staged.st_mode):
+                raise PatchError(f"private parent stage is not a directory: {stage_label}")
+            expected = (staged.st_dev, staged.st_ino)
+            os.fchmod(stage_fd, 0o755)
+            os.fsync(stage_fd)
+            try:
+                _durable_rename_noreplace(
+                    stage_name,
+                    name,
+                    src_dir_fd=parent_fd,
+                    dst_dir_fd=parent_fd,
+                    rename_noreplace=self._rename_noreplace,
+                )
+            except BaseException as original:
+                target = _entry_info(parent_fd, name)
+                if target is not None and (target.st_dev, target.st_ino) == expected:
+                    published = True
+                    record = {
+                        "parent_fd": parent_fd,
+                        "name": name,
+                        "label": label,
+                        "expected": expected,
+                        "fd": stage_fd,
+                    }
+                    self._created.append(record)
+                    self._fds[child_prefix] = stage_fd
+                    # A failure-injection wrapper may raise after renameat2.
+                    # Persist the observed dirent before rollback removes it.
+                    os.fsync(parent_fd)
+                    raise
+
+                staged_after = os.fstat(stage_fd)
+                if (
+                    target is None
+                    and _entry_missing(parent_fd, stage_name)
+                    and staged_after.st_nlink > 0
+                ):
+                    # The staged directory was published and then moved away
+                    # before the wrapper raised. Retain its fd so rollback can
+                    # report that it cannot safely remove an unknown path.
+                    published = True
+                    record = {
+                        "parent_fd": parent_fd,
+                        "name": name,
+                        "label": label,
+                        "expected": expected,
+                        "fd": stage_fd,
+                    }
+                    self._created.append(record)
+                    self._fds[child_prefix] = stage_fd
+                    os.fsync(parent_fd)
+                    raise
+
+                cleanup_failures: list[str] = []
+                try:
+                    os.rmdir(stage_name, dir_fd=parent_fd)
+                    os.fsync(parent_fd)
+                except OSError as cleanup_exc:
+                    cleanup_failures.append(
+                        f"private staging directory {stage_label}: "
+                        f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                    )
+                if cleanup_failures:
+                    raise PatchRollbackError(
+                        original,
+                        cleanup_failures,
+                        [stage_label],
+                    ) from original
+                if isinstance(original, FileExistsError):
+                    try:
+                        existing_fd = os.open(name, self._flags, dir_fd=parent_fd)
+                    except OSError as exc:
+                        raise PatchError(
+                            "parent directory is missing, not a directory, or a symlink: "
+                            f"{label}"
+                        ) from exc
+                    os.close(stage_fd)
+                    stage_fd = -1
+                    return existing_fd
+                raise
+
+            published = True
+            record = {
+                "parent_fd": parent_fd,
+                "name": name,
+                "label": label,
+                "expected": expected,
+                "fd": stage_fd,
+            }
+            self._created.append(record)
+            self._fds[child_prefix] = stage_fd
+            target = _entry_info(parent_fd, name)
+            if target is None or (target.st_dev, target.st_ino) != expected:
+                raise PatchError(f"created parent directory changed during publish: {label}")
+            return stage_fd
+        except BaseException as original:
+            if stage_fd >= 0 and not published:
+                os.close(stage_fd)
+            if not published:
+                # The normal cleanup path above already removed the stage. If
+                # failure happened before publish was attempted, remove it here.
+                try:
+                    if not _entry_missing(parent_fd, stage_name):
+                        os.rmdir(stage_name, dir_fd=parent_fd)
+                        os.fsync(parent_fd)
+                except OSError as cleanup_exc:
+                    raise PatchRollbackError(
+                        original,
+                        [
+                            f"private staging directory {stage_label}: "
+                            f"{type(cleanup_exc).__name__}: {cleanup_exc}"
+                        ],
+                        [stage_label],
+                    ) from cleanup_exc
+            raise
+
+    def rollback_created(self) -> list[str]:
+        """Remove only unchanged, empty directories created by this patch."""
+        failures: list[str] = []
+        for record in reversed(self._created):
+            parent_fd = record["parent_fd"]
+            name = record["name"]
+            label = record["label"]
+            try:
+                current = _entry_info(parent_fd, name)
+                if current is None:
+                    try:
+                        link_count = os.fstat(record["fd"]).st_nlink
+                    except OSError as exc:
+                        failures.append(
+                            f"created directory {label}: could not confirm removal: "
+                            f"{type(exc).__name__}: {exc}"
+                        )
+                    else:
+                        if link_count != 0:
+                            failures.append(
+                                f"created directory {label}: moved away from its planned path"
+                            )
+                    continue
+                expected = record["expected"]
+                if (
+                    expected is None
+                    or not stat.S_ISDIR(current.st_mode)
+                    or (current.st_dev, current.st_ino) != expected
+                ):
+                    failures.append(
+                        f"created directory {label}: refused to remove a replaced path"
+                    )
+                    continue
+                os.rmdir(name, dir_fd=parent_fd)
+                os.fsync(parent_fd)
+            except OSError as exc:
+                failures.append(
+                    f"created directory {label}: {type(exc).__name__}: {exc}"
+                )
+        self._created.clear()
+        return failures
+
+    def created_directories_attached(self) -> bool:
+        """Return whether every patch-created directory retains its planned dirent."""
+        for record in self._created:
+            current = _entry_info(record["parent_fd"], record["name"])
+            if current is None:
+                return False
+            expected = record["expected"]
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected
+            ):
+                return False
+        return True
 
     def display(self, parent_label: str, name: str) -> str:
         relative = f"{parent_label}/{name}" if parent_label else name
@@ -809,24 +1066,28 @@ def apply_plan(
 ) -> list[str]:
     """Validate, privately stage, and apply a compensating multi-file transaction."""
     operations = _validated_plan(plan)
-    directories = _DirectoryRegistry(root_value)
+    directories = _DirectoryRegistry(root_value, rename_noreplace=rename_noreplace)
     prepared: list[dict[str, Any]] = []
     stages: list[dict[str, Any]] = []
     preserve_artifacts = False
+    keep_created_directories = False
     try:
         # Semantic phase: hold parent/source descriptors, snapshot every source,
-        # and derive every output before creating a stage or changing a target.
+        # and derive every output before creating a directory, stage, or target.
         for op in operations:
-            source_parent_fd, source_name, source_parent_label = directories.parent(op["path"])
-            source = {
-                "parent_fd": source_parent_fd,
-                "name": source_name,
-                "parent_label": source_parent_label,
-            }
             action = op["action"]
             if action == "add":
-                if not _entry_missing(source_parent_fd, source_name):
-                    raise PatchError(f"Add File target already exists: {op['path']}")
+                existing = directories.existing_parent(op["path"])
+                source = None
+                if existing is not None:
+                    source_parent_fd, source_name, source_parent_label = existing
+                    if not _entry_missing(source_parent_fd, source_name):
+                        raise PatchError(f"Add File target already exists: {op['path']}")
+                    source = {
+                        "parent_fd": source_parent_fd,
+                        "name": source_name,
+                        "parent_label": source_parent_label,
+                    }
                 prepared.append(
                     {
                         **op,
@@ -841,6 +1102,17 @@ def apply_plan(
                 )
                 continue
 
+            existing = directories.existing_parent(op["path"])
+            if existing is None:
+                raise PatchError(
+                    f"parent directory is missing, not a directory, or a symlink: {op['path']}"
+                )
+            source_parent_fd, source_name, source_parent_label = existing
+            source = {
+                "parent_fd": source_parent_fd,
+                "name": source_name,
+                "parent_label": source_parent_label,
+            }
             snapshot = _open_regular_at(source_parent_fd, source_name, op["path"])
             if action == "delete":
                 new = None
@@ -853,16 +1125,19 @@ def apply_plan(
                 new = _apply_hunks(op["path"], source_text, op["hunks"]).encode("utf-8")
                 destination = source
                 if op["move_to"] is not None:
-                    destination_parent_fd, destination_name, destination_parent_label = (
-                        directories.parent(op["move_to"])
-                    )
-                    destination = {
-                        "parent_fd": destination_parent_fd,
-                        "name": destination_name,
-                        "parent_label": destination_parent_label,
-                    }
-                    if not _entry_missing(destination_parent_fd, destination_name):
-                        raise PatchError(f"Move to target already exists: {op['move_to']}")
+                    destination = None
+                    existing_destination = directories.existing_parent(op["move_to"])
+                    if existing_destination is not None:
+                        destination_parent_fd, destination_name, destination_parent_label = (
+                            existing_destination
+                        )
+                        if not _entry_missing(destination_parent_fd, destination_name):
+                            raise PatchError(f"Move to target already exists: {op['move_to']}")
+                        destination = {
+                            "parent_fd": destination_parent_fd,
+                            "name": destination_name,
+                            "parent_label": destination_parent_label,
+                        }
             prepared.append(
                 {
                     **op,
@@ -875,6 +1150,30 @@ def apply_plan(
                     "gid": snapshot["gid"],
                 }
             )
+
+        # Only Add and Move destinations may create parents. This occurs after
+        # all source reads and hunk matching, so any semantic failure leaves no
+        # directory behind.
+        for item in prepared:
+            if item["action"] == "add" and item["source"] is None:
+                parent_fd, name, parent_label = directories.parent(
+                    item["path"], create_missing=True
+                )
+                endpoint = {"parent_fd": parent_fd, "name": name, "parent_label": parent_label}
+                item["source"] = endpoint
+                item["destination"] = endpoint
+            elif item["action"] == "update" and item["destination"] is None:
+                parent_fd, name, parent_label = directories.parent(
+                    item["move_to"], create_missing=True
+                )
+                item["destination"] = {
+                    "parent_fd": parent_fd,
+                    "name": name,
+                    "parent_label": parent_label,
+                }
+
+        if not directories.created_directories_attached():
+            raise PatchError("a patch-created parent directory changed before staging")
 
         # Staging phase: every new-content artifact is O_EXCL, unpredictable,
         # and forced to mode 0600 independent of the target process umask.
@@ -896,6 +1195,8 @@ def apply_plan(
         # Whole-plan validation is repeated after staging, still before any
         # target is changed. Commit repeats each condition around its effect.
         for item in prepared:
+            if not directories.created_directories_attached():
+                raise PatchError("a patch-created parent directory changed during staging")
             source = item["source"]
             snapshot = item["snapshot"]
             if snapshot is None:
@@ -911,6 +1212,8 @@ def apply_plan(
         committed: list[dict[str, Any]] = []
         try:
             for item in prepared:
+                if not directories.created_directories_attached():
+                    raise PatchError("a patch-created parent directory changed before commit")
                 source = item["source"]
                 snapshot = item["snapshot"]
                 destination = item["destination"]
@@ -971,6 +1274,8 @@ def apply_plan(
                             f"{item.get('move_to') or item['path']}"
                         )
                     os.fchmod(commit_stage["fd"], item["mode"])
+                if not directories.created_directories_attached():
+                    raise PatchError("a patch-created parent directory changed during commit")
         except BaseException as original:
             rollback_failures: list[str] = []
             for item in reversed(committed):
@@ -998,13 +1303,33 @@ def apply_plan(
                 cleanup_failures,
                 artifacts,
             )
+        if not directories.created_directories_attached():
+            raise PatchError("a patch-created parent directory changed after commit")
+        keep_created_directories = True
         return [
             item["path"] if item.get("move_to") is None else f"{item['path']} -> {item['move_to']}"
             for item in prepared
         ]
+    except BaseException as original:
+        if not preserve_artifacts:
+            named_artifacts = [
+                item["recovery"] for item in prepared if item.get("recovery")
+            ] + stages
+            cleanup_failures = _cleanup_named(named_artifacts)
+            directory_failures = directories.rollback_created()
+            if cleanup_failures or directory_failures:
+                retained = _artifact_paths(prepared, stages)
+                raise PatchRollbackError(
+                    original,
+                    cleanup_failures + directory_failures,
+                    retained,
+                ) from original
+        raise
     finally:
         if not preserve_artifacts:
             _cleanup_named([item["recovery"] for item in prepared if item.get("recovery")] + stages)
+        if not keep_created_directories and not preserve_artifacts:
+            directories.rollback_created()
         for item in prepared:
             final_snapshot = item.get("snapshot")
             if final_snapshot is not None:

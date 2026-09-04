@@ -148,8 +148,9 @@ TOOLS_SECTION: list[dict] = [
             "one *** Begin Patch / *** End Patch envelope. Update hunks start with @@; "
             "consecutive named @@ lines before a hunk body are ordered anchors, and the "
             "complete monotonic anchor-chain plus body must match exactly once. "
-            "The complete envelope is "
-            "validated before any write, and multi-file application rolls back on failure. "
+            "Add File and Move to create missing parent directories beneath root; the complete "
+            "envelope is validated before any write, and multi-file application rolls back "
+            "files and patch-created directories on failure. "
             "Requires a Linux host with glibc 2.28 or newer and filesystem support for "
             "renameat2(RENAME_NOREPLACE); no unsafe fallback is used."
         ),

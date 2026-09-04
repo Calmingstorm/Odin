@@ -84,6 +84,220 @@ def test_apply_add_update_move_delete_transaction(tmp_path):
     assert not list(tmp_path.glob(".odin-patch-*"))
 
 
+def test_add_creates_missing_parent_chain_without_replacing_existing_directories(tmp_path):
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    before = existing.stat()
+    plan = parse_patch(
+        _patch(
+            "*** Add File: existing/new/deep/file.txt\n+created\n"
+            "*** Add File: other/tree/second.txt\n+also-created"
+        )
+    )
+
+    assert apply_plan(str(tmp_path), plan) == [
+        "existing/new/deep/file.txt",
+        "other/tree/second.txt",
+    ]
+    assert (existing / "new" / "deep" / "file.txt").read_text() == "created\n"
+    assert (tmp_path / "other" / "tree" / "second.txt").read_text() == "also-created\n"
+    after = existing.stat()
+    assert (after.st_dev, after.st_ino) == (before.st_dev, before.st_ino)
+
+
+def test_move_creates_missing_destination_parents(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("old\n")
+    plan = parse_patch(
+        _patch(
+            "*** Update File: source.txt\n"
+            "*** Move to: nested/destination/moved.txt\n"
+            "@@\n-old\n+new"
+        )
+    )
+
+    assert apply_plan(str(tmp_path), plan) == [
+        "source.txt -> nested/destination/moved.txt"
+    ]
+    assert not source.exists()
+    assert (tmp_path / "nested" / "destination" / "moved.txt").read_text() == "new\n"
+
+
+def test_created_parent_directories_roll_back_after_later_commit_failure(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    existing = tmp_path / "existing"
+    existing.mkdir()
+    survivor = existing / "survivor.txt"
+    survivor.write_text("untouched\n")
+    publishes = 0
+
+    def fail_second_file_publish(source, destination, **kwargs):
+        nonlocal publishes
+        if str(source).startswith(".odin-patch-stage-"):
+            publishes += 1
+            if publishes == 2:
+                raise OSError("injected later operation failure")
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(
+        _patch(
+            "*** Add File: existing/new/deep/first.txt\n+first\n"
+            "*** Add File: another/new/second.txt\n+second"
+        )
+    )
+    with pytest.raises(PatchError, match="rollback completed"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=fail_second_file_publish)
+
+    assert survivor.read_text() == "untouched\n"
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["existing"]
+    assert not (existing / "new").exists()
+    assert not list(tmp_path.rglob(".odin-patch-*"))
+
+
+def test_failure_after_parent_publish_rolls_back_the_published_directory(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    raised = False
+
+    def publish_parent_then_raise(source, destination, **kwargs):
+        nonlocal raised
+        _rename_noreplace(source, destination, **kwargs)
+        if str(source).startswith(".odin-patch-dir-") and not raised:
+            raised = True
+            raise OSError("injected post-effect parent publish failure")
+
+    plan = parse_patch(_patch("*** Add File: created/nested/file.txt\n+content"))
+    with pytest.raises(OSError, match="post-effect parent publish failure"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=publish_parent_then_raise)
+
+    assert raised is True
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_parent_moved_away_after_publish_is_reported_as_rollback_failure(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    root = tmp_path / "root"
+    root.mkdir()
+    detached = tmp_path / "detached"
+    moved = False
+
+    def move_published_parent_then_raise(source, destination, **kwargs):
+        nonlocal moved
+        _rename_noreplace(source, destination, **kwargs)
+        if str(source).startswith(".odin-patch-dir-") and not moved:
+            (root / str(destination)).rename(detached)
+            moved = True
+            raise OSError("injected detached parent failure")
+
+    plan = parse_patch(_patch("*** Add File: created/file.txt\n+content"))
+    with pytest.raises(PatchRollbackError, match="moved away from its planned path"):
+        apply_plan(str(root), plan, rename_noreplace=move_published_parent_then_raise)
+
+    assert moved is True
+    assert not (root / "created").exists()
+    assert detached.is_dir()
+    detached.rmdir()
+
+
+def test_concurrent_parent_creator_is_never_owned_or_removed_by_patch(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    concurrent_fd: int | None = None
+
+    def create_destination_before_parent_publish(source, destination, **kwargs):
+        nonlocal concurrent_fd
+        if str(source).startswith(".odin-patch-dir-") and concurrent_fd is None:
+            os.mkdir(destination, dir_fd=kwargs["dst_dir_fd"])
+            concurrent_fd = os.open(
+                destination,
+                os.O_RDONLY | os.O_DIRECTORY,
+                dir_fd=kwargs["dst_dir_fd"],
+            )
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(_patch("*** Add File: concurrent/nested/file.txt\n+content"))
+    try:
+        apply_plan(str(tmp_path), plan, rename_noreplace=create_destination_before_parent_publish)
+        assert concurrent_fd is not None
+        concurrent = os.fstat(concurrent_fd)
+        current = (tmp_path / "concurrent").stat()
+        assert (current.st_dev, current.st_ino) == (concurrent.st_dev, concurrent.st_ino)
+        assert (tmp_path / "concurrent" / "nested" / "file.txt").read_text() == "content\n"
+    finally:
+        if concurrent_fd is not None:
+            os.close(concurrent_fd)
+
+
+def test_directory_rollback_preserves_external_nonempty_content(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    external = tmp_path / "created" / "external.txt"
+    injected = False
+
+    def inject_external_file_then_fail(source, destination, **kwargs):
+        nonlocal injected
+        if str(source).startswith(".odin-patch-stage-") and not injected:
+            external.write_text("not-owned-by-patch\n")
+            injected = True
+            raise OSError("injected publish failure")
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(_patch("*** Add File: created/nested/file.txt\n+content"))
+    with pytest.raises(PatchRollbackError, match="Directory not empty"):
+        apply_plan(str(tmp_path), plan, rename_noreplace=inject_external_file_then_fail)
+
+    assert external.read_text() == "not-owned-by-patch\n"
+    assert not (tmp_path / "created" / "nested").exists()
+
+
+def test_add_parent_creation_refuses_symlink_components(tmp_path):
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    root = tmp_path / "root"
+    root.mkdir()
+    (root / "link").symlink_to(outside, target_is_directory=True)
+
+    plan = parse_patch(_patch("*** Add File: link/new/deep.txt\n+content"))
+    with pytest.raises(PatchError, match="symlink"):
+        apply_plan(str(root), plan)
+    assert list(outside.iterdir()) == []
+
+
+def test_created_parent_swap_is_detected_and_does_not_write_outside_root(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    swapped = False
+
+    def swap_created_parent_before_file_publish(source, destination, **kwargs):
+        nonlocal swapped
+        if str(source).startswith(".odin-patch-stage-") and not swapped:
+            created = root / "created"
+            created.rename(root / "detached-created")
+            created.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(_patch("*** Add File: created/deep/file.txt\n+content"))
+    with pytest.raises(PatchRollbackError, match="replaced path"):
+        apply_plan(str(root), plan, rename_noreplace=swap_created_parent_before_file_publish)
+
+    assert list(outside.iterdir()) == []
+    assert not (root / "detached-created" / "deep" / "file.txt").exists()
+    assert (root / "created").is_symlink()
+
+
+def test_directory_creation_guard_is_load_bearing(tmp_path):
+    plan = parse_patch(_patch("*** Add File: missing/nested/file.txt\n+content"))
+    apply_plan(str(tmp_path), plan)
+    assert (tmp_path / "missing" / "nested" / "file.txt").read_text() == "content\n"
+
+
 def test_staging_files_are_private_and_unpredictable(tmp_path):
     target = tmp_path / "a.txt"
     target.write_text("old\n")
@@ -290,7 +504,10 @@ async def test_handler_rejects_context_mismatch_as_failure(tmp_path):
         },
     )
     assert result.ok is False
-    assert "context mismatch" in result.output
+    assert (
+        "context mismatch in a.txt, hunk at patch line 3, anchors [<none>]"
+        in result.output
+    )
     assert target.read_text() == "actual\n"
 
 
@@ -310,6 +527,84 @@ def test_ambiguous_context_is_refused(tmp_path):
     with pytest.raises(PatchError, match="ambiguous"):
         apply_plan(str(tmp_path), plan)
     assert target.read_text() == "repeat\nrepeat\n"
+
+
+@pytest.mark.parametrize(
+    "source,body,expected",
+    [
+        (
+            "actual\n",
+            "*** Update File: located.txt\n@@ section\n-expected\n+new",
+            "context mismatch in located.txt, hunk at patch line 3, anchors [@@ section]",
+        ),
+        (
+            "section\nrepeat\nrepeat\n",
+            "*** Update File: located.txt\n@@ section\n-repeat\n+new",
+            (
+                "context is ambiguous in located.txt, hunk at patch line 3, "
+                "anchors [@@ section]"
+            ),
+        ),
+    ],
+)
+def test_match_failures_name_patch_line_and_anchors(tmp_path, source, body, expected):
+    target = tmp_path / "located.txt"
+    target.write_text(source)
+    with pytest.raises(PatchError, match="mismatch|ambiguous") as caught:
+        apply_plan(str(tmp_path), parse_patch(_patch(body)))
+    assert expected in str(caught.value)
+    assert target.read_text() == source
+
+
+def test_model_and_transported_match_error_locations_are_identical(tmp_path):
+    target = tmp_path / "same-error.txt"
+    target.write_text("actual\n")
+    patch = _patch("*** Update File: same-error.txt\n@@ scope\n-expected\n+new")
+    plan = parse_patch(patch)
+
+    with pytest.raises(PatchError) as model_side:
+        apply_plan(str(tmp_path), parse_patch(patch))
+    with pytest.raises(PatchError) as transported:
+        apply_plan(str(tmp_path), plan)
+
+    assert str(model_side.value) == str(transported.value)
+    assert "hunk at patch line 3, anchors [@@ scope]" in str(transported.value)
+    assert target.read_text() == "actual\n"
+
+
+def test_stacked_anchor_failure_names_every_anchor(tmp_path):
+    target = tmp_path / "located.py"
+    target.write_text("class Actual:\n    def method(self):\n        return 1\n")
+    patch = _patch(
+        "*** Update File: located.py\n"
+        "@@ class Expected:\n"
+        "@@     def method(self):\n"
+        "-        return 1\n"
+        "+        return 2"
+    )
+    with pytest.raises(PatchError, match="context mismatch") as caught:
+        apply_plan(str(tmp_path), parse_patch(patch))
+    assert (
+        "located.py, hunk at patch line 3, anchors "
+        "[@@ class Expected:, @@     def method(self):]"
+    ) in str(caught.value)
+    assert target.read_text() == "class Actual:\n    def method(self):\n        return 1\n"
+
+
+def test_transported_plan_preserves_match_failure_location(tmp_path):
+    target = tmp_path / "transported.txt"
+    target.write_text("actual\n")
+    plan = parse_patch(
+        _patch("*** Update File: transported.txt\n@@ scope\n-expected\n+new")
+    )
+    assert plan["operations"][0]["hunks"][0]["patch_line"] == 3
+    with pytest.raises(PatchError) as caught:
+        apply_plan(str(tmp_path), plan)
+    assert (
+        "context mismatch in transported.txt, hunk at patch line 3, anchors [@@ scope]"
+        in str(caught.value)
+    )
+    assert target.read_text() == "actual\n"
 
 
 @pytest.mark.parametrize(
@@ -392,8 +687,8 @@ def test_apply_rejects_bad_roots_missing_parents_and_non_files(tmp_path):
     with pytest.raises(PatchError, match="root"):
         apply_plan(str(root_link), plan)
 
-    with pytest.raises(PatchError, match="parent directory"):
-        apply_plan(str(tmp_path), parse_patch(_patch("*** Add File: missing/a\n+x")))
+    apply_plan(str(tmp_path), parse_patch(_patch("*** Add File: missing/a\n+x")))
+    assert (tmp_path / "missing" / "a").read_text() == "x\n"
 
     directory = tmp_path / "dir"
     directory.mkdir()
@@ -556,7 +851,8 @@ def test_parse_stacked_anchors_form_one_hunk_with_an_ordered_chain():
     assert len(hunks) == 1
     assert hunks[0]["anchors"] == ["class Beta:", "    def method(self):"]
     assert hunks[0]["lines"] == ["         x = 1", "-        return x", "+        return x + 1"]
-    assert plan["version"] == 2
+    assert hunks[0]["patch_line"] == 3
+    assert plan["version"] == 3
 
 
 def test_stacked_anchors_pick_the_site_inside_the_named_class(tmp_path):
@@ -672,16 +968,22 @@ def test_empty_hunk_errors_name_the_patch_line():
     "hunk",
     [
         {"anchor": "old-shape", "lines": ["-x", "+y"]},
-        {"anchors": "not-a-list", "lines": ["-x", "+y"]},
-        {"anchors": [""], "lines": ["-x", "+y"]},
-        {"anchors": ["bad\x01"], "lines": ["-x", "+y"]},
-        {"anchors": ["bad\tanchor"], "lines": ["-x", "+y"]},
-        {"anchors": [f"a{i}" for i in range(9)], "lines": ["-x", "+y"]},
+        {"anchors": "not-a-list", "lines": ["-x", "+y"], "patch_line": 3},
+        {"anchors": [""], "lines": ["-x", "+y"], "patch_line": 3},
+        {"anchors": ["bad\x01"], "lines": ["-x", "+y"], "patch_line": 3},
+        {"anchors": ["bad\tanchor"], "lines": ["-x", "+y"], "patch_line": 3},
+        {
+            "anchors": [f"a{i}" for i in range(9)],
+            "lines": ["-x", "+y"],
+            "patch_line": 3,
+        },
+        {"anchors": [], "lines": ["-x", "+y"], "patch_line": True},
+        {"anchors": [], "lines": ["-x", "+y"], "patch_line": 0},
     ],
 )
 def test_transported_plan_validates_anchor_chains_independently(tmp_path, hunk):
     plan = {
-        "version": 2,
+        "version": 3,
         "operations": [{"action": "update", "path": "a.txt", "move_to": None, "hunks": [hunk]}],
     }
     (tmp_path / "a.txt").write_text("x\n")
