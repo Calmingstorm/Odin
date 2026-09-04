@@ -651,6 +651,20 @@ class _DirectoryRegistry:
         self._created.clear()
         return failures
 
+    def created_directories_attached(self) -> bool:
+        """Return whether every patch-created directory retains its planned dirent."""
+        for record in self._created:
+            current = _entry_info(record["parent_fd"], record["name"])
+            if current is None:
+                return False
+            expected = record["expected"]
+            if (
+                not stat.S_ISDIR(current.st_mode)
+                or (current.st_dev, current.st_ino) != expected
+            ):
+                return False
+        return True
+
     def display(self, parent_label: str, name: str) -> str:
         relative = f"{parent_label}/{name}" if parent_label else name
         return f"{self.root_value}/{relative}" if self.root_value != "/" else f"/{relative}"
@@ -1117,6 +1131,9 @@ def apply_plan(
                     "parent_label": parent_label,
                 }
 
+        if not directories.created_directories_attached():
+            raise PatchError("a patch-created parent directory changed before staging")
+
         # Staging phase: every new-content artifact is O_EXCL, unpredictable,
         # and forced to mode 0600 independent of the target process umask.
         for item in prepared:
@@ -1137,6 +1154,8 @@ def apply_plan(
         # Whole-plan validation is repeated after staging, still before any
         # target is changed. Commit repeats each condition around its effect.
         for item in prepared:
+            if not directories.created_directories_attached():
+                raise PatchError("a patch-created parent directory changed during staging")
             source = item["source"]
             snapshot = item["snapshot"]
             if snapshot is None:
@@ -1152,6 +1171,8 @@ def apply_plan(
         committed: list[dict[str, Any]] = []
         try:
             for item in prepared:
+                if not directories.created_directories_attached():
+                    raise PatchError("a patch-created parent directory changed before commit")
                 source = item["source"]
                 snapshot = item["snapshot"]
                 destination = item["destination"]
@@ -1212,6 +1233,8 @@ def apply_plan(
                             f"{item.get('move_to') or item['path']}"
                         )
                     os.fchmod(commit_stage["fd"], item["mode"])
+                if not directories.created_directories_attached():
+                    raise PatchError("a patch-created parent directory changed during commit")
         except BaseException as original:
             rollback_failures: list[str] = []
             for item in reversed(committed):
@@ -1239,6 +1262,8 @@ def apply_plan(
                 cleanup_failures,
                 artifacts,
             )
+        if not directories.created_directories_attached():
+            raise PatchError("a patch-created parent directory changed after commit")
         keep_created_directories = True
         return [
             item["path"] if item.get("move_to") is None else f"{item['path']} -> {item['move_to']}"

@@ -190,6 +190,33 @@ def test_add_parent_creation_refuses_symlink_components(tmp_path):
     assert list(outside.iterdir()) == []
 
 
+def test_created_parent_swap_is_detected_and_does_not_write_outside_root(tmp_path):
+    from src.tools.apply_patch import _rename_noreplace
+
+    root = tmp_path / "root"
+    root.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    swapped = False
+
+    def swap_created_parent_before_file_publish(source, destination, **kwargs):
+        nonlocal swapped
+        if str(source).startswith(".odin-patch-stage-") and not swapped:
+            created = root / "created"
+            created.rename(root / "detached-created")
+            created.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        _rename_noreplace(source, destination, **kwargs)
+
+    plan = parse_patch(_patch("*** Add File: created/deep/file.txt\n+content"))
+    with pytest.raises(PatchRollbackError, match="replaced path"):
+        apply_plan(str(root), plan, rename_noreplace=swap_created_parent_before_file_publish)
+
+    assert list(outside.iterdir()) == []
+    assert not (root / "detached-created" / "deep" / "file.txt").exists()
+    assert (root / "created").is_symlink()
+
+
 def test_directory_creation_guard_is_load_bearing(tmp_path):
     plan = parse_patch(_patch("*** Add File: missing/nested/file.txt\n+content"))
     apply_plan(str(tmp_path), plan)
@@ -452,6 +479,22 @@ def test_match_failures_name_patch_line_and_anchors(tmp_path, source, body, expe
         apply_plan(str(tmp_path), parse_patch(_patch(body)))
     assert expected in str(caught.value)
     assert target.read_text() == source
+
+
+def test_model_and_transported_match_error_locations_are_identical(tmp_path):
+    target = tmp_path / "same-error.txt"
+    target.write_text("actual\n")
+    patch = _patch("*** Update File: same-error.txt\n@@ scope\n-expected\n+new")
+    plan = parse_patch(patch)
+
+    with pytest.raises(PatchError) as model_side:
+        apply_plan(str(tmp_path), parse_patch(patch))
+    with pytest.raises(PatchError) as transported:
+        apply_plan(str(tmp_path), plan)
+
+    assert str(model_side.value) == str(transported.value)
+    assert "hunk at patch line 3, anchors [@@ scope]" in str(transported.value)
+    assert target.read_text() == "actual\n"
 
 
 def test_stacked_anchor_failure_names_every_anchor(tmp_path):
