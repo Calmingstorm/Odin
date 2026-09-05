@@ -1192,14 +1192,14 @@ class TestEdgeCases:
             iteration_callback=iter_cb,
             tool_executor_callback=tool_cb,
             trajectory_saver=saver,
-            max_iterations=30,
+            max_iterations=3,  # exercise exhaustion before the repetition backstop
         )
 
         entry = await saver.find_by_agent_id("e4")
         assert entry is not None
         assert entry["final_state"] == "completed"
-        assert entry["iteration_count"] == 30
-        assert len(entry["iterations"]) == 30
+        assert entry["iteration_count"] == 3
+        assert len(entry["iterations"]) == 3
 
     async def test_cancelled_agent_trajectory(self, tmp_path):
         saver = AgentTrajectorySaver(directory=str(tmp_path))

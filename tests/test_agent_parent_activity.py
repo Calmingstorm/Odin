@@ -198,3 +198,72 @@ async def test_model_arguments_cannot_select_waiting_parent():
     )
     assert "interrupted" not in str(result).lower()
     assert parent.last_consumed_sequence == 0
+
+
+@pytest.mark.parametrize("signal", ["completion", "cancel", "inbox"])
+async def test_wait_wakeup_events_do_not_need_poll_timer(signal, monkeypatch):
+    manager, parent = registry()
+    child, done = agent(), agent()
+    child.id, done.id = "child", "done"
+    done.transition(AgentState.READY)
+    done.transition(AgentState.COMPLETED)
+    done.result = "captured"
+    manager._agents.update({child.id: child, done.id: done})
+    entered = asyncio.Event()
+    real_wait = asyncio.wait
+
+    async def observe_wait(*args, **kwargs):
+        entered.set()
+        return await real_wait(*args, **kwargs)
+
+    monkeypatch.setattr(asyncio, "wait", observe_wait)
+    token = waiting_agent.set(parent)
+    try:
+        task = asyncio.create_task(
+            manager.wait_for_agents([done.id, child.id], timeout=3600, poll_interval=3600)
+        )
+    finally:
+        waiting_agent.reset(token)
+    await entered.wait()
+    manager._agents.pop(done.id)
+    if signal == "completion":
+        child.transition(AgentState.READY)
+        child.transition(AgentState.COMPLETED)
+    elif signal == "cancel":
+        parent._cancel_event.set()
+    else:
+        manager.send(parent.id, "change plan")
+    if signal == "cancel":
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(task, 1)
+    else:
+        results = await asyncio.wait_for(task, 1)
+        assert set(results) == {"done", "child"}
+        assert results["done"]["result"] == "captured"
+    assert not child._cancel_event.is_set()
+
+
+async def test_last_tool_correction_at_exhaustion_is_not_success():
+    manager, parent = registry()
+
+    async def execute(*args):
+        manager.send(parent.id, "replan")
+        return "completed tool"
+
+    cb = AsyncMock(return_value={"tool_calls": [{"id": "a", "name": "t", "input": {}}]})
+    await _run_agent(parent, "", [], cb, execute, max_iterations=1)
+    assert parent.state == AgentState.FAILED and parent.result == ""
+    assert "replan" in parent.error
+
+
+async def test_wait_timeout_is_effect_free():
+    _, parent = registry()
+    cb = AsyncMock(
+        side_effect=[
+            {"tool_calls": [{"id": "a", "name": "wait_for_agents", "input": {}}]},
+            {"text": "done"},
+        ]
+    )
+    await _run_agent(parent, "", [], cb, AsyncMock(side_effect=TimeoutError()))
+    result = parent.messages[2]["content"][0]
+    assert result["status"] == "timed_out" and not result["uncertain_outcome"]

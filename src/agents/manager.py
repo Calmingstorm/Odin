@@ -16,12 +16,17 @@ from collections.abc import Awaitable, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Protocol
+from typing import Any, Protocol
 
 from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
-from ..llm.tool_history import assistant_content, content_text, normalize_tool_calls
+from ..llm.tool_history import (
+    assistant_content,
+    content_text,
+    normalize_tool_calls,
+    settled_call_ids,
+)
 from ..odin_log import get_logger
 from ..tools.result_validator import ToolResult
 from .execution_context import waiting_agent
@@ -954,18 +959,25 @@ class AgentManager:
             if remaining <= 0:
                 break
             # Only our event waiters are cancelled below, never child tasks.
-            wakeups = [asyncio.create_task(asyncio.sleep(min(poll_interval, remaining)))]
+            wakeups: list[asyncio.Task[Any]] = [
+                asyncio.create_task(asyncio.sleep(min(poll_interval, remaining)))
+            ]
             wakeups.extend(
                 asyncio.create_task(self._agents[aid]._terminal_event.wait())
                 for aid in pending
                 if aid in self._agents
             )
             if parent is not None:
+                assert parent._cancel_event is not None
                 wakeups.append(asyncio.create_task(parent._inbox_event.wait()))
                 wakeups.append(asyncio.create_task(parent._cancel_event.wait()))
             try:
                 await asyncio.wait(wakeups, return_when=asyncio.FIRST_COMPLETED)
-                if parent is not None and parent._cancel_event.is_set():
+                if (
+                    parent is not None
+                    and parent._cancel_event is not None
+                    and parent._cancel_event.is_set()
+                ):
                     raise asyncio.CancelledError()
             finally:
                 for task in wakeups:
@@ -1340,6 +1352,7 @@ async def _run_agent(
 
             # Transition READY → EXECUTING for LLM call
             agent.transition(AgentState.EXECUTING, f"iteration {iteration + 1}")
+            agent._tool_call_ids.update(settled_call_ids(agent.messages))
             agent.set_phase(
                 "generating", time.time() + min(agent.iteration_timeout, _remaining_lifetime(agent))
             )

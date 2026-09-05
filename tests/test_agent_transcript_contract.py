@@ -22,7 +22,12 @@ from src.llm.context_compressor import (
 from src.llm.kimi import KimiClient
 from src.llm.ollama import OllamaClient
 from src.llm.openai_codex import CodexChatClient
-from src.llm.tool_history import assistant_content, normalize_tool_calls
+from src.llm.tool_history import (
+    assistant_content,
+    content_text,
+    normalize_tool_calls,
+    settled_call_ids,
+)
 from src.llm.types import LLMResponse, ToolCall
 from src.tools.result_validator import ToolResult
 from tests.test_native_agents_tasks import _fake_gateway, _message, _tools
@@ -49,7 +54,8 @@ def convert(messages, provider):
 
 @pytest.mark.parametrize("entry", ["direct", "loop"])
 @pytest.mark.parametrize("provider", ["responses", "kimi", "ollama"])
-async def test_manager_callback_converter_replay_executes_once(entry, provider):
+@pytest.mark.parametrize("malformed", [False, True])
+async def test_manager_callback_converter_replay_executes_once(entry, provider, malformed):
     wire_requests = []
 
     async def generate(**kwargs):
@@ -69,7 +75,14 @@ async def test_manager_callback_converter_replay_executes_once(entry, provider):
             text="done" if paired else "",
             tool_calls=[]
             if paired
-            else [ToolCall(id="once", name="run_command", input={"command": "echo ok"})],
+            else [
+                ToolCall(
+                    id="once",
+                    name="run_command",
+                    input={"command": "echo ok"},
+                    parse_error="malformed JSON" if malformed else None,
+                )
+            ],
         )
 
     client = SimpleNamespace(model="test", generate=generate)
@@ -107,7 +120,9 @@ async def test_manager_callback_converter_replay_executes_once(entry, provider):
     a = agent()
     await _run_agent(a, "", [], cb, execute, max_iterations=4)
     assert a.state == AgentState.COMPLETED and a.result == "done"
-    assert execute.await_count == 1 and len(wire_requests) == 2
+    assert execute.await_count == (0 if malformed else 1) and len(wire_requests) == 2
+    if malformed:
+        assert a.messages[2]["content"][0]["status"] == "invalid_arguments"
     assert a.messages[1]["content"][0]["id"] == "once"
     assert a.messages[2]["content"][0]["tool_use_id"] == "once"
 
@@ -268,3 +283,97 @@ def test_summary_uses_matching_id_not_result_order():
     a = agent()
     a.messages.extend(history)
     assert _get_last_progress(a) == "hello"
+
+
+@pytest.mark.parametrize(
+    "history",
+    [
+        [{"role": "assistant", "content": [{"type": "tool_use", "id": "a"}]}],
+        [{"role": "user", "content": [{"type": "tool_result", "tool_use_id": "missing"}]}],
+        [{"role": "assistant", "content": [{"type": "tool_use", "id": ""}]}],
+        cycle(1) + cycle(1),
+        cycle(1)[:1] + cycle(2),
+    ],
+)
+async def test_unresolved_or_invalid_native_history_never_reaches_generation(history):
+    a = agent()
+    a.messages.extend(history)
+    cb = AsyncMock()
+    execute = AsyncMock()
+    await _run_agent(a, "", [], cb, execute)
+    assert a.state == AgentState.FAILED
+    cb.assert_not_called()
+    execute.assert_not_called()
+
+
+def test_legacy_history_is_not_upgraded_and_nonblocks_are_ignored():
+    assert content_text({}) == ""
+    history = [
+        {"role": "user", "content": "[Tool result: t] old"},
+        {"role": "assistant", "content": [None, {"type": "text", "text": "old"}]},
+    ]
+    assert settled_call_ids(history) == set()
+    assert "tool_use" not in str(history)
+
+
+@pytest.mark.parametrize("error", [False, True])
+async def test_soft_compression_native_replay_with_budget_warnings(error, monkeypatch):
+    a = agent()
+    a.messages.extend(cycle(0, 10000) + cycle(1, 10000))
+    if error:
+
+        def fail(*args, **kwargs):
+            raise RuntimeError("injected")
+
+        monkeypatch.setattr("src.llm.context_compressor.compress_tool_context", fail)
+
+    async def callback(messages, *args, **kwargs):
+        if a.iteration_count > 1 and not error:
+            assert any("Earlier tool calls" in str(m["content"]) for m in messages)
+        return {
+            "tool_calls": [
+                {
+                    "id": "new" + str(a.iteration_count),
+                    "name": "t",
+                    "input": {"n": a.iteration_count},
+                }
+            ]
+        }
+
+    await _run_agent(
+        a,
+        "",
+        [],
+        callback,
+        AsyncMock(return_value="output"),
+        max_iterations=7,
+        context_compression_enabled=True,
+        max_context_chars=100,
+        keep_recent_iterations=1,
+        budget_warnings=[7, 5, 1],
+    )
+    assert a.state == AgentState.COMPLETED
+    settled_call_ids(a.messages)
+
+
+async def test_uncertain_structured_result_and_string_denial_are_distinct():
+    a = agent()
+    callback = AsyncMock(
+        side_effect=[
+            {
+                "tool_calls": [
+                    {"id": "a", "name": "t", "input": {}},
+                    {"id": "b", "name": "t", "input": {}},
+                ]
+            },
+            {"text": "done"},
+        ]
+    )
+    execute = AsyncMock(
+        side_effect=[
+            ToolResult("uncertain", ok=False, uncertain_outcome=True),
+            "Permission denied: no",
+        ]
+    )
+    await _run_agent(a, "", [], callback, execute)
+    assert [b["status"] for b in a.messages[2]["content"]] == ["outcome_unknown", "denied"]

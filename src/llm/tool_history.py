@@ -66,3 +66,36 @@ def content_text(content) -> str:
             if isinstance(b, dict) and b.get("type") == "text" and isinstance(b.get("text"), str)
         )
     return ""
+
+
+def settled_call_ids(messages: list[dict]) -> set[str]:
+    """Validate native groups before generation; legacy strings stay legacy.
+
+    A partial native group is not reconstructible from prose. Fail explicitly
+    rather than asking a provider to guess or dispatching the missing call.
+    """
+    seen: set[str] = set()
+    pending: set[str] = set()
+    for message in messages:
+        content = message.get("content")
+        if not isinstance(content, list):
+            continue
+        if message.get("role") == "assistant" and pending:
+            raise ValueError("Unresolved native tool calls before assistant generation")
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_use":
+                identity = block.get("id")
+                if not isinstance(identity, str) or not identity.strip() or identity in seen:
+                    raise ValueError("Invalid or duplicate native tool identity in replay")
+                seen.add(identity)
+                pending.add(identity)
+            elif block.get("type") == "tool_result":
+                identity = block.get("tool_use_id")
+                if identity not in pending:
+                    raise ValueError("Unmatched native tool result in replay")
+                pending.remove(identity)
+    if pending:
+        raise ValueError("Unresolved native tool calls before generation")
+    return seen

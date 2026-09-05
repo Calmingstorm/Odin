@@ -360,8 +360,9 @@ def summarize_iteration(iteration: list[dict]) -> str:
     parts = []
     for i, name in enumerate(tool_names):
         outcome = outcomes[i] if i < len(outcomes) else "?"
-        if call_ids[i]:
-            outcome = outcomes_by_id.get(call_ids[i], outcome)
+        call_id = call_ids[i]
+        if call_id:
+            outcome = outcomes_by_id.get(call_id, outcome)
         parts.append(f"{name}\u2192{outcome}")
 
     summary = ", ".join(parts)
@@ -806,10 +807,18 @@ def emergency_compress_for_window(
         # summary. Only summaries at the compressor's own boundary are
         # replaceable; a real prefix must remain before the marker.
         prefix = list(raw_prefix)
-        carried_summaries.extend(
-            _emergency_summary_body(msg) for msg in prefix[1:] if _is_emergency_summary(msg)
-        )
-        prefix = prefix[:1] + [msg for msg in prefix[1:] if not _is_emergency_summary(msg)]
+        boundary_controls: list[dict] = []
+        while len(prefix) > 1:
+            if prefix[-1].get("provenance") == "agent_parent":
+                boundary_controls.append(prefix.pop())
+            elif _is_emergency_summary(prefix[-1]):
+                body = _emergency_summary_body(prefix.pop())
+                if body:
+                    carried_summaries.append(body)
+            else:
+                break
+        prefix.extend(reversed(boundary_controls))
+        carried_summaries.reverse()
 
     # Controls between cycles are immutable too, not ordinary tool output.
     controls = [msg for it in iterations for msg in it if msg.get("provenance") == "agent_parent"]
