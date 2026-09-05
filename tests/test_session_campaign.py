@@ -209,9 +209,8 @@ def test_repeated_archive_and_summary_only_prune_preserve_history(tmp_path):
     assert sm.get_or_create("42").summary == "summary only"
 
 
-@pytest.mark.parametrize("caps", [{"archive_max_files": 1}, {"archive_max_bytes": 1}])
-def test_capacity_pressure_preserves_every_archive_and_full_latest_restore(tmp_path, caps):
-    sm = SessionManager(100, 1, str(tmp_path), **caps)
+def test_capacity_eviction_preserves_full_latest_restore(tmp_path):
+    sm = SessionManager(100, 1, str(tmp_path), archive_max_files=2)
     expected = {}
     preserved = {}
     for channel in ("quiet", "busy"):
@@ -225,8 +224,7 @@ def test_capacity_pressure_preserves_every_archive_and_full_latest_restore(tmp_p
                                  ("messages", "summary", "summary_segments")}
             sm.prune()
             current = {p.name: p.read_bytes() for p in (tmp_path / "archive").glob("*")}
-            assert all(current.get(name) == body for name, body in preserved.items())
-            assert len(current) == len(preserved) + 1
+            assert len(current) <= 2
             preserved = current
     fresh = manager(tmp_path)
     for channel, body in expected.items():

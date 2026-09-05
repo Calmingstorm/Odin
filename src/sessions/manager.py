@@ -1313,19 +1313,50 @@ class SessionManager:
             task.add_done_callback(self._indexing_tasks.discard)
 
     def _prune_old_archives(self, archive_dir: Path) -> None:
-        """Diagnose capacity pressure without deleting any restore points."""
+        """Enforce size/count caps on the archive directory.
+
+        Archives are knowledge, not garbage: there is deliberately NO
+        time-based deletion (restore-on-demand depends on old archives
+        surviving). Oldest files are removed only when the directory
+        exceeds the configured byte or file-count caps.
+        """
         try:
-            files = list(archive_dir.glob("*.json"))
+            files = sorted(archive_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
             total_bytes = sum(f.stat().st_size for f in files)
-            if (total_bytes > self.archive_max_bytes
-                    or len(files) > self.archive_max_files):
-                log.warning(
-                    "Archive capacity exceeded: %d bytes / %d files "
-                    "(caps: %d bytes / %d files); all archives preserved",
-                    total_bytes, len(files), self.archive_max_bytes, self.archive_max_files,
+
+            # Protect each channel's most-recent archive so a high-traffic
+            # channel can't evict a quiet channel's only restore point.
+            # Eviction order: oldest non-protected first; the protected
+            # newest-per-channel files are only touched as a last resort to
+            # honor a hard cap.
+            newest_per_channel: dict[str, Path] = {}
+            for f in files:  # ascending mtime → last write per channel wins
+                newest_per_channel[f.stem.rsplit("_", 1)[0]] = f
+            protected = set(newest_per_channel.values())
+            evict_order = [f for f in files if f not in protected]
+            evict_order += [f for f in files if f in protected]
+
+            pruned = 0
+
+            def over_cap() -> bool:
+                return (total_bytes > self.archive_max_bytes
+                        or len(files) > self.archive_max_files)
+
+            for f in evict_order:
+                if not over_cap():
+                    break
+                total_bytes -= f.stat().st_size
+                f.unlink()
+                files.remove(f)
+                pruned += 1
+            if pruned:
+                log.info(
+                    "Pruned %d archive(s) from %s (caps: %d bytes / %d files; "
+                    "newest-per-channel protected)",
+                    pruned, archive_dir, self.archive_max_bytes, self.archive_max_files,
                 )
         except Exception as e:
-            log.warning("Archive capacity inspection failed: %s", e)
+            log.warning("Archive pruning failed: %s", e)
 
     async def _safe_index(self, archive_path: Path) -> None:
         """Index an archived session for semantic search, catching all errors."""

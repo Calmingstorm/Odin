@@ -170,7 +170,7 @@ def test_estimator_adds_per_message_overhead():
 
 def test_eviction_protects_quiet_channels_newest_archive(tmp_path):
     mgr = _mgr(tmp_path)
-    mgr.archive_max_files = 3  # tiny cap to exercise capacity pressure
+    mgr.archive_max_files = 3  # tiny cap to force eviction
     mgr.archive_max_bytes = 10**9
     archive_dir = tmp_path / "archive"
     archive_dir.mkdir()
@@ -194,8 +194,8 @@ def test_eviction_protects_quiet_channels_newest_archive(tmp_path):
     remaining = {p.name for p in archive_dir.glob("*.json")}
     # The quiet channel's only restore point survives despite being oldest.
     assert "quiet_100.json" in remaining
-    # Capacity pressure cannot authorize historical cleanup.
-    assert remaining == set(files)
+    # Cap respected, oldest non-protected files evicted first.
+    assert remaining == {"quiet_100.json", "churn_400.json", "churn_500.json"}
 
 
 # ---------------------------------------------------------------------------
