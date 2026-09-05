@@ -52,7 +52,7 @@ def request_stop(_signum,_frame):
     stopping=True
 signal.signal(signal.SIGTERM,request_stop)
 signal.signal(signal.SIGINT,request_stop)
-proc=subprocess.Popen(["/bin/sh","-c",command],stdin=stdin_fd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=env,preexec_fn=os.setpgrp)
+proc=subprocess.Popen(["/bin/sh","-c",command],stdin=stdin_fd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,bufsize=0,env=env,preexec_fn=os.setpgrp)
 pid=proc.pid
 pgid=os.getpgid(pid)
 sid=os.getsid(pid)
@@ -73,7 +73,8 @@ output_state={"bytes":0,"truncated":False}
 def drain_output():
     with open(out_path,"ab",buffering=0) as out:
         while True:
-            chunk=proc.stdout.read(65536)
+            # Drain available bytes: buffered read(n) can wait for n bytes or EOF.
+            chunk=os.read(proc.stdout.fileno(),65536)
             if not chunk: break
             remaining=max(0,4194304-output_state["bytes"])
             if remaining: out.write(chunk[:remaining]); output_state["bytes"]+=min(len(chunk),remaining)
