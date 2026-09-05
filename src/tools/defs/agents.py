@@ -32,8 +32,8 @@ SPAWN_MODEL_CLAUSE = (
 )
 # One ordered constant drives every per-spawn effort enum and clause below —
 # kept in lockstep with config.schema.CODEX_REASONING_EFFORTS by a sync test
-# (this module stays deliberately import-free). "max" is gpt-5.6-family only;
-# the spawn boundary rejects known-incompatible model/effort pairs.
+# (this module stays deliberately import-free). The spawn boundary rejects
+# every known-incompatible model/effort pair, including astra + none.
 SPAWN_EFFORT_OPTIONS: list[str] = ["none", "low", "medium", "high", "xhigh", "max"]
 
 
