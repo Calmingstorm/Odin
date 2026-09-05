@@ -23,7 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from ..observability.diagnostics import command_display, safe_error
+from ..observability.diagnostics import command_display, safe_error, safe_text
 from ..odin_log import get_logger
 from .workspace import WorkspaceError, workspace_env
 
@@ -1386,7 +1386,7 @@ class ProcessRegistry:
         pid = proc.pid
         info = ProcessInfo(
             pid=pid,
-            command=command_display(command),
+            command=command,
             host=host,
             start_time=time.time(),
             process=proc,
@@ -1409,7 +1409,7 @@ class ProcessRegistry:
         )
 
         log.info("Started process PID %d: %s", pid, command_display(command))
-        return f"Process started (PID {pid}): {command_display(command)}"
+        return f"Process started (PID {pid}): {safe_text(command)}"
 
     async def start_remote(self, lease, command: str) -> str:
         """Start a detached SSH process with remote file/FIFO-backed I/O."""
@@ -1477,7 +1477,7 @@ class ProcessRegistry:
         self._next_remote_handle -= 1
         self._processes[handle] = ProcessInfo(
             pid=handle,
-            command=command_display(command),
+            command=command,
             host=lease.target.alias,
             start_time=time.time(),
             remote=True,
@@ -1495,7 +1495,7 @@ class ProcessRegistry:
             self._enforce_lifetime(handle, MAX_LIFETIME_SECONDS),
             name=f"remote_process_lifetime:{handle}",
         )
-        return f"Process started (PID {handle}): {command_display(command)}"
+        return f"Process started (PID {handle}): {safe_text(command)}"
 
     async def poll(self, pid: int, wait_seconds: float = 0.0) -> str:
         """Return recent output lines from a process.
@@ -1622,7 +1622,7 @@ class ProcessRegistry:
                 uptime = f"{elapsed / 60:.1f}m"
             else:
                 uptime = f"{elapsed / 3600:.1f}h"
-            cmd_short = info.command[:40]
+            cmd_short = safe_text(info.command)[:40]
             lines.append(
                 f"{pid:<8} {info.host[:15]:<16} {info.status:<12} {uptime:<10} {cmd_short}"
             )

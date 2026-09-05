@@ -151,9 +151,9 @@ async def test_remote_start_success_tracks_negative_handle_and_identity(no_lifet
     lease = _Lease()
     registry = ProcessRegistry(remote_exec=remote_exec)
     response = await registry.start_remote(lease, "printf ready")
-    assert response == "Process started (PID -1): <shell command: 12 bytes>"
+    assert response == "Process started (PID -1): printf ready"
     info = registry._processes[-1]
-    assert info.command == "<shell command: 12 bytes>"
+    assert info.command == "printf ready"
     assert (info.remote_pid, info.remote_pgid, info.remote_sid, info.remote_start_id) == (
         101,
         101,

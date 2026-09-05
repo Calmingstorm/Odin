@@ -9,7 +9,7 @@ from src.audit.logger import AuditLogger
 from src.llm.codex_auth import CodexAuth
 from src.llm.kimi import KimiClient
 from src.llm.ollama import OllamaClient
-from src.observability.diagnostics import command_display, safe_error, scrub_diagnostic
+from src.observability.diagnostics import command_display, safe_error, safe_text, scrub_diagnostic
 from src.tools.ssh import run_local_command
 
 
@@ -145,7 +145,7 @@ async def test_process_api_scrubs_legacy_and_spoofed_commands_and_output(secret)
     route = next(r for r in routes if r.method == "GET")
     response = await route.handler(None)
     assert secret not in response.text
-    assert json.loads(response.text)[0]["command"] == command_display(info.command)
+    assert json.loads(response.text)[0]["command"] == safe_text(info.command)
     assert info.output_buffer == [secret + "\n"]
 
 

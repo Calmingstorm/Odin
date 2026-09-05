@@ -409,7 +409,7 @@ def register_processes(routes: web.RouteTableDef, bot) -> None:
         for pid, info in sorted(registry._processes.items()):
             # Last 3 lines of output for inline preview
             output_lines = list(info.output_buffer)
-            from ...observability.diagnostics import command_display, safe_text
+            from ...observability.diagnostics import safe_text
 
             # Scrub the complete bounded buffer before selecting lines: PEM
             # credentials can span more than the preview's three lines.
@@ -419,7 +419,7 @@ def register_processes(routes: web.RouteTableDef, bot) -> None:
             ]
             processes.append({
                 "pid": pid,
-                "command": command_display(info.command),
+                "command": safe_text(info.command),
                 "host": info.host,
                 "status": info.status,
                 "exit_code": info.exit_code,
