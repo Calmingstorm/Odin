@@ -1259,7 +1259,7 @@ class ProcessInfo:
     command: str
     host: str
     start_time: float
-    status: str = "running"  # running | completed | failed
+    status: str = "running"  # running | completed | failed | killed
     output_buffer: deque = field(default_factory=lambda: deque(maxlen=OUTPUT_BUFFER_LINES))
     process: asyncio.subprocess.Process | None = None
     _reader_task: asyncio.Task | None = field(default=None, repr=False)
@@ -1599,8 +1599,8 @@ class ProcessRegistry:
                 # rather than trusting a stale-capable number; the exit
                 # watcher's race-free pidfd sweep finishes any survivors.
                 await terminate_process_tree(info.process, grace=5.0)
-            info.status = "failed"
-            info.exit_code = -9
+            info.status = "killed"
+            info.exit_code = info.process.returncode if info.process else info.exit_code
             log.info("Killed process PID %d", pid)
             return f"Process {pid} killed."
         except Exception as e:
@@ -1730,7 +1730,8 @@ class ProcessRegistry:
         if reply.get("status") == "exited":
             exit_record = reply.get("exit") or {}
             info.exit_code = int(exit_record.get("exit_code", 1))
-            info.status = "completed" if info.exit_code == 0 else "failed"
+            if info.status != "killed":
+                info.status = "completed" if info.exit_code == 0 else "failed"
             if info.remote_lease is not None:
                 info.remote_lease.release()
                 info.remote_lease = None
@@ -1779,8 +1780,11 @@ class ProcessRegistry:
                 f"Failed to kill PID {info.pid}: outcome unknown "
                 f"outcome_unknown=true: {detail}"
             )
-        info.status = "failed"
-        info.exit_code = -9
+        if reply.get("already_exited"):
+            return f"Process {info.pid} already exited; poll to collect its outcome."
+        info.status = "killed"
+        exit_record = reply.get("exit") or {}
+        info.exit_code = exit_record.get("exit_code")
         if info.remote_lease is not None:
             info.remote_lease.release()
             info.remote_lease = None
