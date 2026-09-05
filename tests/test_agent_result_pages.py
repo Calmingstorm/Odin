@@ -123,3 +123,28 @@ async def test_durable_result_runtime_is_end_to_end_not_generation_time(tmp_path
     snapshot = read_result(tmp_path, "timing")
     assert snapshot["runtime_seconds"] == 1.2
     assert turn.total_duration_ms == 7
+
+
+async def test_native_escape_heavy_default_passes_both_downstream_guards(tmp_path):
+    from src.agents.tool_cycle import result_record
+    from src.discord.response_guards import truncate_tool_output
+    from src.llm.secret_scrubber import scrub_output_secrets
+
+    manager = AgentManager()
+    saver = AgentTrajectorySaver(str(tmp_path / "trajectories"))
+    raw = "\x00" * 9000 + " password=synthetic-fixture-value end"
+    aid = await finish(manager, saver, raw)
+    call = dispatcher(tmp_path, manager, saver)
+    delivered, cursor = [], ""
+    while True:
+        native = await call("get_agent_results", {"agent_id": aid, "cursor": cursor})
+        record = result_record({"name": "get_agent_results", "id": "call"}, native, "succeeded")
+        text = truncate_tool_output(record["result"])
+        assert text == native
+        page = json.loads(text)
+        assert len(page["preview"].encode()) <= 4000
+        delivered.append(page["preview"])
+        if not page["truncated"]:
+            break
+        cursor = page["cursor"]
+    assert "".join(delivered) == scrub_output_secrets(raw)
