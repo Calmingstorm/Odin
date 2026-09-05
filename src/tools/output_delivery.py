@@ -19,10 +19,12 @@ def get_delivery_budget(config=None) -> int:
 
 class RankedOutput(str):
     matches: tuple[str, ...]
+    recovery_required: bool
 
-    def __new__(cls, text: str, *, matches: tuple[str, ...]):
+    def __new__(cls, text: str, *, matches: tuple[str, ...], recovery_required: bool = True):
         obj = super().__new__(cls, text)
         obj.matches = matches
+        obj.recovery_required = recovery_required
         return obj
 
 
@@ -105,7 +107,8 @@ def render_page(snapshot, *, offset=0, budget=12000, limit=8000, initial=False):
 def deliver(text, *, store=None, owner="", channel="", tool="", hosts=(),
             status="succeeded", budget=12000):
     matches = getattr(text, "matches", ())
-    if len(text) <= budget and (not matches or all(match in text for match in matches)):
+    recovery_required = getattr(text, "recovery_required", bool(matches))
+    if len(text) <= budget and (not recovery_required or all(match in text for match in matches)):
         return text
     if store is None:
         return delivery_failure(

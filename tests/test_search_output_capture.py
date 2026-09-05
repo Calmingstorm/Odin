@@ -62,7 +62,7 @@ async def test_short_knowledge_result_format_is_unchanged():
     )
     output = await tools._handle_search_knowledge({"query": "q"})
     assert output == "**Found 1 result(s) for 'q':**\n\n**[doc.md]** (score: 0.5)\nshort text"
-    assert type(output) is str
+    assert isinstance(output, str) and not output.recovery_required
     assert deliver(output) == output
 
 
@@ -79,7 +79,7 @@ async def test_short_history_and_background_formats_are_unchanged():
     output = await tools._handle_search_history({"query": "q"})
     date = datetime.fromtimestamp(timestamp).strftime("%Y-%m-%d %H:%M")
     assert output == f"**Found 1 result(s) for 'q':**\n[{date}] (user): short text"
-    assert type(output) is str
+    assert isinstance(output, str) and not output.recovery_required
     assert deliver(output) == output
     store = SimpleNamespace(search_hybrid=AsyncMock(return_value=[
         {"source": "doc.md", "score": 0.5, "content": "short\ntext"},
