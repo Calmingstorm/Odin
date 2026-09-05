@@ -21,7 +21,7 @@ import shlex
 from ..branch_freshness import is_test_command, is_test_failure
 from ..process_manager import MAX_POLL_WAIT_SECONDS
 from ..tool_text import _ERROR_RESULT_PREFIXES, _truncate_lines
-from .deps import HandlerBase
+from .deps import HandlerBase, HandlerDeps
 
 
 class SystemTools(HandlerBase):
@@ -235,17 +235,39 @@ class SystemTools(HandlerBase):
     # --- Process management ---
 
     async def _handle_manage_process(self, inp: dict) -> str | tuple[str, int]:
+        from ..output_authorization import (
+            host_binding,
+            request_delivery_channel,
+            request_host_authorizer,
+            request_scope_id,
+            tool_scope_allows,
+        )
+        from ..output_delivery import delivery_scope
+
         action = inp.get("action", "list")
         registry = self._process_registry()
+        channel = request_delivery_channel.get() or str(delivery_scope.get()[1])
+        scope = request_scope_id.get()
 
         def authorized(info) -> bool:
             alias = info.host_alias or info.host
             target = self._host_registry.get(alias, targetable_only=True)
+            host_authorizer = request_host_authorizer.get()
             return (
                 info.owner_id == self._current_user_id
+                and info.origin_channel == channel
+                and info.scope_id == scope
+                and tool_scope_allows("manage_process")
+                and (host_authorizer is None or host_authorizer(alias))
                 and bool(self._resolve_host(alias))
-                and (not info.host_identity or (
+                and ((target is not None and host_binding(target) == info.host_binding)
+                     if info.host_binding else (
+                    # Compatibility for direct internal legacy calls only. No
+                    # channel/token-bound production request may use old evidence.
+                    not isinstance(self._deps, HandlerDeps)
+                    and not channel and not scope and (not info.host_identity or (
                     target is not None and target.runtime_key == info.host_identity
+                    ))
                 ))
             )
 
@@ -272,6 +294,12 @@ class SystemTools(HandlerBase):
                 return f"Unknown or disallowed host: {host}", 1
             target = self._host_registry.get(host, targetable_only=True)
             host_identity = target.runtime_key if target is not None else ""
+            live_hosts = request_host_authorizer.get()
+            if (target is None or not tool_scope_allows("manage_process")
+                    or (live_hosts is not None and not live_hosts(host))):
+                return "Error: process access denied.", 1
+            provenance = dict(origin_channel=channel, scope_id=scope,
+                              host_binding=host_binding(target))
             # Periodic cleanup
             registry.cleanup()
             from ..ssh import is_local_address
@@ -280,6 +308,7 @@ class SystemTools(HandlerBase):
                 result = await registry.start(
                     resolved[0], command, owner_id=self._current_user_id, host_alias=host,
                     host_identity=host_identity,
+                    **provenance,
                 )
             else:
                 lease = self._acquire_host(host)
@@ -288,11 +317,20 @@ class SystemTools(HandlerBase):
                 result = await registry.start_remote(
                     lease, command, owner_id=self._current_user_id, host_alias=host,
                     host_identity=host_identity,
+                    **provenance,
                 )
             if result.startswith(
                 ("Cannot start", "Failed to start", "Error:")
             ):
                 return result, 1
+            # Start awaits dispatch, so recheck the current grants on return.
+            import re
+
+            started = re.search(r"\(PID (-?\d+)\)", result)
+            if started:
+                info = registry.output_info(int(started[1]))
+                if info is not None and not authorized(info):
+                    return "Error: process access denied after start.", 1
             return result, 0
 
         elif action == "poll":
@@ -332,6 +370,7 @@ class SystemTools(HandlerBase):
                 int(pid), wait_seconds=float(wait_raw), cursor=inp.get("cursor"),
                 offset=inp.get("offset"), limit=inp.get("limit", 4000),
                 max_chars=get_delivery_budget(self.config),
+                authorized=authorized,
             )
             info = registry.output_info(int(pid), inp.get("cursor"))
             if info is not None and not authorized(info):
@@ -353,8 +392,10 @@ class SystemTools(HandlerBase):
             allowed, denial, _ = self._govern_command(text)
             if not allowed:
                 return denial, 1
-            result = await registry.write(int(pid), text)
-            if result.startswith(("No process with PID", "Process ", "Failed to write")):
+            result = await registry.write(int(pid), text, authorized=authorized)
+            if info is not None and not authorized(info):
+                return "Error: process access denied.", 1
+            if result.startswith(("No process with PID", "Process ", "Failed to write", "Error:")):
                 # The only successful ProcessRegistry.write result starts
                 # "Wrote"; all Process-prefixed returns describe terminal/no-stdin states.
                 return result, 1
@@ -364,9 +405,11 @@ class SystemTools(HandlerBase):
             pid = inp.get("pid")
             if pid is None:
                 return "pid is required for kill action.", 1
-            result = await registry.kill(int(pid))
+            result = await registry.kill(int(pid), authorized=authorized)
+            if info is not None and not authorized(info):
+                return "Error: process access denied.", 1
             if (
-                result.startswith(("No process with PID", "Failed to kill"))
+                result.startswith(("No process with PID", "Failed to kill", "Error:"))
                 or " already " in result
             ):
                 return result, 1

@@ -11,6 +11,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import ctypes
+import inspect
 import json
 import os
 import re
@@ -47,6 +48,29 @@ def _scrub_process_bytes(data: bytes) -> bytes:
     """
     text = data.decode("utf-8", "surrogateescape")
     spans = []
+    # Decode quoted keys rather than matching their spelling: JSON can escape
+    # any character in a credential key. Work on the full capture BEFORE paging.
+    decoder = json.JSONDecoder()
+    for match in re.finditer(r'"(?:[^"\\]|\\.)*"\s*:\s*', text):
+        try:
+            key, _ = decoder.raw_decode(match.group())
+        except ValueError:
+            continue
+        key = re.sub(r"[^a-z0-9]", "", key.lower())
+        if not (key in {"password", "passwd", "pwd", "secret", "token", "authorization",
+                        "apikey", "accesskey", "privatekey", "credential", "credentials"}
+                or key.endswith(("password", "secret", "token", "apikey", "privatekey"))):
+            continue
+        begin = match.end()
+        if text[begin:begin + 1] == "*":
+            continue  # already length-preservingly masked on capture finalization
+        try:
+            _, end = decoder.raw_decode(text, begin)
+        except ValueError:
+            # A capture cap / running snapshot may end halfway through a value.
+            end = len(text)
+        spans.append((len(text[:begin].encode("utf-8", "surrogateescape")),
+                      len(text[:end].encode("utf-8", "surrogateescape"))))
     for pattern in OUTPUT_SECRET_PATTERNS:
         for match in pattern.finditer(text):
             start = len(text[:match.start()].encode("utf-8", "surrogateescape"))
@@ -61,6 +85,7 @@ def _scrub_process_bytes(data: bytes) -> bytes:
 
 _REMOTE_SUPERVISOR = r'''import base64,json,os,re,signal,subprocess,sys,threading,time
 PATTERNS=__PROCESS_SECRET_PATTERNS__
+__PROCESS_SCRUBBER__
 root,token,encoded,lifetime=sys.argv[1:]
 os.umask(0o077)
 os.setsid()
@@ -141,11 +166,7 @@ except Exception: pass
 reader.join(timeout=2)
 try:
     with open(out_path,"r+b") as handle:
-        raw=handle.read(4194304); text=raw.decode("utf-8","surrogateescape"); masked=bytearray(raw)
-        for pattern,flags in PATTERNS:
-            for match in re.finditer(pattern,text,flags):
-                start=len(text[:match.start()].encode("utf-8","surrogateescape")); end=len(text[:match.end()].encode("utf-8","surrogateescape"))
-                masked[start:end]=b"*"*(end-start)
+        masked=scrub(handle.read(4194304))
         handle.seek(0); handle.write(masked); handle.flush()
 except OSError: pass
 try: os.close(stdin_fd)
@@ -160,13 +181,7 @@ os.replace(tmp,exit_path)
 _REMOTE_CONTROLLER = r'''# noqa: E501
 import base64,json,os,re,shutil,signal,subprocess,sys,time
 PATTERNS=__PROCESS_SECRET_PATTERNS__
-def scrub(data):
-    text=data.decode("utf-8","surrogateescape"); masked=bytearray(data)
-    for pattern,flags in PATTERNS:
-        for match in re.finditer(pattern,text,flags):
-            start=len(text[:match.start()].encode("utf-8","surrogateescape")); end=len(text[:match.end()].encode("utf-8","surrogateescape"))
-            masked[start:end]=b"*"*(end-start)
-    return bytes(masked)
+__PROCESS_SCRUBBER__
 root,token,op,payload,wait_s=sys.argv[1:]
 def emit(**value):
     print(json.dumps(value,separators=(",",":")))
@@ -222,9 +237,12 @@ if op=="status":
                     if width<need: snapshot=snapshot[:-width]; total=len(snapshot)
                     break
             if request.get("tail"):
-                data=scrub(base64.b64decode(tail.get("tail",""))); cursor=max(0,int(tail.get("emitted",total))-len(data))
+                emitted=int(tail.get("emitted",total))
+                data=snapshot[-8000:] if emitted<=4194304 else scrub(base64.b64decode(tail.get("tail","")))
+                cursor=max(0,emitted-len(data))
                 if cursor:
-                    data=re.sub(rb"^\S+",lambda m:b"*"*len(m[0]),data)
+                    if emitted>4194304:
+                        data=re.sub(rb"^[^\n]*",lambda m:b"*"*len(m[0]),data)
                 if exit_record is None:
                     data=re.sub(rb"\S+\Z",b"",data)
             else:
@@ -269,11 +287,16 @@ else:
     emit(ok=False,error="invalid controller operation"); raise SystemExit(2)
 '''
 
-_REMOTE_CONTROLLER = _REMOTE_CONTROLLER.replace(
+_REMOTE_SCRUBBER = (
+    "OUTPUT_SECRET_PATTERNS = [re.compile(pattern, flags) for pattern, flags in PATTERNS]\n"
+    + inspect.getsource(_scrub_process_bytes)
+    + "\nscrub = _scrub_process_bytes\n"
+)
+_REMOTE_CONTROLLER = _REMOTE_CONTROLLER.replace("__PROCESS_SCRUBBER__", _REMOTE_SCRUBBER).replace(
     "__PROCESS_SECRET_PATTERNS__",
     repr([(pattern.pattern, int(pattern.flags)) for pattern in OUTPUT_SECRET_PATTERNS]),
 )
-_REMOTE_SUPERVISOR = _REMOTE_SUPERVISOR.replace(
+_REMOTE_SUPERVISOR = _REMOTE_SUPERVISOR.replace("__PROCESS_SCRUBBER__", _REMOTE_SCRUBBER).replace(
     "__PROCESS_SECRET_PATTERNS__",
     repr([(pattern.pattern, int(pattern.flags)) for pattern in OUTPUT_SECRET_PATTERNS]),
 )
@@ -1388,6 +1411,10 @@ class ProcessInfo:
     output_lease: HostLease | None = field(default=None, repr=False)
     output_revoked: bool = False
     host_identity: str = ""
+    origin_channel: str = ""
+    scope_id: str = ""
+    host_binding: dict | None = None
+    reserved_bytes: int = 0
     restored: bool = False
     expiry_scheduled: bool = False
 
@@ -1418,6 +1445,7 @@ class ProcessRegistry:
         self._remote_exec = remote_exec
         # Public handles are namespace-separated from positive local OS PIDs.
         self._next_remote_handle = -1
+        self._pending_remote_reservations = 0
         # Kernel-backed containment for escaped descendants (round-9 #1):
         # as a child subreaper the PROCESS adopts orphans instead of PID
         # 1, so a double-fork+setsid escape stays attributable. Enabled
@@ -1447,6 +1475,7 @@ class ProcessRegistry:
             "start_time", "status", "exit_code", "total_output_bytes", "retained_bytes",
             "finished_at", "capture_error", "remote", "remote_dir", "remote_token",
             "output_revoked",
+            "origin_channel", "scope_id", "host_binding", "reserved_bytes",
         )}
         path = self._retention_dir / (info.generation + ".json")
         temp = path.with_suffix(".tmp")
@@ -1476,11 +1505,14 @@ class ProcessRegistry:
                 log.warning("Remote process output expiry could not be confirmed")
         self._expire_output(info)
 
-    def _spool_quota_available(self) -> bool:
-        return sum(
-            item.retained_bytes for item in self._retained_generations.values()
+    def _spool_quota_remaining(self) -> int:
+        return max(0, OUTPUT_GLOBAL_QUOTA - self._pending_remote_reservations - sum(
+            max(item.retained_bytes, item.reserved_bytes) for item in self._retained_generations.values()
             if not item.output_revoked
-        ) < OUTPUT_GLOBAL_QUOTA
+        ))
+
+    def _spool_quota_available(self) -> bool:
+        return self._spool_quota_remaining() > 0
 
     def _restore_output(self) -> None:
         directory = self._retention_dir
@@ -1495,6 +1527,8 @@ class ProcessRegistry:
                 info = ProcessInfo(command="(retained output)", **record)
                 info.restored = True
                 if info.finished_at is None:
+                    if info.remote:
+                        info.reserved_bytes = OUTPUT_CAPTURE_BYTES
                     info.status = "unknown"
                     info.finished_at = info.start_time
                 if info.finished_at + OUTPUT_RETENTION_SECONDS <= time.time() or info.output_revoked:
@@ -1544,7 +1578,7 @@ class ProcessRegistry:
     # Public API
     # ------------------------------------------------------------------
 
-    async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "") -> str:
+    async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
         """Start a background process locally. Returns confirmation with PID."""
         from ..tools.ssh import is_local_address
 
@@ -1593,6 +1627,9 @@ class ProcessRegistry:
             owner_id=owner_id,
             host_alias=host_alias,
             host_identity=host_identity,
+            origin_channel=origin_channel,
+            scope_id=scope_id,
+            host_binding=host_binding,
         )
         self._processes[pid] = info
         self._retained_generations[info.generation] = info
@@ -1615,7 +1652,22 @@ class ProcessRegistry:
         log.info("Started process PID %d: %s", pid, command_display(command))
         return f"Process started (PID {pid}): {safe_text(command)}"
 
-    async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "") -> str:
+    async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
+        # Reserve before dispatch, including starts still awaiting settlement.
+        if self._spool_quota_remaining() < OUTPUT_CAPTURE_BYTES:
+            lease.release()
+            return "Cannot start: process retention quota exhausted."
+        self._pending_remote_reservations += OUTPUT_CAPTURE_BYTES
+        try:
+            return await self._start_remote_reserved(
+                lease, command, owner_id=owner_id, host_alias=host_alias,
+                host_identity=host_identity, origin_channel=origin_channel,
+                scope_id=scope_id, host_binding=host_binding,
+            )
+        finally:
+            self._pending_remote_reservations -= OUTPUT_CAPTURE_BYTES
+
+    async def _start_remote_reserved(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "", origin_channel: str = "", scope_id: str = "", host_binding: dict | None = None) -> str:
         """Start a detached SSH process with remote file/FIFO-backed I/O."""
         running = sum(1 for p in self._processes.values() if p.status == "running")
         if running >= MAX_CONCURRENT:
@@ -1648,6 +1700,10 @@ class ProcessRegistry:
             code, output = await lease.run(
                 lambda: self._remote_exec(lease.target, script, 30)
             )
+        except asyncio.CancelledError:
+            await self._teardown_unsettled_remote(lease, root, token)
+            lease.release()
+            raise
         except Exception as exc:
             await self._teardown_unsettled_remote(lease, root, token)
             lease.release()
@@ -1695,6 +1751,10 @@ class ProcessRegistry:
             owner_id=owner_id,
             host_alias=host_alias,
             host_identity=host_identity,
+            origin_channel=origin_channel,
+            scope_id=scope_id,
+            host_binding=host_binding,
+            reserved_bytes=OUTPUT_CAPTURE_BYTES,
         )
         info = self._processes[handle]
         self._retained_generations[info.generation] = info
@@ -1711,6 +1771,7 @@ class ProcessRegistry:
         self, pid: int, wait_seconds: float = 0.0, *, cursor: str | None = None,
         offset: int | None = None, limit: int = OUTPUT_PAGE_DEFAULT,
         max_chars: int | None = None,
+        authorized: Callable[[ProcessInfo], bool] | None = None,
     ) -> str:
         """Return recent output lines from a process.
 
@@ -1725,6 +1786,9 @@ class ProcessRegistry:
         info = self.output_info(pid, cursor)
         if not info:
             return f"No process with PID {pid}."
+
+        if authorized is not None and not authorized(info):
+            return "Error: process access denied."
 
         if max_chars is None:
             from .output_delivery import get_delivery_budget
@@ -1752,7 +1816,12 @@ class ProcessRegistry:
             return "Error: process output retention expired (24 hours after exit)."
         if info.remote:
             async with info._remote_lock:
-                return await self._poll_remote(info, wait_seconds, offset=offset, limit=limit, max_chars=max_chars)
+                if authorized is not None and not authorized(info):
+                    return "Error: process access denied."
+                result = await self._poll_remote(info, wait_seconds, offset=offset, limit=limit, max_chars=max_chars)
+                if authorized is not None and not authorized(info):
+                    return "Error: process access denied."
+                return result
 
         # Exit detection must not depend on the watcher having PUBLISHED
         # yet (round-3 blocker #3): returncode is set at SIGCHLD reap, so a
@@ -1779,6 +1848,8 @@ class ProcessRegistry:
                     except TimeoutError:
                         pass
 
+        if authorized is not None and not authorized(info):
+            return "Error: process access denied."
         if explicit:
             start = offset or 0
             data = b""
@@ -1803,7 +1874,7 @@ class ProcessRegistry:
             tail = _scrub_process_bytes(info.output_tail)
             if info.total_output_bytes > len(info.output_tail):
                 # A clipped prefix can begin inside an arbitrarily long secret.
-                tail = re.sub(rb"^\S+", lambda m: b"*" * len(m[0]), tail)
+                tail = re.sub(rb"^[^\n]*", lambda m: b"*" * len(m[0]), tail)
         data = b"".join(tail.splitlines(keepends=True)[-50:])
         start = max(0, info.total_output_bytes - len(data))
         if info.status == "running":
@@ -1818,6 +1889,7 @@ class ProcessRegistry:
             info.output_lease.release()
             info.output_lease = None
         info.output_revoked = True
+        info.reserved_bytes = 0
         info.output_tail = b""
         info.output_buffer.clear()
         if self._retention_dir is not None:
@@ -1888,17 +1960,21 @@ class ProcessRegistry:
                 high = size - 1
         return best or "Error: delivery budget cannot fit a process output page."
 
-    async def write(self, pid: int, text: str) -> str:
+    async def write(self, pid: int, text: str, *, authorized: Callable[[ProcessInfo], bool] | None = None) -> str:
         """Write text to a process's stdin."""
         info = self._processes.get(pid)
         if not info:
             return f"No process with PID {pid}."
         if info.status != "running":
             return f"Process {pid} is not running (status: {info.status})."
+        if authorized is not None and not authorized(info):
+            return "Error: process access denied."
         if info.restored:
             return "Error: retained process evidence is read-only."
         if info.remote:
             async with info._remote_lock:
+                if authorized is not None and not authorized(info):
+                    return "Error: process access denied."
                 return await self._write_remote(info, text)
         if not info.process or not info.process.stdin:
             return f"Process {pid} has no stdin."
@@ -1910,17 +1986,21 @@ class ProcessRegistry:
         except Exception as e:
             return f"Failed to write to PID {pid}: {e}"
 
-    async def kill(self, pid: int) -> str:
+    async def kill(self, pid: int, *, authorized: Callable[[ProcessInfo], bool] | None = None) -> str:
         """Kill a running process — and its process group when it leads one."""
         info = self._processes.get(pid)
         if not info:
             return f"No process with PID {pid}."
         if info.status != "running":
             return f"Process {pid} already {info.status}."
+        if authorized is not None and not authorized(info):
+            return "Error: process access denied."
         if info.restored:
             return "Error: retained process evidence is read-only."
         if info.remote:
             async with info._remote_lock:
+                if authorized is not None and not authorized(info):
+                    return "Error: process access denied."
                 return await self._kill_remote(info)
 
         try:
@@ -2071,6 +2151,7 @@ class ProcessRegistry:
             if info.status != "killed":
                 info.status = "completed" if info.exit_code == 0 else "failed"
             info.finished_at = info.finished_at or float(exit_record.get("finished_at", time.time()))
+            info.reserved_bytes = 0
             self._retire_execution_lease(info)
         self._persist_output(info)
         if info.finished_at is not None and time.time() >= info.finished_at + OUTPUT_RETENTION_SECONDS:
@@ -2348,7 +2429,8 @@ class ProcessRegistry:
                                 path = self._retention_dir / (info.generation + ".out")
                                 fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
                                 info.spool = os.fdopen(fd, "w+b")
-                        retained = chunk[:OUTPUT_CAPTURE_BYTES - info.retained_bytes]
+                        retained = chunk[:min(OUTPUT_CAPTURE_BYTES - info.retained_bytes,
+                                              self._spool_quota_remaining())]
                         info.spool.seek(info.retained_bytes)
                         info.spool.write(retained)
                         info.retained_bytes += len(retained)
