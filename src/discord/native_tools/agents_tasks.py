@@ -1227,7 +1227,7 @@ class AgentTaskTools:
             )
         try:
             page = result_page(results, inp.get("cursor", ""), inp.get("limit", 4000),
-                               max_chars=get_delivery_budget(self._get_config()))
+                               max_chars=get_delivery_budget(self._tool_executor.config))
         except ValueError as exc:
             return str(exc)
         return serialize_page(page)
@@ -1248,7 +1248,7 @@ class AgentTaskTools:
         from ...agents.wait_results import render_wait_results, validate_wait_roster
         from ...tools.output_delivery import get_delivery_budget
 
-        budget = get_delivery_budget(self._get_config())
+        budget = get_delivery_budget(self._tool_executor.config)
 
         authorized = []
         durable = {}

@@ -92,9 +92,10 @@ def test_fixed_800_preview_mutation_exceeds_guard_budget():
     assert truncate_tool_output(unbounded) != unbounded
 
 
-async def test_handlers_follow_rebound_delivery_budget():
+async def test_handlers_use_executor_effective_delivery_budget():
     config = SimpleNamespace(tools=SimpleNamespace(tool_output_max_chars=3000))
-    tools = _tools(get_config=lambda: config)
+    executor = SimpleNamespace(config=config.tools)
+    tools = _tools(get_config=lambda: config, tool_executor=executor)
     saved = snapshots(1)["agent-0"]
     saved["result"] = "\x00" * 10000
     tools._load_agent_result = AsyncMock(return_value=saved)
@@ -105,6 +106,10 @@ async def test_handlers_follow_rebound_delivery_budget():
     wait = await tools._handle_wait_for_agents({"agent_ids": ["agent-0"]})
     assert len(wait) <= 3000
     config = SimpleNamespace(tools=SimpleNamespace(tool_output_max_chars=1500))
+    # A Config Center publication is pending restart for this field. Agent
+    # envelopes must not silently use a different cap than executor/processes.
+    assert await tools._handle_get_agent_results({"agent_id": "agent-0"}) == first
+    executor.config = config.tools
     second = await tools._handle_get_agent_results({"agent_id": "agent-0"})
     assert len(second) <= 1500 < len(first)
     wait = await tools._handle_wait_for_agents({"agent_ids": list(snapshots(4))})
