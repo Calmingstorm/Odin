@@ -66,6 +66,15 @@ class FilesDocsTools(HandlerBase):
         if type(raw_mode) is not bool:
             return "Error: 'raw' must be a boolean."
 
+        from ..output_delivery import get_delivery_budget
+
+        result_budget = min(_READ_FILE_RESULT_MAX_CHARS, get_delivery_budget(self.config))
+        # Reserve the complete framing at the source. The default allocations
+        # remain unchanged; smaller configured delivery caps return fewer whole
+        # source lines, never a downstream splice through content or metadata.
+        numbered_budget = min(_READ_FILE_BODY_MAX_CHARS, result_budget - 256)
+        raw_budget = min(_READ_FILE_RAW_BODY_MAX_BYTES, result_budget - 600)
+
         # Bound output at the SOURCE. _run_on_host eventually passes through
         # ssh._truncate_output(), whose 16K head+tail splice would destroy the
         # contiguity and interval guarantees of a selected range. This awk
@@ -220,7 +229,7 @@ END {
                 f"final_newline=$(tail -c 1 < {safe_path} 2>/dev/null | wc -l); "
                 f"LC_ALL=C awk -v start={start_line} "
                 f"-v start_label={shlex.quote(start_label)} "
-                f"-v count={lines} -v budget={_READ_FILE_RAW_BODY_MAX_BYTES} "
+                f"-v count={lines} -v budget={raw_budget} "
                 f'-v final_newline="$final_newline" '
                 '-v metadata="$metadata" '
                 f'{shlex.quote(raw_awk_program)} < {safe_path} > "$body"; '
@@ -235,7 +244,7 @@ END {
         else:
             command = (
                 f"awk -v start={start_line} -v start_label={shlex.quote(start_label)} "
-                f"-v count={lines} -v budget={_READ_FILE_BODY_MAX_CHARS} "
+                f"-v count={lines} -v budget={numbered_budget} "
                 f"{shlex.quote(numbered_awk_program)} < {safe_path}"
             )
         raw = await self._run_on_host(host, command)
@@ -315,12 +324,8 @@ END {
         # may legitimately contain the transport marker literal. The source
         # program is already bounded below this threshold, so only the actual
         # returned length is a trustworthy overrun signal here.
-        if len(text) > _READ_FILE_RESULT_MAX_CHARS:
-            text = (
-                text[:_READ_FILE_RESULT_MAX_CHARS]
-                + "\n[read_file error truncated by handler output budget]"
-            )
-            return text, 1
+        if len(text) > result_budget:
+            return "Error: read_file envelope exceeds the delivery budget; no lines returned.", 1
         # The source-budget guard is a handler failure even though awk itself
         # completed normally. Preserve a typed nonzero result through the
         # executor rather than letting an "Error:" string ride exit code 0.
