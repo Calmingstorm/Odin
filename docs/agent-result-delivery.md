@@ -84,3 +84,54 @@ dedicated read-only agent/process retrieval). If even the pointer cannot fit,
 the existing context admission failure remains explicit rather than slicing
 JSON or pretending a lost preview is complete. Nothing automatically drains
 retained evidence back into model context.
+
+## Process output: a spool, not a consuming poll
+
+`manage_process action=poll pid=...` still shows the newest 50 lines (reduced
+when the complete delivery budget cannot hold them), followed by an
+`[output retention]` JSON record. `emitted_bytes` counts raw stdout/stderr bytes,
+`retained_bytes` counts the readable captured prefix, `shown_intervals` gives
+half-open original-byte coordinates, and `capture_limit_loss_bytes` counts bytes
+past the **4 MiB** capture limit. `not_retained_bytes` also includes incomplete
+UTF-8 suffixes, withheld streaming tokens, or capture failures. Output not shown
+in the tail is not necessarily lost: use its explicit retrieval instructions.
+
+For full output, call `manage_process action=poll pid=... offset=0`, then follow
+the returned `cursor` until `truncated=false`. `limit` defaults to 4,000 bytes,
+accepts 4–8,000, and is a ceiling: serialized JSON must fit the shared budget.
+Explicit reads are contiguous head-only pages, never consuming another reader's
+position. Cursors bind a random job generation and byte offset, not just a PID,
+and contain no filesystem path. Old cursors cannot redirect to a reused PID.
+
+Secret matches are replaced with byte-length-preserving `*` masks against the
+whole captured snapshot **before** any requested page is sliced. An incomplete
+trailing streaming token is withheld until settled so a split credential cannot
+escape in separate pages. Valid UTF-8 is never divided between pages; offsets
+inside a multibyte sequence are refused. Malformed source bytes display U+FFFD,
+but cursor coordinates and `shown_bytes` continue to describe the source byte
+interval, not the replacement character's three-byte encoding. A partial code
+point at the capture cap is excluded from the readable prefix.
+
+Local capture uses one private spool, with a **128 MiB aggregate local retained
+byte quota** and explicit capture errors on exhaustion. Durable manifests store
+generation, owner, originating host identity, byte accounting, and expiry, not
+reusable process execution handles. The executor supplies a private retention
+directory; a library registry without that directory uses temporary spools.
+Remote output stays on its original host and is paged only by the fixed
+generation-bound controller through an authorized lease, never an arbitrary
+caller-supplied path. It is not copied into the generic tool-output store.
+
+Output expires **24 hours after observed exit**; reads never renew that deadline.
+Expiry closes/removes local evidence and attempts identity-checked remote spool
+deletion through the output lease. If the host is unreachable or its lease was
+revoked, access still expires locally but remote physical deletion cannot be
+confirmed. Restored manifests with no observed exit report `unknown` and use
+start time as a conservative expiry anchor. Restored handles are read-only:
+they cannot send stdin, signal a job, or recover execution privileges.
+
+Terminal remote jobs relinquish the registry's execution-facing lease slot;
+the retained output-only slot admits only fixed status/expiry operations and
+keeps the host generation's revocation fence. After restart, a fresh authorized
+lease must match the manifest's originating host identity. The handler verifies
+owner and current originating host access before every action and after each
+poll wait. Knowing a PID or cursor is not authorization.

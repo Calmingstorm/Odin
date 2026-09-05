@@ -77,7 +77,14 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Manages local or remote background processes (start/poll/write/kill/list). "
             "Start spawns a detached command on the selected managed host and returns PID. "
-            "Poll gets new output; Write sends stdin; Kill verifies process-group termination. "
+            "Poll defaults to newest 50 lines, with emitted/retained/shown-byte "
+            "and capture-loss metadata. Use poll with offset=0 or the returned "
+            "generation-bound cursor and limit (default 4000, 4-8000 UTF-8 bytes) "
+            "for repeatable retained-output pages; follow cursor until truncated=false. "
+            "Reads never consume another reader's output. Local and remote capture "
+            "retain at most 4 MiB. "
+            "Output stays read-only for 24 hours after exit; access is rechecked on every read. "
+            "Write sends stdin; Kill verifies process-group termination. "
             "Max 20 concurrent, auto-killed after 1hr. When monitoring a "
             "long-running process (build, test suite, download), poll with "
             "wait_seconds (60 is a good default) — one call waits server-side "
@@ -113,6 +120,27 @@ TOOLS_SECTION: list[dict] = [
                         "Poll only: wait up to this many seconds (0-120) for "
                         "the process to exit before reporting. 0 (default) "
                         "reports immediately. Exit ends the wait early."
+                    ),
+                },
+                "cursor": {
+                    "type": "string",
+                    "description": (
+                        "Poll only: opaque job-generation output cursor; "
+                        "do not combine with offset."
+                    ),
+                },
+                "offset": {
+                    "type": "integer", "minimum": 0,
+                    "description": (
+                        "Poll only: retained-output UTF-8 byte offset "
+                        "(0 begins complete retrieval)."
+                    ),
+                },
+                "limit": {
+                    "type": "integer", "minimum": 4, "maximum": 8000,
+                    "description": (
+                        "Poll page maximum UTF-8 bytes (default 4000); "
+                        "complete envelope may reduce the page."
                     ),
                 },
             },

@@ -122,23 +122,27 @@ async def test_remote_slow_producer_streams_before_exit_and_advances_cursor(tmp_
                     break
                 assert time.monotonic() < deadline, "no output delivered before exit"
             expected += line
-            assert result.split("\n", 1)[1] == line.decode()
+            display = result.split("\n[output retention] ")[0].split("\n", 1)[1]
+            assert display == expected.decode()
             assert f"output_bytes={len(expected)}\n" in result
             assert info.remote_cursor == info.total_output_bytes == len(expected)
             assert (tmp_path / "out").read_bytes() == expected
             assert lease.release_count == 0
 
-            # A second poll without another write must not replay the old bytes.
+            # Readers do not consume evidence: the same tail is replayable.
             repeated = await registry.poll(-1)
-            assert repeated.endswith("\n(no new output)")
+            display = repeated.split("\n[output retention] ")[0].split("\n", 1)[1]
+            assert display == expected.decode()
             assert info.remote_cursor == len(expected)
             assert await registry.write(-1, "next\n") == "Wrote 5 bytes to PID -1."
 
         terminal = await registry.poll(-1, wait_seconds=5)
         assert "status=completed exit_code=0" in terminal
-        assert terminal.split("\n", 1)[1] == "done\n"
+        display = terminal.split("\n[output retention] ")[0].split("\n", 1)[1]
+        assert display == (expected + b"done\n").decode()
         assert info.remote_cursor == info.total_output_bytes == len(expected + b"done\n")
-        assert lease.release_count == 1
+        assert lease.release_count == 0
+        assert info.remote_lease is None and info.output_lease is lease
         await asyncio.wait_for(supervisor.wait(), 5)
 
 
@@ -157,20 +161,22 @@ async def test_remote_streaming_preserves_disk_cap_and_bounded_cursor_reads(tmp_
         while not out.exists() or out.stat().st_size < cap:
             assert time.monotonic() < deadline, "supervisor did not drain to the disk cap"
             await asyncio.sleep(0.05)
-        for cursor in (16000, 32000):
-            result = await registry.poll(-1)
-            assert "status=running" in result
-            assert result.split("\n", 1)[1] == "x" * 16000
-            assert info.remote_cursor == cursor
-            assert info.total_output_bytes == cap
+        result = await registry.poll(-1)
+        assert "status=running" in result
+        assert len(result) <= 12000
         assert lease.release_count == 0
         await registry.write(-1, "done\n")
         await asyncio.wait_for(supervisor.wait(), 5)
         record = json.loads((tmp_path / "exit.json").read_text())
-        assert record == {
-            "exit_code": 0, "empty": True, "timed_out": False, "output_truncated": True,
-        }
+        assert record["exit_code"] == 0 and record["empty"]
+        assert not record["timed_out"] and record["output_truncated"]
+        assert record["emitted"] == cap + 65536
         assert out.stat().st_size == cap
         assert out.read_bytes() == b"x" * cap
         await registry.poll(-1)
-        assert lease.release_count == 1
+        assert lease.release_count == 0
+        for offset in (0, 8000):
+            page = json.loads(await registry.poll(-1, offset=offset, limit=8000))
+            assert page["text"] == "x" * 8000
+            assert page["shown_intervals"] == [[offset, offset + 8000]]
+            assert page["capture_limit_loss_bytes"] == 65536

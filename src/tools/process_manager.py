@@ -16,13 +16,15 @@ import re
 import secrets
 import shlex
 import signal
+import tempfile
 import time
 from collections import deque
 from collections.abc import Awaitable, Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, BinaryIO
 
+from ..llm.secret_scrubber import OUTPUT_SECRET_PATTERNS
 from ..observability.diagnostics import command_display, safe_error, safe_text
 from ..odin_log import get_logger
 from .workspace import WorkspaceError, workspace_env
@@ -35,7 +37,29 @@ log = get_logger("process_manager")
 
 _UNKNOWN = object()  # "could not determine" — never means "absent"
 
-_REMOTE_SUPERVISOR = r'''import base64,json,os,signal,subprocess,sys,threading,time
+
+def _scrub_process_bytes(data: bytes) -> bytes:
+    """Mask the complete captured snapshot, retaining original byte coordinates.
+
+    Never scrub page fragments: a credential may straddle any requested offset.
+    Surrogate escape preserves malformed bytes while matching the same patterns.
+    """
+    text = data.decode("utf-8", "surrogateescape")
+    spans = []
+    for pattern in OUTPUT_SECRET_PATTERNS:
+        for match in pattern.finditer(text):
+            start = len(text[:match.start()].encode("utf-8", "surrogateescape"))
+            end = len(text[:match.end()].encode("utf-8", "surrogateescape"))
+            spans.append((start, end))
+    if not spans:
+        return data
+    masked = bytearray(data)
+    for start, end in spans:
+        masked[start:end] = b"*" * (end - start)
+    return bytes(masked)
+
+_REMOTE_SUPERVISOR = r'''import base64,json,os,re,signal,subprocess,sys,threading,time
+PATTERNS=__PROCESS_SECRET_PATTERNS__
 root,token,encoded,lifetime=sys.argv[1:]
 os.umask(0o077)
 os.setsid()
@@ -70,8 +94,9 @@ ready={"token":token,"supervisor_pid":os.getpid(),"pid":pid,"pgid":pgid,"sid":si
 tmp=ready_path+".tmp"
 open(tmp,"w").write(json.dumps(ready,separators=(",",":")))
 os.replace(tmp,ready_path)
-output_state={"bytes":0,"truncated":False}
+output_state={"bytes":0,"emitted":0,"truncated":False}
 def drain_output():
+    tail=b""
     with open(out_path,"ab",buffering=0) as out:
         while True:
             # Drain available bytes: buffered read(n) can wait for n bytes or EOF.
@@ -80,6 +105,11 @@ def drain_output():
             remaining=max(0,4194304-output_state["bytes"])
             if remaining: out.write(chunk[:remaining]); output_state["bytes"]+=min(len(chunk),remaining)
             if len(chunk)>remaining: output_state["truncated"]=True
+            output_state["emitted"]+=len(chunk)
+            tail=(tail+chunk)[-8000:]
+            tmp=root+"/tail.tmp"
+            open(tmp,"w").write(json.dumps({"emitted":output_state["emitted"],"tail":base64.b64encode(tail).decode()},separators=(",",":")))
+            os.replace(tmp,root+"/tail.json")
 reader=threading.Thread(target=drain_output,daemon=True)
 reader.start()
 timed_out=False
@@ -108,9 +138,18 @@ if alive():
 try: proc.wait(timeout=1)
 except Exception: pass
 reader.join(timeout=2)
+try:
+    with open(out_path,"r+b") as handle:
+        raw=handle.read(4194304); text=raw.decode("utf-8","surrogateescape"); masked=bytearray(raw)
+        for pattern,flags in PATTERNS:
+            for match in re.finditer(pattern,text,flags):
+                start=len(text[:match.start()].encode("utf-8","surrogateescape")); end=len(text[:match.end()].encode("utf-8","surrogateescape"))
+                masked[start:end]=b"*"*(end-start)
+        handle.seek(0); handle.write(masked); handle.flush()
+except OSError: pass
 try: os.close(stdin_fd)
 except Exception: pass
-record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out,"output_truncated":output_state["truncated"]}
+record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out,"output_truncated":output_state["truncated"],"emitted":output_state["emitted"],"finished_at":time.time()}
 tmp=exit_path+".tmp"
 open(tmp,"w").write(json.dumps(record,separators=(",",":")))
 os.replace(tmp,exit_path)
@@ -118,7 +157,15 @@ os.replace(tmp,exit_path)
 
 # ruff: noqa: E501
 _REMOTE_CONTROLLER = r'''# noqa: E501
-import base64,json,os,signal,subprocess,sys,time
+import base64,json,os,re,shutil,signal,subprocess,sys,time
+PATTERNS=__PROCESS_SECRET_PATTERNS__
+def scrub(data):
+    text=data.decode("utf-8","surrogateescape"); masked=bytearray(data)
+    for pattern,flags in PATTERNS:
+        for match in re.finditer(pattern,text,flags):
+            start=len(text[:match.start()].encode("utf-8","surrogateescape")); end=len(text[:match.end()].encode("utf-8","surrogateescape"))
+            masked[start:end]=b"*"*(end-start)
+    return bytes(masked)
 root,token,op,payload,wait_s=sys.argv[1:]
 def emit(**value):
     print(json.dumps(value,separators=(",",":")))
@@ -158,15 +205,40 @@ if op=="status":
     exit_record=load("exit.json")
     while exit_record is None and time.monotonic()<end:
         time.sleep(.2); exit_record=load("exit.json")
-    cursor=max(0,int(payload or "0")); data=b""; total=0
+    request=json.loads(payload) if payload.startswith("{") else {"offset":int(payload or "0"),"limit":4000}
+    cursor=max(0,int(request.get("offset",0))); limit=max(4,min(8000,int(request.get("limit",4000)))); data=b""; total=0
+    tail=load("tail.json") or {}
     try:
         with open(root+"/out","rb") as handle:
-            handle.seek(0,2); total=handle.tell(); handle.seek(min(cursor,total)); data=handle.read(16000)
+            snapshot=scrub(handle.read(4194304)); total=len(snapshot)
+            if exit_record is None:
+                snapshot=re.sub(rb"\S+\Z",b"",snapshot); total=len(snapshot)
+            # Withhold only an incomplete final UTF-8 sequence, not malformed bytes.
+            for width in range(1,min(4,total)+1):
+                last=snapshot[-width]
+                if last&0xC0!=0x80:
+                    need=2 if 0xC2<=last<=0xDF else 3 if 0xE0<=last<=0xEF else 4 if 0xF0<=last<=0xF4 else 1
+                    if width<need: snapshot=snapshot[:-width]; total=len(snapshot)
+                    break
+            if request.get("tail"):
+                data=scrub(base64.b64decode(tail.get("tail",""))); cursor=max(0,int(tail.get("emitted",total))-len(data))
+                if cursor:
+                    data=re.sub(rb"^\S+",lambda m:b"*"*len(m[0]),data)
+                if exit_record is None:
+                    data=re.sub(rb"\S+\Z",b"",data)
+            else:
+                data=snapshot[cursor:cursor+limit]
     except FileNotFoundError: pass
     if exit_record is not None and not exit_record.get("empty",False):
         emit(ok=False,unknown=True,error="remote process group emptiness was not verified",output=base64.b64encode(data).decode(),cursor=cursor+len(data),size=total,ready=ready)
         raise SystemExit(4)
-    emit(ok=True,status="exited" if exit_record is not None else "running",exit=exit_record,output=base64.b64encode(data).decode(),cursor=cursor+len(data),size=total,identity=identity(),ready=ready)
+    emit(ok=True,status="exited" if exit_record is not None else "running",exit=exit_record,output=base64.b64encode(data).decode(),start=cursor,cursor=cursor+len(data),size=total,emitted=int((exit_record or {}).get("emitted",tail.get("emitted",total))),identity=identity(),ready=ready)
+elif op=="expire":
+    record=load("exit.json")
+    if record is None or time.time()<float(record.get("finished_at",time.time()))+86400:
+        emit(ok=False,error="retention has not expired"); raise SystemExit(10)
+    shutil.rmtree(root)
+    emit(ok=True,expired=True)
 elif op=="write":
     if load("exit.json") is not None: emit(ok=False,error="process is not running"); raise SystemExit(5)
     if not identity(): emit(ok=False,unknown=True,error="remote process identity changed; stdin not written"); raise SystemExit(6)
@@ -195,6 +267,15 @@ elif op=="kill":
 else:
     emit(ok=False,error="invalid controller operation"); raise SystemExit(2)
 '''
+
+_REMOTE_CONTROLLER = _REMOTE_CONTROLLER.replace(
+    "__PROCESS_SECRET_PATTERNS__",
+    repr([(pattern.pattern, int(pattern.flags)) for pattern in OUTPUT_SECRET_PATTERNS]),
+)
+_REMOTE_SUPERVISOR = _REMOTE_SUPERVISOR.replace(
+    "__PROCESS_SECRET_PATTERNS__",
+    repr([(pattern.pattern, int(pattern.flags)) for pattern in OUTPUT_SECRET_PATTERNS]),
+)
 
 _PR_SET_CHILD_SUBREAPER = 36
 _PR_GET_CHILD_SUBREAPER = 37
@@ -726,6 +807,11 @@ class ProcessCleanupError(RuntimeError):
     """
 
 MAX_CONCURRENT = 20
+OUTPUT_CAPTURE_BYTES = 4 * 1024 * 1024
+OUTPUT_RETENTION_SECONDS = 24 * 60 * 60
+OUTPUT_PAGE_DEFAULT = 4000
+OUTPUT_PAGE_MAX = 8000
+OUTPUT_GLOBAL_QUOTA = 128 * 1024 * 1024
 MAX_LIFETIME_SECONDS = 3600  # 1 hour
 OUTPUT_BUFFER_LINES = 500
 # Ceiling for one poll's server-side wait: comfortably under the executor's
@@ -1289,6 +1375,20 @@ class ProcessInfo:
     remote_lease: HostLease | None = field(default=None, repr=False)
     transport_unknown: bool = False
     _remote_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
+    generation: str = field(default_factory=lambda: secrets.token_hex(16))
+    owner_id: str | None = None
+    host_alias: str = ""
+    spool: BinaryIO | None = field(default=None, repr=False)
+    retained_bytes: int = 0
+    output_tail: bytes = b""
+    finished_at: float | None = None
+    capture_error: str | None = None
+    # No command/stdin/signal API: reachable only by fixed output reads.
+    output_lease: HostLease | None = field(default=None, repr=False)
+    output_revoked: bool = False
+    host_identity: str = ""
+    restored: bool = False
+    expiry_scheduled: bool = False
 
 
 class ProcessRegistry:
@@ -1300,6 +1400,7 @@ class ProcessRegistry:
         remote_exec: Callable[
             [HostTarget, str, int], Awaitable[tuple[int, str]]
         ] | None = None,
+        retention_dir: str | Path | None = None,
     ) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,
@@ -1330,6 +1431,103 @@ class ProcessRegistry:
         # goes by recorded pid because a zombie's environment is
         # unreadable (round-10).
         self._adopted_pids: set[tuple[int, int]] = set()
+        self._retention_dir = Path(retention_dir) if retention_dir is not None else None
+        self._retained_generations: dict[str, ProcessInfo] = {}
+        if self._retention_dir is not None:
+            self._retention_dir.mkdir(mode=0o700, parents=True, exist_ok=True)
+            self._restore_output()
+
+    def _persist_output(self, info: ProcessInfo) -> None:
+        """Persist evidence identity, never reusable execution handles."""
+        if self._retention_dir is None:
+            return
+        record = {key: getattr(info, key) for key in (
+            "pid", "generation", "host", "host_alias", "host_identity", "owner_id",
+            "start_time", "status", "exit_code", "total_output_bytes", "retained_bytes",
+            "finished_at", "capture_error", "remote", "remote_dir", "remote_token",
+            "output_revoked",
+        )}
+        path = self._retention_dir / (info.generation + ".json")
+        temp = path.with_suffix(".tmp")
+        fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            json.dump(record, handle, separators=(",", ":"))
+        os.replace(temp, path)
+
+    def _schedule_output_expiry(self, info: ProcessInfo) -> None:
+        if info.expiry_scheduled or info.finished_at is None:
+            return
+        info.expiry_scheduled = True
+        from ..async_utils import fire_and_forget
+
+        fire_and_forget(self._expire_output_at_deadline(info), name="process_output_expiry")
+
+    async def _expire_output_at_deadline(self, info: ProcessInfo) -> None:
+        deadline = (info.finished_at or time.time()) + OUTPUT_RETENTION_SECONDS
+        await asyncio.sleep(max(0, deadline - time.time()))
+        lease = info.output_lease
+        remote_exec = self._remote_exec
+        if info.remote and lease is not None and remote_exec is not None:
+            try:
+                command = self._remote_controller_command(info, "expire")
+                await lease.run(lambda: remote_exec(lease.target, command, 15))
+            except Exception:
+                log.warning("Remote process output expiry could not be confirmed")
+        self._expire_output(info)
+
+    def _spool_quota_available(self) -> bool:
+        return sum(
+            item.retained_bytes for item in self._retained_generations.values()
+            if not item.output_revoked
+        ) < OUTPUT_GLOBAL_QUOTA
+
+    def _restore_output(self) -> None:
+        directory = self._retention_dir
+        if directory is None:
+            return
+        for path in directory.glob("*.json"):
+            try:
+                record = json.loads(path.read_text())
+                generation = record["generation"]
+                if not re.fullmatch(r"[a-f0-9]{32}", generation) or path.stem != generation:
+                    continue
+                info = ProcessInfo(command="(retained output)", **record)
+                info.restored = True
+                if info.finished_at is None:
+                    info.status = "unknown"
+                    info.finished_at = info.start_time
+                if info.finished_at + OUTPUT_RETENTION_SECONDS <= time.time() or info.output_revoked:
+                    self._expire_output(info)
+                    continue
+                if not info.remote:
+                    spool_path = directory / (generation + ".out")
+                    if spool_path.exists():
+                        info.spool = spool_path.open("rb")
+                        info.retained_bytes = min(info.retained_bytes, os.fstat(info.spool.fileno()).st_size)
+                    elif info.retained_bytes:
+                        info.capture_error = "retained process output is unavailable"
+                        info.retained_bytes = 0
+                self._retained_generations[generation] = info
+                self._processes[info.pid] = info
+                self._next_remote_handle = min(self._next_remote_handle, info.pid - 1)
+                try:
+                    asyncio.get_running_loop()
+                except RuntimeError:
+                    pass
+                else:
+                    self._schedule_output_expiry(info)
+            except (OSError, ValueError, KeyError, TypeError):
+                log.warning("Could not restore a retained process output manifest")
+
+    def output_info(self, pid: int, cursor: str | None = None) -> ProcessInfo | None:
+        if cursor is not None and isinstance(cursor, str):
+            generation = cursor.split(":", 1)[0]
+            info = self._retained_generations.get(generation)
+            if info is None:
+                candidate = self._processes.get(pid)
+                info = candidate if candidate and candidate.generation == generation else None
+            return info if info is not None and info.pid == pid else None
+        return self._processes.get(pid)
 
     @property
     def _containment(self) -> bool:
@@ -1345,7 +1543,7 @@ class ProcessRegistry:
     # Public API
     # ------------------------------------------------------------------
 
-    async def start(self, host: str, command: str, timeout: int = 300) -> str:
+    async def start(self, host: str, command: str, timeout: int = 300, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "") -> str:
         """Start a background process locally. Returns confirmation with PID."""
         from ..tools.ssh import is_local_address
 
@@ -1391,8 +1589,13 @@ class ProcessRegistry:
             start_time=time.time(),
             process=proc,
             job_token=job_token,
+            owner_id=owner_id,
+            host_alias=host_alias,
+            host_identity=host_identity,
         )
         self._processes[pid] = info
+        self._retained_generations[info.generation] = info
+        self._persist_output(info)
         self._own_children.add(pid)
 
         # Drainage and terminal-state publication are SEPARATE tasks:
@@ -1411,7 +1614,7 @@ class ProcessRegistry:
         log.info("Started process PID %d: %s", pid, command_display(command))
         return f"Process started (PID {pid}): {safe_text(command)}"
 
-    async def start_remote(self, lease, command: str) -> str:
+    async def start_remote(self, lease, command: str, *, owner_id: str | None = None, host_alias: str = "", host_identity: str = "") -> str:
         """Start a detached SSH process with remote file/FIFO-backed I/O."""
         running = sum(1 for p in self._processes.values() if p.status == "running")
         if running >= MAX_CONCURRENT:
@@ -1488,7 +1691,13 @@ class ProcessRegistry:
             remote_start_id=remote_start_id,
             remote_token=token,
             remote_lease=lease,
+            owner_id=owner_id,
+            host_alias=host_alias,
+            host_identity=host_identity,
         )
+        info = self._processes[handle]
+        self._retained_generations[info.generation] = info
+        self._persist_output(info)
         from ..async_utils import fire_and_forget
 
         fire_and_forget(
@@ -1497,7 +1706,11 @@ class ProcessRegistry:
         )
         return f"Process started (PID {handle}): {safe_text(command)}"
 
-    async def poll(self, pid: int, wait_seconds: float = 0.0) -> str:
+    async def poll(
+        self, pid: int, wait_seconds: float = 0.0, *, cursor: str | None = None,
+        offset: int | None = None, limit: int = OUTPUT_PAGE_DEFAULT,
+        max_chars: int | None = None,
+    ) -> str:
         """Return recent output lines from a process.
 
         ``wait_seconds > 0`` waits server-side until the process EXITS or
@@ -1508,13 +1721,37 @@ class ProcessRegistry:
         immediately. Cancellation aborts only this wait — the detached
         process is never touched.
         """
-        info = self._processes.get(pid)
+        info = self.output_info(pid, cursor)
         if not info:
             return f"No process with PID {pid}."
 
+        if max_chars is None:
+            from .output_delivery import get_delivery_budget
+
+            max_chars = get_delivery_budget()
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 4 <= limit <= OUTPUT_PAGE_MAX:
+            return "Error: limit must be an integer between 4 and 8000 bytes."
+        explicit = cursor is not None or offset is not None
+        if cursor is not None:
+            if offset is not None:
+                return "Error: provide cursor or offset, not both."
+            try:
+                generation, encoded_offset = cursor.split(":")
+                if generation != info.generation:
+                    raise ValueError
+                offset = int(encoded_offset)
+            except (ValueError, AttributeError):
+                return "Error: invalid cursor or process generation no longer retained."
+        if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int) or offset < 0):
+            return "Error: offset must be a nonnegative integer byte offset."
+        if info.output_revoked:
+            return "Error: process output authorization revoked."
+        if info.finished_at is not None and time.time() >= info.finished_at + OUTPUT_RETENTION_SECONDS:
+            self._expire_output(info)
+            return "Error: process output retention expired (24 hours after exit)."
         if info.remote:
             async with info._remote_lock:
-                return await self._poll_remote(info, wait_seconds)
+                return await self._poll_remote(info, wait_seconds, offset=offset, limit=limit, max_chars=max_chars)
 
         # Exit detection must not depend on the watcher having PUBLISHED
         # yet (round-3 blocker #3): returncode is set at SIGCHLD reap, so a
@@ -1541,19 +1778,114 @@ class ProcessRegistry:
                     except TimeoutError:
                         pass
 
-        lines = list(info.output_buffer)
-        status_line = f"[PID {pid}] status={info.status}"
-        if info.exit_code is not None:
-            status_line += f" exit_code={info.exit_code}"
-        elapsed = time.time() - info.start_time
-        status_line += f" uptime={elapsed:.0f}s"
-        status_line += f" output_bytes={info.total_output_bytes}"
+        if explicit:
+            start = offset or 0
+            data = b""
+            if info.spool is not None:
+                info.spool.seek(0)
+                snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+                snapshot, _ = _utf8_boundary_split(snapshot)
+                if info.status == "running":
+                    snapshot = re.sub(rb"\S+\Z", b"", snapshot)
+                view = replace(info, retained_bytes=len(snapshot))
+                data = snapshot[start:start + limit]
+            else:
+                view = info
+            if start > view.retained_bytes:
+                return "Error: offset exceeds retained output."
+            return self._output_page(view, data, start, limit, max_chars, preview=False)
+        if info.total_output_bytes <= OUTPUT_CAPTURE_BYTES and info.spool is not None:
+            info.spool.seek(0)
+            full = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+            tail = full[-12000:]
+        else:
+            tail = _scrub_process_bytes(info.output_tail)
+            if info.total_output_bytes > len(info.output_tail):
+                # A clipped prefix can begin inside an arbitrarily long secret.
+                tail = re.sub(rb"^\S+", lambda m: b"*" * len(m[0]), tail)
+        data = b"".join(tail.splitlines(keepends=True)[-50:])
+        start = max(0, info.total_output_bytes - len(data))
+        if info.status == "running":
+            data = re.sub(rb"\S+\Z", b"", data)
+        return self._output_page(info, data, start, limit, max_chars, preview=True)
 
-        if not lines:
-            return f"{status_line}\n(no output yet)"
-        # Show last 50 lines by default
-        recent = lines[-50:]
-        return f"{status_line}\n" + "".join(recent)
+    def _expire_output(self, info: ProcessInfo) -> None:
+        if info.spool is not None:
+            info.spool.close()
+            info.spool = None
+        if info.output_lease is not None:
+            info.output_lease.release()
+            info.output_lease = None
+        info.output_revoked = True
+        info.output_tail = b""
+        info.output_buffer.clear()
+        if self._retention_dir is not None:
+            for suffix in (".json", ".out"):
+                (self._retention_dir / (info.generation + suffix)).unlink(missing_ok=True)
+
+    @staticmethod
+    def _output_page(info: ProcessInfo, data: bytes, start: int, limit: int, budget: int, *, preview: bool) -> str:
+        """Fit complete delivery before deriving a cursor. Preview retrieves from zero."""
+        if not preview and data and data[0] & 0xC0 == 0x80:
+            return "Error: offset is not a UTF-8 code point boundary."
+        if preview:
+            while data and data[0] & 0xC0 == 0x80:
+                data = data[1:]
+                start += 1
+        else:
+            data, _ = _utf8_boundary_split(data[:limit])
+
+        def render(chunk: bytes, shown_start: int) -> str:
+            end = shown_start + len(chunk)
+            next_offset = 0 if preview else end
+            more = (preview and info.retained_bytes > 0) or end < info.retained_bytes
+            next_cursor = f"{info.generation}:{next_offset}" if more else None
+            meta = {
+                "kind": "process_output", "pid": info.pid, "generation": info.generation,
+                "status": info.status, "exit_code": info.exit_code,
+                "emitted_bytes": info.total_output_bytes, "retained_bytes": info.retained_bytes,
+                "shown_intervals": [[shown_start, end]] if chunk else [], "shown_bytes": len(chunk),
+                "capture_limit_loss_bytes": max(0, info.total_output_bytes - OUTPUT_CAPTURE_BYTES),
+                "not_retained_bytes": max(0, info.total_output_bytes - info.retained_bytes),
+                "capture_error": info.capture_error,
+                "expires_at": info.finished_at + OUTPUT_RETENTION_SECONDS if info.finished_at is not None else None,
+                "retention_seconds_after_exit": OUTPUT_RETENTION_SECONDS,
+                "truncated": bool(more), "cursor": next_cursor,
+                "retrieval": {"tool": "manage_process", "arguments": {
+                    "action": "poll", "pid": info.pid, "cursor": next_cursor, "limit": limit,
+                }} if more else None,
+            }
+            text = chunk.decode("utf-8", "replace")
+            if preview:
+                status = f"[PID {info.pid}] status={info.status}"
+                if info.exit_code is not None:
+                    status += f" exit_code={info.exit_code}"
+                status += f" uptime={time.time() - info.start_time:.0f}s output_bytes={info.total_output_bytes}"
+                return status + "\n" + (text or "(no output yet)") + "\n[output retention] " + json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+            meta["text"] = text
+            return json.dumps(meta, ensure_ascii=False, separators=(",", ":"))
+
+        result = render(data, start)
+        if len(result) <= budget:
+            return result
+        low, high, best = 0, len(data), None
+        while low <= high:
+            size = (low + high) // 2
+            chunk = data[-size:] if preview and size else data[:size]
+            if preview:
+                while chunk and chunk[0] & 0xC0 == 0x80:
+                    chunk = chunk[1:]
+                shown_start = start + len(data) - len(chunk)
+            else:
+                chunk, _ = _utf8_boundary_split(chunk)
+                shown_start = start
+            candidate = render(chunk, shown_start)
+            if len(candidate) <= budget:
+                best = candidate if chunk or not data else best
+                low = size + 1
+            else:
+                high = size - 1
+        return best or "Error: delivery budget cannot fit a process output page."
 
     async def write(self, pid: int, text: str) -> str:
         """Write text to a process's stdin."""
@@ -1562,6 +1894,8 @@ class ProcessRegistry:
             return f"No process with PID {pid}."
         if info.status != "running":
             return f"Process {pid} is not running (status: {info.status})."
+        if info.restored:
+            return "Error: retained process evidence is read-only."
         if info.remote:
             async with info._remote_lock:
                 return await self._write_remote(info, text)
@@ -1582,6 +1916,8 @@ class ProcessRegistry:
             return f"No process with PID {pid}."
         if info.status != "running":
             return f"Process {pid} already {info.status}."
+        if info.restored:
+            return "Error: retained process evidence is read-only."
         if info.remote:
             async with info._remote_lock:
                 return await self._kill_remote(info)
@@ -1606,7 +1942,7 @@ class ProcessRegistry:
         except Exception as e:
             return f"Failed to kill PID {pid}: {e}"
 
-    def list_all(self) -> str:
+    def list_all(self, *, authorized: Callable[[ProcessInfo], bool] | None = None) -> str:
         """Return a formatted table of all tracked processes."""
         if not self._processes:
             return "No processes tracked."
@@ -1615,6 +1951,8 @@ class ProcessRegistry:
         lines.append("-" * 60)
         now = time.time()
         for pid, info in sorted(self._processes.items()):
+            if authorized is not None and not authorized(info):
+                continue
             elapsed = now - info.start_time
             if elapsed < 60:
                 uptime = f"{elapsed:.0f}s"
@@ -1691,21 +2029,23 @@ class ProcessRegistry:
             return None
         return value if isinstance(value, dict) else None
 
-    async def _poll_remote(self, info: ProcessInfo, wait_seconds: float) -> str:
-        if info.status != "running" and info.remote_lease is None:
-            lines = list(info.output_buffer)[-50:]
-            return (
-                f"[PID {info.pid}] status={info.status} exit_code={info.exit_code} "
-                f"uptime={time.time() - info.start_time:.0f}s "
-                f"output_bytes={info.total_output_bytes}\n"
-                + ("".join(lines) or "(no output)")
-            )
+    async def _poll_remote(
+        self, info: ProcessInfo, wait_seconds: float, *, offset: int | None = None,
+        limit: int = OUTPUT_PAGE_DEFAULT, max_chars: int = 12000,
+    ) -> str:
+        lease = info.remote_lease or info.output_lease
+        remote_exec = self._remote_exec
+        if lease is None or info.output_revoked or remote_exec is None:
+            return "Error: remote process output lease is unavailable or revoked."
         deadline = max(0, min(float(wait_seconds), MAX_POLL_WAIT_SECONDS))
         command = self._remote_controller_command(
-            info, "status", str(info.remote_cursor), deadline
+            info, "status", json.dumps({"offset": offset or 0, "limit": limit, "tail": offset is None}), deadline
         )
         try:
-            code, output = await self._remote_call(info, command, int(deadline) + 15)
+            # Only this fixed, identity-bound status operation uses the output lease.
+            code, output = await lease.run(
+                lambda: remote_exec(lease.target, command, int(deadline) + 15)
+            )
         except Exception as exc:
             return (
                 f"[PID {info.pid}] status=unknown outcome_unknown=true\n"
@@ -1717,31 +2057,38 @@ class ProcessRegistry:
             detail = safe_error(reply.get("error", "") if reply else output)
             return f"[PID {info.pid}] status=unknown outcome_unknown=true\n{detail}"
         try:
-            text = base64.b64decode(reply.get("output", ""), validate=True).decode(
-                "utf-8", "replace"
-            )
+            data = base64.b64decode(reply.get("output", ""), validate=True)
         except (ValueError, TypeError):
             info.transport_unknown = True
             return f"[PID {info.pid}] status=unknown outcome_unknown=true\ninvalid reply"
         info.remote_cursor = int(reply.get("cursor", info.remote_cursor))
-        info.total_output_bytes = int(reply.get("size", info.remote_cursor))
-        if text:
-            info.output_buffer.extend(text.splitlines(keepends=True))
+        info.retained_bytes = int(reply.get("size", info.remote_cursor))
+        info.total_output_bytes = int(reply.get("emitted", info.retained_bytes))
         if reply.get("status") == "exited":
             exit_record = reply.get("exit") or {}
             info.exit_code = int(exit_record.get("exit_code", 1))
             if info.status != "killed":
                 info.status = "completed" if info.exit_code == 0 else "failed"
-            if info.remote_lease is not None:
-                info.remote_lease.release()
-                info.remote_lease = None
-        elapsed = time.time() - info.start_time
-        return (
-            f"[PID {info.pid}] status={info.status}"
-            + (f" exit_code={info.exit_code}" if info.exit_code is not None else "")
-            + f" uptime={elapsed:.0f}s output_bytes={info.remote_cursor}\n"
-            + (text or "(no new output)")
-        )
+            info.finished_at = info.finished_at or float(exit_record.get("finished_at", time.time()))
+            self._retire_execution_lease(info)
+        self._persist_output(info)
+        if info.finished_at is not None and time.time() >= info.finished_at + OUTPUT_RETENTION_SECONDS:
+            self._expire_output(info)
+            return "Error: process output retention expired (24 hours after exit)."
+        if offset is not None and offset > info.retained_bytes:
+            return "Error: offset exceeds retained output."
+        start = int(reply.get("start", info.remote_cursor - len(data)))
+        if offset is None:
+            recent = b"".join(data.splitlines(keepends=True)[-50:])
+            start += len(data) - len(recent)
+            data = recent
+        return self._output_page(info, data, start, limit, max_chars, preview=offset is None)
+
+    def _retire_execution_lease(self, info: ProcessInfo) -> None:
+        if info.remote_lease is not None:
+            info.output_lease = info.remote_lease
+            info.remote_lease = None
+        self._schedule_output_expiry(info)
 
     async def _write_remote(self, info: ProcessInfo, text: str) -> str:
         encoded = base64.b64encode(text.encode("utf-8")).decode("ascii")
@@ -1781,18 +2128,21 @@ class ProcessRegistry:
                 f"outcome_unknown=true: {detail}"
             )
         if reply.get("already_exited"):
+            await self._poll_remote(info, 0)
             return f"Process {info.pid} already exited; poll to collect its outcome."
         info.status = "killed"
         exit_record = reply.get("exit") or {}
         info.exit_code = exit_record.get("exit_code")
-        if info.remote_lease is not None:
-            info.remote_lease.release()
-            info.remote_lease = None
+        info.finished_at = info.finished_at or float(exit_record.get("finished_at", time.time()))
+        self._retire_execution_lease(info)
+        self._persist_output(info)
         return f"Process {info.pid} killed."
 
     async def force_revoke_host(self, alias: str) -> dict[str, int]:
         attempted = unknown = killed = 0
-        for info in list(self._processes.values()):
+        infos = {info.generation: info for info in self._processes.values()}
+        infos.update(self._retained_generations)
+        for info in infos.values():
             if info.remote and info.host == alias and info.status == "running":
                 attempted += 1
                 result = await self._kill_remote(info)
@@ -1800,6 +2150,8 @@ class ProcessRegistry:
                     killed += 1
                 else:
                     unknown += 1
+            if info.host == alias or info.host_alias == alias:
+                self._expire_output(info)
         return {"attempted": attempted, "killed": killed, "unknown": unknown}
 
     async def shutdown(self) -> int:
@@ -1884,7 +2236,7 @@ class ProcessRegistry:
         return killed
 
     def cleanup(self) -> int:
-        """Remove dead processes older than 1 hour. Returns count removed.
+        """Remove terminal output after its explicit 24-hour retention period.
 
         NEVER cancels lifecycle tasks (PR #244 round-2 blocker #1): the
         exit watcher may be mid-group-reap, and cancellation propagates
@@ -1899,14 +2251,19 @@ class ProcessRegistry:
             pid
             for pid, info in self._processes.items()
             if info.status != "running"
-            and (now - info.start_time) > MAX_LIFETIME_SECONDS
+            and info.finished_at is not None
+            and now >= info.finished_at + OUTPUT_RETENTION_SECONDS
             and all(
                 t is None or t.done()
                 for t in (info._reader_task, info._exit_task)
             )
         ]
         for pid in to_remove:
-            self._processes.pop(pid)
+            self._expire_output(self._processes.pop(pid))
+        for generation, info in list(self._retained_generations.items()):
+            if info.finished_at is not None and now >= info.finished_at + OUTPUT_RETENTION_SECONDS:
+                self._expire_output(info)
+                self._retained_generations.pop(generation)
         # Adopted orphans die as zombies (nothing else will wait on them);
         # sweep them here so a long-running process cannot accumulate.
         reap_adopted_zombies(self._adopted_pids)
@@ -1978,6 +2335,26 @@ class ProcessRegistry:
                 if not chunk:
                     break
                 info.total_output_bytes += len(chunk)
+                info.output_tail = (info.output_tail + chunk)[-12000:]
+                if info.capture_error is None and info.retained_bytes < OUTPUT_CAPTURE_BYTES:
+                    try:
+                        if not self._spool_quota_available():
+                            raise OSError("process retention quota exhausted")
+                        if info.spool is None:
+                            if self._retention_dir is None:
+                                info.spool = tempfile.TemporaryFile(mode="w+b")
+                            else:
+                                path = self._retention_dir / (info.generation + ".out")
+                                fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
+                                info.spool = os.fdopen(fd, "w+b")
+                        retained = chunk[:OUTPUT_CAPTURE_BYTES - info.retained_bytes]
+                        info.spool.seek(info.retained_bytes)
+                        info.spool.write(retained)
+                        info.retained_bytes += len(retained)
+                        info.spool.flush()
+                        self._persist_output(info)
+                    except OSError:
+                        info.capture_error = "process spool write failed"
                 pending += chunk
                 # Display buffering: split on both \n and \r so progress
                 # bars render as lines; keep the unterminated tail bounded.
@@ -2001,6 +2378,16 @@ class ProcessRegistry:
             pass
         if pending:
             info.output_buffer.append(pending.decode("utf-8", errors="replace") + "\n")
+        if info.spool is not None:
+            info.spool.seek(0)
+            snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+            snapshot, _ = _utf8_boundary_split(snapshot)
+            info.spool.seek(0)
+            info.spool.write(snapshot)
+            info.spool.truncate()
+            info.spool.flush()
+            info.retained_bytes = len(snapshot)
+        self._persist_output(info)
 
     async def _watch_exit(self, info: ProcessInfo) -> None:
         """Publish terminal state at LEADER exit, then reap the group.
@@ -2017,8 +2404,11 @@ class ProcessRegistry:
         try:
             await _wait_leader_exit(info.process)
             info.exit_code = info.process.returncode
+            info.finished_at = time.time()
             if info.status == "running":
                 info.status = "completed" if info.exit_code == 0 else "failed"
+            self._persist_output(info)
+            self._schedule_output_expiry(info)
         except Exception:
             if info.status == "running":
                 info.status = "failed"

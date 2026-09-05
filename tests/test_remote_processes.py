@@ -230,8 +230,9 @@ async def test_remote_poll_running_then_exited_updates_cursor_output_and_lease()
     assert "status=completed exit_code=0" in exited
     assert "two\n" in exited
     assert registry._processes[-1].status == "completed"
-    assert lease.release_count == 1
+    assert lease.release_count == 0
     assert registry._processes[-1].remote_lease is None
+    assert registry._processes[-1].output_lease is lease
 
 
 @pytest.mark.asyncio
@@ -273,8 +274,8 @@ async def test_remote_poll_transport_loss_and_cached_terminal_result():
     terminal.total_output_bytes = 6
     registry._processes[-2] = terminal
     response = await registry.poll(-2)
-    assert "status=failed exit_code=19" in response
-    assert response.endswith("final\n")
+    assert "lease is unavailable or revoked" in response
+    assert "final" not in response
 
 
 @pytest.mark.asyncio
@@ -315,7 +316,9 @@ async def test_remote_kill_success_failure_and_transport_loss():
     assert await registry.kill(-1) == "Process -1 killed."
     assert registry._processes[-1].status == "killed"
     assert registry._processes[-1].exit_code is None  # acknowledgement supplied no exit code
-    assert lease.release_count == 1
+    assert lease.release_count == 0
+    assert registry._processes[-1].remote_lease is None
+    assert registry._processes[-1].output_lease is lease
 
     async def failed(_target, _command, _timeout):
         return 9, json.dumps({"ok": False, "error": "still alive"})
@@ -368,6 +371,7 @@ async def test_remote_shutdown_kills_running_jobs_and_cleanup_removes_old_termin
 
     old = _remote_info(None, pid=-2, status="completed")
     old.start_time -= MAX_LIFETIME_SECONDS + 1
+    old.finished_at = time.time() - 86401
     fresh = _remote_info(None, pid=-3, status="failed")
     registry._processes[-2] = old
     registry._processes[-3] = fresh

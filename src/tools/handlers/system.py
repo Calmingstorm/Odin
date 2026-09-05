@@ -238,6 +238,24 @@ class SystemTools(HandlerBase):
         action = inp.get("action", "list")
         registry = self._process_registry()
 
+        def authorized(info) -> bool:
+            alias = info.host_alias or info.host
+            target = self._host_registry.get(alias, targetable_only=True)
+            return (
+                info.owner_id == self._current_user_id
+                and bool(self._resolve_host(alias))
+                and (not info.host_identity or (
+                    target is not None and target.runtime_key == info.host_identity
+                ))
+            )
+
+        if action in {"poll", "write", "kill"} and inp.get("pid") is not None:
+            info = registry.output_info(
+                int(inp["pid"]), inp.get("cursor") if action == "poll" else None,
+            )
+            if info is not None and not authorized(info):
+                return "Error: process access denied.", 1
+
         if action == "start":
             command = inp.get("command")
             host = inp.get("host")
@@ -252,17 +270,25 @@ class SystemTools(HandlerBase):
             resolved = self._resolve_host(host)
             if not resolved:
                 return f"Unknown or disallowed host: {host}", 1
+            target = self._host_registry.get(host, targetable_only=True)
+            host_identity = target.runtime_key if target is not None else ""
             # Periodic cleanup
             registry.cleanup()
             from ..ssh import is_local_address
 
             if is_local_address(resolved[0]):
-                result = await registry.start(resolved[0], command)
+                result = await registry.start(
+                    resolved[0], command, owner_id=self._current_user_id, host_alias=host,
+                    host_identity=host_identity,
+                )
             else:
                 lease = self._acquire_host(host)
                 if lease is None:
                     return f"Unknown or disallowed host: {host}", 1
-                result = await registry.start_remote(lease, command)
+                result = await registry.start_remote(
+                    lease, command, owner_id=self._current_user_id, host_alias=host,
+                    host_identity=host_identity,
+                )
             if result.startswith(
                 ("Cannot start", "Failed to start", "Error:")
             ):
@@ -290,8 +316,27 @@ class SystemTools(HandlerBase):
                     f"{MAX_POLL_WAIT_SECONDS}, got {wait_raw!r}.",
                     1,
                 )
-            result = await registry.poll(int(pid), wait_seconds=float(wait_raw))
-            if result.startswith("No process with PID"):
+            from ..output_delivery import get_delivery_budget
+
+            info = registry.output_info(int(pid), inp.get("cursor"))
+            if info is not None and info.remote and info.restored:
+                lease = self._acquire_host(info.host_alias or info.host)
+                if lease is None or not authorized(info):
+                    if lease is not None:
+                        lease.release()
+                    return "Error: process output access denied.", 1
+                if info.output_lease is not None:
+                    info.output_lease.release()
+                info.output_lease = lease
+            result = await registry.poll(
+                int(pid), wait_seconds=float(wait_raw), cursor=inp.get("cursor"),
+                offset=inp.get("offset"), limit=inp.get("limit", 4000),
+                max_chars=get_delivery_budget(self.config),
+            )
+            info = registry.output_info(int(pid), inp.get("cursor"))
+            if info is not None and not authorized(info):
+                return "Error: process access denied.", 1
+            if result.startswith(("No process with PID", "Error:")):
                 return result, 1
             return result, 0
 
@@ -328,6 +373,6 @@ class SystemTools(HandlerBase):
             return result, 0
 
         elif action == "list":
-            return registry.list_all(), 0
+            return registry.list_all(authorized=authorized), 0
 
         return f"Unknown action: {action}", 1
