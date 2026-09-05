@@ -547,17 +547,10 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
     @routes.get("/api/auth/session")
     async def auth_session(request: web.Request) -> web.Response:
         sm = request.app.get("session_manager")
-        auth_header = request.headers.get("Authorization", "")
-        is_authed = False
-        if auth_header.startswith("Bearer "):
-            token = auth_header[7:]
-            import hmac as _hmac
-            api_token = request.app.get("api_token", "")
-            if api_token and _hmac.compare_digest(token, api_token):
-                is_authed = True
-            elif sm and sm.validate(token):
-                is_authed = True
         identity = getattr(request, "_api_identity", None)
+        # Middleware owns authentication for every supported carrier. Anonymous
+        # development access is not an authenticated credential.
+        is_authed = identity is not None
         user_id = identity.user_id if identity else "web-user"
         timeout = sm.timeout_seconds if sm else 0
         return web.json_response({

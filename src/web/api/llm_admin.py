@@ -205,6 +205,7 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
     async def llm_status(_request: web.Request) -> web.Response:
         provider_cfg = getattr(bot.config, "llm_provider", None)
         active = provider_cfg.active_provider if provider_cfg else "codex"
+        serving = bot.llm_gateway.capture_serving_identity()
 
         codex_configured = bot.llm_gateway.codex_client is not None
         ollama_configured = bot.llm_gateway.ollama_client is not None
@@ -224,6 +225,8 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
 
         result = {
             "active_provider": active,
+            "configured_provider": active,
+            "serving_provider": serving.provider if serving.client is not None else None,
             "codex": {
                 "configured": codex_configured,
                 "enabled": bot.config.openai_codex.enabled,
@@ -299,10 +302,10 @@ def register_llm_provider(routes: web.RouteTableDef, bot) -> None:
             "auxiliary": _auxiliary_status(bot),
         }
 
-        client = bot.llm_gateway.active_client
+        client = serving.client
         if client:
-            result["active_model"] = getattr(client, "model", "unknown")
-            result["active_provider_name"] = getattr(client, "provider_name", active)
+            result["active_model"] = serving.model
+            result["active_provider_name"] = serving.provider
 
         return web.json_response(result)
 

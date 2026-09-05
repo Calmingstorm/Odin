@@ -44,7 +44,7 @@ export default {
 
         <!-- ==================== Active Provider ==================== -->
         <div class="hm-card">
-          <h2 class="text-sm font-semibold text-gray-300 mb-3">Active Provider</h2>
+          <h2 class="text-sm font-semibold text-gray-300 mb-3">Configured Provider</h2>
           <div v-if="llmStatus" class="provider-choice-list">
             <div class="provider-choice">
               <label class="provider-choice-label">
@@ -59,7 +59,7 @@ export default {
                 <span v-else-if="llmStatus.codex.configured" class="text-xs text-gray-500">
                   {{ llmStatus.codex.model }}
                 </span>
-                <span v-if="llmStatus.active_provider === 'codex'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
+                <span v-if="llmStatus.serving_provider === 'codex'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
               </label>
             </div>
             <div class="provider-choice">
@@ -75,7 +75,7 @@ export default {
                 <span v-else-if="llmStatus.ollama.configured" class="text-xs text-gray-500">
                   {{ llmStatus.ollama.model }}
                 </span>
-                <span v-if="llmStatus.active_provider === 'ollama'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
+                <span v-if="llmStatus.serving_provider === 'ollama'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
               </label>
             </div>
             <div class="provider-choice">
@@ -91,7 +91,7 @@ export default {
                 <span v-else-if="llmStatus.kimi.configured" class="text-xs text-gray-500">
                   {{ llmStatus.kimi.model }}
                 </span>
-                <span v-if="llmStatus.active_provider === 'kimi'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">active</span>
+                <span v-if="llmStatus.serving_provider === 'kimi'" class="text-xs px-1.5 py-0.5 rounded bg-green-900 text-green-300">serving</span>
               </label>
             </div>
             <div v-if="llmStatus.active_model" class="mt-2">

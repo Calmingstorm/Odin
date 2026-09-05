@@ -55,6 +55,12 @@ def _bot():
     # Real gateways default this to None; without it the MagicMock
     # auto-attr makes _auxiliary_status read a non-serializable mock.
     bot.llm_gateway.auxiliary_llm_client = None
+    # Existing route tests control active_client explicitly. Capture a concrete
+    # snapshot; never let MagicMock manufacture JSON status fields.
+    bot.llm_gateway.capture_serving_identity.side_effect = lambda: SimpleNamespace(
+        provider="codex", client=bot.llm_gateway.active_client,
+        model=getattr(bot.llm_gateway.active_client, "model", None),
+    )
     return bot
 
 

@@ -118,7 +118,7 @@ export default {
           <button @click="runFtsSearch" class="btn btn-primary text-xs" :disabled="ftsSearching || !ftsQuery.trim()">
             {{ ftsSearching ? 'Searching...' : 'Search' }}
           </button>
-          <button v-if="ftsResults !== null" @click="clearFtsSearch" class="btn btn-ghost text-xs">
+          <button v-if="ftsResults !== null || ftsError || ftsSearching" @click="clearFtsSearch" class="btn btn-ghost text-xs">
             Clear
           </button>
         </div>
@@ -126,8 +126,12 @@ export default {
         <div v-if="ftsSearching" class="mt-3 flex items-center gap-2 text-gray-400 text-sm">
           <div class="spinner" style="width:14px;height:14px;border-width:2px;"></div> Searching...
         </div>
-        <div v-else-if="ftsResults !== null" class="mt-3">
-          <div v-if="ftsResults.length === 0" class="text-gray-500 text-sm">No results found</div>
+        <div v-if="ftsError" class="mt-3 text-red-400 text-sm" role="alert">
+          {{ ftsError }} <button @click="runFtsSearch" class="btn btn-ghost text-xs">Retry</button>
+        </div>
+        <div v-if="!ftsSearching && ftsResults !== null" class="mt-3">
+          <div v-if="ftsStale" class="text-amber-400 text-sm">Previous results — not current for these filters.</div>
+          <div v-if="ftsResults.length === 0 && !ftsStale && !ftsError" class="text-gray-500 text-sm">No results found</div>
           <div v-else>
             <div class="text-xs text-gray-500 mb-2">{{ ftsResults.length }} result{{ ftsResults.length !== 1 ? 's' : '' }}</div>
             <div class="space-y-2 max-h-96 overflow-y-auto pr-1" style="scrollbar-gutter: stable;">
@@ -393,6 +397,15 @@ export default {
     const ftsUserId = ref('');
     const ftsResults = ref(null);
     const ftsSearching = ref(false);
+    const ftsError = ref('');
+    const ftsStale = ref(false);
+    let ftsRevision = 0;
+    watch([ftsQuery, ftsChannelId, ftsUserId], () => {
+      ftsRevision++;
+      ftsSearching.value = false;
+      ftsError.value = '';
+      ftsStale.value = ftsResults.value !== null;
+    }, { flush: 'sync' });
 
     // Load custom presets from localStorage
     function loadCustomPresets() {
@@ -607,24 +620,35 @@ export default {
     async function runFtsSearch() {
       const q = ftsQuery.value.trim();
       if (!q) return;
+      const revision = ++ftsRevision;
       ftsSearching.value = true;
+      ftsError.value = '';
+      ftsStale.value = ftsResults.value !== null;
       try {
         let url = `/api/sessions/search?q=${encodeURIComponent(q)}&limit=50`;
         if (ftsChannelId.value.trim()) url += `&channel_id=${encodeURIComponent(ftsChannelId.value.trim())}`;
         if (ftsUserId.value.trim()) url += `&user_id=${encodeURIComponent(ftsUserId.value.trim())}`;
         const data = await api.get(url);
+        if (revision !== ftsRevision) return;
         ftsResults.value = data.results || [];
+        ftsStale.value = false;
       } catch (e) {
-        ftsResults.value = [];
+        if (revision !== ftsRevision) return;
+        ftsError.value = e.message || 'Search failed. Please retry.';
+      } finally {
+        if (revision === ftsRevision) ftsSearching.value = false;
       }
-      ftsSearching.value = false;
     }
 
     function clearFtsSearch() {
+      ftsRevision++;
       ftsQuery.value = '';
       ftsChannelId.value = '';
       ftsUserId.value = '';
       ftsResults.value = null;
+      ftsError.value = '';
+      ftsStale.value = false;
+      ftsSearching.value = false;
     }
 
     function highlightSnippet(text) {
@@ -871,7 +895,7 @@ export default {
       threadView, threads, collapsedThreads,
       // FTS search
       ftsQuery, ftsChannelId, ftsUserId,
-      ftsResults, ftsSearching,
+      ftsResults, ftsSearching, ftsError, ftsStale,
       // Methods
       formatAge, formatTimestamp, formatFullTimestamp,
       messageClass, threadMsgClass, roleBadge, roleDotClass, roleLabelClass,

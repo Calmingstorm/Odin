@@ -333,6 +333,17 @@ def _make_auth_middleware(
                 request._session_managed = True
                 session_identity = session_manager.get_identity(bearer_value)
                 if session_identity is not None:
+                    # Token stores publish detached identities. A browser
+                    # session must not retain yesterday's administrative tier.
+                    user_id = getattr(session_identity, "user_id", None)
+                    current = tm.get(user_id) if tm and user_id else None
+                    if current is None:
+                        current = next((
+                            entry for entry in getattr(web_config, "api_tokens", ())
+                            if entry.user_id == user_id
+                        ), None)
+                    if current is not None:
+                        session_identity = current
                     request._api_identity = session_identity
                 return await handler(request)
 

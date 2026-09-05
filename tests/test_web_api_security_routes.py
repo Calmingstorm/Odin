@@ -368,14 +368,17 @@ class TestAuthRoutes:
     async def test_session_check_unauthenticated_and_via_session(self, tmp_path):
         bot, sm = self._bot_with_sessions(tmp_path)
         async with TestClient(TestServer(self._app_with_sm(bot, sm))) as c:
-            # No app-level api_token → falls to sm.validate (mocked True)
+            # The fixture middleware supplies an authoritative admin identity.
             body = await (await c.get(
                 "/api/auth/session",
                 headers={"Authorization": "Bearer some-session"})).json()
             assert body["authenticated"] is True
-            # No auth header at all → unauthenticated
+            # A handler must not reinterpret the carrier after middleware.
             body2 = await (await c.get("/api/auth/session")).json()
-            assert body2["authenticated"] is False
+            assert body2["authenticated"] is True
+        async with TestClient(TestServer(self._app_with_sm(bot, sm, identity=None))) as c:
+            body = await (await c.get("/api/auth/session")).json()
+            assert body["authenticated"] is False
 
     @pytest.mark.asyncio
     async def test_login_resolves_dynamic_identity_path(self, tmp_path):
