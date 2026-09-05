@@ -1099,6 +1099,7 @@ class CodexChatClient:
         cached_tokens: int | None = None
         cache_write_tokens: int | None = None
         incomplete = False
+        terminal_received = False
 
         # Track in-progress function calls by output_index
         pending_calls: dict[int, dict] = {}  # {index: {"call_id": ..., "name": ..., "args": ""}}
@@ -1210,6 +1211,7 @@ class CodexChatClient:
             # Incomplete (length-capped / filtered): keep the partial output
             # but mark it so callers can tell it isn't a normal completion.
             elif event_type == "response.incomplete":
+                terminal_received = True
                 incomplete = True
                 reason = ((event.get("response") or {}).get("incomplete_details")
                     or {}).get("reason") or "unknown"
@@ -1220,6 +1222,7 @@ class CodexChatClient:
 
             # Final response object — fallback
             elif event_type == "response.completed":
+                terminal_received = True
                 response_obj = event.get("response", {})
                 # Server-authoritative accepted input from the usage echo —
                 # strictly parsed; the client estimate is a separate field
@@ -1255,15 +1258,26 @@ class CodexChatClient:
                                 parse_error=parse_error,
                             ))
 
+        if not terminal_received:
+            # Argument/item completion and [DONE] are not response acceptance.
+            # Nothing has escaped this reader or executed; the existing transport
+            # recovery can retry this generation without replaying prior tools.
+            raise CodexStreamError(
+                "Unexpected stream EOF without response terminal "
+                f"(partial_chars={sum(map(len, text_parts))}, calls={len(tool_calls)})",
+                error_code="unexpected_eof",
+            )
         text = "".join(text_parts)
         if not text and not tool_calls:
             log.warning("Codex tool stream empty (events: %s, pending: %s)",
                         event_types_seen, list(pending_calls.keys()))
 
-        if tool_calls:
-            stop_reason = "tool_use"
-        elif incomplete:
+        if incomplete:
             stop_reason = "incomplete"
+            # Completed arguments do not override response-level settlement.
+            tool_calls = []
+        elif tool_calls:
+            stop_reason = "tool_use"
         else:
             stop_reason = "end_turn"
         return LLMResponse(
@@ -1279,6 +1293,7 @@ class CodexChatClient:
     async def _read_stream(self, resp: aiohttp.ClientResponse) -> str:
         """Read SSE stream and extract text content."""
         text_parts = []
+        terminal_received = False
 
         async for raw_line in resp.content:
             line = raw_line.decode("utf-8", errors="replace").strip()
@@ -1318,6 +1333,7 @@ class CodexChatClient:
                 raise exc
 
             elif event_type == "response.incomplete":
+                terminal_received = True
                 reason = ((event.get("response") or {}).get("incomplete_details")
                     or {}).get("reason") or "unknown"
                 log.warning(
@@ -1327,6 +1343,7 @@ class CodexChatClient:
 
             # response.completed — final response object
             elif event_type == "response.completed":
+                terminal_received = True
                 response = event.get("response", {})
                 output = response.get("output", [])
                 for item in output:
@@ -1338,6 +1355,12 @@ class CodexChatClient:
                                 if not text_parts:
                                     text_parts.append(text)
 
+        if not terminal_received:
+            raise CodexStreamError(
+                "Unexpected stream EOF without response terminal "
+                f"(partial_chars={sum(map(len, text_parts))})",
+                error_code="unexpected_eof",
+            )
         if not text_parts:
             log.warning("Codex stream returned 200 but produced no text content")
             return ""

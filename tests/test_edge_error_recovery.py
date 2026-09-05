@@ -152,6 +152,7 @@ def _wire(monkeypatch, client, session):
 
 TEXT_OK_SSE = [
     'data: {"type": "response.output_text.delta", "delta": "hello"}\n',
+    'data: {"type": "response.completed", "response": {}}\n',
     "data: [DONE]\n",
 ]
 
