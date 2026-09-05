@@ -15,8 +15,10 @@ import aiohttp
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
+from .client_lifecycle import leased_call
 from .errors import LLMRateLimitError, LLMRequestError, LLMTransportError
 from .provider import LLMProvider
+from .tool_history import parse_tool_arguments
 from .types import LLMResponse, ToolCall
 
 log = get_logger("kimi")
@@ -214,6 +216,8 @@ class KimiClient(LLMProvider):
 
     async def _request_with_retry(self, body: dict) -> dict:
         """Send a request to Kimi with retry logic."""
+        from ..observability.diagnostics import safe_error
+
         self.breaker.check()
         session = await self._get_session()
         self._total_requests += 1
@@ -228,7 +232,7 @@ class KimiClient(LLMProvider):
                         self.breaker.record_success()
                         return data
 
-                    text = await resp.text()
+                    text = safe_error(await resp.text())
 
                     if resp.status == 429:
                         if attempt >= self.max_retries:
@@ -240,7 +244,7 @@ class KimiClient(LLMProvider):
                                 hdr_delay = None
                             raise LLMRateLimitError(
                                 f"Kimi rate limited after {self.max_retries + 1} "
-                                f"attempts: {text[:300]}",
+                                f"attempts: {text}",
                                 provider="kimi",
                                 model=self.model,
                                 retry_after=hdr_delay,
@@ -266,7 +270,7 @@ class KimiClient(LLMProvider):
                         continue
 
                     if resp.status in (500, 502, 503, 504) and attempt < self.max_retries:
-                        last_error = RuntimeError(f"Kimi {resp.status}: {text[:300]}")
+                        last_error = RuntimeError(f"Kimi {resp.status}: {text}")
                         delay = compute_backoff(
                             attempt,
                             self.retry_base_delay,
@@ -277,14 +281,15 @@ class KimiClient(LLMProvider):
                         await asyncio.sleep(delay)
                         continue
 
-                    self.breaker.record_failure()
                     exc_cls = (
                         LLMTransportError
                         if resp.status in (500, 502, 503, 504)
                         else LLMRequestError
                     )
+                    if exc_cls is LLMTransportError:
+                        self.breaker.record_failure()
                     raise exc_cls(
-                        f"Kimi {resp.status}: {text[:500]}",
+                        f"Kimi {resp.status}: {text}",
                         provider="kimi",
                         model=self.model,
                     )
@@ -294,18 +299,19 @@ class KimiClient(LLMProvider):
                 if attempt < self.max_retries:
                     delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                     log.warning("Kimi connection error (attempt %d/%d): %s, retrying in %.1fs",
-                                attempt + 1, self.max_retries + 1, e, delay)
+                                attempt + 1, self.max_retries + 1, safe_error(e), delay)
                     await asyncio.sleep(delay)
                     continue
                 raise LLMTransportError(
-                    f"Kimi connection error after {self.max_retries + 1} attempts: {e}",
+                    f"Kimi connection error after {self.max_retries + 1} attempts: {safe_error(e)}",
                     provider="kimi",
                     model=self.model,
-                ) from e
+                ) from None
 
         raise RuntimeError(f"Kimi request failed after {self.max_retries + 1} attempts: "
-                           f"{last_error}")
+                           f"{safe_error(last_error)}")
 
+    @leased_call
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
@@ -322,6 +328,7 @@ class KimiClient(LLMProvider):
             return ""
         return choices[0].get("message", {}).get("content", "") or ""
 
+    @leased_call
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
@@ -374,17 +381,12 @@ class KimiClient(LLMProvider):
         for tc in message.get("tool_calls", []) or []:
             fn = tc.get("function", {})
             args_raw = fn.get("arguments", "{}")
-            if isinstance(args_raw, str):
-                try:
-                    args = json.loads(args_raw)
-                except (json.JSONDecodeError, TypeError):
-                    args = {"raw": args_raw}
-            else:
-                args = args_raw
+            args, parse_error = parse_tool_arguments(args_raw)
             tool_calls.append(ToolCall(
                 id=tc.get("id", f"kimi_{uuid.uuid4().hex[:12]}"),
                 name=fn.get("name", ""),
                 input=args,
+                parse_error=parse_error,
             ))
 
         stop_reason = "tool_use" if finish_reason == "tool_calls" or tool_calls else "end_turn"
@@ -411,6 +413,7 @@ class KimiClient(LLMProvider):
             ),
         )
 
+    @leased_call
     async def health_check(self) -> dict:
         """Check if the Kimi API is reachable by listing models."""
         try:

@@ -9,6 +9,7 @@ import json
 from types import SimpleNamespace
 
 from src.discord.channel_logger import ChannelLogger
+from src.search.fts import FullTextIndex
 
 
 def _msg(cid="100", gid="1", content="hello world", author_id="7", name="alice",
@@ -23,10 +24,7 @@ def _msg(cid="100", gid="1", content="hello world", author_id="7", name="alice",
 
 
 def _fts(available=True):
-    fts = SimpleNamespace(available=available)
-    fts.clear_channel_logs = lambda: None
-    fts.index_channel_messages = lambda batch: len(batch)
-    return fts
+    return FullTextIndex(":memory:") if available else SimpleNamespace(available=False)
 
 
 class TestLogMessage:
@@ -79,13 +77,7 @@ class TestIndexToFts:
         cl = ChannelLogger(tmp_path)
         cl.log_message(_msg(content="one", ts=100.0))
         cl.log_message(_msg(content="two", ts=200.0))
-        indexed = []
         fts = _fts()
-
-        def _index(batch):
-            indexed.extend(batch)
-            return len(batch)
-        fts.index_channel_messages = _index
         assert cl.index_to_fts(fts) == 2
         # second pass: nothing newer than the recorded cutoff
         assert cl.index_to_fts(fts) == 0
@@ -99,8 +91,12 @@ class TestIndexToFts:
         for i in range(3):
             cl.log_message(_msg(content=f"m{i}", ts=100.0 + i))
         fts = _fts()
-        # capped at the batch limit for this cycle
+        # Upgrade consumes every batch atomically; steady-state retains its cap.
+        assert cl.index_to_fts(fts) == 3
+        for i in range(3, 6):
+            cl.log_message(_msg(content=f"m{i}", ts=100.0 + i))
         assert cl.index_to_fts(fts) == 2
+        assert cl.index_to_fts(fts) == 1
 
     def test_skips_bad_lines_and_missing_dir(self, tmp_path):
         cl = ChannelLogger(tmp_path / "gone")

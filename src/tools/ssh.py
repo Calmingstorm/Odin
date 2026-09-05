@@ -223,7 +223,9 @@ async def run_local_command(
     pre-2026-07-27 behaviour, kept only for internal callers that legitimately
     depend on the application directory.
     """
-    log.info("Local exec: %s", command)
+    from ..observability.diagnostics import command_display, safe_error
+
+    log.info("Local exec: %s", command_display(command))
 
     proc: asyncio.subprocess.Process | None = None
     try:
@@ -261,8 +263,8 @@ async def run_local_command(
             await terminate_process_tree(proc, owned_pgid=proc.pid)
         raise
     except Exception as e:
-        log.error("Local command failed: %s", e)
-        return 1, f"Local exec error: {e}"
+        log.error("Local command failed: %s", safe_error(e))
+        return 1, f"Local exec error: {safe_error(e)}"
 
 
 async def run_ssh_command(
@@ -314,7 +316,9 @@ async def run_ssh_command(
             command,
         ]
 
-    log.info("SSH to %s@%s: %s", ssh_user, host, command)
+    from ..observability.diagnostics import command_display, safe_error
+
+    log.info("SSH to %s@%s: %s", ssh_user, host, command_display(command))
     last_exit_code = 1
     last_output = ""
 
@@ -433,8 +437,8 @@ async def run_ssh_command(
             raise
 
         except Exception as e:
-            log.error("SSH command failed: %s", e)
-            return 1, f"SSH error: {e}"
+            log.error("SSH command failed: %s", safe_error(e))
+            return 1, f"SSH error: {safe_error(e)}"
         finally:
             if pool is not None and pool_acquired:
                 pool.release(host, ssh_user, target_id)

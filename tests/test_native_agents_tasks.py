@@ -180,6 +180,55 @@ class TestDelegateTask:
 # list_tasks / cancel_task
 # --------------------------------------------------------------------------- #
 class TestListCancelTasks:
+    @pytest.mark.parametrize("uid,cid,visible", [("7", 42, True), ("8", 42, False),
+                                               ("7", 43, False), ("admin", 43, True),
+                                               ("", 42, False), ("guest", 42, False)])
+    async def test_dispatch_scopes_tasks(self, tmp_path, uid, cid, visible):
+        from src.config.schema import PermissionsConfig
+        from src.discord.native_tools.registry import NativeToolDispatcher, register_native_handlers
+        from src.permissions.manager import PermissionManager
+        from src.tools.executor import ToolExecutor
+
+        permissions = PermissionManager(
+            PermissionsConfig(default_tier="user"), tmp_path / "rbac.json")
+        permissions.set_tier("admin", "admin")
+        permissions.set_tier("guest", "guest")
+        executor = MagicMock()
+        executor._permission_manager = permissions
+        executor.check_permission = lambda name, user: ToolExecutor.check_permission(
+            executor, name, user)
+        t = _tools(tool_executor=executor)
+        task = _task(desc="owner-private-output")
+        task.requester_id = "7"
+        task.channel = SimpleNamespace(id=42)
+        t._channel_state.background_tasks["T1"] = task
+        owners = {k: MagicMock() for k in (
+            "agents", "channel_ops", "media", "scheduling", "knowledge", "memory",
+            "skills", "permissions")}
+        owners["agents"] = t
+        dispatcher = NativeToolDispatcher(owners=owners, skill_manager=MagicMock(),
+                                          tool_catalog=MagicMock(), prompt_builder=MagicMock(),
+                                          channel_state=t._channel_state)
+        register_native_handlers(dispatcher)
+        denial = executor.check_permission("list_tasks", uid)
+        if uid == "guest":
+            assert denial
+            return
+        if not uid:
+            assert denial  # W1 ingress is fail-closed, handler remains scoped too.
+        else:
+            assert denial is None
+        async def dispatch(inp):
+            result, _ = await dispatcher.dispatch("list_tasks", inp, message=_message(cid),
+                                                  user_id=uid, skill_file_delivery="stage")
+            return result
+        overview = await dispatch({})
+        detail = await dispatch({"task_id": "T1"})
+        assert ("owner-private-output" in overview) is visible
+        assert ("owner-private-output" in detail) is visible
+        if not visible:
+            assert detail.replace("T1", "absent") == await dispatch({"task_id": "absent"})
+
     def test_list_empty(self):
         assert "No background tasks" in _tools()._handle_list_tasks()
 
@@ -187,7 +236,8 @@ class TestListCancelTasks:
         deps = _deps()
         r_ok = SimpleNamespace(status="ok", index=0, description="s", elapsed_ms=5, output="done")
         deps.channel_state.background_tasks = {"T1": _task(results=[r_ok])}
-        out = AgentTaskTools(deps)._handle_list_tasks()
+        deps.tool_executor._permission_manager.get_tier.return_value = "admin"
+        out = AgentTaskTools(deps)._handle_list_tasks(user_id="admin")
         assert "`T1`" in out and "1 ok" in out
 
     def test_list_detail_and_missing(self):
@@ -195,7 +245,8 @@ class TestListCancelTasks:
         r = SimpleNamespace(status="error", index=1, description="step", elapsed_ms=9, output="")
         deps.channel_state.background_tasks = {"T1": _task(results=[r])}
         t = AgentTaskTools(deps)
-        out = t._handle_list_tasks({"task_id": "T1"})
+        deps.tool_executor._permission_manager.get_tier.return_value = "admin"
+        out = t._handle_list_tasks({"task_id": "T1"}, user_id="admin")
         assert "job" in out and "(no output)" in out
         assert "No task found" in t._handle_list_tasks({"task_id": "ghost"})
 
@@ -204,7 +255,8 @@ class TestListCancelTasks:
         big = SimpleNamespace(status="ok", index=0, description="s",
                               elapsed_ms=1, output="x" * 4000)
         deps.channel_state.background_tasks = {"T1": _task(results=[big])}
-        out = AgentTaskTools(deps)._handle_list_tasks({"task_id": "T1"})
+        deps.tool_executor._permission_manager.get_tier.return_value = "admin"
+        out = AgentTaskTools(deps)._handle_list_tasks({"task_id": "T1"}, user_id="admin")
         assert "truncated" in out
 
     async def test_cancel(self):
@@ -868,28 +920,34 @@ class TestAgentHandlers:
         t._agent_manager.kill.return_value = "killed"
         assert t._handle_kill_agent({"agent_id": "a"}) == "killed"
 
-    def test_get_agent_results(self):
+    async def test_get_agent_results(self):
         t = _tools()
-        assert "'agent_id' is required" in t._handle_get_agent_results({})
+        t._tool_executor._permission_manager.get_tier.return_value = "admin"
+        assert "'agent_id' is required" in await t._handle_get_agent_results({})
         t._agent_manager.get_results.return_value = None
-        assert "not found" in t._handle_get_agent_results({"agent_id": "a"})
+        assert "not found" in await t._handle_get_agent_results(
+            {"agent_id": "a"}, user_id="admin")
         t._agent_manager.get_results.return_value = {
             "status": "running", "label": "w", "iteration_count": 2, "runtime_seconds": 5}
-        assert "still running" in t._handle_get_agent_results({"agent_id": "a"})
+        assert "still running" in await t._handle_get_agent_results(
+            {"agent_id": "a"}, user_id="admin")
         t._agent_manager.get_results.return_value = {
-            "status": "failed", "label": "w", "iteration_count": 4, "runtime_seconds": 9,
+            "id": "a", "status": "failed", "label": "w", "iteration_count": 4,
+            "runtime_seconds": 9,
             "tools_used": ["grep"], "result": "x" * 2000, "error": "boom"}
-        out = t._handle_get_agent_results({"agent_id": "a"})
-        assert "failed" in out and "Result:" in out and "Error: boom" in out
-        assert "..." in out  # long result truncated
+        out = await t._handle_get_agent_results({"agent_id": "a"}, user_id="admin")
+        assert "failed" in out and '"original_bytes": 2004' in out
+        assert '"truncated": true' in out
 
     async def test_wait_for_agents(self):
         t = _tools()
+        t._tool_executor._permission_manager.get_tier.return_value = "admin"
         assert "required" in await t._handle_wait_for_agents({})
         assert "must be a list" in await t._handle_wait_for_agents({"agent_ids": "notalist"})
         t._agent_manager.wait_for_agents = AsyncMock(return_value={
             "a1": {"status": "completed", "label": "w", "result": "x" * 1000}})
-        out = await t._handle_wait_for_agents({"agent_ids": ["a1"], "timeout": 10})
+        out = await t._handle_wait_for_agents(
+            {"agent_ids": ["a1"], "timeout": 10}, user_id="admin")
         assert "`a1`" in out and "..." in out  # long content truncated at 800
 
     async def test_wait_render_carries_iteration_count_not_runtime(self):
@@ -898,10 +956,12 @@ class TestAgentHandlers:
         progressing agent must not render identically to a hung one.
         Runtime stays excluded (it would make a hung agent immortal)."""
         t = _tools()
+        t._tool_executor._permission_manager.get_tier.return_value = "admin"
         t._agent_manager.wait_for_agents = AsyncMock(return_value={
             "a1": {"status": "running", "label": "w", "iteration_count": 7,
                    "runtime_seconds": 123.4, "result": ""}})
-        out = await t._handle_wait_for_agents({"agent_ids": ["a1"], "timeout": 10})
+        out = await t._handle_wait_for_agents(
+            {"agent_ids": ["a1"], "timeout": 10}, user_id="admin")
         assert "[iterations=7]" in out
         assert "123" not in out  # runtime never rendered
         # Progressing iterations change the render (and therefore the
@@ -909,7 +969,8 @@ class TestAgentHandlers:
         t._agent_manager.wait_for_agents = AsyncMock(return_value={
             "a1": {"status": "running", "label": "w", "iteration_count": 8,
                    "runtime_seconds": 200.0, "result": ""}})
-        out2 = await t._handle_wait_for_agents({"agent_ids": ["a1"], "timeout": 10})
+        out2 = await t._handle_wait_for_agents(
+            {"agent_ids": ["a1"], "timeout": 10}, user_id="admin")
         assert out2 != out and "[iterations=8]" in out2
 
     async def test_collect_agent_result_helper(self):

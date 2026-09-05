@@ -225,13 +225,15 @@ class TestReadStream:
         resp = _FakeResp([
             _sse({"type": "response.output_text.delta", "delta": "hel"}),
             _sse({"type": "response.output_text.delta", "delta": "lo"}),
+            _sse({"type": "response.completed", "response": {}}),
             "data: [DONE]",
         ])
         assert await _client()._read_stream(resp) == "hello"
 
     @pytest.mark.asyncio
     async def test_done_text_used_when_no_deltas(self):
-        resp = _FakeResp([_sse({"type": "response.output_text.done", "text": "final"})])
+        resp = _FakeResp([_sse({"type": "response.output_text.done", "text": "final"}),
+                          _sse({"type": "response.completed", "response": {}})])
         assert await _client()._read_stream(resp) == "final"
 
     @pytest.mark.asyncio
@@ -262,7 +264,9 @@ class TestReadStream:
 
     @pytest.mark.asyncio
     async def test_empty_stream_returns_empty(self):
-        assert await _client()._read_stream(_FakeResp([])) == ""
+        from src.llm.openai_codex import CodexStreamError
+        with pytest.raises(CodexStreamError, match="Unexpected stream EOF"):
+            await _client()._read_stream(_FakeResp([]))
 
 
 class TestReadToolStream:
@@ -276,6 +280,7 @@ class TestReadToolStream:
             _sse({"type": "response.function_call_arguments.delta",
                   "output_index": 0, "delta": '"x"}'}),
             _sse({"type": "response.function_call_arguments.done", "output_index": 0}),
+            _sse({"type": "response.completed", "response": {}}),
         ])
         out = await _client()._read_tool_stream(resp)
         assert out.stop_reason == "tool_use"
@@ -283,7 +288,8 @@ class TestReadToolStream:
 
     @pytest.mark.asyncio
     async def test_text_only_is_end_turn(self):
-        resp = _FakeResp([_sse({"type": "response.output_text.delta", "delta": "hi"})])
+        resp = _FakeResp([_sse({"type": "response.output_text.delta", "delta": "hi"}),
+                          _sse({"type": "response.completed", "response": {}})])
         out = await _client()._read_tool_stream(resp)
         assert out.text == "hi" and out.stop_reason == "end_turn"
 
@@ -295,6 +301,7 @@ class TestReadToolStream:
             _sse({"type": "response.function_call_arguments.delta",
                   "output_index": 0, "delta": "{not json"}),
             _sse({"type": "response.function_call_arguments.done", "output_index": 0}),
+            _sse({"type": "response.completed", "response": {}}),
         ])
         out = await _client()._read_tool_stream(resp)
         assert out.tool_calls[0].parse_error and "malformed" in out.tool_calls[0].parse_error
@@ -306,6 +313,7 @@ class TestReadToolStream:
                   "item": {"type": "function_call", "call_id": "c2", "name": "ls"}}),
             _sse({"type": "response.output_item.done", "output_index": 0,
                   "item": {"type": "function_call", "arguments": '{"path":"/"}'}}),
+            _sse({"type": "response.completed", "response": {}}),
         ])
         out = await _client()._read_tool_stream(resp)
         assert out.tool_calls[0].id == "c2" and out.tool_calls[0].input == {"path": "/"}

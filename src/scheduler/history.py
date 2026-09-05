@@ -5,7 +5,9 @@ Supports querying by schedule ID with pagination and optional pruning.
 """
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Coroutine
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
@@ -35,6 +37,7 @@ class ScheduleHistory:
         self._max_per_schedule = max_entries_per_schedule
         self._records_since_prune = 0
         self._auto_prune_interval = 100
+        self._lock = asyncio.Lock()
 
     async def record(
         self,
@@ -62,6 +65,26 @@ class ScheduleHistory:
             entry["retry_attempt"] = retry_attempt
 
         line = json.dumps(entry, default=str) + "\n"
+        async with self._lock:
+            await self._settle_io(self._append(line))
+        return entry
+
+    @staticmethod
+    async def _settle_io(operation: Coroutine[Any, Any, Any]) -> Any:
+        """Retain the history lock until all threaded I/O and close calls settle."""
+        worker = asyncio.create_task(operation)
+        cancelled = False
+        while not worker.done():
+            try:
+                await asyncio.shield(worker)
+            except asyncio.CancelledError:
+                cancelled = True
+        result = worker.result()
+        if cancelled:
+            raise asyncio.CancelledError
+        return result
+
+    async def _append(self, line: str) -> None:
         try:
             async with aiofiles.open(self.path, "a") as f:
                 await f.write(line)
@@ -71,9 +94,7 @@ class ScheduleHistory:
         self._records_since_prune += 1
         if self._records_since_prune >= self._auto_prune_interval:
             self._records_since_prune = 0
-            await self.prune()
-
-        return entry
+            await self._prune_locked()
 
     async def query(
         self,
@@ -150,6 +171,10 @@ class ScheduleHistory:
         }
 
     async def prune(self) -> int:
+        async with self._lock:
+            return await self._settle_io(self._prune_locked())
+
+    async def _prune_locked(self) -> int:
         """Compact history file, keeping only the most recent entries per schedule.
 
         Returns the number of entries removed.

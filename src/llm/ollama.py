@@ -15,9 +15,11 @@ import aiohttp
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
+from .client_lifecycle import leased_call
 from .cost_tracker import estimate_tokens
 from .errors import LLMRequestError, LLMTransportError
 from .provider import LLMProvider
+from .tool_history import parse_tool_arguments
 from .types import LLMResponse, ToolCall
 
 log = get_logger("ollama")
@@ -181,6 +183,8 @@ class OllamaClient(LLMProvider):
 
     async def _request_with_retry(self, body: dict) -> dict:
         """Send a request to Ollama with retry logic."""
+        from ..observability.diagnostics import safe_error
+
         self.breaker.check()
         session = await self._get_session()
         self._total_requests += 1
@@ -194,9 +198,9 @@ class OllamaClient(LLMProvider):
                         data = await resp.json()
                         self.breaker.record_success()
                         return data
-                    text = await resp.text()
+                    text = safe_error(await resp.text())
                     if resp.status in (500, 502, 503, 504) and attempt < self.max_retries:
-                        last_error = RuntimeError(f"Ollama {resp.status}: {text[:300]}")
+                        last_error = RuntimeError(f"Ollama {resp.status}: {text}")
                         delay = compute_backoff(
                             attempt,
                             self.retry_base_delay,
@@ -206,14 +210,15 @@ class OllamaClient(LLMProvider):
                                     resp.status, attempt + 1, self.max_retries + 1, delay)
                         await asyncio.sleep(delay)
                         continue
-                    self.breaker.record_failure()
                     exc_cls = (
                         LLMTransportError
                         if resp.status in (500, 502, 503, 504)
                         else LLMRequestError
                     )
+                    if exc_cls is LLMTransportError:
+                        self.breaker.record_failure()
                     raise exc_cls(
-                        f"Ollama {resp.status}: {text[:500]}",
+                        f"Ollama {resp.status}: {text}",
                         provider="ollama",
                         model=self.model,
                     )
@@ -223,18 +228,20 @@ class OllamaClient(LLMProvider):
                 if attempt < self.max_retries:
                     delay = compute_backoff(attempt, self.retry_base_delay, self.retry_max_delay)
                     log.warning("Ollama connection error (attempt %d/%d): %s, retrying in %.1fs",
-                                attempt + 1, self.max_retries + 1, e, delay)
+                                attempt + 1, self.max_retries + 1, safe_error(e), delay)
                     await asyncio.sleep(delay)
                     continue
                 raise LLMTransportError(
-                    f"Ollama connection error after {self.max_retries + 1} attempts: {e}",
+                    f"Ollama connection error after {self.max_retries + 1} attempts: "
+                    f"{safe_error(e)}",
                     provider="ollama",
                     model=self.model,
-                ) from e
+                ) from None
 
         raise RuntimeError(f"Ollama request failed after {self.max_retries + 1} attempts: "
-                           f"{last_error}")
+                           f"{safe_error(last_error)}")
 
+    @leased_call
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
@@ -250,6 +257,7 @@ class OllamaClient(LLMProvider):
         data = await self._request_with_retry(body)
         return data.get("message", {}).get("content", "")
 
+    @leased_call
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
@@ -285,15 +293,12 @@ class OllamaClient(LLMProvider):
         for tc in tool_calls_raw:
             fn = tc.get("function", {})
             args = fn.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, TypeError):
-                    args = {"raw": args}
+            args, parse_error = parse_tool_arguments(args)
             tool_calls.append(ToolCall(
-                id=f"ollama_{uuid.uuid4().hex[:12]}",
+                id=tc.get("id") or f"ollama_{uuid.uuid4().hex[:12]}",
                 name=fn.get("name", ""),
                 input=args,
+                parse_error=parse_error,
             ))
 
         stop_reason = "tool_use" if tool_calls else "end_turn"
@@ -329,6 +334,7 @@ class OllamaClient(LLMProvider):
             ),
         )
 
+    @leased_call
     async def health_check(self) -> dict:
         """Check if the Ollama instance is reachable and list available models."""
         try:

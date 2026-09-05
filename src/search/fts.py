@@ -7,11 +7,22 @@ from __future__ import annotations
 
 import sqlite3
 import threading
+import time
+from collections.abc import Iterable
+from dataclasses import dataclass
+from typing import Literal
 
+from ..credential_redaction import redact_credentials
 from ..odin_log import get_logger
 from .errors import SearchExecutionError, validate_search_query
 
 log = get_logger("search.fts")
+
+
+@dataclass(frozen=True)
+class ChannelIndexAck:
+    status: Literal["committed", "empty", "error"]
+    count: int = 0
 
 
 class FullTextIndex:
@@ -60,7 +71,27 @@ class FullTextIndex:
                     timestamp UNINDEXED,
                     tokenize='unicode61 remove_diacritics 2'
                 );
+                CREATE TABLE IF NOT EXISTS channel_log_identity (
+                    channel_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    fts_rowid INTEGER NOT NULL,
+                    PRIMARY KEY (channel_id, message_id)
+                );
+                CREATE INDEX IF NOT EXISTS channel_log_identity_fts_rowid
+                    ON channel_log_identity(fts_rowid);
+                CREATE TABLE IF NOT EXISTS channel_log_cursor (
+                    channel_id TEXT PRIMARY KEY,
+                    identity TEXT NOT NULL,
+                    position TEXT
+                );
             """)
+            # Old cursors contain a JSONL position (a UUID on new messages),
+            # not necessarily a Discord message identity. Keep those concepts
+            # separate so a healthy UUID cursor is not forever inconsistent.
+            if "position" not in {
+                row[1] for row in conn.execute("PRAGMA table_info(channel_log_cursor)")
+            }:
+                conn.execute("ALTER TABLE channel_log_cursor ADD COLUMN position TEXT")
             self._conn = conn
             log.info("FTS5 index initialized at %s", db_path)
         except Exception as e:
@@ -289,6 +320,8 @@ class FullTextIndex:
         try:
             with self._write_lock:
                 self._conn.execute("DELETE FROM channel_log_fts")
+                self._conn.execute("DELETE FROM channel_log_identity")
+                self._conn.execute("DELETE FROM channel_log_cursor")
                 self._conn.commit()
             return True
         except Exception as e:
@@ -296,39 +329,208 @@ class FullTextIndex:
             return False
 
     def index_channel_messages(self, messages: list[dict]) -> int:
-        """Batch-insert channel log messages into the FTS index.
+        """Compatibility count API; cursor owners must use the typed batch API."""
+        return self.index_channel_batch(messages).count
 
-        Each dict should have: content, author, channel_id, timestamp (float).
-        Returns the number of rows inserted.
+    def channel_cursor(self, channel_id: str) -> str | None:
+        if not self._conn:
+            raise SearchExecutionError("full-text search is unavailable")
+        with self._write_lock:
+            row = self._conn.execute(
+                "SELECT COALESCE(position, identity) FROM channel_log_cursor WHERE channel_id=?",
+                (channel_id,),
+            ).fetchone()
+            return row[0] if row else None
+
+    def channel_needs_reconciliation(self, channel_id: str) -> bool:
+        """Detect missing or inconsistent derived state without counting rows."""
+        if not self._conn:
+            raise SearchExecutionError("full-text search is unavailable")
+        with self._write_lock:
+            return self._channel_needs_reconciliation(channel_id)
+
+    def _channel_needs_reconciliation(self, channel_id: str) -> bool:
+        """Caller holds the connection lock; also rechecked before replacement."""
+        assert self._conn is not None
+        cursor = self._conn.execute(
+            "SELECT identity, position FROM channel_log_cursor WHERE channel_id=?",
+            (channel_id,),
+        ).fetchone()
+        if cursor is None:
+            return True
+        # Empty-content records advance the source position but create no FTS
+        # row. An empty anchor with an explicit position means none was indexed
+        # yet; otherwise the anchor must name a real indexed message.
+        if cursor[0] or cursor[1] is None:
+            if not self._conn.execute(
+                "SELECT 1 FROM channel_log_identity WHERE channel_id=? AND message_id=? LIMIT 1",
+                (channel_id, cursor[0]),
+            ).fetchone():
+                return True
+        if self._conn.execute(
+            "SELECT 1 FROM channel_log_fts AS f WHERE f.channel_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM channel_log_identity AS i "
+            "WHERE i.fts_rowid=f.rowid AND i.channel_id=f.channel_id) LIMIT 1",
+            (channel_id,),
+        ).fetchone():
+            return True
+        return self._conn.execute(
+            "SELECT 1 FROM channel_log_identity AS i WHERE i.channel_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM channel_log_fts AS f "
+            "WHERE f.rowid=i.fts_rowid AND f.channel_id=i.channel_id) LIMIT 1",
+            (channel_id,),
+        ).fetchone() is not None
+
+    def index_channel_batch(
+        self, messages: list[dict], *, channel_id: str | None = None,
+        cursor_identity: str | None = None,
+    ) -> ChannelIndexAck:
+        """Commit rows and consumed identity together, or acknowledge no progress."""
+        return self._commit_channel_batches(
+            [messages], channel_id=channel_id, cursor_identity=cursor_identity,
+        )
+
+    def reconcile_channel_batches(
+        self, channel_id: str, batches: Iterable[list[dict]], *, deadline: float,
+    ) -> ChannelIndexAck:
+        """Replace an inconsistent channel after every source batch is indexed.
+
+        Timeouts/errors roll back both the old rows and cursor. No intermediate
+        batch is visible or acknowledged, including through this connection's
+        public channel search API. Other database connections see the old WAL
+        snapshot until the complete replacement commits.
         """
-        if not self._conn or not messages:
-            return 0
+        return self._commit_channel_batches(
+            batches, channel_id=channel_id, reconcile=True, deadline=deadline,
+        )
+
+    def _commit_channel_batches(
+        self, batches: Iterable[list[dict]], *, channel_id: str | None,
+        cursor_identity: str | None = None, reconcile: bool = False,
+        deadline: float | None = None,
+    ) -> ChannelIndexAck:
+        if not self._conn:
+            return ChannelIndexAck("error")
         try:
-            rows = [
-                (
-                    m.get("content", ""),
-                    m.get("author", "Unknown"),
-                    str(m.get("channel_id", "")),
-                    str(m.get("ts", 0.0)),
-                )
-                for m in messages
-                if m.get("content")
-            ]
-            if not rows:
-                return 0
             with self._write_lock:
-                self._conn.executemany(
-                    "INSERT INTO channel_log_fts (content, author, channel_id, timestamp) "
-                    "VALUES (?, ?, ?, ?)",
-                    rows,
-                )
-                self._conn.commit()
-            return len(rows)
+                try:
+                    if deadline is not None:
+                        # Bound long SQLite statements as well as the source loop.
+                        self._conn.set_progress_handler(
+                            lambda: int(time.monotonic() >= deadline), 1000,
+                        )
+                    if reconcile and channel_id is not None:
+                        if not self._channel_needs_reconciliation(channel_id):
+                            return ChannelIndexAck("empty")  # another indexer won
+                    anchor = ""
+                    if not reconcile and channel_id is not None:
+                        previous = self._conn.execute(
+                            "SELECT identity FROM channel_log_cursor WHERE channel_id=?",
+                            (channel_id,),
+                        ).fetchone()
+                        if previous:
+                            anchor = previous[0]
+                    inserted = 0
+                    started = False
+                    for messages in batches:
+                        if not messages:
+                            continue
+                        if reconcile and not started:
+                            self._conn.execute(
+                                "DELETE FROM channel_log_fts WHERE channel_id=?", (channel_id,),
+                            )
+                            self._conn.execute(
+                                "DELETE FROM channel_log_identity WHERE channel_id=?",
+                                (channel_id,),
+                            )
+                            self._conn.execute(
+                                "DELETE FROM channel_log_cursor WHERE channel_id=?", (channel_id,),
+                            )
+                            started = True
+                        for message in messages:
+                            if deadline is not None and time.monotonic() >= deadline:
+                                raise TimeoutError("Channel reconciliation deadline")
+                            if not message.get("content"):
+                                continue
+                            row = (
+                                redact_credentials(message["content"]),
+                                redact_credentials(message.get("author", "Unknown")),
+                                str(message.get("channel_id", "")),
+                                str(message.get("ts", 0.0)),
+                            )
+                            message_id = str(message.get("message_id", "") or "")
+                            if message_id:
+                                if row[2] == channel_id:
+                                    anchor = message_id
+                                existing = self._conn.execute(
+                                    "SELECT fts_rowid FROM channel_log_identity "
+                                    "WHERE channel_id=? AND message_id=?", (row[2], message_id),
+                                ).fetchone()
+                                if existing:
+                                    continue
+                            cursor = self._conn.execute(
+                                "INSERT INTO channel_log_fts "
+                                "(content, author, channel_id, timestamp) VALUES (?, ?, ?, ?)", row,
+                            )
+                            inserted += 1
+                            if message_id:
+                                self._conn.execute(
+                                    "INSERT INTO channel_log_identity VALUES (?, ?, ?)",
+                                    (row[2], message_id, cursor.lastrowid),
+                                )
+                        if reconcile:
+                            cursor_identity = messages[-1]["log_identity"]
+                    if deadline is not None and time.monotonic() >= deadline:
+                        raise TimeoutError("Channel reconciliation deadline")
+                    if channel_id is not None and cursor_identity is not None:
+                        self._conn.execute(
+                            "INSERT OR REPLACE INTO channel_log_cursor "
+                            "(channel_id, identity, position) VALUES (?, ?, ?)",
+                            (channel_id, anchor, cursor_identity),
+                        )
+                    self._conn.commit()
+                except BaseException:
+                    self._conn.set_progress_handler(None, 0)
+                    self._conn.rollback()
+                    raise
+                finally:
+                    self._conn.set_progress_handler(None, 0)
+            return ChannelIndexAck("committed" if inserted else "empty", inserted)
         except Exception as e:
             log.error("FTS channel log index failed: %s", e)
-            return 0
+            return ChannelIndexAck("error")
+
+    def remove_channel_message(self, channel_id: str, message_id: str) -> bool:
+        """Remove only identity-tagged derived rows; never infer legacy identity."""
+        if not self._conn or not message_id:
+            return False
+        with self._write_lock:
+            try:
+                self._conn.execute(
+                    "DELETE FROM channel_log_fts WHERE rowid IN "
+                    "(SELECT fts_rowid FROM channel_log_identity "
+                    "WHERE channel_id=? AND message_id=?)",
+                    (channel_id, message_id),
+                )
+                self._conn.execute(
+                    "DELETE FROM channel_log_identity WHERE channel_id=? AND message_id=?",
+                    (channel_id, message_id),
+                )
+                self._conn.commit()
+                return True
+            except Exception:
+                self._conn.rollback()
+                return False
 
     def search_channel_logs(
+        self, query: str, limit: int = 20, channel_id: str | None = None,
+    ) -> list[dict]:
+        # A shared connection sees its own uncommitted writes. Do not expose a
+        # partially reconciled channel to same-connection readers.
+        with self._write_lock:
+            return self._search_channel_logs(query, limit, channel_id)
+
+    def _search_channel_logs(
         self, query: str, limit: int = 20, channel_id: str | None = None,
     ) -> list[dict]:
         """Search the channel_log_fts table.

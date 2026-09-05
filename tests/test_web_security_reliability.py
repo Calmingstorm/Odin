@@ -43,24 +43,21 @@ def test_admin_only_paths_matched(path):
     assert _is_admin_only_path(path) is True
 
 
-@pytest.mark.parametrize("path", [
-    "/api/chat",
-    "/api/execute",
-    "/api/sessions/123",
-    "/api/loops",
-    "/api/schedules",
-    "/api/status",
-    "/api/configuration-notes",  # must NOT match /api/config by accident
+@pytest.mark.parametrize("method,path", [
+    ("POST", "/api/chat"),
+    ("POST", "/api/execute"),
+    ("GET", "/api/sessions/{channel_id}"),
+    ("GET", "/api/sessions"),
 ])
-def test_non_admin_paths_not_matched(path):
-    assert _is_admin_only_path(path) is False
+def test_non_admin_paths_not_matched(method, path):
+    assert _is_admin_only_path(path, method) is False
 
 
 def test_admin_prefix_exact_and_subpath():
-    # exact prefix and subpaths both match; a longer unrelated name does not
+    # New and unknown API families are administrative, not accidental grants.
     assert _is_admin_only_path("/api/llm")
     assert _is_admin_only_path("/api/llm/status")
-    assert not _is_admin_only_path("/api/llmfoo")
+    assert _is_admin_only_path("/api/llmfoo")
 
 
 # ---------------------------------------------------------------------------

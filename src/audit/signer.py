@@ -33,11 +33,20 @@ class AuditSigner:
 
     def sign(self, entry: dict) -> dict:
         """Add ``_prev_hmac`` and ``_hmac`` fields to *entry* (mutates in place)."""
+        self.prepare(entry)
+        self.commit(entry)
+        return entry
+
+    def prepare(self, entry: dict) -> dict:
+        """Prepare a signature without publishing the predecessor."""
         entry["_prev_hmac"] = self._prev_hmac
         canonical = _canonical(entry)
         entry["_hmac"] = self._compute(canonical)
-        self._prev_hmac = entry["_hmac"]
         return entry
+
+    def commit(self, entry: dict) -> None:
+        """Publish a prepared signature only after its append succeeds."""
+        self._prev_hmac = entry["_hmac"]
 
     def verify_entry(self, entry: dict, expected_prev: str) -> bool:
         """Return True if a single entry's HMAC is valid given *expected_prev*."""
@@ -129,6 +138,13 @@ async def verify_log(path, key: str) -> dict:
                 "error": f"Line {i}: invalid JSON",
             }
 
+        if not isinstance(entry, dict):
+            return {
+                "valid": False, "total": total, "verified": verified,
+                "unsigned_prefix": unsigned_prefix, "first_bad": i,
+                "error": f"Line {i}: non-object audit entry",
+            }
+
         if "_hmac" not in entry:
             # verified == 0 ⟺ no signed entry seen yet (a signed entry that
             # fails returns immediately), i.e. still in the pre-enablement
@@ -145,7 +161,11 @@ async def verify_log(path, key: str) -> dict:
                 "error": f"Line {i}: missing _hmac field (unsigned entry after chain began)",
             }
 
-        if not signer.verify_entry(entry, prev):
+        try:
+            valid = signer.verify_entry(entry, prev)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
             return {
                 "valid": False,
                 "total": total,

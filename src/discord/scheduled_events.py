@@ -202,20 +202,25 @@ class ScheduledEventHandlers:
         """
         # Pre-check RBAC so we can return a structured failure — the dispatch
         # also checks, but returns a plain denial string we'd have to guess at.
-        if requester_id:
-            denial = self._tool_executor.check_permission(tool_name, requester_id)
+        # Empty creators are the existing administrative system schedules.
+        # Make their authority explicit here, never via a falsy RBAC bypass.
+        # The management API that creates these schedules is admin-only.
+        from ..permissions.manager import PermissionManager
+
+        system_scope = PermissionManager.set_request_tier("admin") if not requester_id else None
+        execution_id = requester_id or "scheduler"
+        msg_proxy = _LoopMessageProxy(channel, execution_id, requester_name)
+        try:
+            denial = self._tool_executor.check_permission(tool_name, execution_id)
             if isinstance(denial, str) and denial:
                 return ToolResult(
                     output=denial, ok=False, error="permission_denied", tool_name=tool_name
                 )
-
-        msg_proxy = _LoopMessageProxy(channel, requester_id or "0", requester_name)
-        try:
             result = await self._tool_loop.dispatch_loop_tool_inner(
                 tool_name,
                 tool_input,
                 msg_proxy,
-                requester_id or "",
+                execution_id,
             )
             if isinstance(result, ToolResult) and result.audit_metadata:
                 try:
@@ -235,6 +240,9 @@ class ScheduledEventHandlers:
                 error="execution_error",
                 tool_name=tool_name,
             )
+        finally:
+            if system_scope is not None:
+                PermissionManager.reset_request_tier(system_scope)
 
         if isinstance(result, ToolResult):
             return result

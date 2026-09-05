@@ -14,6 +14,7 @@ is the gateway, and the compression config object is read live through
 from __future__ import annotations
 
 import asyncio
+import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -643,16 +644,24 @@ class AgentTaskTools:
             f"({len(steps)} steps). Progress will be posted to this channel."
         )
 
-    def _handle_list_tasks(self, inp: dict | None = None) -> str:
+    def _handle_list_tasks(
+        self, inp: dict | None = None, *, user_id: str = "", channel_id: str = ""
+    ) -> str:
         """List background tasks, or get detailed results for a specific task."""
-        if not self._channel_state.background_tasks:
-            return "No background tasks."
+        permissions = self._tool_executor._permission_manager
+        admin = (bool(user_id) and permissions is not None
+                 and permissions.get_tier(user_id) == "admin")
+        tasks = {
+            tid: task for tid, task in self._channel_state.background_tasks.items()
+            if admin or (bool(user_id) and task.requester_id == user_id
+                         and str(getattr(task.channel, "id", "")) == channel_id)
+        }
 
         task_id = (inp or {}).get("task_id")
 
         # Detailed view for a specific task
         if task_id:
-            task = self._channel_state.background_tasks.get(task_id)
+            task = tasks.get(task_id)
             if not task:
                 return f"No task found with ID `{task_id}`."
             lines = [
@@ -678,8 +687,10 @@ class AgentTaskTools:
             return text
 
         # Overview of all tasks
+        if not tasks:
+            return "No background tasks."
         lines = []
-        for tid, t in self._channel_state.background_tasks.items():
+        for tid, t in tasks.items():
             done = len(t.results)
             total = len(t.steps)
             ok = sum(1 for r in t.results if r.status == "ok")
@@ -1180,13 +1191,33 @@ class AgentTaskTools:
             return "'agent_id' is required."
         return self._agent_manager.kill(agent_id)
 
-    def _handle_get_agent_results(self, inp: dict) -> str:
+    async def _load_agent_result(self, agent_id: str) -> dict | None:
+        result = self._agent_manager.get_results(agent_id)
+        if result is None and self._agent_trajectory_saver is not None:
+            from ...agents.results import read_result
+
+            result = await asyncio.to_thread(
+                read_result, self._agent_trajectory_saver.directory, agent_id)
+        return result
+
+    def _can_read_agent_result(self, result: dict, user_id: str, channel_id: str) -> bool:
+        permissions = self._tool_executor._permission_manager
+        if user_id and permissions is not None and permissions.get_tier(user_id) == "admin":
+            return True
+        return bool(user_id) and result.get("requester_id") == user_id and (
+            result.get("channel_id") == channel_id)
+
+    async def _handle_get_agent_results(
+        self, inp: dict, *, user_id: str = "", channel_id: str = ""
+    ) -> str:
         """Get results of a completed agent."""
+        from ...agents.results import result_page
+
         agent_id = inp.get("agent_id", "")
         if not agent_id:
             return "'agent_id' is required."
-        results = self._agent_manager.get_results(agent_id)
-        if results is None:
+        results = await self._load_agent_result(agent_id)
+        if results is None or not self._can_read_agent_result(results, user_id, channel_id):
             return f"Agent '{agent_id}' not found."
         if results["status"] == "running":
             return (
@@ -1194,22 +1225,15 @@ class AgentTaskTools:
                 f"({results['iteration_count']} iterations, "
                 f"{results['runtime_seconds']}s elapsed)."
             )
-        parts = [
-            f"**Agent: {results['label']}** ({results['status']})",
-            f"Runtime: {results['runtime_seconds']}s, Iterations: {results['iteration_count']}",
-        ]
-        if results["tools_used"]:
-            parts.append(f"Tools: {', '.join(results['tools_used'])}")
-        if results["result"]:
-            result_text = results["result"]
-            if len(result_text) > 1500:
-                result_text = result_text[:1500] + "..."
-            parts.append(f"Result:\n{result_text}")
-        if results["error"]:
-            parts.append(f"Error: {results['error']}")
-        return "\n".join(parts)
+        try:
+            page = result_page(results, inp.get("cursor", ""), inp.get("limit", 1500))
+        except ValueError as exc:
+            return str(exc)
+        return json.dumps(page, ensure_ascii=False)
 
-    async def _handle_wait_for_agents(self, inp: dict) -> str | ToolResult:
+    async def _handle_wait_for_agents(
+        self, inp: dict, *, user_id: str = "", channel_id: str = ""
+    ) -> str | ToolResult:
         """Wait for agents to complete and return collected results."""
         agent_ids = inp.get("agent_ids", [])
         timeout = inp.get("timeout", 300)
@@ -1218,21 +1242,37 @@ class AgentTaskTools:
         if not isinstance(agent_ids, list):
             return "'agent_ids' must be a list of agent ID strings."
 
+        authorized = []
+        durable = {}
+        for aid in agent_ids:
+            result = await self._load_agent_result(aid)
+            if result is not None and self._can_read_agent_result(result, user_id, channel_id):
+                authorized.append(aid)
+                durable[aid] = result
         results = await self._agent_manager.wait_for_agents(
-            agent_ids,
+            authorized,
             timeout=float(timeout),
         )
+        for aid in agent_ids:
+            if aid not in authorized:
+                results[aid] = {"status": "not_found", "error": f"Agent '{aid}' not found."}
+            elif not results.get(aid) or results[aid].get("status") == "not_found":
+                results[aid] = durable[aid]
 
         lines: list[str] = []
         for aid in agent_ids:
             r = results.get(aid, {})
             status = r.get("status", "unknown")
             label = r.get("label", aid)
-            result_text = r.get("result", "")
-            error_text = r.get("error", "")
-            content = result_text or error_text or "(no output)"
-            if len(content) > 800:
-                content = content[:800] + "..."
+            from ...agents.results import result_page
+
+            page = result_page({"id": aid, **r}, limit=800)
+            content = page["preview"] or "(no output)"
+            if page["truncated"]:
+                content += (
+                    f"\n... [truncated; original_bytes={page['original_bytes']}; "
+                    f"get_agent_results cursor={page['cursor']}]"
+                )
             # iterations is the stable progress marker for the wait-class
             # stuck signature (PR #244 round-1): a silently-progressing
             # agent must not render identically to a hung one. Runtime

@@ -555,11 +555,12 @@ class TestLogSearchEdgeCases:
         logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
         await logger.log_execution(
             tool_name="run_command", user_name="u", user_id="1",
-            channel_id="c", tool_input={"command": "docker ps"},
+            channel_id="c", tool_input={"command": "docker ps", "category": "containers"},
             result_summary="ok", approved=True, execution_time_ms=10,
         )
         results = await logger.search_logs(keyword="docker")
-        assert len(results) == 1
+        assert results == []  # Shell bodies are intentionally absent from audit diagnostics.
+        assert len(await logger.search_logs(keyword="containers")) == 1
 
     async def test_get_log_stats_counts_unique_tools(self, tmp_path):
         logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))

@@ -575,6 +575,7 @@ class TestRecoveryLoopIntegration:
             raise RuntimeError("recorder down")
 
         out = await _call_llm_with_recovery(agent, cb, "sys", [], density_recorder=boom)
+        assert out.pop("duration_ms") > 0
         assert out == {"text": "done", "tool_calls": []}
 
     async def test_manager_pairs_the_rejected_attempts_belief_with_its_overflow(self):
@@ -627,6 +628,7 @@ class TestRecoveryLoopIntegration:
         out = await _call_llm_with_recovery(
             agent, cb, "sys", [], generation_state=state, evidence_recorder=recorder
         )
+        assert out.pop("duration_ms") > 0
         assert out == {"text": "done", "tool_calls": [], "provider": "codex"}
         assert len(recorded) == 1
         err, facts = recorded[0]
@@ -675,6 +677,7 @@ class TestRecoveryLoopIntegration:
         out = await _call_llm_with_recovery(
             agent, cb, "sys", [], generation_state=state, evidence_recorder=recorder
         )
+        assert out.pop("duration_ms") > 0
         assert out == {"text": "done", "tool_calls": [], "provider": "codex"}
         assert recorded == []
 

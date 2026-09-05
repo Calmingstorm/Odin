@@ -9,11 +9,17 @@
 # README "First-time setup" section.
 set -e
 
+case "${1:-configure}" in
+    configure|abort-upgrade|abort-remove|abort-deconfigure) ;;
+    *) echo "Odin: no post-install action for $1."; exit 0 ;;
+esac
+
 SERVICE_USER="odin"
 SERVICE_GROUP="odin"
 APP_DIR="/opt/odin"
 CONFIG_DIR="/etc/odin"
 DATA_DIR="/var/lib/odin"
+STATE_FILE="$DATA_DIR/.package-service-state"
 # Working directory for local user commands (tools.local_working_dir).
 # A SIBLING of DATA_DIR, never inside it: local commands run here so a bare
 # relative path cannot resolve against the install or the live data.
@@ -88,9 +94,14 @@ if [ -f "$APP_DIR/pyproject.toml" ]; then
     # [pdf] installs PyMuPDF so the advertised analyze_pdf tool actually works.
     # Without it the tool is hidden by the catalog gate, so an official package
     # would silently ship without a capability it documents.
-    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR[pdf]" 2>/dev/null || \
-        echo "  Warning: pip install failed — run '$APP_DIR/.venv/bin/pip install $APP_DIR[pdf]' manually"
+    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR[pdf]"
+else
+    echo "Odin: mandatory application metadata is missing." >&2
+    exit 1
 fi
+# A successful dependency command alone does not prove the installed app imports.
+(cd "$APP_DIR" && "$APP_DIR/.venv/bin/python" -c \
+    'import src.__main__; import src.discord.client; import pymupdf')
 
 # Install Playwright browsers for native browser support (optional feature)
 "$APP_DIR/.venv/bin/playwright" install chromium 2>/dev/null || \
@@ -117,12 +128,19 @@ chmod 600 "$CONFIG_DIR/.env"
 chown root:root /usr/lib/systemd/system/odin.service
 
 # Enable the service (do NOT auto-start on a fresh install — it would crash-loop
-# until the Discord token is set). On upgrades, restart only if already running.
+# until the Discord token is set). prerm captured the upgrade's original state.
 systemctl daemon-reload
-systemctl enable odin.service >/dev/null 2>&1 || true
-if [ "$FRESH_INSTALL" = false ] && systemctl is-active --quiet odin.service; then
-    echo "  Upgrade detected — restarting odin.service..."
-    systemctl restart odin.service || true
+if [ "$FRESH_INSTALL" = true ]; then
+    systemctl enable odin.service >/dev/null
+elif [ -f "$STATE_FILE" ]; then
+    case "$(cat "$STATE_FILE")" in
+        active) systemctl restart odin.service ;;
+        inactive) : ;;
+        *) echo "Odin: invalid saved package service state." >&2; exit 1 ;;
+    esac
+    rm "$STATE_FILE"
+elif systemctl is-active --quiet odin.service; then
+    systemctl restart odin.service
 fi
 
 echo ""

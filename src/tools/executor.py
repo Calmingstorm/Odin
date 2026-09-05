@@ -603,8 +603,10 @@ class ToolExecutor:
 
         Returns None if allowed, or an error message string if denied.
         """
-        if not self._permission_manager or not user_id:
+        if not self._permission_manager:
             return None
+        if not user_id:
+            return "Permission denied: a requester identity is required."
         allowed = self._permission_manager.allowed_tool_names(user_id)
         if allowed is None:
             return None

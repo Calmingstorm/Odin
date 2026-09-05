@@ -221,7 +221,7 @@ class TestProcessRegistryShutdown:
 
         killed = await registry.shutdown()
         assert killed == 1
-        assert registry._processes[pid].status == "failed"
+        assert registry._processes[pid].status == "killed"
 
     @pytest.mark.asyncio
     async def test_shutdown_cancels_reader_tasks(self):

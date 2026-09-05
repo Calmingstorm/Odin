@@ -15,6 +15,7 @@ from datetime import UTC
 
 from ..async_utils import fire_and_forget
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.timing import elapsed_ms
 from ..odin_log import get_logger
 
 log = get_logger("discord")
@@ -232,6 +233,11 @@ class TurnRecorder:
             # Aggregate token counts from iterations
             trajectory.total_input_tokens = sum(it.input_tokens for it in trajectory.iterations)
             trajectory.total_output_tokens = sum(it.output_tokens for it in trajectory.iterations)
+            # Chat/web do not call TrajectoryTurn.finalize: its response/tool
+            # and token-fallback semantics differ from this recorder. Derive
+            # timing here too, before JSONL publication and the usage observer.
+            trajectory.total_duration_ms = sum(it.duration_ms for it in trajectory.iterations)
+            trajectory.end_to_end_duration_ms = elapsed_ms(trajectory._started_ns)
             if observe_usage:
                 await self._trajectory_saver.save(trajectory)
             else:

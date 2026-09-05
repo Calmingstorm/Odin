@@ -153,6 +153,7 @@ async def test_remote_start_success_tracks_negative_handle_and_identity(no_lifet
     response = await registry.start_remote(lease, "printf ready")
     assert response == "Process started (PID -1): printf ready"
     info = registry._processes[-1]
+    assert info.command == "printf ready"
     assert (info.remote_pid, info.remote_pgid, info.remote_sid, info.remote_start_id) == (
         101,
         101,
@@ -292,7 +293,7 @@ async def test_remote_write_success_failure_and_transport_loss():
     registry = ProcessRegistry(remote_exec=failed)
     registry._processes[-1] = _remote_info(_Lease())
     response = await registry.write(-1, "abc")
-    assert "outcome_unknown=true: stdin changed" in response
+    assert json.loads(response.split("outcome_unknown=true: ")[1])["message"] == "stdin changed"
     assert registry._processes[-1].transport_unknown is True
 
     async def lost(_target, _command, _timeout):
@@ -312,8 +313,8 @@ async def test_remote_kill_success_failure_and_transport_loss():
     registry = ProcessRegistry(remote_exec=success)
     registry._processes[-1] = _remote_info(lease)
     assert await registry.kill(-1) == "Process -1 killed."
-    assert registry._processes[-1].status == "failed"
-    assert registry._processes[-1].exit_code == -9
+    assert registry._processes[-1].status == "killed"
+    assert registry._processes[-1].exit_code is None  # acknowledgement supplied no exit code
     assert lease.release_count == 1
 
     async def failed(_target, _command, _timeout):
@@ -322,7 +323,7 @@ async def test_remote_kill_success_failure_and_transport_loss():
     registry = ProcessRegistry(remote_exec=failed)
     registry._processes[-1] = _remote_info(_Lease())
     response = await registry.kill(-1)
-    assert "outcome_unknown=true: still alive" in response
+    assert json.loads(response.split("outcome_unknown=true: ")[1])["message"] == "still alive"
     assert registry._processes[-1].transport_unknown is True
 
     async def lost(_target, _command, _timeout):
@@ -363,7 +364,7 @@ async def test_remote_shutdown_kills_running_jobs_and_cleanup_removes_old_termin
     registry = ProcessRegistry(remote_exec=remote_exec)
     registry._processes[-1] = _remote_info(_Lease())
     assert await registry.shutdown() == 1
-    assert registry._processes[-1].status == "failed"
+    assert registry._processes[-1].status == "killed"
 
     old = _remote_info(None, pid=-2, status="completed")
     old.start_time -= MAX_LIFETIME_SECONDS + 1

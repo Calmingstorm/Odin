@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..config.schema import ApiTokenIdentity
 from ..odin_log import get_logger
+from .persistence import write_private_atomic
 
 log = get_logger("token_manager")
 
@@ -90,18 +91,18 @@ class ApiTokenManager:
         except (json.JSONDecodeError, OSError) as e:
             log.warning("Failed to load API tokens: %s", e)
 
-    def _save(self) -> None:
+    def _save(self, candidate: dict[str, _StoredToken] | None = None) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = []
-        for st in self._tokens.values():
+        for st in (self._tokens if candidate is None else candidate).values():
+            if st.identity.tier not in ("admin", "user", "guest"):
+                raise ValueError("Invalid token tier")
             d = st.identity.model_dump()
             del d["token"]
             d["token_hash"] = st.token_hash
             d["token_prefix"] = st.token_prefix
             data.append(d)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(self._path)
+        self.durability_degraded = not write_private_atomic(self._path, json.dumps(data, indent=2))
 
     def resolve(self, raw_token: str) -> ApiTokenIdentity | None:
         """HMAC-safe lookup by hashing the incoming token and comparing."""
@@ -152,12 +153,14 @@ class ApiTokenManager:
                 allowed_hosts=allowed_hosts,
                 default_host=default_host,
             )
-            self._tokens[user_id] = _StoredToken(
+            candidate = dict(self._tokens)
+            candidate[user_id] = _StoredToken(
                 token_hash=_hash_token(raw_token),
                 token_prefix=raw_token[:8],
                 identity=ApiTokenIdentity(**{**identity.model_dump(), "token": ""}),
             )
-            self._save()
+            self._save(candidate)
+            self._tokens = candidate
             log.info("Created API token for user_id=%s label=%s tier=%s", user_id, label, tier)
             return identity
 
@@ -167,6 +170,7 @@ class ApiTokenManager:
             st = self._tokens.get(user_id)
             if st is None:
                 return None
+            fields = st.identity.model_dump()
             for field in (
                 "username",
                 "tier",
@@ -176,10 +180,14 @@ class ApiTokenManager:
                 "default_host",
             ):
                 if field in kwargs:
-                    setattr(st.identity, field, kwargs[field])
-            self._save()
+                    fields[field] = kwargs[field]
+            identity = ApiTokenIdentity.model_validate(fields)
+            candidate = dict(self._tokens)
+            candidate[user_id] = _StoredToken(st.token_hash, st.token_prefix, identity)
+            self._save(candidate)
+            self._tokens = candidate
             log.info("Updated API token for user_id=%s fields=%s", user_id, list(kwargs.keys()))
-            return st.identity
+            return identity
 
     async def regenerate_token(self, user_id: str) -> str | None:
         """Generate a new token value. Returns raw token (shown once)."""
@@ -188,9 +196,12 @@ class ApiTokenManager:
             if st is None:
                 return None
             raw_token = secrets.token_urlsafe(48)
-            st.token_hash = _hash_token(raw_token)
-            st.token_prefix = raw_token[:8]
-            self._save()
+            candidate = dict(self._tokens)
+            candidate[user_id] = _StoredToken(
+                _hash_token(raw_token), raw_token[:8], st.identity.model_copy(deep=True),
+            )
+            self._save(candidate)
+            self._tokens = candidate
             log.info("Regenerated API token for user_id=%s", user_id)
             return raw_token
 
@@ -198,8 +209,10 @@ class ApiTokenManager:
         """Delete a token by user_id."""
         async with self._lock:
             if user_id in self._tokens:
-                del self._tokens[user_id]
-                self._save()
+                candidate = dict(self._tokens)
+                del candidate[user_id]
+                self._save(candidate)
+                self._tokens = candidate
                 log.info("Deleted API token for user_id=%s", user_id)
                 return True
         return False

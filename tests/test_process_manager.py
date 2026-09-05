@@ -446,6 +446,7 @@ class TestProcessRegistryKill:
     async def test_kill_running(self):
         reg = ProcessRegistry()
         mock_proc = AsyncMock()
+        mock_proc.returncode = -15
         mock_proc.terminate = MagicMock()
         mock_proc.kill = MagicMock()
         mock_proc.wait = AsyncMock()
@@ -459,8 +460,8 @@ class TestProcessRegistryKill:
         reg._processes[1] = info
         result = await reg.kill(1)
         assert "killed" in result
-        assert info.status == "failed"
-        assert info.exit_code == -9
+        assert info.status == "killed"
+        assert info.exit_code == -15
 
 
 # ---------------------------------------------------------------------------

@@ -51,6 +51,7 @@ from ..llm.context_compressor import SurfaceBoundary
 from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.recovery import generate_with_recovery, preflight_incompatible_effort
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.timing import timed_generation, timed_tool_batch
 from ..observability.correlation import get_turn, set_turn
 from ..odin_log import get_logger
 from ..tools import ToolResult
@@ -1551,6 +1552,7 @@ class ToolLoopRunner:
             log.exception("mandatory context latch enforcement failed; refusing request")
             return False
 
+    @timed_generation
     async def _call_llm(
         self,
         st: _ChatTurn,
@@ -1968,6 +1970,7 @@ class ToolLoopRunner:
                 llm_text=llm_resp.text or "",
                 input_tokens=llm_resp.input_tokens,
                 output_tokens=llm_resp.output_tokens,
+                duration_ms=getattr(llm_resp, "duration_ms", 0),
                 server_input_tokens=getattr(llm_resp, "server_input_tokens", None),
                 server_output_tokens=getattr(llm_resp, "server_output_tokens", None),
                 estimated_input_tokens=getattr(llm_resp, "estimated_input_tokens", None),
@@ -2700,6 +2703,7 @@ class ToolLoopRunner:
                 cancel_task.cancel()
                 await asyncio.gather(cancel_task, return_exceptions=True)
 
+    @timed_tool_batch
     async def _execute_tool_calls(self, st: _ChatTurn, tool_calls) -> list:
         """Run all tool calls concurrently with per-tool timeout; append the
         result block to the message list (gather preserves call order)."""
@@ -3129,6 +3133,7 @@ class ToolLoopRunner:
         except Exception:
             log.exception("loop compaction failed (non-fatal); continuing with full context")
 
+    @timed_generation
     async def _call_loop_llm(
         self,
         st: _LoopTurn,
@@ -3354,6 +3359,7 @@ class ToolLoopRunner:
                     llm_text=response.text or "",
                     input_tokens=getattr(response, "input_tokens", 0) or 0,
                     output_tokens=getattr(response, "output_tokens", 0) or 0,
+                    duration_ms=getattr(response, "duration_ms", 0),
                     server_input_tokens=getattr(response, "server_input_tokens", None),
                     server_output_tokens=getattr(response, "server_output_tokens", None),
                     estimated_input_tokens=getattr(response, "estimated_input_tokens", None),
@@ -3504,6 +3510,7 @@ class ToolLoopRunner:
             "content": result,
         }
 
+    @timed_tool_batch
     async def _execute_loop_tools(self, st: _LoopTurn, response) -> list:
         """Execute tools concurrently with per-tool timeout; append results
         and pair them into loop-details + the trajectory iteration."""

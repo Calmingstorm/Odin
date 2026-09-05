@@ -25,7 +25,7 @@
     "check:w1-webui": "node scripts/check-w1-webui.mjs",
     "check:w2-freshness": "node scripts/check-w2-freshness.mjs",
     "check:toggle-serialization": "node scripts/check-toggle-serialization.mjs",
-    "check:search-races": "node scripts/check-search-races.mjs",
+    "check:search-races": "node scripts/check-search-races.mjs && node scripts/check-session-search.mjs",
     "check:config-keydown": "node scripts/check-config-keydown.mjs",
     "check:css-tokens": "node scripts/check-css-tokens.mjs",
     "check:turn-state-webui": "node scripts/check-turn-state-webui.mjs",

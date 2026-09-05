@@ -22,6 +22,7 @@ import aiohttp
 
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from .payloads import scrub_payload
 
 log = get_logger("outbound_webhooks")
 
@@ -53,6 +54,20 @@ class EventType(str, Enum):  # noqa: UP042 — str(member) output differs under 
 ALL_EVENT_TYPES: frozenset[str] = frozenset(e.value for e in EventType)
 
 
+def validate_events(events: list[str] | None) -> list[str]:
+    """Empty/omitted remains the legacy all selection; 'all' is explicit too."""
+    if events is None:
+        return []
+    if not isinstance(events, list) or any(
+        not isinstance(event, str) or event not in ALL_EVENT_TYPES | {"all"}
+        for event in events
+    ):
+        raise ValueError("Unknown webhook event filter; use a known event or 'all'")
+    if "all" in events and len(events) != 1:
+        raise ValueError("The 'all' webhook filter must be used alone")
+    return list(events)
+
+
 @dataclass(slots=True)
 class WebhookTarget:
     """A registered outbound webhook endpoint."""
@@ -68,12 +83,13 @@ class WebhookTarget:
     created_at: str = ""
 
     def __post_init__(self) -> None:
+        self.events = validate_events(self.events)
         if not self.created_at:
             self.created_at = datetime.now(UTC).isoformat()
 
     def accepts_event(self, event_type: str) -> bool:
         """Return True if this webhook subscribes to the given event type."""
-        if not self.events:
+        if not self.events or self.events == ["all"]:
             return True  # empty list = all events
         return event_type in self.events
 
@@ -183,7 +199,22 @@ def build_event_payload(
 def _truncate_payload(payload: str) -> str:
     if len(payload) <= MAX_PAYLOAD_CHARS:
         return payload
-    return payload[:MAX_PAYLOAD_CHARS - 30] + ',"_truncated":true}'
+    value = json.loads(payload)
+    original_chars = len(payload)
+    omitted = 0
+    # Drop complete largest top-level fields, retaining envelope metadata where
+    # possible. Never cut serialized JSON or misrepresent a partial data field.
+    while value:
+        key = max(value, key=lambda key: len(json.dumps(value[key], default=str)))
+        del value[key]
+        omitted += 1
+        result = dict(value)
+        result["_truncated"] = True
+        result["_omission"] = {"fields": omitted, "original_chars": original_chars}
+        encoded = json.dumps(result, separators=(",", ":"))
+        if len(encoded) <= MAX_PAYLOAD_CHARS:
+            return encoded
+    raise ValueError("Payload limit cannot hold omission metadata")
 
 
 class OutboundWebhookDispatcher:
@@ -254,7 +285,7 @@ class OutboundWebhookDispatcher:
         if wh_id in self._webhooks:
             raise ValueError(f"Webhook ID '{wh_id}' already exists")
 
-        valid_events = [e for e in (events or []) if e in ALL_EVENT_TYPES]
+        valid_events = validate_events(events)
 
         target = WebhookTarget(
             id=wh_id,
@@ -300,6 +331,8 @@ class OutboundWebhookDispatcher:
         if wh is None:
             return None
 
+        validated_events = validate_events(events) if events is not None else None
+
         if url is not None:
             if not url:
                 raise ValueError("Webhook URL is required")
@@ -320,7 +353,7 @@ class OutboundWebhookDispatcher:
                 raise ValueError(f"Secret must be under {_MAX_SECRET_LEN} characters")
             wh.secret = secret
         if events is not None:
-            wh.events = [e for e in events if e in ALL_EVENT_TYPES]
+            wh.events = validated_events  # type: ignore[assignment]
         if enabled is not None:
             wh.enabled = enabled
         if scrub_secrets is not None:
@@ -453,12 +486,11 @@ class OutboundWebhookDispatcher:
         results: list[DeliveryResult] = []
 
         for target in targets:
-            payload_json = json.dumps(payload, default=str)
-
+            final_payload = json.loads(json.dumps(payload, default=str))
             if target.scrub_secrets and self._scrub:
-                payload_json = scrub_output_secrets(payload_json)
+                final_payload = scrub_payload(final_payload, scrub_output_secrets)
 
-            payload_json = _truncate_payload(payload_json)
+            payload_json = _truncate_payload(json.dumps(final_payload))
             payload_body = payload_json.encode()
 
             result = await self._deliver_one(target, payload_body, event_type)

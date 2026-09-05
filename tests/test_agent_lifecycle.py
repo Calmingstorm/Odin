@@ -1107,6 +1107,8 @@ class TestWaitForAgentsWithStates:
         assert results[finished.id] == {
             **finished.activity(),
             "id": "finished",
+            "channel_id": "c1",
+            "requester_id": "u1",
             "label": "first",
             "status": "completed",
             "state": "completed",

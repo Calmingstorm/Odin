@@ -156,13 +156,14 @@ class TestParseResponse:
             "content": "answer",
             "tool_calls": [
                 {"id": "c1", "function": {"name": "grep", "arguments": '{"q":"x"}'}},
-                {"function": {"name": "bad", "arguments": "not json"}},  # → {"raw": ...}
+                {"function": {"name": "bad", "arguments": "not json"}},  # rejected
             ],
         }}], "usage": {"prompt_tokens": 10, "completion_tokens": 5}}
         r = _client()._parse_response(data)
         assert r.text == "answer" and r.stop_reason == "tool_use"
         assert r.tool_calls[0].input == {"q": "x"}
-        assert r.tool_calls[1].input == {"raw": "not json"}
+        assert r.tool_calls[1].input == {}
+        assert r.tool_calls[1].parse_error
         assert r.input_tokens == 10 and r.output_tokens == 5
 
     def test_tool_args_already_dict(self):

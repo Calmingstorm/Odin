@@ -1194,47 +1194,14 @@ async def shutdown_services(bot) -> None:
             except Exception:
                 log.exception("Error closing SSH pool")
 
-    # Close auxiliary LLM client — the gateway holds the CANONICAL live
-    # instance (reloads replace it there). Await any outstanding background
-    # drains of retired generations first, then drain the live one.
-    _gateway = getattr(bot, "llm_gateway", None)
-    _drains = getattr(_gateway, "_aux_drains", None)
-    if _drains:
-        try:
-            await asyncio.gather(*list(_drains), return_exceptions=True)
-        except Exception:
-            log.exception("Error awaiting auxiliary drains")
-    aux = getattr(_gateway, "auxiliary_llm_client", None)
-    if aux is not None:
-        try:
-            await aux.drain_and_close()
-        except Exception:
-            log.exception("Error closing auxiliary LLM client")
+    # The gateway owns live AND retired generations. Give all of them one
+    # shared deadline, not a per-client budget multiplied across providers.
+    from ..llm.client_lifecycle import shutdown_provider_clients
 
-    # Close LLM HTTP client sessions — read through the gateway: the
-    # per-provider bot properties were retired in RFC-002 P7, and the
-    # gateway holds the LIVE clients (reloads replace them there).
-    gateway = getattr(bot, "llm_gateway", None)
-    codex = getattr(gateway, "codex_client", None)
-    if codex is not None:
-        try:
-            await codex.close()
-        except Exception:
-            log.exception("Error closing Codex client")
-
-    ollama = getattr(gateway, "ollama_client", None)
-    if ollama is not None:
-        try:
-            await ollama.close()
-        except Exception:
-            log.exception("Error closing Ollama client")
-
-    kimi = getattr(gateway, "kimi_client", None)
-    if kimi is not None:
-        try:
-            await kimi.close()
-        except Exception:
-            log.exception("Error closing Kimi client")
+    try:
+        await shutdown_provider_clients(getattr(bot, "llm_gateway", None))
+    except Exception:
+        log.exception("Error closing provider clients")
 
     # Close the native image backend's own HTTP session (separate transport
     # from the codex chat client, so it isn't covered by codex.close()).

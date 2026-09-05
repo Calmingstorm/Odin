@@ -7,6 +7,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from ..odin_log import get_logger
+from .persistence import write_private_atomic
 
 log = get_logger("host_access")
 
@@ -73,15 +74,22 @@ class HostAccessManager:
         except (json.JSONDecodeError, OSError) as e:
             log.warning("Failed to load host access config: %s", e)
 
-    def _save(self) -> None:
+    def _save(
+        self,
+        users: dict[str, HostAccessEntry] | None = None,
+        default_policy: HostAccessEntry | None = None,
+    ) -> None:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = {
-            "default_policy": self._default_policy.to_dict(),
-            "users": {uid: entry.to_dict() for uid, entry in self._users.items()},
+            "default_policy": (
+                self._default_policy if default_policy is None else default_policy
+            ).to_dict(),
+            "users": {
+                uid: entry.to_dict()
+                for uid, entry in (self._users if users is None else users).items()
+            },
         }
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(self._path)
+        self.durability_degraded = not write_private_atomic(self._path, json.dumps(data, indent=2))
 
     @property
     def available_hosts(self) -> list[str]:
@@ -188,11 +196,13 @@ class HostAccessManager:
                     default_host = ""
             if default_host and default_host not in available:
                 default_host = ""
-            self._users[user_id] = HostAccessEntry(
+            candidate = dict(self._users)
+            candidate[user_id] = HostAccessEntry(
                 allowed_hosts=valid_hosts,
                 default_host=default_host,
             )
-            self._save()
+            self._save(users=candidate)
+            self._users = candidate
             log.info(
                 "Host access updated for user %s: hosts=%s, default=%s",
                 user_id,
@@ -203,8 +213,10 @@ class HostAccessManager:
     async def delete_user(self, user_id: str) -> bool:
         async with self._lock:
             if user_id in self._users:
-                del self._users[user_id]
-                self._save()
+                candidate = dict(self._users)
+                del candidate[user_id]
+                self._save(users=candidate)
+                self._users = candidate
                 log.info("Host access override removed for user %s", user_id)
                 return True
         return False
@@ -220,11 +232,12 @@ class HostAccessManager:
                 default_host = ""
             if default_host and valid_hosts is not None and default_host not in valid_hosts:
                 default_host = valid_hosts[0] if valid_hosts else ""
-            self._default_policy = HostAccessEntry(
+            candidate = HostAccessEntry(
                 allowed_hosts=valid_hosts,
                 default_host=default_host,
             )
-            self._save()
+            self._save(default_policy=candidate)
+            self._default_policy = candidate
             log.info(
                 "Default host access policy updated: hosts=%s, default=%s",
                 valid_hosts,

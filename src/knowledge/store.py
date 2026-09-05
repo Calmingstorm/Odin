@@ -578,7 +578,7 @@ class KnowledgeStore:
             return []
 
     def get_source_content(self, source: str) -> str | None:
-        """Get the full concatenated content of a source (for re-ingest)."""
+        """Return a lossy chunk preview, never an authoritative re-ingest body."""
         if not self.available:
             return None
         try:
@@ -591,6 +591,28 @@ class KnowledgeStore:
             return "\n\n".join(r[0] for r in rows)
         except Exception:
             return None
+
+    def get_source_snapshot(self, source: str) -> str | None:
+        """Read the current full snapshot, refusing absent/stale provenance.
+
+        Existing snapshots are reused as stored. No source migration, backfill,
+        chunk reconstruction, or changes to normalized dedup semantics occur.
+        """
+        if not self._conn:
+            return None
+        # One SQLite statement observes snapshot and derived current hash together.
+        row = self._conn.execute(
+            "SELECT v.content, v.content_hash FROM knowledge_versions v "
+            "WHERE v.id=(SELECT id FROM knowledge_versions WHERE source=? "
+            "ORDER BY version DESC, id DESC LIMIT 1) "
+            "AND EXISTS (SELECT 1 FROM knowledge_chunks c WHERE c.source=v.source) "
+            "AND NOT EXISTS (SELECT 1 FROM knowledge_chunks c WHERE c.source=v.source "
+            "AND (c.doc_content_hash IS NULL OR c.doc_content_hash != v.content_hash))",
+            (source,),
+        ).fetchone()
+        if not row or row[0] is None or not row[1] or self._content_hash(row[0]) != row[1]:
+            return None
+        return row[0]
 
     def source_is_durable(
         self,

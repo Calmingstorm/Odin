@@ -52,6 +52,33 @@ class DevOpsTools(HandlerBase):
                 return f"Branch freshness check failed (exit {code}):\n{output}", code
             if output.strip().startswith("STALE:"):
                 return f"Push blocked — {output.strip().split(':', 1)[1].strip()}", 1
+            # Bind the actual push and force lease to the exact preflighted
+            # source commit and destination, not a subsequently moving HEAD.
+            import re
+            import shlex
+
+            marker = re.search(
+                r"^ODIN_PUSH:([0-9a-f]{40,64}):(refs/[^:\s]+):([0-9a-f]{40,64})?$",
+                output, re.MULTILINE,
+            )
+            if marker is None:
+                return "Branch freshness check failed: missing exact-ref evidence", 1
+            source, destination, remote_sha = marker.groups()
+            if params.get("set_upstream"):
+                tracking = re.search(r"^ODIN_TRACK:(refs/heads/[^:\s]+)?$", output, re.MULTILINE)
+                if tracking is None:
+                    return "Branch freshness check failed: missing tracking-ref evidence", 1
+                branch = (tracking.group(1) or "").removeprefix("refs/heads/")
+                push_cmd = push_cmd.replace("__ODIN_TRACK__", shlex.quote(branch))
+            push_cmd = push_cmd.replace("__ODIN_SOURCE__", shlex.quote(source))
+            push_cmd = push_cmd.replace("__ODIN_DEST__", shlex.quote(destination))
+            push_cmd = push_cmd.replace("__ODIN_REMOTE__", remote_sha or "")
+            push_cmd = push_cmd.replace(
+                "__ODIN_BRANCH__", shlex.quote(destination.removeprefix("refs/heads/")),
+            )
+            allowed, denial, _ = self._govern_command(push_cmd, host)
+            if not allowed:
+                return denial
             code, output = await self._exec_command(
                 address,
                 push_cmd,

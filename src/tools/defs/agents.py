@@ -168,12 +168,17 @@ TOOLS_SECTION: list[dict] = [
         "name": "get_agent_results",
         "description": (
             "Returns the final results of a completed/failed agent. Returns result "
-            "text, tools used, iteration count, and runtime. Returns 'still running' if active."
+            "pages with UTF-8 byte length, preview, truncation flag and continuation cursor, "
+            "tools used, iteration count, and runtime. Repeat with cursor for complete output. "
+            "Retained after live registry cleanup. Returns 'still running' if active."
         ),
         "input_schema": {
             "type": "object",
             "properties": {
                 "agent_id": {"type": "string", "description": "Agent ID"},
+                "cursor": {"type": "string", "description": "Continuation from previous page"},
+                "limit": {"type": "integer", "minimum": 4, "maximum": 8000,
+                          "description": "UTF-8 bytes per page (default 1500, max 8000)"},
             },
             "required": ["agent_id"],
         },

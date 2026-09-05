@@ -9,9 +9,9 @@ Usage:
 
 Configuration:
     Set ODIN_URL and ODIN_API_TOKEN in environment, or pass --url and --token.
-    Defaults to http://localhost:3001 with no auth.
+    Defaults to http://localhost:3000 with no auth.
 
-    export ODIN_URL=http://localhost:3001
+    export ODIN_URL=http://localhost:3000
     export ODIN_API_TOKEN=your-api-token
 """
 
@@ -33,8 +33,8 @@ def main() -> int:
     parser.add_argument("prompt", nargs="?", help="Prompt to send (reads stdin if omitted)")
     parser.add_argument(
         "--url",
-        default=os.environ.get("ODIN_URL", "http://localhost:3001"),
-        help="Odin API URL (default: $ODIN_URL or http://localhost:3001)",
+        default=os.environ.get("ODIN_URL", "http://localhost:3000"),
+        help="Odin API URL (default: $ODIN_URL or http://localhost:3000)",
     )
     parser.add_argument(
         "--token",

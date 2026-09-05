@@ -66,6 +66,7 @@ class HostTarget:
     targetable: bool
     trust_state: str
     last_test: dict[str, Any] | None = None
+    diagnostic: str = ""
 
     @property
     def runtime_key(self) -> str:
@@ -173,7 +174,11 @@ class HostRegistry:
         self._revoke_events: dict[str, asyncio.Event] = {}
         self._retired: dict[str, HostTarget] = {}
         self._retire_callback: RetireCallback | None = None
-        self.publish(hosts or {}, default_host=self._default_host)
+        # A malformed legacy inventory must not prevent boot or lose records.
+        # Only boot may retain collisions, and every member is untargetable.
+        initial = self._stage(hosts or {}, default_host=self._default_host, boot=True)
+        self._snapshot = initial.snapshot
+        self._generation = initial.generation
 
     @property
     def generation(self) -> int:
@@ -302,6 +307,31 @@ class HostRegistry:
         default_host: str | None = None,
     ) -> HostPublication:
         """Assemble and materialize trust without changing live state."""
+        return self._stage(hosts, default_host=default_host)
+
+    def _stage(
+        self,
+        hosts: Mapping[str, ToolHost],
+        *,
+        default_host: str | None = None,
+        boot: bool = False,
+    ) -> HostPublication:
+        identities: dict[str, list[str]] = {}
+        for alias, config in hosts.items():
+            identity = str(uuid.UUID(
+                getattr(config, "host_id", "") or deterministic_host_id(alias),
+            ))
+            identities.setdefault(identity, []).append(alias)
+        collisions = {key: aliases for key, aliases in identities.items() if len(aliases) > 1}
+        if collisions and not boot:
+            raise ValueError(
+                "Duplicate host identity; each configured record must have a unique UUID"
+            )
+        if collisions:
+            log.error(
+                "Duplicate host identity in %d groups; all collision members are untargetable",
+                len(collisions),
+            )
         selected_default = self._default_host if default_host is None else str(default_host or "")
         generation = self._generation + 1
         previous = self._snapshot
@@ -309,6 +339,13 @@ class HostRegistry:
 
         for alias, config in hosts.items():
             target = self._target_from_config(alias, config, generation)
+            if target.host_id in collisions:
+                target = replace(
+                    target,
+                    targetable=False,
+                    trust_state="identity_collision",
+                    diagnostic="Duplicate host identity; resolve the configured UUID collision",
+                )
             old = previous.get(alias)
             if old is not None and self._same_definition(old, target):
                 replacements[alias] = old
@@ -326,6 +363,9 @@ class HostRegistry:
         """Publish a fully prepared snapshot with no filesystem I/O."""
         if self._generation != staged.expected_generation:
             raise RuntimeError("host registry changed while publication was staged")
+        identities = [target.host_id for target in staged.snapshot.values()]
+        if len(identities) != len(set(identities)):
+            raise ValueError("Duplicate host identity in staged publication")
         previous = self._snapshot
         self._generation = staged.generation
         self._default_host = staged.default_host
@@ -376,6 +416,7 @@ class HostRegistry:
                 "trust_mode": target.trust_mode,
                 "trust_state": target.trust_state,
                 "last_test": target.last_test,
+                "diagnostic": target.diagnostic,
                 "draining": target.alias in draining,
                 "generation": target.generation,
             }
@@ -417,7 +458,7 @@ class HostRegistry:
         return str(destination)
 
     def _target_from_config(self, alias: str, config: ToolHost, generation: int) -> HostTarget:
-        host_id = getattr(config, "host_id", "") or deterministic_host_id(alias)
+        host_id = str(uuid.UUID(getattr(config, "host_id", "") or deterministic_host_id(alias)))
         local = is_local_address(config.address)
         trust_mode = getattr(config, "trust_mode", "legacy")
         trust_state: str = trust_mode

@@ -299,13 +299,13 @@ class TestAPILimitParamSafety:
 # ---------------------------------------------------------------------------
 
 class TestPermissionManagerEdgeCases:
-    def test_empty_string_user_id_bypasses_rbac(self):
+    def test_empty_string_user_id_denied_at_ingress(self):
         from src.tools.executor import ToolExecutor
         pm = PermissionManager({}, default_tier="guest")
         exec_inst = ToolExecutor.__new__(ToolExecutor)
         exec_inst._permission_manager = pm
         result = exec_inst.check_permission("run_command", "")
-        assert result is None
+        assert result == "Permission denied: a requester identity is required."
 
     def test_overrides_file_not_found_handled(self, tmp_path):
         pm = PermissionManager(

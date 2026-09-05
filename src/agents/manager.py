@@ -21,6 +21,7 @@ from typing import Any, Protocol
 from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.timing import elapsed_ms, timed_generation
 from ..llm.tool_history import (
     assistant_content,
     content_text,
@@ -503,6 +504,10 @@ class AgentManager:
         max_concurrent_agents_provider: Callable[[], int | None] | None = None,
     ) -> None:
         self._agents: dict[str, AgentInfo] = {}
+        # Lightweight ancestry only, retained while a registered descendant
+        # needs it. Never retain the evicted agent's execution/result payload.
+        self._retired_lineage: dict[str, dict] = {}
+        self._result_savers: dict[str, AgentTrajectorySaver] = {}
         # Admission reads this provider for every spawn. The callable is bound
         # to the bot's live config root in production, so a save affects new
         # spawns without changing agents already admitted. None preserves the
@@ -721,6 +726,8 @@ class AgentManager:
         # Schedule cleanup when the agent task finishes (any exit path)
         task.add_done_callback(lambda _t: self._schedule_cleanup(agent_id))
         self._agents[agent_id] = agent
+        if trajectory_saver is not None:
+            self._result_savers[agent_id] = trajectory_saver
         self._tree_spawn_counts[agent.root_id] = self._tree_spawn_counts.get(agent.root_id, 0) + 1
 
         log.info(
@@ -807,30 +814,28 @@ class AgentManager:
     def kill(self, agent_id: str, cascade: bool = True) -> str:
         """Cancel a running agent. If cascade=True, also kill all descendants."""
         agent = self._agents.get(agent_id)
-        if not agent:
+        retired = self._retired_lineage.get(agent_id)
+        if not agent and not retired:
             return f"Error: Agent '{agent_id}' not found."
-        if agent._sm.is_terminal:
-            return f"Agent '{agent_id}' already in terminal state: {agent.status}."
-
-        killed_ids = [agent_id]
-        self._force_cancel(agent)
-
+        parent_active = agent is not None and agent._sm.is_active
+        if parent_active:
+            assert agent is not None
+            self._force_cancel(agent)
+        descendants = 0
         if cascade:
             for desc_id in self.get_descendants(agent_id):
                 desc = self._agents.get(desc_id)
                 if desc and desc._sm.is_active:
                     self._force_cancel(desc)
-                    killed_ids.append(desc_id)
-
-        log.info(
-            "Kill signal sent to agent %s (%s) and %d descendants",
-            agent_id,
-            agent.label,
-            len(killed_ids) - 1,
-        )
-        if len(killed_ids) == 1:
+                    descendants += 1
+        if not parent_active:
+            status = agent.status if agent else retired["status"]  # type: ignore[index]
+            return (f"Agent '{agent_id}' already in terminal state: {status}. "
+                    f"Kill signal sent to {descendants} descendant(s).")
+        assert agent is not None
+        if not descendants:
             return f"Kill signal sent to agent '{agent.label}'."
-        return f"Kill signal sent to agent '{agent.label}' and {len(killed_ids) - 1} descendant(s)."
+        return f"Kill signal sent to agent '{agent.label}' and {descendants} descendant(s)."
 
     @staticmethod
     def _serialize_result(agent: AgentInfo) -> dict:
@@ -838,6 +843,8 @@ class AgentManager:
         runtime = (agent.ended_at or time.time()) - agent.created_at
         return {
             "id": agent.id,
+            "requester_id": agent.requester_id,
+            "channel_id": agent.channel_id,
             "label": agent.label,
             "status": agent.status,
             "state": agent.state.value,
@@ -892,19 +899,20 @@ class AgentManager:
             visited.add(current)
             lineage.append(current)
             agent = self._agents.get(current)
-            if not agent or not agent.parent_id:
+            parent_id = (agent.parent_id if agent else
+                         self._retired_lineage.get(current, {}).get("parent_id"))
+            if not parent_id:
                 break
-            current = agent.parent_id
+            current = parent_id
         lineage.reverse()
         return lineage
 
     def get_descendants(self, agent_id: str) -> builtins.list[str]:
         """Get all descendant agent IDs (children, grandchildren, etc.)."""
         agent = self._agents.get(agent_id)
-        if not agent:
-            return []
         descendants: list[str] = []
-        queue = deque(agent.children_ids)
+        queue = deque(agent.children_ids if agent else
+                      self._retired_lineage.get(agent_id, {}).get("children_ids", []))
         visited: set[str] = set()
         while queue:
             child_id = queue.popleft()
@@ -915,6 +923,8 @@ class AgentManager:
             child = self._agents.get(child_id)
             if child:
                 queue.extend(child.children_ids)
+            else:
+                queue.extend(self._retired_lineage.get(child_id, {}).get("children_ids", []))
         return descendants
 
     async def wait_for_agents(
@@ -1089,11 +1099,31 @@ class AgentManager:
 
     def _remove_agent(self, agent_id: str, source: str = "") -> bool:
         """Single removal point for agents. Returns True if actually removed."""
+        agent = self._agents.get(agent_id)
+        saver = self._result_savers.get(agent_id)
+        if agent is not None and saver is not None:
+            from .results import publish_result
+
+            try:
+                publish_result(saver.directory, self._serialize_result(agent))
+            except Exception:
+                # Keep the full live result and retry on periodic cleanup.
+                log.exception("Agent result persistence failed; retaining %s", agent_id)
+                return False
+        self._result_savers.pop(agent_id, None)
         agent = self._agents.pop(agent_id, None)
         ct = self._cleanup_tasks.pop(agent_id, None)
         if ct and not ct.done():
             ct.cancel()
         if agent:
+            self._retired_lineage[agent_id] = {
+                "parent_id": agent.parent_id, "children_ids": list(agent.children_ids),
+                "status": agent.status,
+            }
+            needed = {ancestor for aid in self._agents for ancestor in self.get_lineage(aid)}
+            self._retired_lineage = {
+                aid: record for aid, record in self._retired_lineage.items() if aid in needed
+            }
             # The single removal point owns release. Periodic cleanup may race
             # and cancel the delayed cleanup task; release-before-pop in that
             # task was therefore not a lifecycle guarantee.
@@ -1223,7 +1253,7 @@ async def _run_agent(
         model_override=agent.model_override,
         reasoning_effort_override=agent.reasoning_effort_override,
     )
-    agent_start = time.time()
+    agent_start = time.monotonic_ns()
     repetition = RepetitionGuard()
 
     def _budget_observation(state: dict) -> tuple[int | None, str, int | None]:
@@ -1357,7 +1387,6 @@ async def _run_agent(
                 "generating", time.time() + min(agent.iteration_timeout, _remaining_lifetime(agent))
             )
             agent.iteration_count = iteration + 1
-            iter_start = time.time()
 
             # Overflow-latch compaction (agent-local, lifetime-only): once an
             # emergency recovery has proven a survivable size, compact BEFORE
@@ -1438,7 +1467,7 @@ async def _run_agent(
                 trajectory.add_iteration(
                     iteration=iteration + 1,
                     llm_text=text,
-                    duration_ms=int((time.time() - iter_start) * 1000),
+                    duration_ms=response.get("duration_ms", 0),
                     input_tokens=usage_response.get("input_tokens", 0) or 0,
                     output_tokens=usage_response.get("output_tokens", 0) or 0,
                     server_input_tokens=usage_response.get("server_input_tokens"),
@@ -1496,6 +1525,7 @@ async def _run_agent(
                 for tc in tool_calls
             ]
             iter_tool_results: list[dict] = []
+            tool_start = time.monotonic_ns()
             try:
                 await execute_cycle(
                     agent,
@@ -1511,7 +1541,8 @@ async def _run_agent(
                     tool_calls=iter_tool_calls,
                     tool_results=iter_tool_results,
                     llm_text=text,
-                    duration_ms=int((time.time() - iter_start) * 1000),
+                    duration_ms=response.get("duration_ms", 0),
+                    tool_duration_ms=elapsed_ms(tool_start),
                     input_tokens=usage_response.get("input_tokens", 0) or 0,
                     output_tokens=usage_response.get("output_tokens", 0) or 0,
                     server_input_tokens=usage_response.get("server_input_tokens"),
@@ -1622,7 +1653,8 @@ async def _run_agent(
             iteration_count=agent.iteration_count,
             recovery_attempts=agent.recovery_attempts,
             state_history=agent._sm.history_as_dicts(),
-            total_duration_ms=int((time.time() - agent_start) * 1000),
+            total_duration_ms=sum(it.duration_ms for it in trajectory.iterations),
+            end_to_end_duration_ms=elapsed_ms(agent_start),
             context_recoveries=agent.context_recoveries,
             context_char_ceiling=agent.context_char_ceiling,
         )
@@ -1777,6 +1809,7 @@ def _predictive_presend_descent(agent: AgentInfo, snapshot, ladder: tuple[int, .
     return consumed
 
 
+@timed_generation
 async def _call_llm_with_recovery(
     agent: AgentInfo,
     iteration_callback: IterationCallback,

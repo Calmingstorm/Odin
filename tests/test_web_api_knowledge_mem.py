@@ -100,7 +100,7 @@ class TestKnowledgeCrud:
             assert r.status == 500
             assert await r.json() == {"error": "document was not durably ingested"}
 
-            kbot.knowledge.get_source_content = lambda source: "body"
+            kbot.knowledge.get_source_snapshot = lambda source: "body"
             r = await c.post("/api/knowledge/doc.md/reingest")
             assert r.status == 500
             assert await r.json() == {"error": "document was not durably reingested"}

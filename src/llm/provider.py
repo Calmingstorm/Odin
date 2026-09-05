@@ -7,10 +7,11 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 
+from .client_lifecycle import ClientLifecycle
 from .types import LLMResponse
 
 
-class LLMProvider(ABC):
+class LLMProvider(ClientLifecycle, ABC):
     """Minimal interface that every LLM backend must implement."""
 
     @abstractmethod

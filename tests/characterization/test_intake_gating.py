@@ -12,6 +12,7 @@ _process_attachments (attachments.py has its own tests).
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Callable
 from unittest.mock import AsyncMock
 
 import pytest
@@ -59,6 +60,16 @@ def handled_contents(bot) -> list[str]:
     return [call.args[1] for call in bot.pipeline.run.await_args_list]
 
 
+async def _wait_for_buffer(predicate: Callable[[], bool]) -> None:
+    """Poll observable buffer progress, with a bounded scheduling allowance."""
+    loop = asyncio.get_running_loop()
+    deadline = loop.time() + 2.0
+    while not predicate():
+        if loop.time() >= deadline:
+            pytest.fail("Timed out waiting for bot-message buffer progress")
+        await asyncio.sleep(0.01)
+
+
 class TestGatingChain:
     async def test_plain_message_reaches_handler(self):
         bot = build()
@@ -69,11 +80,11 @@ class TestGatingChain:
     async def test_own_message_ignored_but_channel_logged(self):
         bot = build()
         logged = []
-        bot.channel_logger.log_message = lambda m: logged.append(m)
+        bot.channel_logger.log_message = lambda m, *, content: logged.append((m, content))
         msg = FakeMessage("from myself")
         msg.author = bot.user  # message.author == self.user
         await bot.on_message(msg)
-        assert logged == [msg]  # passive log happens first
+        assert logged == [(msg, "from myself")]  # redacted ingress log happens first
         bot.process_commands.assert_not_awaited()  # then everything else skipped
         bot.pipeline.run.assert_not_awaited()
 
@@ -184,7 +195,7 @@ class TestBotMessageBuffering:
         await bot.on_message(FakeMessage("part one", author=other_bot, channel=ch))
         await bot.on_message(FakeMessage("part two", author=other_bot, channel=ch))
         bot.pipeline.run.assert_not_awaited()  # buffered, not yet flushed
-        await asyncio.sleep(0.1)
+        await _wait_for_buffer(lambda: bool(bot.pipeline.run.await_args_list))
         assert handled_contents(bot) == ["part one\n\npart two"]
 
     async def test_split_code_block_joined_across_bot_messages(self):
@@ -194,7 +205,7 @@ class TestBotMessageBuffering:
         ch = FakeChannel(id=99)
         await bot.on_message(FakeMessage("```python\nx = 1", author=other_bot, channel=ch))
         await bot.on_message(FakeMessage("y = 2\n```", author=other_bot, channel=ch))
-        await asyncio.sleep(0.1)
+        await _wait_for_buffer(lambda: bool(bot.pipeline.run.await_args_list))
         # Unclosed fence → continuation joined with single newline
         assert handled_contents(bot) == ["```python\nx = 1\ny = 2\n```"]
 
@@ -206,7 +217,8 @@ class TestBotMessageBuffering:
         ch = FakeChannel(id=99)
         ch.guild = guild
         await bot.on_message(FakeMessage("no mention", author=other_bot, channel=ch, guild=guild))
-        await asyncio.sleep(0.1)
+        flush_tasks = tuple(bot.channel_state.bot_msg_tasks.values())
+        await _wait_for_buffer(lambda: all(task.done() for task in flush_tasks))
         bot.pipeline.run.assert_not_awaited()
 
 
@@ -271,7 +283,7 @@ class TestBotAdmissionPreambleConsistency:
             )
         )
         if expected_admitted:
-            await asyncio.sleep(0.08)
+            await _wait_for_buffer(lambda: bool(fake.calls))
 
         assert bool(fake.calls) is expected_admitted
         if expected_admitted:
@@ -336,7 +348,7 @@ class TestBotAdmissionPreambleConsistency:
                 guild=guild,
             )
         )
-        await asyncio.sleep(0.08)
+        await _wait_for_buffer(lambda: bool(fake.calls))
 
         assert len(fake.calls) == 1
         assert "from ANOTHER BOT" in "\n".join(fake.developer_messages_of_call(0))
@@ -360,7 +372,7 @@ class TestBotAdmissionPreambleConsistency:
         # The message is already admitted and buffered. A live update must not
         # erase its origin while it waits to enter the pipeline.
         bot.channel_config.set_channel_config(str(channel.id), respond_to_bots=False)
-        await asyncio.sleep(0.12)
+        await _wait_for_buffer(lambda: bool(fake.calls))
 
         assert len(fake.calls) == 1
         assert "from ANOTHER BOT" in "\n".join(fake.developer_messages_of_call(0))

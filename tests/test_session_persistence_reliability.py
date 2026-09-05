@@ -194,8 +194,8 @@ def test_eviction_protects_quiet_channels_newest_archive(tmp_path):
     remaining = {p.name for p in archive_dir.glob("*.json")}
     # The quiet channel's only restore point survives despite being oldest.
     assert "quiet_100.json" in remaining
-    # Cap respected.
-    assert len(remaining) <= 3
+    # Cap respected, oldest non-protected files evicted first.
+    assert remaining == {"quiet_100.json", "churn_400.json", "churn_500.json"}
 
 
 # ---------------------------------------------------------------------------

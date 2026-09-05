@@ -3,9 +3,11 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import json
+import threading
 from pathlib import Path
 
 from ..odin_log import get_logger
+from .persistence import write_private_atomic
 
 log = get_logger("permissions")
 
@@ -50,6 +52,7 @@ class PermissionManager:
         self._overrides_path = Path(overrides_path)
         self._overrides: dict[str, str] = {}
         self._lock = asyncio.Lock()
+        self._publication_lock = threading.RLock()
         self._load_overrides()
 
     def _load_overrides(self) -> None:
@@ -63,11 +66,11 @@ class PermissionManager:
             except (json.JSONDecodeError, OSError) as e:
                 log.warning("Failed to load permission overrides: %s", e)
 
-    def _save_overrides(self) -> None:
-        self._overrides_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._overrides_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._overrides, indent=2))
-        tmp.replace(self._overrides_path)
+    def _save_overrides(self, candidate: dict[str, str] | None = None) -> None:
+        self.durability_degraded = not write_private_atomic(
+            self._overrides_path,
+            json.dumps(self._overrides if candidate is None else candidate, indent=2),
+        )
 
     @staticmethod
     def set_request_tier(tier: str) -> contextvars.Token:
@@ -92,8 +95,10 @@ class PermissionManager:
         """Set a user's permission tier (persisted as runtime override)."""
         if tier not in VALID_TIERS:
             raise ValueError(f"Invalid tier '{tier}'. Must be one of: {', '.join(VALID_TIERS)}")
-        self._overrides[user_id] = tier
-        self._save_overrides()
+        with self._publication_lock:
+            candidate = {**self._overrides, user_id: tier}
+            self._save_overrides(candidate)
+            self._overrides = candidate
         log.info("Permission tier for user %s set to %s", user_id, tier)
 
     async def async_set_tier(self, user_id: str, tier: str) -> None:
@@ -104,10 +109,13 @@ class PermissionManager:
     async def async_delete_tier(self, user_id: str) -> bool:
         """Remove a user's permission override with locking. Returns True if it existed."""
         async with self._lock:
-            if user_id in self._overrides:
-                del self._overrides[user_id]
-                self._save_overrides()
-                return True
+            with self._publication_lock:
+                if user_id in self._overrides:
+                    candidate = dict(self._overrides)
+                    del candidate[user_id]
+                    self._save_overrides(candidate)
+                    self._overrides = candidate
+                    return True
         return False
 
     def filter_tools(self, user_id: str, tools: list[dict]) -> list[dict] | None:

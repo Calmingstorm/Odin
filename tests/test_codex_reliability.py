@@ -176,7 +176,10 @@ def _sse(events: list[dict], done: bool = True) -> list[str]:
     return lines
 
 
-TEXT_OK_SSE = _sse([{"type": "response.output_text.delta", "delta": "hello"}])
+TEXT_OK_SSE = _sse([
+    {"type": "response.output_text.delta", "delta": "hello"},
+    {"type": "response.completed", "response": {}},
+])
 
 
 # ---------------------------------------------------------------------------
@@ -531,6 +534,7 @@ async def test_malformed_tool_args_set_parse_error():
         {"type": "response.function_call_arguments.delta", "output_index": 0,
          "delta": '{"command": "ls'},
         {"type": "response.function_call_arguments.done", "output_index": 0},
+        {"type": "response.completed", "response": {}},
     ]))
     result = await client._read_tool_stream(resp)
     assert len(result.tool_calls) == 1
@@ -580,6 +584,7 @@ async def test_valid_tool_args_have_no_parse_error():
         {"type": "response.function_call_arguments.delta", "output_index": 0,
          "delta": '{"command": "ls"}'},
         {"type": "response.function_call_arguments.done", "output_index": 0},
+        {"type": "response.completed", "response": {}},
     ]))
     result = await client._read_tool_stream(resp)
     tc = result.tool_calls[0]

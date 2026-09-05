@@ -33,6 +33,7 @@ class LLMResponse:
     stop_reason: str = "end_turn"  # "end_turn" or "tool_use"
     input_tokens: int = 0
     output_tokens: int = 0
+    duration_ms: int = 0  # accepted logical generation; excludes tools
     # Execution provenance: the frozen provider identity and the serialized
     # model/effort of the successful outbound request. Providers stamp these
     # from the SAME pre-await locals the request body was built from — the

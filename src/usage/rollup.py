@@ -1007,7 +1007,7 @@ class UsageRollup:
                     COALESCE(SUM(g.output_tokens),0) output_tokens,
                     SUM(CASE WHEN g.duration_ms > 0 THEN g.duration_ms END) duration_ms,
                     COUNT(CASE WHEN g.duration_ms > 0 THEN 1 END) duration_samples,
-                    COALESCE(SUM(t.is_error),0) terminal_error_turns
+                    COUNT(DISTINCT CASE WHEN t.is_error THEN t.fact_id END) terminal_error_turns
                     FROM generation_facts g JOIN turn_facts t ON t.fact_id=g.turn_fact_id
                     {('WHERE g.occurred_at >= ?' if since is not None else '')}
                     GROUP BY g.provider, g.model, g.effort

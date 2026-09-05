@@ -81,9 +81,14 @@ def register_knowledge(routes: web.RouteTableDef, bot) -> None:
         if not store or not store.available:
             return web.json_response({"error": "knowledge store not available"}, status=503)
         source = request.match_info["source"]
-        content = await asyncio.to_thread(store.get_source_content, source)
+        content = await asyncio.to_thread(store.get_source_snapshot, source)
         if content is None:
-            return web.json_response({"error": "source not found"}, status=404)
+            if not await asyncio.to_thread(store.get_source_chunks, source):
+                return web.json_response({"error": "source not found"}, status=404)
+            return web.json_response(
+                {"error": "No current full-document snapshot; refusing reconstruction from chunks"},
+                status=409,
+            )
         chunks = await store.ingest(content, source, embedder=bot.embedder, uploader="web-reingest")
         if chunks <= 0:
             return web.json_response(

@@ -152,6 +152,7 @@ def _wire(monkeypatch, client, session):
 
 TEXT_OK_SSE = [
     'data: {"type": "response.output_text.delta", "delta": "hello"}\n',
+    'data: {"type": "response.completed", "response": {}}\n',
     "data: [DONE]\n",
 ]
 
@@ -290,7 +291,7 @@ class TestStructuredBodiesStayRequestClass:
         with pytest.raises(LLMRequestError) as ei:
             await client._stream_request({"model": "m"})
         assert session.calls == 1
-        assert client.breaker._failure_count == 1
+        assert client.breaker._failure_count == 0  # deterministic request is not service health
         assert "does not exist" in str(ei.value)
 
     async def test_json_400_fast_fails_one_attempt(self, monkeypatch):

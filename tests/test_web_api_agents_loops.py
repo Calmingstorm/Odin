@@ -339,7 +339,8 @@ class TestProcesses:
         bot.tool_executor._process_registry._processes = {1: self._proc()}
         async with TestClient(TestServer(_app(register_processes, bot=bot))) as c:
             body = await (await c.get("/api/processes")).json()
-            assert body[0]["pid"] == 1 and body[0]["command"] == "tail -f log"
+            assert body[0]["pid"] == 1
+            assert body[0]["command"] == "tail -f log"
             assert body[0]["output_preview"] == ["line2", "line3", "line4"]
 
     @pytest.mark.asyncio
