@@ -69,11 +69,11 @@ class TestGatingChain:
     async def test_own_message_ignored_but_channel_logged(self):
         bot = build()
         logged = []
-        bot.channel_logger.log_message = lambda m: logged.append(m)
+        bot.channel_logger.log_message = lambda m, *, content: logged.append((m, content))
         msg = FakeMessage("from myself")
         msg.author = bot.user  # message.author == self.user
         await bot.on_message(msg)
-        assert logged == [msg]  # passive log happens first
+        assert logged == [(msg, "from myself")]  # redacted ingress log happens first
         bot.process_commands.assert_not_awaited()  # then everything else skipped
         bot.pipeline.run.assert_not_awaited()
 

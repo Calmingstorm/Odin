@@ -11,6 +11,7 @@ from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..credential_redaction import redact_credentials
 from ..odin_log import get_logger
 from ..search.errors import validate_search_query
 
@@ -40,7 +41,7 @@ class ChannelLogger:
         # Track last indexed timestamp per channel (in-memory, reset on restart)
         self._last_indexed_ts: dict[str, float] = {}
 
-    def log_message(self, message: object) -> None:
+    def log_message(self, message: object, *, content: str | None = None) -> None:
         """Append a single message to the appropriate channel JSONL file.
 
         Skips DMs (no guild).  Tolerant of missing attributes so it never
@@ -62,10 +63,16 @@ class ChannelLogger:
                 "ts": (message.created_at.timestamp()
                        if hasattr(message, "created_at") and message.created_at else 0.0),
                 "author_id": str(author.id) if author else "0",
-                "author": str(getattr(author, "display_name", getattr(author, "name", "Unknown"))),
+                "author": redact_credentials(str(
+                    getattr(author, "display_name", getattr(author, "name", "Unknown")),
+                )),
                 "bot": bool(getattr(author, "bot", False)),
-                "content": getattr(message, "content", "") or "",
-                "attachments": [a.filename for a in getattr(message, "attachments", [])],
+                "content": redact_credentials(
+                    (getattr(message, "content", "") or "") if content is None else content,
+                ),
+                "attachments": [redact_credentials(a.filename)
+                                for a in getattr(message, "attachments", [])],
+                "message_id": str(getattr(message, "id", "") or ""),
                 "channel_id": channel_id,
                 "guild_id": str(guild.id),
             }

@@ -8,6 +8,7 @@ from __future__ import annotations
 import sqlite3
 import threading
 
+from ..credential_redaction import redact_credentials
 from ..odin_log import get_logger
 from .errors import SearchExecutionError, validate_search_query
 
@@ -59,6 +60,12 @@ class FullTextIndex:
                     channel_id UNINDEXED,
                     timestamp UNINDEXED,
                     tokenize='unicode61 remove_diacritics 2'
+                );
+                CREATE TABLE IF NOT EXISTS channel_log_identity (
+                    channel_id TEXT NOT NULL,
+                    message_id TEXT NOT NULL,
+                    fts_rowid INTEGER NOT NULL,
+                    PRIMARY KEY (channel_id, message_id)
                 );
             """)
             self._conn = conn
@@ -306,8 +313,8 @@ class FullTextIndex:
         try:
             rows = [
                 (
-                    m.get("content", ""),
-                    m.get("author", "Unknown"),
+                    redact_credentials(m.get("content", "")),
+                    redact_credentials(m.get("author", "Unknown")),
                     str(m.get("channel_id", "")),
                     str(m.get("ts", 0.0)),
                 )
@@ -317,16 +324,51 @@ class FullTextIndex:
             if not rows:
                 return 0
             with self._write_lock:
-                self._conn.executemany(
-                    "INSERT INTO channel_log_fts (content, author, channel_id, timestamp) "
-                    "VALUES (?, ?, ?, ?)",
-                    rows,
-                )
+                for row, message in zip(rows, (m for m in messages if m.get("content"))):
+                    message_id = str(message.get("message_id", "") or "")
+                    if message_id:
+                        existing = self._conn.execute(
+                            "SELECT fts_rowid FROM channel_log_identity "
+                            "WHERE channel_id=? AND message_id=?", (row[2], message_id),
+                        ).fetchone()
+                        if existing:
+                            continue
+                    cursor = self._conn.execute(
+                        "INSERT INTO channel_log_fts (content, author, channel_id, timestamp) "
+                        "VALUES (?, ?, ?, ?)", row,
+                    )
+                    if message_id:
+                        self._conn.execute(
+                            "INSERT INTO channel_log_identity VALUES (?, ?, ?)",
+                            (row[2], message_id, cursor.lastrowid),
+                        )
                 self._conn.commit()
             return len(rows)
         except Exception as e:
             log.error("FTS channel log index failed: %s", e)
             return 0
+
+    def remove_channel_message(self, channel_id: str, message_id: str) -> bool:
+        """Remove only identity-tagged derived rows; never infer legacy identity."""
+        if not self._conn or not message_id:
+            return False
+        with self._write_lock:
+            try:
+                self._conn.execute(
+                    "DELETE FROM channel_log_fts WHERE rowid IN "
+                    "(SELECT fts_rowid FROM channel_log_identity "
+                    "WHERE channel_id=? AND message_id=?)",
+                    (channel_id, message_id),
+                )
+                self._conn.execute(
+                    "DELETE FROM channel_log_identity WHERE channel_id=? AND message_id=?",
+                    (channel_id, message_id),
+                )
+                self._conn.commit()
+                return True
+            except Exception:
+                self._conn.rollback()
+                return False
 
     def search_channel_logs(
         self, query: str, limit: int = 20, channel_id: str | None = None,

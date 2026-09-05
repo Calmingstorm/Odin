@@ -21,7 +21,6 @@ from __future__ import annotations
 
 import asyncio
 import io
-import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -29,6 +28,9 @@ from typing import TYPE_CHECKING
 import discord
 
 from ..async_utils import fire_and_forget
+from ..credential_redaction import SECRET_SCRUB_PATTERNS as SECRET_SCRUB_PATTERNS
+from ..credential_redaction import check_for_secrets as check_for_secrets
+from ..credential_redaction import redact_credentials
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
@@ -50,21 +52,6 @@ if TYPE_CHECKING:
     from .turn_resume import TurnResumeManager
 
 log = get_logger("discord")
-
-# Patterns that might indicate a secret was pasted (moved verbatim from
-# client.py, RFC-002 P4 — the intake is their only behavioral consumer).
-SECRET_SCRUB_PATTERNS = [
-    re.compile(r"sk-[a-zA-Z0-9]{20,}"),
-    re.compile(r"(?i)(api[_-]?key|token|secret|password)\s*[:=]\s*\S{8,}"),
-    re.compile(r"xox[boaprs]-[a-zA-Z0-9-]+"),
-    # Natural language: "my password is ...", "password for gmail is ..."
-    re.compile(r"(?i)(?:my\s+)?(?:password|passwd|pwd)\s+(?:\S+\s+){0,4}(?:is|was)\s+\S{6,}"),
-]
-
-
-def check_for_secrets(content: str) -> bool:
-    return any(p.search(content) for p in SECRET_SCRUB_PATTERNS)
-
 
 @dataclass(frozen=True)
 class MessageIntakeDeps:
@@ -159,7 +146,9 @@ class MessageIntake:
         from .tool_loop_helpers import _ALLOWED_WEBHOOK_IDS
 
         # Passive channel log — every guild message, including our own, before any filtering
-        self._channel_logger.log_message(message)
+        self._channel_logger.log_message(
+            message, content=redact_credentials(message.content or ""),
+        )
 
         # Never respond to our own messages
         if message.author == self._get_user():
