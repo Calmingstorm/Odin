@@ -316,10 +316,11 @@ class TestTruncatePayload:
         assert _truncate_payload(p) == p
 
     def test_long_payload_truncated(self):
-        p = "x" * (MAX_PAYLOAD_CHARS + 100)
+        p = json.dumps({"data": {"nested": "x" * (MAX_PAYLOAD_CHARS + 100)}})
         result = _truncate_payload(p)
         assert len(result) <= MAX_PAYLOAD_CHARS
-        assert '"_truncated":true}' in result
+        assert json.loads(result)["_truncated"] is True
+        assert json.loads(result)["_omission"]["fields"] == 1
 
 
 # ---------------------------------------------------------------------------
@@ -354,14 +355,15 @@ class TestDispatcherRegister:
         assert t.scrub_secrets is False
         assert t.verify_ssl is False
 
-    def test_register_filters_invalid_events(self):
+    def test_register_rejects_invalid_events(self):
         d = OutboundWebhookDispatcher()
-        t = d.register(
-            name="test",
-            url="https://x.com/hook",
-            events=["alert", "bogus", "tool_execution", "not_real"],
-        )
-        assert t.events == ["alert", "tool_execution"]
+        with pytest.raises(ValueError, match="event filter"):
+            d.register(
+                name="test",
+                url="https://example.com/hook",
+                events=["alert", "bogus", "tool_execution", "not_real"],
+            )
+        assert d.list_webhooks() == []
 
     def test_register_no_url_raises(self):
         d = OutboundWebhookDispatcher()
@@ -460,7 +462,10 @@ class TestDispatcherUpdate:
     def test_update_events(self):
         d = OutboundWebhookDispatcher()
         t = d.register(name="test", url="https://x.com/hook", events=["alert"])
-        updated = d.update(t.id, events=["health", "loop", "bogus"])
+        with pytest.raises(ValueError, match="event filter"):
+            d.update(t.id, events=["health", "loop", "bogus"])
+        assert t.events == ["alert"]
+        updated = d.update(t.id, events=["health", "loop"])
         assert updated is not None
         assert updated.events == ["health", "loop"]
 

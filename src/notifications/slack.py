@@ -12,6 +12,7 @@ import aiohttp
 
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..odin_log import get_logger
+from .payloads import scrub_payload
 
 log = get_logger("slack")
 
@@ -150,9 +151,8 @@ class SlackNotifier:
 
         if payload is None:
             payload = build_plain_payload(_discord_to_slack_markdown(text))
-        else:
-            if self._scrub and "text" in payload:
-                payload["text"] = scrub_output_secrets(str(payload["text"]))
+        if self._scrub:
+            payload = scrub_payload(payload, scrub_output_secrets)
 
         try:
             session = await self._get_session()
