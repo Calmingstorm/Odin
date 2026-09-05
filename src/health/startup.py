@@ -324,9 +324,9 @@ def check_host_inventory_compat(tools_config: Any) -> DiagnosticResult:
 
 def warn_missing_host_defaults(tools_config: Any, host_access_manager: Any) -> list[str]:
     """Warn when omitted-host work lost its former YAML-order fallback."""
-    if not getattr(tools_config, "hosts", {}) or getattr(
-        tools_config, "default_host", ""
-    ):
+    hosts: Any = getattr(tools_config, "hosts", {})
+    default_host: Any = getattr(tools_config, "default_host", "")
+    if not hosts or default_host:
         return []
     entries = [("default_policy", host_access_manager.default_policy.to_dict())]
     entries.extend(
