@@ -1242,6 +1242,13 @@ class AgentTaskTools:
             return "'agent_ids' list is required."
         if not isinstance(agent_ids, list):
             return "'agent_ids' must be a list of agent ID strings."
+        if any(not isinstance(aid, str) or not aid for aid in agent_ids):
+            return "'agent_ids' must contain non-empty agent ID strings."
+        agent_ids = list(dict.fromkeys(agent_ids))
+        from ...agents.wait_results import render_wait_results, validate_wait_roster
+        from ...tools.output_delivery import get_delivery_budget
+
+        budget = get_delivery_budget(self._get_config())
 
         authorized = []
         durable = {}
@@ -1250,42 +1257,38 @@ class AgentTaskTools:
             if result is not None and self._can_read_agent_result(result, user_id, channel_id):
                 authorized.append(aid)
                 durable[aid] = result
+        try:
+            validate_wait_roster(agent_ids, durable, budget)
+        except ValueError as exc:
+            return str(exc)
         results = await self._agent_manager.wait_for_agents(
             authorized,
             timeout=float(timeout),
         )
+        # Invocation metadata must survive replacement by durable snapshots.
+        interruptions = {aid: r.get("wait_interrupted") for aid, r in results.items()
+                         if r.get("wait_interrupted") == "parent_message"}
         for aid in agent_ids:
-            if aid not in authorized:
+            if aid not in authorized or not self._can_read_agent_result(
+                durable[aid], user_id, channel_id
+            ):
                 results[aid] = {"status": "not_found", "error": f"Agent '{aid}' not found."}
             elif not results.get(aid) or results[aid].get("status") == "not_found":
-                results[aid] = durable[aid]
+                results[aid] = dict(durable[aid])
+            if aid in interruptions:
+                results[aid] = {**results[aid], "wait_interrupted": interruptions[aid]}
 
-        lines: list[str] = []
-        for aid in agent_ids:
-            r = results.get(aid, {})
-            status = r.get("status", "unknown")
-            label = r.get("label", aid)
-            from ...agents.results import result_page
+        try:
+            text = render_wait_results(agent_ids, results, budget)
+        except ValueError as exc:
+            text = str(exc)
+            if interruptions:
+                from ...agents.wait_results import INTERRUPTION_NOTICE
 
-            page = result_page({"id": aid, **r}, limit=800)
-            content = page["preview"] or "(no output)"
-            if page["truncated"]:
-                content += (
-                    f"\n... [truncated; original_bytes={page['original_bytes']}; "
-                    f"get_agent_results cursor={page['cursor']}]"
-                )
-            # iterations is the stable progress marker for the wait-class
-            # stuck signature (PR #244 round-1): a silently-progressing
-            # agent must not render identically to a hung one. Runtime
-            # stays excluded — hashing elapsed time would make a hung
-            # agent immortal.
-            iters = r.get("iteration_count", 0)
-            lines.append(f"**{label}** (`{aid}`): {status} [iterations={iters}]\n{content}")
-
-        text = "\n\n".join(lines) if lines else "No results."
-        if any(r.get("wait_interrupted") == "parent_message" for r in results.values()):
+                text = INTERRUPTION_NOTICE + text
+        if interruptions:
             return ToolResult(
-                "Wait interrupted by parent message; children continue.\n\n" + text,
+                text,
                 audit_metadata={"wait_interrupted": "parent_message"},
             )
         return text
