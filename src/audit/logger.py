@@ -13,6 +13,7 @@ import aiofiles
 from ..observability.correlation import get_turn
 from ..observability.failure_classes import classify_failure
 from ..odin_log import get_logger
+from ..permissions.persistence import write_private_atomic
 from .signer import GENESIS_HASH, AuditSigner, verify_log
 
 log = get_logger("audit")
@@ -108,6 +109,10 @@ class AuditLogger:
         # _maybe_rotate (as called from persist), and initialize_chain all hold
         # this lock.
         self._persist_lock = asyncio.Lock()
+        self._repair_marker = self.path.with_name(self.path.name + ".repair-required")
+        self.repair_required = self._repair_marker.exists()
+        self.durability_degraded = self.repair_required
+        self._chain_initialized = False
         self._classify_failures = classify_failures
         self._result_cap = result_cap
         self._tool_input_cap = tool_input_cap
@@ -249,21 +254,91 @@ class AuditLogger:
         best-effort side effect and runs AFTER the lock — the signed append has
         already durably happened, so a slow or failing callback can neither
         stall other persists nor affect the persisted result."""
+        if not self._chain_initialized:
+            await self.initialize_chain()
         async with self._persist_lock:
-            self._maybe_rotate()
-            if self._signer:
-                self._signer.sign(entry)
-            line = json.dumps(entry, default=str) + "\n"
-            try:
-                async with aiofiles.open(self.path, "a") as f:
-                    await f.write(line)
-            except Exception as e:
-                log.error("Failed to write audit log: %s", e)
+            if self.repair_required:
+                entry["audit_durability"] = "repair_required"
+            else:
+                self._maybe_rotate()
+                if self._signer:
+                    self._signer.prepare(entry)
+                line = json.dumps(entry, default=str) + "\n"
+                append = asyncio.create_task(self._append_durable(line))
+                cancelled = False
+                try:
+                    # aiofiles delegates writes to threads. Cancellation must not
+                    # release chain ownership while one can still append bytes.
+                    while not append.done():
+                        try:
+                            await asyncio.shield(append)
+                        except asyncio.CancelledError:
+                            cancelled = True
+                    append.result()
+                except BaseException as exc:
+                    self.durability_degraded = True
+                    entry["audit_durability"] = (
+                        "repair_required" if self.repair_required else "not_persisted"
+                    )
+                    log.error(
+                        "Audit append failed (%s); durability=%s",
+                        type(exc).__name__, entry["audit_durability"],
+                    )
+                    if not isinstance(exc, Exception):
+                        raise
+                else:
+                    if self._signer:
+                        self._signer.commit(entry)
+                    self.durability_degraded = False
+                if cancelled:
+                    raise asyncio.CancelledError
         if self._event_callback:
             try:
                 await self._event_callback(entry)
             except Exception:
                 pass
+
+    async def _append_durable(self, line: str) -> None:
+        """Persist intent before the first byte; remove it only after settlement."""
+        intent = False
+        try:
+            async with aiofiles.open(self.path, "a", encoding="utf-8") as f:
+                if not write_private_atomic(
+                    self._repair_marker,
+                    "Audit append pending or uncertain; operator repair required.\n",
+                ):
+                    self.repair_required = True
+                    raise OSError("Audit intent durability unproven")
+                intent = True
+                written = await f.write(line)
+                if written != len(line):
+                    raise OSError("Short audit append")
+                await f.flush()
+                os.fsync(f.fileno())
+            self._repair_marker.unlink()
+            directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(directory)
+            finally:
+                os.close(directory)
+        except BaseException:
+            if intent:
+                self._quarantine_uncertain_append()
+            elif self._repair_marker.exists():
+                self.repair_required = True
+            raise
+
+    def _quarantine_uncertain_append(self) -> None:
+        """Fence further appends, preserving every uncertain byte for repair."""
+        self.repair_required = True
+        self.durability_degraded = True
+        try:
+            write_private_atomic(
+                self._repair_marker,
+                "Audit append outcome uncertain. Preserve log bytes; operator repair required.\n",
+            )
+        except OSError:
+            log.critical("Audit repair marker failed to persist; restart requires operator repair")
 
     async def log_execution(
         self,
@@ -640,31 +715,37 @@ class AuditLogger:
         return await self._collect_matches(_match, limit)
 
     async def initialize_chain(self) -> None:
-        """Read the last signed entry to resume the HMAC chain state.
-
-        Holds _persist_lock: it mutates the signer's chain state, and must not
-        race a persist if startup overlaps with the first served requests."""
-        if not self._signer or not self.path.exists():
-            return
+        """Resume only a verified chain, under the same ownership as appends."""
         async with self._persist_lock:
+            if self._chain_initialized:
+                return
+            if self.repair_required or not self._signer or not self.path.exists():
+                self._chain_initialized = True
+                return
             try:
                 async with aiofiles.open(self.path) as f:
                     lines = await f.readlines()
-            except Exception as exc:
-                log.error("Failed to read audit log for chain init: %s", exc)
-                return
-            for line in reversed(lines):
-                line = line.strip()
-                if not line:
-                    continue
-                try:
+                predecessor = GENESIS_HASH
+                signed = False
+                for line in lines:
+                    if not line.endswith("\n"):
+                        raise ValueError("Unsettled audit tail")
+                    if not line.strip():
+                        continue
                     entry = json.loads(line)
-                except json.JSONDecodeError:
-                    continue
-                prev = entry.get("_hmac")
-                if prev:
-                    self._signer.prev_hmac = prev
-                return
+                    if not isinstance(entry, dict):
+                        raise ValueError("Non-object audit entry")
+                    if "_hmac" not in entry and not signed:
+                        continue  # Existing pre-signing history remains valid.
+                    if not self._signer.verify_entry(entry, predecessor):
+                        raise ValueError("Unverified audit chain")
+                    predecessor = entry["_hmac"]
+                    signed = True
+                self._signer.prev_hmac = predecessor
+            except Exception as exc:
+                log.error("Audit chain initialization failed (%s)", type(exc).__name__)
+                self._quarantine_uncertain_append()
+            self._chain_initialized = True
 
     async def verify_integrity(self) -> dict:
         """Verify the HMAC chain of the audit log.
@@ -687,4 +768,8 @@ class AuditLogger:
         # returns valid=False is a failure even when its diagnostic has an
         # error string; only the explicit not_enabled shape is soft copy.
         result["availability"] = "available"
+        result["durability"] = (
+            "repair_required" if self.repair_required
+            else "degraded" if self.durability_degraded else "durable"
+        )
         return result

@@ -33,11 +33,20 @@ class AuditSigner:
 
     def sign(self, entry: dict) -> dict:
         """Add ``_prev_hmac`` and ``_hmac`` fields to *entry* (mutates in place)."""
+        self.prepare(entry)
+        self.commit(entry)
+        return entry
+
+    def prepare(self, entry: dict) -> dict:
+        """Prepare a signature without publishing the predecessor."""
         entry["_prev_hmac"] = self._prev_hmac
         canonical = _canonical(entry)
         entry["_hmac"] = self._compute(canonical)
-        self._prev_hmac = entry["_hmac"]
         return entry
+
+    def commit(self, entry: dict) -> None:
+        """Publish a prepared signature only after its append succeeds."""
+        self._prev_hmac = entry["_hmac"]
 
     def verify_entry(self, entry: dict, expected_prev: str) -> bool:
         """Return True if a single entry's HMAC is valid given *expected_prev*."""
