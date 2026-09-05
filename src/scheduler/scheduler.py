@@ -198,6 +198,32 @@ class Scheduler:
             os.fsync(f.fileno())
         os.replace(tmp, self.data_path)
 
+    async def _publish(self, candidate: list[dict]) -> None:
+        """Caller holds _lock; persist detached state before making it visible."""
+        candidate = copy.deepcopy(candidate)
+        writer = copy.copy(self)
+        writer._schedules = candidate
+        write = asyncio.create_task(asyncio.to_thread(writer._save))
+        cancelled = False
+        while not write.done():
+            try:
+                await asyncio.shield(write)
+            except asyncio.CancelledError:
+                # Every wait must be shielded: repeated cancellation must not
+                # cancel the task wrapping the still-running writer thread.
+                cancelled = True
+        write.result()  # A failed write must never publish the candidate.
+        self._schedules = candidate
+        if cancelled:
+            raise asyncio.CancelledError
+
+    @staticmethod
+    def _execution_identity(schedule: dict) -> tuple:
+        return (
+            schedule.get("_generation", schedule.get("created_at")),
+            schedule.get("_execution_revision", 0),
+        )
+
     def set_known_report_formats_provider(
         self, provider: Callable[[], Collection[str]]
     ) -> None:
@@ -275,6 +301,9 @@ class Scheduler:
 
         schedule: dict[str, Any] = {
             "id": uuid.uuid4().hex[:8],
+            "_generation": uuid.uuid4().hex,
+            "_revision": 0,
+            "_execution_revision": 0,
             "description": description,
             "action": action,
             "channel_id": channel_id,
@@ -340,8 +369,7 @@ class Scheduler:
         schedule["last_error_at"] = None
 
         async with self._lock:
-            self._schedules.append(schedule)
-            await asyncio.to_thread(self._save)
+            await self._publish([*self._schedules, schedule])
         self._wake.set()
         log_next = schedule.get("next_run", "on trigger")
         log.info("Added schedule %s: %s (next: %s)", schedule["id"], description, log_next)
@@ -609,7 +637,8 @@ class Scheduler:
         matched: list[dict] = []
         async with self._lock:
             now = datetime.now(UTC)
-            for schedule in self._schedules:
+            candidate = copy.deepcopy(self._schedules)
+            for schedule in candidate:
                 if schedule.get("paused"):
                     continue
                 trigger = schedule.get("trigger")
@@ -623,13 +652,10 @@ class Scheduler:
                     schedule["id"], schedule["description"], source,
                 )
                 schedule["last_run"] = now.isoformat()
-                matched.append(schedule)
+                matched.append(copy.deepcopy(schedule))
 
             if matched:
-                try:
-                    await asyncio.to_thread(self._save)
-                except Exception as e:
-                    log.error("Schedule save failed after trigger fire: %s", e)
+                await self._publish(candidate)
 
         for schedule in matched:
             await self._execute_and_record(schedule)
@@ -641,14 +667,17 @@ class Scheduler:
     async def reset_failures(self, schedule_id: str) -> dict | None:
         """Reset failure counters and cancel pending retries for a schedule."""
         async with self._lock:
-            for s in self._schedules:
+            candidate = copy.deepcopy(self._schedules)
+            for s in candidate:
                 if s["id"] == schedule_id:
                     s["consecutive_failures"] = 0
                     s["retry_count"] = 0
                     s["last_error"] = None
                     s["last_error_at"] = None
                     s.pop("retry_at", None)
-                    await asyncio.to_thread(self._save)
+                    s["_revision"] = s.get("_revision", 0) + 1
+                    s["_execution_revision"] = s.get("_execution_revision", 0) + 1
+                    await self._publish(candidate)
                     log.info("Reset failure state for schedule %s", schedule_id)
                     return dict(s)
         return None
@@ -786,14 +815,15 @@ class Scheduler:
                 # Timezone changed on an existing cron schedule — recompute.
                 target["next_run"] = _cron_next_run(target["cron"], cron_timezone)
 
-            self._schedules[target_index] = target
-            try:
-                await asyncio.to_thread(self._save)
-            except Exception:
-                # Persistence failure must not leave an in-memory update that
-                # disagrees with disk and may be serialized by a later write.
-                self._schedules[target_index] = original
-                raise
+            target["_revision"] = original.get("_revision", 0) + 1
+            # Descriptive edits preserve outcomes; execution-affecting edits
+            # supersede the old run's retry/completion policy.
+            if any(target.get(key) != original.get(key) for key in
+                   set(target) | set(original) if key not in {"description", "_revision"}):
+                target["_execution_revision"] = original.get("_execution_revision", 0) + 1
+            candidate = list(self._schedules)
+            candidate[target_index] = target
+            await self._publish(candidate)
             log.info("Updated schedule %s", schedule_id)
             return dict(target)
 
@@ -810,15 +840,13 @@ class Scheduler:
         async with self._lock:
             for s in self._schedules:
                 if s["id"] == schedule_id:
-                    schedule = s
+                    schedule = copy.deepcopy(s)
                     break
             if schedule is None:
                 raise ValueError(f"Schedule '{schedule_id}' not found")
             schedule["last_run"] = datetime.now(UTC).isoformat()
-            try:
-                await asyncio.to_thread(self._save)
-            except Exception as e:
-                log.error("Schedule save failed after manual run: %s", e)
+            candidate = [schedule if s["id"] == schedule_id else s for s in self._schedules]
+            await self._publish(candidate)
 
         log.info("Manual run: schedule %s (%s)", schedule_id, schedule.get("description", ""))
         failures_before = schedule.get("consecutive_failures", 0)
@@ -843,23 +871,14 @@ class Scheduler:
         if schedule.get("paused"):
             result["warning"] = "schedule is paused — this was a manual override"
 
-        # Persist callback outcome.  A successful manual recovery completes a
-        # one-time schedule; a failed one remains inert and recoverable.
-        async with self._lock:
-            if not failed and schedule.get("one_time"):
-                self._schedules = [s for s in self._schedules if s["id"] != schedule_id]
-            try:
-                await asyncio.to_thread(self._save)
-            except Exception as e:
-                log.error("Schedule save failed after manual execution: %s", e)
         return result
 
     async def delete(self, schedule_id: str) -> bool:
         async with self._lock:
             before = len(self._schedules)
-            self._schedules = [s for s in self._schedules if s["id"] != schedule_id]
-            if len(self._schedules) < before:
-                await asyncio.to_thread(self._save)
+            candidate = [s for s in self._schedules if s["id"] != schedule_id]
+            if len(candidate) < before:
+                await self._publish(candidate)
                 log.info("Deleted schedule %s", schedule_id)
                 return True
         return False
@@ -969,7 +988,26 @@ class Scheduler:
             return False
         self._in_flight.add(sid)
         try:
+            identity = self._execution_identity(schedule)
             await self._execute_and_record_inner(schedule)
+            async with self._lock:
+                candidate = copy.deepcopy(self._schedules)
+                for current in candidate:
+                    if current["id"] != sid or self._execution_identity(current) != identity:
+                        continue
+                    for key in ("last_run", "consecutive_failures", "retry_count",
+                                "last_error", "last_error_at", "retry_at"):
+                        if key in schedule:
+                            current[key] = schedule[key]
+                        else:
+                            current.pop(key, None)
+                    if schedule.get("one_time"):
+                        if not schedule.get("last_error"):
+                            candidate.remove(current)
+                        elif "next_run" not in schedule:
+                            current.pop("next_run", None)
+                    await self._publish(candidate)
+                    break
             return True
         finally:
             self._in_flight.discard(sid)
@@ -1111,7 +1149,8 @@ class Scheduler:
             now = datetime.now(UTC)
             now_naive = now.replace(tzinfo=None)
 
-            for schedule in self._schedules:
+            candidate = copy.deepcopy(self._schedules)
+            for schedule in candidate:
                 if schedule.get("paused"):
                     continue
 
@@ -1126,7 +1165,7 @@ class Scheduler:
                             schedule["id"], schedule["description"],
                             schedule.get("retry_count", 0),
                         )
-                        to_fire.append(schedule)
+                        to_fire.append(copy.deepcopy(schedule))
                     continue
 
                 next_run_str = schedule.get("next_run")
@@ -1141,7 +1180,7 @@ class Scheduler:
 
                 log.info("Firing schedule %s: %s", schedule["id"], schedule["description"])
                 schedule["last_run"] = now.isoformat()
-                to_fire.append(schedule)
+                to_fire.append(copy.deepcopy(schedule))
 
                 if schedule.get("cron"):
                     schedule["next_run"] = _cron_next_run(
@@ -1149,38 +1188,11 @@ class Scheduler:
                     )
 
             if to_fire:
-                try:
-                    await asyncio.to_thread(self._save)
-                except Exception as e:
-                    log.error("Schedule save failed (in-memory state may diverge from disk): %s", e)
+                await self._publish(candidate)
 
         # Execute callbacks OUTSIDE the lock so callbacks can safely
         # call add()/delete()/update() without deadlocking.  Keep only the
         # executions this tick actually owned: an overlapping run_now may hold
         # the in-flight guard, and a skipped one-time task is not completed.
-        executed: list[dict] = []
         for schedule in to_fire:
-            if await self._execute_and_record(schedule):
-                executed.append(schedule)
-
-        # Remove a one-time schedule only after confirmed success.  A failed
-        # delivery remains persisted even when automatic retries are disabled,
-        # so an operator can run it again instead of losing the reminder.
-        one_time_done = [
-            s["id"] for s in executed
-            if s.get("one_time")
-            and not s.get("retry_at")
-            and not s.get("last_error")
-        ]
-        if to_fire:
-            async with self._lock:
-                if one_time_done:
-                    self._schedules = [
-                        s for s in self._schedules if s["id"] not in one_time_done
-                    ]
-                try:
-                    # Persist retries, terminal failure state, and successful
-                    # counter resets even when no one-time item was removed.
-                    await asyncio.to_thread(self._save)
-                except Exception as e:
-                    log.error("Schedule save failed after execution: %s", e)
+            await self._execute_and_record(schedule)
