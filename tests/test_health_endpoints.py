@@ -252,9 +252,9 @@ class TestBuiltinToolsAdminPolicy:
     def test_builtin_tools_surface_is_centrally_admin_only(self):
         assert _is_admin_only_path("/api/tools/builtins")
         assert _is_admin_only_path("/api/tools/builtins/kubectl/enabled")
-        # Neighboring observability remains available to authenticated tiers.
-        assert not _is_admin_only_path("/api/tools")
-        assert not _is_admin_only_path("/api/tools/stats")
+        # Operational inventory is also administrative under deny-by-default.
+        assert _is_admin_only_path("/api/tools")
+        assert _is_admin_only_path("/api/tools/stats")
 
     async def test_both_routes_reject_user_and_guest_but_allow_admin(self):
         web_config = WebConfig(

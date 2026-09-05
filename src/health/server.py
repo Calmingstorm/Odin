@@ -72,11 +72,27 @@ ADMIN_ONLY_PREFIXES = (
 )
 
 
-def _is_admin_only_path(path: str) -> bool:
-    return any(
-        path == prefix or path.startswith(prefix + "/")
-        for prefix in ADMIN_ONLY_PREFIXES
-    )
+# Deliberate self-service exceptions. Everything else in the API, including
+# future routes and sensitive reads, is administrative by default. Dynamic
+# entries use the router's canonical resource, not a user-supplied prefix.
+SELF_SERVICE_ROUTES = frozenset({
+    ("POST", "/api/auth/login"),
+    ("POST", "/api/auth/logout"),
+    ("GET", "/api/auth/session"),
+    ("POST", "/api/chat"),
+    ("POST", "/api/execute"),
+    ("GET", "/api/ws"),
+    ("GET", "/api/sessions"),
+    ("GET", "/api/sessions/search"),
+    ("GET", "/api/sessions/{channel_id}"),
+    ("GET", "/api/sessions/{channel_id}/export"),
+    ("DELETE", "/api/sessions/{channel_id}"),
+})
+
+
+def _is_admin_only_path(path: str, method: str = "GET") -> bool:
+    method = "GET" if method == "HEAD" else method
+    return path.startswith("/api/") and (method, path) not in SELF_SERVICE_ROUTES
 
 
 def _client_ip(request: web.Request, trusted_proxies: tuple[str, ...] = ()) -> str:
@@ -325,7 +341,7 @@ def _make_auth_middleware(
     return auth_middleware
 
 def _make_admin_middleware(web_config) -> Middleware:
-    """Enforce the admin tier on control-plane prefixes (ADMIN_ONLY_PREFIXES).
+    """Deny API access by default except explicit method/resource exceptions.
 
     Runs after auth_middleware, so request._api_identity is already resolved.
     Dev mode (no tokens configured) is unaffected — auth is disabled wholesale
@@ -336,7 +352,9 @@ def _make_admin_middleware(web_config) -> Middleware:
         request: web.Request,
         handler: Callable[[web.Request], Awaitable[web.StreamResponse]],
     ) -> web.StreamResponse:
-        if not _is_admin_only_path(request.path):
+        resource = request.match_info.route.resource
+        path = resource.canonical if resource is not None else request.path
+        if not _is_admin_only_path(path, request.method):
             return await handler(request)
         token = web_config.api_token
         tm = request.app.get("token_manager")
