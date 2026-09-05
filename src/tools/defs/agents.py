@@ -188,10 +188,13 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "wait_for_agents",
         "description": (
-            "Waits for one or more agents to complete and returns their results. "
+            "Waits for one or more agents to complete. "
             "Essential for fan-out (spawn N agents → wait → collect results) and "
             "pipeline (spawn A → wait → spawn B with A's output) coordination patterns. "
             "Returns a snapshot for every requested agent once all finish or timeout. "
+            "Returns status snapshots with up to 800 UTF-8 bytes of result preview per agent, "
+            "possibly less under the aggregate budget. Use get_agent_results and follow its "
+            "cursor until truncated=false for complete output. "
             "Inside an agent, a parent message interrupts the wait; children continue."
         ),
         "input_schema": {
