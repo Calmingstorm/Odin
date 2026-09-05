@@ -8,6 +8,7 @@ under ``data/trajectories/agents/YYYY-MM-DD.jsonl``.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
@@ -199,6 +200,17 @@ class AgentTrajectorySaver:
         self.usage_observer = observer
 
     async def save(self, turn: AgentTrajectoryTurn) -> Path:
+        from .results import publish_result
+
+        # Result publication is independent of verbose trajectory append: even
+        # if that append fails, the final answer remains durably collectible.
+        await asyncio.to_thread(publish_result, self.directory, {
+            "id": turn.agent_id, "label": turn.label, "status": turn.final_state,
+            "requester_id": turn.requester_id, "channel_id": turn.channel_id,
+            "result": turn.result, "error": turn.error, "tools_used": turn.tools_used,
+            "iteration_count": turn.iteration_count,
+            "runtime_seconds": turn.total_duration_ms / 1000,
+        })
         now = datetime.now(UTC)
         if not turn.timestamp:
             turn.timestamp = now.isoformat()

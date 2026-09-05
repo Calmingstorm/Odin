@@ -115,7 +115,7 @@ EXPECTED_TOOL_HASHES = {
     "send_to_agent": "cbd6fb681bca2543",
     "list_agents": "89bed3253e8298d8",
     "kill_agent": "2543a3eeb5720fdf",
-    "get_agent_results": "82b266fc0e61b299",
+    "get_agent_results": "fe7d43d1328fa712",
     "wait_for_agents": "f04627146b090818",
     "spawn_loop_agents": "f221de14d29ddc02",
     "collect_loop_agents": "b4eddcf0e4e2edca",

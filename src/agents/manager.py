@@ -506,6 +506,7 @@ class AgentManager:
         # Lightweight ancestry only, retained while a registered descendant
         # needs it. Never retain the evicted agent's execution/result payload.
         self._retired_lineage: dict[str, dict] = {}
+        self._result_savers: dict[str, AgentTrajectorySaver] = {}
         # Admission reads this provider for every spawn. The callable is bound
         # to the bot's live config root in production, so a save affects new
         # spawns without changing agents already admitted. None preserves the
@@ -724,6 +725,8 @@ class AgentManager:
         # Schedule cleanup when the agent task finishes (any exit path)
         task.add_done_callback(lambda _t: self._schedule_cleanup(agent_id))
         self._agents[agent_id] = agent
+        if trajectory_saver is not None:
+            self._result_savers[agent_id] = trajectory_saver
         self._tree_spawn_counts[agent.root_id] = self._tree_spawn_counts.get(agent.root_id, 0) + 1
 
         log.info(
@@ -839,6 +842,8 @@ class AgentManager:
         runtime = (agent.ended_at or time.time()) - agent.created_at
         return {
             "id": agent.id,
+            "requester_id": agent.requester_id,
+            "channel_id": agent.channel_id,
             "label": agent.label,
             "status": agent.status,
             "state": agent.state.value,
@@ -1093,6 +1098,18 @@ class AgentManager:
 
     def _remove_agent(self, agent_id: str, source: str = "") -> bool:
         """Single removal point for agents. Returns True if actually removed."""
+        agent = self._agents.get(agent_id)
+        saver = self._result_savers.get(agent_id)
+        if agent is not None and saver is not None:
+            from .results import publish_result
+
+            try:
+                publish_result(saver.directory, self._serialize_result(agent))
+            except Exception:
+                # Keep the full live result and retry on periodic cleanup.
+                log.exception("Agent result persistence failed; retaining %s", agent_id)
+                return False
+        self._result_savers.pop(agent_id, None)
         agent = self._agents.pop(agent_id, None)
         ct = self._cleanup_tasks.pop(agent_id, None)
         if ct and not ct.done():

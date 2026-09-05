@@ -105,7 +105,8 @@ async def test_nested_wait_wakes_for_parent_with_all_child_snapshots():
 
     async def execute(name, inp):
         assert waiting_agent.get() is parent
-        return await tools._handle_wait_for_agents(inp)
+        return await tools._handle_wait_for_agents(
+            inp, user_id=parent.requester_id, channel_id=parent.channel_id)
 
     async def callback(messages, *args, **kwargs):
         if parent.iteration_count == 1:

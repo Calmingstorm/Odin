@@ -202,8 +202,8 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("search_audit", "knowledge", "_handle_search_audit", "input")
     d.register("send_to_agent", "agents", "_handle_send_to_agent", "input")
     d.register("kill_agent", "agents", "_handle_kill_agent", "input")
-    d.register("get_agent_results", "agents", "_handle_get_agent_results", "input")
-    d.register("wait_for_agents", "agents", "_handle_wait_for_agents", "input")
+    d.register("get_agent_results", "agents", "_handle_get_agent_results", "scoped_input")
+    d.register("wait_for_agents", "agents", "_handle_wait_for_agents", "scoped_input")
     d.register("collect_loop_agents", "agents", "_handle_collect_loop_agents", "input")
     # no-arg
     d.register("list_schedules", "scheduling", "_handle_list_schedules", "none")
