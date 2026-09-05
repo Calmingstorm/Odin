@@ -537,6 +537,8 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
     """
     import copy
 
+    from .retained_output import compact_retained_output
+
     work = copy.deepcopy(iteration)
     original_chars = _iteration_chars(work)
     if original_chars <= max_chars:
@@ -567,7 +569,15 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
         if current_chars <= max_chars:
             break
         overshoot = current_chars - max_chars
-        holder[key] = _elide_string(original, max(0, len(original) - overshoot))
+        retained = compact_retained_output(original)
+        if retained is not None:
+            # Retrieval metadata is indivisible, like call IDs. If the minimal
+            # roster itself cannot fit, the caller reports fits=False rather
+            # than admitting corrupt JSON or an unreachable continuation.
+            if len(retained) < len(original):
+                holder[key] = retained
+        else:
+            holder[key] = _elide_string(original, max(0, len(original) - overshoot))
 
     compressed_chars = _iteration_chars(work)
     return work, max(0, original_chars - compressed_chars)
