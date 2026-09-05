@@ -113,6 +113,7 @@ class AuditLogger:
         self._repair_marker = self.path.with_name(self.path.name + ".repair-required")
         self.repair_required = self._repair_marker.exists()
         self.durability_degraded = self.repair_required
+        self._historical_break = False
         self._chain_initialized = False
         self._classify_failures = classify_failures
         self._result_cap = result_cap
@@ -261,6 +262,8 @@ class AuditLogger:
         async with self._persist_lock:
             if self.repair_required:
                 entry["audit_durability"] = "repair_required"
+            elif not self._chain_initialized:
+                entry["audit_durability"] = "not_persisted"
             else:
                 self._maybe_rotate()
                 if self._signer:
@@ -291,7 +294,7 @@ class AuditLogger:
                 else:
                     if self._signer:
                         self._signer.commit(entry)
-                    self.durability_degraded = False
+                    self.durability_degraded = self._historical_break
                 if cancelled:
                     raise asyncio.CancelledError
         if self._event_callback:
@@ -717,36 +720,76 @@ class AuditLogger:
         return await self._collect_matches(_match, limit)
 
     async def initialize_chain(self) -> None:
-        """Resume only a verified chain, under the same ownership as appends."""
+        """Report historical breaks, but resume from the actual settled tail.
+
+        Integrity and append settlement are independent: old tamper evidence
+        must not stop recording new actions. Only an uncertain tail fences
+        writes. A restart can settle a stale intent without rewriting history.
+        """
         async with self._persist_lock:
             if self._chain_initialized:
                 return
-            if self.repair_required or not self._signer or not self.path.exists():
+            if not self.path.exists():
                 self._chain_initialized = True
                 return
             try:
-                async with aiofiles.open(self.path) as f:
+                async with aiofiles.open(self.path, encoding="utf-8") as f:
                     lines = await f.readlines()
+                    if self.repair_required:
+                        os.fsync(f.fileno())
+            except Exception as exc:
+                # An unreadable file proves neither a broken chain nor a torn
+                # append. Retry initialization before the next persist.
+                self.durability_degraded = True
+                log.error("Audit tail unavailable (%s); durability=degraded", type(exc).__name__)
+                return
+
+            if self._signer:
+                result = await verify_log(self.path, self._signer._key.decode())
+                self._historical_break = not result["valid"]
+                if self._historical_break:
+                    log.error(
+                        "Audit historical chain break at line %s; durability=degraded; "
+                        "resuming from the actual tail", result["first_bad"],
+                    )
+            self.durability_degraded = self._historical_break
+            try:
                 predecessor = GENESIS_HASH
-                signed = False
-                for line in lines:
-                    if not line.endswith("\n"):
-                        raise ValueError("Unsettled audit tail")
+                # Do not stop at the first historical verification failure: the
+                # next append links to the tail actually present on disk.
+                for line in reversed(lines):
                     if not line.strip():
                         continue
+                    if not line.endswith("\n"):
+                        raise ValueError("Unsettled audit tail")
                     entry = json.loads(line)
-                    if not isinstance(entry, dict):
-                        raise ValueError("Non-object audit entry")
-                    if "_hmac" not in entry and not signed:
-                        continue  # Existing pre-signing history remains valid.
-                    if not self._signer.verify_entry(entry, predecessor):
-                        raise ValueError("Unverified audit chain")
-                    predecessor = entry["_hmac"]
-                    signed = True
-                self._signer.prev_hmac = predecessor
+                    tail_hmac = entry.get("_hmac") if isinstance(entry, dict) else None
+                    if isinstance(tail_hmac, str) and tail_hmac:
+                        predecessor = tail_hmac
+                    break
+                if self._signer:
+                    self._signer.prev_hmac = predecessor
             except Exception as exc:
-                log.error("Audit chain initialization failed (%s)", type(exc).__name__)
+                log.error(
+                    "Audit tail unsettled (%s); durability=repair_required", type(exc).__name__,
+                )
                 self._quarantine_uncertain_append()
+            else:
+                if self.repair_required:
+                    try:
+                        self._repair_marker.unlink(missing_ok=True)
+                        directory = os.open(self.path.parent, os.O_RDONLY | os.O_DIRECTORY)
+                        try:
+                            os.fsync(directory)
+                        finally:
+                            os.close(directory)
+                    except OSError:
+                        self._quarantine_uncertain_append()
+                    else:
+                        self.repair_required = False
+                        log.info(
+                            "Cleared stale audit append marker; tail is complete and parseable",
+                        )
             self._chain_initialized = True
 
     async def verify_integrity(self) -> dict:
@@ -772,6 +815,6 @@ class AuditLogger:
         result["availability"] = "available"
         result["durability"] = (
             "repair_required" if self.repair_required
-            else "degraded" if self.durability_degraded else "durable"
+            else "degraded" if self.durability_degraded or not result["valid"] else "durable"
         )
         return result

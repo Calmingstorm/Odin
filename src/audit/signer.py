@@ -138,6 +138,13 @@ async def verify_log(path, key: str) -> dict:
                 "error": f"Line {i}: invalid JSON",
             }
 
+        if not isinstance(entry, dict):
+            return {
+                "valid": False, "total": total, "verified": verified,
+                "unsigned_prefix": unsigned_prefix, "first_bad": i,
+                "error": f"Line {i}: non-object audit entry",
+            }
+
         if "_hmac" not in entry:
             # verified == 0 ⟺ no signed entry seen yet (a signed entry that
             # fails returns immediately), i.e. still in the pre-enablement
@@ -154,7 +161,11 @@ async def verify_log(path, key: str) -> dict:
                 "error": f"Line {i}: missing _hmac field (unsigned entry after chain began)",
             }
 
-        if not signer.verify_entry(entry, prev):
+        try:
+            valid = signer.verify_entry(entry, prev)
+        except (TypeError, ValueError):
+            valid = False
+        if not valid:
             return {
                 "valid": False,
                 "total": total,

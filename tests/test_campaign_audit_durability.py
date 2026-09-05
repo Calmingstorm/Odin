@@ -67,12 +67,18 @@ async def test_uncertain_append_is_preserved_and_quarantined(tmp_path, failure):
     assert logger.repair_required
     await logger._persist({"seq": 3})
     assert path.read_bytes() == damaged
-    # Quarantine survives process recreation; no repair or historical cleanup.
+    # Only an unsettled tail remains fenced after recreation. A complete
+    # parseable tail settles the stale intent without changing existing bytes.
     reopened = AuditLogger(str(path), hmac_key="fixture")
     await reopened.initialize_chain()
     await reopened._persist({"seq": 4})
-    assert reopened.repair_required
-    assert path.read_bytes() == damaged
+    assert reopened.repair_required == (failure == "partial")
+    if failure == "partial":
+        assert path.read_bytes() == damaged
+    else:
+        assert path.read_bytes().startswith(damaged)
+        assert (await reopened.verify_integrity())["valid"]
+        assert not reopened._repair_marker.exists()
     assert callback.call_count == 2
     assert callback.call_args.args[0]["audit_durability"] == "repair_required"
 
@@ -87,7 +93,7 @@ async def test_successful_append_commits_actual_predecessor(tmp_path):
 
 
 @pytest.mark.parametrize("damage", ["hmac", "partial", "nonobject", "unsigned_gap"])
-async def test_startup_never_accepts_unverified_chain(tmp_path, damage):
+async def test_startup_distinguishes_historical_break_from_uncertain_tail(tmp_path, damage):
     path = tmp_path / "audit.jsonl"
     logger = AuditLogger(str(path), hmac_key="fixture")
     await logger._persist({"seq": 1})
@@ -102,8 +108,16 @@ async def test_startup_never_accepts_unverified_chain(tmp_path, damage):
     before = path.read_bytes()
     reopened = AuditLogger(str(path), hmac_key="fixture")
     await reopened._persist({"seq": 2})
-    assert reopened.repair_required and reopened.durability_degraded
-    assert path.read_bytes() == before
+    assert reopened.durability_degraded
+    assert reopened.repair_required == (damage == "partial")
+    if damage == "partial":
+        assert path.read_bytes() == before
+    else:
+        assert path.read_bytes().startswith(before)
+        assert not reopened._repair_marker.exists()
+        report = await reopened.verify_integrity()
+        assert not report["valid"] and report["durability"] == "degraded"
+        assert report["first_bad"] == (1 if damage == "hmac" else 2)
 
 
 async def test_failed_intent_publication_never_starts_append(tmp_path):
