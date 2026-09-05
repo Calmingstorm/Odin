@@ -71,7 +71,9 @@ def render_page(snapshot, *, offset=0, budget=12000, limit=8000, initial=False):
             count = len(snapshot.boundaries)
             value["matches"] = {
                 "showing": shown, "total_returned": count, "deferred": count-before-shown,
-                "first_index": before, "fragment": end not in snapshot.boundaries and end < total,
+                "first_index": before,
+                "fragment": ((offset > 0 and offset not in snapshot.boundaries)
+                             or (end not in snapshot.boundaries and end < total)),
                 "summary": (
                     f"showing {shown} of {count} returned matches; {count-before-shown} deferred"),
             }
