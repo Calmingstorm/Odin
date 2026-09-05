@@ -5,6 +5,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.agents.results import result_page
+from src.agents.tool_cycle import result_record
 from src.agents.wait_results import render_wait_results, validate_wait_roster
 from src.discord.response_guards import truncate_tool_output
 from src.tools.result_validator import ToolResult
@@ -60,6 +61,9 @@ async def test_durable_fallback_preserves_interruption_text_and_audit_metadata()
     assert "Wait interrupted by parent message; children continue." in str(out)
     assert "completed" in str(out) and "[iterations=0]" in str(out)
     assert out.audit_metadata == {"wait_interrupted": "parent_message"}
+    delivered = result_record({"name": "wait_for_agents", "id": "call"}, str(out), "succeeded")
+    assert "Wait interrupted by parent message; children continue." in delivered["result"]
+    assert truncate_tool_output(delivered["result"]) == delivered["result"]
     assert "wait_interrupted" not in saved
 
 
@@ -78,3 +82,10 @@ async def test_revocation_during_wait_does_not_deliver_saved_output():
 async def test_invalid_ids_rejected(ids):
     result = await _tools()._handle_wait_for_agents({"agent_ids": ids})
     assert "non-empty agent ID strings" in result
+
+
+def test_fixed_800_preview_mutation_exceeds_guard_budget():
+    results = snapshots()
+    unbounded = render_wait_results(list(results), results, 100000)
+    assert len(unbounded) > 12000
+    assert truncate_tool_output(unbounded) != unbounded
