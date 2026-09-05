@@ -104,10 +104,10 @@ def result_page(
     # consume the entire page budget or force a non-advancing cursor.
     allowance = min(2000, max_chars // 4)
     for name in tools[:50]:
-        candidate = page["tools_used"] + [scrub_output_secrets(name)[:100]]
-        if len(serialize_page({"tools_used": candidate})) > allowance:
+        tool_candidate = page["tools_used"] + [scrub_output_secrets(name)[:100]]
+        if len(serialize_page({"tools_used": tool_candidate})) > allowance:
             break
-        page["tools_used"] = candidate
+        page["tools_used"] = tool_candidate
     page["tools_omitted"] = len(tools) - len(page["tools_used"])
     text = body[offset:offset + limit].decode("utf-8", errors="ignore")
 
