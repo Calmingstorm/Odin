@@ -22,8 +22,6 @@ async def test_slow_tools_excluded_from_generation(entry, tmp_path, monkeypatch)
     records = []
 
     async def save(turn, **kwargs):
-        if entry != "agent":
-            turn.finalize(kwargs.get("final_response", "done"))
         records.append(turn)
 
     async def slow(*args, **kwargs):
