@@ -1304,7 +1304,9 @@ class TestRunSSHCommandMasterRegistration:
                 "h1", "ls", "/k", "/kh", pool=pool
             )
             assert code == 1
-            assert out == "SSH error: cannot spawn"
+            from src.observability.diagnostics import safe_error
+
+            assert out == f"SSH error: {safe_error(OSError('cannot spawn'))}"
 
     async def test_unpooled_command_has_no_pool_to_register(self):
         with patch("src.tools.ssh.asyncio.create_subprocess_exec") as mock_exec:

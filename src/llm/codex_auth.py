@@ -126,7 +126,9 @@ class CodexAuth:
             try:
                 self.on_save(creds)
             except Exception as e:
-                log.warning("Failed to propagate refreshed Codex credentials: %s", e)
+                from ..observability.diagnostics import safe_error
+
+                log.warning("Failed to propagate refreshed Codex credentials: %s", safe_error(e))
 
     async def get_access_token(self) -> str:
         """Return a valid access token, refreshing if needed.
@@ -193,7 +195,9 @@ class CodexAuth:
                 await self._refresh(creds)
                 return True
             except Exception as e:
-                log.warning("Reactive Codex token refresh failed: %s", e)
+                from ..observability.diagnostics import safe_error
+
+                log.warning("Reactive Codex token refresh failed: %s", safe_error(e))
                 return False
 
     async def _refresh(self, creds: dict) -> None:
@@ -220,7 +224,9 @@ class CodexAuth:
             ) as resp:
                 if resp.status != 200:
                     body = (await resp.read()).decode("utf-8", errors="replace")
-                    log.error("Token refresh failed (%d): %s", resp.status, body)
+                    from ..observability.diagnostics import safe_error
+
+                    log.error("Token refresh failed (%d): %s", resp.status, safe_error(body))
                     raise RuntimeError(
                         f"Codex token refresh failed (HTTP {resp.status}). "
                         "Run scripts/codex_login.py to re-authenticate."
@@ -312,7 +318,9 @@ class CodexAuth:
             ) as resp:
                 if resp.status != 200:
                     body = (await resp.read()).decode("utf-8", errors="replace")
-                    raise RuntimeError(f"Token exchange failed ({resp.status}): {body}")
+                    from ..observability.diagnostics import safe_error
+
+                    raise RuntimeError(f"Token exchange failed ({resp.status}): {safe_error(body)}")
                 raw = await resp.read()
                 data = json.loads(raw)
 
@@ -345,7 +353,11 @@ class CodexAuth:
             ) as resp:
                 if resp.status != 200:
                     body = (await resp.read()).decode("utf-8", errors="replace")
-                    raise RuntimeError(f"Device code request failed ({resp.status}): {body}")
+                    from ..observability.diagnostics import safe_error
+
+                    raise RuntimeError(
+                        f"Device code request failed ({resp.status}): {safe_error(body)}"
+                    )
                 data = json.loads(await resp.read())
 
         return {
@@ -384,7 +396,11 @@ class CodexAuth:
                     if resp.status in (403, 404):
                         continue
                     body = (await resp.read()).decode("utf-8", errors="replace")
-                    raise RuntimeError(f"Device auth polling failed ({resp.status}): {body}")
+                    from ..observability.diagnostics import safe_error
+
+                    raise RuntimeError(
+                        f"Device auth polling failed ({resp.status}): {safe_error(body)}"
+                    )
 
         raise TimeoutError("Device authorization timed out — user did not complete login")
 
@@ -599,7 +615,9 @@ class CodexAuthPool:
                     "Codex account %s failed: %s — rotating to next",
                     self._account_label(auth, idx), e,
                 )
-                errors.append((idx, str(e)))
+                from ..observability.diagnostics import safe_error
+
+                errors.append((idx, safe_error(e)))
                 async with self._pool_lock:
                     auth.mark_rate_limited()
                     if (len(self._accounts) > 1

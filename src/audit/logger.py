@@ -11,6 +11,7 @@ from typing import BinaryIO, Literal
 import aiofiles
 
 from ..observability.correlation import get_turn
+from ..observability.diagnostics import scrub_diagnostic
 from ..observability.failure_classes import classify_failure
 from ..odin_log import get_logger
 from ..permissions.persistence import write_private_atomic
@@ -254,6 +255,7 @@ class AuditLogger:
         best-effort side effect and runs AFTER the lock — the signed append has
         already durably happened, so a slow or failing callback can neither
         stall other persists nor affect the persisted result."""
+        entry = scrub_diagnostic(entry)
         if not self._chain_initialized:
             await self.initialize_chain()
         async with self._persist_lock:
@@ -363,9 +365,9 @@ class AuditLogger:
             "user_name": user_name,
             "channel_id": channel_id,
             "tool_name": tool_name,
-            "tool_input": _cap_tool_input(tool_input, self._tool_input_cap),
+            "tool_input": _cap_tool_input(scrub_diagnostic(tool_input), self._tool_input_cap),
             "approved": approved,
-            "result_summary": result_summary[:self._result_cap],
+            "result_summary": scrub_diagnostic(result_summary)[:self._result_cap],
             "execution_time_ms": execution_time_ms,
             "error": error,
         }
@@ -407,7 +409,7 @@ class AuditLogger:
             "type": event_type,
             "action": action,
             "actor": actor,
-            "detail": detail[:self._result_cap],
+            "detail": scrub_diagnostic(detail)[:self._result_cap],
             "tool_name": action,
             "user_id": actor,
         }

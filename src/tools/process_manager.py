@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from ..observability.diagnostics import command_display, safe_error
 from ..odin_log import get_logger
 from .workspace import WorkspaceError, workspace_env
 
@@ -1385,7 +1386,7 @@ class ProcessRegistry:
         pid = proc.pid
         info = ProcessInfo(
             pid=pid,
-            command=command,
+            command=command_display(command),
             host=host,
             start_time=time.time(),
             process=proc,
@@ -1407,8 +1408,8 @@ class ProcessRegistry:
             self._enforce_lifetime(pid, MAX_LIFETIME_SECONDS), name=f"process_lifetime:{pid}"
         )
 
-        log.info("Started process PID %d: %s", pid, command[:80])
-        return f"Process started (PID {pid}): {command[:120]}"
+        log.info("Started process PID %d: %s", pid, command_display(command))
+        return f"Process started (PID {pid}): {command_display(command)}"
 
     async def start_remote(self, lease, command: str) -> str:
         """Start a detached SSH process with remote file/FIFO-backed I/O."""
@@ -1448,7 +1449,7 @@ class ProcessRegistry:
             lease.release()
             return (
                 "Failed to start process: SSH transport failed after dispatch; "
-                f"outcome unknown outcome_unknown=true: {exc}"
+                f"outcome unknown outcome_unknown=true: {safe_error(exc)}"
             )
         try:
             ready = json.loads(output.strip().splitlines()[-1])
@@ -1476,7 +1477,7 @@ class ProcessRegistry:
         self._next_remote_handle -= 1
         self._processes[handle] = ProcessInfo(
             pid=handle,
-            command=command,
+            command=command_display(command),
             host=lease.target.alias,
             start_time=time.time(),
             remote=True,
@@ -1494,7 +1495,7 @@ class ProcessRegistry:
             self._enforce_lifetime(handle, MAX_LIFETIME_SECONDS),
             name=f"remote_process_lifetime:{handle}",
         )
-        return f"Process started (PID {handle}): {command[:120]}"
+        return f"Process started (PID {handle}): {command_display(command)}"
 
     async def poll(self, pid: int, wait_seconds: float = 0.0) -> str:
         """Return recent output lines from a process.
@@ -1708,12 +1709,12 @@ class ProcessRegistry:
         except Exception as exc:
             return (
                 f"[PID {info.pid}] status=unknown outcome_unknown=true\n"
-                f"SSH transport failed: {exc}"
+                f"SSH transport failed: {safe_error(exc)}"
             )
         reply = self._parse_remote_reply(output)
         if code != 0 or reply is None or not reply.get("ok"):
             info.transport_unknown = True
-            detail = reply.get("error", "") if reply else output[:500]
+            detail = safe_error(reply.get("error", "") if reply else output)
             return f"[PID {info.pid}] status=unknown outcome_unknown=true\n{detail}"
         try:
             text = base64.b64decode(reply.get("output", ""), validate=True).decode(
@@ -1749,12 +1750,12 @@ class ProcessRegistry:
         except Exception as exc:
             return (
                 f"Failed to write to PID {info.pid}: SSH transport failed; "
-                f"outcome unknown outcome_unknown=true: {exc}"
+                f"outcome unknown outcome_unknown=true: {safe_error(exc)}"
             )
         reply = self._parse_remote_reply(output)
         if code != 0 or reply is None or not reply.get("ok"):
             info.transport_unknown = True
-            detail = reply.get("error", "") if reply else output[:500]
+            detail = safe_error(reply.get("error", "") if reply else output)
             return (
                 f"Failed to write to PID {info.pid}: outcome unknown "
                 f"outcome_unknown=true: {detail}"
@@ -1768,12 +1769,12 @@ class ProcessRegistry:
         except Exception as exc:
             return (
                 f"Failed to kill PID {info.pid}: SSH transport failed; "
-                f"outcome unknown outcome_unknown=true: {exc}"
+                f"outcome unknown outcome_unknown=true: {safe_error(exc)}"
             )
         reply = self._parse_remote_reply(output)
         if code != 0 or reply is None or not reply.get("ok"):
             info.transport_unknown = True
-            detail = reply.get("error", "") if reply else output[:500]
+            detail = safe_error(reply.get("error", "") if reply else output)
             return (
                 f"Failed to kill PID {info.pid}: outcome unknown "
                 f"outcome_unknown=true: {detail}"
