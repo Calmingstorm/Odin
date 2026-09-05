@@ -788,6 +788,13 @@ def test_host_inventory_compat_warns_without_rejecting_legacy_shapes():
     assert "missing" in result.detail
     assert "Existing entries remain loaded" in result.recommendation
 
+    pinned_without_key = MagicMock(os="linux", trust_mode="pinned", host_keys=[])
+    pinned_cfg = MagicMock(hosts={"build": pinned_without_key}, default_host="build")
+    pinned_cfg.governor.host_overrides = {}
+    pinned_result = check_host_inventory_compat(pinned_cfg)
+    assert pinned_result.passed is False
+    assert "no usable pinned host key" in pinned_result.detail
+
 
 def test_missing_host_defaults_warning_names_only_affected_entries(caplog):
     tools = MagicMock(hosts={"build": object()}, default_host="")
