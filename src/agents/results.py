@@ -129,6 +129,9 @@ def result_page(
         page["tools_omitted"] = len(tools) - len(page["tools_used"])
     if len(serialize_page(candidate(min(1, len(text))))) > max_chars:
         raise ValueError("Agent result envelope exceeds delivery budget; reduce metadata.")
+    full = candidate(len(text))
+    if len(serialize_page(full)) <= max_chars:
+        return full
     lo, hi = 0, len(text)
     while lo < hi:
         mid = (lo + hi + 1) // 2
