@@ -1444,4 +1444,3 @@ class TestAstraSpawnBoundary:
         client.reasoning_effort = "none"
         err = _spawn_pair_error(self._cfg(agent_model="gpt-6-astra"), client, None, None)
         assert err is not None and "gpt-6-astra" in err
-
