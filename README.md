@@ -252,6 +252,11 @@ The Codex model selectors include `gpt-6-astra` for accounts where that model
 is entitled. Astra accepts `low` through `max` reasoning effort but rejects
 `none`; Odin validates that pair for main, fixed-agent, and per-spawn settings.
 
+Remote `manage_process` jobs are supervised on the target with a one-hour
+deadline. Odin shutdown/restart attempts to terminate every tracked remote job;
+jobs are not re-adopted after restart, and transport loss is reported as an
+unknown outcome rather than a claimed stop.
+
 Important sections include:
 
 | Section | Purpose |

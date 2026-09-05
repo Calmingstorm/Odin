@@ -1799,6 +1799,11 @@ class ProcessRegistry:
     async def shutdown(self) -> int:
         """Terminate all managed processes and their groups before returning.
 
+        Remote jobs are deliberately included: restart does not re-adopt
+        detached remote state, so leaving one behind would turn a managed job
+        into an untracked effect. A failed remote kill remains outcome-unknown
+        and the remote supervisor's one-hour deadline is the final backstop.
+
         Returns the number of processes that were still running.
 
         Callers re-exec in place once this returns, so NOTHING the registry
