@@ -108,26 +108,38 @@ async def test_remote_start_releases_lease_for_capacity_and_unavailable_executor
     ],
 )
 async def test_remote_start_unsettled_reply_is_unknown(result, expected):
+    calls = []
+
     async def remote_exec(_target, _command, _timeout):
-        return result
+        calls.append(_command)
+        return result if len(calls) == 1 else (0, "cleanup attempted")
 
     lease = _Lease()
     response = await ProcessRegistry(remote_exec=remote_exec).start_remote(lease, "sleep 1")
     assert "outcome_unknown=true" in response
     assert expected in response
     assert lease.release_count == 1
+    assert len(calls) == 2
+    assert "rm -rf" in calls[1]
 
 
 @pytest.mark.asyncio
 async def test_remote_start_transport_loss_is_unknown_and_releases():
+    calls = 0
+
     async def remote_exec(_target, _command, _timeout):
-        raise ConnectionError("link vanished")
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise ConnectionError("link vanished")
+        return 0, "cleanup attempted"
 
     lease = _Lease()
     response = await ProcessRegistry(remote_exec=remote_exec).start_remote(lease, "sleep 1")
     assert "SSH transport failed after dispatch" in response
     assert "outcome_unknown=true" in response
     assert lease.release_count == 1
+    assert calls == 2
 
 
 @pytest.mark.asyncio
@@ -148,6 +160,37 @@ async def test_remote_start_success_tracks_negative_handle_and_identity(no_lifet
         "77",
     )
     assert info.remote_lease is lease
+
+
+def test_remote_scripts_have_cross_platform_identity_and_no_base64_binary_dependency():
+    from src.tools.process_manager import _REMOTE_CONTROLLER, _REMOTE_SUPERVISOR
+
+    assert 'check_output(["ps","-o","lstart="' in _REMOTE_SUPERVISOR
+    assert 'check_output(["ps","-o","lstart="' in _REMOTE_CONTROLLER
+    registry = ProcessRegistry()
+    info = _remote_info(_Lease())
+    controller = registry._remote_controller_command(info, "status")
+    assert "python3 -c" in controller
+    assert "base64 -d" not in controller
+
+
+@pytest.mark.asyncio
+async def test_remote_polls_are_serialized_per_handle():
+    active = 0
+    peak = 0
+
+    async def remote_exec(_target, _command, _timeout):
+        nonlocal active, peak
+        active += 1
+        peak = max(peak, active)
+        await __import__("asyncio").sleep(0)
+        active -= 1
+        return _reply(status="running", output="", cursor=0, size=0)
+
+    registry = ProcessRegistry(remote_exec=remote_exec)
+    registry._processes[-1] = _remote_info(_Lease())
+    await __import__("asyncio").gather(registry.poll(-1), registry.poll(-1))
+    assert peak == 1
 
 
 @pytest.mark.asyncio

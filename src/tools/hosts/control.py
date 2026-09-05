@@ -17,6 +17,7 @@ from ...config.schema import ToolHost
 from ...error_presentation import sanitize_error_text
 from ...llm.secret_scrubber import scrub_output_secrets
 from ..ssh import is_local_address
+from .registry import deterministic_host_id
 from .trust import HostCandidate, HostTrustError, fingerprint_public_key, normalize_public_key
 
 _ALIAS_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
@@ -189,7 +190,11 @@ class HostEnrollmentManager:
         candidate = HostCandidate(
             token=token,
             alias=details["alias"],
-            host_id=(existing.host_id if existing and existing.host_id else str(uuid.uuid4())),
+            host_id=(
+                (existing.host_id or deterministic_host_id(alias))
+                if existing is not None
+                else str(uuid.uuid4())
+            ),
             address=details["address"],
             ssh_user=details["ssh_user"],
             os=details["os"],
@@ -257,7 +262,7 @@ class HostEnrollmentManager:
         candidate = HostCandidate(
             token=token,
             alias=alias,
-            host_id=host.host_id or str(uuid.uuid4()),
+            host_id=host.host_id or deterministic_host_id(alias),
             address=host.address,
             ssh_user=host.ssh_user,
             os=host.os,
@@ -280,11 +285,16 @@ class HostEnrollmentManager:
         if is_local_address(candidate.address):
             argv = ["sh", "-c", "printf 'odin-host-test linux\\n'"]
         else:
-            known_hosts = self.registry.materialize_trust(
-                candidate.host_id,
-                f"odin-{candidate.host_id}",
-                candidate.trust_mode,
-                candidate.host_keys,
+            legacy = candidate.trust_mode == "legacy"
+            known_hosts = (
+                self.registry.effective_legacy_known_hosts_path
+                if legacy
+                else self.registry.materialize_trust(
+                    candidate.host_id,
+                    f"odin-{candidate.host_id}",
+                    candidate.trust_mode,
+                    candidate.host_keys,
+                )
             )
             remote = (
                 "printf 'odin-host-test '; "
@@ -311,8 +321,11 @@ class HostEnrollmentManager:
                 "PreferredAuthentications=publickey",
                 "-o",
                 "ControlMaster=no",
-                "-o",
-                f"HostKeyAlias=odin-{candidate.host_id}",
+                *(
+                    []
+                    if legacy
+                    else ["-o", f"HostKeyAlias=odin-{candidate.host_id}"]
+                ),
                 "-o",
                 "ConnectTimeout=10",
                 "-p",
@@ -339,6 +352,22 @@ class HostEnrollmentManager:
                     else text or f"ssh exit {code}"
                 ),
             }
+        active = self.registry.get(candidate.alias)
+        mismatch = not result["ok"] and _is_host_key_mismatch(
+            str(result.get("detail", ""))
+        )
+        testing_active_identity = bool(
+            active is not None
+            and candidate.address == active.address
+            and candidate.ssh_user == active.ssh_user
+            and candidate.port == active.port
+            and candidate.trust_mode == active.trust_mode
+            and candidate.host_keys == active.host_keys
+        )
+        if mismatch and testing_active_identity:
+            self.registry.mark_test_result(
+                candidate.alias, result, host_key_mismatch=True
+            )
         candidate = replace(candidate, tested=bool(result["ok"]), test_result=result)
         self._candidates[token] = candidate
         return candidate
@@ -383,7 +412,7 @@ async def public_key_info(private_key_path: str) -> dict[str, str]:
         "public_key": key,
         "fingerprint": fingerprint_public_key(key),
         "authorized_keys_command": authorized_keys_command(key),
-        "permissions": "~/.ssh modeless must be 0700 and authorized_keys 0600",
+        "permissions": "~/.ssh permissions must be 0700 and authorized_keys 0600",
     }
 
 
@@ -452,6 +481,19 @@ def scan_host_references(bot: Any, alias: str) -> list[dict[str, str]]:
     channel_state = getattr(bot, "channel_state", None)
     tasks = getattr(channel_state, "background_tasks", {}) if channel_state else {}
     for task_id, task in tasks.items():
-        if task.status == "running":
+        if task.status not in {"completed", "failed", "cancelled", "done"}:
             walk(task.steps, f"background_tasks.{task_id}.steps")
     return refs
+
+
+def _is_host_key_mismatch(detail: str) -> bool:
+    """Recognize OpenSSH's strict host-identity refusal diagnostics."""
+    lowered = detail.lower()
+    return any(
+        marker in lowered
+        for marker in (
+            "remote host identification has changed",
+            "host key verification failed",
+            "offending ",
+        )
+    )

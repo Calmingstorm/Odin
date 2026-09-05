@@ -47,6 +47,15 @@ def _app(registrar, bot, *, identity=None) -> web.Application:
     return app
 
 
+def test_hosts_page_renders_structured_delete_references():
+    source = (
+        __import__("pathlib").Path(__file__).parents[1] / "ui/js/pages/hosts.js"
+    ).read_text()
+    assert "pendingReferences.value=Array.isArray(e.data?.pending_references)" in source
+    assert 'v-for="item in pendingReferences"' in source
+    assert "item.kind" in source and "item.location" in source
+
+
 @pytest.mark.asyncio
 async def test_generic_config_rejects_all_dedicated_managed_host_fields():
     """The generic PUT reports every host-owned field and changes no runtime state."""

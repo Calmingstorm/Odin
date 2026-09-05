@@ -7,6 +7,7 @@ host: the executor transport is replaced before every execution path.
 
 from __future__ import annotations
 
+import asyncio
 import json
 from pathlib import Path
 from types import SimpleNamespace
@@ -92,6 +93,30 @@ async def test_execute_and_run_on_host_hold_a_host_lease_without_transport(tmp_p
     # execute holds the lease in its context; the domain handler intentionally
     # keeps its established three-argument transport call shape.
     assert seen[0][:3] == ("127.0.0.1", "echo ok", "root")
+
+
+async def test_execute_force_revoke_returns_structured_uncertain_outcome(tmp_path, monkeypatch):
+    executor = _executor(tmp_path)
+    started = asyncio.Event()
+
+    async def blocked(_address, _command, _ssh_user, **_kwargs):
+        started.set()
+        await asyncio.Event().wait()
+
+    monkeypatch.setattr(executor, "_exec_command", blocked)
+    running = asyncio.create_task(
+        executor.execute("run_command", {"host": "alpha", "command": "echo maybe"})
+    )
+    await started.wait()
+    assert executor.host_registry.force_revoke("alpha") == 1
+    result = await running
+    assert result.ok is False
+    assert result.error == "host_force_revoked"
+    assert result.uncertain_outcome is True
+    assert "outcome_unknown=true" in result.output
+    reacquired = executor.host_registry.acquire("alpha")
+    assert reacquired is not None
+    reacquired.release()
 
     async def failing_transport(*_args, **_kwargs):
         return 7, "transport failed"

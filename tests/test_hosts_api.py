@@ -337,6 +337,9 @@ async def test_enabled_references_delete_and_force_revoke(monkeypatch, tmp_path)
         assert (await ref_response.json())["references"] == references
         blocked_delete = await client.delete("/api/hosts/alpha")
         assert blocked_delete.status == 409
+        blocked_body = await blocked_delete.json()
+        assert blocked_body["error"] == "host deletion is blocked by configured references"
+        assert blocked_body["pending_references"] == references
         assert (await client.delete("/api/hosts/missing")).status == 404
 
         revoked = await client.post("/api/hosts/alpha/force-revoke")

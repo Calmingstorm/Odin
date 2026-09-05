@@ -34,7 +34,7 @@ log = get_logger("process_manager")
 
 _UNKNOWN = object()  # "could not determine" — never means "absent"
 
-_REMOTE_SUPERVISOR = r'''import base64,json,os,signal,subprocess,sys,time
+_REMOTE_SUPERVISOR = r'''import base64,json,os,signal,subprocess,sys,threading,time
 root,token,encoded,lifetime=sys.argv[1:]
 os.umask(0o077)
 os.setsid()
@@ -43,11 +43,16 @@ out_path=root+"/out"
 exit_path=root+"/exit.json"
 ready_path=root+"/ready.json"
 stdin_fd=os.open(fifo,os.O_RDWR)
-out=open(out_path,"ab",buffering=0)
 env=dict(os.environ)
 env["ODIN_REMOTE_JOB_TOKEN"]=token
 command=base64.b64decode(encoded).decode("utf-8")
-proc=subprocess.Popen(["/bin/sh","-c",command],stdin=stdin_fd,stdout=out,stderr=subprocess.STDOUT,env=env,preexec_fn=os.setpgrp)
+stopping=False
+def request_stop(_signum,_frame):
+    global stopping
+    stopping=True
+signal.signal(signal.SIGTERM,request_stop)
+signal.signal(signal.SIGINT,request_stop)
+proc=subprocess.Popen(["/bin/sh","-c",command],stdin=stdin_fd,stdout=subprocess.PIPE,stderr=subprocess.STDOUT,env=env,preexec_fn=os.setpgrp)
 pid=proc.pid
 pgid=os.getpgid(pid)
 sid=os.getsid(pid)
@@ -55,17 +60,31 @@ def start_id(value):
     try:
         return open("/proc/%d/stat"%value).read().rsplit(")",1)[1].split()[19]
     except Exception:
-        return ""
+        try:
+            probe=subprocess.check_output(["ps","-o","lstart=","-p",str(value)],env={**os.environ,"LC_ALL":"C"},stderr=subprocess.DEVNULL).decode().strip()
+            return "ps:"+probe if probe else ""
+        except Exception:
+            return ""
 ready={"token":token,"supervisor_pid":os.getpid(),"pid":pid,"pgid":pgid,"sid":sid,"start_id":start_id(pid)}
 tmp=ready_path+".tmp"
 open(tmp,"w").write(json.dumps(ready,separators=(",",":")))
 os.replace(tmp,ready_path)
+output_state={"bytes":0,"truncated":False}
+def drain_output():
+    with open(out_path,"ab",buffering=0) as out:
+        while True:
+            chunk=proc.stdout.read(65536)
+            if not chunk: break
+            remaining=max(0,4194304-output_state["bytes"])
+            if remaining: out.write(chunk[:remaining]); output_state["bytes"]+=min(len(chunk),remaining)
+            if len(chunk)>remaining: output_state["truncated"]=True
+reader=threading.Thread(target=drain_output,daemon=True)
+reader.start()
 timed_out=False
-try:
-    rc=proc.wait(timeout=int(lifetime))
-except subprocess.TimeoutExpired:
-    timed_out=True
-    rc=124
+deadline=time.monotonic()+int(lifetime)
+while proc.poll() is None and not stopping and time.monotonic()<deadline: time.sleep(.2)
+if proc.poll() is None and time.monotonic()>=deadline: timed_out=True
+rc=proc.returncode if proc.returncode is not None else (124 if timed_out else 143)
 def alive():
     try:
         os.killpg(pgid,0)
@@ -86,7 +105,10 @@ if alive():
     while alive() and time.monotonic()<end: time.sleep(.1)
 try: proc.wait(timeout=1)
 except Exception: pass
-record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out}
+reader.join(timeout=2)
+try: os.close(stdin_fd)
+except Exception: pass
+record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out,"output_truncated":output_state["truncated"]}
 tmp=exit_path+".tmp"
 open(tmp,"w").write(json.dumps(record,separators=(",",":")))
 os.replace(tmp,exit_path)
@@ -94,7 +116,7 @@ os.replace(tmp,exit_path)
 
 # ruff: noqa: E501
 _REMOTE_CONTROLLER = r'''# noqa: E501
-import base64,json,os,signal,sys,time
+import base64,json,os,signal,subprocess,sys,time
 root,token,op,payload,wait_s=sys.argv[1:]
 def emit(**value):
     print(json.dumps(value,separators=(",",":")))
@@ -112,7 +134,11 @@ def start_id(value):
     try:
         return open("/proc/%d/stat"%value).read().rsplit(")",1)[1].split()[19]
     except Exception:
-        return ""
+        try:
+            probe=subprocess.check_output(["ps","-o","lstart=","-p",str(value)],env={**os.environ,"LC_ALL":"C"},stderr=subprocess.DEVNULL).decode().strip()
+            return "ps:"+probe if probe else ""
+        except Exception:
+            return ""
 def identity():
     try:
         if os.getpgid(pid)!=pgid or os.getsid(pid)!=sid: return False
@@ -1260,6 +1286,7 @@ class ProcessInfo:
     remote_cursor: int = 0
     remote_lease: HostLease | None = field(default=None, repr=False)
     transport_unknown: bool = False
+    _remote_lock: asyncio.Lock = field(default_factory=asyncio.Lock, repr=False)
 
 
 class ProcessRegistry:
@@ -1395,10 +1422,15 @@ class ProcessRegistry:
         encoded = base64.b64encode(command.encode("utf-8")).decode("ascii")
         root = f"/tmp/odin-process-{token}"
         supervisor = base64.b64encode(_REMOTE_SUPERVISOR.encode()).decode("ascii")
+        write_supervisor = (
+            "import base64,sys;"
+            f"open(sys.argv[1],'wb').write(base64.b64decode({supervisor!r}))"
+        )
         script = (
-            f"set -eu; umask 077; d={shlex.quote(root)}; mkdir -- \"$d\"; "
+            "set -eu; umask 077; command -v python3 >/dev/null; "
+            f"d={shlex.quote(root)}; mkdir -- \"$d\"; "
             "mkfifo \"$d/in\"; "
-            f"printf %s {shlex.quote(supervisor)} | base64 -d >\"$d/supervisor.py\"; "
+            f"python3 -c {shlex.quote(write_supervisor)} \"$d/supervisor.py\"; "
             f"nohup python3 \"$d/supervisor.py\" \"$d\" {shlex.quote(token)} "
             f"{shlex.quote(encoded)} {MAX_LIFETIME_SECONDS} "
             "</dev/null >/dev/null 2>&1 & "
@@ -1411,6 +1443,7 @@ class ProcessRegistry:
                 lambda: self._remote_exec(lease.target, script, 30)
             )
         except Exception as exc:
+            await self._teardown_unsettled_remote(lease, root, token)
             lease.release()
             return (
                 "Failed to start process: SSH transport failed after dispatch; "
@@ -1432,6 +1465,7 @@ class ProcessRegistry:
         except (IndexError, KeyError, TypeError, ValueError, json.JSONDecodeError):
             identity_ok = False
         if code != 0 or not identity_ok:
+            await self._teardown_unsettled_remote(lease, root, token)
             lease.release()
             return (
                 "Failed to start process: SSH settlement was not observed; "
@@ -1477,7 +1511,8 @@ class ProcessRegistry:
             return f"No process with PID {pid}."
 
         if info.remote:
-            return await self._poll_remote(info, wait_seconds)
+            async with info._remote_lock:
+                return await self._poll_remote(info, wait_seconds)
 
         # Exit detection must not depend on the watcher having PUBLISHED
         # yet (round-3 blocker #3): returncode is set at SIGCHLD reap, so a
@@ -1526,7 +1561,8 @@ class ProcessRegistry:
         if info.status != "running":
             return f"Process {pid} is not running (status: {info.status})."
         if info.remote:
-            return await self._write_remote(info, text)
+            async with info._remote_lock:
+                return await self._write_remote(info, text)
         if not info.process or not info.process.stdin:
             return f"Process {pid} has no stdin."
 
@@ -1545,7 +1581,8 @@ class ProcessRegistry:
         if info.status != "running":
             return f"Process {pid} already {info.status}."
         if info.remote:
-            return await self._kill_remote(info)
+            async with info._remote_lock:
+                return await self._kill_remote(info)
 
         try:
             if info.process:
@@ -1608,11 +1645,41 @@ class ProcessRegistry:
         self, info: ProcessInfo, operation: str, payload: str = "", wait_seconds: float = 0
     ) -> str:
         controller = base64.b64encode(_REMOTE_CONTROLLER.encode()).decode("ascii")
+        execute_controller = (
+            "import base64;"
+            f"exec(compile(base64.b64decode({controller!r}),"
+            "'<odin-remote-controller>','exec'))"
+        )
         return (
-            f"printf %s {shlex.quote(controller)} | base64 -d | python3 - "
+            f"python3 -c {shlex.quote(execute_controller)} "
             f"{shlex.quote(info.remote_dir)} {shlex.quote(info.remote_token)} "
             f"{shlex.quote(operation)} {shlex.quote(payload)} {float(wait_seconds)!r}"
         )
+
+    async def _teardown_unsettled_remote(self, lease, root: str, token: str) -> None:
+        """Best-effort cleanup when dispatch happened but settlement did not."""
+        if self._remote_exec is None:
+            return
+        controller = base64.b64encode(_REMOTE_CONTROLLER.encode()).decode("ascii")
+        execute_controller = (
+            "import base64;"
+            f"exec(compile(base64.b64decode({controller!r}),"
+            "'<odin-remote-controller>','exec'))"
+        )
+        quoted_root = shlex.quote(root)
+        command = (
+            f"d={quoted_root}; if [ -f \"$d/ready.json\" ]; then "
+            f"python3 -c {shlex.quote(execute_controller)} "
+            f"{quoted_root} {shlex.quote(token)} kill '' 0 >/dev/null 2>&1 || true; "
+            "fi; rm -rf -- \"$d\""
+        )
+        try:
+            await self._remote_exec(lease.target, command, 15)
+        except Exception:
+            log.warning(
+                "Could not verify cleanup of unsettled remote process on %s",
+                lease.target.alias,
+            )
 
     @staticmethod
     def _parse_remote_reply(output: str) -> dict | None:

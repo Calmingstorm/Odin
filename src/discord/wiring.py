@@ -290,6 +290,9 @@ def build_services(
         path="./data/host_access.json",
         available_hosts_provider=host_registry.active_aliases,
     )
+    from ..health.startup import warn_missing_host_defaults
+
+    warn_missing_host_defaults(config.tools, host_access_manager)
 
     # Built before ToolExecutor so it can be wired in as the RBAC gate.
     permissions = PermissionManager(

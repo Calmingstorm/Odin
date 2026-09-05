@@ -678,9 +678,22 @@ class ToolExecutor:
         with lease:
             lease_token = _host_lease_ctx.set(lease)
             try:
-                return await lease.run(
-                    lambda: self._execute_inner(tool_name, prepared, user_id=user_id)
-                )
+                try:
+                    return await lease.run(
+                        lambda: self._execute_inner(tool_name, prepared, user_id=user_id)
+                    )
+                except Exception as exc:
+                    from .hosts import HostForceRevokedError
+
+                    if not isinstance(exc, HostForceRevokedError):
+                        raise
+                    return ToolResult(
+                        output=f"Error: {exc}",
+                        ok=False,
+                        error="host_force_revoked",
+                        tool_name=tool_name,
+                        uncertain_outcome=True,
+                    )
             finally:
                 _host_lease_ctx.reset(lease_token)
 

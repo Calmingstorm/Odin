@@ -297,7 +297,9 @@ class SkillContext:
         if self._requester_id and access is not None:
             return access.get_allowed_hosts(self._requester_id)
         registry = getattr(self._executor, "host_registry", None)
-        if registry is not None and registry.__class__.__name__ == "HostRegistry":
+        from .hosts import HostRegistry
+
+        if isinstance(registry, HostRegistry):
             return list(registry.active_aliases())
         return list(getattr(getattr(self._executor, "config", None), "hosts", {}))
 

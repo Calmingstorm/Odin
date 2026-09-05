@@ -34,10 +34,7 @@ class TestManagedHostSchemaRatchet:
     @pytest.mark.parametrize(
         ("field", "value", "message"),
         [
-            ("address", "a" * 254, "too long"),
             ("description", "line\nbreak", "control characters"),
-            ("address", "-unsafe", "invalid"),
-            ("ssh_user", "", "invalid"),
         ],
     )
     def test_host_text_rejects_unsafe_values(self, field, value, message):
@@ -52,32 +49,16 @@ class TestManagedHostSchemaRatchet:
         with pytest.raises(ValidationError, match="canonical UUID form"):
             _host(host_id="{06eebf65-8f6e-4c36-9acc-ce393fb34642}")
 
-    def test_governor_rejects_unsafe_override_alias(self):
-        with pytest.raises(ValidationError, match="invalid host alias"):
-            GovernorConfig(host_overrides={"-not-an-alias": "allow"})
-
-    @pytest.mark.parametrize(
-        ("hosts", "governor", "default_host", "message"),
-        [
-            ({"-bad": _host()}, GovernorConfig(), "", "invalid tools.hosts alias"),
-            (
-                {"build": _host(trust_mode="pinned", host_keys=[])},
-                GovernorConfig(),
-                "",
-                "requires public host_keys",
-            ),
-            (
-                {"build": _host()},
-                GovernorConfig(host_overrides={"missing": "allow"}),
-                "",
-                "names unknown host",
-            ),
-            ({"build": _host()}, GovernorConfig(), "missing", "must name a configured host"),
-        ],
-    )
-    def test_config_rejects_incoherent_host_inventory(self, hosts, governor, default_host, message):
-        with pytest.raises(ValidationError, match=message):
-            _config(hosts=hosts, governor=governor, default_host=default_host)
+    @pytest.mark.parametrize("alias", ["1box", "host with space"])
+    def test_legacy_host_inventory_shapes_still_load(self, alias):
+        config = _config(
+            hosts={alias: _host(os="Windows")},
+            governor=GovernorConfig(host_overrides={"removed-host": "allow"}),
+            default_host="removed-host",
+        )
+        assert config.tools.hosts[alias].os == "Windows"
+        assert config.tools.governor.host_overrides == {"removed-host": "allow"}
+        assert config.tools.default_host == "removed-host"
 
     def test_unknown_config_key_warning_handles_a_field_alias(self, monkeypatch):
         warning = Mock()

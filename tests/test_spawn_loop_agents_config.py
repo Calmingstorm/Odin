@@ -154,3 +154,46 @@ class TestSpawnLoopPairValidation:
         assert "Error" not in result
         assert captured["tasks"][0]["reasoning_effort_override"] == "max"
         assert captured["tasks"][1]["model_override"] == "gpt-5.6-luna"
+
+    async def test_astra_override_accepts_max_and_rejects_none_atomically(self):
+        bot, captured = _bot_with_running_loop()
+        bot.config.openai_codex.agent_model = "auto"
+        bot.config.openai_codex.agent_reasoning_effort = "auto"
+        bot.llm_gateway.active_client.reasoning_effort = "medium"
+        bot.llm_gateway.active_client.model = "gpt-5.6-sol"
+        msg = FakeMessage("go", channel=FakeChannel(id=777))
+
+        accepted = await bot.agent_task_tools._handle_spawn_loop_agents(
+            msg,
+            {
+                "loop_id": "loop-1",
+                "tasks": [
+                    {
+                        "label": "astra",
+                        "goal": "hard work",
+                        "model": "gpt-6-astra",
+                        "reasoning_effort": "max",
+                    }
+                ],
+            },
+        )
+        assert "Error" not in accepted
+        assert captured["tasks"][0]["model_override"] == "gpt-6-astra"
+
+        captured.clear()
+        rejected = await bot.agent_task_tools._handle_spawn_loop_agents(
+            msg,
+            {
+                "loop_id": "loop-1",
+                "tasks": [
+                    {
+                        "label": "bad-astra",
+                        "goal": "hard work",
+                        "model": "gpt-6-astra",
+                        "reasoning_effort": "none",
+                    }
+                ],
+            },
+        )
+        assert "gpt-6-astra" in rejected and "'none'" in rejected
+        assert captured == {}

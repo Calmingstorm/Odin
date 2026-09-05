@@ -220,7 +220,7 @@ async def test_prepare_rejects_pinned_mismatch_and_legacy_edits(monkeypatch, tmp
             allow_tofu=False,
         )
 
-    legacy = _host(trust_mode="legacy", host_keys=[])
+    legacy = _host(host_id="", trust_mode="legacy", host_keys=[])
     with pytest.raises(HostTrustError, match="require pinned enrollment"):
         await manager.prepare(
             "build",
@@ -232,6 +232,21 @@ async def test_prepare_rejects_pinned_mismatch_and_legacy_edits(monkeypatch, tmp
         await manager.prepare(
             "fresh", {"address": "example.invalid", "trust_mode": "legacy"}, allow_tofu=False
         )
+
+    metadata_edit = await manager.prepare(
+        "build",
+        {
+            "address": legacy.address,
+            "ssh_user": legacy.ssh_user,
+            "os": legacy.os,
+            "port": legacy.port,
+            "description": "updated description",
+            "trust_mode": "legacy",
+        },
+        allow_tofu=False,
+        existing=legacy,
+    )
+    assert metadata_edit.host_id == deterministic_host_id("build")
 
 
 async def test_prepare_local_and_tofu_policy_paths(monkeypatch, tmp_path):
@@ -307,10 +322,11 @@ async def test_scan_import_test_consume_and_expiry_are_hermetic(monkeypatch, tmp
     with pytest.raises(HostTrustError, match="unknown or expired"):
         manager.get(candidate.token)
 
-    legacy = _host(port=2222, trust_mode="legacy", host_keys=[])
+    legacy = _host(port=2222, host_id="", trust_mode="legacy", host_keys=[])
     imported = await manager.import_legacy("build", legacy)
     assert imported.trust_mode == "pinned"
     assert calls[-1][0] == ["ssh-keygen", "-F", "[example.invalid]:2222", "-f", "/tmp/legacy"]
+    assert imported.host_id == deterministic_host_id("build")
     manager._candidates[imported.token] = replace(imported, created_monotonic=0)
     monkeypatch.setattr(control.time, "monotonic", lambda: 1_000_000)
     with pytest.raises(HostTrustError, match="expired"):
@@ -471,6 +487,77 @@ async def test_registry_leases_revoke_release_and_retirement(tmp_path):
     current.release()
     assert not registry.has_active_leases("build")
     assert retired == [old.target.runtime_key]
+    reacquired = registry.acquire("build")
+    assert reacquired is not None
+    reacquired.release()
+
+
+async def test_legacy_metadata_edit_uses_global_known_hosts(monkeypatch, tmp_path):
+    legacy = _host(host_id="", trust_mode="legacy", host_keys=[])
+    registry = HostRegistry(
+        {"build": legacy},
+        key_path="/tmp/private",
+        legacy_known_hosts_path="/tmp/global-known-hosts",
+        trust_dir=tmp_path,
+    )
+    manager = HostEnrollmentManager(registry)
+    candidate = await manager.prepare(
+        "build",
+        {
+            "address": legacy.address,
+            "ssh_user": legacy.ssh_user,
+            "os": legacy.os,
+            "port": legacy.port,
+            "description": "metadata only",
+            "trust_mode": "legacy",
+        },
+        allow_tofu=False,
+        existing=legacy,
+    )
+
+    async def fake(argv, _timeout, **_kwargs):
+        assert "UserKnownHostsFile=/tmp/global-known-hosts" in argv
+        assert not any("HostKeyAlias=" in part for part in argv)
+        assert "StrictHostKeyChecking=yes" in argv
+        return 0, b"odin-host-test linux\n"
+
+    monkeypatch.setattr(control, "_run_argv", fake)
+    tested = await manager.test(candidate.token)
+    assert tested.tested is True
+    assert manager.consume(candidate.token).host_id == deterministic_host_id("build")
+
+
+async def test_later_host_key_mismatch_marks_registry_untargetable(monkeypatch, tmp_path):
+    current = _host()
+    registry = HostRegistry({"build": current}, trust_dir=tmp_path)
+    manager = HostEnrollmentManager(registry)
+    key = current.host_keys[0]
+    fingerprint = __import__(
+        "src.tools.hosts.trust", fromlist=["fingerprint_public_key"]
+    ).fingerprint_public_key(key)
+    monkeypatch.setattr(manager, "scan", AsyncMock(return_value=(key,)))
+    candidate = await manager.prepare(
+        "build",
+        {
+            "address": current.address,
+            "ssh_user": current.ssh_user,
+            "os": current.os,
+            "trust_mode": current.trust_mode,
+            "expected_fingerprints": [fingerprint],
+        },
+        allow_tofu=False,
+        existing=current,
+    )
+
+    async def mismatch(_argv, _timeout, **_kwargs):
+        return 255, b"REMOTE HOST IDENTIFICATION HAS CHANGED"
+
+    monkeypatch.setattr(control, "_run_argv", mismatch)
+    tested = await manager.test(candidate.token)
+    target = registry.get("build")
+    assert tested.tested is False
+    assert target is not None and target.trust_state == "mismatch"
+    assert registry.acquire("build") is None
 
 
 async def test_registry_run_cancels_inflight_work_and_stage_cas_and_mismatch(tmp_path):

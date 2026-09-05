@@ -470,6 +470,11 @@ class HostRegistry:
             self._lease_counts.pop(runtime_key, None)
             if runtime_key in self._retired:
                 self._finish_retirement(runtime_key)
+            else:
+                # Force-revoke is an operation fence, not a permanent host
+                # tombstone.  Once the final affected lease settles, new work
+                # may acquire the still-published generation again.
+                self._revoke_events.pop(runtime_key, None)
         else:
             self._lease_counts[runtime_key] = count - 1
 

@@ -510,7 +510,13 @@ def register_hosts(routes: web.RouteTableDef, bot) -> None:
                         alias,
                         {"result": "blocked", "dependencies": references},
                     )
-                    return web.json_response(response(alias, references=references), status=409)
+                    return web.json_response(
+                        {
+                            **response(alias, references=references),
+                            "error": "host deletion is blocked by configured references",
+                        },
+                        status=409,
+                    )
                 desired = dict(before)
                 del desired[alias]
                 return await publish_desired(

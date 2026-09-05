@@ -98,10 +98,12 @@ class TestSkillContextHostEdges:
         executor._host_access.get_allowed_hosts.assert_called_once_with("user-1")
 
     def test_get_hosts_uses_active_host_registry(self) -> None:
-        registry_type = type("HostRegistry", (), {"active_aliases": lambda self: ("live",)})
+        from src.config.schema import ToolHost
+        from src.tools.hosts import HostRegistry
+
         executor = MagicMock()
         executor._host_access = None
-        executor.host_registry = registry_type()
+        executor.host_registry = HostRegistry({"live": ToolHost(address="localhost")})
         context = SkillContext(executor, "edge")
 
         assert context.get_hosts() == ["live"]

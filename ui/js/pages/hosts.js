@@ -11,6 +11,10 @@ export default {
         <div class="flex gap-2"><button class="btn btn-ghost text-xs" @click="load">Refresh</button><button class="btn btn-primary text-xs" @click="beginAdd">Add Host</button></div>
       </div>
       <div v-if="error" class="hm-card border-red-900 text-red-400">{{ error }}</div>
+      <div v-if="pendingReferences.length" class="hm-card border-amber-800 space-y-2">
+        <div class="text-sm text-amber-300">Deletion is blocked by these references:</div>
+        <ul class="text-xs text-gray-300 list-disc pl-5"><li v-for="item in pendingReferences" :key="item.kind+':'+item.location"><span class="text-gray-400">{{ item.kind }}</span> · {{ item.location }}</li></ul>
+      </div>
       <div class="hm-card flex flex-wrap gap-3 items-end">
         <label class="text-xs">Default host<select class="hm-input mt-1" v-model="defaultHost"><option value="">Require explicit host</option><option v-for="host in hosts" :key="host.host_id" :value="host.alias">{{ host.alias }}</option></select></label>
         <label class="text-xs flex gap-2 items-center"><input type="checkbox" v-model="tofuEnabled" /> Allow explicit TOFU enrollment</label>
@@ -49,7 +53,7 @@ export default {
       </div>
     </div>`,
   setup() {
-    const hosts=ref([]), loading=ref(false), error=ref(''), wizard=ref(false), editing=ref(false), step=ref(1), defaultHost=ref(''), tofuEnabled=ref(false);
+    const hosts=ref([]), loading=ref(false), error=ref(''), pendingReferences=ref([]), wizard=ref(false), editing=ref(false), step=ref(1), defaultHost=ref(''), tofuEnabled=ref(false);
     const keyInfo=ref(null), candidate=ref(''), observed=ref([]), tested=ref(false), testResult=ref(null), fingerprintsText=ref('');
     const blank=()=>({alias:'',address:'',port:22,ssh_user:'root',os:'linux',description:'',trust_mode:'pinned',enabled:true,confirm_local:false,confirm_tofu:false});
     const form=ref(blank()); const isLocal=computed(()=>['127.0.0.1','localhost','::1'].includes(form.value.address));
@@ -64,8 +68,8 @@ export default {
     async function testConnection(){try{const r=await api.post('/api/hosts/candidates/'+candidate.value+'/test',{});tested.value=!!r.tested;testResult.value=r.last_test;if(tested.value)step.value=5;}catch(e){toast.error(e.message);}}
     async function commit(){try{await api.post('/api/hosts/candidates/'+candidate.value+'/commit',{});toast.success('Host saved and published live');wizard.value=false;await load();}catch(e){toast.error(e.message);}}
     async function toggle(h){try{await api.post('/api/hosts/'+encodeURIComponent(h.alias)+'/enabled',{enabled:!h.enabled});await load();}catch(e){toast.error(e.message);}}
-    async function remove(h){if(!await confirmDialog('Delete host '+h.alias+'? Dependencies will block deletion.'))return;try{await api.del('/api/hosts/'+encodeURIComponent(h.alias));await load();}catch(e){toast.error(e.message);}}
+    async function remove(h){if(!await confirmDialog('Delete host '+h.alias+'? Dependencies will block deletion.'))return;pendingReferences.value=[];try{await api.del('/api/hosts/'+encodeURIComponent(h.alias));await load();}catch(e){pendingReferences.value=Array.isArray(e.data?.pending_references)?e.data.pending_references:[];toast.error(e.message);}}
     async function forceRevoke(h){if(!await confirmDialog('Force revoke '+h.alias+'? Remote outcomes may be unknown.'))return;try{await api.post('/api/hosts/'+encodeURIComponent(h.alias)+'/force-revoke',{});await load();}catch(e){toast.error(e.message);}}
-    onMounted(load); return{hosts,loading,error,wizard,editing,step,defaultHost,tofuEnabled,form,isLocal,keyInfo,candidate,observed,tested,testResult,fingerprintsText,load,saveSettings,beginAdd,beginEdit,loadKey,importLegacy,prepare,testConnection,commit,toggle,remove,forceRevoke};
+    onMounted(load); return{hosts,loading,error,pendingReferences,wizard,editing,step,defaultHost,tofuEnabled,form,isLocal,keyInfo,candidate,observed,tested,testResult,fingerprintsText,load,saveSettings,beginAdd,beginEdit,loadKey,importLegacy,prepare,testConnection,commit,toggle,remove,forceRevoke};
   }
 };

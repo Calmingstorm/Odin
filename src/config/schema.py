@@ -52,7 +52,10 @@ class ToolHost(BaseModel):
 
     address: str
     ssh_user: str = "root"
-    os: Literal["linux", "macos"] = "linux"
+    # Kept deliberately open at config-load time.  Older releases accepted
+    # arbitrary strings here; the admin control plane enforces linux/macos on
+    # every mutation without making an existing installation unbootable.
+    os: str = "linux"
     port: int = Field(default=22, ge=1, le=65535)
     description: str = ""
     enabled: bool = True
@@ -64,7 +67,7 @@ class ToolHost(BaseModel):
     # Public OpenSSH key material only. Private keys never belong here.
     host_keys: list[str] = Field(default_factory=list)
 
-    @field_validator("address", "ssh_user", "description", "host_id")
+    @field_validator("description", "host_id")
     @classmethod
     def _host_text(cls, value: str, info):
         limits = {"address": 253, "ssh_user": 64, "description": 200, "host_id": 64}
@@ -72,21 +75,7 @@ class ToolHost(BaseModel):
             raise ValueError(f"{info.field_name} is too long")
         if any(ord(char) < 32 or ord(char) == 127 for char in value):
             raise ValueError(f"{info.field_name} contains control characters")
-        if info.field_name in {"address", "ssh_user"} and (
-            not value or value.startswith("-")
-        ):
-            raise ValueError(f"{info.field_name} is invalid")
         return value
-
-    @field_validator("host_keys")
-    @classmethod
-    def _public_host_keys_only(cls, values: list[str]) -> list[str]:
-        for value in values:
-            if len(value) > 24_000 or any(
-                ord(char) < 32 or ord(char) == 127 for char in value
-            ):
-                raise ValueError("host_keys contains malformed key material")
-        return values
 
     @field_validator("host_id")
     @classmethod
@@ -99,6 +88,16 @@ class ToolHost(BaseModel):
             if str(parsed) != value.lower():
                 raise ValueError("host_id must use canonical UUID form")
         return value
+
+    @field_validator("host_keys")
+    @classmethod
+    def _public_host_keys_only(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if len(value) > 24_000 or any(
+                ord(char) < 32 or ord(char) == 127 for char in value
+            ):
+                raise ValueError("host_keys contains malformed key material")
+        return values
 
 
 class RetryConfig(BaseModel):
@@ -285,15 +284,6 @@ class GovernorConfig(BaseModel):
     block_exfil: bool = True
     admin_can_override: bool = True
     host_overrides: dict[str, str] = Field(default_factory=dict)
-
-    @field_validator("host_overrides")
-    @classmethod
-    def _host_override_aliases(cls, values: dict[str, str]) -> dict[str, str]:
-        alias_pattern = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
-        if any(not alias_pattern.fullmatch(alias) for alias in values):
-            raise ValueError("governor.host_overrides contains an invalid host alias")
-        return values
-
 
 # The default local command workspace, spelled ONCE: the field default, the
 # blank-value normalizer, the tracked config.yml template and the packaging
@@ -1237,25 +1227,6 @@ class Config(BaseModel):
     graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
     llm_recovery: LLMRecoveryConfig = LLMRecoveryConfig()
     turn_state: TurnStateConfig = TurnStateConfig()
-
-    @model_validator(mode="after")
-    def _validate_host_inventory(self):
-        alias_pattern = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
-        for alias, host in self.tools.hosts.items():
-            if not alias_pattern.fullmatch(alias):
-                raise ValueError(f"invalid tools.hosts alias: {alias!r}")
-            if host.trust_mode in {"pinned", "tofu", "ca"} and not host.host_keys:
-                raise ValueError(f"tools.hosts.{alias} requires public host_keys")
-        dangling_overrides = set(self.tools.governor.host_overrides) - set(self.tools.hosts)
-        if dangling_overrides:
-            raise ValueError(
-                "tools.governor.host_overrides names unknown host(s): "
-                + ", ".join(sorted(dangling_overrides))
-            )
-        if self.tools.default_host and self.tools.default_host not in self.tools.hosts:
-            raise ValueError("tools.default_host must name a configured host")
-        return self
-
 
 def _substitute_env_vars(text: str) -> str:
     """Replace ${VAR} and ${VAR:-default} patterns with environment variable values.
