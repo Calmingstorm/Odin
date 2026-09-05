@@ -503,6 +503,9 @@ class AgentManager:
         max_concurrent_agents_provider: Callable[[], int | None] | None = None,
     ) -> None:
         self._agents: dict[str, AgentInfo] = {}
+        # Lightweight ancestry only, retained while a registered descendant
+        # needs it. Never retain the evicted agent's execution/result payload.
+        self._retired_lineage: dict[str, dict] = {}
         # Admission reads this provider for every spawn. The callable is bound
         # to the bot's live config root in production, so a save affects new
         # spawns without changing agents already admitted. None preserves the
@@ -807,30 +810,28 @@ class AgentManager:
     def kill(self, agent_id: str, cascade: bool = True) -> str:
         """Cancel a running agent. If cascade=True, also kill all descendants."""
         agent = self._agents.get(agent_id)
-        if not agent:
+        retired = self._retired_lineage.get(agent_id)
+        if not agent and not retired:
             return f"Error: Agent '{agent_id}' not found."
-        if agent._sm.is_terminal:
-            return f"Agent '{agent_id}' already in terminal state: {agent.status}."
-
-        killed_ids = [agent_id]
-        self._force_cancel(agent)
-
+        parent_active = agent is not None and agent._sm.is_active
+        if parent_active:
+            assert agent is not None
+            self._force_cancel(agent)
+        descendants = 0
         if cascade:
             for desc_id in self.get_descendants(agent_id):
                 desc = self._agents.get(desc_id)
                 if desc and desc._sm.is_active:
                     self._force_cancel(desc)
-                    killed_ids.append(desc_id)
-
-        log.info(
-            "Kill signal sent to agent %s (%s) and %d descendants",
-            agent_id,
-            agent.label,
-            len(killed_ids) - 1,
-        )
-        if len(killed_ids) == 1:
+                    descendants += 1
+        if not parent_active:
+            status = agent.status if agent else retired["status"]  # type: ignore[index]
+            return (f"Agent '{agent_id}' already in terminal state: {status}. "
+                    f"Kill signal sent to {descendants} descendant(s).")
+        assert agent is not None
+        if not descendants:
             return f"Kill signal sent to agent '{agent.label}'."
-        return f"Kill signal sent to agent '{agent.label}' and {len(killed_ids) - 1} descendant(s)."
+        return f"Kill signal sent to agent '{agent.label}' and {descendants} descendant(s)."
 
     @staticmethod
     def _serialize_result(agent: AgentInfo) -> dict:
@@ -892,19 +893,20 @@ class AgentManager:
             visited.add(current)
             lineage.append(current)
             agent = self._agents.get(current)
-            if not agent or not agent.parent_id:
+            parent_id = (agent.parent_id if agent else
+                         self._retired_lineage.get(current, {}).get("parent_id"))
+            if not parent_id:
                 break
-            current = agent.parent_id
+            current = parent_id
         lineage.reverse()
         return lineage
 
     def get_descendants(self, agent_id: str) -> builtins.list[str]:
         """Get all descendant agent IDs (children, grandchildren, etc.)."""
         agent = self._agents.get(agent_id)
-        if not agent:
-            return []
         descendants: list[str] = []
-        queue = deque(agent.children_ids)
+        queue = deque(agent.children_ids if agent else
+                      self._retired_lineage.get(agent_id, {}).get("children_ids", []))
         visited: set[str] = set()
         while queue:
             child_id = queue.popleft()
@@ -915,6 +917,8 @@ class AgentManager:
             child = self._agents.get(child_id)
             if child:
                 queue.extend(child.children_ids)
+            else:
+                queue.extend(self._retired_lineage.get(child_id, {}).get("children_ids", []))
         return descendants
 
     async def wait_for_agents(
@@ -1094,6 +1098,14 @@ class AgentManager:
         if ct and not ct.done():
             ct.cancel()
         if agent:
+            self._retired_lineage[agent_id] = {
+                "parent_id": agent.parent_id, "children_ids": list(agent.children_ids),
+                "status": agent.status,
+            }
+            needed = {ancestor for aid in self._agents for ancestor in self.get_lineage(aid)}
+            self._retired_lineage = {
+                aid: record for aid, record in self._retired_lineage.items() if aid in needed
+            }
             # The single removal point owns release. Periodic cleanup may race
             # and cancel the delayed cleanup task; release-before-pop in that
             # task was therefore not a lifecycle guarantee.
