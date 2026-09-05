@@ -10,10 +10,19 @@ from .wait_deadlines import WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS, wait_for_agent
 
 
 def result_record(call: dict, text: str, status: str, *, uncertain: bool = False) -> dict:
+    from ..tools.output_delivery import DeliveredOutput, deliver
+
+    text = scrub_output_secrets(text)
+    if (status != "succeeded" and not isinstance(text, DeliveredOutput)
+            and not text.startswith(
+                ("Error", "Denied", "Permission denied", "Command failed", "Script failed"))):
+        text = f"Error ({status}):\n{text}"
+    if call["name"] != "read_file" and not isinstance(text, DeliveredOutput):
+        text = deliver(text, tool=call["name"], status=status)
     return {
         "name": call["name"],
         "tool_use_id": call["id"],
-        "result": scrub_output_secrets(text),
+        "result": text,
         "ok": status == "succeeded",
         "status": status,
         "uncertain_outcome": uncertain,
@@ -77,7 +86,8 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                         status = "denied"
                     if raw.uncertain_outcome:
                         status = "outcome_unknown"
-                    record = result_record(call, str(raw), status, uncertain=raw.uncertain_outcome)
+                    record = result_record(
+                        call, raw.output, status, uncertain=raw.uncertain_outcome)
                     if (
                         raw.ok
                         and raw.audit_metadata
@@ -87,16 +97,19 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                     if raw.audit_metadata:
                         record["audit_metadata"] = raw.audit_metadata
                 else:
-                    text = str(raw)
+                    text = raw if isinstance(raw, str) else str(raw)
                     status = "failed" if _is_error_result(text) else "succeeded"
                     if text.startswith(
                         ("Denied", "Permission denied", "Unknown or disallowed host")
                     ):
                         status = "denied"
                     record = result_record(call, text, status)
-                if not record["ok"] and not record["result"].startswith(
+                from ..tools.output_delivery import DeliveredOutput
+
+                if (not record["ok"] and not isinstance(record["result"], DeliveredOutput)
+                        and not record["result"].startswith(
                     ("Error", "Denied", "Permission denied", "Command failed", "Script failed")
-                ):
+                )):
                     record["result"] = f"Error ({record['status']}):\n{record['result']}"
             except TimeoutError:
                 effect_free = name == "wait_for_agents"

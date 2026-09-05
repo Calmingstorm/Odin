@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from src.discord.background_task import _execute_tool
+from src.discord.background_task import _execute_tool_captured
 from src.discord.native_tools.knowledge import KnowledgeTools
 from src.tools.output_delivery import RankedOutput, deliver, render_page
 from src.tools.output_retention import OutputStore
@@ -29,7 +29,7 @@ async def test_ranked_snapshot_preserves_original_order_and_oversized_match(kind
         sessions=sessions, get_knowledge_store=lambda: store, embedder=object(), audit=None
     )
     if kind == "background":
-        output = await _execute_tool(
+        output = await _execute_tool_captured(
             "search_knowledge", {"query": "rank"}, MagicMock(), MagicMock(),
             store, object(), "requester",
         )
@@ -84,12 +84,12 @@ async def test_short_history_and_background_formats_are_unchanged():
     store = SimpleNamespace(search_hybrid=AsyncMock(return_value=[
         {"source": "doc.md", "score": 0.5, "content": "short\ntext"},
     ]))
-    background = await _execute_tool(
+    background = await _execute_tool_captured(
         "search_knowledge", {"query": "q"}, MagicMock(), MagicMock(),
         store, object(), "requester",
     )
     assert background == "[doc.md] (score: 0.5): short\ntext"
-    assert type(background) is str
+    assert isinstance(background, str) and not background.recovery_required
     assert deliver(background) == background
 
 

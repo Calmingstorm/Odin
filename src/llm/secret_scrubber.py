@@ -6,6 +6,7 @@ them from leaking through LLM responses or tool output.
 """
 from __future__ import annotations
 
+import json
 import re
 
 # Patterns to scrub from tool output before it reaches the LLM
@@ -43,7 +44,39 @@ OUTPUT_SECRET_PATTERNS = [
 
 
 def scrub_output_secrets(text: str) -> str:
-    """Replace detected secrets in tool output with [REDACTED]."""
+    """Scrub payload strings without consuming JSON framing or ranked metadata."""
+    from ..tools.output_delivery import DeliveredOutput, RankedOutput
+
+    if isinstance(text, DeliveredOutput):
+        return text
+    if isinstance(text, RankedOutput):
+        return RankedOutput(scrub_output_secrets(str(text)), matches=tuple(
+            scrub_output_secrets(match) for match in text.matches),
+            recovery_required=text.recovery_required)
+    if not isinstance(text, str):
+        text = str(text)
+    if text.lstrip().startswith(("{", "[")):
+        try:
+            value = json.loads(text)
+        except (ValueError, RecursionError):
+            pass
+        else:
+            def clean(item):
+                if isinstance(item, dict):
+                    return {key: "[REDACTED]" if re.fullmatch(
+                        r"(?i)(password|passwd|pwd|api[_-]?key|apikey|secret|"
+                        r"token|access_token|auth_token)", key)
+                        else clean(value) for key, value in item.items()}
+                if isinstance(item, list):
+                    return [clean(value) for value in item]
+                return _scrub_text(item) if isinstance(item, str) else item
+
+            cleaned = clean(value)
+            return text if cleaned == value else json.dumps(cleaned, ensure_ascii=True)
+    return _scrub_text(text)
+
+
+def _scrub_text(text: str) -> str:
     for pattern in OUTPUT_SECRET_PATTERNS:
         text = pattern.sub("[REDACTED]", text)
     return text

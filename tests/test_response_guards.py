@@ -202,20 +202,20 @@ class TestTruncateToolOutput:
         text = "x" * 100
         assert truncate_tool_output(text, max_chars=100) == text
 
-    def test_truncation_preserves_start(self):
+    def test_standalone_guard_reports_retention_unavailable(self):
         text = "START" + "x" * 1000 + "END"
         result = truncate_tool_output(text, max_chars=50)
-        assert result.startswith("START")
+        assert '"retention":"failed"' in result
 
-    def test_truncation_preserves_end(self):
+    def test_standalone_guard_never_promises_missing_content(self):
         text = "START" + "x" * 1000 + "END"
         result = truncate_tool_output(text, max_chars=50)
-        assert result.endswith("END")
+        assert '"cursor":null' in result
 
-    def test_truncation_contains_omitted_marker(self):
+    def test_truncation_contains_explicit_failure(self):
         text = "a" * 200
         result = truncate_tool_output(text, max_chars=100)
-        assert "omitted" in result
+        assert "no continuation exists" in result
 
     def test_truncation_result_shorter_than_input(self):
         text = "a" * 200

@@ -97,9 +97,8 @@ class TestTruncateSmart:
     def test_truncation_over_limit(self):
         text = "A" * 50 + "B" * 50
         result = _truncate_smart(text, 60)
-        assert "characters omitted" in result
-        assert result.startswith("A" * 30)
-        assert result.endswith("B" * 30)
+        assert json.loads(result)["retention"] == "failed"
+        assert json.loads(result)["cursor"] is None
 
     def test_truncation_preserves_length(self):
         text = "x" * 200
@@ -110,7 +109,7 @@ class TestTruncateSmart:
     def test_omission_count_accurate(self):
         text = "x" * 300
         result = _truncate_smart(text, 100)
-        assert "200 characters omitted" in result
+        assert "no continuation exists" in result
 
 
 # -----------------------------------------------------------------------
@@ -186,7 +185,7 @@ class TestValidateTruncation:
         outcome = validate_tool_result("run_command", text)
         assert "truncated" in outcome.violations
         assert len(outcome.normalized) < len(text)
-        assert "characters omitted" in outcome.normalized
+        assert json.loads(outcome.normalized)["retention"] == "failed"
 
     def test_under_limit_not_truncated(self):
         text = "x" * 100
@@ -517,7 +516,7 @@ class TestEdgeCases:
         msg = "Error: " + "x" * 20000
         outcome = validate_tool_result("run_command", msg)
         assert "truncated" in outcome.violations
-        assert outcome.normalized.startswith("Error: ")
+        assert json.loads(outcome.normalized)["status"] == "failed"
 
     def test_unicode_result(self):
         outcome = validate_tool_result("run_command", "héllo wörld 🌍")

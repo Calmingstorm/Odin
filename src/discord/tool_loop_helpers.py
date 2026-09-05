@@ -93,6 +93,12 @@ def ensure_failure_visible(result_text: str, ok: bool) -> str:
     (e.g. run_command_multi's per-host markdown aggregate wrapping a
     denial), the model reads a refused action as success. Prefix it.
     """
+    from ..tools.output_delivery import DeliveredOutput
+
+    if isinstance(result_text, DeliveredOutput):
+        # Canonical envelopes carry status separately. Prefixing invalidates
+        # JSON and can exceed the complete serialized-envelope budget.
+        return result_text
     if ok or result_text.lstrip().startswith(_ERROR_RESULT_PREFIXES):
         return result_text
     return f"Error (tool reported failure):\n{result_text}"

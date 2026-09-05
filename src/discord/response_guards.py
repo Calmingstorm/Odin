@@ -745,15 +745,13 @@ def truncate_tool_output(text: str, max_chars: int = TOOL_OUTPUT_MAX_CHARS) -> s
     a single large result (Prometheus JSON, file contents, long command output)
     from ballooning costs across iterations.
     """
-    if len(text) <= max_chars:
+    from ..tools.output_delivery import DeliveredOutput, deliver
+
+    # Runtime dispatch retained before this compatibility guard. A standalone
+    # caller without a store gets an honest bounded failure.
+    if isinstance(text, DeliveredOutput):
         return text
-    half = max_chars // 2
-    omitted = len(text) - max_chars
-    return (
-        text[:half]
-        + f"\n\n[... {omitted} characters omitted ...]\n\n"
-        + text[-half:]
-    )
+    return deliver(text, budget=max_chars)
 
 
 # ---------------------------------------------------------------------------
