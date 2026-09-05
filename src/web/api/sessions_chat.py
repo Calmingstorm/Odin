@@ -35,7 +35,13 @@ async def _pkg_process_web_chat(*args, **kwargs):
     """
     from . import process_web_chat as pwc
 
-    return await pwc(*args, **kwargs)
+    request = kwargs.pop("_request", None)
+    if request is None:
+        return await pwc(*args, **kwargs)
+    from ...tools.output_authorization import web_output_scope
+
+    with web_output_scope(args[0], request):
+        return await pwc(*args, **kwargs)
 
 def register_chat(routes: web.RouteTableDef, bot) -> None:
     """Chat (verbatim from the monolith)."""
@@ -92,6 +98,7 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
             allowed_tools=token_tools, tier=tier,
             token_allowed_hosts=token_hosts,
             token_default_host=token_default_host,
+            _request=request,
         )
 
         # Scoped-session locks are cached like the default per-identity lock. We do NOT
@@ -161,6 +168,7 @@ def register_chat(routes: web.RouteTableDef, bot) -> None:
             token_allowed_hosts=token_hosts,
             token_default_host=token_default_host,
             persist_channel_lock=False,  # ephemeral per-request channel — no lock to cache or leak
+            _request=request,
         )
 
         bot.sessions.reset(channel_id)

@@ -22,6 +22,17 @@ from .branch_freshness import (
     format_staleness_warning,
 )
 from .bulkhead import BulkheadFullError, BulkheadRegistry
+from .output_authorization import (
+    accessed_hosts,
+    host_access_capture,
+    host_binding,
+    record_host,
+    request_delivery_channel,
+    request_host_authorizer,
+    request_scope_id,
+    tool_scope_allows,
+)
+from .output_delivery import DeliveredOutput, deliver, delivery_scope, get_delivery_budget
 from .output_streamer import ToolOutputStreamer
 from .post_validation import annotate_if_mutation
 from .recovery import (
@@ -38,7 +49,14 @@ from .recovery import (
 from .recovery import (
     decide_recovery_action as _decide_recovery_action,
 )
-from .result_validator import ResultValidationStats, ToolResult, validate_tool_result
+from .result_capture import result_capture
+from .result_validator import (
+    DEFAULT_SCHEMA,
+    TOOL_SCHEMAS,
+    ResultValidationStats,
+    ToolResult,
+    validate_tool_result,
+)
 from .risk_classifier import RiskStats, classify_tool
 from .ssh import (
     OutputCallback,
@@ -127,6 +145,7 @@ def _build_bulkhead_registry(config: ToolsConfig) -> BulkheadRegistry:
 # characterization contract pins table keys == executor-routed set, and
 # __init__ asserts every entry resolves on its owner at construction.
 EXECUTOR_HANDLERS: dict[str, tuple[str, str]] = {
+    "get_tool_output": ("output", "_handle_get_tool_output"),
     "run_command": ("system", "_handle_run_command"),
     "run_script": ("system", "_handle_run_script"),
     "run_command_multi": ("system", "_handle_run_command_multi"),
@@ -261,6 +280,7 @@ class ToolExecutor:
         from .handlers.deps import HandlerDeps
         from .handlers.devops import DevOpsTools
         from .handlers.files_docs import FilesDocsTools
+        from .handlers.output import OutputTools
         from .handlers.state import StateTools
         from .handlers.system import SystemTools
         from .handlers.validation import ValidationTools
@@ -301,6 +321,7 @@ class ToolExecutor:
         self.state_tools = StateTools(self._handler_deps)
         self.comms_tools = CommsTools(self._handler_deps)
         self.validation_tools = ValidationTools(self._handler_deps)
+        self.output_tools = OutputTools(self)
         # Owners for EXECUTOR_HANDLERS resolution. "core" is the executor
         # itself for not-yet-moved handlers; domain owners are added as the
         # P4–P6 waves land.
@@ -313,6 +334,7 @@ class ToolExecutor:
             "state": self.state_tools,
             "comms": self.comms_tools,
             "validation": self.validation_tools,
+            "output": self.output_tools,
         }
         # RFC-004 P7 startup assertion (plan advisory #5): every dispatch-table
         # entry must resolve to a callable on its bound owner — a rebind typo
@@ -360,19 +382,19 @@ class ToolExecutor:
         """Acquire one generation-bound target after the same fence as resolve."""
         active = _host_lease_ctx.get()
         if active is not None and active.target.alias == alias:
-            return active.borrow()
+            return record_host(active.borrow())
         if self._host_access and self._current_user_id:
             if not self._host_access.is_host_allowed(self._current_user_id, alias):
                 return None
         lease = self.host_registry.acquire(alias)
         if lease is not None:
-            return lease
+            return record_host(lease)
         if self._compat_config_host_fallback:
             legacy = getattr(self.config, "hosts", {}).get(alias)
             if legacy is not None:
-                return self.host_registry.unmanaged_lease(
+                return record_host(self.host_registry.unmanaged_lease(
                     alias, (legacy.address, legacy.ssh_user, legacy.os)
-                )
+                ))
         return None
 
     def acquire_host_for_user(self, alias: str, user_id: str | None):
@@ -380,7 +402,7 @@ class ToolExecutor:
         if self._host_access and user_id:
             if not self._host_access.is_host_allowed(user_id, alias):
                 return None
-        return self.host_registry.acquire(alias)
+        return record_host(self.host_registry.acquire(alias))
 
     def _resolve_default_host(self, user_id: str | None) -> str:
         """Get an explicit effective default; mapping order is never policy."""
@@ -585,8 +607,84 @@ class ToolExecutor:
             self._process_registry = ProcessRegistry(
                 workspace=self._ensure_local_workspace,
                 remote_exec=self._exec_remote_target,
+                retention_dir=self._retention_root() / "process-output",
             )
         return self._process_registry
+
+    def _retention_root(self) -> Path:
+        """Use the runtime's configured data anchor, never an install path."""
+        memory = getattr(self, "_memory_path", None)
+        if memory is not None:
+            return Path(memory).absolute().parent
+        return Path(self.config.audit_log_path).absolute().parent
+
+    def _ensure_output_store(self):
+        from .output_retention import OutputStore
+
+        if not hasattr(self, "_output_store"):
+            self._output_store = OutputStore(self._retention_root() / "tool-output.sqlite3")
+        return self._output_store
+
+    def _authorize_output(self, tool, hosts, owner):
+        """Fence metadata before the store loads the body. Cursors grant nothing."""
+        policy = getattr(self, "_builtin_policy", None)
+        if ((policy is not None and policy.is_disabled(tool))
+                or self.check_permission(tool, owner) or not tool_scope_allows(tool)):
+            return False
+        for binding in hosts:
+            if not isinstance(binding, dict):
+                return False  # old/unbound evidence must not gain fresh privileges
+            if "scope" in binding:
+                if binding["scope"] != request_scope_id.get():
+                    return False
+                continue
+            alias = binding.get("alias")
+            live_hosts = request_host_authorizer.get()
+            if live_hosts is not None and not live_hosts(alias):
+                return False
+            if not alias or (self._host_access
+                             and not self._host_access.is_host_allowed(owner, alias)):
+                return False
+            lease = self.host_registry.acquire(alias)
+            if lease is None:
+                return False
+            with lease:
+                if lease.revoked or host_binding(lease.target) != binding:
+                    return False
+        return True
+
+    def deliver_output(self, text, *, tool_name, tool_input, user_id,
+                       channel_id=None, status="succeeded"):
+        from ..llm.secret_scrubber import scrub_output_secrets
+
+        # These have their own byte-faithful or bounded retention contracts.
+        # Do not re-scrub process byte offsets or persist a second spool copy.
+        if tool_name == "read_file" or isinstance(text, DeliveredOutput):
+            return text
+        if tool_name == "manage_process" and tool_input.get("action") == "poll":
+            return text
+        text = scrub_output_secrets(text)
+        config = getattr(self, "config", None)
+        if config is None:
+            return deliver(text, tool=tool_name, status=status)
+        owner, channel = delivery_scope.get()
+        owner = str(user_id or owner or "")
+        channel = str(channel_id if channel_id is not None else channel)
+        channel = request_delivery_channel.get() or channel
+        hosts = list((accessed_hosts.get() or {}).values())
+        if request_scope_id.get():
+            hosts.append({"scope": request_scope_id.get()})
+        if ((len(text) > get_delivery_budget(config) or getattr(text, "recovery_required", False))
+                and (not tool_scope_allows("get_tool_output")
+                     or self.check_permission("get_tool_output", owner)
+                     or (self._builtin_policy is not None
+                         and self._builtin_policy.is_disabled("get_tool_output")))):
+            from .output_delivery import delivery_failure
+
+            return delivery_failure("Retrieval is not authorized; no continuation exists.", status)
+        return deliver(text, store=self._ensure_output_store(), owner=owner, channel=channel,
+                       tool=tool_name, hosts=hosts, status=status,
+                       budget=get_delivery_budget(config))
 
     async def _exec_remote_target(self, target, command: str, timeout: int):
         """Process-manager transport using one exact leased target."""
@@ -647,8 +745,26 @@ class ToolExecutor:
     async def execute(
         self, tool_name: str, tool_input: dict, *, user_id: str | None = None
     ) -> ToolResult:
+        owner, channel = delivery_scope.get()
+        scope_token = delivery_scope.set((str(user_id or owner or ""), str(channel)))
+        user_token = _user_id_ctx.set(user_id)
+        tier_token = _user_tier_ctx.set(None)
+        try:
+            with host_access_capture(), result_capture():
+                return await self._execute_scoped(tool_name, tool_input, user_id=user_id)
+        finally:
+            _user_tier_ctx.reset(tier_token)
+            _user_id_ctx.reset(user_token)
+            delivery_scope.reset(scope_token)
+
+    async def _execute_scoped(
+        self, tool_name: str, tool_input: dict, *, user_id: str | None = None
+    ) -> ToolResult:
         """Dispatch with a whole-operation lease for an explicit target."""
         prepared = dict(tool_input or {})
+        if not tool_scope_allows(tool_name):
+            return ToolResult(output="Permission denied: tool scope revoked or unavailable.",
+                              ok=False, error="permission_denied", tool_name=tool_name)
         policy = getattr(self, "_builtin_policy", None)
         if policy is not None and policy.is_disabled(tool_name):
             from .builtin_policy import disabled_rejection
@@ -827,7 +943,15 @@ class ToolExecutor:
             mutation_detected = _mutation.detected
             mutation_reason = _mutation.reason
 
-        outcome = validate_tool_result(tool_name, raw_result, stats=self.validation_stats)
+        # Validate the complete captured result before the delivery boundary.
+        # The validator remains authoritative for coercion/empty/JSON checks,
+        # but its legacy standalone cap must not discard unrecoverable bytes.
+        from dataclasses import replace
+
+        schema = TOOL_SCHEMAS.get(tool_name, DEFAULT_SCHEMA)
+        outcome = validate_tool_result(
+            tool_name, raw_result, stats=self.validation_stats,
+            schema=replace(schema, max_chars=max(schema.max_chars, len(str(raw_result)))))
 
         # Extract exit code from string if handler didn't return one
         if exit_code is None and isinstance(raw_result, str):
@@ -838,10 +962,15 @@ class ToolExecutor:
                 exit_code = int(m.group(1))
 
         unknown = isinstance(raw_result, str) and "outcome_unknown=true" in raw_result
+        output = self.deliver_output(
+            outcome.normalized, tool_name=tool_name, tool_input=tool_input, user_id=user_id,
+            status="outcome_unknown" if unknown else "failed" if is_error else "succeeded")
+        from ..llm.secret_scrubber import scrub_output_secrets
+
         return ToolResult(
-            output=outcome.normalized,
+            output=output,
             ok=not is_error,
-            error=raw_result[:200] if is_error else None,
+            error=scrub_output_secrets(raw_result[:200]) if is_error else None,
             exit_code=exit_code,
             truncated="truncated" in outcome.violations,
             duration_ms=duration_ms,
@@ -1074,6 +1203,7 @@ class ToolExecutor:
         )
         if not lease:
             return f"Unknown or disallowed host: {alias}"
+        record_host(lease)
         with lease:
             target = lease.target
             code, output = await lease.run(
