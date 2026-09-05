@@ -72,8 +72,8 @@ def preview(raw):
 
 @pytest.mark.parametrize("remote", [False, True])
 async def test_overflow_nested_secret_withheld_and_prefix_retrievable(tmp_path, remote):
-    suffix = ('\n{"credentials": {\n"padding": "' + "p" * 14000
-              + '\",\n"value": "INDEPENDENT_NESTED_SECRET"\n}}\n')
+    suffix = ('\n{"credentials":{\n"padding":"' + "p" * 14000
+              + '\",\n"value":"INDEPENDENT_NESTED_SECRET"\n}}\n')
     producer = f"import sys;sys.stdout.write('x'*{OUTPUT_CAPTURE_BYTES - 100}+{suffix!r})"
     async with job(tmp_path, producer, remote) as (ex, reg, info):
         raw = await delivered(ex, info)
@@ -83,6 +83,7 @@ async def test_overflow_nested_secret_withheld_and_prefix_retrievable(tmp_path, 
         assert meta["tail_status"] == "withheld_unverifiable_secret_context"
         assert meta["shown_intervals"] == [] and meta["shown_bytes"] == 0
         assert meta["emitted_bytes"] == OUTPUT_CAPTURE_BYTES - 100 + len(suffix)
+        assert meta["emitted_bytes"] == 4208275
         assert meta["retained_bytes"] == OUTPUT_CAPTURE_BYTES
         assert meta["capture_limit_loss_bytes"] == meta["not_retained_bytes"] > 0
         assert meta["cursor"] == info.generation + ":0"
