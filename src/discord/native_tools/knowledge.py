@@ -13,6 +13,7 @@ from collections.abc import Callable
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from ...search.errors import InvalidSearchQuery
+from ...tools.output_delivery import RankedOutput
 
 log = get_logger("discord")
 
@@ -46,6 +47,7 @@ class KnowledgeTools:
             return f"No past conversations found matching '{query}'."
 
         lines = []
+        matches = []
         for r in results:
             from datetime import datetime
 
@@ -53,8 +55,12 @@ class KnowledgeTools:
             role = r["type"]
             content = r["content"].replace("\n", " ")[:300]
             lines.append(f"[{ts}] ({role}): {content}")
+            matches.append(f"[{ts}] ({role}): {r['content']}")
 
-        return f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines)
+        return RankedOutput(
+            f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines),
+            matches=tuple(matches),
+        )
 
     async def _handle_search_knowledge(self, inp: dict) -> str:
         """Semantic + FTS search over the knowledge base."""
@@ -82,13 +88,18 @@ class KnowledgeTools:
             )
 
         lines = []
+        matches = []
         for r in results:
             source = r["source"]
             score = r.get("score", r.get("rrf_score", r.get("rank", 0)))
             content = scrub_output_secrets(r["content"].replace("\n", " ")[:500])
             lines.append(f"**[{source}]** (score: {score})\n{content}")
+            matches.append(f"**[{source}]** (score: {score})\n{r['content']}")
 
-        return f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines)
+        return RankedOutput(
+            f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines),
+            matches=tuple(matches),
+        )
 
     async def _handle_ingest_document(self, inp: dict, uploader: str) -> str:
         """Ingest a document into the knowledge base."""

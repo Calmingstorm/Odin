@@ -10,6 +10,7 @@ from typing import TYPE_CHECKING
 
 from ..llm.backoff import compute_backoff
 from ..odin_log import get_logger
+from .result_capture import capture_active
 from .workspace import workspace_env
 
 if TYPE_CHECKING:
@@ -48,6 +49,9 @@ def is_local_address(address: str) -> bool:
 
 def _truncate_output(output: str) -> str:
     """Truncate output exceeding MAX_OUTPUT_CHARS, keeping head and tail."""
+    if capture_active():
+        # The delivery boundary retains the complete output before previewing it.
+        return output
     if len(output) <= MAX_OUTPUT_CHARS:
         return output
     half = MAX_OUTPUT_CHARS // 2

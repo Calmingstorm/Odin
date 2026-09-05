@@ -551,8 +551,11 @@ END {
                 parts.append(f"## Page {i + 1}\n{text}")
 
             result = "\n\n".join(parts)
-            # Truncate to TOOL_OUTPUT_MAX_CHARS (handled by caller, but be safe)
-            if len(result) > 12000:
+            from ..result_capture import capture_active
+
+            # Direct helpers keep their legacy limit; retained delivery must see
+            # every extracted page before applying its serialized preview budget.
+            if not capture_active() and len(result) > 12000:
                 result = (
                     result[:12000]
                     + "\n\n[... truncated — use pages parameter for specific pages ...]"

@@ -12,6 +12,7 @@ from urllib.parse import quote_plus
 import aiohttp
 
 from ..odin_log import get_logger
+from .result_capture import capture_active
 
 log = get_logger("tools.web")
 
@@ -108,7 +109,7 @@ async def fetch_url(url: str, max_chars: int = MAX_CONTENT_CHARS) -> str:
     else:
         result = body
 
-    if len(result) > max_chars:
+    if not capture_active() and len(result) > max_chars:
         result = result[:max_chars] + "\n\n... (content truncated)"
     return result
 

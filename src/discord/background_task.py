@@ -505,12 +505,21 @@ async def _execute_tool(
             return "Search failed while searching the knowledge base."
         if not results:
             return f"No results for '{query}'."
+        from ..tools.output_delivery import RankedOutput
+
         lines = [
             f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
             f"{r['content'][:200]}"
             for r in results
         ]
-        return "\n".join(lines)
+        return RankedOutput(
+            "\n".join(lines),
+            matches=tuple(
+                f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
+                f"{r['content']}"
+                for r in results
+            ),
+        )
 
     if tool_name == "list_knowledge" and knowledge_store:
         sources = knowledge_store.list_sources()

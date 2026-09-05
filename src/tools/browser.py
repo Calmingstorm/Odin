@@ -14,6 +14,7 @@ from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, TypeVar
 
 from ..odin_log import get_logger
+from .result_capture import capture_active
 
 if TYPE_CHECKING:
     from playwright.async_api import Browser, Playwright
@@ -481,7 +482,7 @@ async def handle_browser_read_page(
         final_url = page.url
 
     text = text.strip()
-    if len(text) > max_chars:
+    if not capture_active() and len(text) > max_chars:
         text = text[:max_chars] + "\n\n... (content truncated)"
 
     return f"**{title}** ({final_url})\n\n{text}"
@@ -540,7 +541,7 @@ async def handle_browser_read_table(
             lines.append("| " + " | ".join("---" for _ in row) + " |")
 
     md = "\n".join(lines)
-    if len(md) > 4000:
+    if not capture_active() and len(md) > 4000:
         md = md[:16000] + "\n... (table truncated)"
 
     return f"**{title}** — Table {table_index + 1} of {table_count}\n\n{md}"
@@ -640,7 +641,7 @@ async def handle_browser_evaluate(
     else:
         text = str(result)
 
-    if len(text) > 4000:
+    if not capture_active() and len(text) > 4000:
         text = text[:16000] + "\n... (result truncated)"
 
     return text

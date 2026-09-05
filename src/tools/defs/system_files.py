@@ -12,7 +12,8 @@ TOOLS_SECTION: list[dict] = [
         "name": "run_command",
         "is_core": True,
         "description": (
-            "Runs a shell command on a managed host. Returns stdout/stderr (max 200 lines). On "
+            "Runs a shell command on a managed host. Returns stdout/stderr; large output has a "
+            "retained preview and get_tool_output(cursor=...) continuation without re-running. On "
             "failure: 'Command failed (exit N): output'. For multi-line scripts, use run_script. "
             "For multiple hosts, use run_command_multi. Host may be omitted only when an explicit "
             "requester or runtime default host exists."
@@ -40,7 +41,8 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Runs a multi-line script on a managed host via temp file. Handles heredocs, code "
             "blocks, "
-            "and complex quoting. Returns stdout/stderr (max 200 lines). On failure: 'Script "
+            "and complex quoting. Large stdout/stderr has a retained preview and "
+            "get_tool_output(cursor=...) continuation without re-running. On failure: 'Script "
             "failed (exit N): output'. "
             "Interpreters: bash (default), python3, python, sh, node, ruby, perl. "
             "For single commands, use run_command. Host may be omitted only when an explicit "

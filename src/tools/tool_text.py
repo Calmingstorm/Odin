@@ -8,6 +8,8 @@ existing importers (background_task, tool_loop_helpers, tests).
 
 from __future__ import annotations
 
+from .result_capture import capture_active
+
 # String prefixes that mark a handler's plain-string return as an error
 # (used by execute()'s ok/error classification and by run_command_multi's
 # per-host aggregation).
@@ -20,8 +22,7 @@ _ERROR_RESULT_PREFIXES = (
 )
 
 # Maximum lines of output from run_command / run_command_multi before
-# truncation.  The LLM can always re-run with head/tail/grep to see
-# specific portions.
+# truncation for direct helpers. Retained tool delivery bypasses this legacy cut.
 _RUN_COMMAND_MAX_LINES = 200
 
 
@@ -33,6 +34,8 @@ def _truncate_lines(text: str, max_lines: int = _RUN_COMMAND_MAX_LINES) -> str:
     complete lines.  A notice is inserted in the middle telling the LLM
     how to get more specific output.
     """
+    if capture_active():
+        return text
     lines = text.split("\n")
     if len(lines) <= max_lines:
         return text
