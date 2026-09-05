@@ -749,12 +749,11 @@ class ConversationReflector:
             if not new_entries:
                 return
 
-            single_user = user_ids[0] if len(user_ids) == 1 else None
+            new_entries = self._attribute_personal_entries(new_entries, user_ids)
+            if not new_entries:
+                return
             for entry in new_entries:
                 entry.setdefault("source", {"created_by": "operation"})
-                if entry["category"] in ("preference", "correction") and single_user:
-                    if "user_id" not in entry:
-                        entry["user_id"] = single_user
 
             async with self._lock:
                 from ..json_store import StoreCorruptError
@@ -891,19 +890,11 @@ class ConversationReflector:
                 if not new_entries:
                     return
 
-            # Tag user-specific entries with user_id.
-            # If the LLM already assigned a user_id (multi-user case), keep it.
-            # If only one user participated, tag preference/correction entries.
-            effective_ids = user_ids or []
-            single_user = effective_ids[0] if len(effective_ids) == 1 else None
+            new_entries = self._attribute_personal_entries(new_entries, user_ids or [])
+            if not new_entries:
+                return
             for entry in new_entries:
                 entry.setdefault("source", {"created_by": "reflection"})
-                if entry["category"] in ("preference", "correction"):
-                    if single_user and "user_id" not in entry:
-                        entry["user_id"] = single_user
-                    # If multi-user, the LLM should have set user_id via _parse_entries
-                    # If it didn't and we have multiple users, leave untagged (global)
-                # operational and fact entries stay global (no user_id)
 
             self._apply_use_stamps(existing)
             merged = self._merge_entries(existing, new_entries)
@@ -920,6 +911,25 @@ class ConversationReflector:
                 "Reflection complete: %d new insights, %d total entries",
                 len(new_entries), len(merged),
             )
+
+    @staticmethod
+    def _attribute_personal_entries(entries: list[dict], user_ids: list[str]) -> list[dict]:
+        """Generated personal lessons require a known participant, never global fallback.
+
+        Explicit operator writes and existing global facts do not pass this gate.
+        """
+        participants = {uid for uid in user_ids if isinstance(uid, str) and uid.strip()}
+        single_user = next(iter(participants)) if len(participants) == 1 else None
+        accepted = []
+        for entry in entries:
+            if entry["category"] in ("preference", "correction"):
+                uid = entry.get("user_id", single_user)
+                if uid not in participants:
+                    log.warning("Dropped personal lesson with uncertain participant attribution")
+                    continue
+                entry["user_id"] = uid
+            accepted.append(entry)
+        return accepted
 
     @staticmethod
     def _merge_entries(existing: list[dict], new_entries: list[dict]) -> list[dict]:
@@ -1225,6 +1235,28 @@ class ConversationReflector:
                 entry["updated_at"] = now
                 entry.setdefault("confidence", _default_confidence(entry.get("category", "")))
                 entry.setdefault("source", {"created_by": "consolidation"})
+
+        # Consolidation is another model publication boundary. A new key must
+        # not turn an attributed personal lesson into an unscoped global one;
+        # existing keys must not transfer ownership to a different participant.
+        participants = {e["user_id"] for e in candidates
+                        if isinstance(e.get("user_id"), str) and e["user_id"].strip()}
+        for entry in consolidated:
+            original = orig_by_key.get(entry["key"])
+            if original and original.get("user_id"):
+                if entry.get("user_id") != original["user_id"]:
+                    log.warning("Consolidation changed personal ownership; retaining originals")
+                    return candidates + damaged
+            if entry["category"] in ("preference", "correction"):
+                # An existing explicitly global entry may stay global. A model
+                # cannot manufacture global personal entries under a new key.
+                existing_global = (original is not None
+                                   and not original.get("user_id")
+                                   and original.get("category") == entry["category"]
+                                   and not entry.get("user_id"))
+                if not existing_global and entry.get("user_id") not in participants:
+                    log.warning("Consolidation lost personal attribution; retaining originals")
+                    return candidates + damaged
 
         elapsed = _time.monotonic() - t0
         log.info(
