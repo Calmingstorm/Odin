@@ -25,6 +25,7 @@ from ..llm.tool_history import assistant_content, content_text, normalize_tool_c
 from ..odin_log import get_logger
 from ..tools.result_validator import ToolResult
 from .execution_context import waiting_agent
+from .repetition import RepetitionGuard
 from .tool_cycle import execute_cycle
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 
@@ -1211,6 +1212,7 @@ async def _run_agent(
         reasoning_effort_override=agent.reasoning_effort_override,
     )
     agent_start = time.time()
+    repetition = RepetitionGuard()
 
     def _budget_observation(state: dict) -> tuple[int | None, str, int | None]:
         plan = state.get("plan")
@@ -1530,6 +1532,32 @@ async def _run_agent(
                 agent.transition(AgentState.FAILED, "budget exhausted with parent correction")
                 agent.error = (
                     "Parent correction consumed, but no iteration budget remains to replan."
+                )
+                agent.ended_at = time.time()
+                return
+
+            repeat_action = repetition.observe(tool_calls, iter_tool_results)
+            if repeat_action == "nudge":
+                agent.messages.append(
+                    {
+                        "role": "user",
+                        "provenance": "agent_guard",
+                        "content": "Repeated identical tool calls returned identical results. "
+                        "Review the recorded call/result pairs; do not repeat unchanged work. "
+                        "Replan or return a truthful final result.",
+                    }
+                )
+            elif repeat_action == "stop":
+                agent.transition(AgentState.EXECUTING, "settling repetition guard")
+                agent.transition(AgentState.FAILED, "unchanged tool/result cycle after warning")
+                agent.error = "Stopped repeated identical tool calls and results after one warning."
+                agent.result = (
+                    agent.error
+                    + "\n"
+                    + "\n".join(
+                        f"{r['name']} [{r['status']}]: {r['result'][:300]}"
+                        for r in iter_tool_results
+                    )
                 )
                 agent.ended_at = time.time()
                 return
