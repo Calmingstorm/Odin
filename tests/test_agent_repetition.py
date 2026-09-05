@@ -51,3 +51,41 @@ def test_fingerprint_includes_input_status_output_and_order_not_identity():
     for status in ("not_executed", "invalid_arguments", "interrupted_effect_free"):
         results[0]["status"] = status
         assert guard.observe(calls, results) == "" and guard.repeats == 0
+
+
+async def test_identical_effect_free_waits_are_not_repetition():
+    """A child inside one long iteration renders the same snapshot on every wait."""
+    a = agent()
+
+    async def cb(*args, **kwargs):
+        if a.iteration_count >= 5:
+            return {"text": "children finished"}
+        return {
+            "tool_calls": [
+                {
+                    "id": str(a.iteration_count),
+                    "name": "wait_for_agents",
+                    "input": {"agent_ids": ["child"], "timeout": 300},
+                }
+            ]
+        }
+
+    execute = AsyncMock(return_value="**child** (`child`): running [iterations=3]\n(no output)")
+    await _run_agent(a, "", [], cb, execute, max_iterations=10)
+    assert a.state == AgentState.COMPLETED and a.result == "children finished"
+    assert execute.await_count == 4
+    assert not any(m.get("provenance") == "agent_guard" for m in a.messages)
+
+
+def test_effect_free_observation_pairs_do_not_feed_the_fingerprint():
+    guard = RepetitionGuard()
+    wait = [{"id": "w", "name": "wait_for_agents", "input": {"agent_ids": ["c"]}}]
+    snapshot = [
+        {"tool_use_id": "w", "result": "running [iterations=3]\n(no output)", "status": "succeeded"}
+    ]
+    for _ in range(6):
+        assert guard.observe(wait, snapshot) == "" and guard.repeats == 0
+    # A real tool repeated alongside the wait still counts.
+    calls = wait + [{"id": "r", "name": "read_file", "input": {"path": "/x"}}]
+    results = snapshot + [{"tool_use_id": "r", "result": "same", "status": "succeeded"}]
+    assert [guard.observe(calls, results) for _ in range(4)] == ["", "", "nudge", "stop"]

@@ -26,6 +26,8 @@ wait is not idle; overdue deadlines and genuinely idle ready workers remain
 detectable. A private identical-call **and** identical-result guard gives one
 warning after three unchanged cycles, then terminates truthfully if unchanged.
 It is a backstop, not the transcript fix; changing results reset the streak.
+Effect-free observation waits (`wait_for_agents`) never count toward the streak:
+a child inside one long iteration renders the same snapshot on every wait.
 
 ## Deployment and validation
 
