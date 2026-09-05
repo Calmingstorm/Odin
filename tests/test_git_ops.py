@@ -276,7 +276,7 @@ class TestBuildPush:
 
     def test_freshness_check_compares_revisions(self):
         cmds = build_git_command("push", {})
-        assert "rev-parse HEAD" in cmds[0]
+        assert '"$SOURCE^{commit}"' in cmds[0]
         assert "merge-base" in cmds[0]
 
     def test_freshness_outputs_fresh_or_stale(self):
@@ -294,7 +294,8 @@ class TestBuildPush:
 
     def test_push_with_branch(self):
         cmds = build_git_command("push", {"branch": "main"})
-        assert "main" in cmds[1]
+        assert "SOURCE=main; DEST=refs/heads/main" in cmds[0]
+        assert "__ODIN_SOURCE__:__ODIN_DEST__" in cmds[1]
 
     def test_push_force_uses_lease(self):
         cmds = build_git_command("push", {"force": True})
@@ -676,7 +677,7 @@ class TestPushFreshnessCheck:
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_push_fresh_ahead_succeeds(self, mock_exec):
         mock_exec.side_effect = [
-            (0, "FRESH:ahead"),
+            (0, "FRESH:ahead\nODIN_PUSH:" + "a" * 40 + ":refs/heads/main:" + "b" * 40),
             (0, "Everything up-to-date\n"),
         ]
         exe = self._make_executor()
@@ -690,7 +691,7 @@ class TestPushFreshnessCheck:
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_push_fresh_up_to_date_succeeds(self, mock_exec):
         mock_exec.side_effect = [
-            (0, "FRESH:up_to_date"),
+            (0, "FRESH:up_to_date\nODIN_PUSH:" + "a" * 40 + ":refs/heads/main:" + "a" * 40),
             (0, "Everything up-to-date\n"),
         ]
         exe = self._make_executor()
@@ -703,7 +704,8 @@ class TestPushFreshnessCheck:
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_push_fresh_no_remote_succeeds(self, mock_exec):
         mock_exec.side_effect = [
-            (0, "FRESH:no_remote_tracking"),
+            (0, "FRESH:no_remote_tracking\nODIN_PUSH:" + "a" * 40
+             + ":refs/heads/main:\nODIN_TRACK:refs/heads/main\n"),
             (0, "new branch\n"),
         ]
         exe = self._make_executor()
@@ -740,7 +742,7 @@ class TestPushFreshnessCheck:
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_push_command_fails(self, mock_exec):
         mock_exec.side_effect = [
-            (0, "FRESH:ahead"),
+            (0, "FRESH:ahead\nODIN_PUSH:" + "a" * 40 + ":refs/heads/main:" + "b" * 40),
             (1, "error: failed to push some refs"),
         ]
         exe = self._make_executor()
@@ -754,7 +756,7 @@ class TestPushFreshnessCheck:
     @patch("src.tools.executor.ToolExecutor._exec_command")
     async def test_push_empty_output_shows_success(self, mock_exec):
         mock_exec.side_effect = [
-            (0, "FRESH:ahead"),
+            (0, "FRESH:ahead\nODIN_PUSH:" + "a" * 40 + ":refs/heads/main:" + "b" * 40),
             (0, ""),
         ]
         exe = self._make_executor()

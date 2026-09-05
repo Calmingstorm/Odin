@@ -176,28 +176,67 @@ def _build_push(params: dict) -> list[str]:
     sq_repo = _sq(repo)
     sq_remote = _sq(remote)
 
+    if branch:
+        source, separator, destination = branch.partition(":")
+        if not source or source.startswith("+") or "*" in branch:
+            raise ValueError("push requires a single non-deleting branch refspec")
+        destination = destination if separator else source
+        if not destination or ":" in destination:
+            raise ValueError("push requires a single destination branch")
+        _safe_ref(destination, "destination")
+        if source == "HEAD" and not separator:
+            # A bare HEAD refspec means the branch HEAD currently names, not
+            # a new remote branch literally named HEAD. Detached HEAD cannot
+            # infer a destination and must fail before pushing.
+            select = (
+                f"SOURCE=$(git -C {sq_repo} symbolic-ref --quiet HEAD) || exit $?; "
+                'DEST="$SOURCE"; '
+            )
+        else:
+            if not destination.startswith("refs/"):
+                destination = "refs/heads/" + destination
+            select = f"SOURCE={_sq(source)}; DEST={_sq(destination)}; "
+    else:
+        select = (
+            f"SOURCE=$(git -C {sq_repo} symbolic-ref --quiet HEAD) || exit $?; "
+            f"DEST=$(git -C {sq_repo} for-each-ref --format='%(upstream:remoteref)' "
+            '"$SOURCE") && '
+            '[ -n "$DEST" ] || DEST="$SOURCE"; '
+        )
+    tracking = (
+        f'TRACK=$(git -C {sq_repo} rev-parse --symbolic-full-name --verify '
+        '--end-of-options "$SOURCE") || exit $?; '
+        'case "$TRACK" in refs/heads/*) ;; *) TRACK="" ;; esac; '
+    ) if set_upstream else 'TRACK=""; '
     freshness_script = (
-        f"git -C {sq_repo} fetch --quiet -- {sq_remote} 2>&1 && "
-        f"LOCAL=$(git -C {sq_repo} rev-parse HEAD) && "
-        f"MERGE_BASE=$(git -C {sq_repo} merge-base HEAD "
-        f"{sq_remote}/$(git -C {sq_repo} rev-parse --abbrev-ref HEAD) 2>/dev/null || echo NONE) && "
-        f"REMOTE=$(git -C {sq_repo} rev-parse "
-        f"{sq_remote}/$(git -C {sq_repo} rev-parse --abbrev-ref HEAD) 2>/dev/null || echo NONE) && "
-        f'if [ "$REMOTE" = "NONE" ]; then echo "FRESH:no_remote_tracking"; '
-        f'elif [ "$LOCAL" = "$REMOTE" ]; then echo "FRESH:up_to_date"; '
-        f'elif [ "$MERGE_BASE" = "$REMOTE" ]; then echo "FRESH:ahead"; '
-        f'else echo "STALE:local_behind_remote — pull or rebase first"; fi'
+        select
+        + tracking
+        + f'git -C {sq_repo} check-ref-format "$DEST" && '
+        f'LOCAL=$(git -C {sq_repo} rev-parse --verify --end-of-options "$SOURCE^{{commit}}") && '
+        f'REMOTE=$(git -C {sq_repo} ls-remote --refs -- {sq_remote} "$DEST") || exit $?; '
+        'REMOTE=${REMOTE%%[[:space:]]*}; '
+        'if [ -z "$LOCAL" ]; then exit 1; fi; '
+        'if [ -n "$REMOTE" ]; then '
+        f'git -C {sq_repo} fetch --quiet -- {sq_remote} "$DEST" || exit $?; '
+        f'if ! git -C {sq_repo} merge-base --is-ancestor "$REMOTE" "$LOCAL"; then '
+        'echo "STALE:local_behind_remote — pull or rebase first"; exit 0; fi; fi; '
+        'printf "FRESH:exact_ref\\nODIN_PUSH:%s:%s:%s\\nODIN_TRACK:%s\\n" '
+        '"$LOCAL" "$DEST" "$REMOTE" "$TRACK"'
     )
 
     push_parts = ["git", "-C", sq_repo, "push"]
     if force:
-        push_parts.append("--force-with-lease")
-    if set_upstream:
-        push_parts.append("--set-upstream")
+        push_parts.append("--force-with-lease=__ODIN_DEST__:__ODIN_REMOTE__")
     push_parts.append(sq_remote)
-    if branch:
-        push_parts.append(_sq(branch))
+    push_parts.append("__ODIN_SOURCE__:__ODIN_DEST__")
     push_cmd = " ".join(push_parts)
+    if set_upstream:
+        # Pushing a pinned commit cannot itself set branch tracking. Apply the
+        # requested tracking update to the original branch only after success.
+        push_cmd += (
+            f" && ( test -z __ODIN_TRACK__ || git -C {sq_repo} branch --set-upstream-to="
+            f"{sq_remote}/__ODIN_BRANCH__ __ODIN_TRACK__ )"
+        )
 
     return [freshness_script, push_cmd]
 
