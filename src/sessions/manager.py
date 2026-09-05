@@ -424,6 +424,7 @@ class SessionManager:
         self._state_lock = threading.RLock()
         self._publication_lock = threading.RLock()
         self._pending_reset_epochs: dict[str, float] = {}
+        self._reset_epochs_degraded = False
         # Reset tombstones: channel -> epoch. Archives at or before the
         # epoch are never restored — reset/purge means GONE, not "back on
         # the next message". Persisted so restarts honor resets too.
@@ -464,7 +465,7 @@ class SessionManager:
 
     @_owned
     def get_or_create(self, channel_id: str) -> Session:
-        if self._pending_reset_epochs:
+        if channel_id in self._pending_reset_epochs:
             raise RuntimeError("Reset durability unresolved; retry reset before session activity")
         if channel_id not in self._sessions:
             session = self._restore_from_archive(channel_id)
@@ -488,6 +489,8 @@ class SessionManager:
         channel is active again. Compaction and relevance selection — not
         restoration — decide what actually reaches the prompt.
         """
+        if self._reset_epochs_degraded:
+            return None  # unknown reset history must never resurrect an archive
         archive_dir = self.persist_dir / "archive"
         if not archive_dir.exists():
             return None
@@ -1158,7 +1161,12 @@ class SessionManager:
                     raise ValueError("Invalid reset epoch store")
                 return {k: float(v) for k, v in raw.items()}
         except Exception as e:
-            raise RuntimeError("Cannot safely load reset epochs; repair required") from e
+            self._reset_epochs_degraded = True
+            log.error(
+                "Reset epoch durability degraded: cannot load reset epochs (%s); "
+                "archive restoration and pruning suspended; repair store and reload",
+                type(e).__name__,
+            )
         return {}
 
     def _save_reset_epochs(self) -> None:
@@ -1192,6 +1200,12 @@ class SessionManager:
             requested = set(channel_ids)
             if not requested:
                 return 0
+            if self._reset_epochs_degraded:
+                # Never replace an unreadable tombstone ledger with a partial
+                # one. Live sessions can still load, accept activity and save.
+                raise RuntimeError(
+                    "Reset epoch store degraded; repair store and reload before reset",
+                )
             removed = sum(cid in self._sessions for cid in requested)
             previous = self._reset_epochs
             self._reset_epochs = {
@@ -1237,6 +1251,8 @@ class SessionManager:
 
     @_publication_owned
     def prune(self) -> int:
+        if self._reset_epochs_degraded:
+            return 0  # keep live sessions available while restoration is suspended
         now = time.time()
         expired = [
             cid
@@ -1583,11 +1599,13 @@ class SessionManager:
         # during I/O, but cannot be acknowledged by an older snapshot.
         with self._publication_lock:
             with self._state_lock:
-                if self._pending_reset_epochs:
-                    raise RuntimeError("Reset durability unresolved; retry reset before saving")
                 channels = list(self._sessions if all_sessions else self._dirty)
             for cid in channels:
                 with self._state_lock:
+                    if cid in self._pending_reset_epochs:
+                        # Keep this channel dirty/fenced, not the entire bot.
+                        log.warning("Session %s save suspended: reset durability unresolved", cid)
+                        continue
                     session = self._sessions.get(cid)
                     if session is None:
                         self._dirty.discard(cid)

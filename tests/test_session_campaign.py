@@ -89,10 +89,35 @@ def test_failed_reset_is_not_acknowledged_and_can_retry(tmp_path, monkeypatch, o
 
 
 @pytest.mark.parametrize("body", ["{", "[]", '{"42": "bad"}', '{"42": NaN}'])
-def test_corrupt_epochs_fail_closed(tmp_path, body):
+def test_corrupt_epochs_degrade_without_boot_or_live_session_outage(tmp_path, body, caplog):
+    sm = manager(tmp_path)
+    sm.add_message("42", "user", "live history")
+    sm.add_message("archived", "user", "possibly reset history")
+    sm._archive_session("archived")
+    sm.reset("archived")
+    sm.save_all()
+    archive = next((tmp_path / "archive").glob("*.json"))
+    original_archive = archive.read_bytes()
     (tmp_path / "reset_epochs.json").write_text(body)
-    with pytest.raises(RuntimeError, match="Cannot safely"):
-        manager(tmp_path)
+    sm = manager(tmp_path)
+    sm.load()
+    assert sm._reset_epochs_degraded
+    assert "archive restoration and pruning suspended" in caplog.text
+    assert sm.get_or_create("42").messages[0].content == "live history"
+    assert not sm.get_or_create("archived").messages
+    sm.add_message("42", "user", "still available")
+    sm.add_message("new", "user", "new channel")
+    sm.get("42").last_active = 100
+    assert sm.prune() == 0
+    sm.save_all()
+    assert json.loads((tmp_path / "42.json").read_text())["messages"][-1]["content"] == (
+        "still available"
+    )
+    assert (tmp_path / "new.json").exists()
+    with pytest.raises(RuntimeError, match="store degraded"):
+        sm.reset("42")
+    assert (tmp_path / "reset_epochs.json").read_text() == body
+    assert archive.read_bytes() == original_archive
 
 
 def test_successful_reset_fences_stale_live_file(tmp_path):
@@ -245,8 +270,21 @@ def test_pending_reset_requires_explicit_retry_not_unrelated_or_empty_reset(
     assert sm.reset_many(["other"]) == 1
     assert sm._pending_reset_epochs == pending
     assert sm.get("42").messages[0].content == "preserved"
+    before_live = (tmp_path / "42.json").read_bytes()
     with pytest.raises(RuntimeError, match="durability unresolved"):
-        sm.save_all()
+        sm.get_or_create("42")
+    sm.add_message("other", "user", "new other history")
+    sm.add_message("new", "user", "new channel history")
+    sm.save()
+    sm.save_all()
+    assert (tmp_path / "42.json").read_bytes() == before_live
+    assert json.loads((tmp_path / "other.json").read_text())["messages"][0]["content"] == (
+        "new other history"
+    )
+    assert json.loads((tmp_path / "new.json").read_text())["messages"][0]["content"] == (
+        "new channel history"
+    )
+    assert sm._pending_reset_epochs == pending
     sm.reset("42")
     assert not sm._pending_reset_epochs
     assert sm.get("42") is None
