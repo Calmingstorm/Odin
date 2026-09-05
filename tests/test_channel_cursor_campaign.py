@@ -20,11 +20,11 @@ def test_equal_timestamp_batches_restart_and_late_arrival(tmp_path):
     index = FullTextIndex(str(tmp_path / "fts.db"))
     for identity in range(3):
         logger.log_message(message(identity + 1))
-    assert logger.index_to_fts(index) == 2
+    assert logger.index_to_fts(index) == 3  # first cursor-less pass consumes all batches
     index._conn.close()
     index = FullTextIndex(str(tmp_path / "fts.db"))
     logger = ChannelLogger(tmp_path / "logs")
-    assert logger.index_to_fts(index) == 1
+    assert logger.index_to_fts(index) == 0
     logger.log_message(message(4))
     assert logger.index_to_fts(index) == 1
     assert logger.index_to_fts(index) == 0

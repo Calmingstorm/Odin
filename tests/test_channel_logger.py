@@ -91,8 +91,12 @@ class TestIndexToFts:
         for i in range(3):
             cl.log_message(_msg(content=f"m{i}", ts=100.0 + i))
         fts = _fts()
-        # capped at the batch limit for this cycle
+        # Upgrade consumes every batch atomically; steady-state retains its cap.
+        assert cl.index_to_fts(fts) == 3
+        for i in range(3, 6):
+            cl.log_message(_msg(content=f"m{i}", ts=100.0 + i))
         assert cl.index_to_fts(fts) == 2
+        assert cl.index_to_fts(fts) == 1
 
     def test_skips_bad_lines_and_missing_dir(self, tmp_path):
         cl = ChannelLogger(tmp_path / "gone")

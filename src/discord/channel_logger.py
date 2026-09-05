@@ -9,8 +9,10 @@ from __future__ import annotations
 import hashlib
 import json
 import threading
+import time
 import uuid
 from collections import deque
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -36,6 +38,8 @@ class ChannelLogger:
 
     # Batch size cap for FTS indexing to limit memory on huge JSONL files
     FTS_BATCH_LIMIT = 5000
+    # First-pass reconciliation is all-or-nothing, not one committed row batch.
+    FTS_RECONCILE_SECONDS = 5.0
 
     def __init__(self, log_dir: str | Path) -> None:
         self._log_dir = Path(log_dir)
@@ -110,6 +114,15 @@ class ChannelLogger:
                 channel_id = path.stem
                 try:
                     cursor = fts.channel_cursor(channel_id)
+                    if cursor is None:
+                        deadline = time.monotonic() + self.FTS_RECONCILE_SECONDS
+                        ack = fts.reconcile_channel_batches(
+                            channel_id, self._initial_index_batches(path, deadline),
+                            deadline=deadline,
+                        )
+                        if ack.status != "error":
+                            total += ack.count
+                        continue
                     batch = self._index_batch(path, cursor)
                     if batch:
                         ack = fts.index_channel_batch(
@@ -124,6 +137,49 @@ class ChannelLogger:
             log.info("Indexed %d channel log messages into FTS", total)
         return total
 
+    def _initial_index_batches(self, path: Path, deadline: float) -> Iterator[list[dict]]:
+        """Stream one time-bounded source snapshot, with bounded batch memory.
+
+        Snapshot EOF prevents a busy channel from extending the upgrade forever.
+        A torn final record is left for the next pass, as on incremental reads.
+        """
+        batch: list[dict] = []
+        with path.open(encoding="utf-8") as stream:
+            end = path.stat().st_size
+            number = 0
+            while stream.tell() < end:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError("Channel reconciliation deadline; old index retained")
+                line = stream.readline()
+                if not line or not line.endswith("\n") or stream.tell() > end:
+                    break
+                record = self._index_record(path, number, line)
+                number += 1
+                if record is None:
+                    continue
+                batch.append(record)
+                if len(batch) >= self.FTS_BATCH_LIMIT:
+                    yield batch
+                    batch = []
+            if batch:
+                yield batch
+
+    @staticmethod
+    def _index_record(path: Path, number: int, line: str) -> dict | None:
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            return None
+        if not isinstance(record, dict):
+            return None
+        identity = record.get("log_identity") or "legacy:" + hashlib.sha256(
+            f"{path.stem}:{number}:{line}".encode(),
+        ).hexdigest()
+        record["log_identity"] = identity
+        if not record.get("message_id"):
+            record["message_id"] = identity
+        return record
+
     def _index_batch(self, path: Path, cursor: str | None) -> list[dict]:
         batch: list[dict] = []
         found = cursor is None
@@ -131,18 +187,11 @@ class ChannelLogger:
             for number, line in enumerate(stream):
                 if not line.endswith("\n"):
                     break  # an in-flight append is not consumed
-                try:
-                    record = json.loads(line)
-                except json.JSONDecodeError:
+                record = self._index_record(path, number, line)
+                if record is None:
                     continue
-                identity = record.get("log_identity") or "legacy:" + hashlib.sha256(
-                    f"{path.stem}:{number}:{line}".encode(),
-                ).hexdigest()
-                record["log_identity"] = identity
-                if not record.get("message_id"):
-                    record["message_id"] = identity
                 if not found:
-                    found = identity == cursor
+                    found = record["log_identity"] == cursor
                     continue
                 batch.append(record)
                 if len(batch) >= self.FTS_BATCH_LIMIT:
