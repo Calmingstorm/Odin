@@ -224,9 +224,14 @@ if op=="status":
     request=json.loads(payload) if payload.startswith("{") else {"offset":int(payload or "0"),"limit":4000}
     cursor=max(0,int(request.get("offset",0))); limit=max(4,min(8000,int(request.get("limit",4000)))); data=b""; total=0
     tail=load("tail.json") or {}
+    emitted=int((exit_record or {}).get("emitted",tail.get("emitted",0)))
+    tail_withheld=False
+    capture_error=None
     try:
         with open(root+"/out","rb") as handle:
             snapshot=scrub(handle.read(4194304)); total=len(snapshot)
+            captured=total; emitted=max(emitted,captured)
+            if captured<min(emitted,4194304): capture_error="process output capture incomplete"
             if exit_record is None:
                 snapshot=re.sub(rb"\S+\Z",b"",snapshot); total=len(snapshot)
             # Withhold only an incomplete final UTF-8 sequence, not malformed bytes.
@@ -237,12 +242,14 @@ if op=="status":
                     if width<need: snapshot=snapshot[:-width]; total=len(snapshot)
                     break
             if request.get("tail"):
-                emitted=int(tail.get("emitted",total))
-                data=snapshot[-8000:] if emitted<=4194304 else scrub(base64.b64decode(tail.get("tail","")))
-                cursor=max(0,emitted-len(data))
-                if cursor:
-                    if emitted>4194304:
-                        data=re.sub(rb"^[^\n]*",lambda m:b"*"*len(m[0]),data)
+                if captured==emitted:
+                    data=snapshot[-8000:]; cursor=total-len(data)
+                else:
+                    complete_tail=base64.b64decode(tail.get("tail",""))
+                    if len(complete_tail)==emitted:
+                        data=scrub(complete_tail); cursor=0
+                    else:
+                        data=b""; cursor=0; tail_withheld=True
                 if exit_record is None:
                     data=re.sub(rb"\S+\Z",b"",data)
             else:
@@ -251,7 +258,7 @@ if op=="status":
     if exit_record is not None and not exit_record.get("empty",False):
         emit(ok=False,unknown=True,error="remote process group emptiness was not verified",output=base64.b64encode(data).decode(),cursor=cursor+len(data),size=total,ready=ready)
         raise SystemExit(4)
-    emit(ok=True,status="exited" if exit_record is not None else "running",exit=exit_record,output=base64.b64encode(data).decode(),start=cursor,cursor=cursor+len(data),size=total,emitted=int((exit_record or {}).get("emitted",tail.get("emitted",total))),identity=identity(),ready=ready)
+    emit(ok=True,status="exited" if exit_record is not None else "running",exit=exit_record,output=base64.b64encode(data).decode(),start=cursor,cursor=cursor+len(data),size=total,emitted=emitted,tail_withheld=tail_withheld,capture_error=capture_error,identity=identity(),ready=ready)
 elif op=="expire":
     record=load("exit.json")
     if record is None or time.time()<float(record.get("finished_at",time.time()))+86400:
@@ -1866,15 +1873,21 @@ class ProcessRegistry:
             if start > view.retained_bytes:
                 return "Error: offset exceeds retained output."
             return self._output_page(view, data, start, limit, max_chars, preview=False)
-        if info.total_output_bytes <= OUTPUT_CAPTURE_BYTES and info.spool is not None:
+        full = b""
+        if info.spool is not None:
             info.spool.seek(0)
             full = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+        if len(full) == info.total_output_bytes:
             tail = full[-12000:]
-        else:
+        elif len(info.output_tail) == info.total_output_bytes:
+            # Quota/write loss can leave a complete small stream in memory.
+            # Only a COMPLETE stream establishes enclosing JSON secret context.
             tail = _scrub_process_bytes(info.output_tail)
-            if info.total_output_bytes > len(info.output_tail):
-                # A clipped prefix can begin inside an arbitrarily long secret.
-                tail = re.sub(rb"^[^\n]*", lambda m: b"*" * len(m[0]), tail)
+        else:
+            # A clipped tail may begin inside a multiline credential object;
+            # masking just its first line cannot make the remaining lines safe.
+            return self._output_page(info, b"", 0, limit, max_chars,
+                                     preview=True, tail_withheld=True)
         data = b"".join(tail.splitlines(keepends=True)[-50:])
         start = max(0, info.total_output_bytes - len(data))
         if info.status == "running":
@@ -1897,7 +1910,8 @@ class ProcessRegistry:
                 (self._retention_dir / (info.generation + suffix)).unlink(missing_ok=True)
 
     @staticmethod
-    def _output_page(info: ProcessInfo, data: bytes, start: int, limit: int, budget: int, *, preview: bool) -> str:
+    def _output_page(info: ProcessInfo, data: bytes, start: int, limit: int, budget: int, *, preview: bool,
+                     tail_withheld: bool = False) -> str:
         """Fit complete delivery before deriving a cursor. Preview retrieves from zero."""
         if not preview and data and data[0] & 0xC0 == 0x80:
             return "Error: offset is not a UTF-8 code point boundary."
@@ -1929,6 +1943,9 @@ class ProcessRegistry:
                 }} if more else None,
             }
             text = chunk.decode("utf-8", "replace")
+            if tail_withheld:
+                meta["tail_status"] = "withheld_unverifiable_secret_context"
+                text = "(tail withheld: incomplete capture cannot establish secret-masking context; retrieve the retained prefix using the cursor)"
             if preview:
                 status = f"[PID {info.pid}] status={info.status}"
                 if info.exit_code is not None:
@@ -2145,6 +2162,8 @@ class ProcessRegistry:
         info.remote_cursor = int(reply.get("cursor", info.remote_cursor))
         info.retained_bytes = int(reply.get("size", info.remote_cursor))
         info.total_output_bytes = int(reply.get("emitted", info.retained_bytes))
+        if reply.get("capture_error"):
+            info.capture_error = "process output capture incomplete"
         if reply.get("status") == "exited":
             exit_record = reply.get("exit") or {}
             info.exit_code = int(exit_record.get("exit_code", 1))
@@ -2164,7 +2183,8 @@ class ProcessRegistry:
             recent = b"".join(data.splitlines(keepends=True)[-50:])
             start += len(data) - len(recent)
             data = recent
-        return self._output_page(info, data, start, limit, max_chars, preview=offset is None)
+        return self._output_page(info, data, start, limit, max_chars, preview=offset is None,
+                                 tail_withheld=bool(reply.get("tail_withheld", False)))
 
     def _retire_execution_lease(self, info: ProcessInfo) -> None:
         if info.remote_lease is not None:
@@ -2429,12 +2449,15 @@ class ProcessRegistry:
                                 path = self._retention_dir / (info.generation + ".out")
                                 fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_EXCL, 0o600)
                                 info.spool = os.fdopen(fd, "w+b")
-                        retained = chunk[:min(OUTPUT_CAPTURE_BYTES - info.retained_bytes,
-                                              self._spool_quota_remaining())]
+                        capture_remaining = OUTPUT_CAPTURE_BYTES - info.retained_bytes
+                        quota_remaining = self._spool_quota_remaining()
+                        retained = chunk[:min(capture_remaining, quota_remaining)]
                         info.spool.seek(info.retained_bytes)
                         info.spool.write(retained)
                         info.retained_bytes += len(retained)
                         info.spool.flush()
+                        if len(retained) < min(len(chunk), capture_remaining):
+                            info.capture_error = "process retention quota exhausted"
                         self._persist_output(info)
                     except OSError:
                         info.capture_error = "process spool write failed"

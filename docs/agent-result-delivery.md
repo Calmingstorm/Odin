@@ -96,6 +96,14 @@ past the **4 MiB** capture limit. `not_retained_bytes` also includes incomplete
 UTF-8 suffixes, withheld streaming tokens, or capture failures. Output not shown
 in the tail is not necessarily lost: use its explicit retrieval instructions.
 
+If capture overflow or failure leaves only a clipped tail, its enclosing secret
+context cannot be verified. That broken path returns no tail bytes, explicit
+`tail_status=withheld_unverifiable_secret_context`, and a cursor to the safely
+masked retained prefix. A complete small in-memory stream may still supply the
+true tail after partial quota loss; its coordinates describe emitted bytes,
+not the shorter spool. Partial quota loss sets `capture_error` immediately.
+Ordinary complete-capture newest-50 behavior is unchanged.
+
 For full output, call `manage_process action=poll pid=... offset=0`, then follow
 the returned `cursor` until `truncated=false`. `limit` defaults to 4,000 bytes,
 accepts 4–8,000, and is a ceiling: serialized JSON must fit the shared budget.

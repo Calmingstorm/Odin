@@ -25,14 +25,22 @@ keys are decoded (including escaped key characters); complete nested values and
 incomplete values at capture boundaries are masked. Replacement uses one ASCII
 asterisk per original UTF-8 byte, preserving coordinates. Local capture, remote
 supervisor finalization, and remote controller reads share the same scrubber.
-Tail views derive from the scrubbed capture while within the capture cap.
+Tail views derive from the scrubbed capture only when it contains the entire
+emitted stream, or from a complete small in-memory stream after storage loss.
+A clipped tail has unverifiable enclosing secret context, even across multiple
+lines: it is withheld with explicit `tail_status` and a retrieval cursor for the
+safely masked retained prefix. No tail bytes or fabricated intervals are shown
+on that failure path. Ordinary complete-capture newest-50 behavior is unchanged.
 
 ## Capacity
 
 Each remote start reserves 4 MiB before dispatch against the combined 128 MiB
 process-output quota. Pending dispatches count too. Local writers may consume
 only the exact remaining unreserved bytes. Accounting charges the greater of
-actual retained bytes and a job's reservation, not their sum. A terminal remote
+actual retained bytes and a job's reservation, not their sum. A partial chunk
+lost to quota sets `capture_error` immediately, without waiting for another read.
+A complete small memory tail can still be shown at its true emitted coordinates;
+prefix retrieval reports only actual retained coordinates. A terminal remote
 snapshot releases unused reservation, retaining its actual byte charge until
 expiry. Unknown remote jobs conservatively keep their reservation across
 restart. Failed starts release pending reservations; cancellation attempts the
