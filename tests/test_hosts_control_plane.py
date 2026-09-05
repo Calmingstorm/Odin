@@ -428,7 +428,10 @@ def test_registry_target_materialization_and_status(tmp_path):
     registry = HostRegistry(
         {
             "build": _host(description="builder"),
-            "local": _host(address="127.0.0.1", trust_mode="pinned", host_keys=[]),
+            "local": _host(
+                address="127.0.0.1", trust_mode="pinned", host_keys=[],
+                host_id="c3eebf65-8f6e-4c36-9acc-ce393fb34642",
+            ),
             "invalid": _host(host_id="a3eebf65-8f6e-4c36-9acc-ce393fb34642", host_keys=[]),
             "disabled": _host(host_id="b3eebf65-8f6e-4c36-9acc-ce393fb34642", enabled=False),
         },
