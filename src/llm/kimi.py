@@ -17,6 +17,7 @@ from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES,
 from .circuit_breaker import CircuitBreaker
 from .errors import LLMRateLimitError, LLMRequestError, LLMTransportError
 from .provider import LLMProvider
+from .tool_history import parse_tool_arguments
 from .types import LLMResponse, ToolCall
 
 log = get_logger("kimi")
@@ -376,17 +377,12 @@ class KimiClient(LLMProvider):
         for tc in message.get("tool_calls", []) or []:
             fn = tc.get("function", {})
             args_raw = fn.get("arguments", "{}")
-            if isinstance(args_raw, str):
-                try:
-                    args = json.loads(args_raw)
-                except (json.JSONDecodeError, TypeError):
-                    args = {"raw": args_raw}
-            else:
-                args = args_raw
+            args, parse_error = parse_tool_arguments(args_raw)
             tool_calls.append(ToolCall(
                 id=tc.get("id", f"kimi_{uuid.uuid4().hex[:12]}"),
                 name=fn.get("name", ""),
                 input=args,
+                parse_error=parse_error,
             ))
 
         stop_reason = "tool_use" if finish_reason == "tool_calls" or tool_calls else "end_turn"

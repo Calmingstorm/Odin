@@ -172,7 +172,8 @@ class TestParseResponse:
                 ],
             },
         })
-        assert resp.tool_calls[0].input == {"raw": "not json"}
+        assert resp.tool_calls[0].input == {}
+        assert resp.tool_calls[0].parse_error
 
     def test_empty_tool_calls(self, client):
         resp = client._parse_response({

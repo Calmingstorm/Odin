@@ -18,6 +18,7 @@ from .circuit_breaker import CircuitBreaker
 from .cost_tracker import estimate_tokens
 from .errors import LLMRequestError, LLMTransportError
 from .provider import LLMProvider
+from .tool_history import parse_tool_arguments
 from .types import LLMResponse, ToolCall
 
 log = get_logger("ollama")
@@ -288,15 +289,12 @@ class OllamaClient(LLMProvider):
         for tc in tool_calls_raw:
             fn = tc.get("function", {})
             args = fn.get("arguments", {})
-            if isinstance(args, str):
-                try:
-                    args = json.loads(args)
-                except (json.JSONDecodeError, TypeError):
-                    args = {"raw": args}
+            args, parse_error = parse_tool_arguments(args)
             tool_calls.append(ToolCall(
-                id=f"ollama_{uuid.uuid4().hex[:12]}",
+                id=tc.get("id") or f"ollama_{uuid.uuid4().hex[:12]}",
                 name=fn.get("name", ""),
                 input=args,
+                parse_error=parse_error,
             ))
 
         stop_reason = "tool_use" if tool_calls else "end_turn"

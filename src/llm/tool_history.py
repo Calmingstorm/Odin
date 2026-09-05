@@ -4,8 +4,21 @@ Normalize at acceptance, never during replay. IDs correlate calls and results;
 they do not make a side-effectful tool safe to retry.
 """
 
+import json
 from copy import deepcopy
 from uuid import uuid4
+
+
+def parse_tool_arguments(value: object) -> tuple[dict, str | None]:
+    """Decode provider arguments without manufacturing executable defaults."""
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except (ValueError, TypeError):
+            return {}, "Invalid tool argument JSON; call not executed."
+    if not isinstance(value, dict):
+        return {}, "Tool arguments must be a JSON object; call not executed."
+    return value, None
 
 
 def normalize_tool_calls(calls, *, used_ids: set[str] | None = None) -> list[dict]:
