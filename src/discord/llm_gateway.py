@@ -129,6 +129,7 @@ class LLMGateway:
         # changed; _aux_drains tracks background drains of retired wrappers.
         self._aux_reload_gen = 0
         self._aux_drains: set = set()
+        self._draining_clients: dict = {}
         self.inflight_requests = 0
         self.switching = False
         # Called after a provider switch settles — wiring points it at the tool
@@ -374,7 +375,9 @@ class LLMGateway:
             return
         task = asyncio.ensure_future(wrapper.drain_and_close())
         self._aux_drains.add(task)
+        self._draining_clients[task] = wrapper
         task.add_done_callback(self._aux_drains.discard)
+        task.add_done_callback(lambda done: self._draining_clients.pop(done, None))
 
     def _apply_aux_desired(self, desired: dict) -> None:
         """Commit a validated auxiliary spec onto live config (under lock)."""
