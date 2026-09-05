@@ -182,7 +182,7 @@ class HostRegistry:
     @property
     def default_host(self) -> str:
         target = self._snapshot.get(self._default_host)
-        return self._default_host if target is not None and target.targetable else ""
+        return self._default_host if target is not None and self._is_targetable(target) else ""
 
     @property
     def effective_key_path(self) -> str:
@@ -200,7 +200,7 @@ class HostRegistry:
 
     def get(self, alias: str, *, targetable_only: bool = False) -> HostTarget | None:
         target = self._snapshot.get(alias)
-        if targetable_only and (target is None or not target.targetable):
+        if targetable_only and (target is None or not self._is_targetable(target)):
             return None
         return target
 
@@ -208,7 +208,9 @@ class HostRegistry:
         return tuple(self._snapshot)
 
     def active_aliases(self) -> tuple[str, ...]:
-        return tuple(alias for alias, target in self._snapshot.items() if target.targetable)
+        return tuple(
+            alias for alias, target in self._snapshot.items() if self._is_targetable(target)
+        )
 
     def draining_aliases(self) -> tuple[str, ...]:
         return tuple(
@@ -370,7 +372,7 @@ class HostRegistry:
                 "description": target.description,
                 "enabled": target.enabled,
                 "active": target.enabled,
-                "targetable": target.targetable,
+                "targetable": self._is_targetable(target),
                 "trust_mode": target.trust_mode,
                 "trust_state": target.trust_state,
                 "last_test": target.last_test,
@@ -494,6 +496,10 @@ class HostRegistry:
         result = {target.runtime_key: target for target in self._snapshot.values()}
         result.update(self._retired)
         return result
+
+    def _is_targetable(self, target: HostTarget) -> bool:
+        event = self._revoke_events.get(target.runtime_key)
+        return target.targetable and not (event is not None and event.is_set())
 
     @staticmethod
     def _same_definition(left: HostTarget, right: HostTarget) -> bool:

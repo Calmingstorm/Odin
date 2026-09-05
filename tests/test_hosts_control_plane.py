@@ -482,6 +482,9 @@ async def test_registry_leases_revoke_release_and_retirement(tmp_path):
     with pytest.raises(HostForceRevokedError):
         await old.run(lambda: asyncio.sleep(0))
     assert registry.acquire("build") is None
+    assert next(row for row in registry.status_rows() if row["alias"] == "build")[
+        "targetable"
+    ] is False
     old.release()
     old.release()
     current.release()
@@ -490,6 +493,10 @@ async def test_registry_leases_revoke_release_and_retirement(tmp_path):
     reacquired = registry.acquire("build")
     assert reacquired is not None
     reacquired.release()
+    registry.publish({"build": _host(description="new")})
+    after_republish = registry.acquire("build")
+    assert after_republish is not None
+    after_republish.release()
 
 
 async def test_legacy_metadata_edit_uses_global_known_hosts(monkeypatch, tmp_path):
