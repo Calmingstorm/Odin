@@ -1105,6 +1105,7 @@ class TestWaitForAgentsWithStates:
 
         assert sleep_calls == 1
         assert results[finished.id] == {
+            **finished.activity(),
             "id": "finished",
             "label": "first",
             "status": "completed",
@@ -1268,7 +1269,9 @@ class TestAgentToolExecution:
 
         assert agent.state == AgentState.COMPLETED
         # Tool timeout is handled as an error result, not a state transition
-        tool_msgs = [m for m in agent.messages if "timed out" in m.get("content", "")]
+        tool_msgs = [b for m in agent.messages if isinstance(m.get("content"), list)
+                     for b in m["content"]
+                     if b.get("type") == "tool_result" and b.get("status") == "timed_out"]
         assert len(tool_msgs) == 1
 
     async def test_tool_exception_continues(self):
@@ -1502,7 +1505,8 @@ class TestEdgeCases:
 
         assert agent.state == AgentState.COMPLETED
         # Both tool results should be in messages
-        tool_msgs = [m for m in agent.messages if "Tool result" in m.get("content", "")]
+        tool_msgs = [b for m in agent.messages if isinstance(m.get("content"), list)
+                     for b in m["content"] if b.get("type") == "tool_result"]
         assert len(tool_msgs) == 2
 
     def test_state_machine_fresh_per_agent(self):
@@ -1915,7 +1919,9 @@ class TestHardDeadlineDuringToolsAndSleep:
         # the partial iteration was still recorded
         turn = saved["turn"]
         assert len(turn.iterations) == 1
-        assert len(turn.iterations[0].tool_calls) == 1
+        assert len(turn.iterations[0].tool_calls) == 3
+        assert [r["status"] for r in turn.iterations[0].tool_results] == [
+            "timed_out", "not_executed", "not_executed"]
         assert "timed out" in turn.iterations[0].tool_results[0]["result"]
 
     async def test_no_manager_sleep_exists_on_failure_path(self):
@@ -2268,8 +2274,9 @@ class TestNestedMalformedWaitInput:
             tool_timeouts={"wait_for_agents": 91},
         )
         assert agent.state == AgentState.COMPLETED
-        assert seen == [["bad"]]
-        assert 91 in observed
+        assert seen == []  # malformed arguments must never dispatch
+        assert 91 not in observed
+        assert agent.messages[2]["content"][0]["status"] == "invalid_arguments"
 
 
 class TestTurnScopedAgentCancellation:

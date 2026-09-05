@@ -294,6 +294,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
                 "depth": getattr(info, "depth", 0),
                 "parent_id": getattr(info, "parent_id", None),
                 "children_ids": list(getattr(info, "children_ids", [])),
+                **(info.activity() if callable(getattr(info, "activity", None)) else {}),
             })
         return web.json_response(agents)
 
@@ -336,6 +337,7 @@ def register_agents(routes: web.RouteTableDef, bot) -> None:
             "depth": getattr(info, "depth", 0),
             "parent_id": getattr(info, "parent_id", None),
             "children_ids": list(getattr(info, "children_ids", [])),
+            **(info.activity() if callable(getattr(info, "activity", None)) else {}),
             # Spawn-time policy, distinct from what executed.
             "model_override": getattr(info, "model_override", None),
             "reasoning_effort_override": getattr(info, "reasoning_effort_override", None),

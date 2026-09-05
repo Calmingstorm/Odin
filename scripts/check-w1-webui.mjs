@@ -3,6 +3,39 @@ import { readFileSync } from 'node:fs';
 import { baseParse, compile, NodeTypes } from '@vue/compiler-dom';
 import * as Vue from 'vue';
 
+// Compile the production modal against both historical and additive records.
+async function checkAgentRecordRendering() {
+  const { default: page } = await import('../ui/js/pages/agents.js');
+  const savedWarn = console.warn;
+  console.warn = () => {};
+  try {
+    const state = page.setup();
+    const render = new Function('Vue', compile(page.template, { mode: 'function' }).code)(Vue);
+    const text = node => {
+      if (typeof node === 'string') return node;
+      if (Array.isArray(node)) return node.map(text).join(' ');
+      return node && typeof node === 'object' ? text(node.children) : '';
+    };
+    state.loading.value = false;
+    state.detailId.value = 'fixture';
+    const legacy = {id: 'fixture', label: 'worker', status: 'completed', result: 'legacy result',
+      goal: 'goal', error: '', iteration_count: 2, runtime_seconds: 1, tools_used: []};
+    state.detail.value = legacy;
+    let output = text(render(Vue.proxyRefs(state), []));
+    assert.match(output, /legacy result/);
+    assert.match(output, /Not recorded/);
+    state.detail.value = {...legacy, result: 'native result', activity: 'waiting for children for 180s',
+      tool_execution_count: 4, pending_inbox_count: 2, last_consumed_sequence: 3};
+    output = text(render(Vue.proxyRefs(state), []));
+    assert.match(output, /native result/);
+    assert.match(output, /waiting for children for 180s/);
+    assert.match(output, /2 queued; consumed sequence 3/);
+    assert.doesNotMatch(output, /\[object Object\]/);
+  } finally {
+    console.warn = savedWarn;
+  }
+}
+
 function storage() {
   const values = new Map();
   return {
@@ -30,6 +63,7 @@ globalThis.window = {
   location: { hash: '#dashboard' },
 };
 globalThis.location = { protocol: 'http:', host: 'localhost', hash: '#dashboard' };
+await checkAgentRecordRendering();
 
 function response(body, status = 200) {
   return new Response(JSON.stringify(body), {

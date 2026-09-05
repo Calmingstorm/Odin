@@ -62,6 +62,8 @@ class AgentTrajectoryTurn:
     total_duration_ms: int = 0
     recovery_attempts: int = 0
     state_history: list[dict] = field(default_factory=list)
+    inbox_events: list[dict] = field(default_factory=list)
+    activity: dict = field(default_factory=dict)
 
     def add_iteration(
         self,
@@ -170,6 +172,8 @@ class AgentTrajectoryTurn:
             "total_duration_ms": self.total_duration_ms,
             "recovery_attempts": self.recovery_attempts,
             "state_history": self.state_history,
+            "inbox_events": list(self.inbox_events),
+            "activity": dict(self.activity),
         }
 
 

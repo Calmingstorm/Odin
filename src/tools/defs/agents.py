@@ -132,8 +132,9 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "send_to_agent",
         "description": (
-            "Sends a message to a running agent, injected as context in its next "
-            "LLM turn. Use to provide additional instructions, data, or course corrections."
+            "Queues a message to a running agent for its next safe boundary. "
+            "Wakes an agent waiting for children; does not cancel ordinary tools. "
+            "Acknowledges queued, not consumed. Use for instructions, data, or corrections."
         ),
         "input_schema": {
             "type": "object",
@@ -183,7 +184,8 @@ TOOLS_SECTION: list[dict] = [
             "Waits for one or more agents to complete and returns their results. "
             "Essential for fan-out (spawn N agents → wait → collect results) and "
             "pipeline (spawn A → wait → spawn B with A's output) coordination patterns. "
-            "Returns results for each agent once all finish or timeout."
+            "Returns a snapshot for every requested agent once all finish or timeout. "
+            "Inside an agent, a parent message interrupts the wait; children continue."
         ),
         "input_schema": {
             "type": "object",

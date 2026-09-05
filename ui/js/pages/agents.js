@@ -229,6 +229,18 @@ export default {
                 <span class="ag-detail-meta-value">{{ detail.tools_used_count ?? 0 }}</span>
               </div>
               <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Activity</span>
+                <span class="ag-detail-meta-value">{{ detail.activity || 'Not recorded' }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Tool executions</span>
+                <span class="ag-detail-meta-value">{{ detail.tool_execution_count ?? 'Not recorded' }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
+                <span class="ag-detail-meta-label">Parent inbox</span>
+                <span class="ag-detail-meta-value">{{ detail.pending_inbox_count ?? '—' }} queued; consumed sequence {{ detail.last_consumed_sequence ?? '—' }}</span>
+              </div>
+              <div class="ag-detail-meta-item">
                 <span class="ag-detail-meta-label">Requested by</span>
                 <span class="ag-detail-meta-value">{{ detail.requester_name || '—' }}</span>
               </div>
