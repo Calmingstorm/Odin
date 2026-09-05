@@ -59,7 +59,7 @@ Three tiers control tool access:
 
 | Tier | Tools | Use Case |
 |------|-------|----------|
-| `admin` | All 71 | Operators |
+| `admin` | All 73 built-in tools | Operators |
 | `user` | Read-only subset | Team members |
 | `guest` | None (chat only) | Restricted |
 
@@ -89,7 +89,7 @@ Patterns detected: Discord tokens, API keys, Bearer tokens, SSH private keys, AW
 
 Skills run in-process as trusted plugins (not sandboxed). Mitigations:
 - **Admin-only creation** by default
-- **AST validation** — no code executes during `create_skill` validation
+- **Validation versus loading** — standalone AST validation does not execute code. Trusted local create/edit loads Python before validating the runtime definition; URL install additionally runs static validation and prohibited-construct checks before loading. None of these checks is a sandbox.
 - **Safe tool allowlist** — skills cannot call `run_command`, `apply_patch`, etc. directly
 - **Blocked file paths** — cannot read `.env`, SSH keys, credentials
 - **Blocked URLs** — localhost, private IPs blocked unless whitelisted

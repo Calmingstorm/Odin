@@ -279,9 +279,9 @@ See [`docs/configuration.md`](docs/configuration.md) for the configuration refer
 
 A skill is a Python module that exports a `SKILL_DEFINITION` dictionary and an asynchronous `execute` function. Definitions include a JSON input schema and can optionally declare dependencies and a configuration schema.
 
-Skills are AST-validated before loading, can be hot-reloaded, and receive a bounded context API for host execution, selected tool calls, HTTP, memory, knowledge, scheduling, and Discord delivery. Default execution limits cover runtime, output size, tool calls, HTTP requests, messages, files, and dependency count.
+Skills can be hot-reloaded and receive a bounded context API for host execution, selected tool calls, HTTP, memory, knowledge, scheduling, and Discord delivery. Default execution limits cover runtime, output size, tool calls, HTTP requests, messages, files, and dependency count.
 
-Skills are trusted code. AST validation prevents validation-time execution and catches prohibited constructs, but it does not provide process isolation.
+Skills are trusted code. Local create/edit executes the module before validating its runtime definition for catalog publication. Separate AST validation does not execute code; URL installation additionally applies static validation and prohibited-construct checks before loading. These checks do not provide process isolation or restrict the supplied context's capabilities.
 
 See [`docs/skills.md`](docs/skills.md) for the skill contract and context API.
 

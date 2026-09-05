@@ -1,6 +1,6 @@
 # Skills Reference
 
-Skills are user-created Python tools that extend Odin at runtime. They are AST-validated on creation (no code executes during validation), hot-reloaded on edit, and available immediately via `invoke_skill`.
+Skills are user-created Python tools that extend Odin at runtime. Trusted local creation and editing execute the Python module, then validate its runtime tool definition before publication. Edits hot-reload and successful skills are available immediately via `invoke_skill`. The separate AST validator does not execute code; URL installation additionally runs static validation and prohibited-construct checks before loading. These checks are not a sandbox and do not restrict the capabilities of the supplied context.
 
 ## Creating a Skill
 
