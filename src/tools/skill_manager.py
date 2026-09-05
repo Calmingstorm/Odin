@@ -18,6 +18,8 @@ from importlib.metadata import PackageNotFoundError, distribution
 from pathlib import Path
 from typing import Any
 
+from jsonschema.validators import validator_for
+
 from ..odin_log import get_logger
 from .executor import ToolExecutor
 from .registry import TOOLS
@@ -29,6 +31,38 @@ SKILL_NAME_PATTERN = re.compile(r"^[a-z][a-z0-9_]{0,49}$")
 BUILTIN_TOOL_NAMES = {t["name"] for t in TOOLS}
 SKILL_EXECUTE_TIMEOUT = 120  # seconds
 MAX_SKILL_OUTPUT_CHARS = 50000  # truncate skill output beyond this
+
+
+def validate_skill_definition(definition: Any) -> None:
+    """Validate the runtime tool contract, not Python's trusted loading behavior."""
+    if not isinstance(definition, dict):
+        raise ValueError("SKILL_DEFINITION must be an object")
+    name = definition.get("name")
+    if not isinstance(name, str) or not SKILL_NAME_PATTERN.fullmatch(name):
+        raise ValueError("SKILL_DEFINITION.name must be a valid skill name")
+    if name in BUILTIN_TOOL_NAMES:
+        raise ValueError("SKILL_DEFINITION.name conflicts with a built-in tool")
+    if not isinstance(definition.get("description"), str):
+        raise ValueError("SKILL_DEFINITION.description must be a string")
+    schema = definition.get("input_schema")
+    if not isinstance(schema, dict) or schema.get("type") != "object":
+        raise ValueError("SKILL_DEFINITION.input_schema must be an object schema")
+    # JSON round-trip also rejects non-JSON values before provider conversion.
+    json.dumps(schema, allow_nan=False)
+    validator_for(schema).check_schema(schema)
+
+    def check_required(node: Any) -> None:
+        if isinstance(node, dict):
+            if "required" in node and "properties" in node:
+                if any(key not in node["properties"] for key in node["required"]):
+                    raise ValueError("input_schema.required refers to an undefined property")
+            for value in node.values():
+                check_required(value)
+        elif isinstance(node, list):
+            for value in node:
+                check_required(value)
+
+    check_required(schema)
 
 # Supported metadata keys in SKILL_DEFINITION (beyond the required ones).
 _METADATA_KEYS = ("version", "author", "homepage", "tags", "dependencies", "config_schema")
@@ -599,6 +633,7 @@ class SkillManager:
         else:
             self._memory_path = None
         self._skills: dict[str, LoadedSkill] = {}
+        self.definition_errors: dict[str, str] = {}
         # ONE lock shared across every SkillContext this manager creates — all
         # contexts write the same <memory>_skills.json, so a per-context lock
         # would let concurrent remember() calls race and collide on the .tmp.
@@ -654,6 +689,8 @@ class SkillManager:
 
     def _load_skill(self, path: Path) -> LoadedSkill | None:
         module_name = f"odin_skill_{path.stem}"
+        previous_module = sys.modules.get(module_name)
+        accepted = False
 
         # Pre-load: extract and resolve dependencies from source *before*
         # executing the module, so that imports succeed.
@@ -679,20 +716,15 @@ class SkillManager:
 
             module = importlib.util.module_from_spec(spec)
             sys.modules[module_name] = module
-            spec.loader.exec_module(module)
+            # Validate the source we just read, not an importlib timestamp/size
+            # cache that can still contain a previous same-size edit.
+            exec(compile(source, str(path), "exec"), module.__dict__)
 
-            # Validate SKILL_DEFINITION
+            # Shared startup/create/edit/install publication boundary. Loading
+            # remains trusted execution; no mandatory static preflight is added.
             definition = getattr(module, "SKILL_DEFINITION", None)
-            if not isinstance(definition, dict):
-                log.warning("Skill %s: missing or invalid SKILL_DEFINITION dict", path.name)
-                del sys.modules[module_name]
-                return None
-
-            for key in ("name", "description", "input_schema"):
-                if key not in definition:
-                    log.warning("Skill %s: SKILL_DEFINITION missing '%s'", path.name, key)
-                    del sys.modules[module_name]
-                    return None
+            validate_skill_definition(definition)
+            assert isinstance(definition, dict)
 
             # Validate execute function
             execute_fn = getattr(module, "execute", None)
@@ -711,6 +743,8 @@ class SkillManager:
             all_diagnostics = dep_diagnostics + meta_diagnostics
 
             name = definition["name"]
+            accepted = True
+            self.definition_errors.pop(path.name, None)
             log.info("Loaded skill: %s from %s", name, path.name)
             return LoadedSkill(
                 name=name,
@@ -725,9 +759,18 @@ class SkillManager:
             )
 
         except Exception as e:
+            self.definition_errors[path.name] = (
+                type(e).__name__ + ": invalid skill definition or module"
+            )
             log.error("Failed to load skill %s: %s", path.name, e)
             sys.modules.pop(module_name, None)
             return None
+        finally:
+            if not accepted:
+                if previous_module is not None:
+                    sys.modules[module_name] = previous_module
+                else:
+                    sys.modules.pop(module_name, None)
 
     def _unload_skill(self, name: str) -> None:
         if name in self._skills:
@@ -774,7 +817,9 @@ class SkillManager:
             )
 
         if skill.name != name:
-            self._unload_skill(skill.name)
+            # The candidate was never published. Its declared name may belong
+            # to an unrelated working skill; unload only the candidate module.
+            sys.modules.pop(skill.module_name, None)
             path.unlink(missing_ok=True)
             return (
                 f"SKILL_DEFINITION.name ('{skill.name}') doesn't match filename "
@@ -797,23 +842,19 @@ class SkillManager:
         except Exception as e:
             return f"Failed to write skill file: {e}"
 
-        self._unload_skill(name)
+        previous_skill = self._skills[name]
+        previous_module = sys.modules.get(previous_skill.module_name)
         skill = self._load_skill(path)
         if not skill:
             # Restore old code
             path.write_text(old_code)
-            old_skill = self._load_skill(path)
-            if old_skill:
-                self._skills[name] = old_skill
             return "New code failed to load. Reverted to previous version."
 
         if skill.name != name:
             # Name mismatch — revert to old code
-            self._unload_skill(skill.name)
             path.write_text(old_code)
-            old_skill = self._load_skill(path)
-            if old_skill:
-                self._skills[name] = old_skill
+            if previous_module is not None:
+                sys.modules[previous_skill.module_name] = previous_module
             return (
                 f"SKILL_DEFINITION.name ('{skill.name}') doesn't match filename "
                 f"('{name}'). They must be identical. Reverted to previous version."
