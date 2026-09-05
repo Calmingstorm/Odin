@@ -383,9 +383,22 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
                     )
         if not kwargs:
             return web.json_response({"error": "no fields to update"}, status=400)
-        identity = await tm.update_token(uid, **kwargs)
+        ws_mgr = request.app.get("ws_manager")
+        policy_changed = bool(
+            set(kwargs) & {"tier", "allowed_tools", "allowed_hosts", "default_host"}
+        )
+        if ws_mgr and policy_changed:
+            async with ws_mgr.policy_change(uid):
+                identity = await tm.update_token(uid, **kwargs)
+        else:
+            identity = await tm.update_token(uid, **kwargs)
         if identity is None:
             return web.json_response({"error": "token not found"}, status=404)
+        if ws_mgr and policy_changed:
+            sm = request.app.get("session_manager")
+            if sm:
+                sm.destroy_by_user_id(uid)
+            await ws_mgr.close_by_user_id(uid)
         return web.json_response({"user_id": uid, "status": "updated"})
 
     @routes.post("/api/tokens/{user_id}/regenerate")
@@ -397,7 +410,12 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
         if not tm:
             return web.json_response({"error": "token manager not available"}, status=503)
         uid = request.match_info["user_id"]
-        new_token = await tm.regenerate_token(uid)
+        ws_mgr = request.app.get("ws_manager")
+        if ws_mgr:
+            async with ws_mgr.policy_change(uid):
+                new_token = await tm.regenerate_token(uid)
+        else:
+            new_token = await tm.regenerate_token(uid)
         if new_token is None:
             return web.json_response({"error": "token not found"}, status=404)
         sm = request.app.get("session_manager")
@@ -417,7 +435,12 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
         if not tm:
             return web.json_response({"error": "token manager not available"}, status=503)
         uid = request.match_info["user_id"]
-        deleted = await tm.delete_token(uid)
+        ws_mgr = request.app.get("ws_manager")
+        if ws_mgr:
+            async with ws_mgr.policy_change(uid):
+                deleted = await tm.delete_token(uid)
+        else:
+            deleted = await tm.delete_token(uid)
         if not deleted:
             return web.json_response({"error": "token not found"}, status=404)
         sm = request.app.get("session_manager")

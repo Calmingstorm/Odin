@@ -13,6 +13,10 @@ import base64
 import binascii
 import hmac
 import json
+from contextlib import asynccontextmanager
+from copy import deepcopy
+from dataclasses import dataclass, field
+from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -66,6 +70,26 @@ _WS_CHAT_RATE_LIMIT = 10
 _WS_CHAT_RATE_WINDOW = 60.0
 
 
+def _policy_fingerprint(identity) -> tuple:
+    """Immutable policy/credential value, never an alias into a mutable store."""
+    return tuple(
+        tuple(value) if isinstance(value, list) else value
+        for value in (getattr(identity, key, None) for key in (
+            "user_id", "token", "tier", "allowed_tools", "allowed_hosts", "default_host",
+        ))
+    )
+
+
+@dataclass(frozen=True)
+class _CredentialPolicy:
+    source: str
+    user_id: str
+    fingerprint: tuple
+    generation: int
+    legacy_digest: bytes = b""
+    bearer: str = field(default="", repr=False)
+
+
 class WebSocketManager:
     """Manages WebSocket connections and broadcasts events."""
 
@@ -94,6 +118,100 @@ class WebSocketManager:
         # could retain privileged subscriptions forever without this owner.
         self._session_expiry_tasks: dict[str, asyncio.Task[None]] = {}
         self._shutting_down = False
+        # Publication of a credential-policy mutation cannot cross an in-flight
+        # stream write. The same fence covers initial tails and event delivery.
+        self._policy_lock = asyncio.Lock()
+        self._policy_generations: dict[str, int] = {}
+
+    @asynccontextmanager
+    async def policy_change(self, user_id: str):
+        async with self._policy_lock:
+            yield
+            self._policy_generations[user_id] = self._policy_generations.get(user_id, 0) + 1
+            # Called only after successful persistence/publication. Remove
+            # memberships before any asynchronous transport teardown.
+            for ws in list(self._clients):
+                identity = getattr(ws, "_odin_identity", None)
+                if getattr(identity, "user_id", None) == user_id:
+                    ws._odin_policy_revoked = True  # type: ignore[attr-defined]
+                    self._log_subscribers.discard(ws)
+                    self._event_subscribers.discard(ws)
+
+    def _policy_authorized(self, ws: web.WebSocketResponse) -> bool:
+        if (getattr(ws, "_odin_policy_revoked", False)
+                or not self._session_is_valid(ws, touch=False)):
+            return False
+        identity = getattr(ws, "_odin_identity", None)
+        credential = getattr(ws, "_odin_credential_policy", None)
+        if isinstance(credential, _CredentialPolicy):
+            if self._policy_generations.get(credential.user_id, 0) != credential.generation:
+                return False
+            current = identity
+            if credential.source == "dynamic":
+                tm = ws._odin_token_manager  # type: ignore[attr-defined]
+                current = (tm.resolve(credential.bearer) if credential.bearer
+                           else tm.get(credential.user_id))
+            elif credential.source == "static":
+                current = next((i for i in self._web_config.api_tokens
+                                if i.user_id == credential.user_id), None)
+            elif credential.source == "legacy":
+                token = (getattr(self._web_config, "api_token", "")
+                         if self._web_config else self._api_token)
+                return hmac.compare_digest(
+                    credential.legacy_digest, sha256(token.encode()).digest(),
+                )
+            elif credential.source == "session":
+                current = self._session_manager.get_identity(ws._odin_session_id)  # type: ignore[attr-defined]
+            elif credential.source == "development":
+                return True
+            elif credential.source == "unknown":
+                return False
+            return current is not None and _policy_fingerprint(current) == credential.fingerprint
+        # Compatibility for internally constructed transports; real handshakes
+        # always bind the explicit immutable credential record above.
+        source = getattr(ws, "_odin_policy_source", None)
+        current = identity
+        if source in {"dynamic", "static"} and identity is None:
+            return False
+        if source == "dynamic":
+            current = self._bot.api_token_manager.get(getattr(identity, "user_id", ""))
+        elif source == "static":
+            current = next((i for i in self._bot.config.web.api_tokens
+                            if i.user_id == getattr(identity, "user_id", "")), None)
+        return _policy_fingerprint(current) == _policy_fingerprint(identity)
+
+    def _stream_authorized(self, ws: web.WebSocketResponse) -> bool:
+        if not self._policy_authorized(ws):
+            return False
+        identity = getattr(ws, "_odin_identity", None)
+        if identity is None and not self._api_token and self._web_config is None:
+            return True  # explicitly unauthenticated development composition
+        return identity is not None and getattr(identity, "tier", None) == "admin"
+
+    async def _send_chat(self, ws: web.WebSocketResponse, payload: dict) -> None:
+        async with self._policy_lock:
+            if not ws.closed and self._policy_authorized(ws):
+                await ws.send_json(payload)
+
+    async def _subscribe(self, ws: web.WebSocketResponse, stream: str) -> bool:
+        async with self._policy_lock:
+            if not self._stream_authorized(ws):
+                await ws.send_json({"error": "admin access required", "channel": stream})
+                return False
+            subscribers = self._log_subscribers if stream == "logs" else self._event_subscribers
+            subscribers.add(ws)
+            await ws.send_json({"type": "subscribed", "channel": stream})
+            return True
+
+    async def _send_stream(self, ws: web.WebSocketResponse, stream: str, payload: dict) -> bool:
+        async with self._policy_lock:
+            subscribers = self._log_subscribers if stream == "logs" else self._event_subscribers
+            if ws not in subscribers or not self._stream_authorized(ws):
+                self._log_subscribers.discard(ws)
+                self._event_subscribers.discard(ws)
+                return False
+            await ws.send_json(payload)
+            return True
 
     @staticmethod
     def _consume_task(task: asyncio.Task) -> None:
@@ -271,11 +389,69 @@ class WebSocketManager:
             heartbeat=30.0,
             protocols=(offered_protocol,) if offered_protocol else (),
         )
-        await ws.prepare(request)
-        self._clients.add(ws)
         ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"  # type: ignore[attr-defined]  # sanctioned dynamic attr
         ws._odin_session_managed = bool(getattr(request, "_session_managed", False))  # type: ignore[attr-defined]  # sanctioned dynamic attr
-        ws._odin_identity = identity  # type: ignore[attr-defined]  # sanctioned dynamic attr
+        tm = request.app.get("token_manager")
+        source = "unknown"
+        legacy = getattr(self._web_config, "api_token", "") if self._web_config else self._api_token
+        header = request.headers.get("Authorization", "")
+        presented = (header[len("Bearer "):]
+                     if header.startswith("Bearer ")
+                     else _decode_bearer_subprotocol(offered_protocol))
+        session_identity = None
+        if ws._odin_session_managed:  # type: ignore[attr-defined]
+            # Middleware historically refreshes sessions by user ID. That is
+            # not provenance: a static and dynamic credential can share an ID.
+            session_identity = self._session_manager.get_identity(ws._odin_session_id)  # type: ignore[attr-defined]
+            presented = getattr(session_identity, "token", "")
+            identity = session_identity
+        # Legacy middleware has precedence over the token stores. A duplicate
+        # user ID must not change which credential actually authenticated us.
+        if legacy and hmac.compare_digest(presented, legacy):
+            source = "legacy"
+        elif identity is not None:
+            candidate = tm.resolve(presented) if tm and presented else None
+            if candidate is None and tm and session_identity is not None and not presented:
+                candidate = tm.get(identity.user_id)
+            if candidate is not None:
+                source = "dynamic"
+                identity = candidate
+            if source == "unknown" and self._web_config and any(
+                i.user_id == identity.user_id and i.token == presented
+                for i in self._web_config.api_tokens
+            ):
+                source = "static"
+                identity = next(i for i in self._web_config.api_tokens if i.token == presented)
+        if source == "unknown":
+            if legacy and not presented and (
+                getattr(identity, "user_id", None) == "api-admin" or identity is None
+            ):
+                source = "legacy"
+            elif ws._odin_session_managed and not presented:  # type: ignore[attr-defined]
+                source = "session"
+            elif (identity is None and not legacy
+                  and not getattr(self._web_config, "api_tokens", ())
+                  and not (tm and tm.list_tokens())):
+                source = "development"
+        uid = getattr(identity, "user_id", "")
+        ws._odin_identity = deepcopy(identity)  # type: ignore[attr-defined]
+        ws._odin_token_manager = tm  # type: ignore[attr-defined]
+        ws._odin_credential_policy = _CredentialPolicy(  # type: ignore[attr-defined]
+            source, uid, _policy_fingerprint(identity), self._policy_generations.get(uid, 0),
+            sha256(legacy.encode()).digest() if source == "legacy" else b"",
+            presented if source == "dynamic" and not ws._odin_session_managed else "",  # type: ignore[attr-defined]
+        )
+        # Do not hold the publication fence across a network handshake. Bind
+        # provenance before suspension, then check and register under that fence.
+        await ws.prepare(request)
+        async with self._policy_lock:
+            authorized = not self._shutting_down and self._policy_authorized(ws)
+            if authorized:
+                self._clients.add(ws)
+        if not authorized:
+            await ws.send_json({"error": "authorization changed; reconnect"})
+            await ws.close(code=4002, message=b"authorization changed")
+            return ws
         if ws._odin_session_managed:  # type: ignore[attr-defined]
             self._ensure_session_expiry_watch(ws._odin_session_id)  # type: ignore[attr-defined]
         log.info("WebSocket client connected (%d total)", len(self._clients))
@@ -302,16 +478,15 @@ class WebSocketManager:
                     unsub = data.get("unsubscribe")
 
                     if sub == "logs":
-                        self._log_subscribers.add(ws)
+                        if not await self._subscribe(ws, sub):
+                            continue
                         # Start tailing the log file for this client
                         if log_task is None or log_task.done():
                             log_task = asyncio.create_task(
                                 self._tail_logs(ws)
                             )
-                        await ws.send_json({"type": "subscribed", "channel": "logs"})
                     elif sub == "events":
-                        self._event_subscribers.add(ws)
-                        await ws.send_json({"type": "subscribed", "channel": "events"})
+                        await self._subscribe(ws, sub)
                     elif unsub == "logs":
                         self._log_subscribers.discard(ws)
                         await ws.send_json({"type": "unsubscribed", "channel": "logs"})
@@ -346,6 +521,13 @@ class WebSocketManager:
 
     async def _handle_chat(self, ws: web.WebSocketResponse, data: dict) -> None:
         """Handle an incoming chat message from a WebSocket client."""
+        async with self._policy_lock:
+            if not self._policy_authorized(ws):
+                if not ws.closed:
+                    await ws.send_json({
+                        "type": "chat_error", "error": "authorization changed; reconnect",
+                    })
+                return
         content = (data.get("content") or "").strip()
         if not content:
             await ws.send_json({"type": "chat_error", "error": "content is required"})
@@ -392,19 +574,17 @@ class WebSocketManager:
             files = result.get("files", [])
             if files:
                 resp["files"] = files
-            if not ws.closed:
-                await ws.send_json(resp)
+            await self._send_chat(ws, resp)
         except Exception as e:
             # A naturally raised TimeoutError lands here and is formatted
             # like any other failure. Never send raw str(e): exception
             # text carries HTTP bodies (HTML pages), control bytes, and
             # secrets — the shared formatter bounds and scrubs it.
             log.error("WebSocket chat error: %s", format_user_facing_error(e), exc_info=True)
-            if not ws.closed:
-                await ws.send_json({
-                    "type": "chat_error",
-                    "error": format_user_facing_error(e),
-                })
+            await self._send_chat(ws, {
+                "type": "chat_error",
+                "error": format_user_facing_error(e),
+            })
 
     async def broadcast_event(self, event: dict) -> None:
         """Broadcast an event to all subscribed WebSocket clients."""
@@ -414,7 +594,7 @@ class WebSocketManager:
         dead: list[web.WebSocketResponse] = []
         for ws in list(self._event_subscribers):
             try:
-                await ws.send_json(payload)
+                await self._send_stream(ws, "events", payload)
             except (ConnectionError, RuntimeError):
                 dead.append(ws)
         for ws in dead:
@@ -502,6 +682,8 @@ class WebSocketManager:
             if identity and getattr(identity, "user_id", None) == user_id:
                 to_close.append(ws)
         for ws in to_close:
+            self._log_subscribers.discard(ws)
+            self._event_subscribers.discard(ws)
             try:
                 await ws.close(code=4002, message=b"token revoked")
             except Exception:
@@ -531,7 +713,8 @@ class WebSocketManager:
                 for line in tail:
                     if ws.closed:
                         return
-                    await ws.send_json({"type": "log", "line": line})
+                    if not await self._send_stream(ws, "logs", {"type": "log", "line": line}):
+                        return
                 last_pos = log_path.stat().st_size
             except OSError:
                 pass
@@ -553,7 +736,8 @@ class WebSocketManager:
                     last_pos = f.tell()
                 for line in new_data.strip().split("\n"):
                     if line and not ws.closed:
-                        await ws.send_json({"type": "log", "line": line})
+                        if not await self._send_stream(ws, "logs", {"type": "log", "line": line}):
+                            return
             except asyncio.CancelledError:
                 break
             except (OSError, ConnectionError, RuntimeError):

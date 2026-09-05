@@ -407,7 +407,16 @@ class TestTailLogs:
         (data / "audit.jsonl").write_text('{"a":1}\n{"a":2}\n{"a":3}\n')
         mgr = WebSocketManager(_bot())
         ws = _fake_ws()
-        # ws is not in _log_subscribers → the poll loop exits after the tail send
+        # Delivery requires membership, including the initial tail.
+        mgr._log_subscribers.add(ws)
+        original_send = ws.send_json
+
+        async def send(payload):
+            await original_send(payload)
+            if original_send.await_count == 3:
+                mgr._log_subscribers.discard(ws)
+
+        ws.send_json = AsyncMock(side_effect=send)
         await mgr._tail_logs(ws)
         assert ws.send_json.await_count == 3
 

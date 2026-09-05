@@ -21,6 +21,9 @@ def _make_ws(*, closed=False):
     ws.closed = closed
     ws.send_json = AsyncMock()
     ws.close = AsyncMock()
+    ws._odin_identity = None
+    ws._odin_policy_revoked = False
+    ws._odin_session_managed = False
     type(ws).__hash__ = lambda self: id(self)
     type(ws).__eq__ = lambda self, other: self is other
     return ws
