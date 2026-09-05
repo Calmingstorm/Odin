@@ -1508,7 +1508,45 @@ class SessionManager:
         if len(results) >= limit:
             return results[:limit]
 
-        # Step 3: hybrid search (FTS5 + semantic) fills remaining slots.
+        async def _append_channel_matches() -> None:
+            # Full channel history from all users. An FTS execution failure is
+            # not equivalent to an empty result set.
+            if len(results) < limit and self._channel_logger:
+                remaining = limit - len(results)
+                fts = self._fts_index
+                channel_results = []
+                if fts and hasattr(fts, "search_channel_logs"):
+                    channel_results = fts.search_channel_logs(
+                        query, limit=remaining, channel_id=channel_id,
+                    )
+                if not channel_results and hasattr(self._channel_logger, "search"):
+                    channel_results = await asyncio.to_thread(
+                        self._channel_logger.search, query, remaining,
+                    )
+                seen = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
+                for cr in channel_results:
+                    ts = cr.get("timestamp", 0)
+                    if not _ts_ok(ts):
+                        continue
+                    cr_cid = cr.get("channel_id", "")
+                    if channel_id and cr_cid != channel_id:
+                        continue
+                    # Reset content stays purged from channel-log search too.
+                    if ts <= self._reset_epochs.get(cr_cid, 0.0):
+                        continue
+                    key = (cr_cid, ts)
+                    if key not in seen:
+                        results.append(cr)
+                        seen.add(key)
+                        if len(results) >= limit:
+                            break
+
+        # Step 3: unscoped keyword matches get priority across all three sources
+        # before semantic suggestions can consume the remaining result budget.
+        if not channel_id:
+            await _append_channel_matches()
+
+        # Step 4: hybrid search (FTS5 + semantic) fills remaining slots.
         # Backend failures propagate to the caller rather than masquerading as
         # a keyword-only result set.
         if len(results) < limit and self._vector_store:
@@ -1532,37 +1570,9 @@ class SessionManager:
                     if len(results) >= limit:
                         break
 
-        # Step 4: channel log search (full channel history from all users).
-        # An FTS execution failure is not equivalent to an empty result set.
-        if len(results) < limit and self._channel_logger:
-            remaining = limit - len(results)
-            fts = self._fts_index
-            channel_results = []
-            if fts and hasattr(fts, "search_channel_logs"):
-                channel_results = fts.search_channel_logs(
-                    query, limit=remaining, channel_id=channel_id,
-                )
-            if not channel_results and hasattr(self._channel_logger, "search"):
-                channel_results = await asyncio.to_thread(
-                    self._channel_logger.search, query, remaining,
-                )
-            seen = {(r.get("channel_id", ""), r.get("timestamp", 0)) for r in results}
-            for cr in channel_results:
-                ts = cr.get("timestamp", 0)
-                if not _ts_ok(ts):
-                    continue
-                cr_cid = cr.get("channel_id", "")
-                if channel_id and cr_cid != channel_id:
-                    continue
-                # Reset content stays purged from channel-log search too.
-                if ts <= self._reset_epochs.get(cr_cid, 0.0):
-                    continue
-                key = (cr_cid, ts)
-                if key not in seen:
-                    results.append(cr)
-                    seen.add(key)
-                    if len(results) >= limit:
-                        break
+        # Explicitly scoped searches keep their existing source priority.
+        if channel_id:
+            await _append_channel_matches()
 
         return results
 
