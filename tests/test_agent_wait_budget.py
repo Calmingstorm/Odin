@@ -1,5 +1,6 @@
 """Full roster, aggregate preview ceiling and invocation interruption pins."""
 import re
+from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
@@ -89,3 +90,23 @@ def test_fixed_800_preview_mutation_exceeds_guard_budget():
     unbounded = render_wait_results(list(results), results, 100000)
     assert len(unbounded) > 12000
     assert truncate_tool_output(unbounded) != unbounded
+
+
+async def test_handlers_follow_rebound_delivery_budget():
+    config = SimpleNamespace(tools=SimpleNamespace(tool_output_max_chars=3000))
+    tools = _tools(get_config=lambda: config)
+    saved = snapshots(1)["agent-0"]
+    saved["result"] = "\x00" * 10000
+    tools._load_agent_result = AsyncMock(return_value=saved)
+    tools._can_read_agent_result = lambda *_: True
+    tools._agent_manager.wait_for_agents = AsyncMock(return_value={"agent-0": saved})
+    first = await tools._handle_get_agent_results({"agent_id": "agent-0"})
+    assert len(first) <= 3000
+    wait = await tools._handle_wait_for_agents({"agent_ids": ["agent-0"]})
+    assert len(wait) <= 3000
+    config = SimpleNamespace(tools=SimpleNamespace(tool_output_max_chars=1500))
+    second = await tools._handle_get_agent_results({"agent_id": "agent-0"})
+    assert len(second) <= 1500 < len(first)
+    wait = await tools._handle_wait_for_agents({"agent_ids": list(snapshots(4))})
+    assert "Split agent_ids" in wait
+    assert tools._agent_manager.wait_for_agents.await_count == 1
