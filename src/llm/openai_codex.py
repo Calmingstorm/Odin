@@ -12,6 +12,7 @@ from ..config.schema import effort_incompatibility_error
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
+from .client_lifecycle import ClientLifecycle, leased_call
 from .codex_auth import CodexAuth, CodexAuthPool
 from .cost_tracker import estimate_tokens
 from .errors import (
@@ -318,7 +319,7 @@ def _stream_error_from_event(event_type: str, event: dict) -> CodexStreamError:
     )
 
 
-class CodexChatClient:
+class CodexChatClient(ClientLifecycle):
     """Chat client using OpenAI Codex backend API (ChatGPT subscription)."""
 
     def __init__(
@@ -483,6 +484,7 @@ class CodexChatClient:
             headers["ChatGPT-Account-Id"] = account_id
         return headers
 
+    @leased_call
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
@@ -740,6 +742,7 @@ class CodexChatClient:
             self._last_tools_list = tools
         return self._last_tools_converted
 
+    @leased_call
     async def chat_with_tools(
         self,
         messages: list[dict],
@@ -1052,7 +1055,6 @@ class CodexChatClient:
                     # model, malformed input) — deterministic, so retrying
                     # the identical payload burns attempts on a guaranteed
                     # failure. Fast-fail, never retried.
-                    self.breaker.record_failure()
                     raise LLMRequestError(
                         f"Codex API error ({resp.status}): {descriptor}",
                         provider="codex",

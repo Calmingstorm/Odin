@@ -383,6 +383,7 @@ class TestAuxiliaryLLMCostTrackingEdge:
 
         primary = AsyncMock()
         primary.model = "gpt-4o"
+        primary.generation_lease = None  # legacy fake, not a lifecycle-aware provider
 
         tracker = MagicMock()
         client = AuxiliaryLLMClient(aux, primary, cost_tracker=tracker)

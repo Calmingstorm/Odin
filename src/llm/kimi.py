@@ -15,6 +15,7 @@ import aiohttp
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
+from .client_lifecycle import leased_call
 from .errors import LLMRateLimitError, LLMRequestError, LLMTransportError
 from .provider import LLMProvider
 from .tool_history import parse_tool_arguments
@@ -280,12 +281,13 @@ class KimiClient(LLMProvider):
                         await asyncio.sleep(delay)
                         continue
 
-                    self.breaker.record_failure()
                     exc_cls = (
                         LLMTransportError
                         if resp.status in (500, 502, 503, 504)
                         else LLMRequestError
                     )
+                    if exc_cls is LLMTransportError:
+                        self.breaker.record_failure()
                     raise exc_cls(
                         f"Kimi {resp.status}: {text}",
                         provider="kimi",
@@ -309,6 +311,7 @@ class KimiClient(LLMProvider):
         raise RuntimeError(f"Kimi request failed after {self.max_retries + 1} attempts: "
                            f"{safe_error(last_error)}")
 
+    @leased_call
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
@@ -325,6 +328,7 @@ class KimiClient(LLMProvider):
             return ""
         return choices[0].get("message", {}).get("content", "") or ""
 
+    @leased_call
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
@@ -409,6 +413,7 @@ class KimiClient(LLMProvider):
             ),
         )
 
+    @leased_call
     async def health_check(self) -> dict:
         """Check if the Kimi API is reachable by listing models."""
         try:

@@ -94,10 +94,16 @@ class AuxiliaryLLMClient:
         primary client transparently. ``task`` labels the job for cost/metrics.
         """
         async with self._lease():
-            return await self._chat_aux(messages, system, task, max_tokens)
+            # A reload may rebind the wrapper while the cheap call is pending.
+            # Its fallback belongs to this call's captured primary generation.
+            primary = self.primary_client
+            lease = getattr(primary, "generation_lease", None)
+            async with lease() if lease else contextlib.nullcontext():
+                return await self._chat_aux(messages, system, task, max_tokens, primary)
 
     async def _chat_aux(
-        self, messages: list[dict], system: str, task: str, max_tokens: int | None
+        self, messages: list[dict], system: str, task: str, max_tokens: int | None,
+        primary_client=None,
     ) -> str:
         try:
             result = await self.aux_client.chat(messages, system, max_tokens=max_tokens)
@@ -113,7 +119,8 @@ class AuxiliaryLLMClient:
 
         self._fallback_calls += 1
         self._track_cost(task, is_fallback=True)
-        return await self.primary_client.chat(messages, system, max_tokens=max_tokens)
+        primary = primary_client if primary_client is not None else self.primary_client
+        return await primary.chat(messages, system, max_tokens=max_tokens)
 
     def make_chat_fn(self, task: str):
         """Return an ``async (messages, system) -> str`` callable for a specific task.

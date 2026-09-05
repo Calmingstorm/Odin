@@ -16,6 +16,12 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 from src.discord.llm_gateway import LLMGateway
+from src.llm.client_lifecycle import ClientLifecycle
+
+
+class _LifecycleClient(ClientLifecycle, SimpleNamespace):
+    def __init__(self, **kwargs):
+        super().__init__(close=AsyncMock(), **kwargs)
 
 
 def _cfg(active="codex", codex_enabled=True, ollama_enabled=False,
@@ -101,9 +107,10 @@ class TestActiveClientAndCallbacks:
 
 class TestReloadCodex:
     async def test_disabled(self):
-        gw = _gw(_cfg(codex_enabled=False), codex=object())
+        gw = _gw(_cfg(codex_enabled=False), codex=_LifecycleClient())
         r = await gw.reload_codex_inner()
         assert r["configured"] is False and gw.codex_client is None
+        await asyncio.gather(*gw._aux_drains)
 
     async def test_existing_auth_pool_reloads(self):
         from src.discord.llm_gateway import CodexAuthPool
@@ -206,29 +213,30 @@ class TestReloadCodex:
         assert r["configured"] is False and "credentials" in r["reason"]
 
     async def test_reload_wrapper_holds_lock(self):
-        gw = _gw(_cfg(codex_enabled=False), codex=object())
+        gw = _gw(_cfg(codex_enabled=False), codex=_LifecycleClient())
         assert (await gw.reload_codex())["configured"] is False
+        await asyncio.gather(*gw._aux_drains)
 
 
 class TestReloadOllamaKimi:
     async def test_ollama_disabled_closes_old(self):
-        old = SimpleNamespace(close=AsyncMock())
+        old = _LifecycleClient()
         gw = _gw(_cfg(ollama_enabled=False), ollama=old)
-        loop = asyncio.get_running_loop()
-        with patch.object(loop, "call_later") as cl:  # record deferred close, don't schedule
-            r = await gw.reload_ollama_inner()
+        r = await gw.reload_ollama_inner()
         assert r["configured"] is False and gw.ollama_client is None
-        assert cl.called  # old client's close was scheduled
+        await asyncio.gather(*gw._aux_drains)
+        old.close.assert_awaited_once()
 
     async def test_ollama_constructs(self):
         with patch("src.discord.llm_gateway.OllamaClient",
-                   return_value=SimpleNamespace(health_check=AsyncMock(return_value={"ok": 1}),
-                                                close=AsyncMock())):
+                   side_effect=lambda **kw: _LifecycleClient(
+                       health_check=AsyncMock(return_value={"ok": 1}))):
             gw = _gw(_cfg(ollama_enabled=True))
             r = await gw.reload_ollama_inner()
             assert r["configured"] is True
             wrapped = await gw.reload_ollama()  # wrapper adds health
             assert wrapped["health"] == {"ok": 1}
+            await asyncio.gather(*gw._aux_drains)
 
     async def test_kimi_disabled_and_no_key(self):
         gw = _gw(_cfg(kimi_enabled=False))
@@ -238,20 +246,21 @@ class TestReloadOllamaKimi:
         assert r["configured"] is False and "api_key" in r["reason"]
 
     async def test_kimi_disabled_closes_old(self):
-        old = SimpleNamespace(close=AsyncMock())
+        old = _LifecycleClient()
         gw = _gw(_cfg(kimi_enabled=False), kimi=old)
-        loop = asyncio.get_running_loop()
-        with patch.object(loop, "call_later") as cl:
-            r = await gw.reload_kimi_inner()
-        assert r["configured"] is False and gw.kimi_client is None and cl.called
+        r = await gw.reload_kimi_inner()
+        assert r["configured"] is False and gw.kimi_client is None
+        await asyncio.gather(*gw._aux_drains)
+        old.close.assert_awaited_once()
 
     async def test_kimi_constructs(self):
         with patch("src.discord.llm_gateway.KimiClient",
-                   return_value=SimpleNamespace(health_check=AsyncMock(return_value={"h": 1}),
-                                                close=AsyncMock())):
+                   side_effect=lambda **kw: _LifecycleClient(
+                       health_check=AsyncMock(return_value={"h": 1}))):
             gw = _gw(_cfg(kimi_enabled=True, kimi_key="k"))
             assert (await gw.reload_kimi_inner())["configured"] is True
             assert (await gw.reload_kimi())["health"] == {"h": 1}
+            await asyncio.gather(*gw._aux_drains)
 
 
 class TestSwitchProvider:
@@ -592,7 +601,7 @@ class TestPrimaryLifecycleReconcile:
 
     async def test_primary_disabled_retires_auxiliary(self):
         aux = SimpleNamespace(drain_and_close=AsyncMock(), primary_client=object())
-        gw = _gw(self._cfg_codex_disabled(), codex=object(), aux=aux)
+        gw = _gw(self._cfg_codex_disabled(), codex=_LifecycleClient(), aux=aux)
         await gw.reload_codex_inner()
         assert gw.codex_client is None
         assert gw.auxiliary_llm_client is None  # retired

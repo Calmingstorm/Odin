@@ -15,6 +15,7 @@ import aiohttp
 from ..odin_log import get_logger
 from .backoff import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, compute_backoff
 from .circuit_breaker import CircuitBreaker
+from .client_lifecycle import leased_call
 from .cost_tracker import estimate_tokens
 from .errors import LLMRequestError, LLMTransportError
 from .provider import LLMProvider
@@ -209,12 +210,13 @@ class OllamaClient(LLMProvider):
                                     resp.status, attempt + 1, self.max_retries + 1, delay)
                         await asyncio.sleep(delay)
                         continue
-                    self.breaker.record_failure()
                     exc_cls = (
                         LLMTransportError
                         if resp.status in (500, 502, 503, 504)
                         else LLMRequestError
                     )
+                    if exc_cls is LLMTransportError:
+                        self.breaker.record_failure()
                     raise exc_cls(
                         f"Ollama {resp.status}: {text}",
                         provider="ollama",
@@ -239,6 +241,7 @@ class OllamaClient(LLMProvider):
         raise RuntimeError(f"Ollama request failed after {self.max_retries + 1} attempts: "
                            f"{safe_error(last_error)}")
 
+    @leased_call
     async def chat(
         self, messages: list[dict], system: str,
         max_tokens: int | None = None,
@@ -254,6 +257,7 @@ class OllamaClient(LLMProvider):
         data = await self._request_with_retry(body)
         return data.get("message", {}).get("content", "")
 
+    @leased_call
     async def chat_with_tools(
         self, messages: list[dict], system: str,
         tools: list[dict],
@@ -330,6 +334,7 @@ class OllamaClient(LLMProvider):
             ),
         )
 
+    @leased_call
     async def health_check(self) -> dict:
         """Check if the Ollama instance is reachable and list available models."""
         try:

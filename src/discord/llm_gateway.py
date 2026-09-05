@@ -31,7 +31,7 @@ from ..config.persistence import config_transaction
 from ..llm import CodexChatClient, KimiClient, OllamaClient
 from ..llm.circuit_breaker import CircuitOpenError
 from ..llm.codex_auth import CodexAuthPool
-from ..llm.errors import LLMCapacityError
+from ..llm.errors import LLMCapacityError, LLMRequestError
 from ..llm.model_breaker import ModelBreakerRegistry, ModelCapacityBreaker
 from ..llm.recovery import RecoveryPolicy
 from ..odin_log import get_logger
@@ -290,8 +290,10 @@ class LLMGateway:
         """Inner reload — caller must hold provider_lock."""
         config = self.get_config()
         if not config.openai_codex.enabled:
+            old = self.codex_client
             self.codex_client = None
             self._reconcile_auxiliary_primary()
+            self._schedule_client_drain(old)
             return {"configured": False, "reason": "openai_codex disabled in config"}
 
         if self.codex_client is not None:
@@ -356,6 +358,12 @@ class LLMGateway:
         """Reload Codex credentials and create the client if it was missing at boot."""
         async with self.provider_lock:
             return await self.reload_codex_inner()
+
+    def _schedule_client_drain(self, client) -> None:
+        if client is None:
+            return
+        client.retire()
+        self._schedule_drain(client)
 
     def _schedule_drain(self, wrapper) -> None:
         """Retire a wrapper generation via a TRACKED background drain — it
@@ -637,9 +645,7 @@ class LLMGateway:
             old = self.ollama_client
             self.ollama_client = None
             if old:
-                asyncio.get_event_loop().call_later(
-                    5, lambda: asyncio.ensure_future(old.close())  # type: ignore[union-attr]  # deferred close inside if old:
-                )
+                self._schedule_client_drain(old)
             return {"configured": False, "reason": "ollama disabled in config"}
 
         old = self.ollama_client
@@ -651,7 +657,7 @@ class LLMGateway:
             api_key=ollama_cfg.api_key,
         )
         if old:
-            asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+            self._schedule_client_drain(old)
         self.wire_callbacks()
         log.info(
             "Ollama client reloaded (model: %s, url: %s)", ollama_cfg.model, ollama_cfg.base_url
@@ -673,9 +679,7 @@ class LLMGateway:
             old = self.kimi_client
             self.kimi_client = None
             if old:
-                asyncio.get_event_loop().call_later(
-                    5, lambda: asyncio.ensure_future(old.close())  # type: ignore[union-attr]  # deferred close inside if old:
-                )
+                self._schedule_client_drain(old)
             return {"configured": False, "reason": "kimi disabled in config"}
         if not kimi_cfg.api_key:
             return {"configured": False, "reason": "kimi api_key not set"}
@@ -688,7 +692,7 @@ class LLMGateway:
             timeout=kimi_cfg.timeout,
         )
         if old:
-            asyncio.get_event_loop().call_later(5, lambda: asyncio.ensure_future(old.close()))
+            self._schedule_client_drain(old)
         self.wire_callbacks()
         log.info("Kimi client reloaded (model: %s)", kimi_cfg.model)
         return {"configured": True}
@@ -828,7 +832,7 @@ class LLMGateway:
                         self.subsystem_guard.mark_degraded_transient(
                             guard_key, str(exc)[:200], expires_in=120.0
                         )
-                    else:
+                    elif not isinstance(exc, LLMRequestError):
                         self.subsystem_guard.record_failure(guard_key, str(exc))
                 raise
             if self.subsystem_guard is not None:

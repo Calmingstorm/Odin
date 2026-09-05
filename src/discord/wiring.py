@@ -1218,21 +1218,21 @@ async def shutdown_services(bot) -> None:
     codex = getattr(gateway, "codex_client", None)
     if codex is not None:
         try:
-            await codex.close()
+            await codex.drain_and_close()
         except Exception:
             log.exception("Error closing Codex client")
 
     ollama = getattr(gateway, "ollama_client", None)
     if ollama is not None:
         try:
-            await ollama.close()
+            await ollama.drain_and_close()
         except Exception:
             log.exception("Error closing Ollama client")
 
     kimi = getattr(gateway, "kimi_client", None)
     if kimi is not None:
         try:
-            await kimi.close()
+            await kimi.drain_and_close()
         except Exception:
             log.exception("Error closing Kimi client")
 
