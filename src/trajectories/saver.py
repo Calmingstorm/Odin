@@ -10,6 +10,7 @@ under ``data/trajectories/YYYY-MM-DD.jsonl``.
 from __future__ import annotations
 
 import json
+import time
 from dataclasses import asdict, dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ class ToolIteration:
     input_tokens: int = 0
     output_tokens: int = 0
     duration_ms: int = 0
+    tool_duration_ms: int = 0
     # Per-iteration execution provenance (chat, loop, AND agent paths),
     # sourced from the LLMResponse provenance fields — the values the
     # provider actually serialized into the successful request. The active
@@ -134,6 +136,8 @@ class TrajectoryTurn:
     total_input_tokens: int = 0
     total_output_tokens: int = 0
     total_duration_ms: int = 0
+    end_to_end_duration_ms: int = 0
+    _started_ns: int = field(default_factory=time.monotonic_ns, repr=False)
 
     # Context-overflow recovery evidence (campaign phase 4): one report per
     # rescue/latch pass, same shape agents already persist. Optional and
@@ -171,6 +175,8 @@ class TrajectoryTurn:
         self.total_input_tokens = sum(it.input_tokens for it in self.iterations)
         self.total_output_tokens = sum(it.output_tokens for it in self.iterations)
         self.total_duration_ms = sum(it.duration_ms for it in self.iterations)
+        from ..llm.timing import elapsed_ms
+        self.end_to_end_duration_ms = elapsed_ms(self._started_ns)
         if self.total_input_tokens == 0:
             self.total_input_tokens = estimate_tokens(
                 self.system_prompt + self.user_content + self.final_response
@@ -195,6 +201,7 @@ class TrajectoryTurn:
             "total_input_tokens": self.total_input_tokens,
             "total_output_tokens": self.total_output_tokens,
             "total_duration_ms": self.total_duration_ms,
+            "end_to_end_duration_ms": self.end_to_end_duration_ms,
             "iteration_count": len(self.iterations),
         }
         if self.loop_id:

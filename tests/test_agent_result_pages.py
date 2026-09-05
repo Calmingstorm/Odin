@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from src.agents.manager import AgentManager
-from src.agents.results import result_page
-from src.agents.trajectory import AgentTrajectorySaver
+from src.agents.results import read_result, result_page
+from src.agents.trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 from src.discord.native_tools.registry import NativeToolDispatcher, register_native_handlers
 from src.permissions.manager import PermissionManager
 from tests.test_native_agents_tasks import _message, _tools
@@ -111,3 +111,15 @@ def test_cursor_and_separate_error_lengths():
         result_page(snapshot, page["cursor"].split(":")[0] + ":1")
     with pytest.raises(ValueError):
         result_page(snapshot, limit=9000)
+
+
+async def test_durable_result_runtime_is_end_to_end_not_generation_time(tmp_path):
+    saver = AgentTrajectorySaver(str(tmp_path))
+    turn = AgentTrajectoryTurn(
+        agent_id="timing", final_state="completed", requester_id="owner", channel_id="test",
+        result="done", total_duration_ms=7, end_to_end_duration_ms=1200,
+    )
+    await saver.save(turn)
+    snapshot = read_result(tmp_path, "timing")
+    assert snapshot["runtime_seconds"] == 1.2
+    assert turn.total_duration_ms == 7

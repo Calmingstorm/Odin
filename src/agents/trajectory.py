@@ -61,6 +61,7 @@ class AgentTrajectoryTurn:
     tools_used: list[str] = field(default_factory=list)
     iteration_count: int = 0
     total_duration_ms: int = 0
+    end_to_end_duration_ms: int = 0
     recovery_attempts: int = 0
     state_history: list[dict] = field(default_factory=list)
     inbox_events: list[dict] = field(default_factory=list)
@@ -73,6 +74,7 @@ class AgentTrajectoryTurn:
         tool_results: list[dict] | None = None,
         llm_text: str = "",
         duration_ms: int = 0,
+        tool_duration_ms: int = 0,
         input_tokens: int = 0,
         output_tokens: int = 0,
         server_input_tokens: int | None = None,
@@ -95,6 +97,7 @@ class AgentTrajectoryTurn:
             tool_results=tool_results or [],
             llm_text=llm_text,
             duration_ms=duration_ms,
+            tool_duration_ms=tool_duration_ms,
             input_tokens=input_tokens,
             output_tokens=output_tokens,
             server_input_tokens=server_input_tokens,
@@ -125,6 +128,7 @@ class AgentTrajectoryTurn:
         recovery_attempts: int = 0,
         state_history: list[dict] | None = None,
         total_duration_ms: int = 0,
+        end_to_end_duration_ms: int = 0,
         context_recoveries: list[dict] | None = None,
         context_char_ceiling: int | None = None,
     ) -> None:
@@ -136,6 +140,7 @@ class AgentTrajectoryTurn:
         self.recovery_attempts = recovery_attempts
         self.state_history = state_history or []
         self.total_duration_ms = total_duration_ms
+        self.end_to_end_duration_ms = end_to_end_duration_ms
         self.context_recoveries = list(context_recoveries or [])
         self.context_char_ceiling = context_char_ceiling
 
@@ -171,6 +176,7 @@ class AgentTrajectoryTurn:
             "tools_used": self.tools_used,
             "iteration_count": self.iteration_count,
             "total_duration_ms": self.total_duration_ms,
+            "end_to_end_duration_ms": self.end_to_end_duration_ms,
             "recovery_attempts": self.recovery_attempts,
             "state_history": self.state_history,
             "inbox_events": list(self.inbox_events),
@@ -209,7 +215,7 @@ class AgentTrajectorySaver:
             "requester_id": turn.requester_id, "channel_id": turn.channel_id,
             "result": turn.result, "error": turn.error, "tools_used": turn.tools_used,
             "iteration_count": turn.iteration_count,
-            "runtime_seconds": turn.total_duration_ms / 1000,
+            "runtime_seconds": turn.end_to_end_duration_ms / 1000,
         })
         now = datetime.now(UTC)
         if not turn.timestamp:

@@ -1086,6 +1086,7 @@ class TestAgentSurfaceHooks:
             },
             evidence_recorder=recorder,
         )
+        assert response.pop("duration_ms") > 0
         assert response == {"text": "done", "tool_calls": [], "provider": "codex"}
         assert len(recorded) == 1
         assert recorded[0][0] is overflow

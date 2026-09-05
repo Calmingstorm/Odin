@@ -21,6 +21,7 @@ from typing import Any, Protocol
 from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.timing import elapsed_ms, timed_generation
 from ..llm.tool_history import (
     assistant_content,
     content_text,
@@ -1252,7 +1253,7 @@ async def _run_agent(
         model_override=agent.model_override,
         reasoning_effort_override=agent.reasoning_effort_override,
     )
-    agent_start = time.time()
+    agent_start = time.monotonic_ns()
     repetition = RepetitionGuard()
 
     def _budget_observation(state: dict) -> tuple[int | None, str, int | None]:
@@ -1386,7 +1387,6 @@ async def _run_agent(
                 "generating", time.time() + min(agent.iteration_timeout, _remaining_lifetime(agent))
             )
             agent.iteration_count = iteration + 1
-            iter_start = time.time()
 
             # Overflow-latch compaction (agent-local, lifetime-only): once an
             # emergency recovery has proven a survivable size, compact BEFORE
@@ -1467,7 +1467,7 @@ async def _run_agent(
                 trajectory.add_iteration(
                     iteration=iteration + 1,
                     llm_text=text,
-                    duration_ms=int((time.time() - iter_start) * 1000),
+                    duration_ms=response.get("duration_ms", 0),
                     input_tokens=usage_response.get("input_tokens", 0) or 0,
                     output_tokens=usage_response.get("output_tokens", 0) or 0,
                     server_input_tokens=usage_response.get("server_input_tokens"),
@@ -1525,6 +1525,7 @@ async def _run_agent(
                 for tc in tool_calls
             ]
             iter_tool_results: list[dict] = []
+            tool_start = time.monotonic_ns()
             try:
                 await execute_cycle(
                     agent,
@@ -1540,7 +1541,8 @@ async def _run_agent(
                     tool_calls=iter_tool_calls,
                     tool_results=iter_tool_results,
                     llm_text=text,
-                    duration_ms=int((time.time() - iter_start) * 1000),
+                    duration_ms=response.get("duration_ms", 0),
+                    tool_duration_ms=elapsed_ms(tool_start),
                     input_tokens=usage_response.get("input_tokens", 0) or 0,
                     output_tokens=usage_response.get("output_tokens", 0) or 0,
                     server_input_tokens=usage_response.get("server_input_tokens"),
@@ -1651,7 +1653,8 @@ async def _run_agent(
             iteration_count=agent.iteration_count,
             recovery_attempts=agent.recovery_attempts,
             state_history=agent._sm.history_as_dicts(),
-            total_duration_ms=int((time.time() - agent_start) * 1000),
+            total_duration_ms=sum(it.duration_ms for it in trajectory.iterations),
+            end_to_end_duration_ms=elapsed_ms(agent_start),
             context_recoveries=agent.context_recoveries,
             context_char_ceiling=agent.context_char_ceiling,
         )
@@ -1806,6 +1809,7 @@ def _predictive_presend_descent(agent: AgentInfo, snapshot, ladder: tuple[int, .
     return consumed
 
 
+@timed_generation
 async def _call_llm_with_recovery(
     agent: AgentInfo,
     iteration_callback: IterationCallback,
