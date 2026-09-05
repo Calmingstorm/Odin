@@ -7,6 +7,7 @@ import threading
 from pathlib import Path
 
 from ..odin_log import get_logger
+from .persistence import write_private_atomic
 
 log = get_logger("permissions")
 
@@ -66,10 +67,10 @@ class PermissionManager:
                 log.warning("Failed to load permission overrides: %s", e)
 
     def _save_overrides(self, candidate: dict[str, str] | None = None) -> None:
-        self._overrides_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp = self._overrides_path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(self._overrides if candidate is None else candidate, indent=2))
-        tmp.replace(self._overrides_path)
+        self.durability_degraded = not write_private_atomic(
+            self._overrides_path,
+            json.dumps(self._overrides if candidate is None else candidate, indent=2),
+        )
 
     @staticmethod
     def set_request_tier(tier: str) -> contextvars.Token:

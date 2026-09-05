@@ -190,9 +190,6 @@ def write_env_file(path: Path, content: str) -> None:
 
     Shared between the CLI wizard and the web API — single source of truth.
     """
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content)
-    try:
-        path.chmod(0o600)
-    except OSError:
-        pass  # Windows or permission issue
+    from .permissions.persistence import write_private_atomic
+
+    write_private_atomic(path, content)

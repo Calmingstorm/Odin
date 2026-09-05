@@ -9,6 +9,7 @@ from pathlib import Path
 
 from ..config.schema import ApiTokenIdentity
 from ..odin_log import get_logger
+from .persistence import write_private_atomic
 
 log = get_logger("token_manager")
 
@@ -101,9 +102,7 @@ class ApiTokenManager:
             d["token_hash"] = st.token_hash
             d["token_prefix"] = st.token_prefix
             data.append(d)
-        tmp = self._path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(self._path)
+        self.durability_degraded = not write_private_atomic(self._path, json.dumps(data, indent=2))
 
     def resolve(self, raw_token: str) -> ApiTokenIdentity | None:
         """HMAC-safe lookup by hashing the incoming token and comparing."""
