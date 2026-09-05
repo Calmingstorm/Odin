@@ -110,3 +110,26 @@ async def test_handlers_follow_rebound_delivery_budget():
     wait = await tools._handle_wait_for_agents({"agent_ids": list(snapshots(4))})
     assert "Split agent_ids" in wait
     assert tools._agent_manager.wait_for_agents.await_count == 1
+
+
+@pytest.mark.parametrize("interrupted", [False, True])
+async def test_malformed_terminal_snapshot_error_preserves_wait_invocation(interrupted):
+    tools = _tools()
+    saved = snapshots(1)["agent-0"]
+    tools._load_agent_result = AsyncMock(return_value=saved)
+    tools._can_read_agent_result = lambda *_: True
+    # A hostile/unbounded optional terminal field cannot break the guard or
+    # erase the fact that THIS wait was interrupted, even if rendering fails.
+    terminal = {**saved, "status": "x" * 20000}
+    if interrupted:
+        terminal["wait_interrupted"] = "parent_message"
+    tools._agent_manager.wait_for_agents = AsyncMock(return_value={"agent-0": terminal})
+    result = await tools._handle_wait_for_agents({"agent_ids": ["agent-0"]})
+    assert "exceeds delivery budget" in str(result)
+    assert len(str(result)) < 12000
+    if interrupted:
+        assert isinstance(result, ToolResult)
+        assert result.audit_metadata == {"wait_interrupted": "parent_message"}
+        assert str(result).startswith("Wait interrupted by parent message; children continue.")
+    else:
+        assert isinstance(result, str)
