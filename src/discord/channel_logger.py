@@ -38,7 +38,7 @@ class ChannelLogger:
 
     # Batch size cap for FTS indexing to limit memory on huge JSONL files
     FTS_BATCH_LIMIT = 5000
-    # First-pass reconciliation is all-or-nothing, not one committed row batch.
+    # Reconciliation is all-or-nothing, not one committed row batch.
     FTS_RECONCILE_SECONDS = 5.0
 
     def __init__(self, log_dir: str | Path) -> None:
@@ -102,9 +102,10 @@ class ChannelLogger:
     def index_to_fts(self, fts: FullTextIndex) -> int:
         """Consume durable identities only with a committed/empty ACK.
 
-        Restart never clears historical rows. Missing cursors after rotation or
-        truncation replay the current file idempotently. Legacy JSONL stays
-        untouched; its stable line identity is assigned only to derived rows.
+        Consistent cursors survive restart/rotation without clearing history.
+        Missing or inconsistent derived state is reconciled atomically, even
+        after an older indexer rebuilt FTS without updating identities/cursors.
+        Legacy JSONL stays untouched; identities are assigned to derived rows.
         """
         if not fts or not fts.available:
             return 0
@@ -114,7 +115,7 @@ class ChannelLogger:
                 channel_id = path.stem
                 try:
                     cursor = fts.channel_cursor(channel_id)
-                    if cursor is None:
+                    if cursor is None or fts.channel_needs_reconciliation(channel_id):
                         deadline = time.monotonic() + self.FTS_RECONCILE_SECONDS
                         ack = fts.reconcile_channel_batches(
                             channel_id, self._initial_index_batches(path, deadline),

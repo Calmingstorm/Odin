@@ -77,11 +77,21 @@ class FullTextIndex:
                     fts_rowid INTEGER NOT NULL,
                     PRIMARY KEY (channel_id, message_id)
                 );
+                CREATE INDEX IF NOT EXISTS channel_log_identity_fts_rowid
+                    ON channel_log_identity(fts_rowid);
                 CREATE TABLE IF NOT EXISTS channel_log_cursor (
                     channel_id TEXT PRIMARY KEY,
-                    identity TEXT NOT NULL
+                    identity TEXT NOT NULL,
+                    position TEXT
                 );
             """)
+            # Old cursors contain a JSONL position (a UUID on new messages),
+            # not necessarily a Discord message identity. Keep those concepts
+            # separate so a healthy UUID cursor is not forever inconsistent.
+            if "position" not in {
+                row[1] for row in conn.execute("PRAGMA table_info(channel_log_cursor)")
+            }:
+                conn.execute("ALTER TABLE channel_log_cursor ADD COLUMN position TEXT")
             self._conn = conn
             log.info("FTS5 index initialized at %s", db_path)
         except Exception as e:
@@ -327,9 +337,49 @@ class FullTextIndex:
             raise SearchExecutionError("full-text search is unavailable")
         with self._write_lock:
             row = self._conn.execute(
-                "SELECT identity FROM channel_log_cursor WHERE channel_id=?", (channel_id,),
+                "SELECT COALESCE(position, identity) FROM channel_log_cursor WHERE channel_id=?",
+                (channel_id,),
             ).fetchone()
             return row[0] if row else None
+
+    def channel_needs_reconciliation(self, channel_id: str) -> bool:
+        """Detect missing or inconsistent derived state without counting rows."""
+        if not self._conn:
+            raise SearchExecutionError("full-text search is unavailable")
+        with self._write_lock:
+            return self._channel_needs_reconciliation(channel_id)
+
+    def _channel_needs_reconciliation(self, channel_id: str) -> bool:
+        """Caller holds the connection lock; also rechecked before replacement."""
+        assert self._conn is not None
+        cursor = self._conn.execute(
+            "SELECT identity, position FROM channel_log_cursor WHERE channel_id=?",
+            (channel_id,),
+        ).fetchone()
+        if cursor is None:
+            return True
+        # Empty-content records advance the source position but create no FTS
+        # row. An empty anchor with an explicit position means none was indexed
+        # yet; otherwise the anchor must name a real indexed message.
+        if cursor[0] or cursor[1] is None:
+            if not self._conn.execute(
+                "SELECT 1 FROM channel_log_identity WHERE channel_id=? AND message_id=? LIMIT 1",
+                (channel_id, cursor[0]),
+            ).fetchone():
+                return True
+        if self._conn.execute(
+            "SELECT 1 FROM channel_log_fts AS f WHERE f.channel_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM channel_log_identity AS i "
+            "WHERE i.fts_rowid=f.rowid AND i.channel_id=f.channel_id) LIMIT 1",
+            (channel_id,),
+        ).fetchone():
+            return True
+        return self._conn.execute(
+            "SELECT 1 FROM channel_log_identity AS i WHERE i.channel_id=? AND NOT EXISTS "
+            "(SELECT 1 FROM channel_log_fts AS f "
+            "WHERE f.rowid=i.fts_rowid AND f.channel_id=i.channel_id) LIMIT 1",
+            (channel_id,),
+        ).fetchone() is not None
 
     def index_channel_batch(
         self, messages: list[dict], *, channel_id: str | None = None,
@@ -343,7 +393,7 @@ class FullTextIndex:
     def reconcile_channel_batches(
         self, channel_id: str, batches: Iterable[list[dict]], *, deadline: float,
     ) -> ChannelIndexAck:
-        """Replace an upgrade channel only after every source batch is indexed.
+        """Replace an inconsistent channel after every source batch is indexed.
 
         Timeouts/errors roll back both the old rows and cursor. No intermediate
         batch is visible or acknowledged, including through this connection's
@@ -369,13 +419,17 @@ class FullTextIndex:
                         self._conn.set_progress_handler(
                             lambda: int(time.monotonic() >= deadline), 1000,
                         )
-                    if reconcile:
-                        has_cursor = self._conn.execute(
-                            "SELECT 1 FROM channel_log_cursor WHERE channel_id=?",
+                    if reconcile and channel_id is not None:
+                        if not self._channel_needs_reconciliation(channel_id):
+                            return ChannelIndexAck("empty")  # another indexer won
+                    anchor = ""
+                    if not reconcile and channel_id is not None:
+                        previous = self._conn.execute(
+                            "SELECT identity FROM channel_log_cursor WHERE channel_id=?",
                             (channel_id,),
                         ).fetchone()
-                        if has_cursor:
-                            return ChannelIndexAck("empty")  # another indexer won
+                        if previous:
+                            anchor = previous[0]
                     inserted = 0
                     started = False
                     for messages in batches:
@@ -388,6 +442,9 @@ class FullTextIndex:
                             self._conn.execute(
                                 "DELETE FROM channel_log_identity WHERE channel_id=?",
                                 (channel_id,),
+                            )
+                            self._conn.execute(
+                                "DELETE FROM channel_log_cursor WHERE channel_id=?", (channel_id,),
                             )
                             started = True
                         for message in messages:
@@ -403,6 +460,8 @@ class FullTextIndex:
                             )
                             message_id = str(message.get("message_id", "") or "")
                             if message_id:
+                                if row[2] == channel_id:
+                                    anchor = message_id
                                 existing = self._conn.execute(
                                     "SELECT fts_rowid FROM channel_log_identity "
                                     "WHERE channel_id=? AND message_id=?", (row[2], message_id),
@@ -425,8 +484,9 @@ class FullTextIndex:
                         raise TimeoutError("Channel reconciliation deadline")
                     if channel_id is not None and cursor_identity is not None:
                         self._conn.execute(
-                            "INSERT OR REPLACE INTO channel_log_cursor VALUES (?, ?)",
-                            (channel_id, cursor_identity),
+                            "INSERT OR REPLACE INTO channel_log_cursor "
+                            "(channel_id, identity, position) VALUES (?, ?, ?)",
+                            (channel_id, anchor, cursor_identity),
                         )
                     self._conn.commit()
                 except BaseException:
