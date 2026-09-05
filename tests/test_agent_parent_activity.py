@@ -267,3 +267,28 @@ async def test_wait_timeout_is_effect_free():
     await _run_agent(parent, "", [], cb, AsyncMock(side_effect=TimeoutError()))
     result = parent.messages[2]["content"][0]
     assert result["status"] == "timed_out" and not result["uncertain_outcome"]
+
+
+@pytest.mark.parametrize("signal", ["inbox", "cancel"])
+async def test_scheduler_gap_before_tool_dispatch_does_not_claim_execution(signal, monkeypatch):
+    manager, parent = registry()
+    real_wait = asyncio.wait_for
+
+    async def gap(awaitable, timeout):
+        if parent.phase == "executing_tool":
+            if signal == "inbox":
+                manager.send(parent.id, "do not execute")
+            else:
+                parent._cancel_event.set()
+        return await real_wait(awaitable, timeout)
+
+    monkeypatch.setattr(asyncio, "wait_for", gap)
+    callback = AsyncMock(
+        side_effect=[{"tool_calls": [{"id": "a", "name": "t", "input": {}}]}, {"text": "replanned"}]
+    )
+    execute = AsyncMock()
+    await _run_agent(parent, "", [], callback, execute)
+    execute.assert_not_called()
+    assert parent.tool_execution_count == 0
+    result = parent.messages[2]["content"][0]
+    assert result["status"] == "not_executed" and not result["uncertain_outcome"]

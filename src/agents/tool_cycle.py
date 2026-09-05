@@ -49,13 +49,28 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                 "waiting_for_children" if name == "wait_for_agents" else "executing_tool",
                 time.time() + timeout,
             )
-            agent.tool_execution_count += 1
-            if name not in agent.tools_used:
-                agent.tools_used.append(name)
-            active = call
+
+            async def dispatch():
+                # wait_for schedules a child task: recheck at actual dispatch,
+                # not only before yielding to the scheduler.
+                nonlocal active
+                if (
+                    agent._cancel_event.is_set()
+                    or not agent._inbox.empty()
+                    or time.time() >= agent.created_at + agent.max_lifetime
+                ):
+                    return None
+                active = call
+                agent.tool_execution_count += 1
+                if name not in agent.tools_used:
+                    agent.tools_used.append(name)
+                return await execute(name, arguments)
+
             context_token = waiting_agent.set(agent if name == "wait_for_agents" else None)
             try:
-                raw = await asyncio.wait_for(execute(name, arguments), timeout=timeout)
+                raw = await asyncio.wait_for(dispatch(), timeout=timeout)
+                if active is None:
+                    break
                 if isinstance(raw, ToolResult):
                     status = "succeeded" if raw.ok else "failed"
                     if raw.error in {"denied", "permission_denied", "host_denied"}:
