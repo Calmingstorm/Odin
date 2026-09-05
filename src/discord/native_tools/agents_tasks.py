@@ -14,7 +14,6 @@ is the gateway, and the compression config object is read live through
 from __future__ import annotations
 
 import asyncio
-import json
 from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
@@ -1211,7 +1210,8 @@ class AgentTaskTools:
         self, inp: dict, *, user_id: str = "", channel_id: str = ""
     ) -> str:
         """Get results of a completed agent."""
-        from ...agents.results import result_page
+        from ...agents.results import result_page, serialize_page
+        from ...tools.output_delivery import get_delivery_budget
 
         agent_id = inp.get("agent_id", "")
         if not agent_id:
@@ -1226,10 +1226,11 @@ class AgentTaskTools:
                 f"{results['runtime_seconds']}s elapsed)."
             )
         try:
-            page = result_page(results, inp.get("cursor", ""), inp.get("limit", 1500))
+            page = result_page(results, inp.get("cursor", ""), inp.get("limit", 4000),
+                               max_chars=get_delivery_budget(self._get_config()))
         except ValueError as exc:
             return str(exc)
-        return json.dumps(page, ensure_ascii=False)
+        return serialize_page(page)
 
     async def _handle_wait_for_agents(
         self, inp: dict, *, user_id: str = "", channel_id: str = ""

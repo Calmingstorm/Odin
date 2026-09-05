@@ -179,7 +179,8 @@ TOOLS_SECTION: list[dict] = [
                 "agent_id": {"type": "string", "description": "Agent ID"},
                 "cursor": {"type": "string", "description": "Continuation from previous page"},
                 "limit": {"type": "integer", "minimum": 4, "maximum": 8000,
-                          "description": "UTF-8 bytes per page (default 1500, max 8000)"},
+                          "description": "UTF-8 byte ceiling per page (default 4000, max 8000); "
+                                         "may be smaller to fit serialized delivery budget"},
             },
             "required": ["agent_id"],
         },
