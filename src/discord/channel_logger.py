@@ -6,7 +6,10 @@ Zero LLM tokens. Pure file I/O. One JSON line per message, appended to
 
 from __future__ import annotations
 
+import hashlib
 import json
+import threading
+import uuid
 from collections import deque
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -38,8 +41,7 @@ class ChannelLogger:
         self._log_dir = Path(log_dir)
         self._log_dir.mkdir(parents=True, exist_ok=True)
         self._dir_exists = True  # track dir state to avoid per-message stat()
-        # Track last indexed timestamp per channel (in-memory, reset on restart)
-        self._last_indexed_ts: dict[str, float] = {}
+        self._index_lock = threading.Lock()
 
     def log_message(self, message: object, *, content: str | None = None) -> None:
         """Append a single message to the appropriate channel JSONL file.
@@ -73,6 +75,7 @@ class ChannelLogger:
                 "attachments": [redact_credentials(a.filename)
                                 for a in getattr(message, "attachments", [])],
                 "message_id": str(getattr(message, "id", "") or ""),
+                "log_identity": uuid.uuid4().hex,
                 "channel_id": channel_id,
                 "guild_id": str(guild.id),
             }
@@ -93,58 +96,60 @@ class ChannelLogger:
             log.debug("Failed to log channel message", exc_info=True)
 
     def index_to_fts(self, fts: FullTextIndex) -> int:
-        """Batch-index new messages into the FTS5 channel_log_fts table.
+        """Consume durable identities only with a committed/empty ACK.
 
-        Reads JSONL files, finds lines newer than the last indexed timestamp
-        per channel, and inserts them into FTS. Returns total rows indexed.
-
-        On first call (no channels indexed yet), clears the FTS table to
-        prevent duplicates after a restart.
+        Restart never clears historical rows. Missing cursors after rotation or
+        truncation replay the current file idempotently. Legacy JSONL stays
+        untouched; its stable line identity is assigned only to derived rows.
         """
         if not fts or not fts.available:
             return 0
         total = 0
-        try:
-            if not self._log_dir.exists():
-                return 0
-            # On fresh start, clear stale FTS data to prevent duplicates
-            if not self._last_indexed_ts:
-                fts.clear_channel_logs()
+        with self._index_lock:
             for path in self._log_dir.glob("*.jsonl"):
                 channel_id = path.stem
-                cutoff = self._last_indexed_ts.get(channel_id, 0.0)
-                batch: list[dict] = []
-                max_ts = cutoff
                 try:
-                    with open(path, encoding="utf-8") as f:
-                        for line in f:
-                            line = line.strip()
-                            if not line:
-                                continue
-                            try:
-                                record = json.loads(line)
-                            except json.JSONDecodeError:
-                                continue
-                            ts = record.get("ts", 0.0)
-                            if ts > cutoff:
-                                batch.append(record)
-                                if ts > max_ts:
-                                    max_ts = ts
-                                if len(batch) >= self.FTS_BATCH_LIMIT:
-                                    break  # cap memory; remainder indexed next cycle
+                    cursor = fts.channel_cursor(channel_id)
+                    batch = self._index_batch(path, cursor)
+                    if batch:
+                        ack = fts.index_channel_batch(
+                            batch, channel_id=channel_id,
+                            cursor_identity=batch[-1]["log_identity"],
+                        )
+                        if ack.status != "error":
+                            total += ack.count
                 except Exception:
-                    log.debug("Failed to read %s for indexing", path, exc_info=True)
-                    continue
-                if batch:
-                    indexed = fts.index_channel_messages(batch)
-                    total += indexed
-                    if max_ts > cutoff:
-                        self._last_indexed_ts[channel_id] = max_ts
-        except Exception:
-            log.debug("FTS channel log indexing failed", exc_info=True)
+                    log.debug("Channel indexing failed; progress retained for retry", exc_info=True)
         if total:
             log.info("Indexed %d channel log messages into FTS", total)
         return total
+
+    def _index_batch(self, path: Path, cursor: str | None) -> list[dict]:
+        batch: list[dict] = []
+        found = cursor is None
+        with path.open(encoding="utf-8") as stream:
+            for number, line in enumerate(stream):
+                if not line.endswith("\n"):
+                    break  # an in-flight append is not consumed
+                try:
+                    record = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                identity = record.get("log_identity") or "legacy:" + hashlib.sha256(
+                    f"{path.stem}:{number}:{line}".encode(),
+                ).hexdigest()
+                record["log_identity"] = identity
+                if not record.get("message_id"):
+                    record["message_id"] = identity
+                if not found:
+                    found = identity == cursor
+                    continue
+                batch.append(record)
+                if len(batch) >= self.FTS_BATCH_LIMIT:
+                    break
+        if not found:
+            return self._index_batch(path, None)
+        return batch
 
     def search(self, query: str, limit: int = 20, channel_id: str | None = None) -> list[dict]:
         """Keyword search on JSONL files (fallback when FTS is unavailable).
