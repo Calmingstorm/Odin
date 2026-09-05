@@ -146,8 +146,9 @@ def websocket_output_scope(manager, ws):
         return getattr(identity, "allowed_tools", None) or None
 
     def hosts(alias):
+        allowed_hosts = getattr(identity, "allowed_hosts", None)
         return manager._policy_authorized(ws) and (
-            getattr(identity, "allowed_hosts", None) is None or alias in identity.allowed_hosts)
+            allowed_hosts is None or alias in allowed_hosts)
 
     scope_token = request_scope_id.set(scope)
     tools_token = request_scope_authorizer.set(tools)
