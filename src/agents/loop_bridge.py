@@ -18,7 +18,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
-from .manager import MAX_NESTING_DEPTH
+from .manager import MAX_NESTING_DEPTH, TERMINAL_STATES
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -266,7 +266,8 @@ class LoopAgentBridge:
         If agent_ids is None, waits for all uncollected agents from this loop.
         Returns {agent_id: results_dict}.
         """
-        if agent_ids is None:
+        implicit = agent_ids is None
+        if implicit:
             records = self._loop_agents.get(loop_id, [])
             agent_ids = [r.agent_id for r in records if not r.collected]
 
@@ -278,12 +279,23 @@ class LoopAgentBridge:
             timeout=timeout,
         )
 
-        # Mark collected
-        for record in self._loop_agents.get(loop_id, []):
-            if record.agent_id in agent_ids:
+        # No await between delivery selection and acknowledgement: overlapping
+        # implicit collectors cannot deliver a terminal entry twice. Explicit
+        # IDs deliberately permit rereading an acknowledged result.
+        records_by_id = {r.agent_id: r for r in self._loop_agents.get(loop_id, [])}
+        delivered = {}
+        for aid in agent_ids:
+            record = records_by_id.get(aid)
+            if implicit and record is not None and record.collected:
+                continue
+            result = results.get(aid) or {
+                "id": aid, "status": "not_found",
+                "error": "Agent result omitted by wait; unresolved, retry collection.",
+            }
+            delivered[aid] = result
+            if record is not None and result.get("status") in TERMINAL_STATES:
                 record.collected = True
-
-        return results
+        return delivered
 
     def format_agent_results_for_context(self, results: dict[str, dict]) -> str:
         """Format agent results into a string for loop iteration context."""
@@ -324,6 +336,11 @@ class LoopAgentBridge:
                         "status": agent_results.get("status", "unknown"),
                     }
                 )
+            else:
+                active.append({
+                    "agent_id": r.agent_id, "label": r.label, "iteration": r.iteration,
+                    "status": "not_found", "error": "Unresolved agent result; retry collection.",
+                })
         return active
 
     @property
