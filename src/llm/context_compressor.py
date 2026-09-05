@@ -112,6 +112,8 @@ def _hash_prefix(system: str, messages: list[dict]) -> str:
 def _is_tool_message(msg: dict) -> bool:
     """True if a message contains tool_use or tool_result content blocks,
     or agent-style string tool result messages."""
+    if msg.get("provenance") == "agent_parent":
+        return False
     content = msg.get("content")
     if isinstance(content, list):
         return any(
@@ -130,6 +132,8 @@ def _is_tool_use_message(msg: dict) -> bool:
 
 
 def _is_tool_result_message(msg: dict) -> bool:
+    if msg.get("provenance") == "agent_parent":
+        return False
     content = msg.get("content")
     if isinstance(content, list):
         return any(isinstance(b, dict) and b.get("type") == "tool_result" for b in content)
@@ -303,9 +307,13 @@ _ERROR_PREFIXES = (
 def summarize_iteration(iteration: list[dict]) -> str:
     """Produce a compact ``tool_name→OK/ERR`` summary for one iteration."""
     tool_names: list[str] = []
+    call_ids: list[str | None] = []
+    outcomes_by_id: dict[str, str] = {}
     outcomes: list[str] = []
 
     for msg in iteration:
+        if msg.get("provenance") == "agent_parent":
+            continue
         content = msg.get("content")
         # Structured content blocks (main loop format)
         if isinstance(content, list):
@@ -315,6 +323,7 @@ def summarize_iteration(iteration: list[dict]) -> str:
                 btype = block.get("type", "")
                 if btype == "tool_use":
                     tool_names.append(block.get("name", "?"))
+                    call_ids.append(block.get("id"))
                 elif btype == "tool_result":
                     result = block.get("content", "")
                     if isinstance(result, list):
@@ -325,10 +334,15 @@ def summarize_iteration(iteration: list[dict]) -> str:
                         )
                     elif not isinstance(result, str):
                         result = str(result)
-                    if result.startswith(_ERROR_PREFIXES):
-                        outcomes.append("ERR")
+                    if block.get("status"):
+                        outcome = str(block["status"])
+                    elif "is_error" in block:
+                        outcome = "ERR" if block["is_error"] else "OK"
                     else:
-                        outcomes.append("OK")
+                        outcome = "ERR" if result.startswith(_ERROR_PREFIXES) else "OK"
+                    outcomes.append(outcome)
+                    if block.get("tool_use_id"):
+                        outcomes_by_id[block["tool_use_id"]] = outcome
         # Agent-style string tool results: "[Tool result: tool_name]\n..."
         elif isinstance(content, str) and content.startswith("[Tool result:"):
             # Extract tool name from "[Tool result: tool_name]"
@@ -336,6 +350,7 @@ def summarize_iteration(iteration: list[dict]) -> str:
             if end > 14:
                 name = content[14:end].strip()
                 tool_names.append(name)
+                call_ids.append(None)
             result_body = content[end + 1 :].strip() if end > 0 else content
             if result_body.startswith(_ERROR_PREFIXES):
                 outcomes.append("ERR")
@@ -345,6 +360,8 @@ def summarize_iteration(iteration: list[dict]) -> str:
     parts = []
     for i, name in enumerate(tool_names):
         outcome = outcomes[i] if i < len(outcomes) else "?"
+        if call_ids[i]:
+            outcome = outcomes_by_id.get(call_ids[i], outcome)
         parts.append(f"{name}\u2192{outcome}")
 
     summary = ", ".join(parts)
@@ -413,6 +430,7 @@ def compress_tool_context(
         prefix = messages[:prefix_end]
         iterations = _group_iterations(messages[prefix_end:])
 
+    keep_recent = max(1, keep_recent)
     if len(iterations) <= keep_recent:
         return messages, 0
 
@@ -425,6 +443,9 @@ def compress_tool_context(
     summary_msg: dict = {"role": "user", "content": summary_text}
 
     result = list(prefix) + [summary_msg]
+    result.extend(
+        msg for it in to_compress for msg in it if msg.get("provenance") == "agent_parent"
+    )
     for iteration in to_keep:
         result.extend(iteration)
 
@@ -522,12 +543,14 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
 
     strings: list[tuple[dict, str, str]] = []
     for msg in work:
+        if msg.get("provenance") == "agent_parent":
+            continue
         content = msg.get("content", "")
         if isinstance(content, str):
             strings.append((msg, "content", content))
         elif isinstance(content, list):
             for block in content:
-                if not isinstance(block, dict):
+                if not isinstance(block, dict) or block.get("type") == "tool_use":
                     continue
                 for key in ("text", "content", "input", "arguments"):
                     value = block.get(key)
@@ -554,6 +577,7 @@ def _is_emergency_summary(msg: dict) -> bool:
     content = msg.get("content")
     return (
         msg.get("role") == "user"
+        and msg.get("provenance") != "agent_parent"
         and isinstance(content, str)
         and content.startswith(_EMERGENCY_SUMMARY_PREFIX)
         and content.endswith(_EMERGENCY_SUMMARY_SUFFIX)
@@ -782,12 +806,19 @@ def emergency_compress_for_window(
         # summary. Only summaries at the compressor's own boundary are
         # replaceable; a real prefix must remain before the marker.
         prefix = list(raw_prefix)
-        while len(prefix) > 1 and _is_emergency_summary(prefix[-1]):
-            body = _emergency_summary_body(prefix.pop())
-            if body:
-                carried_summaries.append(body)
-        carried_summaries.reverse()
+        carried_summaries.extend(
+            _emergency_summary_body(msg) for msg in prefix[1:] if _is_emergency_summary(msg)
+        )
+        prefix = prefix[:1] + [msg for msg in prefix[1:] if not _is_emergency_summary(msg)]
 
+    # Controls between cycles are immutable too, not ordinary tool output.
+    controls = [msg for it in iterations for msg in it if msg.get("provenance") == "agent_parent"]
+    if controls:
+        prefix.extend(controls)
+        iterations = [
+            [msg for msg in it if msg.get("provenance") != "agent_parent"] for it in iterations
+        ]
+        iterations = [it for it in iterations if it]
     prefix_chars = estimate_message_chars(prefix)
     report: dict = {
         "original_chars": original_chars,
@@ -950,6 +981,7 @@ def emergency_compress_for_window(
     report["compressed_chars"] = compressed_chars
     report["fits"] = compressed_chars <= target_chars
     if not report["fits"]:
+        report["unfit_reason"] = "immutable newest call or control messages exceed target"
         return messages, report
     if stats:
         stats.compressions += 1

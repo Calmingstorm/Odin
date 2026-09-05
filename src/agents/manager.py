@@ -21,13 +21,11 @@ from typing import Protocol
 from ..discord.tool_loop_helpers import _scrub_tool_input_for_storage
 from ..error_presentation import format_user_facing_error
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.tool_history import assistant_content, content_text, normalize_tool_calls
 from ..odin_log import get_logger
 from ..tools.result_validator import ToolResult
+from .tool_cycle import execute_cycle
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
-from .wait_deadlines import (
-    WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
-    wait_for_agents_wrapper_timeout,
-)
 
 log = get_logger("agents")
 
@@ -340,6 +338,8 @@ class AgentInfo:
     error: str = ""
     messages: list[dict] = field(default_factory=list)
     tools_used: list[str] = field(default_factory=list)
+    tool_execution_count: int = 0
+    _tool_call_ids: set[str] = field(default_factory=set, repr=False)
     iteration_count: int = 0
     last_activity: float = field(default_factory=time.time)
     recovery_attempts: int = 0
@@ -1181,6 +1181,7 @@ async def _run_agent(
                         {
                             "role": "user",
                             "content": f"[Message from parent] {msg}",
+                            "provenance": "agent_parent",
                         }
                     )
                     log.debug("Agent %s received inbox message", agent.id)
@@ -1323,14 +1324,18 @@ async def _run_agent(
             agent._accepted_usage_facts = {}
             usage_response = {**response, **usage_facts}
 
-            text = response.get("text", "")
-            tool_calls = response.get("tool_calls", [])
-            context_density, context_density_source, context_primary_chars = (
-                _budget_observation(generation_state)
+            text = content_text(response.get("text", ""))
+            tool_calls = normalize_tool_calls(
+                response.get("tool_calls", []), used_ids=agent._tool_call_ids
+            )
+            context_density, context_density_source, context_primary_chars = _budget_observation(
+                generation_state
             )
 
             # Append assistant response to messages
-            agent.messages.append({"role": "assistant", "content": text})
+            agent.messages.append(
+                {"role": "assistant", "content": assistant_content(text, tool_calls)}
+            )
 
             # No tool calls = agent is done
             if not tool_calls:
@@ -1359,136 +1364,60 @@ async def _run_agent(
                 agent.ended_at = time.time()
                 elapsed = time.time() - agent.created_at
                 log.info(
-                    "Agent %s (%s) completed in %ds, %d tool calls",
+                    "Agent %s (%s) completed in %ds, %d tool executions, %d unique tool names",
                     agent.id,
                     agent.label,
                     int(elapsed),
+                    agent.tool_execution_count,
                     len(agent.tools_used),
                 )
                 return
 
-            # Execute tool calls
-            iter_tool_calls: list[dict] = []
+            # Storage redaction must never mutate the accepted replay inputs.
+            iter_tool_calls = [
+                {
+                    "id": tc["id"],
+                    "name": tc["name"],
+                    "input": _scrub_tool_input_for_storage(tc["name"], tc["input"]),
+                    "parse_error": scrub_output_secrets(tc["parse_error"])
+                    if tc["parse_error"]
+                    else None,
+                }
+                for tc in tool_calls
+            ]
             iter_tool_results: list[dict] = []
-            for tc in tool_calls:
-                tool_name = tc.get("name", "")
-                tool_input = tc.get("input", {})
-
-                # Hard deadline BETWEEN tools too: without this an expired
-                # agent still got a fresh (floored) budget per remaining
-                # tool call and ran seconds past its lifetime.
-                lifetime_left = _remaining_lifetime(agent)
-                if lifetime_left <= 0:
-                    trajectory.add_iteration(
-                        iteration=iteration + 1,
-                        tool_calls=iter_tool_calls,
-                        tool_results=iter_tool_results,
-                        llm_text=text,
-                        duration_ms=int((time.time() - iter_start) * 1000),
-                        input_tokens=usage_response.get("input_tokens", 0) or 0,
-                        output_tokens=usage_response.get("output_tokens", 0) or 0,
-                        server_input_tokens=usage_response.get("server_input_tokens"),
-                        server_output_tokens=usage_response.get("server_output_tokens"),
-                        estimated_input_tokens=usage_response.get("estimated_input_tokens"),
-                        input_token_provenance=usage_response.get("input_token_provenance", ""),
-                        output_token_provenance=usage_response.get("output_token_provenance", ""),
-                        cached_tokens=usage_response.get("cached_tokens"),
-                        cache_write_tokens=usage_response.get("cache_write_tokens"),
-                        provider=response.get("provider", ""),
-                        model=response.get("model", ""),
-                        reasoning_effort=response.get("reasoning_effort"),
-                        context_density_milli=context_density,
-                        context_density_source=context_density_source,
-                        context_primary_chars=context_primary_chars,
-                    )
-                    _lifetime_timeout(agent)
-                    return
-
-                if tool_name not in agent.tools_used:
-                    agent.tools_used.append(tool_name)
-
-                agent.last_activity = time.time()
-                iter_tool_calls.append(
-                    {
-                        "name": tool_name,
-                        "input": _scrub_tool_input_for_storage(tool_name, tool_input),
-                    }
+            try:
+                await execute_cycle(
+                    agent,
+                    tool_calls,
+                    tool_executor_callback,
+                    iter_tool_results,
+                    timeouts=tool_timeouts or {},
+                    default_timeout=TOOL_EXEC_TIMEOUT,
                 )
-
-                tool_timeout: float = (tool_timeouts or {}).get(tool_name, TOOL_EXEC_TIMEOUT)
-                # A nested wait has its own handler deadline. Give it room to
-                # collect and render the progress snapshot before retaining the
-                # lifetime-capped outer backstop for a genuinely wedged handler.
-                tool_timeout = wait_for_agents_wrapper_timeout(
-                    tool_name,
-                    tool_input,
-                    tool_timeout,
-                    grace_seconds=WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
+            finally:
+                trajectory.add_iteration(
+                    iteration=iteration + 1,
+                    tool_calls=iter_tool_calls,
+                    tool_results=iter_tool_results,
+                    llm_text=text,
+                    duration_ms=int((time.time() - iter_start) * 1000),
+                    input_tokens=usage_response.get("input_tokens", 0) or 0,
+                    output_tokens=usage_response.get("output_tokens", 0) or 0,
+                    server_input_tokens=usage_response.get("server_input_tokens"),
+                    server_output_tokens=usage_response.get("server_output_tokens"),
+                    estimated_input_tokens=usage_response.get("estimated_input_tokens"),
+                    input_token_provenance=usage_response.get("input_token_provenance", ""),
+                    output_token_provenance=usage_response.get("output_token_provenance", ""),
+                    cached_tokens=usage_response.get("cached_tokens"),
+                    cache_write_tokens=usage_response.get("cache_write_tokens"),
+                    provider=response.get("provider", ""),
+                    model=response.get("model", ""),
+                    reasoning_effort=response.get("reasoning_effort"),
+                    context_density_milli=context_density,
+                    context_density_source=context_density_source,
+                    context_primary_chars=context_primary_chars,
                 )
-                # Cap at the POSITIVE remainder so the lifetime deadline holds
-                # inside a long tool call — never floored to a bonus second.
-                tool_timeout = min(tool_timeout, lifetime_left)
-                try:
-                    raw_result = await asyncio.wait_for(
-                        tool_executor_callback(tool_name, tool_input),
-                        timeout=tool_timeout,
-                    )
-                    structured = raw_result if isinstance(raw_result, ToolResult) else None
-                    result = scrub_output_secrets(str(raw_result))
-                    if (
-                        structured is not None
-                        and not structured.ok
-                        and not result.lstrip().startswith(
-                            ("Error", "Command failed", "Script failed", "Denied")
-                        )
-                    ):
-                        result = f"Error (tool reported failure):\n{result}"
-                except TimeoutError:
-                    structured = None
-                    result = f"Error: Tool '{tool_name}' timed out after {tool_timeout}s"
-                    log.warning("Agent %s tool %s timed out", agent.id, tool_name)
-                except Exception as e:
-                    structured = None
-                    result = f"Error: {e}"
-                    log.warning("Agent %s tool %s failed: %s", agent.id, tool_name, e)
-
-                stored_result: dict = {"name": tool_name, "result": result}
-                if structured is not None:
-                    stored_result["ok"] = structured.ok
-                    if structured.audit_metadata:
-                        stored_result["audit_metadata"] = structured.audit_metadata
-                iter_tool_results.append(stored_result)
-
-                # Append tool result to messages
-                agent.messages.append(
-                    {
-                        "role": "user",
-                        "content": f"[Tool result: {tool_name}]\n{result}",
-                    }
-                )
-
-            trajectory.add_iteration(
-                iteration=iteration + 1,
-                tool_calls=iter_tool_calls,
-                tool_results=iter_tool_results,
-                llm_text=text,
-                duration_ms=int((time.time() - iter_start) * 1000),
-                input_tokens=usage_response.get("input_tokens", 0) or 0,
-                output_tokens=usage_response.get("output_tokens", 0) or 0,
-                server_input_tokens=usage_response.get("server_input_tokens"),
-                server_output_tokens=usage_response.get("server_output_tokens"),
-                estimated_input_tokens=usage_response.get("estimated_input_tokens"),
-                input_token_provenance=usage_response.get("input_token_provenance", ""),
-                output_token_provenance=usage_response.get("output_token_provenance", ""),
-                cached_tokens=usage_response.get("cached_tokens"),
-                cache_write_tokens=usage_response.get("cache_write_tokens"),
-                provider=response.get("provider", ""),
-                model=response.get("model", ""),
-                reasoning_effort=response.get("reasoning_effort"),
-                context_density_milli=context_density,
-                context_density_source=context_density_source,
-                context_primary_chars=context_primary_chars,
-            )
 
             # Post-tool deadline check: expiry during the FINAL tool call of
             # the FINAL iteration must terminate as TIMEOUT here — falling
@@ -1516,11 +1445,13 @@ async def _run_agent(
         agent.ended_at = time.time()
         elapsed = time.time() - agent.created_at
         log.info(
-            "Agent %s (%s) completed in %ds after %d iterations (max reached), %d tool calls",
+            "Agent %s (%s) completed in %ds after %d iterations (max reached), "
+            "%d tool executions, %d unique tool names",
             agent.id,
             agent.label,
             int(elapsed),
             max_iterations,
+            agent.tool_execution_count,
             len(agent.tools_used),
         )
 
@@ -1681,9 +1612,7 @@ def _predictive_presend_descent(agent: AgentInfo, snapshot, ladder: tuple[int, .
             if _believed_within_effective_budget(agent.messages, snapshot) is not False:
                 break
             target = ladder[consumed]
-            compressed, report = emergency_compress_for_window(
-                agent.messages, target_chars=target
-            )
+            compressed, report = emergency_compress_for_window(agent.messages, target_chars=target)
             consumed += 1
             report["attempt"] = 0
             report["trigger"] = "predictive"
@@ -1828,9 +1757,7 @@ async def _call_llm_with_recovery(
                     snapshot=_plan_snapshot,
                 )
                 if isinstance(response, dict) and any(
-                    value is not None
-                    for key, value in usage.items()
-                    if key.endswith("_tokens")
+                    value is not None for key, value in usage.items() if key.endswith("_tokens")
                 ):
                     # Private metadata preserves the callback's public response
                     # shape. The manager consumes it when persisting the
@@ -1847,9 +1774,7 @@ async def _call_llm_with_recovery(
                 # The rescue rung is now server-accepted evidence.
                 agent.context_char_ceiling = pending_ceiling
                 accepted_is_codex = (
-                    _is_codex
-                    and isinstance(response, dict)
-                    and response.get("provider") == "codex"
+                    _is_codex and isinstance(response, dict) and response.get("provider") == "codex"
                 )
                 if (
                     evidence_recorder is not None
@@ -1975,7 +1900,9 @@ def _get_last_progress(agent: AgentInfo) -> str:
     """Extract the last meaningful text from agent messages."""
     for msg in reversed(agent.messages):
         if msg["role"] == "assistant" and msg.get("content"):
-            return msg["content"]
+            text = content_text(msg["content"])
+            if text:
+                return text
     return "(no output)"
 
 
@@ -1988,10 +1915,19 @@ def _synthesize_fallback(agent: AgentInfo, max_iterations: int) -> str:
     tool_results = []
     for msg in reversed(agent.messages):
         content = msg.get("content", "")
-        if msg["role"] == "user" and content.startswith("[Tool result:"):
+        if msg["role"] != "user":
+            continue
+        if isinstance(content, str) and content.startswith("[Tool result:"):
             tool_results.append(content[:300])
-            if len(tool_results) >= 3:
-                break
+        elif isinstance(content, list):
+            for block in reversed(content):
+                if isinstance(block, dict) and block.get("type") == "tool_result":
+                    tool_results.append(
+                        f"[{block.get('status', 'result')}] {block.get('content', '')}"[:300]
+                    )
+        if len(tool_results) >= 3:
+            tool_results = tool_results[:3]
+            break
     if tool_results:
         parts.append("Last tool results:")
         for tr in reversed(tool_results):

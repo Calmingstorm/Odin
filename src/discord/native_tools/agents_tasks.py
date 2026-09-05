@@ -23,6 +23,7 @@ import discord
 from ...agents.manager import AGENT_BLOCKED_TOOLS, filter_agent_tools
 from ...async_utils import fire_and_forget
 from ...llm.recovery import generate_with_recovery, preflight_incompatible_effort
+from ...llm.tool_history import normalize_tool_calls
 from ...odin_log import get_logger
 from ...tools.result_validator import ToolResult
 from ..background_task import (
@@ -966,7 +967,7 @@ class AgentTaskTools:
             )
             return {
                 "text": resp.text,
-                "tool_calls": [{"name": tc.name, "input": tc.input} for tc in resp.tool_calls],
+                "tool_calls": normalize_tool_calls(resp.tool_calls),
                 "stop_reason": resp.stop_reason,
                 # Phase 5: server acceptance evidence rides the callback dict
                 # so a rescued iteration can qualify a window clamp.
@@ -1341,9 +1342,7 @@ class AgentTaskTools:
                 )
                 return {
                     "text": resp.text or "",
-                    "tool_calls": [
-                        {"name": tc.name, "input": tc.input} for tc in (resp.tool_calls or [])
-                    ],
+                    "tool_calls": normalize_tool_calls(resp.tool_calls),
                     "stop_reason": resp.stop_reason or "end_turn",
                     "input_tokens": getattr(resp, "input_tokens", 0) or 0,
                     "output_tokens": getattr(resp, "output_tokens", 0) or 0,
