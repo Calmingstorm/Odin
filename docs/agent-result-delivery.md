@@ -112,10 +112,12 @@ but cursor coordinates and `shown_bytes` continue to describe the source byte
 interval, not the replacement character's three-byte encoding. A partial code
 point at the capture cap is excluded from the readable prefix.
 
-Local capture uses one private spool, with a **128 MiB aggregate local retained
-byte quota** and explicit capture errors on exhaustion. Durable manifests store
-generation, owner, originating host identity, byte accounting, and expiry, not
-reusable process execution handles. The executor supplies a private retention
+Local capture uses one private spool, with a **128 MiB combined local/remote
+retention quota** and explicit capture errors on exhaustion. Remote starts reserve
+their 4 MiB allowance before dispatch; local capture cannot consume those
+reservations. Durable manifests store generation, owner, channel, hashed
+credential scope, hashed originating host identity, byte accounting, and expiry,
+not reusable process execution handles. The executor supplies a private retention
 directory; a library registry without that directory uses temporary spools.
 Remote output stays on its original host and is paged only by the fixed
 generation-bound controller through an authorized lease, never an arbitrary
@@ -133,5 +135,7 @@ Terminal remote jobs relinquish the registry's execution-facing lease slot;
 the retained output-only slot admits only fixed status/expiry operations and
 keeps the host generation's revocation fence. After restart, a fresh authorized
 lease must match the manifest's originating host identity. The handler verifies
-owner and current originating host access before every action and after each
-poll wait. Knowing a PID or cursor is not authorization.
+owner, originating channel/credential scope, and current originating host access
+before every action and after each poll wait. Knowing a PID or cursor is not
+authorization. See [process-output-retention.md](process-output-retention.md) for
+the reservation and restart identity details.
