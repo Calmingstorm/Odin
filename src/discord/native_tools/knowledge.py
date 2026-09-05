@@ -57,10 +57,10 @@ class KnowledgeTools:
             lines.append(f"[{ts}] ({role}): {content}")
             matches.append(f"[{ts}] ({role}): {r['content']}")
 
-        return RankedOutput(
-            f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines),
-            matches=tuple(matches),
-        )
+        formatted = f"**Found {len(results)} result(s) for '{query}':**\n" + "\n".join(lines)
+        if any(len(r["content"]) > 300 for r in results) or len(formatted) > 12000:
+            return RankedOutput(formatted, matches=tuple(matches))
+        return formatted
 
     async def _handle_search_knowledge(self, inp: dict) -> str:
         """Semantic + FTS search over the knowledge base."""
@@ -96,10 +96,10 @@ class KnowledgeTools:
             lines.append(f"**[{source}]** (score: {score})\n{content}")
             matches.append(f"**[{source}]** (score: {score})\n{r['content']}")
 
-        return RankedOutput(
-            f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines),
-            matches=tuple(matches),
-        )
+        formatted = f"**Found {len(results)} result(s) for '{query}':**\n\n" + "\n\n".join(lines)
+        if any(len(r["content"]) > 500 for r in results) or len(formatted) > 12000:
+            return RankedOutput(formatted, matches=tuple(matches))
+        return formatted
 
     async def _handle_ingest_document(self, inp: dict, uploader: str) -> str:
         """Ingest a document into the knowledge base."""

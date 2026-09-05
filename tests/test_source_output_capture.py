@@ -63,7 +63,9 @@ def test_legacy_character_and_line_limits_unchanged_outside_capture():
 
 @pytest.mark.parametrize("remote", [False, True])
 @pytest.mark.parametrize("streaming", [False, True])
-async def test_command_source_preserves_middle_before_both_cuts(monkeypatch, remote, streaming):
+async def test_command_source_preserves_middle_before_both_cuts(
+    monkeypatch, tmp_path, remote, streaming
+):
     full = _evidence()
     reader = asyncio.StreamReader()
     reader.feed_data(full.encode())
@@ -90,13 +92,16 @@ async def test_command_source_preserves_middle_before_both_cuts(monkeypatch, rem
     assert status == 0
     assert formatted == full
     assert "line-0250" in formatted
+    from tests.test_source_output_delivery import assert_retained_roundtrip
+
+    assert_retained_roundtrip(formatted, tmp_path, "run_command")
     assert spawn.await_count == 1
     if streaming:
         assert callback.await_count == 500
 
 
 @pytest.mark.parametrize("content_type", ["text/plain", "text/html", "application/json"])
-async def test_fetch_captures_full_transformed_source(monkeypatch, content_type):
+async def test_fetch_captures_full_transformed_source(monkeypatch, tmp_path, content_type):
     full = _evidence()
     body = f"<p>{full}</p>" if content_type == "text/html" else full
     fetch = AsyncMock(return_value=SafeFetchResponse(
@@ -106,6 +111,9 @@ async def test_fetch_captures_full_transformed_source(monkeypatch, content_type)
     with result_capture():
         output = await web.fetch_url("https://example.com", max_chars=100)
     assert output == full
+    from tests.test_source_output_delivery import assert_retained_roundtrip
+
+    assert_retained_roundtrip(output, tmp_path, "fetch_url")
     assert fetch.await_count == 1
     legacy = await web.fetch_url("https://example.com", max_chars=100)
     assert legacy == full[:100] + "\n\n... (content truncated)"
@@ -128,7 +136,7 @@ def _browser_manager(full, mode):
 
 
 @pytest.mark.parametrize("mode", ["page", "table", "evaluate"])
-async def test_browser_sources_preserve_middle(monkeypatch, mode):
+async def test_browser_sources_preserve_middle(monkeypatch, tmp_path, mode):
     full = _evidence()
     manager, page = _browser_manager(full, mode)
     handler = getattr(browser, f"handle_browser_{'read_' if mode != 'evaluate' else ''}{mode}")
@@ -139,10 +147,13 @@ async def test_browser_sources_preserve_middle(monkeypatch, mode):
     else:
         assert full in output
     assert "truncated" not in output
+    from tests.test_source_output_delivery import assert_retained_roundtrip
+
+    assert_retained_roundtrip(output, tmp_path, f"browser_{mode}")
     assert page.goto.await_count == 1
 
 
-async def test_pdf_preserves_all_extracted_pages_and_closes_document(monkeypatch):
+async def test_pdf_preserves_all_extracted_pages_and_closes_document(monkeypatch, tmp_path):
     full = _evidence()
     close = SimpleNamespace(calls=0)
 
@@ -164,5 +175,8 @@ async def test_pdf_preserves_all_extracted_pages_and_closes_document(monkeypatch
     with result_capture():
         output = await tools._handle_analyze_pdf({"url": "https://example.com/doc.pdf"})
     assert output == "## Page 1\n" + full
+    from tests.test_source_output_delivery import assert_retained_roundtrip
+
+    assert_retained_roundtrip(output, tmp_path, "analyze_pdf")
     assert fetch.await_count == 1
     assert close.calls == 1

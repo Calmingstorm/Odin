@@ -512,8 +512,11 @@ async def _execute_tool(
             f"{r['content'][:200]}"
             for r in results
         ]
+        formatted = "\n".join(lines)
+        if all(len(r["content"]) <= 200 for r in results) and len(formatted) <= 12000:
+            return formatted
         return RankedOutput(
-            "\n".join(lines),
+            formatted,
             matches=tuple(
                 f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
                 f"{r['content']}"
