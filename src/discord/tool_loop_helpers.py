@@ -99,7 +99,7 @@ def ensure_failure_visible(result_text: str, ok: bool) -> str:
         # Canonical envelopes carry status separately. Prefixing invalidates
         # JSON and can exceed the complete serialized-envelope budget.
         return result_text
-    if ok or result_text.lstrip().startswith(_ERROR_RESULT_PREFIXES):
+    if ok or result_text.lstrip().startswith((*_ERROR_RESULT_PREFIXES, "Failed to ")):
         return result_text
     return f"Error (tool reported failure):\n{result_text}"
 

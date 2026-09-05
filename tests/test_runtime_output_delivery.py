@@ -223,3 +223,33 @@ def test_configured_larger_envelope_not_recut_by_legacy_guards(tmp_path):
     assert isinstance(value, DeliveredOutput)
     assert truncate_tool_output(value, max_chars=1024) is value
     assert validate_tool_result("native", value).normalized is value
+
+
+@pytest.mark.parametrize("text,expected", [
+    ("Failed to ingest 'doc.md' durably.", "Failed to ingest 'doc.md' durably."),
+    ("apparently ordinary output", "Error (tool reported failure):\napparently ordinary output"),
+])
+def test_runtime_failure_preserves_existing_message(tmp_path, text, expected):
+    from src.tools.runtime_delivery import deliver_runtime_result
+
+    result = ToolResult(output=text, ok=False, error=text, tool_name="ingest_document")
+    delivered = deliver_runtime_result(
+        Executor(tmp_path / "evidence.sqlite"), result,
+        tool_name="ingest_document", tool_input={}, user_id="reader")
+    assert delivered.output == expected
+    assert delivered.ok is False
+    assert delivered.error == text
+    assert result.output == text
+
+
+def test_embedded_dispatcher_fallback_does_not_promise_unretained_output():
+    from src.tools.runtime_delivery import deliver_runtime_result
+
+    executor = SimpleNamespace(config=None)
+    kwargs = dict(tool_name="fixture", tool_input={}, user_id="reader")
+    assert deliver_runtime_result(executor, "short result", **kwargs) == "short result"
+    result = json.loads(deliver_runtime_result(executor, "x" * 20000, **kwargs))
+    assert result["retention"] != "retained"
+    assert not result.get("cursor")
+    image = {"__image_block__": {"type": "image", "data": "synthetic"}}
+    assert deliver_runtime_result(executor, image, **kwargs) is image

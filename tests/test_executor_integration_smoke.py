@@ -365,8 +365,12 @@ class TestProcessWithToolsEndToEnd:
         msg.attachments = []
         msg.webhook_id = None
 
-        with patch("src.discord.tool_loop.scrub_output_secrets", side_effect=lambda x: x), \
-             patch("src.discord.tool_loop.truncate_tool_output", side_effect=lambda x: x):
+        from src.tools.runtime_delivery import deliver_runtime_output
+
+        with patch(
+            "src.tools.runtime_delivery.deliver_runtime_output",
+            wraps=deliver_runtime_output,
+        ) as delivery:
             text, _already_sent, is_error, tools_used, _handoff = (
                 await bot.tool_loop.run(
                     msg,
@@ -376,6 +380,8 @@ class TestProcessWithToolsEndToEnd:
 
         # The executor actually ran the tool
         bot.tool_executor.execute.assert_called()
+        # Exercise (rather than replace) the real shared delivery guard.
+        assert any(call.kwargs["tool_name"] == "check_disk" for call in delivery.call_args_list)
         # The tool was tracked
         assert "check_disk" in tools_used
         # No error
