@@ -248,6 +248,10 @@ migration or config rewrite. Host Access remains a separate authorization
 policy, and `tools.default_host` is the explicit fallback for omitted-host
 system work; mapping order is never treated as policy.
 
+The Codex model selectors include `gpt-6-astra` for accounts where that model
+is entitled. Astra accepts `low` through `max` reasoning effort but rejects
+`none`; Odin validates that pair for main, fixed-agent, and per-spawn settings.
+
 Important sections include:
 
 | Section | Purpose |
