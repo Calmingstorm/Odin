@@ -84,24 +84,45 @@ def test_legacy_source_untouched_partial_append_not_consumed(tmp_path):
     index._conn.close()
 
 
-def test_restart_preserves_pre_identity_history_and_resumes_durable_cursor(tmp_path):
+def test_upgrade_reconciles_channel_once_and_resumes_durable_cursor(tmp_path):
     database = str(tmp_path / "fts.db")
     logger = ChannelLogger(tmp_path / "logs")
     index = FullTextIndex(database)
-    index.index_channel_messages([{"content": "historical exact marker", "channel_id": "42"}])
-    historical = index._conn.execute("SELECT rowid, * FROM channel_log_fts").fetchall()
-    logger.log_message(message(1, "first new marker"))
-    assert logger.index_to_fts(index) == 1
+    # Legacy rows have no identity; a compatibility caller may also have
+    # inserted tagged rows. Replaying the source must reconcile both kinds.
+    index.index_channel_messages([
+        {"content": "first marker", "channel_id": "42"},
+        {"content": "first marker", "channel_id": "42"},
+        {"content": "second marker", "channel_id": "42", "message_id": "2"},
+        {"content": "unrelated marker", "channel_id": "99"},
+    ])
+    unrelated = index._conn.execute(
+        "SELECT rowid, * FROM channel_log_fts WHERE channel_id='99'",
+    ).fetchall()
+    logger.log_message(message(1, "first marker"))
+    logger.log_message(message(2, "second marker"))
+    logger.log_message(message(2, "second marker"))
+    original_log = (tmp_path / "logs" / "42.jsonl").read_bytes()
+    assert logger.index_to_fts(index) == 2
+    assert index._conn.execute(
+        "SELECT count(*) FROM channel_log_fts WHERE channel_id='42'",
+    ).fetchone()[0] == 2
+    assert index._conn.execute(
+        "SELECT count(*) FROM channel_log_identity WHERE channel_id='42'",
+    ).fetchone()[0] == 2
+    assert (tmp_path / "logs" / "42.jsonl").read_bytes() == original_log
     cursor = index.channel_cursor("42")
     index._conn.close()
     logger = ChannelLogger(tmp_path / "logs")
     index = FullTextIndex(database)
     assert index.channel_cursor("42") == cursor
-    logger.log_message(message(2, "late equal timestamp marker"))
+    logger.log_message(message(3, "late equal timestamp marker"))
     assert logger.index_to_fts(index) == 1
     rows = index._conn.execute("SELECT rowid, * FROM channel_log_fts ORDER BY rowid").fetchall()
-    assert rows[:1] == historical
-    assert len(rows) == 3
+    assert index._conn.execute(
+        "SELECT rowid, * FROM channel_log_fts WHERE channel_id='99'",
+    ).fetchall() == unrelated
+    assert len(rows) == 4
     assert index.channel_cursor("42") != cursor
     assert logger.index_to_fts(index) == 0
     assert index._conn.execute(
@@ -119,3 +140,26 @@ def test_unavailable_index_and_empty_identity_do_not_claim_progress():
         index.channel_cursor("42")
     assert index.index_channel_batch([], channel_id="42", cursor_identity="next").status == "error"
     assert not index.remove_channel_message("42", "8")
+
+
+def test_upgrade_reconciliation_rolls_back_legacy_rows_on_failed_commit(tmp_path):
+    logger = ChannelLogger(tmp_path / "logs")
+    index = FullTextIndex(":memory:")
+    index.index_channel_messages([
+        {"content": "legacy", "channel_id": "42"},
+        {"content": "tagged", "channel_id": "42", "message_id": "1"},
+    ])
+    before_rows = index._conn.execute("SELECT rowid, * FROM channel_log_fts").fetchall()
+    before_ids = index._conn.execute("SELECT * FROM channel_log_identity").fetchall()
+    logger.log_message(message(1))
+    index._conn.execute("CREATE TRIGGER fail_cursor BEFORE INSERT ON channel_log_cursor "
+                        "BEGIN SELECT RAISE(ABORT, 'synthetic failure'); END")
+    assert logger.index_to_fts(index) == 0
+    assert index.channel_cursor("42") is None
+    assert index._conn.execute("SELECT rowid, * FROM channel_log_fts").fetchall() == before_rows
+    assert index._conn.execute("SELECT * FROM channel_log_identity").fetchall() == before_ids
+    index._conn.execute("DROP TRIGGER fail_cursor")
+    assert logger.index_to_fts(index) == 1
+    assert logger.index_to_fts(index) == 0
+    assert index._conn.execute("SELECT count(*) FROM channel_log_fts").fetchone()[0] == 1
+    index._conn.close()

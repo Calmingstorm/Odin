@@ -349,6 +349,22 @@ class FullTextIndex:
             ]
             with self._write_lock:
                 try:
+                    if channel_id is not None and cursor_identity is not None:
+                        has_cursor = self._conn.execute(
+                            "SELECT 1 FROM channel_log_cursor WHERE channel_id=?",
+                            (channel_id,),
+                        ).fetchone()
+                        if not has_cursor:
+                            # Upgrade from the pre-cursor index: untagged rows
+                            # cannot be deduplicated by message identity. Rebuild
+                            # only this channel, atomically with its first batch.
+                            self._conn.execute(
+                                "DELETE FROM channel_log_fts WHERE channel_id=?", (channel_id,),
+                            )
+                            self._conn.execute(
+                                "DELETE FROM channel_log_identity WHERE channel_id=?",
+                                (channel_id,),
+                            )
                     inserted = 0
                     for row, message in zip(rows, (m for m in messages if m.get("content"))):
                         message_id = str(message.get("message_id", "") or "")
