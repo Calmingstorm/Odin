@@ -1,8 +1,9 @@
 """Background process lifecycle management.
 
 Provides start/poll/write/kill/list operations for long-running processes
-spawned locally or on remote hosts. Each process gets a ring buffer of
-output lines (max 500) and is auto-killed after 1 hour.
+spawned locally or on remote hosts. Jobs retain a bounded 4 MiB output spool
+with generation-bound reads and a 24-hour post-exit evidence lifecycle.
+Execution is still auto-killed after 1 hour.
 """
 
 from __future__ import annotations
