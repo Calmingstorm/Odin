@@ -643,16 +643,24 @@ class AgentTaskTools:
             f"({len(steps)} steps). Progress will be posted to this channel."
         )
 
-    def _handle_list_tasks(self, inp: dict | None = None) -> str:
+    def _handle_list_tasks(
+        self, inp: dict | None = None, *, user_id: str = "", channel_id: str = ""
+    ) -> str:
         """List background tasks, or get detailed results for a specific task."""
-        if not self._channel_state.background_tasks:
-            return "No background tasks."
+        permissions = self._tool_executor._permission_manager
+        admin = (bool(user_id) and permissions is not None
+                 and permissions.get_tier(user_id) == "admin")
+        tasks = {
+            tid: task for tid, task in self._channel_state.background_tasks.items()
+            if admin or (bool(user_id) and task.requester_id == user_id
+                         and str(getattr(task.channel, "id", "")) == channel_id)
+        }
 
         task_id = (inp or {}).get("task_id")
 
         # Detailed view for a specific task
         if task_id:
-            task = self._channel_state.background_tasks.get(task_id)
+            task = tasks.get(task_id)
             if not task:
                 return f"No task found with ID `{task_id}`."
             lines = [
@@ -678,8 +686,10 @@ class AgentTaskTools:
             return text
 
         # Overview of all tasks
+        if not tasks:
+            return "No background tasks."
         lines = []
-        for tid, t in self._channel_state.background_tasks.items():
+        for tid, t in tasks.items():
             done = len(t.results)
             total = len(t.steps)
             ok = sum(1 for r in t.results if r.status == "ok")

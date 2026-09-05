@@ -45,7 +45,9 @@ log = get_logger("discord")
 
 # How each handler is invoked. The shapes mirror the exact call forms the
 # two old chains used — do not "simplify" a shape without checking both.
-Shape = Literal["msg_input", "input", "none", "msg_only", "author_input", "user_input"]
+Shape = Literal[
+    "msg_input", "input", "none", "msg_only", "author_input", "user_input", "scoped_input"
+]
 
 
 @dataclass
@@ -142,6 +144,8 @@ class NativeToolDispatcher:
                 result = handler(tool_input, str(message.author))
             elif shape == "user_input":
                 result = handler(user_id, tool_input)
+            elif shape == "scoped_input":
+                result = handler(tool_input, user_id=user_id, channel_id=str(message.channel.id))
             else:  # pragma: no cover — registration-time invariant
                 raise RuntimeError(f"unknown shape {shape!r} for {tool_name}")
             if asyncio.iscoroutine(result):
@@ -190,7 +194,7 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("delete_schedule", "scheduling", "_handle_delete_schedule", "input")
     d.register("parse_time", "scheduling", "_handle_parse_time", "input")
     d.register("search_history", "knowledge", "_handle_search_history", "input")
-    d.register("list_tasks", "agents", "_handle_list_tasks", "input")
+    d.register("list_tasks", "agents", "_handle_list_tasks", "scoped_input")
     d.register("cancel_task", "agents", "_handle_cancel_task", "input")
     d.register("stop_loop", "agents", "_handle_stop_loop", "input")
     d.register("search_knowledge", "knowledge", "_handle_search_knowledge", "input")
