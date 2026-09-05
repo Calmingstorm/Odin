@@ -13,8 +13,11 @@ def compact_retained_output(text: str) -> str | None:
     The compressor treats this envelope as structural metadata. If it cannot
     fit, its existing admission failure is safer than destroying the pointer.
     """
+    source = text
+    if "\n[output retention] " in text:
+        source = text.rsplit("\n[output retention] ", 1)[1]
     try:
-        value = json.loads(text)
+        value = json.loads(source)
     except (ValueError, TypeError):
         return None
     if not isinstance(value, dict):
@@ -29,6 +32,13 @@ def compact_retained_output(text: str) -> str | None:
             "tool": "get_tool_output",
             "arguments": {"cursor": f"{result_id}:{start}"},
         }
+    elif value.get("kind") == "process_output":
+        generation, pid = value.get("generation"), value.get("pid")
+        if not isinstance(generation, str) or type(pid) is not int:
+            return None
+        retrieval = {"tool": "manage_process", "arguments": {
+            "action": "poll", "pid": pid, "cursor": f"{generation}:0",
+        }}
     elif {"id", "preview", "original_bytes", "result_bytes", "error_bytes"} <= value.keys():
         if not isinstance(value["id"], str):
             return None
@@ -45,4 +55,6 @@ def compact_retained_output(text: str) -> str | None:
     }
     if value.get("expires_at"):
         compact["expires_at"] = value["expires_at"]
+    if value.get("exit_code") is not None:
+        compact["exit_code"] = value["exit_code"]
     return json.dumps(compact, ensure_ascii=True, separators=(",", ":"))

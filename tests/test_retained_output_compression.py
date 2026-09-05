@@ -75,3 +75,18 @@ def test_ordinary_result_compression_unchanged():
     work, saved = _truncate_iteration(_iteration("x" * 5000), 200)
     assert saved > 4500
     assert estimate_message_chars(work) <= 200
+
+
+@pytest.mark.parametrize("preview", [False, True])
+def test_process_page_and_default_poll_keep_the_generation_pointer(preview):
+    value = {"kind": "process_output", "pid": -8, "generation": "c" * 32,
+             "status": "exited", "exit_code": 7, "text": "x" * 5000}
+    text = json.dumps(value)
+    if preview:
+        text = "[PID -8] status=exited\n" + "x" * 5000 + "\n[output retention] " + text
+    compact = json.loads(compact_retained_output(text))
+    assert compact["retrieval"] == {"tool": "manage_process", "arguments": {
+        "action": "poll", "pid": -8, "cursor": f"{'c' * 32}:0",
+    }}
+    assert compact["exit_code"] == 7
+    assert compact_retained_output('{"kind":"process_output","pid":true}') is None
