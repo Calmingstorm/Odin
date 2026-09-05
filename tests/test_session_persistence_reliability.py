@@ -70,6 +70,14 @@ def test_successful_save_clears_dirty(tmp_path):
 
 
 def test_save_all_keeps_only_failed_dirty(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    # Atomic temporary names contain UUIDs. A random UUID containing "bad"
+    # must not make the successful channel look like an injected I/O failure.
+    monkeypatch.setattr(
+        "src.sessions.manager.uuid.uuid4",
+        lambda: SimpleNamespace(hex="0123456789bad0123456789abcdef01234"),
+    )
     mgr = _mgr(tmp_path)
     mgr.add_message("good", "user", "x", user_id="u1")
     mgr.add_message("bad", "user", "y", user_id="u1")
@@ -77,13 +85,15 @@ def test_save_all_keeps_only_failed_dirty(tmp_path, monkeypatch):
     real_write = Path.write_text
 
     def _selective(self, *a, **k):
-        if "bad" in self.name:
+        if self.name.startswith(".bad.") and self.suffix == ".tmp":
             raise OSError("nope")
         return real_write(self, *a, **k)
 
     monkeypatch.setattr(Path, "write_text", _selective)
     mgr.save_all()
     assert mgr._dirty == {"bad"}
+    assert json.loads((tmp_path / "good.json").read_text())["channel_id"] == "good"
+    assert not (tmp_path / "bad.json").exists()
 
 
 def test_save_all_remarks_previously_clean_session_on_failure(tmp_path, monkeypatch):
@@ -97,7 +107,7 @@ def test_save_all_remarks_previously_clean_session_on_failure(tmp_path, monkeypa
     real_write = Path.write_text
 
     def _fail_bad(self, *a, **k):
-        if "bad" in self.name:
+        if self.name.startswith(".bad.") and self.suffix == ".tmp":
             raise OSError("disk full")
         return real_write(self, *a, **k)
 
