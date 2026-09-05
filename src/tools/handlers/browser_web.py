@@ -89,11 +89,14 @@ class BrowserWebTools(HandlerBase):
 
         host = inp.get("host", "")
         if host:
-            resolved = self._resolve_host(host)
-            if not resolved:
+            lease = self._acquire_host(host)
+            if not lease:
                 return f"Unknown or disallowed host: {host}"
-            address, ssh_user, _os = resolved
+            target = lease.target
+            address, ssh_user = target.address, target.ssh_user
         else:
+            lease = None
+            target = None
             address = "127.0.0.1"
             ssh_user = "root"
 
@@ -104,7 +107,15 @@ class BrowserWebTools(HandlerBase):
             # whose prose happens to describe a rejection.
             return f"http_probe error: {e}", 1
 
-        code, output = await self._exec_command(address, cmd, ssh_user)
+        if lease is not None:
+            with lease:
+                code, output = await lease.run(
+                    lambda: self._exec_command(
+                        address, cmd, ssh_user, target=target
+                    )
+                )
+        else:
+            code, output = await self._exec_command(address, cmd, ssh_user)
         # curl's exit code is the ground truth and was being discarded: a
         # connection failure (exit 7, status_code 000) returned prose that
         # matched no error prefix, so the executor classified the probe as a

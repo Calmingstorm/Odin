@@ -1408,3 +1408,39 @@ async def test_spawn_agent_links_triggering_message_turn():
 
     assert not result.startswith("Error")
     assert deps.agent_manager.spawn.call_args.kwargs["turn_id"] == "4242"
+
+
+class TestAstraSpawnBoundary:
+    """gpt-6-astra per-spawn: accepted as an override, and the spawn boundary
+    rejects the one pair it cannot serve (effort none) through the shared
+    validator — never a per-model comparison scattered at the call site."""
+
+    @staticmethod
+    def _cfg(agent_model=None, agent_effort=None):
+        return SimpleNamespace(
+            openai_codex=SimpleNamespace(
+                agent_model=agent_model, agent_reasoning_effort=agent_effort
+            )
+        )
+
+    def test_override_parsed_on_auto_axes(self):
+        from src.discord.native_tools.agents_tasks import _parse_spawn_overrides
+
+        model, effort, err = _parse_spawn_overrides(
+            {"model": "gpt-6-astra", "reasoning_effort": "max"},
+            model_mode="auto", effort_mode="auto",
+        )
+        assert (model, effort, err) == ("gpt-6-astra", "max", None)
+
+    def test_pair_boundary_rejects_none_accepts_max(self):
+        from src.discord.native_tools.agents_tasks import _spawn_pair_error
+
+        client = _FakeEffortClient()
+        err = _spawn_pair_error(self._cfg(), client, "gpt-6-astra", "none")
+        assert err is not None and "gpt-6-astra" in err and "'none'" in err
+        assert _spawn_pair_error(self._cfg(), client, "gpt-6-astra", "max") is None
+        # Inherited pair: a fixed astra agent model under a "none" main effort
+        # is caught the same way (override beats fixed beats inherited-main).
+        client.reasoning_effort = "none"
+        err = _spawn_pair_error(self._cfg(agent_model="gpt-6-astra"), client, None, None)
+        assert err is not None and "gpt-6-astra" in err

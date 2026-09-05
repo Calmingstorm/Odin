@@ -41,6 +41,7 @@ export default {
                      @change="toggleDefaultHost(host, $event.target.checked)"
                      class="rounded border-gray-600 bg-gray-800" />
               <span class="text-gray-300">{{ host }}</span>
+              <span v-if="hostDescriptions[host]" class="text-gray-500 text-xs">— {{ hostDescriptions[host] }}</span>
             </label>
           </div>
           <div class="flex items-center gap-3">
@@ -81,7 +82,7 @@ export default {
               <tr>
                 <th>User</th>
                 <th v-for="host in availableHosts" :key="'th-'+host" class="text-center" style="min-width:90px">
-                  {{ host }}
+                  <div>{{ host }}</div><div v-if="hostDescriptions[host]" class="text-gray-500 text-xs font-normal">{{ hostDescriptions[host] }}</div>
                 </th>
                 <th class="text-center" style="min-width:120px">Default Host</th>
                 <th class="text-center" style="width:80px">Actions</th>
@@ -135,6 +136,7 @@ export default {
     const error = ref('');
     const data = ref(null);
     const availableHosts = ref([]);
+    const hostDescriptions = ref({});
     const defaultPolicy = ref({ allowed_hosts: [], default_host: '' });
     const users = ref({});
     const showAddUser = ref(false);
@@ -216,6 +218,7 @@ export default {
         if (generation !== fetchGeneration) return;
         data.value = hostResp;
         availableHosts.value = hostResp.available_hosts || [];
+        hostDescriptions.value = hostResp.host_descriptions || {};
         defaultPolicy.value = normalizeEntry(hostResp.default_policy, availableHosts.value);
         const rawUsers = hostResp.users || {};
         const normalized = {};
@@ -371,7 +374,7 @@ export default {
     onUnmounted(flushPendingSaves);
 
     return {
-      loading, error, data, availableHosts, defaultPolicy, users,
+      loading, error, data, availableHosts, hostDescriptions, defaultPolicy, users,
       showAddUser, members,
       fetchData, saveDefaultPolicy, toggleDefaultHost, getMember,
       toggleUserHost, setUserDefault, openAddUser, addUserById, deleteUser,

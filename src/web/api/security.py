@@ -117,23 +117,36 @@ def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
 
 def register_host_access(routes: web.RouteTableDef, bot) -> None:
     """Host access control (verbatim from the monolith)."""
+    _require_admin = admin_gate(bot)
     # ------------------------------------------------------------------
     # Host access control
     # ------------------------------------------------------------------
 
     @routes.get("/api/host-access")
-    async def get_host_access(_request: web.Request) -> web.Response:
+    async def get_host_access(request: web.Request) -> web.Response:
+        if denied := _require_admin(request):
+            return denied
         ham = getattr(bot, "host_access_manager", None)
         if not ham:
             return web.json_response({"error": "host access manager not available"}, status=503)
         return web.json_response({
             "available_hosts": ham.available_hosts,
+            "host_descriptions": (
+                {
+                    row["alias"]: row.get("description", "")
+                    for row in bot.host_registry.status_rows()
+                }
+                if getattr(bot, "host_registry", None) is not None
+                else {}
+            ),
             "default_policy": ham.default_policy.to_dict(),
             "users": ham.list_users(),
         })
 
     @routes.put("/api/host-access/user/{user_id}")
     async def set_host_access_user(request: web.Request) -> web.Response:
+        if denied := _require_admin(request):
+            return denied
         ham = getattr(bot, "host_access_manager", None)
         if not ham:
             return web.json_response({"error": "host access manager not available"}, status=503)
@@ -170,6 +183,8 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
 
     @routes.delete("/api/host-access/user/{user_id}")
     async def delete_host_access_user(request: web.Request) -> web.Response:
+        if denied := _require_admin(request):
+            return denied
         ham = getattr(bot, "host_access_manager", None)
         if not ham:
             return web.json_response({"error": "host access manager not available"}, status=503)
@@ -180,6 +195,8 @@ def register_host_access(routes: web.RouteTableDef, bot) -> None:
 
     @routes.put("/api/host-access/default-policy")
     async def set_host_access_default(request: web.Request) -> web.Response:
+        if denied := _require_admin(request):
+            return denied
         ham = getattr(bot, "host_access_manager", None)
         if not ham:
             return web.json_response({"error": "host access manager not available"}, status=503)

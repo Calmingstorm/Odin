@@ -12,6 +12,7 @@ exposed via the ``/api/startup/diagnostics`` REST endpoint for operators.
 from __future__ import annotations
 
 import json
+import re
 import sqlite3
 import time
 from dataclasses import dataclass, field
@@ -224,6 +225,11 @@ def check_ssh_hosts(tools_config: Any) -> DiagnosticResult:
 
     ssh_key = getattr(tools_config, "ssh_key_path", "")
     known_hosts = getattr(tools_config, "ssh_known_hosts_path", "")
+    needs_legacy_trust = any(
+        getattr(host, "address", "") not in {"127.0.0.1", "localhost", "::1"}
+        and getattr(host, "trust_mode", None) not in {"pinned", "tofu", "ca"}
+        for host in hosts.values()
+    )
     issues: list[str] = []
     meta: dict[str, Any] = {"host_count": len(hosts)}
 
@@ -233,10 +239,10 @@ def check_ssh_hosts(tools_config: Any) -> DiagnosticResult:
     elif ssh_key:
         meta["ssh_key_exists"] = True
 
-    if known_hosts and not Path(known_hosts).exists():
+    if needs_legacy_trust and known_hosts and not Path(known_hosts).exists():
         issues.append(f"Known hosts file not found: {known_hosts}")
         meta["known_hosts_exists"] = False
-    elif known_hosts:
+    elif needs_legacy_trust and known_hosts:
         meta["known_hosts_exists"] = True
 
     host_names = list(hosts.keys()) if isinstance(hosts, dict) else []
@@ -260,6 +266,86 @@ def check_ssh_hosts(tools_config: Any) -> DiagnosticResult:
         detail=f"{len(hosts)} SSH host(s) configured, key and known_hosts present",
         metadata=meta,
     )
+
+
+def check_host_inventory_compat(tools_config: Any) -> DiagnosticResult:
+    """Warn about legacy host shapes without turning an upgrade into an outage."""
+    hosts = getattr(tools_config, "hosts", {})
+    if not hosts:
+        return DiagnosticResult(
+            name="host_inventory_compat",
+            passed=True,
+            detail="No managed hosts configured — skipped",
+        )
+    alias_pattern = re.compile(r"^[A-Za-z][A-Za-z0-9_.-]{0,63}$")
+    issues: list[str] = []
+    for alias, host in hosts.items():
+        if not alias_pattern.fullmatch(alias):
+            issues.append(f"tools.hosts alias {alias!r} is not editable in the Hosts panel")
+        if getattr(host, "os", "linux") not in {"linux", "macos"}:
+            issues.append(
+                f"tools.hosts.{alias}.os={getattr(host, 'os', '')!r} is legacy-only"
+            )
+        if (
+            getattr(host, "trust_mode", "legacy") in {"pinned", "tofu", "ca"}
+            and not getattr(host, "host_keys", [])
+        ):
+            issues.append(f"tools.hosts.{alias} has no usable pinned host key")
+    configured = set(hosts)
+    dangling = set(
+        getattr(getattr(tools_config, "governor", None), "host_overrides", {})
+    ) - configured
+    if dangling:
+        issues.append(
+            "tools.governor.host_overrides names unknown hosts: "
+            + ", ".join(sorted(dangling))
+        )
+    default_host = getattr(tools_config, "default_host", "")
+    if default_host and default_host not in configured:
+        issues.append(f"tools.default_host names unknown host {default_host!r}")
+    if issues:
+        return DiagnosticResult(
+            name="host_inventory_compat",
+            passed=False,
+            detail="; ".join(issues),
+            recommendation=(
+                "Existing entries remain loaded. Normalize them through config.yml or the "
+                "Hosts and Host Access panels before relying on omitted-host execution."
+            ),
+            metadata={"issue_count": len(issues)},
+        )
+    return DiagnosticResult(
+        name="host_inventory_compat",
+        passed=True,
+        detail="Managed-host inventory and explicit defaults are coherent",
+        metadata={"host_count": len(hosts)},
+    )
+
+
+def warn_missing_host_defaults(tools_config: Any, host_access_manager: Any) -> list[str]:
+    """Warn when omitted-host work lost its former YAML-order fallback."""
+    hosts: Any = getattr(tools_config, "hosts", {})
+    default_host: Any = getattr(tools_config, "default_host", "")
+    if not hosts or default_host:
+        return []
+    entries = [("default_policy", host_access_manager.default_policy.to_dict())]
+    entries.extend(
+        (f"users.{user_id}", entry)
+        for user_id, entry in host_access_manager.list_users().items()
+    )
+    missing = [
+        name
+        for name, entry in entries
+        if entry.get("allowed_hosts") != [] and not entry.get("default_host")
+    ]
+    if missing:
+        log.warning(
+            "Managed-host default selection changed: tools.default_host is unset and %s "
+            "has no policy default. Omitted-host work now requires an explicit host; YAML "
+            "inventory order is no longer used.",
+            ", ".join(missing),
+        )
+    return missing
 
 
 def check_sessions_directory(sessions_config: Any) -> DiagnosticResult:
@@ -585,6 +671,7 @@ _CONFIG_CHECKS = [
     ("codex_credentials", check_codex_credentials, "openai_codex"),
     ("codex_model", check_codex_model, "openai_codex"),
     ("ssh_hosts", check_ssh_hosts, "tools"),
+    ("host_inventory_compat", check_host_inventory_compat, "tools"),
     ("sessions_directory", check_sessions_directory, "sessions"),
     ("knowledge_db", check_knowledge_db, "search"),
     # Full Config, not only ToolsConfig: every relocatable live-state path

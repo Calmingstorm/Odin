@@ -502,23 +502,31 @@ END {
             pdf_bytes = resp.body
         elif host and path:
             # Fetch from host as bounded raw bytes
-            resolved = self._resolve_host(host)
-            if not resolved:
+            lease = self._acquire_host(host)
+            if not lease:
                 return f"Unknown or disallowed host: {host}", 1
-            address, ssh_user, _os = resolved
-            # Binary payloads do NOT travel the text pipeline: base64 over
-            # stdout was truncated at MAX_OUTPUT_CHARS, so any PDF over roughly
-            # 12KB arrived corrupt and failed to decode (adversarial review).
-            from ..ssh import read_binary_file
+            try:
+                target = lease.target
+                address, ssh_user = target.address, target.ssh_user
+                # Binary payloads do NOT travel the text pipeline: base64 over
+                # stdout was truncated at MAX_OUTPUT_CHARS, so any PDF over roughly
+                # 12KB arrived corrupt and failed to decode (adversarial review).
+                from ..ssh import read_binary_file
 
-            pdf_bytes, read_error = await read_binary_file(
-                address,
-                path,
-                max_bytes=_ANALYZE_PDF_MAX_BYTES,
-                ssh_key_path=self.config.ssh_key_path,
-                known_hosts_path=self.config.ssh_known_hosts_path,
-                ssh_user=ssh_user,
-            )
+                pdf_bytes, read_error = await lease.run(
+                    lambda: read_binary_file(
+                        address,
+                        path,
+                        max_bytes=_ANALYZE_PDF_MAX_BYTES,
+                        ssh_key_path=target.key_path,
+                        known_hosts_path=target.known_hosts_path,
+                        ssh_user=ssh_user,
+                        port=target.port,
+                        host_key_alias=target.host_key_alias,
+                    )
+                )
+            finally:
+                lease.release()
             if read_error:
                 return f"Failed to read PDF from host: {read_error}", 1
         else:

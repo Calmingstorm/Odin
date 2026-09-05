@@ -160,6 +160,7 @@ class SkillTools:
                 skill_input,
                 message_callback=self._skill_message_cb(message),
                 file_callback=self._skill_file_cb(message, skill_file_delivery),
+                requester_id=user_id,
             )
             return result, effects
 
@@ -170,6 +171,7 @@ class SkillTools:
                 tool_input,
                 message_callback=self._skill_message_cb(message),
                 file_callback=self._skill_file_cb(message, skill_file_delivery),
+                requester_id=user_id,
             )
             return result, effects
 

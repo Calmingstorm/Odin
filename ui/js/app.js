@@ -62,6 +62,7 @@ const routes = [
   { path: '/logs',       redirect: legacyTabRedirect('/system', 'logs') },
   { path: '/config',     redirect: legacyTabRedirect('/system', 'config') },
   { path: '/host-access', redirect: legacyTabRedirect('/system', 'host-access') },
+  { path: '/hosts',       redirect: legacyTabRedirect('/system', 'hosts') },
   { path: '/internals',  redirect: legacyTabRedirect('/system', 'internals') },
 ];
 

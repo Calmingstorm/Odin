@@ -8,7 +8,6 @@ helper. ``get_config`` is a provider callable (config hot-reload).
 
 from __future__ import annotations
 
-import asyncio
 import base64
 import io
 import os
@@ -97,62 +96,51 @@ class MediaTools:
         if not host_alias or not path:
             return "Both 'host' and 'path' are required."
 
-        resolved = self.tool_executor._resolve_host(host_alias)
-        if not resolved:
+        requester_id = str(getattr(getattr(message, "author", None), "id", "")) or None
+        lease = self.tool_executor.acquire_host_for_user(host_alias, requester_id)
+        if not lease:
             return f"Unknown or disallowed host: {host_alias}"
-        address, ssh_user, _os = resolved
+        try:
+            target = lease.target
+            address, ssh_user = target.address, target.ssh_user
 
-        # Local fast path — no SSH gymnastics needed.
-        from ...tools.ssh import is_local_address
+            # Local fast path — no SSH gymnastics needed.
+            from ...tools.ssh import is_local_address
 
-        if is_local_address(address):
-            try:
-                with open(path, "rb") as f:
-                    file_bytes = f.read()
-            except FileNotFoundError:
-                return f"File not found: {path}"
-            except PermissionError:
-                return f"Permission denied reading file: {path}"
-            except OSError as exc:
-                return f"Failed to read file: {exc}"
-        else:
-            # Fetch file as base64 via SSH (handles binary safely)
-            import shlex
+            if is_local_address(address):
+                try:
+                    with open(path, "rb") as f:
+                        file_bytes = f.read()
+                except FileNotFoundError:
+                    return f"File not found: {path}"
+                except PermissionError:
+                    return f"Permission denied reading file: {path}"
+                except OSError as exc:
+                    return f"Failed to read file: {exc}"
+            else:
+                try:
+                    from ...tools.ssh import read_binary_file
 
-            config = self.get_config()
-            safe_path = shlex.quote(path)
-            ssh_args = [
-                "ssh",
-                "-i",
-                config.tools.ssh_key_path,
-                "-o",
-                f"UserKnownHostsFile={config.tools.ssh_known_hosts_path}",
-                "-o",
-                "StrictHostKeyChecking=yes",
-                "-o",
-                "ConnectTimeout=10",
-                "-o",
-                "BatchMode=yes",
-                f"{ssh_user}@{address}",
-                f"base64 {safe_path}",
-            ]
-            try:
-                proc = await asyncio.create_subprocess_exec(
-                    *ssh_args,
-                    stdout=asyncio.subprocess.PIPE,
-                    stderr=asyncio.subprocess.PIPE,
-                )
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=30)
-                if proc.returncode != 0:
-                    return (
-                        "Failed to fetch file: "
-                        f"{stderr.decode('utf-8', errors='replace').strip()}"
+                    file_bytes, read_error = await lease.run(
+                        lambda: read_binary_file(
+                            address,
+                            path,
+                            max_bytes=25 * 1024 * 1024 + 1,
+                            ssh_key_path=target.key_path,
+                            known_hosts_path=target.known_hosts_path,
+                            ssh_user=ssh_user,
+                            port=target.port,
+                            host_key_alias=target.host_key_alias,
+                        )
                     )
-                file_bytes = base64.b64decode(stdout)
-            except TimeoutError:
-                return "File fetch timed out (30s)."
-            except Exception as e:
-                return f"Failed to fetch file: {e}"
+                    if read_error or file_bytes is None:
+                        return f"Failed to fetch file: {read_error}"
+                except TimeoutError:
+                    return "File fetch timed out (30s)."
+                except Exception as e:
+                    return f"Failed to fetch file: {e}"
+        finally:
+            lease.release()
 
         if not file_bytes:
             return f"File not found or empty: {path}"
@@ -224,24 +212,32 @@ class MediaTools:
         elif host and path:
             # Fetch from host as bounded raw bytes
 
-            resolved = self.tool_executor._resolve_host(host)
-            if not resolved:
+            requester_id = str(getattr(getattr(message, "author", None), "id", "")) or None
+            lease = self.tool_executor.acquire_host_for_user(host, requester_id)
+            if not lease:
                 return f"Unknown or disallowed host: {host}"
-            address, ssh_user, _os = resolved
-            # Same defect as analyze_pdf: base64 over the text pipeline is
-            # truncated at MAX_OUTPUT_CHARS, so any image over roughly 12KB
-            # arrived corrupt (adversarial review). Raw bounded bytes instead.
-            from ...tools.ssh import read_binary_file
+            try:
+                target = lease.target
+                address, ssh_user = target.address, target.ssh_user
+                # Same defect as analyze_pdf: base64 over the text pipeline is
+                # truncated at MAX_OUTPUT_CHARS, so any image over roughly 12KB
+                # arrived corrupt (adversarial review). Raw bounded bytes instead.
+                from ...tools.ssh import read_binary_file
 
-            cfg = self.tool_executor.config
-            image_bytes, read_error = await read_binary_file(
-                address,
-                path,
-                max_bytes=_ANALYZE_IMAGE_MAX_BYTES,
-                ssh_key_path=cfg.ssh_key_path,
-                known_hosts_path=cfg.ssh_known_hosts_path,
-                ssh_user=ssh_user,
-            )
+                image_bytes, read_error = await lease.run(
+                    lambda: read_binary_file(
+                        address,
+                        path,
+                        max_bytes=_ANALYZE_IMAGE_MAX_BYTES,
+                        ssh_key_path=target.key_path,
+                        known_hosts_path=target.known_hosts_path,
+                        ssh_user=ssh_user,
+                        port=target.port,
+                        host_key_alias=target.host_key_alias,
+                    )
+                )
+            finally:
+                lease.release()
             if read_error:
                 return f"Failed to read image from host: {read_error}"
         else:

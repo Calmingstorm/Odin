@@ -96,6 +96,8 @@ class ToolResult:
     risk_reason: str = ""
     requires_validation: bool = False
     validation_reason: str = ""
+    # External effect may have happened but settlement could not be observed.
+    uncertain_outcome: bool = False
     # Non-model-facing structured record for the audit log (never in output).
     # Bounded, non-sensitive enums/metadata only — no prompts, IDs, or payloads.
     audit_metadata: dict | None = None
@@ -119,6 +121,8 @@ class ToolResult:
         if self.risk_level != "low":
             d["risk_level"] = self.risk_level
             d["risk_reason"] = self.risk_reason
+        if self.uncertain_outcome:
+            d["uncertain_outcome"] = True
         return d
 
 

@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 from src.discord.native_tools.media import MediaTools
+from src.tools.hosts import HostRegistry
 
 PNG = b"\x89PNG\r\n\x1a\n" + b"\x00" * 32
 
@@ -33,6 +34,14 @@ def _config(comfy_enabled=True):
 def _executor(resolve=("1.2.3.4", "root", "linux"), exec_ret=(0, "")):
     ex = MagicMock()
     ex._resolve_host = MagicMock(return_value=resolve)
+    if resolve is None:
+        ex.acquire_host_for_user = MagicMock(return_value=None)
+    else:
+        ex.acquire_host_for_user = MagicMock(
+            side_effect=lambda alias, _user_id=None: HostRegistry.unmanaged_lease(
+                alias, resolve
+            )
+        )
     ex._exec_command = AsyncMock(return_value=exec_ret)
     return ex
 

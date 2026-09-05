@@ -199,6 +199,17 @@ EXPECTED_ROUTES = [
     ("PUT", "/api/host-access/user/{user_id}", "set_host_access_user"),
     ("DELETE", "/api/host-access/user/{user_id}", "delete_host_access_user"),
     ("PUT", "/api/host-access/default-policy", "set_host_access_default"),
+    ("GET", "/api/hosts", "list_hosts"),
+    ("POST", "/api/hosts/settings", "set_host_settings"),
+    ("GET", "/api/hosts/public-key", "get_public_key"),
+    ("POST", "/api/hosts/candidates", "prepare_candidate"),
+    ("POST", "/api/hosts/{alias}/import-legacy", "import_legacy"),
+    ("POST", "/api/hosts/candidates/{token}/test", "test_candidate"),
+    ("POST", "/api/hosts/candidates/{token}/commit", "commit_candidate"),
+    ("POST", "/api/hosts/{alias}/enabled", "set_host_enabled"),
+    ("GET", "/api/hosts/{alias}/references", "get_references"),
+    ("DELETE", "/api/hosts/{alias}", "delete_host"),
+    ("POST", "/api/hosts/{alias}/force-revoke", "force_revoke"),
     ("GET", "/api/tokens", "list_api_tokens"),
     ("POST", "/api/tokens", "create_api_token"),
     ("PUT", "/api/tokens/{user_id}", "update_api_token"),
@@ -248,7 +259,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 200
+        assert len(actual) == len(expected) == 211
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

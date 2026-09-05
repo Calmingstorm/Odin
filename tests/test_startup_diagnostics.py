@@ -18,10 +18,12 @@ from src.health.startup import (
     check_config_sections,
     check_data_directories,
     check_discord_token,
+    check_host_inventory_compat,
     check_knowledge_db,
     check_sessions_directory,
     check_ssh_hosts,
     run_startup_diagnostics,
+    warn_missing_host_defaults,
 )
 
 # ---------------------------------------------------------------------------
@@ -766,7 +768,51 @@ class TestConfigChecksRegistry:
         assert len(names) == len(set(names)), "Duplicate check names"
 
     def test_check_count(self):
-        assert len(_CONFIG_CHECKS) == 8
+        assert len(_CONFIG_CHECKS) == 9
+
+
+def test_host_inventory_compat_warns_without_rejecting_legacy_shapes():
+    cfg = MagicMock()
+    cfg.hosts = {
+        "1box": MagicMock(os="Windows", trust_mode="legacy"),
+        "host with space": MagicMock(os="Linux", trust_mode="legacy"),
+    }
+    cfg.governor.host_overrides = {"removed-host": "allow"}
+    cfg.default_host = "missing"
+    result = check_host_inventory_compat(cfg)
+    assert result.passed is False
+    assert "1box" in result.detail
+    assert "host with space" in result.detail
+    assert "legacy-only" in result.detail
+    assert "removed-host" in result.detail
+    assert "missing" in result.detail
+    assert "Existing entries remain loaded" in result.recommendation
+
+    pinned_without_key = MagicMock(os="linux", trust_mode="pinned", host_keys=[])
+    pinned_cfg = MagicMock(hosts={"build": pinned_without_key}, default_host="build")
+    pinned_cfg.governor.host_overrides = {}
+    pinned_result = check_host_inventory_compat(pinned_cfg)
+    assert pinned_result.passed is False
+    assert "no usable pinned host key" in pinned_result.detail
+
+
+def test_missing_host_defaults_warning_names_only_affected_entries(caplog):
+    tools = MagicMock(hosts={"build": object()}, default_host="")
+    access = MagicMock()
+    access.default_policy.to_dict.return_value = {
+        "allowed_hosts": None,
+        "default_host": "",
+    }
+    access.list_users.return_value = {
+        "missing": {"allowed_hosts": ["build"], "default_host": ""},
+        "denied": {"allowed_hosts": [], "default_host": ""},
+        "ready": {"allowed_hosts": ["build"], "default_host": "build"},
+    }
+    assert warn_missing_host_defaults(tools, access) == [
+        "default_policy",
+        "users.missing",
+    ]
+    assert "YAML inventory order is no longer used" in caplog.text
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +911,11 @@ class TestRealWorldScenarios:
         # MagicMock attribute is not a workspace (PR #239).
         yaml_cfg.tools.local_working_dir = str(_usable_workspace())
         yaml_cfg.tools.hosts = {"web1": MagicMock(), "db1": MagicMock()}
+        for host in yaml_cfg.tools.hosts.values():
+            host.os = "linux"
+            host.trust_mode = "legacy"
+        yaml_cfg.tools.governor.host_overrides = {}
+        yaml_cfg.tools.default_host = "web1"
         yaml_cfg.tools.ssh_key_path = str(ssh_key)
         yaml_cfg.tools.ssh_known_hosts_path = str(known_hosts)
         yaml_cfg.sessions = MagicMock()

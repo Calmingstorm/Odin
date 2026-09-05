@@ -60,7 +60,7 @@ _AUTH_SKIP_PATHS = AUTH_PUBLIC_EXACT
 # ~80 mutating routes, leaving a self-escalation path.
 ADMIN_ONLY_PREFIXES = (
     "/api/config", "/api/reload", "/api/setup",
-    "/api/permissions", "/api/host-access",
+    "/api/permissions", "/api/host-access", "/api/hosts",
     "/api/update", "/api/codex", "/api/llm",
     "/api/ollama", "/api/kimi", "/api/skills",
     "/api/mcp", "/api/tokens", "/api/personality",

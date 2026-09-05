@@ -141,12 +141,12 @@ export default {
               <label class="text-xs text-gray-400 block">Reasoning
               <select v-model="codexForm.reasoning_effort" @change="saveCodexConfigDebounced"
                       class="hm-input">
-                <option value="none">None</option>
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="xhigh">Extra High</option>
-                <option v-if="mainMaxAllowed" value="max">Max</option>
+                <option v-if="mainEffortAllowed('none')" value="none">None</option>
+                <option v-if="mainEffortAllowed('low')" value="low">Low</option>
+                <option v-if="mainEffortAllowed('medium')" value="medium">Medium</option>
+                <option v-if="mainEffortAllowed('high')" value="high">High</option>
+                <option v-if="mainEffortAllowed('xhigh')" value="xhigh">Extra High</option>
+                <option v-if="mainEffortAllowed('max')" value="max">Max</option>
               </select>
               </label>
             </div>
@@ -156,12 +156,12 @@ export default {
                       class="hm-input">
                 <option value="">Inherit chat setting</option>
                 <option value="auto">Auto — choose per spawn</option>
-                <option value="none">None</option>
-                <option value="low">Low</option>
-                <option value="medium">Medium</option>
-                <option value="high">High</option>
-                <option value="xhigh">Extra High</option>
-                <option v-if="agentMaxAllowed" value="max">Max</option>
+                <option v-if="agentEffortAllowed('none')" value="none">None</option>
+                <option v-if="agentEffortAllowed('low')" value="low">Low</option>
+                <option v-if="agentEffortAllowed('medium')" value="medium">Medium</option>
+                <option v-if="agentEffortAllowed('high')" value="high">High</option>
+                <option v-if="agentEffortAllowed('xhigh')" value="xhigh">Extra High</option>
+                <option v-if="agentEffortAllowed('max')" value="max">Max</option>
               </select>
               </label>
             </div>
@@ -617,9 +617,10 @@ export default {
 
     // Codex model catalog — ONE ordered list renders the Model, Agent Model,
     // and Auxiliary Model selects so the dropdowns can never drift apart.
-    // The 5.6 family first, then gpt-5.5 beneath it. The defunct gpt-4.1/
-    // gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
-    const CODEX_MODELS = ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
+    // gpt-6-astra (GPT-6, served-but-unlisted, Personal/Pro rollout 2026-09-04)
+    // first, then the 5.6 family, then gpt-5.5 beneath it. The defunct
+    // gpt-4.1/gpt-4o/gpt-4o-mini/gpt-5/gpt-5-mini entries were removed.
+    const CODEX_MODELS = ['gpt-6-astra', 'gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.5'];
     // model/agent_model are free strings server-side: an unknown configured
     // value (hand-edited or future model) must render as a temporary option —
     // a blank select would let the next save silently replace it.
@@ -633,39 +634,48 @@ export default {
       // inject them as a temporary/unknown option, which would duplicate them.
       return v && v !== 'auto' && !CODEX_MODELS.includes(v) ? [v, ...CODEX_MODELS] : CODEX_MODELS;
     });
-    // "max" is gpt-5.6-family only (mirrors config.schema
-    // CODEX_MODEL_UNSUPPORTED_EFFORTS; the server 400s the pair). Both
-    // directions are guarded here because the full-form debounced save would
-    // otherwise carry a hidden-but-still-selected invalid value: the Max
-    // option hides when its governing model can't serve it, AND an excluded
-    // model can't be selected while "max" is (or would become) that axis's
-    // effective effort. Agent Model "auto" always offers Max — the per-spawn
-    // pair is validated at execution.
-    const MAX_EXCLUDED_MODELS = ['gpt-5.5', 'gpt-5.4', 'gpt-5.4-mini'];
-    const mainMaxAllowed = computed(() =>
-      !MAX_EXCLUDED_MODELS.includes(codexForm.value.model)
-      // A fixed excluded agent model inheriting the chat effort would turn
-      // "max" here into an invalid agent pair — hide Max then too.
-      && !(MAX_EXCLUDED_MODELS.includes(codexForm.value.agent_model)
-           && codexForm.value.agent_reasoning_effort === ''));
-    const agentMaxAllowed = computed(() => {
+    // Per-model efforts the server rejects per-request — a MIRROR of
+    // config.schema.CODEX_MODEL_UNSUPPORTED_EFFORTS, pinned by
+    // tests/test_ui_effort_mirror.py so the dropdowns can never drift from the
+    // four server-side boundaries. "max" is gpt-5.6-family-and-newer only;
+    // gpt-6-astra rejects "none". Both directions are guarded here because the
+    // full-form debounced save would otherwise carry a hidden-but-still-
+    // selected invalid value: an effort option hides when its governing model
+    // can't serve it, AND a model can't be selected while that axis's
+    // effective effort is one the model rejects. Agent Model "auto" always
+    // offers every effort — the per-spawn pair is validated at execution.
+    const UNSUPPORTED_EFFORTS = {
+      'gpt-5.5': ['max'],
+      'gpt-5.4': ['max'],
+      'gpt-5.4-mini': ['max'],
+      'gpt-6-astra': ['none'],
+    };
+    const modelRejects = (model, effort) =>
+      Boolean(model) && Boolean(effort) && (UNSUPPORTED_EFFORTS[model] || []).includes(effort);
+    // Main (chat) axis: the chat model must serve the effort, and so must a
+    // fixed agent model that inherits the chat effort.
+    const mainEffortAllowed = (effort) =>
+      !modelRejects(codexForm.value.model, effort)
+      && !(codexForm.value.agent_reasoning_effort === ''
+           && modelRejects(codexForm.value.agent_model, effort));
+    // Agent axis: governed by the agent model, or the chat model when
+    // inheriting; "auto" defers to spawn-time validation.
+    const agentEffortAllowed = (effort) => {
       const am = codexForm.value.agent_model;
       if (am === 'auto') return true;
-      return !MAX_EXCLUDED_MODELS.includes(am || codexForm.value.model);
-    });
-    const agentEffortEffectiveMax = computed(() => {
+      return !modelRejects(am || codexForm.value.model, effort);
+    };
+    const agentEffectiveEffort = computed(() => {
       const ae = codexForm.value.agent_reasoning_effort;
-      if (ae === 'auto') return false;
-      return (ae || codexForm.value.reasoning_effort) === 'max';
+      if (ae === 'auto') return null;
+      return ae || codexForm.value.reasoning_effort;
     });
     const mainModelOptionDisabled = (m) =>
-      MAX_EXCLUDED_MODELS.includes(m)
-      && (codexForm.value.reasoning_effort === 'max'
-          // Inherit-chain: agents inheriting this model while their effective
-          // effort is max would become an invalid pair.
-          || (codexForm.value.agent_model === '' && agentEffortEffectiveMax.value));
-    const agentModelOptionDisabled = (m) =>
-      MAX_EXCLUDED_MODELS.includes(m) && agentEffortEffectiveMax.value;
+      modelRejects(m, codexForm.value.reasoning_effort)
+      // Inherit-chain: agents inheriting this model while their effective
+      // effort is one it rejects would become an invalid pair.
+      || (codexForm.value.agent_model === '' && modelRejects(m, agentEffectiveEffort.value));
+    const agentModelOptionDisabled = (m) => modelRejects(m, agentEffectiveEffort.value);
     // --- Auxiliary (cheap-model) ---
     const auxForm = ref({ enabled: false, model: 'gpt-5.6-luna' });
     const auxData = ref({ unavailable_reason: null });
@@ -1288,7 +1298,7 @@ export default {
     return {
       loading, llmStatus, llmStatusLoadFailed, selectedProvider, switching, advancedOpen,
       codexForm, codexModelOptions, codexAgentModelOptions,
-      mainMaxAllowed, agentMaxAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
+      mainEffortAllowed, agentEffortAllowed, mainModelOptionDisabled, agentModelOptionDisabled,
       auxForm, auxData, auxModelOptions, onAuxModelChange, savingAux, saveAuxConfigDebounced,
       ollamaForm, kimiForm, savingCodex, savingOllama, savingKimi, probingOllama, ollamaKeyDirty, kimiKeyDirty,
       fetchCodexStatus,

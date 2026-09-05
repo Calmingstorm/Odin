@@ -53,6 +53,7 @@ from .config_admin import (
     register_startup_diagnostics,
     register_status_info,
 )
+from .hosts import register_hosts
 from .integrations import (
     register_grafana_alerts,
     register_issue_tracker,
@@ -189,6 +190,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_kimi_admin(routes, bot)
 
     register_host_access(routes, bot)
+
+    register_hosts(routes, bot)
 
     register_api_tokens(routes, bot)
 

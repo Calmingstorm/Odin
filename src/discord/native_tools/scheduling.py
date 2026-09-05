@@ -44,7 +44,9 @@ class SchedulingTools:
             if tool_input is None or (isinstance(tool_input, dict) and not tool_input):
                 shortcut_cmd = inp.get("command")
                 if shortcut_cmd and tool_name == "run_command":
-                    tool_input = {"host": inp.get("host", "localhost"), "command": shortcut_cmd}
+                    tool_input = {"command": shortcut_cmd}
+                    if inp.get("host"):
+                        tool_input["host"] = inp["host"]
                     inp["tool_input"] = tool_input
                 else:
                     tool_input = self._extract_tool_input_from_steps(inp)

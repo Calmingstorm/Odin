@@ -2507,6 +2507,8 @@ class ToolLoopRunner:
             elapsed_ms = tool_result.duration_ms or elapsed_ms
             if tool_result.error and not error:
                 error = tool_result.error
+            if tool_result.uncertain_outcome:
+                uncertain_outcome = True
             if not tool_result.ok and not error:
                 error = "tool reported failure"
             result = ensure_failure_visible(result, tool_result.ok)

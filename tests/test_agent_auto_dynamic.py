@@ -180,6 +180,14 @@ class TestEffortCatalogueFiltering:
         assert field["enum"] == ["none", "low", "medium", "high", "xhigh"]
         assert "max" not in desc
 
+    @pytest.mark.parametrize("name", ["spawn_agent", "spawn_loop_agents"])
+    def test_fixed_astra_drops_none_keeps_max(self, name):
+        from src.tools.defs.agents import spawn_effort_clause
+
+        field, desc = self._effort_schema(_cfg("gpt-6-astra", "auto"), name)
+        assert field["enum"] == ["low", "medium", "high", "xhigh", "max"]
+        assert spawn_effort_clause(field["enum"]) in desc
+
     @pytest.mark.parametrize("model", ["gpt-5.6-sol", "gpt-5.6-luna", "brand-new-model"])
     def test_capable_and_unknown_models_keep_full_ordered_enum(self, model):
         field, desc = self._effort_schema(_cfg(model, "auto"), "spawn_agent")

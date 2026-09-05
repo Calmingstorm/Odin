@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import re
+import uuid
 from pathlib import Path
 from typing import Literal, get_args
 
@@ -41,9 +42,62 @@ class SessionsConfig(BaseModel):
 
 
 class ToolHost(BaseModel):
+    """One managed execution target.
+
+    The first three fields are the complete legacy shape. Every control-plane
+    field therefore has a default: loading an existing config is read-only and
+    preserves its pre-control-plane behaviour until an operator deliberately
+    edits or enrolls the host.
+    """
+
     address: str
     ssh_user: str = "root"
-    os: str = "linux"  # "linux" or "macos"
+    # Kept deliberately open at config-load time.  Older releases accepted
+    # arbitrary strings here; the admin control plane enforces linux/macos on
+    # every mutation without making an existing installation unbootable.
+    os: str = "linux"
+    port: int = Field(default=22, ge=1, le=65535)
+    description: str = ""
+    enabled: bool = True
+    # Empty on legacy records. HostRegistry derives a deterministic in-memory
+    # identity and the dedicated control plane persists it on first mutation;
+    # boot never rewrites config.yml.
+    host_id: str = ""
+    trust_mode: Literal["legacy", "pinned", "ca", "tofu"] = "legacy"
+    # Public OpenSSH key material only. Private keys never belong here.
+    host_keys: list[str] = Field(default_factory=list)
+
+    @field_validator("description", "host_id")
+    @classmethod
+    def _host_text(cls, value: str, info):
+        limits = {"address": 253, "ssh_user": 64, "description": 200, "host_id": 64}
+        if len(value) > limits[info.field_name]:
+            raise ValueError(f"{info.field_name} is too long")
+        if any(ord(char) < 32 or ord(char) == 127 for char in value):
+            raise ValueError(f"{info.field_name} contains control characters")
+        return value
+
+    @field_validator("host_id")
+    @classmethod
+    def _valid_host_id(cls, value: str) -> str:
+        if value:
+            try:
+                parsed = uuid.UUID(value)
+            except ValueError:
+                raise ValueError("host_id must be a UUID") from None
+            if str(parsed) != value.lower():
+                raise ValueError("host_id must use canonical UUID form")
+        return value
+
+    @field_validator("host_keys")
+    @classmethod
+    def _public_host_keys_only(cls, values: list[str]) -> list[str]:
+        for value in values:
+            if len(value) > 24_000 or any(
+                ord(char) < 32 or ord(char) == 127 for char in value
+            ):
+                raise ValueError("host_keys contains malformed key material")
+        return values
 
 
 class RetryConfig(BaseModel):
@@ -231,7 +285,6 @@ class GovernorConfig(BaseModel):
     admin_can_override: bool = True
     host_overrides: dict[str, str] = Field(default_factory=dict)
 
-
 # The default local command workspace, spelled ONCE: the field default, the
 # blank-value normalizer, the tracked config.yml template and the packaging
 # scripts must never drift apart.
@@ -244,6 +297,11 @@ class ToolsConfig(BaseModel):
     ssh_key_path: str = "/app/.ssh/id_ed25519"
     ssh_known_hosts_path: str = "/app/.ssh/known_hosts"
     hosts: dict[str, ToolHost] = Field(default_factory=dict)
+    # Omitted-host execution is never selected by YAML mapping order. Empty
+    # means callers must choose a host unless requester policy supplies one.
+    default_host: str = ""
+    # Break-glass first-use trust must be explicitly enabled by an operator.
+    allow_host_tofu: bool = False
     command_timeout_seconds: int = 300
     tool_timeouts: dict[str, int] = Field(default_factory=dict)
     skill_allowed_urls: list[str] = Field(default_factory=list)
@@ -412,6 +470,11 @@ CODEX_MODEL_UNSUPPORTED_EFFORTS: dict[str, frozenset[str]] = {
     "gpt-5.5": frozenset({"max"}),
     "gpt-5.4": frozenset({"max"}),
     "gpt-5.4-mini": frozenset({"max"}),
+    # gpt-6-astra (served-but-unlisted; Personal/Pro rollout observed 2026-09-04)
+    # accepts low..max but rejects "none" per-request: 400 "Unsupported value:
+    # 'none' is not supported with the 'gpt-6-astra' model. Supported values
+    # are: 'low', 'medium', 'high', 'xhigh', 'max'".
+    "gpt-6-astra": frozenset({"none"}),
 }
 
 
@@ -462,6 +525,10 @@ def effort_incompatibility_error(model: str | None, effort: str | None) -> str |
 # it. Serving moves silently in both directions; these floors are refreshed
 # by manual probes, bounded downward at runtime only by observed clamps.
 CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
+    # gpt-6-astra: probed 2026-09-04 on the Personal/Pro account (descending
+    # free-reject ladder, usage-echo bracketing): accepted 917,534 / rejected
+    # at the 922,000 rung — the 922K class, lockstep with sol/terra/luna.
+    "gpt-6-astra": 917_534,
     "gpt-5.6-sol": 921_601,
     "gpt-5.6-terra": 917_506,
     "gpt-5.6-luna": 917_506,
@@ -1160,7 +1227,6 @@ class Config(BaseModel):
     graceful_degradation: GracefulDegradationConfig = GracefulDegradationConfig()
     llm_recovery: LLMRecoveryConfig = LLMRecoveryConfig()
     turn_state: TurnStateConfig = TurnStateConfig()
-
 
 def _substitute_env_vars(text: str) -> str:
     """Replace ${VAR} and ${VAR:-default} patterns with environment variable values.

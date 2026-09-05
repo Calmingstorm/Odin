@@ -129,19 +129,19 @@ class TestGetDefaultHost:
         mgr = _mgr(tmp_path)
         tok = mgr.set_request_default_host("nonexistent")
         try:
-            # falls through to first allowed
-            assert mgr.get_default_host("stranger") == "alpha"
+            # no valid explicit default; mapping/list order is not policy
+            assert mgr.get_default_host("stranger") == ""
         finally:
             mgr.reset_request_default_host(tok)
 
-    def test_scopeless_user_falls_back_to_first_allowed(self, tmp_path):
-        assert _mgr(tmp_path).get_default_host("stranger") == "alpha"
+    def test_scopeless_user_without_explicit_default_has_none(self, tmp_path):
+        assert _mgr(tmp_path).get_default_host("stranger") == ""
 
     def test_scope_no_entry_returns_first_of_scope(self, tmp_path):
         mgr = _mgr(tmp_path)
         tok = mgr.set_request_host_scope(["beta", "gamma"])
         try:
-            assert mgr.get_default_host("stranger") == "beta"
+            assert mgr.get_default_host("stranger") == ""
         finally:
             mgr.reset_request_host_scope(tok)
 

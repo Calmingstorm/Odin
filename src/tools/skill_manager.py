@@ -1119,6 +1119,7 @@ class SkillManager:
         tool_input: dict,
         message_callback: Callable | None = None,
         file_callback: Callable | None = None,
+        requester_id: str | None = None,
     ) -> str:
         """Execute a user-created skill with timeout and sandboxing."""
         skill = self._skills.get(tool_name)
@@ -1144,6 +1145,7 @@ class SkillManager:
             skill_config=skill_config,
             resource_tracker=tracker,
             skill_memory_lock=self._skill_memory_lock,
+            requester_id=requester_id,
         )
 
         start = time.monotonic()

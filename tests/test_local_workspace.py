@@ -1942,8 +1942,11 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     "src/tools/ssh.py": "run_local_command — takes cwd from the caller; THE seam",
     "src/tools/process_manager.py": "background manage_process — resolves workspace per spawn",
     # --- deliberately does not ----------------------------------------------
-    "src/discord/native_tools/media.py": "argv-form ssh to a REMOTE host; local cwd is irrelevant",
     "src/tools/ssh_pool.py": "argv-form ssh control-socket management, no user command text",
+    "src/tools/hosts/control.py": (
+        "argv-form ssh-keyscan/ssh-keygen/ssh enrollment probes with validated endpoint fields "
+        "and fixed commands; no user shell command or relative workspace path"
+    ),
     "src/tools/mcp/transport_stdio.py": (
         "operator-configured MCP server process, not a user command; spawns "
         "with an allowlisted env, an owned process group, and an explicit "
@@ -2081,6 +2084,9 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     # because base64 over that pipeline was truncated at MAX_OUTPUT_CHARS
     # (adversarial review of v3.65.1).
     # --- plumbing -----------------------------------------------------------
+    ("src/tools/executor.py", "_exec_remote_target"): (
+        "remote managed-process protocol with fixed /tmp paths; no local workspace"
+    ),
     ("src/tools/executor.py", "_run_on_host"): "CONDITIONAL",  # forwards its caller's decision
     ("src/tools/executor.py", "__init__"): "HandlerDeps lambdas forwarding **kwargs",
 }

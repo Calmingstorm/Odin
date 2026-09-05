@@ -223,8 +223,12 @@ def check_ssh_hosts(bot: OdinBot) -> ComponentStatus:
             detail="Tool executor not initialised",
         )
     try:
-        config = executor.config
-        hosts = config.hosts
+        registry = getattr(executor, "host_registry", None)
+        from ..tools.hosts import HostRegistry
+
+        if not isinstance(registry, HostRegistry):
+            registry = None
+        hosts = registry.snapshot() if registry is not None else executor.config.hosts
         if not hosts:
             return ComponentStatus(
                 name="ssh_hosts",
@@ -240,6 +244,8 @@ def check_ssh_hosts(bot: OdinBot) -> ComponentStatus:
                     "address": host_cfg.address,
                     "ssh_user": host_cfg.ssh_user,
                     "os": host_cfg.os,
+                    "targetable": getattr(host_cfg, "targetable", True),
+                    "trust_state": getattr(host_cfg, "trust_state", "legacy"),
                 }
             )
 

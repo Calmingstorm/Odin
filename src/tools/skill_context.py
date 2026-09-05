@@ -143,6 +143,7 @@ class SkillContext:
         skill_config: dict[str, Any] | None = None,
         resource_tracker: ResourceTracker | None = None,
         skill_memory_lock: threading.Lock | None = None,
+        requester_id: str | None = None,
     ) -> None:
         self._executor = tool_executor
         self._log = get_logger(f"skills.{skill_name}")
@@ -158,19 +159,35 @@ class SkillContext:
         self._scheduler = scheduler
         self._config: dict[str, Any] = skill_config or {}
         self._tracker: ResourceTracker = resource_tracker or ResourceTracker()
+        self._requester_id = requester_id
 
     async def run_on_host(self, alias: str, command: str) -> str:
         """Run a shell command on a managed host via SSH. Returns output string."""
-        # _run_on_host returns (output, exit_code) for resolved hosts and a bare
-        # denial string for unknown ones (TS-0004 — forwarding the raw tuple
-        # violated this method's documented str contract for every real host).
-        # use_workspace=True: this is arbitrary command execution exposed to
-        # user-created skills, so it is a raw user-command route exactly like
-        # run_command — leaving it out made it an alternate path back into the
-        # 2026-07-27 wipe, reproduced through this method (PR #239 round-9
-        # review). Remote hosts are unaffected: the workspace applies only
-        # after local-address resolution.
-        raw = await self._executor._run_on_host(alias, command, use_workspace=True)
+        # Preserve the direct-executor seam used by older embedders/tests;
+        # real ToolExecutor execution takes the generation lease below.
+        from .executor import ToolExecutor
+
+        if not isinstance(self._executor, ToolExecutor) and hasattr(
+            self._executor, "execute"
+        ):
+            return str(
+                await self._executor.execute(
+                    "run_command",
+                    {"host": alias, "command": command},
+                    user_id=getattr(self, "_requester_id", None),
+                )
+            )
+        if isinstance(self._executor, ToolExecutor):
+            raw = await self._executor._run_on_host(
+                alias,
+                command,
+                use_workspace=True,
+                user_id=getattr(self, "_requester_id", None),
+            )
+        else:
+            raw = await self._executor._run_on_host(
+                alias, command, use_workspace=True
+            )
         if isinstance(raw, tuple):
             return raw[0]
         return raw
@@ -181,7 +198,7 @@ class SkillContext:
         Requires Prometheus to be reachable from a configured host.
         """
         # Use run_command with curl since the dedicated query_prometheus tool was removed.
-        hosts = list(self._executor.config.hosts.keys())
+        hosts = self.get_hosts()
         if not hosts:
             return "No hosts configured to reach Prometheus."
         host = hosts[0]
@@ -195,6 +212,7 @@ class SkillContext:
                     "host": host,
                     "command": f"curl -sf 'http://localhost:9090/api/v1/query?query={encoded_query}'",
                 },
+                user_id=self._requester_id,
             )
         )
 
@@ -220,6 +238,7 @@ class SkillContext:
                     "start_line": start_line,
                     "raw": raw,
                 },
+                user_id=self._requester_id,
             )
         )
 
@@ -274,7 +293,15 @@ class SkillContext:
 
     def get_hosts(self) -> list[str]:
         """List available host aliases."""
-        return list(self._executor.config.hosts.keys())
+        access = getattr(self._executor, "_host_access", None)
+        if self._requester_id and access is not None:
+            return access.get_allowed_hosts(self._requester_id)
+        registry = getattr(self._executor, "host_registry", None)
+        from .hosts import HostRegistry
+
+        if isinstance(registry, HostRegistry):
+            return list(registry.active_aliases())
+        return list(getattr(getattr(self._executor, "config", None), "hosts", {}))
 
     def get_services(self) -> list[str]:
         """List allowed systemd service names.
@@ -418,9 +445,8 @@ class SkillContext:
         """
         if not self._scheduler:
             return None
-        # Skills are trusted, admin-authored code; schedules they create carry
-        # system authority (requester_id unset -> unrestricted execution) unless
-        # the skill explicitly passes requester_id via **kwargs.
+        if self._requester_id and "requester_id" not in kwargs:
+            kwargs["requester_id"] = self._requester_id
         return await self._scheduler.add(description, action, channel_id, **kwargs)
 
     def list_schedules(self) -> list[dict]:
@@ -466,7 +492,11 @@ class SkillContext:
             if is_path_denied(path):
                 self._log.warning("Skill attempted to read denied path via tool: %s", path)
                 return f"Access denied: '{path}' is a restricted path."
-        return str(await self._executor.execute(tool_name, tool_input or {}))
+        return str(
+            await self._executor.execute(
+                tool_name, tool_input or {}, user_id=self._requester_id
+            )
+        )
 
     def log(self, msg: str) -> None:
         """Write a log message under the skill's namespace."""

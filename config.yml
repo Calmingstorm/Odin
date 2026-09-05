@@ -12,13 +12,16 @@ discord:
 
 openai_codex:
   enabled: true
-  # ChatGPT-account Codex backend only supports the GPT-5 family
-  # (gpt-4o et al return "model not supported" via this auth path).
+  # ChatGPT-account Codex backend serves the GPT-5.x family and, where the
+  # account is entitled, gpt-6-astra (gpt-4o et al return "model not
+  # supported" via this auth path). Entitlement is per account: gpt-6-astra
+  # reached Personal/Pro accounts before Team accounts (2026-09-04).
   model: gpt-5.6-sol
   # Reasoning effort sent with every main-provider request:
   # none | low | medium | high | xhigh | max (backend default: medium).
-  # "max" is gpt-5.6-family only — config load rejects a known-incompatible
-  # model/effort pair (e.g. gpt-5.5 + max) rather than 400 on every request.
+  # "max" is gpt-5.6-family-and-newer only, and gpt-6-astra rejects "none" —
+  # config load rejects a known-incompatible model/effort pair (e.g.
+  # gpt-5.5 + max, gpt-6-astra + none) rather than 400 on every request.
   reasoning_effort: xhigh
   # Effort for spawned-agent iterations only. Unset/null = inherit
   # reasoning_effort ("none" is a real effort level, not inherit). Set to
@@ -107,14 +110,27 @@ tools:
   ssh_key_path: /app/.ssh/id_ed25519
   # Customize SSH known hosts path for your deployment
   ssh_known_hosts_path: /app/.ssh/known_hosts
-  # Add hosts here, e.g.:
+  # Managed live in WebUI System → Hosts (this file remains durable truth).
+  # Existing address/ssh_user/os-only entries remain legacy-trusted through
+  # ssh_known_hosts_path. New enrollments pin public host keys per host.
+  # Add hosts here manually, e.g.:
   #   my-host:
-  #     address: 1.2.3.4
+  #     address: example.invalid
   #     ssh_user: root
+  #     os: linux
+  #     port: 22
+  #     description: "Staging build host"
+  #     enabled: true
+  # Optional explicit default for omitted-host system work. YAML order is not policy.
+  default_host: localhost
+  # Break-glass TOFU enrollment stays disabled unless explicitly enabled.
+  allow_host_tofu: false
   hosts:
     localhost:
       address: 127.0.0.1
       ssh_user: root
+      os: linux
+      description: "Local Odin workspace"
   command_timeout_seconds: 300
   tool_timeouts: {}
   audit_log_path: ./data/audit.jsonl

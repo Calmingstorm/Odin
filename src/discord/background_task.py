@@ -253,6 +253,11 @@ async def run_background_task(
             if isinstance(output, ToolResult):
                 structured_ok = output.ok
                 structured_metadata = output.audit_metadata
+                if output.uncertain_outcome:
+                    structured_metadata = {
+                        **(structured_metadata or {}),
+                        "outcome": "uncertain",
+                    }
                 # Same canonical marking the chat/loop pipelines apply: a
                 # structurally-failed result gets an explicit Error prefix so
                 # the posted step output cannot read as success.
@@ -400,15 +405,10 @@ async def run_background_task(
     )
 
 
-def _get_default_host(executor: ToolExecutor) -> str:
-    """Get the first configured host alias, falling back to 'localhost'."""
-    try:
-        hosts = executor.config.hosts
-        if hosts and isinstance(hosts, dict):
-            return next(iter(hosts))
-    except (AttributeError, StopIteration):
-        pass
-    return "localhost"
+def _get_default_host(executor: ToolExecutor, requester_id: str = "") -> str:
+    """Use explicit requester/runtime default policy, never mapping order."""
+    resolver = getattr(executor, "_resolve_default_host", None)
+    return resolver(requester_id or None) if callable(resolver) else ""
 
 
 def _is_error_output(output: str) -> bool:
@@ -547,9 +547,13 @@ async def _execute_tool(
         skill_input = tool_input.get("input") or {}
         if not isinstance(skill_input, dict):
             return "Error: invoke_skill 'input' must be an object."
-        return await skill_manager.execute(target_name, skill_input)
+        return await skill_manager.execute(
+            target_name, skill_input, requester_id=requester_id or None
+        )
     if skill_manager.has_skill(tool_name):
-        return await skill_manager.execute(tool_name, tool_input)
+        return await skill_manager.execute(
+            tool_name, tool_input, requester_id=requester_id or None
+        )
 
     # MCP tools (namespaced as mcp_<server>_<tool>)
     if mcp_manager is not None and mcp_manager.has_tool(tool_name):
@@ -561,7 +565,9 @@ async def _execute_tool(
 
     # Built-in tools via executor — default missing required fields
     if "host" not in tool_input:
-        tool_input = {**tool_input, "host": _get_default_host(executor)}
+        default_host = _get_default_host(executor, requester_id)
+        if default_host:
+            tool_input = {**tool_input, "host": default_host}
     # run_command/run_script: if 'command'/'script' missing, let executor handle it
     # (it will return an error that _is_error_output catches)
     # Return the structured result — run_background_task consumes .ok so a
