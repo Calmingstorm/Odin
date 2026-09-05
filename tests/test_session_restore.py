@@ -2,7 +2,7 @@
 
 Covers the memory-overhaul guarantees:
 - pruned sessions come back in full from the archive, regardless of age
-- archives are never deleted by time, only by size/count caps
+- archives are never deleted, including under size/count capacity pressure
 - idle gaps close conversation segments at the natural boundary
 - v1 session files (no schema_version / summary_segments) load transparently
 - segment text is never silently chopped
@@ -170,7 +170,7 @@ class TestArchiveRetention:
         mgr._prune_old_archives(archive_dir)
         assert old_file.exists()
 
-    def test_file_count_cap_prunes_oldest(self, tmp_path):
+    def test_file_count_cap_preserves_all_archives(self, tmp_path):
         import os
         mgr = _make_manager(tmp_path, archive_max_files=3)
         archive_dir = tmp_path / "archive"
@@ -181,9 +181,9 @@ class TestArchiveRetention:
             os.utime(f, (1000 + i, 1000 + i))
         mgr._prune_old_archives(archive_dir)
         remaining = sorted(p.name for p in archive_dir.glob("*.json"))
-        assert remaining == ["ch2_100.json", "ch3_100.json", "ch4_100.json"]
+        assert remaining == [f"ch{i}_100.json" for i in range(5)]
 
-    def test_byte_cap_prunes_oldest(self, tmp_path):
+    def test_byte_cap_preserves_all_archives(self, tmp_path):
         import os
         mgr = _make_manager(tmp_path, archive_max_bytes=250)
         archive_dir = tmp_path / "archive"
@@ -194,7 +194,7 @@ class TestArchiveRetention:
             os.utime(f, (1000 + i, 1000 + i))
         mgr._prune_old_archives(archive_dir)
         remaining = sorted(p.name for p in archive_dir.glob("*.json"))
-        assert remaining == ["ch1_100.json", "ch2_100.json"]
+        assert remaining == [f"ch{i}_100.json" for i in range(3)]
 
 
 class TestIdleSplit:

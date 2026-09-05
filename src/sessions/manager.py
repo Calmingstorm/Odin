@@ -3,13 +3,18 @@ from __future__ import annotations
 import asyncio
 import copy
 import json
+import math
+import os
 import re
+import threading
 import time
+import uuid
 from collections.abc import Awaitable, Callable, Iterable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+from functools import wraps
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from ..llm.cost_tracker import estimate_tokens
 from ..odin_log import get_logger
@@ -27,6 +32,45 @@ if TYPE_CHECKING:
 CompactionFn = Callable[[list[dict], str], Awaitable[str]]
 
 log = get_logger("sessions")
+def _owned(fn: Any) -> Any:
+    @wraps(fn)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._state_lock:
+            return fn(self, *args, **kwargs)
+    return wrapped
+
+
+def _publication_owned(fn: Any) -> Any:
+    @wraps(fn)
+    def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+        with self._publication_lock, self._state_lock:
+            return fn(self, *args, **kwargs)
+    return wrapped
+
+
+class _PublishedButUnsyncedError(OSError):
+    """Replacement is visible, but directory durability is unconfirmed."""
+
+
+def _atomic_json(path: Path, data: dict) -> None:
+    tmp = path.with_name(f".{path.stem}.{uuid.uuid4().hex}.tmp")
+    try:
+        tmp.write_text(json.dumps(data, indent=2))
+        with tmp.open("rb") as stream:
+            os.fsync(stream.fileno())
+        tmp.replace(path)
+        try:
+            fd = os.open(path.parent, os.O_RDONLY | os.O_DIRECTORY)
+            try:
+                os.fsync(fd)
+            finally:
+                os.close(fd)
+        except OSError as exc:
+            raise _PublishedButUnsyncedError(str(exc)) from exc
+    finally:
+        tmp.unlink(missing_ok=True)
+
+
 COMPACTION_THRESHOLD = 100  # compact when history exceeds this many messages
 COMPACTION_MAX_CHARS = 2000  # default target chars per summary segment
 
@@ -377,6 +421,9 @@ class SessionManager:
         self.archive_max_files = archive_max_files
         self.context_token_budget = context_token_budget
         self.context_budget_overrides = context_budget_overrides or {}
+        self._state_lock = threading.RLock()
+        self._publication_lock = threading.RLock()
+        self._pending_reset_epochs: dict[str, float] = {}
         # Reset tombstones: channel -> epoch. Archives at or before the
         # epoch are never restored — reset/purge means GONE, not "back on
         # the next message". Persisted so restarts honor resets too.
@@ -415,7 +462,10 @@ class SessionManager:
         """
         self._compaction_fn = fn
 
+    @_owned
     def get_or_create(self, channel_id: str) -> Session:
+        if self._pending_reset_epochs:
+            raise RuntimeError("Reset durability unresolved; retry reset before session activity")
         if channel_id not in self._sessions:
             session = self._restore_from_archive(channel_id)
             if session is None:
@@ -425,6 +475,7 @@ class SessionManager:
                 self._continuity_source[channel_id] = "archive_restore"
             self._sessions[channel_id] = session
             self._dirty.add(channel_id)
+            self._bump_mutation_revision(channel_id)
         session = self._sessions[channel_id]
         session.last_active = time.time()
         return session
@@ -480,6 +531,7 @@ class SessionManager:
         """Monotonic watermark of semantic history mutations (never ABAs)."""
         return self._mutation_revisions.get(channel_id, 0)
 
+    @_owned
     def add_message(
         self, channel_id: str, role: str, content: str,
         *, user_id: str | None = None,
@@ -494,6 +546,7 @@ class SessionManager:
         self._dirty.add(channel_id)
         self._bump_mutation_revision(channel_id)
 
+    @_owned
     def remove_last_message(self, channel_id: str, role: str) -> bool:
         """Remove the most recent message if it matches *role*.
 
@@ -943,7 +996,9 @@ class SessionManager:
         and identifiers across long-running channels. A substantial raw tail
         always survives — see _split_for_compaction.
         """
-        to_summarize, to_keep = self._split_for_compaction(session)
+        with self._state_lock:
+            revision = self.mutation_revision(session.channel_id)
+            to_summarize, to_keep = self._split_for_compaction(session)
         if not to_summarize:
             return
 
@@ -1000,14 +1055,17 @@ class SessionManager:
                 system_instruction,
             )
 
-            self._fold_legacy_summary(session)
-            segment = self._append_segment(session, summary_text, to_summarize)
-
-            # Trigger reflection on discarded messages before replacing
-            discarded = list(to_summarize)
-            session.messages = to_keep
-            self._dirty.add(session.channel_id)
-            self._bump_mutation_revision(session.channel_id)
+            with self._state_lock:
+                if (self._sessions.get(session.channel_id) is not session
+                        or session.channel_id in self._pending_reset_epochs
+                        or revision != self.mutation_revision(session.channel_id)):
+                    return
+                self._fold_legacy_summary(session)
+                segment = self._append_segment(session, summary_text, to_summarize)
+                discarded = list(to_summarize)
+                session.messages = to_keep
+                self._dirty.add(session.channel_id)
+                self._bump_mutation_revision(session.channel_id)
             log.info(
                 "Compacted %d messages into segment %s for channel %s (%d segments total)",
                 len(discarded), segment["id"], session.channel_id,
@@ -1029,8 +1087,13 @@ class SessionManager:
                 task.add_done_callback(self._reflection_tasks.discard)
         except Exception as e:
             log.error("Failed to compact session: %s", e)
-            self._fallback_compact(session)
+            with self._state_lock:
+                if (self._sessions.get(session.channel_id) is session
+                        and session.channel_id not in self._pending_reset_epochs
+                        and revision == self.mutation_revision(session.channel_id)):
+                    self._fallback_compact(session)
 
+    @_owned
     def _fallback_compact(self, session) -> None:
         """Deterministic local compaction when LLM summarization fails.
 
@@ -1087,34 +1150,26 @@ class SessionManager:
             path = self._epochs_path()
             if path.exists():
                 raw = json.loads(path.read_text())
-                return {str(k): float(v) for k, v in raw.items()}
+                if not isinstance(raw, dict) or any(
+                    not isinstance(k, str) or isinstance(v, bool)
+                    or not isinstance(v, (int, float)) or not math.isfinite(v) or v < 0
+                    for k, v in raw.items()
+                ):
+                    raise ValueError("Invalid reset epoch store")
+                return {k: float(v) for k, v in raw.items()}
         except Exception as e:
-            log.warning("Failed to load reset epochs: %s", e)
+            raise RuntimeError("Cannot safely load reset epochs; repair required") from e
         return {}
 
     def _save_reset_epochs(self) -> None:
-        try:
-            path = self._epochs_path()
-            tmp = path.with_suffix(".tmp")
-            tmp.write_text(json.dumps(self._reset_epochs))
-            tmp.replace(path)
-        except Exception as e:
-            log.warning("Failed to persist reset epochs: %s", e)
+        _atomic_json(self._epochs_path(), self._reset_epochs)
 
     def _tombstone(self, channel_id: str) -> None:
-        """Drop the live session AND block archive restoration up to now."""
-        self._sessions.pop(channel_id, None)
-        self._bump_mutation_revision(channel_id)
-        session_file = self.persist_dir / f"{channel_id}.json"
-        try:
-            session_file.unlink(missing_ok=True)
-        except OSError as e:
-            log.warning("Could not remove session file for %s: %s", channel_id, e)
-        self._reset_epochs[channel_id] = time.time()
+        """Compatibility entry point; all resets use durable publication."""
+        self.reset(channel_id)
 
     def reset(self, channel_id: str) -> None:
-        self._tombstone(channel_id)
-        self._save_reset_epochs()
+        self.reset_many([channel_id])
         log.info("Session reset for channel %s (archives tombstoned)", channel_id)
 
     def count(self) -> int:
@@ -1133,18 +1188,38 @@ class SessionManager:
         return list(self._sessions.items())
 
     def reset_many(self, channel_ids: list[str]) -> int:
-        removed = 0
-        for cid in channel_ids:
-            existed = cid in self._sessions
-            self._tombstone(cid)
-            if existed:
-                removed += 1
-        if channel_ids:
-            self._save_reset_epochs()
-        if removed:
-            log.info("Bulk reset %d sessions (archives tombstoned)", removed)
-        return removed
+        with self._publication_lock, self._state_lock:
+            requested = set(channel_ids)
+            if not requested:
+                return 0
+            removed = sum(cid in self._sessions for cid in requested)
+            previous = self._reset_epochs
+            self._reset_epochs = {
+                **previous, **dict.fromkeys(requested, time.time()),
+            }
+            try:
+                self._save_reset_epochs()
+            except Exception as exc:
+                self._pending_reset_epochs.update({
+                    cid: self._reset_epochs[cid] for cid in requested
+                })
+                # A failed directory fsync cannot undo an already visible rename.
+                # Preserve the published fence, but never acknowledge durability.
+                if not isinstance(exc, _PublishedButUnsyncedError):
+                    self._reset_epochs = previous
+                raise
+            for cid in requested:
+                self._pending_reset_epochs.pop(cid, None)
+                self._sessions.pop(cid, None)
+                self._bump_mutation_revision(cid)
+                self._dirty.discard(cid)
+                try:
+                    (self.persist_dir / f"{cid}.json").unlink(missing_ok=True)
+                except OSError:
+                    log.warning("Reset live file retained; durable epoch fences loading")
+            return removed
 
+    @_publication_owned
     def clear_all(self) -> int:
         count = len(self._sessions)
         # Tombstone every channel known from memory, live files, or archives —
@@ -1155,20 +1230,19 @@ class SessionManager:
         archive_dir = self.persist_dir / "archive"
         if archive_dir.exists():
             known.update(p.stem.rsplit("_", 1)[0] for p in archive_dir.glob("*_*.json"))
-        for cid in known:
-            self._tombstone(cid)
-        if known:
-            self._save_reset_epochs()
+        self.reset_many(list(known))
         if count:
             log.info("Cleared all %d sessions (%d channels tombstoned)", count, len(known))
         return count
 
+    @_publication_owned
     def prune(self) -> int:
         now = time.time()
         expired = [
             cid
             for cid, s in self._sessions.items()
             if now - s.last_active > self.max_age_seconds
+            and cid not in self._pending_reset_epochs
         ]
         for cid in expired:
             self._archive_session(cid)
@@ -1182,22 +1256,24 @@ class SessionManager:
             log.info("Pruned and archived %d expired sessions", len(expired))
         return len(expired)
 
+    @_owned
     def _archive_session(self, channel_id: str) -> None:
         """Save a session to the archive before pruning."""
         session = self._sessions.get(channel_id)
-        if not session or not session.messages:
+        if not session or not (session.messages or session.summary or session.summary_segments):
             return
         archive_dir = self.persist_dir / "archive"
         archive_dir.mkdir(exist_ok=True)
-        timestamp = int(session.last_active)
+        timestamp: float = int(session.last_active)
         path = archive_dir / f"{channel_id}_{timestamp}.json"
+        while path.exists():
+            timestamp = math.nextafter(timestamp, math.inf)
+            path = archive_dir / f"{channel_id}_{timestamp}.json"
         data = asdict(session)
         # Atomic write: a bare write_text left a truncated newest archive on an
         # OOM/crash mid-write, and _restore_from_archive aborts on the newest
         # file — so one bad write erased the channel despite good older archives.
-        tmp = path.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(data, indent=2))
-        tmp.replace(path)
+        _atomic_json(path, data)
         log.info("Archived session %s (%d messages)", channel_id, len(session.messages))
         self._prune_old_archives(archive_dir)
 
@@ -1221,50 +1297,19 @@ class SessionManager:
             task.add_done_callback(self._indexing_tasks.discard)
 
     def _prune_old_archives(self, archive_dir: Path) -> None:
-        """Enforce size/count caps on the archive directory.
-
-        Archives are knowledge, not garbage: there is deliberately NO
-        time-based deletion (restore-on-demand depends on old archives
-        surviving). Oldest files are removed only when the directory
-        exceeds the configured byte or file-count caps.
-        """
+        """Diagnose capacity pressure without deleting any restore points."""
         try:
-            files = sorted(archive_dir.glob("*.json"), key=lambda p: p.stat().st_mtime)
+            files = list(archive_dir.glob("*.json"))
             total_bytes = sum(f.stat().st_size for f in files)
-
-            # Protect each channel's most-recent archive so a high-traffic
-            # channel can't evict a quiet channel's only restore point.
-            # Eviction order: oldest non-protected first; the protected
-            # newest-per-channel files are only touched as a last resort to
-            # honor a hard cap.
-            newest_per_channel: dict[str, Path] = {}
-            for f in files:  # ascending mtime → last write per channel wins
-                newest_per_channel[f.stem.rsplit("_", 1)[0]] = f
-            protected = set(newest_per_channel.values())
-            evict_order = [f for f in files if f not in protected]
-            evict_order += [f for f in files if f in protected]
-
-            pruned = 0
-
-            def over_cap() -> bool:
-                return (total_bytes > self.archive_max_bytes
-                        or len(files) > self.archive_max_files)
-
-            for f in evict_order:
-                if not over_cap():
-                    break
-                total_bytes -= f.stat().st_size
-                f.unlink()
-                files.remove(f)
-                pruned += 1
-            if pruned:
-                log.info(
-                    "Pruned %d archive(s) from %s (caps: %d bytes / %d files; "
-                    "newest-per-channel protected)",
-                    pruned, archive_dir, self.archive_max_bytes, self.archive_max_files,
+            if (total_bytes > self.archive_max_bytes
+                    or len(files) > self.archive_max_files):
+                log.warning(
+                    "Archive capacity exceeded: %d bytes / %d files "
+                    "(caps: %d bytes / %d files); all archives preserved",
+                    total_bytes, len(files), self.archive_max_bytes, self.archive_max_files,
                 )
         except Exception as e:
-            log.warning("Archive pruning failed: %s", e)
+            log.warning("Archive capacity inspection failed: %s", e)
 
     async def _safe_index(self, archive_path: Path) -> None:
         """Index an archived session for semantic search, catching all errors."""
@@ -1474,6 +1519,7 @@ class SessionManager:
 
         return results
 
+    @_owned
     def scrub_secrets(self, channel_id: str, content: str) -> bool:
         """Remove a message containing secrets from history.
 
@@ -1525,47 +1571,41 @@ class SessionManager:
             log.error("Compaction reflection failed: %s", e)
 
     def save(self) -> None:
-        """Persist only sessions that changed since the last save.
-
-        A channel is cleared from the dirty set only AFTER its write
-        succeeds. The old code cleared dirty up-front, so any write failure
-        (disk full, permission, tmp collision with the web-chat save) silently
-        dropped that session's changes forever.
-        """
-        for cid in list(self._dirty):
-            session = self._sessions.get(cid)
-            if session is None:
-                self._dirty.discard(cid)
-                continue
-            try:
-                path = self.persist_dir / f"{cid}.json"
-                data = asdict(session)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data, indent=2))
-                tmp.replace(path)
-            except Exception as e:
-                log.error("Failed to save session %s (kept dirty for retry): %s", cid, e)
-                continue
-            self._dirty.discard(cid)
+        """Publish revision-owned snapshots, retaining newer work for retry."""
+        self._save_sessions(all_sessions=False)
 
     def save_all(self) -> None:
         """Persist every session (used during shutdown)."""
-        failed: set[str] = set()
-        for cid, session in list(self._sessions.items()):
-            try:
-                path = self.persist_dir / f"{cid}.json"
-                data = asdict(session)
-                tmp = path.with_suffix(".tmp")
-                tmp.write_text(json.dumps(data, indent=2))
-                tmp.replace(path)
-            except Exception as e:
-                log.error("Failed to save session %s during save_all: %s", cid, e)
-                failed.add(cid)
-        # After attempting every session, exactly the failed ones remain dirty
-        # so a later save retries them. Assigning the failed set directly (vs
-        # intersecting the old dirty set) also re-marks a session that was
-        # already clean before save_all but whose shutdown write just failed.
-        self._dirty = failed
+        self._save_sessions(all_sessions=True)
+
+    def _save_sessions(self, *, all_sessions: bool) -> None:
+        # Serialize entire publications (including reset); mutations may proceed
+        # during I/O, but cannot be acknowledged by an older snapshot.
+        with self._publication_lock:
+            with self._state_lock:
+                if self._pending_reset_epochs:
+                    raise RuntimeError("Reset durability unresolved; retry reset before saving")
+                channels = list(self._sessions if all_sessions else self._dirty)
+            for cid in channels:
+                with self._state_lock:
+                    session = self._sessions.get(cid)
+                    if session is None:
+                        self._dirty.discard(cid)
+                        continue
+                    revision = self.mutation_revision(cid)
+                    data = asdict(session)
+                    data["reset_epoch"] = self._reset_epochs.get(cid, 0.0)
+                try:
+                    _atomic_json(self.persist_dir / f"{cid}.json", data)
+                except Exception as e:
+                    with self._state_lock:
+                        self._dirty.add(cid)
+                    log.error("Failed to save session %s (kept dirty for retry): %s", cid, e)
+                    continue
+                with self._state_lock:
+                    if (self._sessions.get(cid) is session
+                            and revision == self.mutation_revision(cid)):
+                        self._dirty.discard(cid)
 
     @staticmethod
     def _session_from_dict(data: dict) -> Session:
@@ -1583,12 +1623,16 @@ class SessionManager:
             schema_version=SESSION_SCHEMA_VERSION,
         )
 
+    @_publication_owned
     def load(self) -> None:
         for path in self.persist_dir.glob("*.json"):
             if path.name == "reset_epochs.json":
                 continue
             try:
                 data = json.loads(path.read_text())
+                epoch = self._reset_epochs.get(data["channel_id"], 0.0)
+                if epoch and data.get("reset_epoch", data.get("created_at", 0.0)) < epoch:
+                    continue  # only an explicit reset may suppress a live file
                 self._sessions[data["channel_id"]] = self._session_from_dict(data)
                 self._continuity_source[data["channel_id"]] = "loaded_live"
             except Exception as e:

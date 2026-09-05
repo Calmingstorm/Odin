@@ -721,10 +721,12 @@ class TestMonotonicSessionFence:
         sess = h.bot.sessions
         assert sess.mutation_revision("chX") == 0
         sess.add_message("chX", "user", "a")
+        created_revision = sess.mutation_revision("chX")
+        assert created_revision > 0
         sess.add_message("chX", "assistant", "b")
-        assert sess.mutation_revision("chX") == 2
+        assert sess.mutation_revision("chX") == created_revision + 1
         sess.remove_last_message("chX", "assistant")
-        assert sess.mutation_revision("chX") == 3  # removal GROWS the watermark
+        assert sess.mutation_revision("chX") == created_revision + 2  # removal GROWS it
 
 
 class _FakeBotUser:
