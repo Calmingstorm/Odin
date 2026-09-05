@@ -177,7 +177,7 @@ class TestAgentTrajectoryTurn:
             "model_override", "reasoning_effort_override",
             "iterations", "final_state", "result",
             "error", "tools_used", "iteration_count", "total_duration_ms",
-            "recovery_attempts", "state_history",
+            "recovery_attempts", "state_history", "inbox_events", "activity",
         }
         assert set(d.keys()) == expected_keys
 

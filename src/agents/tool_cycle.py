@@ -5,6 +5,7 @@ import time
 
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..tools.result_validator import ToolResult, _is_error_result
+from .execution_context import waiting_agent
 from .wait_deadlines import WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS, wait_for_agents_wrapper_timeout
 
 
@@ -29,7 +30,7 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
     try:
         for call in calls:
             lifetime = agent.max_lifetime - (time.time() - agent.created_at)
-            if lifetime <= 0 or agent._cancel_event.is_set():
+            if lifetime <= 0 or agent._cancel_event.is_set() or not agent._inbox.empty():
                 break
             if call.get("parse_error"):
                 results.append(
@@ -44,11 +45,15 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                 grace_seconds=WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS,
             )
             timeout = min(timeout, lifetime)
-            agent.last_activity = time.time()
+            agent.set_phase(
+                "waiting_for_children" if name == "wait_for_agents" else "executing_tool",
+                time.time() + timeout,
+            )
             agent.tool_execution_count += 1
             if name not in agent.tools_used:
                 agent.tools_used.append(name)
             active = call
+            context_token = waiting_agent.set(agent if name == "wait_for_agents" else None)
             try:
                 raw = await asyncio.wait_for(execute(name, arguments), timeout=timeout)
                 if isinstance(raw, ToolResult):
@@ -58,6 +63,12 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                     if raw.uncertain_outcome:
                         status = "outcome_unknown"
                     record = result_record(call, str(raw), status, uncertain=raw.uncertain_outcome)
+                    if (
+                        raw.ok
+                        and raw.audit_metadata
+                        and raw.audit_metadata.get("wait_interrupted") == "parent_message"
+                    ):
+                        record["status"] = "interrupted_effect_free"
                     if raw.audit_metadata:
                         record["audit_metadata"] = raw.audit_metadata
                 else:
@@ -68,36 +79,45 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                     ):
                         status = "denied"
                     record = result_record(call, text, status)
-                if record["status"] != "succeeded" and not record["result"].startswith(
+                if not record["ok"] and not record["result"].startswith(
                     ("Error", "Denied", "Permission denied", "Command failed", "Script failed")
                 ):
                     record["result"] = f"Error ({record['status']}):\n{record['result']}"
             except TimeoutError:
+                effect_free = name == "wait_for_agents"
                 record = result_record(
                     call,
-                    f"Error: Tool '{name}' timed out after {timeout}s; external outcome unknown.",
+                    f"Error: Tool '{name}' timed out after {timeout}s; "
+                    + ("children continue." if effect_free else "external outcome unknown."),
                     "timed_out",
-                    uncertain=True,
+                    uncertain=not effect_free,
                 )
             except Exception as exc:
                 record = result_record(call, f"Error: {exc}", "failed")
+            finally:
+                waiting_agent.reset(context_token)
             results.append(record)
             active = None
-            agent.last_activity = time.time()
+            agent.set_phase("ready")
     finally:
         if active is not None:
+            effect_free = active["name"] == "wait_for_agents"
             results.append(
                 result_record(
                     active,
-                    "Tool interrupted after dispatch; external outcome unknown.",
-                    "interrupted",
-                    uncertain=True,
+                    "Wait interrupted; children continue."
+                    if effect_free
+                    else "Tool interrupted after dispatch; external outcome unknown.",
+                    "interrupted_effect_free" if effect_free else "interrupted",
+                    uncertain=not effect_free,
                 )
             )
         for call in calls[len(results) :]:
             results.append(
                 result_record(
-                    call, "Not executed: agent interrupted before dispatch.", "not_executed"
+                    call,
+                    "Not executed: agent stopped or parent correction queued before dispatch.",
+                    "not_executed",
                 )
             )
         agent.messages.append(

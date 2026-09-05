@@ -399,6 +399,26 @@ class TestAgentDisplayPolicy:
         assert row["display_source"] == "last_execution"
 
     @pytest.mark.asyncio
+    async def test_native_agent_activity_and_string_results(self):
+        import time
+
+        from tests.test_agent_transcript_contract import agent
+
+        info = agent()
+        info.set_phase("waiting_for_children", time.time() + 100)
+        info.tool_execution_count = 3
+        info.result = "still a string"
+        bot = _display_bot(info)
+        async with TestClient(TestServer(_app(register_agents, bot=bot))) as c:
+            row = (await (await c.get("/api/agents")).json())[0]
+            detail = await (await c.get("/api/agents/A1")).json()
+        for record in (row, detail):
+            assert record["phase"] == "waiting_for_children"
+            assert record["tool_execution_count"] == 3
+            assert record["pending_inbox_count"] == record["last_consumed_sequence"] == 0
+            assert record["result"] == "still a string"
+
+    @pytest.mark.asyncio
     async def test_override_before_execution_is_pending(self):
         agent = _agent_info(model_override="gpt-5.6-terra", reasoning_effort_override="high")
         bot = _display_bot(agent)

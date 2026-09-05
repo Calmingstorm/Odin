@@ -1105,6 +1105,7 @@ class TestWaitForAgentsWithStates:
 
         assert sleep_calls == 1
         assert results[finished.id] == {
+            **finished.activity(),
             "id": "finished",
             "label": "first",
             "status": "completed",

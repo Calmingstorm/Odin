@@ -24,6 +24,7 @@ from ..llm.secret_scrubber import scrub_output_secrets
 from ..llm.tool_history import assistant_content, content_text, normalize_tool_calls
 from ..odin_log import get_logger
 from ..tools.result_validator import ToolResult
+from .execution_context import waiting_agent
 from .tool_cycle import execute_cycle
 from .trajectory import AgentTrajectorySaver, AgentTrajectoryTurn
 
@@ -342,6 +343,14 @@ class AgentInfo:
     _tool_call_ids: set[str] = field(default_factory=set, repr=False)
     iteration_count: int = 0
     last_activity: float = field(default_factory=time.time)
+    phase: str = "ready"
+    phase_started_at: float = field(default_factory=time.time)
+    phase_deadline: float | None = None
+    last_consumed_sequence: int = 0
+    inbox_sequence: int = 0
+    inbox_events: list[dict] = field(default_factory=list)
+    _inbox_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    _terminal_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
     recovery_attempts: int = 0
     # Context-overflow recovery (agent-local, lifetime-only): after the first
     # real overflow, the ceiling latches to the size that SUCCEEDED so later
@@ -420,6 +429,9 @@ class AgentInfo:
     def transition(self, to: AgentState, reason: str = "") -> StateTransition:
         """Transition agent state. Logs the transition."""
         record = self._sm.transition(to, reason)
+        if self._sm.is_terminal:
+            self._terminal_event.set()
+            self.set_phase("ready")
         log.debug(
             "Agent %s (%s): %s → %s%s",
             self.id,
@@ -429,6 +441,52 @@ class AgentInfo:
             f" ({reason})" if reason else "",
         )
         return record
+
+    def set_phase(self, phase: str, deadline: float | None = None) -> None:
+        """Only actual transitions/completions are progress; no heartbeat timer."""
+        self.phase = phase
+        self.phase_started_at = self.last_activity = time.time()
+        self.phase_deadline = deadline
+
+    def drain_inbox(self) -> bool:
+        """Consume each queued directive exactly once, with structural provenance."""
+        consumed = False
+        assert self._inbox is not None
+        while not self._inbox.empty():
+            item = self._inbox.get_nowait()
+            if isinstance(item, str):  # legacy in-memory queues
+                self.inbox_sequence += 1
+                item = {"sequence": self.inbox_sequence, "text": item}
+            sequence = item["sequence"]
+            self.messages.append(
+                {
+                    "role": "user",
+                    "content": f"[Message from parent] {item['text']}",
+                    "provenance": "agent_parent",
+                    "sequence": sequence,
+                }
+            )
+            self.last_consumed_sequence = sequence
+            self.inbox_events.append({"event": "consumed", "sequence": sequence, "at": time.time()})
+            consumed = True
+        self._inbox_event.clear()
+        if consumed:
+            self.last_activity = time.time()
+        return consumed
+
+    def activity(self) -> dict:
+        now = self.ended_at or time.time()
+        seconds = max(0, now - self.phase_started_at)
+        return {
+            "phase": self.phase,
+            "phase_started_at": self.phase_started_at,
+            "phase_deadline": self.phase_deadline,
+            "last_observed_progress": self.last_activity,
+            "pending_inbox_count": self._inbox.qsize() if self._inbox is not None else 0,
+            "last_consumed_sequence": self.last_consumed_sequence,
+            "tool_execution_count": self.tool_execution_count,
+            "activity": f"{self.phase.replace('_', ' ')} for {int(seconds)}s",
+        }
 
 
 class AgentManager:
@@ -680,9 +738,13 @@ class AgentManager:
         if not message:
             return "Error: Message cannot be empty."
 
-        agent._inbox.put_nowait(message)  # type: ignore[union-attr]  # __post_init__ always sets it
-        log.info("Sent message to agent %s (%s): %s", agent_id, agent.label, message[:80])
-        return f"Message delivered to agent '{agent.label}'."
+        agent.inbox_sequence += 1
+        sequence = agent.inbox_sequence
+        agent._inbox.put_nowait({"sequence": sequence, "text": message})  # type: ignore[union-attr]
+        agent.inbox_events.append({"event": "queued", "sequence": sequence, "at": time.time()})
+        agent._inbox_event.set()
+        log.info("Queued message %d to agent %s (%s)", sequence, agent_id, agent.label)
+        return f"Message queued to agent '{agent.label}' (sequence {sequence}; not yet consumed)."
 
     def list(self, channel_id: str | None = None) -> list[dict]:
         """List agents, optionally filtered by channel."""
@@ -704,6 +766,7 @@ class AgentManager:
                     "depth": agent.depth,
                     "parent_id": agent.parent_id,
                     "children_count": len(agent.children_ids),
+                    **agent.activity(),
                 }
             )
         return result
@@ -792,6 +855,7 @@ class AgentManager:
             "parent_id": agent.parent_id,
             "turn_id": agent.turn_id,
             "children_ids": list(agent.children_ids),
+            **agent.activity(),
         }
 
     def get_results(self, agent_id: str) -> dict | None:
@@ -862,6 +926,8 @@ class AgentManager:
             return {}
 
         deadline = time.time() + timeout
+        parent = waiting_agent.get()
+        interrupted = False
         captured: dict[str, dict] = {}
         pending = set(agent_ids)
         while True:
@@ -878,12 +944,32 @@ class AgentManager:
                 elif agent._sm.is_active:
                     any_active = True
 
+            if parent is not None and parent._inbox_event.is_set():
+                interrupted = True
+                break
             if not any_active:
                 break
             remaining = deadline - time.time()
             if remaining <= 0:
                 break
-            await asyncio.sleep(min(poll_interval, remaining))
+            # Only our event waiters are cancelled below, never child tasks.
+            wakeups = [asyncio.create_task(asyncio.sleep(min(poll_interval, remaining)))]
+            wakeups.extend(
+                asyncio.create_task(self._agents[aid]._terminal_event.wait())
+                for aid in pending
+                if aid in self._agents
+            )
+            if parent is not None:
+                wakeups.append(asyncio.create_task(parent._inbox_event.wait()))
+                wakeups.append(asyncio.create_task(parent._cancel_event.wait()))
+            try:
+                await asyncio.wait(wakeups, return_when=asyncio.FIRST_COMPLETED)
+                if parent is not None and parent._cancel_event.is_set():
+                    raise asyncio.CancelledError()
+            finally:
+                for task in wakeups:
+                    task.cancel()
+                await asyncio.gather(*wakeups, return_exceptions=True)
 
         # Captured terminal observations are never re-queried. Resolve only
         # still-pending IDs against the live registry at the deadline.
@@ -903,7 +989,10 @@ class AgentManager:
                 }
 
         still_running = [aid for aid, r in results.items() if r.get("status") == "running"]
-        if still_running:
+        if interrupted:
+            for result in results.values():
+                result["wait_interrupted"] = "parent_message"
+        if still_running and not interrupted:
             log.warning(
                 "wait_for_agents timed out with %d still running: %s",
                 len(still_running),
@@ -1059,12 +1148,15 @@ class AgentManager:
                     agent.label,
                     int(elapsed),
                 )
-            elif idle > STALE_WARN_SECONDS:
+            elif (agent.phase_deadline is not None and now > agent.phase_deadline) or (
+                agent.phase == "ready" and idle > STALE_WARN_SECONDS
+            ):
                 stale += 1
                 log.warning(
-                    "Agent %s (%s) appears stale: %ds idle",
+                    "Agent %s (%s) appears stale: %s, last progress %ds ago",
                     agent.id,
                     agent.label,
+                    agent.activity()["activity"],
                     int(idle),
                 )
         return {"killed": killed, "stale": stale}
@@ -1173,20 +1265,7 @@ async def _run_agent(
             if _check_lifetime():
                 return
 
-            # Check inbox for injected messages
-            while not agent._inbox.empty():  # type: ignore[union-attr]  # __post_init__ always sets it
-                try:
-                    msg = agent._inbox.get_nowait()  # type: ignore[union-attr]  # __post_init__ always sets it
-                    agent.messages.append(
-                        {
-                            "role": "user",
-                            "content": f"[Message from parent] {msg}",
-                            "provenance": "agent_parent",
-                        }
-                    )
-                    log.debug("Agent %s received inbox message", agent.id)
-                except asyncio.QueueEmpty:
-                    break
+            agent.drain_inbox()
 
             # ONE authoritative plan is captured before any compaction for
             # this logical generation. Its serving identity and budget snapshot
@@ -1259,7 +1338,9 @@ async def _run_agent(
 
             # Transition READY → EXECUTING for LLM call
             agent.transition(AgentState.EXECUTING, f"iteration {iteration + 1}")
-            agent.last_activity = time.time()
+            agent.set_phase(
+                "generating", time.time() + min(agent.iteration_timeout, _remaining_lifetime(agent))
+            )
             agent.iteration_count = iteration + 1
             iter_start = time.time()
 
@@ -1359,6 +1440,20 @@ async def _run_agent(
                     context_density_source=context_density_source,
                     context_primary_chars=context_primary_chars,
                 )
+                # No await separates the checkpoint from completing: send cannot race it.
+                if agent.drain_inbox():
+                    if iteration + 1 == max_iterations:
+                        agent.transition(
+                            AgentState.FAILED, "budget exhausted with parent correction"
+                        )
+                        agent.error = (
+                            "Parent correction consumed, but no iteration budget remains to replan."
+                        )
+                        agent.ended_at = time.time()
+                        return
+                    agent.transition(AgentState.READY, "parent correction before finalization")
+                    agent.set_phase("ready")
+                    continue
                 agent.transition(AgentState.COMPLETED, "no more tool calls")
                 agent.result = text
                 agent.ended_at = time.time()
@@ -1426,16 +1521,18 @@ async def _run_agent(
                 return
 
             # Back to READY for next iteration
+            if _check_kill():
+                return
             agent.transition(AgentState.READY, "tools complete")
-
-            # Check stale warning
-            if time.time() - agent.last_activity > STALE_WARN_SECONDS:
-                log.warning(
-                    "Agent %s (%s) has been idle for >%ds",
-                    agent.id,
-                    agent.label,
-                    STALE_WARN_SECONDS,
+            agent.set_phase("ready")
+            if agent.drain_inbox() and iteration + 1 == max_iterations:
+                agent.transition(AgentState.EXECUTING, "settling exhausted correction")
+                agent.transition(AgentState.FAILED, "budget exhausted with parent correction")
+                agent.error = (
+                    "Parent correction consumed, but no iteration budget remains to replan."
                 )
+                agent.ended_at = time.time()
+                return
 
         # Exhausted iterations — transition from READY → COMPLETED
         agent.transition(AgentState.COMPLETED, f"max iterations ({max_iterations}) reached")
@@ -1474,6 +1571,8 @@ async def _run_agent(
         log.error("Agent %s (%s) crashed: %s", agent.id, agent.label, err_msg, exc_info=e)
 
     finally:
+        trajectory.inbox_events = list(agent.inbox_events)
+        trajectory.activity = agent.activity()
         trajectory.finalize(
             final_state=agent.state.value,
             result=agent.result,

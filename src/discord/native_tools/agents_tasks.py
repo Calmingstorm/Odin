@@ -1169,6 +1169,7 @@ class AgentTaskTools:
             lines.append(
                 f"`{a['id']}` | **{a['label']}** | {a['status']} | "
                 f"{a['iteration_count']} iters | {a['runtime_seconds']}s"
+                + (f" | {a['activity']}" if a.get("activity") else "")
             )
         return f"**Agents ({len(agents)}):**\n" + "\n".join(lines)
 
@@ -1208,7 +1209,7 @@ class AgentTaskTools:
             parts.append(f"Error: {results['error']}")
         return "\n".join(parts)
 
-    async def _handle_wait_for_agents(self, inp: dict) -> str:
+    async def _handle_wait_for_agents(self, inp: dict) -> str | ToolResult:
         """Wait for agents to complete and return collected results."""
         agent_ids = inp.get("agent_ids", [])
         timeout = inp.get("timeout", 300)
@@ -1240,7 +1241,13 @@ class AgentTaskTools:
             iters = r.get("iteration_count", 0)
             lines.append(f"**{label}** (`{aid}`): {status} [iterations={iters}]\n{content}")
 
-        return "\n\n".join(lines) if lines else "No results."
+        text = "\n\n".join(lines) if lines else "No results."
+        if any(r.get("wait_interrupted") == "parent_message" for r in results.values()):
+            return ToolResult(
+                "Wait interrupted by parent message; children continue.\n\n" + text,
+                audit_metadata={"wait_interrupted": "parent_message"},
+            )
+        return text
 
     # --- Loop-Agent bridge tool handlers ---
 
