@@ -1724,6 +1724,7 @@ def test_every_declared_state_path_is_covered(tmp_path: Path) -> None:
         "permissions.overrides_path": (tmp_path / "s-perm" / "p.json", tmp_path / "s-perm"),
         "openai_codex.credentials_path": (tmp_path / "s-codex" / "c.json", tmp_path / "s-codex"),
         "attachments.temp_directory": (tmp_path / "s-att", tmp_path / "s-att"),
+        "computer.storage_dir": (tmp_path / "s-computer", tmp_path / "s-computer"),
     }
     assert set(relocations) == {dotted for dotted, _ in _DECLARED_STATE_PATHS}, (
         "a declared state path has no relocation case — add one so protection "
@@ -1954,6 +1955,28 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     ),
     "src/tools/skill_manager.py": "argv-form `pip install <specs>`, no user-supplied relative path",
     "src/tools/workspace.py": "`sudo -n install -d` provisioning the workspace itself",
+    # Fixed-profile experimental desktop runtime, not arbitrary command routes.
+    # This is cwd/argv accounting, NOT approval of desktop safety or API wiring.
+    "src/computer/runtime/backend.py": (
+        "enabled-only launch of an absolute supervisor.py via isolated Python (-I), "
+        "validated session/profile and clean env; inherits cwd but accepts no shell "
+        "or relative user path; public act currently rejects input (capture only)"
+    ),
+    "src/computer/runtime/supervisor.py": (
+        "fixed systemd-run/bwrap profile and systemctl control argv (optional sudo -n); "
+        "validated generated unit names, clean env, no user command; host control "
+        "processes inherit cwd, sandbox profile explicitly chdirs to /workspace"
+    ),
+    "src/computer/runtime/worker.py": (
+        "internal spawn helper called only for fixed dbus-daemon/Xvfb/openbox argv; "
+        "requires /runtime and uid 65534, inherits sandbox /workspace cwd and fixed "
+        "env; wire operations do not expose spawn or arbitrary command execution"
+    ),
+    "src/computer/runtime/primitives.py": (
+        "fixed absolute xdotool plus allowlisted drawing/xed launch argv, explicit "
+        "/workspace cwd and :77 env; input uses validated arguments and type -- text, "
+        "not a shell; containment depends on worker/profile, not this helper alone"
+    ),
     "src/web/api/self_update.py": "argv-form git/gh during self-update, inside the install",
     "src/packaging/validate.py": "build-time packaging check, not a runtime path",
     "src/restart.py": "os.execve re-exec of Odin himself",

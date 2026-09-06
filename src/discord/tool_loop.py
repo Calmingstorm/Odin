@@ -417,6 +417,7 @@ class _ChatTurn:
     # Process-local, per-generation cache captured beside serving identity.
     # Rebuilt from durable _gen_identity on resume; never serialized directly.
     _generation_budget_snapshot: ContextBudgetSnapshot | None = None
+    _computer_serving: LLMServingIdentity | None = None
     # Process-local durability handle (write-invariant driver). Classified
     # RECONSTRUCTED in the checkpoint codec: a resumed turn gets a fresh
     # handle bound to the resume lease, never a deserialized one.
@@ -497,6 +498,8 @@ class ToolLoopDeps:
     mcp_manager: MCPManager | None = None
     # Exact cleanup target for agents spawned by a cancelled main turn.
     kill_agents_for_turn: Callable[[str], list[str]] = lambda _turn_id: []
+    get_computer: Callable = lambda: None
+    computer_restricted: Callable = lambda _owner, _channel: False
 
 
 class ToolLoopRunner:
@@ -525,6 +528,40 @@ class ToolLoopRunner:
         self._turn_store = deps.turn_store
         self._window_observer = deps.window_observer
         self._on_turn_suspended = deps.on_turn_suspended
+        self._get_computer = deps.get_computer
+        self._computer_restricted = deps.computer_restricted
+
+    def _computer_mode(self, st) -> bool:
+        return bool(getattr(self, "_computer_restricted", lambda *_: False)(
+            st.user_id, str(st.message.channel.id)))
+
+    def _computer_service(self):
+        return getattr(self, "_get_computer", lambda: None)()
+
+    async def _stop_computer_turn(self, st):
+        computer = self._computer_service()
+        if computer is not None and self._computer_mode(st):
+            try:
+                await computer.finish_turn(st)
+            except Exception:
+                log.exception("Computer stop could not be confirmed")
+
+    def _computer_frames(self, st, *, capture=False):
+        if not self._computer_mode(st):
+            return
+        from ..computer.vision import plan_model_frames
+
+        plan = plan_model_frames(st.messages)
+        st.messages = plan.messages
+        stamps = frozenset(
+            (b["__computer_frame__"]["observation_id"], b["__computer_frame__"]["sha256"])
+            for m in plan.messages if isinstance(m.get("content"), list)
+            for b in m["content"] if isinstance(b, dict) and b.get("type") == "image"
+            and "__computer_frame__" in b)
+        if capture:
+            st._computer_required_frames = stamps
+        elif not getattr(st, "_computer_required_frames", frozenset()).issubset(stamps):
+            raise PermissionError("Computer frame lost during compaction; stopped.")
 
     def _scoped_tools_for_request(
         self,
@@ -651,6 +688,12 @@ class ToolLoopRunner:
         return await self._run_with_guards(st)
 
     async def _run_with_guards(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
+        async def observe_cancel():
+            await st._cancel.wait()
+            await self._stop_computer_turn(st)
+
+        computer_stop_observer = (
+            asyncio.create_task(observe_cancel()) if self._computer_service() is not None else None)
         try:
             result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
@@ -720,6 +763,10 @@ class ToolLoopRunner:
             raise
         finally:
             # A suspended durable turn still owns its lineage and may resume.
+            await self._stop_computer_turn(st)
+            if computer_stop_observer is not None:
+                computer_stop_observer.cancel()
+                await asyncio.gather(computer_stop_observer, return_exceptions=True)
             # Every other exit is terminal for this process-local owner.
             if getattr(st.durability, "settled", False) and not getattr(
                 st.durability, "suspended", False
@@ -754,6 +801,7 @@ class ToolLoopRunner:
             # and rescue must never observe different clamp generations.
             config = self._get_config()
             serving = self._llm_gateway.capture_serving_identity(config)
+            self._computer_frames(st, capture=True)
             if st._gen_identity:
                 budget_snapshot = self._snapshot_from_generation_facts(st._gen_identity)
             else:
@@ -1612,6 +1660,14 @@ class ToolLoopRunner:
                 self._llm_gateway, fallback_client=request_client
             )
         request_client = serving_identity.client
+        st._computer_serving = serving_identity
+        if self._computer_mode(st):
+            from ..computer.integration import require_vision
+
+            try:
+                require_vision(serving_identity)
+            except PermissionError as exc:
+                return ("done", await self._llm_error_done(st, LLMRequestError(str(exc))))
         # Pre-admission and breaker identity are frozen beside the client that
         # every physical attempt will invoke.
         preflight_incompatible_effort(
@@ -1654,6 +1710,21 @@ class ToolLoopRunner:
                 cache_result=False,
                 request_config=request_config,
             )
+            computer = self._computer_service()
+            if computer is not None:
+                from ..computer.integration import COMPUTER_TOOLS, require_vision
+
+                if self._computer_mode(st):
+                    require_vision(serving_identity)
+                    self._computer_frames(st)
+                    st.tools = [t for t in (st.tools or []) if t["name"] in COMPUTER_TOOLS]
+                else:
+                    try:
+                        require_vision(serving_identity)
+                    except PermissionError:
+                        st.tools = [t for t in (st.tools or []) if t["name"] not in COMPUTER_TOOLS]
+            elif self._computer_mode(st):
+                st.tools = []
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -2308,7 +2379,8 @@ class ToolLoopRunner:
 
         # Tier 3: Completion classifier — uses LLM to judge whether
         # the user's request was fully addressed.
-        if st.tools_used_in_loop and st.continuation_count < st.max_continuations:
+        if (st.tools_used_in_loop and st.continuation_count < st.max_continuations
+                and not self._computer_mode(st)):
             is_complete, reason = await self._completion_classifier.classify(
                 st.message.content,
                 llm_resp.text or "",

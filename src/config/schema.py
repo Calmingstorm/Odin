@@ -1193,7 +1193,7 @@ class ComputerUseConfig(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
-    storage_dir: str = "data/computer"
+    storage_dir: str = "/var/lib/odin/computer"
     # Explicit operator provisioning, never inferred from root/sudo availability.
     runtime_sudo: bool = False
 
@@ -1203,6 +1203,8 @@ class ComputerUseConfig(BaseModel):
         value = value.strip()
         if not value or any(ord(char) < 32 for char in value):
             raise ValueError("computer.storage_dir must be a nonempty private directory")
+        if not Path(value).is_absolute():
+            raise ValueError("computer.storage_dir must be absolute")
         return value
 
 

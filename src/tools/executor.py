@@ -827,6 +827,15 @@ class ToolExecutor:
     async def _execute_inner(
         self, tool_name: str, tool_input: dict, *, user_id: str | None = None
     ) -> ToolResult:
+        # Native foreground admission is the only source of desktop authority.
+        owner, channel = delivery_scope.get()
+        restricted = getattr(self, "computer_restricted", None)
+        reserved = getattr(self, "computer_reserved", None)
+        if ((reserved is not None and reserved(tool_name))
+                or not tool_scope_allows(tool_name)
+                or (restricted is not None and restricted(str(user_id or owner), str(channel)))):
+            return ToolResult(output="Permission denied: restricted tool authority.",
+                              ok=False, error="permission_denied", tool_name=tool_name)
         # Operator-disabled built-in (config-gated visibility): typed
         # rejection BEFORE handler resolution, durability transitions,
         # recovery machinery, or any external effect. getattr tolerates the

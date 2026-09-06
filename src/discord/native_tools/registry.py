@@ -92,6 +92,7 @@ class NativeToolDispatcher:
             channel_state=channel_state,
         )
         self._handlers: dict[str, tuple[str, str, Shape]] = {}
+        self.computer_restricted = None
 
     # -- registration ---------------------------------------------------------
 
@@ -103,6 +104,8 @@ class NativeToolDispatcher:
 
     def handles(self, tool_name: str) -> bool:
         """Native table + skill-domain tools (skill CRUD/meta + user skills)."""
+        if "computer" in self.owners:
+            register_computer_handlers(self)
         if tool_name in self._handlers:
             return True
         return self.skills.handles(tool_name)
@@ -119,13 +122,35 @@ class NativeToolDispatcher:
         skill_file_delivery: Literal["send", "stage"],
     ) -> tuple[Any, NativeToolEffects]:
         effects = NativeToolEffects()
+        register_computer_handlers(self)
 
-        # Operator-disabled built-in: typed rejection BEFORE any handler —
-        # covers requests assembled before a live disable landed.
+        # Unconditional denial needs no owner/channel lookup. Preserve the
+        # disabled-built-in fast path even for a minimal transport envelope.
         if self.builtin_policy is not None and self.builtin_policy.is_disabled(tool_name):
             from ...tools.builtin_policy import disabled_rejection
 
             return disabled_rejection(tool_name), effects
+
+        # Offer-time filtering is not authority. Enforce inherited scopes for
+        # every native/indirect dispatch, not just the executor's handlers.
+        from ...tools.output_authorization import tool_scope_allows
+        from ...tools.result_validator import ToolResult
+
+        denied = not tool_scope_allows(tool_name)
+        owner = self.owners.get("computer")
+        computer_tool = owner is not None and getattr(owner, "enabled") and tool_name in (
+            "computer_session", "computer_observe", "computer_act")
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        if (computer_tool or self.computer_restricted is not None) and channel_id is None:
+            denied = True
+        if computer_tool:
+            denied = denied or not getattr(owner, "grant_allows")(
+                tool_name, user_id, str(channel_id))
+        elif self.computer_restricted is not None:
+            denied = denied or self.computer_restricted(user_id, str(channel_id))
+        if denied:
+            return ToolResult(output="Permission denied: restricted tool authority.",
+                              ok=False, error="permission_denied", tool_name=tool_name), effects
 
         # --- registered native handlers ---
         entry = self._handlers.get(tool_name)
@@ -214,3 +239,18 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("ingest_document", "knowledge", "_handle_ingest_document", "author_input")
     d.register("bulk_ingest_knowledge", "knowledge", "_handle_bulk_ingest", "author_input")
     d.register("set_permission", "channel_ops", "_handle_set_permission", "user_input")
+    register_computer_handlers(d)
+
+
+def register_computer_handlers(dispatcher: NativeToolDispatcher) -> None:
+    """Optional late registration; default-off static handlers stay unchanged."""
+    owner = dispatcher.owners.get("computer")
+    names = ("computer_session", "computer_observe", "computer_act")
+    if owner is None or not getattr(owner, "enabled"):
+        for name in names:
+            if dispatcher._handlers.get(name, (None,))[0] == "computer":
+                del dispatcher._handlers[name]
+        return
+    for name in names:
+        if name not in dispatcher._handlers:
+            dispatcher.register(name, "computer", "_handle_" + name, "input")

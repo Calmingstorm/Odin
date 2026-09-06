@@ -120,6 +120,7 @@ RECONSTRUCTED_FIELDS: frozenset[str] = frozenset({
     "policy",
     "trace",
     "_generation_budget_snapshot",
+    "_computer_serving",  # Live client/serving identity, re-captured before each request.
     "durability",
 })
 

@@ -186,7 +186,7 @@ class TestResolution:
         from src.config.apply_registry import schema_facts
 
         facts = schema_facts()
-        assert len(facts) == 274
+        assert len(facts) == 277  # Includes the three computer configuration leaves.
         assert "graceful_degradation.enabled" not in facts
         assert "grafana_alerts.enabled" not in facts
         for path in (
@@ -950,7 +950,7 @@ class TestPlainLanguageEffects:
         assert WORKSPACE_PROTECTED_CONFIG_PATH_NAMES == {
             path for path, _is_file in _DECLARED_STATE_PATHS
         }
-        assert len(WORKSPACE_PROTECTED_CONFIG_PATH_NAMES) == 13
+        assert len(WORKSPACE_PROTECTED_CONFIG_PATH_NAMES) == 14
 
         for path in WORKSPACE_PROTECTED_CONFIG_PATH_NAMES:
             spec = spec_for(path)
