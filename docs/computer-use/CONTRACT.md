@@ -1,4 +1,4 @@
-# Stage 0 contract and acceptance matrix
+# Computer contract and acceptance matrix (R1)
 
 Three configured-only tools: `computer_session`, `computer_observe`,
 `computer_act`. No desktop dependency imports, prompt text, processes, listeners,
@@ -11,17 +11,38 @@ approval, host display, executable, socket, bus, or runtime path. Only foregroun
 entry is admitted. Restricted task context must survive cancellation and resume;
 observation text is untrusted data and cannot grant another tool's authority.
 
-States: starting → active → paused/cancelled/closed/quarantined. Resume requires
-a new generation, renewed authorization and a new observation. Stop revokes
-the generation first, releases held input, then tears down only owned processes.
-Human takeover means agent authority is revoked before any human input.
+Platform (X11/Wayland) is independent of environment (isolated/existing-session).
+Launching an application, offline access and disposable processes are isolated
+backend properties, never shared session prerequisites. Real-session assisted
+work is the destination of the same product, not permission for this branch to
+access the active workstation. Both platform families are feasibility gates now.
 
-Observations bind an opaque ID to generation, monotonic capture time, display
-and window geometry, focus/modal identity, exact image/crop transform, and
-bounded semantic nodes. No input consumes an observation older than the finite
-freshness limit or one invalidated by geometry/focus changes. Every action
-requires an ID, observation, target and expected postcondition. Coordinates map
-through trusted transforms. No indefinite key/button holds.
+States: starting → active → paused/cancelled/closed/quarantined. Resume requires
+a new generation, renewed authorization and a new observation. Stop fences the
+task and consent bindings first, disconnects capture/input, and releases only
+owned devices/input. Isolated backends may tear down their owned sandbox;
+existing-session backends must leave applications and the desktop alive. A human
+does not have to stop using the machine for us to revoke agent authority.
+Private-display-wide key cleanup is never available to existing-session adapters.
+
+Observations bind an opaque ID to task generation, consent generation, monotonic
+capture time/expiry, opaque source ID/revision, delivered raster dimensions,
+source-local geometry and explicit crop/affine input transforms. Optional focus,
+modal and semantic evidence can be unknown; missing evidence is not permission.
+No public display number, XID, desktop-global coordinate, bus address or cookie.
+Capture scope, input reach, task authority, and pointer/keyboard independence are
+separate capabilities. Capture permission is not input confinement. Unknown or
+shared input separation denies assisted actions rather than moving the human
+pointer and restoring it afterward.
+
+Multi-monitor capture is source-scoped from day one, including different origins,
+fractional scales, rotations and gaps. Placement belongs inside the backend; no
+single desktop-wide scale or bounding-span action plane is inferred. Actions bind
+to one observed source. Resize, hotplug, same-sized replacement, region/device
+replacement and consent revocation invalidate the binding. Missing input mapping
+allows a capture-only result, never a guessed scale=1 action. Every action needs
+a fresh observation, unique ID, target and expected postcondition. No indefinite
+key/button holds.
 
 Receipt states distinguish executed, verified, not_satisfied, unavailable, and
 unknown. An action is durably marked pending before injection. Duplicate ID and
@@ -30,7 +51,10 @@ error. Crash/pending outcomes become unknown, not eligible for replay. Fresh
 observation and explicit reconciliation are the only recovery path.
 
 Images are native multimodal content with bounded metadata and separate evidence
-storage. Unsupported execution surfaces/adapters refuse; they cannot continue
+storage. The 2-million-pixel / 2-MiB limit applies to delivered frames, not source
+geometry: even 1920x1080 exceeds 2 million source pixels. Overview resampling and
+detail crops must preserve explicit mappings; backend capture-allocation limits
+are independently bounded. Unsupported execution surfaces/adapters refuse; they cannot continue
 visually blind. Older working frames are removed without severing tool/result
 correlation. Typed text is not stored in ordinary audit.
 
@@ -41,9 +65,12 @@ correlation. Typed text is not stored in ordinary audit.
   expired evidence, and alternate-tool denial within restricted tasks.
 * Private display/buses/home/network/devices, resource limits, owned cleanup;
   no mutation or capture of the active workstation session.
-* Pixel/image byte caps, crop transforms, native serialized requests, fallback
+* Delivered pixel/image byte caps distinct from source bounds; downsampled 1080p,
+  1440p, 4K and wide-layout metadata, detail crops and resize rounding; native serialized requests, fallback
   refusal; no base64 stringification in agents, audit, durable summaries.
-* Moved window, stale node/frame, unexpected modal, coordinate bounds,
+* Multi-source negative/nonzero origins, gaps, fractional scales, rotations,
+  source-local pixel/input round trips and stale same-size source replacement.
+* Changed source/focus, stale node/frame, unexpected modal, coordinate bounds,
   wrong postcondition, duplicate ID, lost response, worker crash, unknown effect.
 * Mid-gesture pause/cancel, lease loss, hung primitive (stub), no late input,
   no cross-session teardown; record stop latency separately from request success.
@@ -52,6 +79,10 @@ correlation. Typed text is not stored in ordinary audit.
   no automatic evidence retrieval on expansion, no screenshot auto-posting.
 * GUI-only drawing/editor saves and reopens with independent artifact checks;
   explicit successes/failures and comparison against a safe isolated baseline.
+* Private X11 XI2 and Wayland portal/PipeWire/libei feasibility: actual toolkit
+  event receipt, concurrent simulated-human pointer/focus/modifiers, grabs and
+  cancellation. A second drawn cursor is not a pass. Revoke/disconnect removes
+  only agent devices and leaves pre-existing disposable-session applications alive.
 
 The build evidence document will separate unit/contract proof, actual runtime
 measurements, and uncompleted release gates. A service returning exit 0 is not

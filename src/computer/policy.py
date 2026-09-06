@@ -1,0 +1,66 @@
+"""Fail-closed admission and restricted-actor policy independent of tool presentation."""
+
+from .models import BackendCapabilities, ComputerError, RequestContext, SessionGrant
+
+COMPUTER_TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
+MAX_TASK_SECONDS = 1200
+MAX_ACTIONS = 200
+MAX_INPUT_SECONDS = 2.0
+MAX_POINTS = 256
+MAX_BATCH = 8
+FRAME_FRESH_SECONDS = 5.0
+STOP_TIMEOUT_SECONDS = 3.0
+
+
+def foreground(context: RequestContext) -> None:
+    if (not isinstance(context, RequestContext) or context.origin != "foreground"
+            or context.surface not in {"discord", "webui"}):
+        raise ComputerError("foreground_only")
+
+
+def owned(context: RequestContext, grant: SessionGrant, *, same_turn: bool = True) -> None:
+    if (context.owner_id != grant.owner_id or context.channel_id != grant.channel_id
+            or context.host_id != grant.host_id
+            or (same_turn and context.turn_id != grant.turn_id)):
+        raise ComputerError("not_found")
+
+
+def check_tool(store, context: RequestContext, tool_name: str) -> None:
+    if (store.is_restricted(context.owner_id, context.channel_id)
+            and tool_name not in COMPUTER_TOOLS):
+        raise ComputerError("restricted_computer_task")
+
+
+def exact_keys(value: dict, allowed: set[str], required: set[str] | None = None) -> None:
+    if not isinstance(value, dict) or set(value) - allowed or (required or set()) - set(value):
+        raise ComputerError("invalid_arguments")
+
+
+def integer(value, minimum: int, maximum: int) -> int:
+    if type(value) is not int or not minimum <= value <= maximum:
+        raise ComputerError("invalid_bounds")
+    return value
+
+
+def input_eligible(capabilities: BackendCapabilities) -> None:
+    if type(capabilities) is not BackendCapabilities:
+        raise ComputerError("backend_capabilities_unknown")
+    if capabilities.environment == "existing_session" and (
+        capabilities.pointer_separation != "independent"
+        or capabilities.keyboard_separation != "independent"
+    ):
+        raise ComputerError("assisted_input_separation_unproven")
+
+
+def observation_input(grant, live, observation) -> None:
+    input_eligible(live.capabilities)
+    source = observation.source
+    if (observation.session_id != grant.session_id or observation.generation != grant.generation
+            or source.consent_generation != grant.consent_generation):
+        raise ComputerError("stale_observation_binding")
+    if source.source_id not in observation.scope.input_sources:
+        raise ComputerError("input_not_granted")
+    if source.pixel_to_input is None:
+        raise ComputerError("input_mapping_unknown")
+    if not observation.focused:
+        raise ComputerError("input_focus_unavailable")

@@ -18,6 +18,8 @@ import zlib
 from dataclasses import asdict, dataclass, field
 from typing import Literal, TypedDict
 
+from .geometry import MAX_SOURCE_DIMENSION, AffineTransform, crop_transform
+
 MAX_PNG_BYTES = 2 * 1024 * 1024
 MAX_FRAME_PIXELS = 2_000_000
 _TAG = "__computer_frame__"
@@ -48,48 +50,104 @@ class FrameCrop:
 
 @dataclass(frozen=True)
 class FrameMetadata:
+    """Capture provenance, not an input grant or a global desktop action plane.
+
+    Source dimensions have a numeric metadata bound, not the delivered pixel
+    budget. Backend source allocation is a separate capability/resource check.
+    Input requires a separately authorized SourceGeometry binding: this class
+    maps only delivered raster pixels to source raster pixels.
+    """
+
     observation_id: str
     generation: int
     captured_monotonic_ns: int
     width: int
     height: int
-    display_width: int
-    display_height: int
+    session_id: str
+    source_id: str
+    source_revision: int
+    consent_generation: int
+    source_width: int
+    source_height: int
     kind: Literal["full", "crop"] = "full"
     crop: FrameCrop | None = None
+    rotation: Literal[0, 90, 180, 270] = 0
+    resize_scale: tuple[int, int] = (1, 1)
+    resize_rounding: Literal["nearest", "floor"] = "nearest"
 
     def __post_init__(self) -> None:
-        if type(self.observation_id) is not str or not re.fullmatch(
-            r"[A-Za-z0-9_-]{1,96}", self.observation_id
-        ):
-            raise VisionError("Invalid observation identity")
+        for identity in (self.observation_id, self.session_id, self.source_id):
+            if type(identity) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", identity):
+                raise VisionError("Invalid observation or source identity")
         if not all(_integer(v) for v in (
             self.generation, self.captured_monotonic_ns, self.width, self.height,
-            self.display_width, self.display_height,
+            self.source_revision, self.consent_generation, self.source_width, self.source_height,
         )):
             raise VisionError("Invalid frame dimensions or generation")
         if self.width * self.height > MAX_FRAME_PIXELS:
             raise VisionError("Frame exceeds pixel limit")
-        if self.display_width * self.display_height > MAX_FRAME_PIXELS:
-            raise VisionError("Display exceeds pixel limit")
+        if max(self.source_width, self.source_height) > MAX_SOURCE_DIMENSION:
+            raise VisionError("Source dimension exceeds metadata bound")
         if self.kind not in ("full", "crop"):
             raise VisionError("Invalid frame kind")
         if self.kind == "full":
             if self.crop is not None:
                 raise VisionError("Full frame cannot specify crop")
-            source_width, source_height = self.display_width, self.display_height
         else:
             if type(self.crop) is not FrameCrop:
                 raise VisionError("Crop frame requires crop geometry")
-            if (self.crop.x + self.crop.width > self.display_width
-                    or self.crop.y + self.crop.height > self.display_height):
-                raise VisionError("Crop outside display")
-            source_width, source_height = self.crop.width, self.crop.height
-        # No hidden stretch or upscaling. Exact rational scale is recoverable
-        # from image dimensions and source rectangle, without rounded floats.
-        if (self.width > source_width or self.height > source_height
-                or self.width * source_height != self.height * source_width):
-            raise VisionError("Invalid frame scale")
+            if (self.crop.x + self.crop.width > self.source_width
+                    or self.crop.y + self.crop.height > self.source_height):
+                raise VisionError("Crop outside source")
+        if type(self.rotation) is not int or self.rotation not in (0, 90, 180, 270):
+            raise VisionError("Invalid frame rotation")
+        if (type(self.resize_scale) is not tuple or len(self.resize_scale) != 2
+                or not all(_integer(v) for v in self.resize_scale)
+                or self.resize_scale[0] > self.resize_scale[1]):
+            raise VisionError("Invalid frame resize scale")
+        if self.resize_rounding not in ("nearest", "floor"):
+            raise VisionError("Invalid frame resize rounding")
+        rectangle = self.source_rectangle
+        rw, rh = rectangle.width, rectangle.height
+        if self.rotation in (90, 270):
+            rw, rh = rh, rw
+        numerator, denominator = self.resize_scale
+
+        def rounded(dimension: int) -> int:
+            # Nearest means half-up, not Python's tie-to-even round(). The
+            # declared uniform scale is verified before exact raster mapping.
+            if self.resize_rounding == "floor":
+                return dimension * numerator // denominator
+            return (2 * dimension * numerator + denominator) // (2 * denominator)
+
+        if (self.width, self.height) != (rounded(rw), rounded(rh)):
+            raise VisionError("Frame dimensions do not match declared resize")
+
+    @property
+    def source_rectangle(self) -> FrameCrop:
+        return self.crop or FrameCrop(0, 0, self.source_width, self.source_height)
+
+    @property
+    def delivered_to_source(self) -> AffineTransform:
+        """Exact raster-edge mapping, crop then clockwise rotation then resize.
+
+        Pixel centers are (column + 1/2, row + 1/2). Resize rounding gives
+        slightly different effective axis ratios: record these exact ratios,
+        never guess a desktop-wide scale or infer source-local INPUT mapping.
+        """
+        r = self.source_rectangle
+        return crop_transform(r.x, r.y, r.width, r.height, self.width, self.height, self.rotation)
+
+    @property
+    def binding(self) -> tuple:
+        """One capture/source binding; a crop cannot silently retarget it."""
+        return (self.observation_id, self.session_id, self.generation, self.captured_monotonic_ns,
+                self.source_id, self.source_revision, self.consent_generation,
+                self.source_width, self.source_height, self.rotation)
+
+    def public(self) -> dict:
+        return {**asdict(self), "resize_scale": list(self.resize_scale),
+                "delivered_to_source": self.delivered_to_source.public()}
 
 
 class ObservationImage(TypedDict):
@@ -162,7 +220,8 @@ def observation_image(png: bytes, metadata: FrameMetadata) -> ObservationImage:
     if type(metadata) is not FrameMetadata:
         raise VisionError("FrameMetadata required")
     _validate_png(png, metadata)
-    summary = {**asdict(metadata), "png_bytes": len(png), "sha256": hashlib.sha256(png).hexdigest()}
+    summary = {**metadata.public(), "png_bytes": len(png),
+               "sha256": hashlib.sha256(png).hexdigest()}
     return {
         "__image_block__": {
             "type": "image",
@@ -181,8 +240,8 @@ def observation_image(png: bytes, metadata: FrameMetadata) -> ObservationImage:
 def frame_summary(result: ObservationImage) -> dict:
     """Pixel-free allowlisted metadata for audit; never stringify the result."""
     metadata = _parse_summary(result.get(_TAG))
-    summary = result[_TAG]
-    return {**asdict(metadata), "png_bytes": summary["png_bytes"], "sha256": summary["sha256"]}
+    summary = result["__computer_frame__"]
+    return {**metadata.public(), "png_bytes": summary["png_bytes"], "sha256": summary["sha256"]}
 
 
 def _parse_summary(value: object) -> FrameMetadata:
@@ -196,7 +255,18 @@ def _parse_summary(value: object) -> FrameMetadata:
             raise VisionError("Invalid computer frame summary")
         if values.get("crop") is not None:
             values["crop"] = FrameCrop(**values["crop"])
-        return FrameMetadata(**values)
+        transform = values.pop("delivered_to_source")
+        if (type(transform) is not dict or set(transform) != set("abcdef")
+                or any(type(pair) is not list or len(pair) != 2
+                       or not all(type(v) is int for v in pair)
+                       for pair in transform.values())):
+            raise VisionError("Invalid frame transform")
+        if type(values.get("resize_scale")) is list:
+            values["resize_scale"] = tuple(values["resize_scale"])
+        metadata = FrameMetadata(**values)
+        if transform != metadata.delivered_to_source.public():
+            raise VisionError("Frame transform does not match geometry")
+        return metadata
     except (TypeError, KeyError):
         raise VisionError("Invalid computer frame summary") from None
 
@@ -255,17 +325,10 @@ def plan_model_frames(messages: list[dict]) -> ModelFramePlan:
     keep = {(full[0], full[1])}
     base = full[2]
     newest = frames[-1][2]
-    if (newest.observation_id, newest.generation, newest.captured_monotonic_ns,
-            newest.display_width, newest.display_height) != (
-            base.observation_id, base.generation, base.captured_monotonic_ns,
-            base.display_width, base.display_height):
+    if newest.binding != base.binding:
         raise VisionError("Newest crop requires its matching full frame")
     for i, j, metadata in reversed(frames):
-        if metadata.kind == "crop" and (
-            metadata.observation_id, metadata.generation, metadata.captured_monotonic_ns,
-            metadata.display_width, metadata.display_height,
-        ) == (base.observation_id, base.generation, base.captured_monotonic_ns,
-              base.display_width, base.display_height):
+        if metadata.kind == "crop" and metadata.binding == base.binding:
             keep.add((i, j))
             break
     planned = list(messages)

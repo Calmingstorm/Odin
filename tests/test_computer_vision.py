@@ -7,6 +7,7 @@ import subprocess
 import sys
 import zlib
 from dataclasses import replace
+from fractions import Fraction
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -15,6 +16,7 @@ import pytest
 from src.computer.vision import (
     MAX_FRAME_PIXELS,
     MAX_PNG_BYTES,
+    MAX_SOURCE_DIMENSION,
     FrameCrop,
     FrameMetadata,
     VisionError,
@@ -41,7 +43,9 @@ def png(width=4, height=3, *, depth=8, color=2, row_filter=0, raw=None, extra=b"
 def metadata(**kwargs):
     return FrameMetadata(**dict({"observation_id": "obs_1", "generation": 1,
                                  "captured_monotonic_ns": 10, "width": 4, "height": 3,
-                                 "display_width": 4, "display_height": 3}, **kwargs))
+                                 "session_id": "session_1", "source_id": "source_1",
+                                 "source_revision": 1, "consent_generation": 1,
+                                 "source_width": 4, "source_height": 3}, **kwargs))
 
 
 def image_message(result):
@@ -70,7 +74,7 @@ def test_native_marker_round_trip_and_bounded_pixel_free_summary(color):
     summary = frame_summary(result)
     assert summary["width"] == 4 and summary["height"] == 3
     assert summary["png_bytes"] == len(data)
-    assert len(json.dumps(summary)) < 1024 and len(result["__prompt__"]) < 1200
+    assert len(json.dumps(summary)) < 1536 and len(result["__prompt__"]) < 1700
     assert block["source"]["data"] not in json.dumps(summary)
 
 
@@ -79,7 +83,15 @@ def test_native_marker_round_trip_and_bounded_pixel_free_summary(color):
     {"observation_id": "\ud800"}, {"observation_id": True}, {"generation": True},
     {"generation": 0}, {"generation": 2**64}, {"captured_monotonic_ns": -1},
     {"width": 0}, {"width": 4.0}, {"width": 2000, "height": 1001},
-    {"display_width": MAX_FRAME_PIXELS + 1}, {"kind": "gif"},
+    {"source_width": MAX_SOURCE_DIMENSION + 1}, {"kind": "gif"},
+    {"source_id": ":0"}, {"source_id": ""}, {"session_id": "bad\n"},
+    {"source_revision": 0}, {"source_revision": True}, {"consent_generation": -1},
+    {"source_width": float("inf")}, {"source_height": float("nan")},
+    {"rotation": 45}, {"rotation": True}, {"rotation": 90.0},
+    {"resize_scale": (2, 1)}, {"resize_scale": (0, 1)}, {"resize_scale": (1, 0)},
+    {"resize_scale": (True, 1)}, {"resize_scale": (float("nan"), 1)},
+    {"resize_scale": (1, 2**64)}, {"resize_scale": [1, 1]},
+    {"resize_rounding": "guess"},
     {"width": 2, "height": 3}, {"crop": FrameCrop(0, 0, 2, 2)},
     {"kind": "crop"}, {"kind": "crop", "crop": {"x": 0}},
     {"kind": "crop", "crop": FrameCrop(3, 2, 4, 3)},
@@ -96,11 +108,13 @@ def test_invalid_crop(args):
 
 
 def test_exact_scaling_and_crop_mapping():
-    full = metadata(width=2, height=1, display_width=8, display_height=4)
+    full = metadata(width=2, height=1, source_width=8, source_height=4, resize_scale=(1, 4))
     observation_image(png(2, 1), full)
-    cropped = replace(full, kind="crop", crop=FrameCrop(2, 1, 4, 2))
+    cropped = replace(full, kind="crop", crop=FrameCrop(2, 1, 4, 2), resize_scale=(1, 2))
     summary = frame_summary(observation_image(png(2, 1), cropped))
     assert summary["crop"] == {"x": 2, "y": 1, "width": 4, "height": 2}
+    assert cropped.delivered_to_source.map_point(0, 0) == (2, 1)
+    assert cropped.delivered_to_source.map_point(2, 1) == (6, 3)
 
 
 @pytest.mark.parametrize("data", [
@@ -130,7 +144,7 @@ def test_zlib_extra_stream_rejected():
 def test_pixel_limit_exact_boundary():
     data = png(2000, 1000)
     result = observation_image(data, metadata(width=2000, height=1000,
-                                            display_width=2000, display_height=1000))
+                                            source_width=2000, source_height=1000))
     assert frame_summary(result)["width"] * frame_summary(result)["height"] == MAX_FRAME_PIXELS
 
 
@@ -204,6 +218,118 @@ def test_newer_crop_without_matching_full_cannot_reuse_old_full():
         plan_model_frames([full, crop])
 
 
+@pytest.mark.parametrize("sw,sh,dw,dh,scale", [
+    (1920, 1080, 960, 540, (1, 2)),
+    (2560, 1440, 1280, 720, (1, 2)),
+    (3840, 2160, 1280, 720, (1, 3)),
+    (7920, 2520, 1320, 420, (1, 6)),
+    (MAX_SOURCE_DIMENSION, MAX_SOURCE_DIMENSION, 10, 10, (1, 100_000)),
+])
+def test_large_source_downsampled_overview_and_readable_crop(sw, sh, dw, dh, scale):
+    # No source-sized buffers: only DELIVERED PNG pixels are allocated.
+    full = metadata(source_width=sw, source_height=sh, width=dw, height=dh,
+                    resize_scale=scale)
+    image = observation_image(png(dw, dh), full)
+    crop = replace(full, width=160, height=90, kind="crop", resize_scale=(1, 1),
+                   crop=FrameCrop(sw - 160, sh - 90, 160, 90))
+    detail = observation_image(png(160, 90), crop)
+    assert plan_model_frames([image_message(image), image_message(detail)]).frame_count == 2
+    assert full.delivered_to_source.map_point(dw, dh) == (sw, sh)
+    assert crop.delivered_to_source.map_point(160, 90) == (sw, sh)
+    summary = frame_summary(image)
+    assert summary["source_width"] == sw and summary["width"] == dw
+    assert not {"display_width", "display_height", "origin_x", "origin_y", "xid"} & summary.keys()
+
+
+@pytest.mark.parametrize("sw,sh,dw,dh,scale,rounding", [
+    (1920, 1080, 1000, 563, (25, 48), "nearest"),
+    (1920, 1080, 1000, 562, (25, 48), "floor"),
+    (2560, 1440, 1365, 768, (1365, 2560), "nearest"),
+    (3840, 2160, 1333, 750, (1333, 3840), "nearest"),
+])
+def test_realistic_resize_rounding_is_explicit_and_exact_mapping_round_trips(
+    sw, sh, dw, dh, scale, rounding,
+):
+    frame = metadata(source_width=sw, source_height=sh, width=dw, height=dh,
+                     resize_scale=scale, resize_rounding=rounding)
+    assert dw * sh != dh * sw  # Deliberately not exact aspect ratio.
+    transform = frame.delivered_to_source
+    assert transform.map_point(dw, dh) == (sw, sh)
+    point = (Fraction(17, 2), Fraction(19, 2))
+    assert transform.inverse().map_point(*transform.map_point(*point)) == point
+    for wrong_height in (dh - 2, dh + 2):
+        with pytest.raises(VisionError, match="declared resize"):
+            replace(frame, height=wrong_height)
+
+
+@pytest.mark.parametrize("rotation,corners", [
+    (0, ((10, 20), (18, 24))),
+    (90, ((10, 24), (18, 20))),
+    (180, ((18, 24), (10, 20))),
+    (270, ((18, 20), (10, 24))),
+])
+def test_rotated_crop_raster_edges_and_pixel_centers(rotation, corners):
+    width, height = (2, 4) if rotation in (90, 270) else (4, 2)
+    frame = metadata(source_width=1920, source_height=1080, width=width, height=height,
+                     kind="crop", crop=FrameCrop(10, 20, 8, 4), rotation=rotation,
+                     resize_scale=(1, 2))
+    transform = frame.delivered_to_source
+    assert transform.map_point(0, 0) == corners[0]
+    assert transform.map_point(width, height) == corners[1]
+    for x in range(width):
+        for y in range(height):
+            center = (Fraction(2 * x + 1, 2), Fraction(2 * y + 1, 2))
+            sx, sy = transform.map_point(*center)
+            assert 10 < sx < 18 and 20 < sy < 24
+            assert transform.inverse().map_point(sx, sy) == center
+    assert frame_summary(observation_image(png(width, height), frame))["rotation"] == rotation
+
+
+@pytest.mark.parametrize("changes", [
+    {"source_id": "replacement"}, {"source_revision": 2}, {"consent_generation": 2},
+    {"session_id": "new_session"}, {"generation": 2}, {"rotation": 180},
+    {"source_width": 5},
+])
+def test_matching_dimensions_do_not_let_crop_retarget_source_binding(changes):
+    full = image_message(observation_image(png(), metadata()))
+    crop = metadata(kind="crop", crop=FrameCrop(0, 0, 2, 2), width=2, height=2, **changes)
+    with pytest.raises(VisionError, match="matching full"):
+        plan_model_frames([full, image_message(observation_image(png(2, 2), crop))])
+
+
+def test_json_round_trip_transform_checked_and_global_coordinates_rejected():
+    original = observation_image(png(), metadata())
+    restored = json.loads(json.dumps(original))
+    assert frame_summary(restored) == frame_summary(original)
+    assert plan_model_frames([image_message(restored)]).frame_count == 1
+    for field, value in (("origin_x", -1920), ("display_id", ":0"),
+                         ("delivered_to_source", {"a": [100, 1]})):
+        changed = copy.deepcopy(restored)
+        changed["__computer_frame__"][field] = value
+        with pytest.raises(VisionError):
+            frame_summary(changed)
+
+
+@pytest.mark.parametrize("coefficient", [[True, 1], [1.0, 1], [float("nan"), 1],
+                                      [1, 0], [2**300, 1], [1, 1, 1], "1"])
+def test_summary_rejects_noncanonical_or_nonfinite_affine_coefficients(coefficient):
+    result = observation_image(png(), metadata())
+    result["__computer_frame__"]["delivered_to_source"]["a"] = coefficient
+    with pytest.raises(VisionError):
+        frame_summary(result)
+
+
+def test_source_pixel_mapping_does_not_create_input_authority():
+    from src.computer.geometry import GeometryError, SourceGeometry
+
+    frame = metadata(source_width=1920, source_height=1080,
+                     width=960, height=540, resize_scale=(1, 2))
+    source = SourceGeometry(frame.source_id, frame.source_revision, frame.consent_generation,
+                            frame.source_width, frame.source_height)
+    with pytest.raises(GeometryError, match="input_mapping_unknown"):
+        source.input_point(frame.delivered_to_source, 0, 0, frame.width, frame.height)
+
+
 class Response:
     status = 200
     headers = {}
@@ -219,14 +345,22 @@ class Response:
 
 
 @pytest.mark.parametrize("provider", ["codex", "ollama"])
-async def test_final_http_body_contains_native_png_not_text_or_path(provider):
+@pytest.mark.parametrize("frame_changes", [
+    {},
+    {"source_width": 1920, "source_height": 1080, "width": 1000, "height": 563,
+     "resize_scale": (25, 48)},
+    {"source_width": 3840, "source_height": 2160, "width": 160, "height": 90,
+     "kind": "crop", "crop": FrameCrop(3600, 2000, 160, 90)},
+])
+async def test_final_http_body_contains_native_png_not_text_or_path(provider, frame_changes):
     """Real chat_with_tools -> real HTTP send; fake transport records JSON body."""
     from src.llm.ollama import OllamaClient
     from src.llm.types import LLMResponse
     from tests.test_openai_codex_client import _client
 
-    data = png()
-    observation = observation_image(data, metadata())
+    frame = metadata(**frame_changes)
+    data = png(frame.width, frame.height)
+    observation = observation_image(data, frame)
     messages = [
         {"role": "assistant", "content": [{"type": "tool_use", "id": "frame-call",
                                              "name": "computer_observe", "input": {}}]},
