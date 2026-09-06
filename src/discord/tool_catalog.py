@@ -46,6 +46,15 @@ class ToolCatalog:
             return self.cached
         config = self.get_config()
         builtin = get_tool_definitions()
+        computer_cfg = getattr(config, "computer", None)
+        if computer_cfg is not None and computer_cfg.enabled:
+            from ..tools.defs.computer import assert_no_computer_collisions, computer_definitions
+
+            assert_no_computer_collisions(
+                self.skill_manager.get_tool_definitions(),
+                self.get_mcp_definitions() if self.get_mcp_definitions else [],
+            )
+            builtin = [*builtin, *computer_definitions()]
         # ALL static built-in names stay reserved even when a tool is
         # disabled or backend-hidden — skills and MCP tools must never
         # shadow one (collision checks below use this set, not post-filter

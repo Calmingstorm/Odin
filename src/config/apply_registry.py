@@ -140,6 +140,13 @@ class SectionSpec:
 # --------------------------------------------------------------------------
 
 SECTIONS: dict[str, SectionSpec] = {
+    "computer": SectionSpec(
+        "restart",
+        "Isolated offline desktop prerequisites; disabled by default. "
+        "Never controls the host desktop.",
+        owner="computer",
+        restart_reason="Private storage and launcher policy are operator-provisioned at startup.",
+    ),
     "timezone": SectionSpec("restart", "Locale and scheduling defaults used across Odin."),
     "discord": SectionSpec(
         "live_read",
@@ -420,6 +427,12 @@ _IDENTITY_CONSUMERS: tuple[Consumer, ...] = (
 )
 
 FIELDS: dict[str, FieldSpec] = {
+    "computer.enabled": FieldSpec(
+        apply_mode="live_apply",
+        owner="computer",
+        apply_handler="POST /api/computer/enabled",
+        description="Explicit opt-in. Disable revokes desktop sessions before removing the tools.",
+    ),
     "timezone": FieldSpec(
         label="Timezone",
         description="Timezone used in prompts and scheduled-time parsing.",

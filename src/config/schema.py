@@ -1188,6 +1188,24 @@ class MCPConfig(BaseModel):
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class ComputerUseConfig(BaseModel):
+    """Opt-in offline desktop. Bounds are deliberately not model configurable."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    storage_dir: str = "data/computer"
+    # Explicit operator provisioning, never inferred from root/sudo availability.
+    runtime_sudo: bool = False
+
+    @field_validator("storage_dir")
+    @classmethod
+    def validate_storage_dir(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(ord(char) < 32 for char in value):
+            raise ValueError("computer.storage_dir must be a nonempty private directory")
+        return value
+
+
 class Config(BaseModel):
     # ``model``/``agent_model`` and other ``model_*`` fields would otherwise
     # collide with pydantic v2's protected ``model_*`` namespace. Disable it.
@@ -1210,6 +1228,7 @@ class Config(BaseModel):
     email: EmailConfig = EmailConfig()
     search: SearchConfig = SearchConfig()
     browser: BrowserConfig = BrowserConfig()
+    computer: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
     permissions: PermissionsConfig = PermissionsConfig()
     comfyui: ComfyUIConfig = ComfyUIConfig()
     image: ImageConfig = ImageConfig()

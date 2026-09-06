@@ -388,6 +388,15 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         # one commit. Config Center is deliberately read-only for this section;
         # accepting it here would persist desired state without reconciling the
         # live manager.
+        if "computer" in updates:
+            return web.json_response(
+                {
+                    "error": "Computer settings are read-only on this route",
+                    "detail": "Provision prerequisites offline; use POST /api/computer/enabled "
+                    "to activate or revoke.",
+                },
+                status=409,
+            )
         if "mcp" in updates:
             return web.json_response(
                 {

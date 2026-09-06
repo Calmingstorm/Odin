@@ -66,6 +66,23 @@ def _deep_scrub_strings(value):
 
 def _scrub_tool_input_for_storage(tool_name: str, tool_input: dict) -> dict:
     """Redact privacy-sensitive fields from tool input before any storage path."""
+    if (
+        tool_name in {"computer_act", "computer_session", "computer_observe"}
+        and isinstance(tool_input, dict)
+    ):
+        # Desktop fields and expected text can contain a whole private document.
+        # Keep attribution/IDs and shape; never retain text, pixels or a data URL.
+        def desktop_scrub(value, key=""):
+            if key in {"text", "value", "content", "data", "image_bytes", "text_equals"}:
+                length = len(value) if isinstance(value, (str, bytes)) else 0
+                return f"[private desktop content: {length} chars]"
+            if isinstance(value, dict):
+                return {name: desktop_scrub(item, name) for name, item in value.items()}
+            if isinstance(value, list):
+                return [desktop_scrub(item) for item in value]
+            return value
+
+        return _deep_scrub_strings(desktop_scrub(tool_input))
     if tool_name.startswith("mcp_") and isinstance(tool_input, dict):
         # MCP argument shapes are arbitrary third-party contracts and may
         # carry credentials — deep-scrub every string value with the shared
