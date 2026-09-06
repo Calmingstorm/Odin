@@ -357,21 +357,32 @@ class SystemTools(HandlerBase):
             from ..output_delivery import get_delivery_budget
 
             info = registry.output_info(int(pid), inp.get("cursor"))
-            if info is not None and info.remote and info.restored:
-                lease = self._acquire_host(info.host_alias or info.host)
-                if lease is None or not authorized(info):
-                    if lease is not None:
-                        lease.release()
-                    return "Error: process output access denied.", 1
-                if info.output_lease is not None:
-                    info.output_lease.release()
-                info.output_lease = lease
-            result = await registry.poll(
-                int(pid), wait_seconds=float(wait_raw), cursor=inp.get("cursor"),
-                offset=inp.get("offset"), limit=inp.get("limit", 4000),
-                max_chars=get_delivery_budget(self.config),
-                authorized=authorized,
-            )
+            output_lease = None
+
+            def acquire_output_lease():
+                # Called under the registry's remote lock, after any preceding
+                # reader has retired execution. This invocation owns the lease;
+                # never store it on shared ProcessInfo evidence.
+                nonlocal output_lease
+                if info is None or not authorized(info):
+                    return None
+                output_lease = self._acquire_host(info.host_alias or info.host)
+                if (output_lease is None or not authorized(info)
+                        or (info.host_binding
+                            and host_binding(output_lease.target) != info.host_binding)):
+                    return None
+                return output_lease
+
+            try:
+                result = await registry.poll(
+                    int(pid), wait_seconds=float(wait_raw), cursor=inp.get("cursor"),
+                    offset=inp.get("offset"), limit=inp.get("limit", 4000),
+                    max_chars=get_delivery_budget(self.config),
+                    authorized=authorized, acquire_output_lease=acquire_output_lease,
+                )
+            finally:
+                if output_lease is not None:
+                    output_lease.release()
             info = registry.output_info(int(pid), inp.get("cursor"))
             if info is not None and not authorized(info):
                 return "Error: process access denied.", 1
