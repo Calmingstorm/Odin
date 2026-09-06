@@ -19,9 +19,10 @@ permissions:
   pages: write
   id-token: write
 
+# Pull-request builds cancel only earlier builds of the same PR; master publications keep their own group and are never cancelled mid-deploy.
 concurrency:
-  group: pages
-  cancel-in-progress: true
+  group: pages-${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.pull_request.number) || 'publish' }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build:
