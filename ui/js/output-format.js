@@ -34,7 +34,7 @@ const pretty = value => JSON.stringify(value, null, 2);
 const content = text => { const parsed = json(text); return parsed === undefined ? text : pretty(parsed); };
 const interval = (a, b, unit) => `[${a}, ${b}) ${unit}`;
 
-export function parseOutput(value) {
+export function parseOutput(value, { prettyPrint = true } = {}) {
   const raw = typeof value === 'string' ? value : (pretty(value) ?? '');
   let v = typeof value === 'string' ? json(value) : value;
   let previewText = null;
@@ -51,7 +51,7 @@ export function parseOutput(value) {
     }
   }
   const model = { raw, kind: 'text', header: [], sections: [], metadata: null };
-  const section = (label, text) => ({ label, text: content(text) });
+  const section = (label, text) => ({ label, text: prettyPrint ? content(text) : text });
   if (object(v) && v.kind === 'audit_preview' && v.audit_clipped === true
       && (!('original_chars' in v) || count(v.original_chars)) && (!('preview' in v) || typeof v.preview === 'string')) {
     model.kind = 'audit_preview';
@@ -64,7 +64,7 @@ export function parseOutput(value) {
         if (['string', 'number', 'boolean'].includes(typeof v.source[key])) model.header.push(`source ${key}: ${v.source[key]}`);
       }
     }
-    model.sections.push({ label: 'Audit preview — incomplete source; raw shows stored wrapper', text: v.preview ?? '(no preview retained in audit)' });
+    model.sections.push({ label: 'Audit preview — incomplete source; raw shows stored wrapper', text: v.preview ?? (prettyPrint ? '(no preview retained in audit)' : '') });
     model.metadata = v;
     return model;
   }
@@ -96,7 +96,7 @@ export function parseOutput(value) {
     model.sections.push(section(`Result + error page ${interval(v.offset, v.end, 'UTF-8 bytes')}`, v.preview));
   } else {
     model.kind = v === undefined ? 'text' : 'json';
-    model.sections.push({ label: '', text: v === undefined ? raw : pretty(v) });
+    model.sections.push({ label: '', text: v === undefined || (!prettyPrint && typeof value === 'string') ? raw : (prettyPrint ? pretty(v) : JSON.stringify(v)) });
     return model;
   }
   model.metadata = v;

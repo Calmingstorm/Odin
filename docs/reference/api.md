@@ -193,11 +193,11 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | POST | /api/hosts/candidates | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L338) | Yes + local | — |
 | POST | /api/hosts/&#123;alias&#125;/import-legacy | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L367) | Yes + local | — |
 | POST | /api/hosts/candidates/&#123;token&#125;/test | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L388) | Yes + local | — |
-| POST | /api/hosts/candidates/&#123;token&#125;/commit | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L411) | Yes + local | — |
-| POST | /api/hosts/&#123;alias&#125;/enabled | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L460) | Yes + local | — |
-| GET | /api/hosts/&#123;alias&#125;/references | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L486) | Yes + local | — |
-| DELETE | /api/hosts/&#123;alias&#125; | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L495) | Yes + local | — |
-| POST | /api/hosts/&#123;alias&#125;/force-revoke | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L526) | Yes + local | — |
+| POST | /api/hosts/candidates/&#123;token&#125;/commit | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L417) | Yes + local | — |
+| POST | /api/hosts/&#123;alias&#125;/enabled | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L466) | Yes + local | — |
+| GET | /api/hosts/&#123;alias&#125;/references | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L492) | Yes + local | — |
+| DELETE | /api/hosts/&#123;alias&#125; | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L501) | Yes + local | — |
+| POST | /api/hosts/&#123;alias&#125;/force-revoke | [src.web.api.hosts](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/hosts.py#L532) | Yes + local | — |
 | GET | /api/tokens | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L227) | Yes + local | — |
 | POST | /api/tokens | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L243) | Yes + local | — |
 | PUT | /api/tokens/&#123;user&#95;id&#125; | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L321) | Yes + local | — |

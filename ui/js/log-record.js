@@ -1,41 +1,60 @@
+import { computed } from 'vue';
 import ToolOutput from './tool-output.js';
+import { logDisplay, operatorMetadata } from './log-display.js';
+import { displayText } from './compact-output-format.js';
 
-/** One row for both chronological and turn-grouped audit streams. */
+/** Live tail only: one row for chronological and turn-grouped audit streams. */
 export default {
   components: { ToolOutput },
   props: { entry: { type: Object, required: true } },
   emits: ['copy'],
+  setup(props) {
+    const display = computed(() => logDisplay(props.entry));
+    const argumentsText = computed(() => displayText(props.entry.record?.tool_input ?? ''));
+    const errorText = computed(() => displayText(props.entry.record?.error || props.entry.record?.metadata?.error || ''));
+    const metadataText = computed(() => operatorMetadata(props.entry.record));
+    return { display, argumentsText, errorText, metadataText };
+  },
   template: `
-    <article class="log-line py-2 leading-relaxed border-b border-gray-800 min-w-0"
+    <article class="log-line log-compact-line min-w-0"
              :class="{ 'log-line-error': entry.level === 'ERROR', 'log-line-warning': entry.level === 'WARNING' }"
              :data-log-id="entry.id">
-      <div class="flex flex-wrap items-center gap-2 break-all mb-1">
-        <button class="log-ts text-gray-500 hover:text-gray-300" @click="$emit('copy', entry)"
-                title="Copy complete retained record">{{ entry.ts }}</button>
-        <span :class="entry.level === 'ERROR' ? 'text-red-400' : 'text-blue-400'">{{ entry.level }}</span>
-        <span v-if="entry.tool" class="logs-tool-badge">{{ entry.tool }}</span>
-        <span v-if="entry.record && entry.record.type" class="text-gray-500">{{ entry.record.type }}</span>
-        <span v-else-if="entry.tool" class="text-gray-500">execution</span>
-        <span v-if="entry.record && (entry.record.status || entry.record.metadata?.status)" class="text-gray-400">{{ entry.record.status || entry.record.metadata?.status }}</span>
-        <span v-if="entry.attribution.agentId" class="text-gray-400">Agent {{ entry.attribution.label || entry.attribution.agentId }} ({{ entry.attribution.agentId }})</span>
-        <span v-if="entry.attribution.turnId" class="text-gray-500">turn {{ entry.attribution.turnId }}</span>
-        <span v-if="entry.attribution.parentId" class="text-gray-500">parent {{ entry.attribution.parentId }}</span>
-        <span v-if="entry.attribution.rootId" class="text-gray-500">root {{ entry.attribution.rootId }}</span>
-        <span v-if="entry.attribution.iteration" class="text-gray-500">iteration {{ entry.attribution.iteration }}</span>
-        <span v-if="entry.attribution.callId" class="text-gray-500">call {{ entry.attribution.callId }}</span>
-        <span v-if="entry.record && entry.record.execution_time_ms !== undefined" class="text-gray-500">{{ entry.record.execution_time_ms }}ms</span>
-      </div>
-      <div v-if="entry.record && entry.record.tool_input" class="mb-2" data-log-arguments>
-        <div class="text-gray-500">Arguments</div>
-        <tool-output :value="entry.record.tool_input" />
-      </div>
-      <tool-output v-if="entry.text" :value="entry.text" />
-      <div v-if="entry.record && entry.record.error" class="mt-1 text-red-400">
-        <tool-output :value="entry.record.error" />
-      </div>
-      <details v-if="entry.record" class="mt-1 text-gray-500">
-        <summary class="cursor-pointer">Complete retained record</summary>
-        <tool-output :value="entry.record" />
-      </details>
+      <tool-output presentation="compact" :value="display.body" :raw-value="entry.record || undefined" label="Live log record"
+                   :has-context="display.status !== '' || display.duration !== null || Boolean(entry.attribution.agentId || argumentsText)">
+        <template #header>
+          <button class="log-ts text-gray-500 hover:text-gray-300" @click="$emit('copy', entry)"
+                  title="Copy complete retained record">{{ entry.ts }}</button>
+          <span class="log-level" :class="entry.level === 'ERROR' ? 'text-red-400' : 'text-blue-400'">{{ entry.level }}</span>
+          <span v-if="display.action" class="log-compact-action"
+                :class="{ 'log-compact-web-action': entry.record?.type === 'web_action' }" :title="display.action">{{ display.action }}</span>
+          <span v-if="display.action" class="output-control-separator" aria-hidden="true"> | </span>
+        </template>
+        <template #context>
+          <span v-if="display.status !== ''" class="text-gray-400">{{ display.status }}</span>
+          <span v-if="display.duration !== null" class="text-gray-500">{{ display.duration }}ms</span>
+          <span v-if="entry.attribution.agentId" class="log-compact-agent text-gray-400" :title="entry.attribution.agentId">{{ entry.attribution.label || entry.attribution.agentId }}</span>
+          <span v-if="argumentsText" class="log-compact-arguments text-gray-500" data-log-arguments :title="argumentsText">{{ argumentsText }}</span>
+        </template>
+        <template #details>
+          <div class="log-compact-attribution text-gray-500">
+            <span v-if="entry.attribution.agentId">Agent {{ entry.attribution.label || entry.attribution.agentId }} ({{ entry.attribution.agentId }})</span>
+            <span v-if="entry.attribution.turnId">turn {{ entry.attribution.turnId }}</span>
+            <span v-if="entry.attribution.parentId">parent {{ entry.attribution.parentId }}</span>
+            <span v-if="entry.attribution.rootId">root {{ entry.attribution.rootId }}</span>
+            <span v-if="entry.attribution.iteration">iteration {{ entry.attribution.iteration }}</span>
+            <span v-if="entry.attribution.callId">call {{ entry.attribution.callId }}</span>
+          </div>
+          <div v-if="argumentsText" class="log-compact-detail-arguments">
+            <div class="text-gray-500">Arguments</div>
+            <pre class="output-body output-wrapped">{{ argumentsText }}</pre>
+          </div>
+          <div v-if="errorText && errorText !== display.body" class="text-red-400">
+            <span>Error</span><pre class="output-body output-wrapped">{{ errorText }}</pre>
+          </div>
+          <div v-if="metadataText" class="log-compact-metadata">
+            <span class="text-gray-500">Metadata</span><pre class="output-body output-wrapped">{{ metadataText }}</pre>
+          </div>
+        </template>
+      </tool-output>
     </article>`,
 };

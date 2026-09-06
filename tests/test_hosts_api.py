@@ -19,6 +19,7 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import ToolHost
 from src.tools.hosts import HostCandidate, HostRegistry, HostTrustError
+from src.tools.hosts import control as hosts_control
 from src.web.api import hosts as hosts_api
 
 _HOST_ID = "06eebf65-8f6e-4c36-9acc-ce393fb34642"
@@ -169,6 +170,57 @@ async def test_admin_denial_unavailable_list_and_public_key(monkeypatch, tmp_pat
     monkeypatch.setattr(hosts_api, "public_key_info", key_error)
     async with await _client(bot) as client:
         assert (await client.get("/api/hosts/public-key")).status == 400
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("code", "output", "expected"),
+    [
+        (255, b"Permission denied (publickey).\n", "Permission denied (publickey)."),
+        (255, b"Host key verification failed.\n", "Host key verification failed."),
+        (255, b"", "ssh exit 255"),
+        (None, b"", "connection test timed out"),
+        (0, b"odin-host-test macos\n", "platform mismatch: observed macos; selected linux"),
+        (255, b"odin-host-test macos\n", "odin-host-test macos"),
+        (0, b"unexpected output\n", "unexpected output"),
+        (255, b"Permission denied token=definitely-not-real\n", "Permission denied"),
+        (0, b"odin-host-test linux\n", "authentication and platform verified"),
+    ],
+)
+async def test_connection_diagnostics_survive_http_response(
+    monkeypatch, tmp_path, code, output, expected
+):
+    bot = _bot(tmp_path)
+
+    async def run(argv, _timeout):
+        assert argv[0] == "ssh"
+        if code is None:
+            raise TimeoutError
+        return code, output
+
+    monkeypatch.setattr(hosts_control, "_run_argv", run)
+    async with await _client(bot) as client:
+        prepared = await client.post(
+            "/api/hosts/candidates", json={"alias": "alpha", **_host().model_dump()}
+        )
+        assert prepared.status == 201
+        token = (await prepared.json())["candidate_token"]
+        response = await client.post(f"/api/hosts/candidates/{token}/test", json={})
+        body = await response.json()
+        success = expected == "authentication and platform verified"
+        assert response.status == (200 if success else 424)
+        assert body["tested"] is success
+        assert body["last_test"]["ok"] is success
+        assert expected in body["last_test"]["detail"]
+        assert "definitely-not-real" not in str(body)
+        if success:
+            assert "error" not in body
+        else:
+            assert body["error"] == body["last_test"]["detail"]
+            # Failed tests remain non-activatable; displaying the reason never
+            # bypasses the existing server-side enrollment gate.
+            blocked = await client.post(f"/api/hosts/candidates/{token}/commit", json={})
+            assert blocked.status == 400
 
 
 @pytest.mark.asyncio
