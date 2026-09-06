@@ -23,7 +23,7 @@ def fixture(tmp_path):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("limit", [True, False, None, 0, 3, 8001, 4.0, "8000"])
+@pytest.mark.parametrize("limit", [True, False, 0, 3, 8001, 4.0, "8000"])
 async def test_invalid_limits_never_access_store(tmp_path, limit):
     executor, page = fixture(tmp_path)
     result = await OutputTools(executor)._handle_get_tool_output(

@@ -30,6 +30,7 @@ from ..llm.secret_scrubber import embedded_process_scrubber_source
 from ..llm.secret_scrubber import scrub_process_secrets as _scrub_process_bytes
 from ..observability.diagnostics import command_display, safe_error, safe_text
 from ..odin_log import get_logger
+from .input_defaults import default_if_empty
 from .workspace import WorkspaceError, workspace_env
 
 if TYPE_CHECKING:
@@ -1556,6 +1557,7 @@ class ProcessRegistry:
                 log.warning("Could not restore a retained process output manifest")
 
     def output_info(self, pid: int, cursor: str | None = None) -> ProcessInfo | None:
+        cursor = default_if_empty(cursor)
         if cursor is not None and isinstance(cursor, str):
             generation = cursor.split(":", 1)[0]
             info = self._retained_generations.get(generation)
@@ -1786,6 +1788,9 @@ class ProcessRegistry:
         immediately. Cancellation aborts only this wait — the detached
         process is never touched.
         """
+        cursor = default_if_empty(cursor)
+        offset = default_if_empty(offset)
+        limit = default_if_empty(limit, OUTPUT_PAGE_DEFAULT)
         info = self.output_info(pid, cursor)
         if not info:
             return f"No process with PID {pid}."

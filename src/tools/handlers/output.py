@@ -1,4 +1,5 @@
 """Read retained evidence without re-executing the originating tool."""
+from ..input_defaults import default_if_empty
 from ..output_authorization import request_delivery_channel
 from ..output_delivery import delivery_scope, get_delivery_budget, render_page
 from ..output_retention import RetentionError
@@ -13,7 +14,7 @@ class OutputTools:
         owner, channel = delivery_scope.get()
         owner = str(executor._current_user_id or owner or "")
         channel = request_delivery_channel.get() or channel
-        limit = inp.get("limit", 4000)
+        limit = default_if_empty(inp.get("limit"), 4000)
         if type(limit) is not int or not 4 <= limit <= 8000:
             return "Error: limit must be an integer from 4 through 8000."
         try:

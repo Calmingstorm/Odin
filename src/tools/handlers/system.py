@@ -19,6 +19,7 @@ import os
 import shlex
 
 from ..branch_freshness import is_test_command, is_test_failure
+from ..input_defaults import default_if_empty
 from ..process_manager import MAX_POLL_WAIT_SECONDS
 from ..tool_text import _ERROR_RESULT_PREFIXES, _truncate_lines
 from .deps import HandlerBase, HandlerDeps
@@ -245,6 +246,7 @@ class SystemTools(HandlerBase):
         from ..output_delivery import delivery_scope
 
         action = inp.get("action", "list")
+        cursor = default_if_empty(inp.get("cursor"))
         registry = self._process_registry()
         channel = request_delivery_channel.get() or str(delivery_scope.get()[1])
         scope = request_scope_id.get()
@@ -273,7 +275,7 @@ class SystemTools(HandlerBase):
 
         if action in {"poll", "write", "kill"} and inp.get("pid") is not None:
             info = registry.output_info(
-                int(inp["pid"]), inp.get("cursor") if action == "poll" else None,
+                int(inp["pid"]), cursor if action == "poll" else None,
             )
             if info is not None and not authorized(info):
                 return "Error: process access denied.", 1
@@ -356,7 +358,7 @@ class SystemTools(HandlerBase):
                 )
             from ..output_delivery import get_delivery_budget
 
-            info = registry.output_info(int(pid), inp.get("cursor"))
+            info = registry.output_info(int(pid), cursor)
             output_lease = None
 
             def acquire_output_lease():
@@ -375,7 +377,7 @@ class SystemTools(HandlerBase):
 
             try:
                 result = await registry.poll(
-                    int(pid), wait_seconds=float(wait_raw), cursor=inp.get("cursor"),
+                    int(pid), wait_seconds=float(wait_raw), cursor=cursor,
                     offset=inp.get("offset"), limit=inp.get("limit", 4000),
                     max_chars=get_delivery_budget(self.config),
                     authorized=authorized, acquire_output_lease=acquire_output_lease,
@@ -383,7 +385,7 @@ class SystemTools(HandlerBase):
             finally:
                 if output_lease is not None:
                     output_lease.release()
-            info = registry.output_info(int(pid), inp.get("cursor"))
+            info = registry.output_info(int(pid), cursor)
             if info is not None and not authorized(info):
                 return "Error: process access denied.", 1
             if result.startswith(("No process with PID", "Error:")):

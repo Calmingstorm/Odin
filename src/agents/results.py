@@ -13,6 +13,7 @@ import tempfile
 from pathlib import Path
 
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..tools.input_defaults import default_if_empty
 
 
 def result_path(directory: Path, agent_id: str) -> Path:
@@ -69,6 +70,8 @@ def result_page(
 
     if max_chars is None:
         max_chars = get_delivery_budget()
+    cursor = default_if_empty(cursor, "")
+    limit = default_if_empty(limit, 4000)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 4 <= limit <= 8000:
         raise ValueError("limit must be an integer between 4 and 8000 UTF-8 bytes")
     result, error = canonical_result(snapshot)
