@@ -12,7 +12,7 @@ hero:
     alt: Odin
   actions:
     - theme: brand
-      text: Install in sixty seconds
+      text: Install
       link: /install
     - theme: alt
       text: Architecture
@@ -44,7 +44,7 @@ features:
     linkText: API reference
   - icon: ⊘
     title: Bounded by policy
-    details: Permission tiers, per-user host access, a command governor, secret redaction, and an HMAC-chained audit log. Odin executes what it is asked, inside what it is allowed.
+    details: Permission tiers, per-user host access, a command governor, secret redaction, and an audit log with optional HMAC tamper evidence. Odin executes what it is asked, inside what it is allowed.
     link: /security
     linkText: Security model
   - icon: ⇄
@@ -67,7 +67,7 @@ features:
   <p>the staging API is returning 502s since the deploy — find out why and fix it if it's safe</p>
   <div class="who">odin</div>
   <p>Probed the health endpoint → 502 in 40 ms, upstream refused. The service unit has been flapping since 14:02; the journal ends in <code>address already in use :8080</code> — the previous worker was never reaped. Killed the orphan, restarted the unit, health is 200 in 12 ms across five probes. Validation bundle passed 4/4: service active, port open, HTTP 200, no new errors in 60 s. Audit record written.</p>
-  <small>An illustrative exchange — hostnames invented, behaviour real. Every tool call above is recorded in the audit log and shown live in the WebUI.</small>
+  <small>An illustrative exchange — hostnames invented, behaviour real. Tool calls are recorded in the audit log and shown live in the WebUI.</small>
 </div>
 
 <div class="odin-shot">

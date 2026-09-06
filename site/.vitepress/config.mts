@@ -7,7 +7,8 @@ export default withMermaid(defineConfig({
   title: 'Odin',
   description: 'Odin developer hub — architecture, configuration, tool and API reference for the self-hosted Discord execution agent.',
   base: '/Odin/',
-  srcDir: '../docs',
+  // docs/ is synced into ./content by scripts/sync-docs.mjs before every dev/build so resolution stays inside site/.
+  srcDir: './content',
   srcExclude: ['plans/**'],
   outDir: './dist',
   cleanUrls: true,
