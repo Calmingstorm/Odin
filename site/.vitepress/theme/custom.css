@@ -34,7 +34,8 @@
 .VPFeature .title { font-family: var(--vp-font-family-mono); font-weight: 600; letter-spacing: -0.01em; }
 .vp-doc h1, .vp-doc h2, .vp-doc h3 { letter-spacing: -0.03em; }
 .vp-doc h2 { border-top: 1px solid var(--vp-c-divider); }
-.vp-doc table { display: table; width: 100%; font-size: 13.5px; }
+.vp-doc table { display: block; max-width: 100%; overflow-x: auto; font-size: 13.5px; }
+.vp-doc td { overflow-wrap: anywhere; }
 .vp-doc th { font-family: var(--vp-font-family-mono); font-weight: 600; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--vp-c-text-2); }
 .vp-doc td code, .vp-doc th code { font-size: 12.5px; }
 .vp-doc div[class*='language-'] { border: 1px solid var(--vp-c-divider); }
