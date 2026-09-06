@@ -75,6 +75,15 @@ private dependency prefix/container using existing facilities; any system-wide
 installation requires Aaron. Unsupported feasibility findings are reviewable
 results, not Stage 6 completion. Do not build atop an unverified input guarantee.
 
+R1 review clarification: the synchronous private capture adapter does not supply
+a trustworthy source timestamp yet. Record the controller's request-start time
+as an explicitly labelled conservative lower bound, never the time the response
+arrived. This relies on the adapter taking a NEW capture for each request; buffered
+Wayland frames will require source timestamp/clock-domain validation before that
+adapter can claim freshness. Reject observations already expired on arrival and
+recheck both original and verification frames after awaited capture/authorization.
+Store immutable render provenance; public serialization must not mutate receipts.
+
 ## Q1 — First-release environment (R1 corrected)
 
 An offline desktop in its own mount, PID, IPC, network, and session-bus
