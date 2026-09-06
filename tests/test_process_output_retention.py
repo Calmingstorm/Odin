@@ -78,10 +78,10 @@ async def test_local_begin_middle_end_replay_concurrent_restart_and_expiry(tmp_p
 async def test_local_escape_heavy_reconstruction_secret_boundary_and_unicode(tmp_path, no_lifetime):
     text = ("\"\\\n\t\x00世界" * 1800) + "password=fixture-secret-value\nend\n"
     reg, info = await local_job(tmp_path, text)
-    cursor, offset, parts = None, 0, []
+    cursor, offset, parts = info.generation + ":0", 0, []
     while True:
         result = page(await reg.poll(
-            info.pid, cursor=cursor, offset=None if cursor else 0, limit=8000,
+            info.pid, cursor=cursor, offset=0, limit=8000,
         ))
         start, end = result["shown_intervals"][0]
         assert start == offset and end > start
@@ -123,7 +123,7 @@ async def test_local_capture_cap_and_invalid_utf8(tmp_path, no_lifetime):
                           process=SimpleNamespace(stdout=stream))
     reg._processes[987] = invalid
     await reg._read_output(invalid)
-    assert page(await reg.poll(987, offset=0))["text"] == "hello�world\n"
+    assert page(await reg.poll(987, cursor=invalid.generation + ":0"))["text"] == "hello�world\n"
     invalid.spool.close()
 
 
@@ -185,7 +185,7 @@ async def test_handler_owner_host_rebind_and_revocation_after_wait(tmp_path, no_
         host_registry=lambda: SimpleNamespace(get=lambda *a, **kw: target),
     )
     handler._resolve_host = lambda alias: state["allowed"] and alias == "origin"
-    request = {"action": "poll", "pid": info.pid, "offset": 0}
+    request = {"action": "poll", "pid": info.pid, "cursor": info.generation + ":0", "offset": 0}
     output, code = await handler._handle_manage_process(request)
     assert code == 0 and page(output)["text"] == "private evidence\n"
     state["user"] = "other"
@@ -220,7 +220,7 @@ async def test_remote_manifest_restart_generation_and_real_lease_revocation(tmp_
         info.remote_lease = lease
         directory.mkdir()
         reg._retention_dir = directory
-        first = page(await reg.poll(-1, offset=0, limit=4))
+        first = page(await reg.poll(-1, cursor=info.generation + ":0", limit=4))
         restored = ProcessRegistry(remote_exec=reg._remote_exec, retention_dir=directory)
         retained = restored.output_info(-1, first["cursor"])
         assert retained.restored and retained.remote_lease is None
@@ -240,7 +240,7 @@ async def test_remote_manifest_restart_generation_and_real_lease_revocation(tmp_
 @pytest.mark.asyncio
 async def test_generation_reuse_does_not_redirect_old_cursor(tmp_path, no_lifetime):
     reg, original = await local_job(tmp_path, "original evidence\n")
-    first = page(await reg.poll(original.pid, offset=0, limit=4))
+    first = page(await reg.poll(original.pid, cursor=original.generation + ":0", limit=4))
     replacement = ProcessInfo(original.pid, "other", "localhost", time.time())
     reg._processes[original.pid] = replacement
     next_page = page(await reg.poll(original.pid, cursor=first["cursor"]))
@@ -260,13 +260,13 @@ async def test_running_split_secret_withheld_and_quota_failure_honest(tmp_path, 
     reader = asyncio.create_task(reg._read_output(info))
     stream.feed_data(b"safe\npassword=fixture-")
     await asyncio.sleep(0.01)
-    first = page(await reg.poll(98, offset=0))
+    first = page(await reg.poll(98, cursor=info.generation + ":0"))
     assert "fixture-" not in first["text"]
     stream.feed_data(b"credential\n")
     stream.feed_eof()
     await reader
     info.status = "completed"
-    terminal = page(await reg.poll(98, offset=0))
+    terminal = page(await reg.poll(98, cursor=info.generation + ":0"))
     assert "credential" not in terminal["text"]
     assert terminal["text"].startswith("safe\n")
     assert b"fixture-" not in (tmp_path / (info.generation + ".out")).read_bytes()
@@ -279,7 +279,7 @@ async def test_running_split_secret_withheld_and_quota_failure_honest(tmp_path, 
     blocked.process = SimpleNamespace(stdout=blocked_stream)
     reg._processes[99] = blocked
     await reg._read_output(blocked)
-    result = page(await reg.poll(99, offset=0))
+    result = page(await reg.poll(99, cursor=blocked.generation + ":0"))
     assert result["retained_bytes"] == 0 and result["cursor"] is None
     assert result["capture_error"] and result["not_retained_bytes"] == 9
 

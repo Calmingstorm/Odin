@@ -42,7 +42,7 @@ async def test_invalid_page_size_does_not_read_evidence(evidence, limit):
     assert info.spool.tell() == 2
 
 
-@pytest.mark.parametrize("offset", [True, -1, 0.5, "0"])
+@pytest.mark.parametrize("offset", [True, False, -1, 0.0, 0.5, "0"])
 async def test_invalid_offset_does_not_read_evidence(evidence, offset):
     reg, info = evidence
     info.spool.seek(2)
@@ -56,7 +56,7 @@ async def test_malformed_cursor_cannot_fall_back_to_preview(evidence, suffix, of
     reg, info = evidence
     response = await reg.poll(info.pid, cursor=info.generation + suffix, offset=offset)
     assert "invalid cursor" in response and "public" not in response
-    assert page(await reg.poll(info.pid, offset=0))["text"] == "public 世界\n"
+    assert page(await reg.poll(info.pid, cursor=info.generation + ":0"))["text"] == "public 世界\n"
 
 
 @pytest.mark.parametrize("offset", [0, 1, 10000, -1, True, 0.5, "invalid"])
@@ -225,7 +225,7 @@ async def test_reader_transport_failure_retains_complete_prefix(evidence):
     info.process = SimpleNamespace(stdout=SimpleNamespace(
         read=AsyncMock(side_effect=OSError("stream lost"))))
     await reg._read_output(info)
-    assert page(await reg.poll(info.pid, offset=0))["text"] == "public 世界\n"
+    assert page(await reg.poll(info.pid, cursor=info.generation + ":0"))["text"] == "public 世界\n"
 
 
 async def test_watcher_missing_process_and_failed_wait_publish_failure(evidence, monkeypatch):

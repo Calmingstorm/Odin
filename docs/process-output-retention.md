@@ -1,10 +1,13 @@
 # Process evidence authorization and quota
 
-`manage_process poll` retains its default newest-50-lines view. Explicit
-offset/cursor reads use immutable job generations and bounded UTF-8 byte pages.
+`manage_process poll` retains its default newest-50-lines status view. Offset 0,
+blank, null, or omitted means that status view, not an explicit page read.
+To read from the beginning, pass the preview's `generation:0` cursor; offsets
+>= 1 select an explicit byte range. Cursor/range reads use immutable job
+generations and bounded UTF-8 byte pages.
 When both are supplied, a non-empty cursor takes precedence and the offset is
 ignored, including `offset=0`. Blank or whitespace cursors mean no cursor;
-blank/absent offsets and limits use their defaults. Invalid non-empty cursors
+blank/absent/null limits use their default. Invalid non-empty cursors
 still fail rather than silently restarting retrieval from the offset.
 Output remains evidence, not permission to write stdin or signal an exited job.
 

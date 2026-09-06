@@ -103,8 +103,8 @@ EXPECTED_TOOL_HASHES = {
     "read_channel": "22d87d43b1ac97e2",
     "add_reaction": "f466eef6573b0166",
     "create_poll": "6fb64482c930284b",
-    # Updated 2026-09-06: non-empty process cursors take precedence over offset.
-    "manage_process": "3be9bbbbfc759b72",
+    # Updated 2026-09-06: zero offset selects status; generation:0 starts paging.
+    "manage_process": "7878b41ea2f80e09",
     "manage_list": "1fe50a2ac7a59952",
     "analyze_image": "8680a337769f8d09",
     "start_loop": "67faa086c9b0987f",

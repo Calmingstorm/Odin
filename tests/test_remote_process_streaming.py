@@ -196,7 +196,10 @@ async def test_remote_streaming_preserves_disk_cap_and_bounded_cursor_reads(tmp_
         await registry.poll(-1)
         assert lease.release_count == 1
         for offset in (0, 8000):
-            page = json.loads(await registry.poll(-1, offset=offset, limit=8000))
+            page = json.loads(await registry.poll(
+                -1, cursor=info.generation + ":0" if offset == 0 else "",
+                offset=offset, limit=8000,
+            ))
             assert page["text"] == "x" * 8000
             assert page["shown_intervals"] == [[offset, offset + 8000]]
             assert page["capture_limit_loss_bytes"] == 65536

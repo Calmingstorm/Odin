@@ -35,9 +35,9 @@ async def test_soak_poll_shape_empty_cursor_with_zero_offset(tmp_path, remote, c
             "wait_seconds": 0,
         }, user_id="owner")
         assert result.ok, result.output
-        assert result.output == expected
-        assert json.loads(result.output)["text"] == "retained evidence\n"
-        assert await reg.poll(info.pid, cursor=cursor, offset=0) == expected
+        assert preview(result.output) == preview(expected)
+        assert preview(result.output)[0] == "retained evidence\n"
+        assert preview(await reg.poll(info.pid, cursor=cursor, offset=0)) == preview(expected)
 
 
 @pytest.mark.parametrize("remote", [False, True])
@@ -45,11 +45,12 @@ async def test_real_process_empty_fields_preserve_default_and_explicit_offset(tm
     text = "".join(f"row-{i:04d} 世界\n" for i in range(400))
     async with job(tmp_path, f"print({text!r}, end='')", remote) as (ex, reg, info):
         baseline = await delivered(ex, info, offset=0)
-        first = json.loads(baseline)
+        tail, metadata = preview(baseline)
+        first = json.loads(await delivered(ex, info, cursor=metadata["cursor"]))
         assert first["shown_bytes"] == 4000 and first["truncated"]
         assert first["text"].encode() == text.encode()[:4000]
-        tail, metadata = preview(await delivered(ex, info))
         assert tail == "".join(text.splitlines(keepends=True)[-50:])
+        assert preview(await delivered(ex, info)) == (tail, metadata)
 
         # Omission, null, and blank are equivalent independently and together.
         for empty in EMPTY:
@@ -68,8 +69,10 @@ async def test_real_process_empty_fields_preserve_default_and_explicit_offset(tm
                 "input_text": "", "wait_seconds": 0,
             }, user_id="owner")
             assert result.ok, result.output
-            assert result.output == baseline
-            assert await reg.poll(info.pid, cursor=empty, offset=0, limit=empty) == baseline
+            # Status uptime may advance between reads; evidence and status must not.
+            assert preview(result.output) == (tail, metadata)
+            assert preview(await reg.poll(info.pid, cursor=empty, offset=0,
+                                          limit=empty)) == (tail, metadata)
 
             # A real continuation must also tolerate an empty offset/limit.
             following = await delivered(ex, info, cursor=first["cursor"])
@@ -99,7 +102,9 @@ async def test_soak_poll_shape_real_cursor_with_zero_offset(tmp_path, remote):
     text = "".join(f"row-{i:04d} 世界\n" for i in range(1200))
     raw = text.encode()
     async with job(tmp_path, f"print({text!r}, end='')", remote) as (ex, reg, info):
-        first = json.loads(await delivered(ex, info, cursor="", offset=0))
+        _, metadata = preview(await delivered(ex, info, cursor="", offset=0))
+        assert metadata["cursor"] == info.generation + ":0"
+        first = json.loads(await delivered(ex, info, cursor=metadata["cursor"], offset=0))
         assert first["shown_bytes"] == 4000 and first["truncated"]
         chunks = [first["text"]]
         previous = first

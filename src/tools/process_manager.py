@@ -1804,7 +1804,6 @@ class ProcessRegistry:
             max_chars = get_delivery_budget()
         if isinstance(limit, bool) or not isinstance(limit, int) or not 4 <= limit <= OUTPUT_PAGE_MAX:
             return "Error: limit must be an integer between 4 and 8000 bytes."
-        explicit = cursor is not None or offset is not None
         if cursor is not None:
             # Schema-filling callers may also send offset=0. The generation-bound
             # cursor takes precedence; never restart a continuation from offset.
@@ -1817,6 +1816,11 @@ class ProcessRegistry:
                 return "Error: invalid cursor or process generation no longer retained."
         if offset is not None and (isinstance(offset, bool) or not isinstance(offset, int) or offset < 0):
             return "Error: offset must be a nonnegative integer byte offset."
+        if cursor is None and offset == 0:
+            # Zero-filled optional fields mean the ordinary newest-lines poll.
+            # Only a generation:0 cursor explicitly starts a read at byte zero.
+            offset = None
+        explicit = cursor is not None or offset is not None
         if info.output_revoked:
             return "Error: process output authorization revoked."
         if info.finished_at is not None and time.time() >= info.finished_at + OUTPUT_RETENTION_SECONDS:

@@ -78,8 +78,10 @@ TOOLS_SECTION: list[dict] = [
             "Manages local or remote background processes (start/poll/write/kill/list). "
             "Start spawns a detached command on the selected managed host and returns PID. "
             "Poll defaults to newest 50 lines, with emitted/retained/shown-byte "
-            "and capture-loss metadata. Use poll with offset=0 or the returned "
-            "generation-bound cursor and limit (default 4000, 4-8000 UTF-8 bytes) "
+            "and capture-loss metadata. Offset 0, blank, null, or omitted means the "
+            "newest-lines status view, not a page read. Use the preview's generation:0 "
+            "cursor to read from the beginning, or offset >= 1 for a byte range. "
+            "Use the returned cursor and limit (default 4000, 4-8000 UTF-8 bytes) "
             "for repeatable retained-output pages; follow cursor until truncated=false. "
             "A non-empty cursor takes precedence over offset. "
             "Reads never consume another reader's output. Local and remote capture "
@@ -127,14 +129,17 @@ TOOLS_SECTION: list[dict] = [
                     "type": "string",
                     "description": (
                         "Poll only: opaque job-generation output cursor; "
-                        "a non-empty cursor takes precedence over offset; blank means no cursor."
+                        "a non-empty cursor takes precedence over offset; blank means no cursor. "
+                        "Use the preview's generation:0 cursor to read from the beginning."
                     ),
                 },
                 "offset": {
                     "type": "integer", "minimum": 0,
                     "description": (
                         "Poll only: retained-output UTF-8 byte offset "
-                        "(0 begins complete retrieval); ignored when cursor is non-empty."
+                        "(>= 1 for an explicit range). 0, blank, null, or omitted means the "
+                        "newest-lines status view; ignored when cursor is non-empty. "
+                        "Read from the beginning with the preview's generation:0 cursor."
                     ),
                 },
                 "limit": {

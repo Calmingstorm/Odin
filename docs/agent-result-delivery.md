@@ -104,8 +104,11 @@ true tail after partial quota loss; its coordinates describe emitted bytes,
 not the shorter spool. Partial quota loss sets `capture_error` immediately.
 Ordinary complete-capture newest-50 behavior is unchanged.
 
-For full output, call `manage_process action=poll pid=... offset=0`, then follow
-the returned `cursor` until `truncated=false`. `limit` defaults to 4,000 bytes,
+Offset 0, blank, null, or omitted means the newest-lines status view, not a page
+read. For full output, pass the preview's `generation:0` cursor to
+`manage_process action=poll pid=...`, then follow the returned `cursor` until
+`truncated=false`. A non-empty cursor takes precedence over any supplied offset;
+without a cursor, offsets >= 1 select an explicit byte range. `limit` defaults to 4,000 bytes,
 accepts 4–8,000, and is a ceiling: serialized JSON must fit the shared budget.
 Explicit reads are contiguous head-only pages, never consuming another reader's
 position. Cursors bind a random job generation and byte offset, not just a PID,

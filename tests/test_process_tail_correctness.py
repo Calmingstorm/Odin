@@ -24,7 +24,7 @@ def no_background(monkeypatch):
 
 
 @asynccontextmanager
-async def job(tmp_path, producer, remote):
+async def job(tmp_path, producer, remote, *, wait_for_exit=True):
     ex = executor(tmp_path)
     with execution_delivery_scope("owner", "tail-fixture"):
         if remote:
@@ -36,7 +36,8 @@ async def job(tmp_path, producer, remote):
                 info.owner_id, info.origin_channel = "owner", "tail-fixture"
                 info.host_alias, info.host_binding = "testhost", host_binding(target)
                 reg._retained_generations[info.generation] = info
-                await asyncio.wait_for(supervisor.wait(), 15)
+                if wait_for_exit:
+                    await asyncio.wait_for(supervisor.wait(), 15)
                 yield ex, reg, info
                 assert info.remote_lease is None and info.output_lease is None
                 assert lease.release_count == 1
@@ -48,10 +49,13 @@ async def job(tmp_path, producer, remote):
             assert result.ok, result.output
             reg = ex._ensure_process_registry()
             info = next(iter(reg._processes.values()))
-            await reg.poll(info.pid, wait_seconds=10)
+            if wait_for_exit:
+                await reg.poll(info.pid, wait_seconds=10)
             try:
                 yield ex, reg, info
             finally:
+                if info.status == "running":
+                    await reg.kill(info.pid)
                 reg._expire_output(info)
 
 

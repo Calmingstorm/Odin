@@ -86,7 +86,9 @@ def harness(tmp_path):
 
 
 async def read(h):
-    return await h.handler._handle_manage_process({"action": "poll", "pid": -1, "offset": 0})
+    return await h.handler._handle_manage_process({
+        "action": "poll", "pid": -1, "cursor": h.info.generation + ":0", "offset": 0,
+    })
 
 
 def no_references(h):
