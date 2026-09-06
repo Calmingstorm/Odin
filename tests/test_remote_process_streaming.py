@@ -25,6 +25,7 @@ class _Lease:
         self.release_count = 0
 
     async def run(self, factory):
+        assert self.release_count == 0, "a released lease must never be reused"
         return await factory()
 
     def release(self):
@@ -76,6 +77,25 @@ async def _remote_job(root, producer):
         )
         registry = ProcessRegistry(remote_exec=remote_exec)
         registry._processes[-1] = info
+        direct_poll = registry.poll
+
+        async def poll_with_fresh_read_lease(*args, **kwargs):
+            # This helper substitutes transport and the handler's read-scoped
+            # authorization lease, not the registry's execution lease lifecycle.
+            fresh = None
+            if (info.remote_lease is None and "output_lease" not in kwargs
+                    and "acquire_output_lease" not in kwargs):
+                fresh = _Lease()
+                kwargs["output_lease"] = fresh
+            try:
+                return await direct_poll(*args, **kwargs)
+            finally:
+                if fresh is not None:
+                    fresh.release()
+                    assert fresh.release_count == 1
+                assert info.output_lease is None
+
+        registry.poll = poll_with_fresh_read_lease
         yield registry, info, lease, supervisor
     finally:
         if supervisor.returncode is None:
@@ -141,8 +161,8 @@ async def test_remote_slow_producer_streams_before_exit_and_advances_cursor(tmp_
         display = terminal.split("\n[output retention] ")[0].split("\n", 1)[1]
         assert display == (expected + b"done\n").decode()
         assert info.remote_cursor == info.total_output_bytes == len(expected + b"done\n")
-        assert lease.release_count == 0
-        assert info.remote_lease is None and info.output_lease is lease
+        assert lease.release_count == 1
+        assert info.remote_lease is None and info.output_lease is None
         await asyncio.wait_for(supervisor.wait(), 5)
 
 
@@ -174,7 +194,7 @@ async def test_remote_streaming_preserves_disk_cap_and_bounded_cursor_reads(tmp_
         assert out.stat().st_size == cap
         assert out.read_bytes() == b"x" * cap
         await registry.poll(-1)
-        assert lease.release_count == 0
+        assert lease.release_count == 1
         for offset in (0, 8000):
             page = json.loads(await registry.poll(-1, offset=offset, limit=8000))
             assert page["text"] == "x" * 8000

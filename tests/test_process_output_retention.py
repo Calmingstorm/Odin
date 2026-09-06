@@ -135,8 +135,8 @@ async def test_remote_begin_middle_end_after_exit_replay_and_read_only(tmp_path)
         await supervisor.wait()
         preview = await reg.poll(-1)
         meta = json.loads(preview.split("\n[output retention] ")[1])
-        assert info.remote_lease is None and info.output_lease is lease
-        assert lease.release_count == 0  # Retention fence remains revocable.
+        assert info.remote_lease is None and info.output_lease is None
+        assert lease.release_count == 1
         first = page(await reg.poll(-1, cursor=meta["cursor"], limit=8000))
         replay = await asyncio.gather(*(reg.poll(-1, cursor=first["cursor"]) for _ in range(3)))
         assert replay[0] == replay[1] == replay[2]
@@ -225,12 +225,16 @@ async def test_remote_manifest_restart_generation_and_real_lease_revocation(tmp_
         retained = restored.output_info(-1, first["cursor"])
         assert retained.restored and retained.remote_lease is None
         assert "unavailable" in await restored.poll(-1, cursor=first["cursor"])
-        retained.output_lease = lease
-        result = page(await restored.poll(-1, cursor=first["cursor"]))
-        assert result["text"] == "art evidence\n"
-        lease._revoked.set()
-        assert "restart evidence" not in await restored.poll(-1, offset=0)
-        assert "unknown" in await restored.poll(-1, offset=0)
+        fresh = HostRegistry.unmanaged_lease("fixture", ("example.test", "tester", "linux"))
+        try:
+            result = page(await restored.poll(-1, cursor=first["cursor"], output_lease=fresh))
+            assert result["text"] == "art evidence\n"
+            assert retained.output_lease is None
+            fresh._revoked.set()
+            denied = await restored.poll(-1, offset=0, output_lease=fresh)
+            assert "restart evidence" not in denied and "unknown" in denied
+        finally:
+            fresh.release()
 
 
 @pytest.mark.asyncio
@@ -290,6 +294,17 @@ async def test_remote_physical_expiry_through_identity_bound_controller(tmp_path
         record["finished_at"] = time.time() - OUTPUT_RETENTION_SECONDS - 1
         exit_path.write_text(json.dumps(record))
         info.finished_at = record["finished_at"]
+        # No execution lease is held for the retention period. Physical cleanup
+        # uses a newly authorized controller call, never the released lease.
+        from tests.test_remote_process_streaming import _Lease
+
+        fresh = _Lease()
+        try:
+            command = reg._remote_controller_command(info, "expire")
+            rc, reply = await fresh.run(lambda: reg._remote_exec(fresh.target, command, 15))
+            assert rc == 0 and json.loads(reply)["ok"]
+        finally:
+            fresh.release()
         await reg._expire_output_at_deadline(info)
         assert not tmp_path.exists()
         assert info.output_revoked and lease.release_count == 1

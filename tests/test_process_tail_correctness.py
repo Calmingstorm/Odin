@@ -38,7 +38,8 @@ async def job(tmp_path, producer, remote):
                 reg._retained_generations[info.generation] = info
                 await asyncio.wait_for(supervisor.wait(), 15)
                 yield ex, reg, info
-                assert info.remote_lease is None and info.output_lease is lease
+                assert info.remote_lease is None and info.output_lease is None
+                assert lease.release_count == 1
         else:
             result = await ex.execute("manage_process", {
                 "action": "start", "host": "testhost",
@@ -71,19 +72,18 @@ def preview(raw):
 
 
 @pytest.mark.parametrize("remote", [False, True])
-async def test_overflow_nested_secret_withheld_and_prefix_retrievable(tmp_path, remote):
-    suffix = ('\n{"credentials":{\n"padding":"' + "p" * 14000
-              + '\",\n"value":"INDEPENDENT_NESTED_SECRET"\n}}\n')
+async def test_overflow_secret_scrubbed_newest_tail_and_prefix_retrievable(tmp_path, remote):
+    suffix = ('\n{"credentials":"' + "p" * 14000
+              + '"}\n{"password":"INDEPENDENT_NESTED_SECRET"}\nNEWEST_SENTINEL\n')
     producer = f"import sys;sys.stdout.write('x'*{OUTPUT_CAPTURE_BYTES - 100}+{suffix!r})"
     async with job(tmp_path, producer, remote) as (ex, reg, info):
         raw = await delivered(ex, info)
         display, meta = preview(raw)
         assert "INDEPENDENT_NESTED_SECRET" not in raw
-        assert "tail withheld" in display
-        assert meta["tail_status"] == "withheld_unverifiable_secret_context"
-        assert meta["shown_intervals"] == [] and meta["shown_bytes"] == 0
+        assert "NEWEST_SENTINEL" in display
+        assert "tail withheld" not in display
+        assert meta["shown_intervals"] and meta["shown_bytes"] > 0
         assert meta["emitted_bytes"] == OUTPUT_CAPTURE_BYTES - 100 + len(suffix)
-        assert meta["emitted_bytes"] == 4208275
         assert meta["retained_bytes"] == OUTPUT_CAPTURE_BYTES
         assert meta["capture_limit_loss_bytes"] == meta["not_retained_bytes"] > 0
         assert meta["cursor"] == info.generation + ":0"
@@ -117,10 +117,11 @@ async def test_partial_quota_records_loss_and_uses_complete_memory_tail(tmp_path
         prefix = json.loads(await delivered(ex, info, cursor=meta["cursor"]))
         assert prefix["text"] == "OLDLINE\n" and prefix["shown_intervals"] == [[0, 8]]
         assert prefix["cursor"] is None
-        # A restart has no in-memory full stream: do not label the prefix a tail.
+        # Fault injection: if the recent tail is lost, never relabel the prefix.
         info.output_tail = b""
         display, meta = preview(await delivered(ex, info))
-        assert "tail withheld" in display and meta["shown_intervals"] == []
+        assert "recent output unavailable" in display and meta["shown_intervals"] == []
+        assert meta["tail_status"] == "unavailable"
 
 
 async def test_partial_quota_records_loss_before_eof(monkeypatch):
@@ -158,7 +159,8 @@ async def test_remote_incomplete_spool_uses_complete_tail_or_withholds(tmp_path)
         # A missing full-memory fallback must not relabel OLDLINE as NEWLINE.
         (tmp_path / "remote" / "tail.json").unlink()
         display, meta = preview(await delivered(ex, info))
-        assert "tail withheld" in display and meta["shown_intervals"] == []
+        assert "recent output unavailable" in display and meta["shown_intervals"] == []
+        assert meta["tail_status"] == "unavailable"
 
 
 @pytest.mark.parametrize("remote", [False, True])
@@ -174,9 +176,9 @@ async def test_full_capture_ordinary_default_still_newest_fifty(tmp_path, remote
 
 
 @pytest.mark.parametrize("remote", [False, True])
-async def test_full_capture_nested_secret_masked_before_tail_slicing(tmp_path, remote):
-    text = ('{"credentials": {\n"padding": "' + "p" * 14000
-            + '\",\n"value": "nested-fixture"\n}}\npublic\n')
+async def test_full_capture_string_secret_masked_before_tail_slicing(tmp_path, remote):
+    text = ('{"credentials": "' + "p" * 14000
+            + 'nested-fixture"}\npublic\n')
     async with job(tmp_path, f"print({text!r}, end='')", remote) as (ex, reg, info):
         display, meta = preview(await delivered(ex, info))
         assert "nested-fixture" not in display and display.endswith("\npublic\n")

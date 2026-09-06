@@ -28,6 +28,7 @@ class _Lease:
         self.run_count = 0
 
     async def run(self, factory):
+        assert self.release_count == 0, "a released lease must never be reused"
         self.run_count += 1
         return await factory()
 
@@ -230,9 +231,9 @@ async def test_remote_poll_running_then_exited_updates_cursor_output_and_lease()
     assert "status=completed exit_code=0" in exited
     assert "two\n" in exited
     assert registry._processes[-1].status == "completed"
-    assert lease.release_count == 0
+    assert lease.release_count == 1
     assert registry._processes[-1].remote_lease is None
-    assert registry._processes[-1].output_lease is lease
+    assert registry._processes[-1].output_lease is None
 
 
 @pytest.mark.asyncio
@@ -316,9 +317,9 @@ async def test_remote_kill_success_failure_and_transport_loss():
     assert await registry.kill(-1) == "Process -1 killed."
     assert registry._processes[-1].status == "killed"
     assert registry._processes[-1].exit_code is None  # acknowledgement supplied no exit code
-    assert lease.release_count == 0
+    assert lease.release_count == 1
     assert registry._processes[-1].remote_lease is None
-    assert registry._processes[-1].output_lease is lease
+    assert registry._processes[-1].output_lease is None
 
     async def failed(_target, _command, _timeout):
         return 9, json.dumps({"ok": False, "error": "still alive"})
