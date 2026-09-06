@@ -24,6 +24,7 @@
 .output-event-heading > * { flex-shrink: 0; }
 .output-event-heading .log-compact-action { overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; max-width: 24ch; min-width: 0; color: var(--hm-accent-hover); }
 .output-event-heading .log-compact-web-action { color: #a78bfa; }
+.output-control-separator { color: var(--hm-text-dim); white-space: pre; }
 .output-inline-summary { flex: 1 1 4ch; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .output-inline-summary > span { margin-right: .5rem; }
 .output-inline-summary .log-compact-agent, .output-inline-summary .log-compact-arguments { display: inline-block; vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; max-width: 24ch; }
@@ -36,7 +37,7 @@
 .output-compact-actions { display: flex; align-items: center; flex-shrink: 0; gap: .4rem; }
 .output-compact .output-controls { position: static; padding: 0; gap: .4rem; flex-wrap: nowrap; border: 0; background: transparent; }
 .output-compact-actions button { border: 0; border-radius: 0; background: transparent; min-width: 0; min-height: 0; padding: 0; margin: 0; font: inherit; font-size: .6875rem; line-height: inherit; color: var(--hm-text-muted); cursor: pointer; text-decoration: none; }
-.output-compact-actions button[aria-pressed="true"] { color: var(--hm-accent-hover); background: transparent; }
+.output-compact-actions button[aria-pressed="true"] { color: var(--hm-info); background: transparent; }
 .output-compact-actions button:hover, .output-compact-actions button:focus, .output-compact-warning:hover, .output-compact-warning:focus { text-decoration: underline; }
 .output-compact-actions button:focus-visible, .output-compact-warning:focus-visible { outline: 2px solid var(--hm-accent); outline-offset: 2px; }
 .output-compact .output-body { padding: 0; line-height: 18px; }

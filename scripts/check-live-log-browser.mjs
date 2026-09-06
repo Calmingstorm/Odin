@@ -37,6 +37,24 @@ server.middlewares.use(async (request, response, next) => {
   response.end(await server.transformIndexHtml(request.url, html));
 });
 let browser;
+async function assertControlColours(row, label) {
+  const state = await row.evaluate(el => {
+    const probe = document.createElement('span');
+    el.append(probe);
+    const tokenColour = token => { probe.style.color = `var(${token})`; return getComputedStyle(probe).color; };
+    const info = tokenColour('--hm-info'), muted = tokenColour('--hm-text-muted');
+    probe.remove();
+    const action = el.querySelector('.log-compact-action');
+    return { info, muted, action: action ? getComputedStyle(action).color : null,
+      buttons: [...el.querySelectorAll('.output-compact-actions button')].map(button => ({
+        name: button.textContent.trim(), pressed: button.getAttribute('aria-pressed') === 'true', colour: getComputedStyle(button).color,
+      })) };
+  });
+  for (const button of state.buttons) {
+    assert.equal(button.colour, button.pressed ? state.info : state.muted, `${label}: ${button.name} uses info when pressed, muted when idle`);
+    if (button.pressed && state.action) assert.notEqual(button.colour, state.action, `${label}: pressed ${button.name} is distinct from tool-name colour`);
+  }
+}
 // Check painted controls, not just DOM presence: the previous hover overlay
 // passed isVisible() while being transparent and stealing the summary's space.
 async function assertInlineControls(page, row, label) {
@@ -44,6 +62,7 @@ async function assertInlineControls(page, row, label) {
   const state = await row.evaluate(el => {
     const event = el.querySelector('.output-event-row'), summary = el.querySelector('.output-inline-summary');
     const actions = el.querySelector('.output-compact-actions'), controls = el.querySelector('.output-controls');
+    const action = el.querySelector('.log-compact-action'), separators = [...el.querySelectorAll('.output-control-separator')];
     const rect = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
     const buttons = [...actions.querySelectorAll('button')].map(button => {
       const r = button.getBoundingClientRect(), s = getComputedStyle(button);
@@ -53,6 +72,9 @@ async function assertInlineControls(page, row, label) {
         decoration: s.textDecorationLine, size: parseFloat(s.fontSize) };
     });
     return { event: rect(event), summary: rect(summary), actions: rect(actions), buttons,
+      action: action ? rect(action) : null,
+      separators: separators.map(node => ({ ...rect(node), text: node.textContent, hidden: node.getAttribute('aria-hidden'),
+        colour: getComputedStyle(node).color, dim: getComputedStyle(node).getPropertyValue('--hm-text-dim').trim() })),
       headingOrder: [...el.querySelector('.output-event-heading').children].map(node => node.classList[0]),
       opacity: controls ? getComputedStyle(controls).opacity : '1',
       position: controls ? getComputedStyle(controls).position : 'static',
@@ -60,10 +82,18 @@ async function assertInlineControls(page, row, label) {
   });
   assert.equal(state.opacity, '1', `${label}: controls painted without hover/focus`);
   assert.equal(state.position, 'static', `${label}: controls occupy normal flow`);
-  assert.equal(state.headingOrder[0], 'log-ts');
-  assert.equal(state.headingOrder[1], 'log-level');
-  assert.equal(state.headingOrder.at(-1), 'output-compact-actions');
-  if (state.headingOrder.length === 4) assert.equal(state.headingOrder[2], 'log-compact-action');
+  assert.deepEqual(state.headingOrder, ['log-ts', 'log-level', ...(state.action ? ['log-compact-action', 'output-control-separator'] : []), 'output-compact-actions']);
+  assert.equal(state.separators.length, Number(Boolean(state.action)), `${label}: one separator after a named action`);
+  for (const separator of state.separators) {
+    assert.equal(separator.text, ' | ', `${label}: pipe has a space on either side`);
+    assert.equal(separator.hidden, 'true', `${label}: separator is decorative for assistive technology`);
+    assert.ok(separator.width > 0 && separator.left >= state.action.right && separator.right <= state.actions.left, `${label}: separator occupies its own space between tool and controls`);
+    assert.ok(separator.dim, `${label}: dim token exists`);
+    assert.equal(separator.colour, await row.evaluate((el, dim) => {
+      const probe = document.createElement('span'); probe.style.color = dim; el.append(probe);
+      const colour = getComputedStyle(probe).color; probe.remove(); return colour;
+    }, separator.dim), `${label}: separator uses the dim text token`);
+  }
   assert.ok(state.summary.width > 0, `${label}: summary has a remaining-width lane: ${JSON.stringify(state)}`);
   assert.ok(state.actions.right <= state.summary.left, `${label}: controls never overlap/cover the summary: ${JSON.stringify(state)}`);
   assert.ok(state.summary.right <= state.event.right + 1, `${label}: summary truncates at the right edge`);
@@ -81,6 +111,7 @@ async function assertInlineControls(page, row, label) {
     assert.equal(button.decoration, 'none', `${label}: no underline until hover/focus`);
     assert.ok(button.size <= 11, `${label}: small text controls`);
   }
+  await assertControlColours(row, label);
 }
 try {
   await server.listen();
@@ -265,6 +296,8 @@ try {
   assert.equal(await row('short-json').locator('pre').count(), 0);
   await row('login').locator('.output-expand').click();
   await row('login').getByRole('button', { name: 'Raw', exact: true }).click();
+  assert.equal(await row('login').getByRole('button', { name: 'Raw', exact: true }).getAttribute('aria-pressed'), 'true');
+  await assertControlColours(row('login'), 'pressed Raw beside violet web action');
   assert.match(await row('login').locator('pre').textContent(), /_hmac.*a{64}/s);
   await row('login').getByRole('button', { name: 'Copy', exact: true }).click();
   const rawCopied = JSON.parse(await page.evaluate(() => window.copiedText));
@@ -311,6 +344,8 @@ try {
   assert.equal(await preview.textContent(), longWrapped, 'expansion reveals all already-loaded text');
   assert.ok((await preview.boundingBox()).height > dimensions.height);
   await row('wrapped').getByRole('button', { name: 'Wrap', exact: true }).click();
+  assert.equal(await row('wrapped').getByRole('button', { name: 'Wrap', exact: true }).getAttribute('aria-pressed'), 'false');
+  await assertControlColours(row('wrapped'), 'Wrap toggles back to muted');
   assert.equal(await preview.evaluate(el => getComputedStyle(el).whiteSpace), 'pre');
   await row('wrapped').getByRole('button', { name: 'Copy', exact: true }).click();
   assert.equal(await page.evaluate(() => window.copiedText), longWrapped);
@@ -380,7 +415,7 @@ try {
   const exported = fs.readFileSync(await download.path(), 'utf8');
   assert.match(exported, /"_hmac": "fake"/, 'export retains integrity data, not compact projection');
   assert.deepEqual(errors, []);
-  console.log('live-log-browser: plain accent/violet actions, always-visible text controls in normal flow without summary overlap, applicable actions, compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
+  console.log('live-log-browser: plain accent/violet actions, distinct info-coloured pressed controls, dim aria-hidden pipe separator, always-visible text controls in normal flow without summary overlap, applicable actions, compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
 } finally {
   if (browser) await browser.close();
   await server.close();

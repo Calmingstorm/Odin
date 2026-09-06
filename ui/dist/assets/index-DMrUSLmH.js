@@ -3785,6 +3785,7 @@ ${u.text}`:u.text).join(`
           <span class="log-level" :class="entry.level === 'ERROR' ? 'text-red-400' : 'text-blue-400'">{{ entry.level }}</span>
           <span v-if="display.action" class="log-compact-action"
                 :class="{ 'log-compact-web-action': entry.record?.type === 'web_action' }" :title="display.action">{{ display.action }}</span>
+          <span v-if="display.action" class="output-control-separator" aria-hidden="true"> | </span>
         </template>
         <template #context>
           <span v-if="display.status !== ''" class="text-gray-400">{{ display.status }}</span>
