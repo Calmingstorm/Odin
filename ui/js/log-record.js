@@ -19,7 +19,8 @@ export default {
     <article class="log-line log-compact-line min-w-0"
              :class="{ 'log-line-error': entry.level === 'ERROR', 'log-line-warning': entry.level === 'WARNING' }"
              :data-log-id="entry.id">
-      <tool-output presentation="compact" :value="display.body" :raw-value="entry.record || undefined" label="Live log record">
+      <tool-output presentation="compact" :value="display.body" :raw-value="entry.record || undefined" label="Live log record"
+                   :has-context="display.status !== '' || display.duration !== null || Boolean(entry.attribution.agentId || argumentsText)">
         <template #header>
           <button class="log-ts text-gray-500 hover:text-gray-300" @click="$emit('copy', entry)"
                   title="Copy complete retained record">{{ entry.ts }}</button>

@@ -4,7 +4,8 @@ import { compactOutput } from './compact-output-format.js';
 /** The Live-tail presentation of ToolOutput. All expansion is local; no API imports. */
 export default {
   name: 'CompactOutput',
-  props: { value: { default: '' }, rawValue: { default: undefined }, label: { type: String, default: 'Output' } },
+  props: { value: { default: '' }, rawValue: { default: undefined }, label: { type: String, default: 'Output' },
+    hasContext: { type: Boolean, default: false } },
   setup(props) {
     const expanded = ref(false), wrapped = ref(true), rawMode = ref(false), copyStatus = ref('');
     const previewElement = ref(null), summaryElement = ref(null), layoutFolded = ref(false);
@@ -60,6 +61,7 @@ export default {
               {{ expanded ? 'Collapse' : model.promoted ? 'Expand' : 'Inspect' }}
             </button>
           </div>
+          <span v-if="model.summary.trim() || model.outcome || hasContext" class="output-control-separator output-summary-separator" aria-hidden="true"> — </span>
         </div>
         <button v-if="model.warnings.length" type="button" class="output-compact-warning" @click="expanded = true"
                 @pointerdown.stop @keydown.stop :aria-label="model.warnings.join('; ') + ' — inspect record'" :title="model.warnings.join('; ')">

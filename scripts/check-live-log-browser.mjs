@@ -62,7 +62,8 @@ async function assertInlineControls(page, row, label) {
   const state = await row.evaluate(el => {
     const event = el.querySelector('.output-event-row'), summary = el.querySelector('.output-inline-summary');
     const actions = el.querySelector('.output-compact-actions'), controls = el.querySelector('.output-controls');
-    const action = el.querySelector('.log-compact-action'), separators = [...el.querySelectorAll('.output-control-separator')];
+    const action = el.querySelector('.log-compact-action'), separators = [...el.querySelectorAll('.output-control-separator:not(.output-summary-separator)')];
+    const summarySeparators = [...el.querySelectorAll('.output-summary-separator')];
     const rect = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
     const buttons = [...actions.querySelectorAll('button')].map(button => {
       const r = button.getBoundingClientRect(), s = getComputedStyle(button);
@@ -72,22 +73,34 @@ async function assertInlineControls(page, row, label) {
         decoration: s.textDecorationLine, size: parseFloat(s.fontSize) };
     });
     return { event: rect(event), summary: rect(summary), actions: rect(actions), buttons,
-      action: action ? rect(action) : null,
+      action: action ? rect(action) : null, hasSummary: Boolean(summary.textContent.trim()),
       separators: separators.map(node => ({ ...rect(node), text: node.textContent, hidden: node.getAttribute('aria-hidden'),
         colour: getComputedStyle(node).color, dim: getComputedStyle(node).getPropertyValue('--hm-text-dim').trim() })),
-      headingOrder: [...el.querySelector('.output-event-heading').children].map(node => node.classList[0]),
+      summarySeparators: summarySeparators.map(node => ({ ...rect(node), text: node.textContent, hidden: node.getAttribute('aria-hidden'),
+        colour: getComputedStyle(node).color, dim: getComputedStyle(node).getPropertyValue('--hm-text-dim').trim(),
+        sharedStyle: node.classList.contains('output-control-separator'), inButton: Boolean(node.closest('button')) })),
+      headingOrder: [...el.querySelector('.output-event-heading').children].map(node => node.classList.contains('output-summary-separator') ? 'output-summary-separator' : node.classList[0]),
       opacity: controls ? getComputedStyle(controls).opacity : '1',
       position: controls ? getComputedStyle(controls).position : 'static',
       overflow: getComputedStyle(summary).overflow, ellipsis: getComputedStyle(summary).textOverflow };
   });
   assert.equal(state.opacity, '1', `${label}: controls painted without hover/focus`);
   assert.equal(state.position, 'static', `${label}: controls occupy normal flow`);
-  assert.deepEqual(state.headingOrder, ['log-ts', 'log-level', ...(state.action ? ['log-compact-action', 'output-control-separator'] : []), 'output-compact-actions']);
+  assert.deepEqual(state.headingOrder, ['log-ts', 'log-level', ...(state.action ? ['log-compact-action', 'output-control-separator'] : []), 'output-compact-actions', ...(state.hasSummary ? ['output-summary-separator'] : [])]);
   assert.equal(state.separators.length, Number(Boolean(state.action)), `${label}: one separator after a named action`);
   for (const separator of state.separators) {
     assert.equal(separator.text, ' | ', `${label}: pipe has a space on either side`);
-    assert.equal(separator.hidden, 'true', `${label}: separator is decorative for assistive technology`);
     assert.ok(separator.width > 0 && separator.left >= state.action.right && separator.right <= state.actions.left, `${label}: separator occupies its own space between tool and controls`);
+  }
+  assert.equal(state.summarySeparators.length, Number(state.hasSummary), `${label}: em dash only when trailing summary content exists`);
+  for (const separator of state.summarySeparators) {
+    assert.equal(separator.text, ' — ', `${label}: em dash has a space on either side`);
+    assert.equal(separator.sharedStyle, true, `${label}: em dash shares the pipe's styling`);
+    assert.equal(separator.inButton, false, `${label}: em dash never forms part of a button label`);
+    assert.ok(separator.width > 0 && separator.left >= state.actions.right && separator.right <= state.summary.left, `${label}: em dash occupies its own space after controls and before summary: ${JSON.stringify(state)}`);
+  }
+  for (const separator of [...state.separators, ...state.summarySeparators]) {
+    assert.equal(separator.hidden, 'true', `${label}: separator is decorative for assistive technology`);
     assert.ok(separator.dim, `${label}: dim token exists`);
     assert.equal(separator.colour, await row.evaluate((el, dim) => {
       const probe = document.createElement('span'); probe.style.color = dim; el.append(probe);
@@ -199,6 +212,13 @@ try {
   const longWrapped = Array.from({ length: 60 }, () => 'wrapped words').join(' ');
   const cases = [
     ['login', login, false], ['empty', { result_summary: '' }, false],
+    ['empty-tool', { tool_name: 'run_command', result_summary: '' }, false],
+    ['whitespace-only', { tool_name: 'run_command', result_summary: '   ' }, false],
+    ['context-only', { tool_name: 'run_command', status: 0, execution_time_ms: 0, result_summary: '' }, false],
+    ['arguments-only', { tool_name: 'read_file', tool_input: { path: '/example/input' }, result_summary: '' }, false],
+    ['agent-only', { tool_name: 'read_file', metadata: { agent_id: 'context-agent', agent_label: 'context only' }, result_summary: '' }, false],
+    ['warnings-only', { result_summary: JSON.stringify(empty) }, false],
+    ['outcome-only', { result_summary: JSON.stringify(failedProcess) }, false],
     ['240', { message: 'x'.repeat(240) }, false], ['241', { message: 'x'.repeat(241) }, true],
     ['final-newline', { message: 'one\r\n' }, false], ['two-lines', { message: 'one\r\ntwo' }, true],
     ['short-json', { message: '{"ok":true,"n":1}' }, false],
@@ -224,7 +244,7 @@ try {
     document.querySelector(`[data-log-id="${entry.id}"] .output-event-row`).dataset.fixture = ids[index];
   }), cases.map(([id]) => id));
   await page.mouse.move(0, 0);
-  const noBody = new Set(['empty', 'empty-envelope', 'empty-failed-process']);
+  const noBody = new Set(['empty', 'empty-tool', 'context-only', 'arguments-only', 'agent-only', 'warnings-only', 'outcome-only', 'empty-envelope', 'empty-failed-process']);
   for (const [id, , promoted] of cases) {
     assert.equal(await row(id).locator('.output-compact-preview').count(), Number(promoted), `${id} promotion`);
     assert.equal(await row(id).locator('.output-renderer').count(), 1, `${id} has no second card`);
@@ -234,6 +254,15 @@ try {
     assert.deepEqual(await row(id).locator('.output-compact-actions button').allTextContents(),
       [...(noBody.has(id) ? [] : ['Wrap', 'Raw', 'Copy']), promoted ? 'Expand' : 'Inspect'], `${id}: only applicable controls in requested order`);
     await assertInlineControls(page, row(id), `${id} desktop`);
+  }
+  for (const id of ['empty', 'empty-tool', 'whitespace-only', 'warnings-only']) {
+    assert.equal(await row(id).locator('.output-summary-separator').count(), 0, `${id}: no dangling em dash`);
+    await row(id).locator('.output-expand').click();
+    assert.equal(await row(id).locator('.output-summary-separator').count(), 0, `${id}: inspection does not manufacture trailing content`);
+    await row(id).locator('.output-expand').click();
+  }
+  for (const id of ['context-only', 'arguments-only', 'agent-only', 'outcome-only']) {
+    assert.equal(await row(id).locator('.output-summary-separator').count(), 1, `${id}: context/outcome is trailing content even without an output body`);
   }
   assert.equal(await row('login').locator('.log-compact-action').evaluate(el => {
     const s = getComputedStyle(el);
@@ -415,7 +444,7 @@ try {
   const exported = fs.readFileSync(await download.path(), 'utf8');
   assert.match(exported, /"_hmac": "fake"/, 'export retains integrity data, not compact projection');
   assert.deepEqual(errors, []);
-  console.log('live-log-browser: plain accent/violet actions, distinct info-coloured pressed controls, dim aria-hidden pipe separator, always-visible text controls in normal flow without summary overlap, applicable actions, compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
+  console.log('live-log-browser: plain accent/violet actions, distinct info-coloured pressed controls, dim aria-hidden pipe and conditional em dash separators without dangling dashes, always-visible text controls in normal flow without summary overlap, applicable actions, compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
 } finally {
   if (browser) await browser.close();
   await server.close();

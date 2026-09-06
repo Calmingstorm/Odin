@@ -100,7 +100,7 @@ var _v=Object.defineProperty;var wv=(e,t,s)=>t in e?_v(e,t,{enumerable:!0,config
 `).length:0,o=!["text","json"].includes(t.kind),r=l>=2||i>br.inlineChars||o&&a.length>0,c=s.filter(m=>m.text).map(m=>{let v=m.text;try{v=JSON.stringify(JSON.parse(v),null,2)}catch{}return m.label?`${m.label}
 ${v}`:v}).join(`
 
-`).replace(/\n$/,""),d=Vm(c,br.previewLines,br.previewChars),u=t.kind==="audit_preview"?(f=t.metadata)==null?void 0:f.source:t.metadata,p=u&&(t.kind==="process_output"||u.kind==="process_output")?`PID ${u.pid??"?"} ${u.status??""}${Number.isInteger(u.exit_code)?` exit ${u.exit_code}`:""}`.trim():t.kind==="agent_result"&&(u!=null&&u.status)?`agent ${u.status}`:"";return{promoted:r,chars:i,lines:l,envelope:o,kind:t.kind,formatted:c,preview:d,outcome:p,header:t.header,summary:a.replace(/\n/g," "),warnings:Nw(t)}}const Mw={name:"CompactOutput",props:{value:{default:""},rawValue:{default:void 0},label:{type:String,default:"Output"}},setup(e){const t=h(!1),s=h(!0),n=h(!1),a=h(""),i=h(null),l=h(null),o=h(!1),r=K(()=>Dw(e.value)),c=K(()=>{const g=e.rawValue===void 0?e.value:e.rawValue;return typeof g=="string"?g:JSON.stringify(g,null,2)??""}),d=K(()=>n.value?c.value:r.value.formatted),u=K(()=>r.value.promoted&&r.value.preview.folded||o.value),p=K(()=>t.value?!!d.value:r.value.promoted);let f;function m(){if(t.value)return;const g=r.value.promoted?i.value:l.value;o.value=!!(g&&(g.scrollHeight>g.clientHeight+1||g.scrollWidth>g.clientWidth+1))}function v(){f==null||f.disconnect();for(const g of[i.value,l.value])g&&(f==null||f.observe(g));m()}function w(){t.value=!t.value,t.value||(n.value=!1)}function L(){n.value=!n.value,t.value=!0,a.value=""}async function x(){const g=e.value;try{await navigator.clipboard.writeText(d.value),g===e.value&&(a.value="Copied")}catch{g===e.value&&(a.value="Copy unavailable — select text manually")}}return Mt(()=>e.value,()=>{t.value=!1,n.value=!1,a.value=""}),Mt([i,l,t,s,r],()=>Rt(v),{flush:"post"}),Ve(()=>{f=new ResizeObserver(m),v()}),mt(()=>f==null?void 0:f.disconnect()),{expanded:t,wrapped:s,rawMode:n,copyStatus:a,previewElement:i,summaryElement:l,model:r,body:d,canExpand:u,showBody:p,toggleExpanded:w,toggleRaw:L,copyOutput:x}},template:`
+`).replace(/\n$/,""),d=Vm(c,br.previewLines,br.previewChars),u=t.kind==="audit_preview"?(f=t.metadata)==null?void 0:f.source:t.metadata,p=u&&(t.kind==="process_output"||u.kind==="process_output")?`PID ${u.pid??"?"} ${u.status??""}${Number.isInteger(u.exit_code)?` exit ${u.exit_code}`:""}`.trim():t.kind==="agent_result"&&(u!=null&&u.status)?`agent ${u.status}`:"";return{promoted:r,chars:i,lines:l,envelope:o,kind:t.kind,formatted:c,preview:d,outcome:p,header:t.header,summary:a.replace(/\n/g," "),warnings:Nw(t)}}const Mw={name:"CompactOutput",props:{value:{default:""},rawValue:{default:void 0},label:{type:String,default:"Output"},hasContext:{type:Boolean,default:!1}},setup(e){const t=h(!1),s=h(!0),n=h(!1),a=h(""),i=h(null),l=h(null),o=h(!1),r=K(()=>Dw(e.value)),c=K(()=>{const g=e.rawValue===void 0?e.value:e.rawValue;return typeof g=="string"?g:JSON.stringify(g,null,2)??""}),d=K(()=>n.value?c.value:r.value.formatted),u=K(()=>r.value.promoted&&r.value.preview.folded||o.value),p=K(()=>t.value?!!d.value:r.value.promoted);let f;function m(){if(t.value)return;const g=r.value.promoted?i.value:l.value;o.value=!!(g&&(g.scrollHeight>g.clientHeight+1||g.scrollWidth>g.clientWidth+1))}function v(){f==null||f.disconnect();for(const g of[i.value,l.value])g&&(f==null||f.observe(g));m()}function w(){t.value=!t.value,t.value||(n.value=!1)}function L(){n.value=!n.value,t.value=!0,a.value=""}async function x(){const g=e.value;try{await navigator.clipboard.writeText(d.value),g===e.value&&(a.value="Copied")}catch{g===e.value&&(a.value="Copy unavailable — select text manually")}}return Mt(()=>e.value,()=>{t.value=!1,n.value=!1,a.value=""}),Mt([i,l,t,s,r],()=>Rt(v),{flush:"post"}),Ve(()=>{f=new ResizeObserver(m),v()}),mt(()=>f==null?void 0:f.disconnect()),{expanded:t,wrapped:s,rawMode:n,copyStatus:a,previewElement:i,summaryElement:l,model:r,body:d,canExpand:u,showBody:p,toggleExpanded:w,toggleRaw:L,copyOutput:x}},template:`
     <section class="output-renderer output-compact" :class="{ 'output-compact-expanded': expanded }" :aria-label="label">
       <div class="output-event-row">
         <div class="output-event-heading">
@@ -116,6 +116,7 @@ ${v}`:v}).join(`
               {{ expanded ? 'Collapse' : model.promoted ? 'Expand' : 'Inspect' }}
             </button>
           </div>
+          <span v-if="model.summary.trim() || model.outcome || hasContext" class="output-control-separator output-summary-separator" aria-hidden="true"> — </span>
         </div>
         <button v-if="model.warnings.length" type="button" class="output-compact-warning" @click="expanded = true"
                 @pointerdown.stop @keydown.stop :aria-label="model.warnings.join('; ') + ' — inspect record'" :title="model.warnings.join('; ')">
@@ -135,11 +136,11 @@ ${v}`:v}).join(`
         <slot name="details" />
       </div>
       <span v-if="copyStatus" class="output-copy-status" role="status">{{ copyStatus }}</span>
-    </section>`},Yo={name:"ToolOutput",components:{CompactOutput:Mw},props:{value:{default:""},label:{type:String,default:"Output"},presentation:{type:String,default:"inspector"},rawValue:{default:void 0}},setup(e){const t=h(!1),s=h(!0),n=h(!1),a=h(""),i=K(()=>jm(e.value)),l=K(()=>n.value?[{label:"Raw received value",text:i.value.raw}]:i.value.sections),o=K(()=>{let u=30,p=6e3;return l.value.map(f=>{const m=Vm(f.text,u,p);return u=Math.max(0,u-m.lines),p=Math.max(0,p-m.chars),{...f,display:t.value?f.text:m.text,folded:m.folded}})}),r=K(()=>o.value.some(u=>u.folded)),c=K(()=>n.value?i.value.raw:l.value.map(u=>u.label?`${u.label}
+    </section>`},Yo={name:"ToolOutput",components:{CompactOutput:Mw},props:{value:{default:""},label:{type:String,default:"Output"},presentation:{type:String,default:"inspector"},rawValue:{default:void 0},hasContext:{type:Boolean,default:!1}},setup(e){const t=h(!1),s=h(!0),n=h(!1),a=h(""),i=K(()=>jm(e.value)),l=K(()=>n.value?[{label:"Raw received value",text:i.value.raw}]:i.value.sections),o=K(()=>{let u=30,p=6e3;return l.value.map(f=>{const m=Vm(f.text,u,p);return u=Math.max(0,u-m.lines),p=Math.max(0,p-m.chars),{...f,display:t.value?f.text:m.text,folded:m.folded}})}),r=K(()=>o.value.some(u=>u.folded)),c=K(()=>n.value?i.value.raw:l.value.map(u=>u.label?`${u.label}
 ${u.text}`:u.text).join(`
 
 `));async function d(){const u=e.value;try{await navigator.clipboard.writeText(c.value),e.value===u&&(a.value="Copied")}catch{e.value===u&&(a.value="Copy unavailable — select text manually")}}return Mt(()=>e.value,()=>{t.value=!1,a.value=""}),Mt(n,()=>{t.value=!1,a.value=""}),{expanded:t,wrapped:s,rawMode:n,copyStatus:a,model:i,foldedSections:o,canExpand:r,copyOutput:d}},template:`
-    <compact-output v-if="presentation === 'compact'" :value="value" :raw-value="rawValue" :label="label">
+    <compact-output v-if="presentation === 'compact'" :value="value" :raw-value="rawValue" :label="label" :has-context="hasContext">
       <template #header><slot name="header" /></template>
       <template #context><slot name="context" /></template>
       <template #details><slot name="details" /></template>
@@ -3778,7 +3779,8 @@ ${u.text}`:u.text).join(`
     <article class="log-line log-compact-line min-w-0"
              :class="{ 'log-line-error': entry.level === 'ERROR', 'log-line-warning': entry.level === 'WARNING' }"
              :data-log-id="entry.id">
-      <tool-output presentation="compact" :value="display.body" :raw-value="entry.record || undefined" label="Live log record">
+      <tool-output presentation="compact" :value="display.body" :raw-value="entry.record || undefined" label="Live log record"
+                   :has-context="display.status !== '' || display.duration !== null || Boolean(entry.attribution.agentId || argumentsText)">
         <template #header>
           <button class="log-ts text-gray-500 hover:text-gray-300" @click="$emit('copy', entry)"
                   title="Copy complete retained record">{{ entry.ts }}</button>

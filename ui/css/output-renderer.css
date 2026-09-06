@@ -22,6 +22,9 @@
    summary truncates; no overlay or hover-dependent geometry is involved. */
 .output-event-heading { display: flex; align-items: center; gap: .5rem; min-width: 0; flex: 0 0 auto; max-width: calc(100% - 4ch); white-space: nowrap; }
 .output-event-heading > * { flex-shrink: 0; }
+/* Let the timestamp share truncation with long tool names at narrow widths,
+   so the fixed controls and separators cannot overflow into the summary. */
+.output-event-heading .log-ts { flex-shrink: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .output-event-heading .log-compact-action { overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; max-width: 24ch; min-width: 0; color: var(--hm-accent-hover); }
 .output-event-heading .log-compact-web-action { color: #a78bfa; }
 .output-control-separator { color: var(--hm-text-dim); white-space: pre; }

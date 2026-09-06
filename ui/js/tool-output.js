@@ -8,7 +8,8 @@ export default {
   name: 'ToolOutput',
   components: { CompactOutput },
   props: { value: { default: '' }, label: { type: String, default: 'Output' },
-    presentation: { type: String, default: 'inspector' }, rawValue: { default: undefined } },
+    presentation: { type: String, default: 'inspector' }, rawValue: { default: undefined },
+    hasContext: { type: Boolean, default: false } },
   setup(props) {
     const expanded = ref(false), wrapped = ref(true), rawMode = ref(false), copyStatus = ref('');
     const model = computed(() => parseOutput(props.value));
@@ -37,7 +38,7 @@ export default {
     return { expanded, wrapped, rawMode, copyStatus, model, foldedSections, canExpand, copyOutput };
   },
   template: `
-    <compact-output v-if="presentation === 'compact'" :value="value" :raw-value="rawValue" :label="label">
+    <compact-output v-if="presentation === 'compact'" :value="value" :raw-value="rawValue" :label="label" :has-context="hasContext">
       <template #header><slot name="header" /></template>
       <template #context><slot name="context" /></template>
       <template #details><slot name="details" /></template>
