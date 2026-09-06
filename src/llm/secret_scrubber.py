@@ -212,7 +212,7 @@ def scrub_output_secrets(text: str) -> str:
 
 
 def _scrub_text(text: str) -> str:
-    pieces = []
+    pieces: list[str] = []
     cursor = 0
     for start, end in iter_secret_spans(text):
         pieces.extend((text[cursor:start], "[REDACTED]"))

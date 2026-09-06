@@ -1492,7 +1492,7 @@ class ProcessRegistry:
             remote_exec = self._remote_exec
             if info.remote and remote_exec is not None and self._acquire_output_lease is not None:
                 lease = self._acquire_output_lease(info)
-            if lease is not None:
+            if lease is not None and remote_exec is not None:
                 command = self._remote_controller_command(info, "expire")
                 await lease.run(lambda: remote_exec(lease.target, command, 15))
         except Exception:
