@@ -1,0 +1,51 @@
+/* Odin brand for the developer hub — dark-first, gold accent, matching odin-bot.net */
+:root {
+  --vp-font-family-base: 'Manrope', system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --vp-font-family-mono: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+  --vp-c-brand-1: #b48847;
+  --vp-c-brand-2: #c39448;
+  --vp-c-brand-3: #d8ae68;
+  --vp-c-brand-soft: rgba(195, 148, 72, 0.14);
+  --vp-home-hero-name-color: transparent;
+  --vp-home-hero-name-background: linear-gradient(120deg, #efd29a 10%, #c39448 60%, #b48847);
+  --vp-home-hero-image-background-image: radial-gradient(circle at 50% 50%, rgba(195,148,72,.35) 0%, rgba(195,148,72,0) 62%);
+  --vp-home-hero-image-filter: blur(48px);
+}
+.dark {
+  --vp-c-bg: #090907;
+  --vp-c-bg-alt: #0f0e0b;
+  --vp-c-bg-soft: #14130f;
+  --vp-c-bg-elv: #14130f;
+  --vp-c-divider: rgba(231, 218, 190, 0.12);
+  --vp-c-gutter: rgba(231, 218, 190, 0.08);
+  --vp-c-text-1: #f0ece1;
+  --vp-c-text-2: #b9b3a4;
+  --vp-c-text-3: #7f7a6e;
+  --vp-c-brand-1: #d8ae68;
+  --vp-c-brand-2: #c39448;
+  --vp-c-brand-3: #efd29a;
+  --vp-code-block-bg: #0c0b09;
+  --vp-c-default-soft: rgba(231, 218, 190, 0.06);
+}
+.VPHero .name, .VPHero .text { letter-spacing: -0.04em; }
+.VPHero .tagline { color: var(--vp-c-text-2); font-family: var(--vp-font-family-mono); font-size: 15px; }
+.VPFeature { border: 1px solid var(--vp-c-divider); background: var(--vp-c-bg-alt); }
+.VPFeature:hover { border-color: rgba(195, 148, 72, 0.45); }
+.VPFeature .title { font-family: var(--vp-font-family-mono); font-weight: 600; letter-spacing: -0.01em; }
+.vp-doc h1, .vp-doc h2, .vp-doc h3 { letter-spacing: -0.03em; }
+.vp-doc h2 { border-top: 1px solid var(--vp-c-divider); }
+.vp-doc table { display: table; width: 100%; font-size: 13.5px; }
+.vp-doc th { font-family: var(--vp-font-family-mono); font-weight: 600; font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--vp-c-text-2); }
+.vp-doc td code, .vp-doc th code { font-size: 12.5px; }
+.vp-doc div[class*='language-'] { border: 1px solid var(--vp-c-divider); }
+.odin-proof { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 12px; margin: 40px auto 8px; max-width: 1152px; padding: 0 24px; }
+.odin-proof article { padding: 18px 20px; border: 1px solid var(--vp-c-divider); border-radius: 12px; background: var(--vp-c-bg-alt); }
+.odin-proof strong { display: block; font-size: 26px; font-weight: 800; letter-spacing: -0.04em; color: var(--vp-c-brand-1); }
+.odin-proof span { font-family: var(--vp-font-family-mono); font-size: 11.5px; letter-spacing: .04em; text-transform: uppercase; color: var(--vp-c-text-3); }
+.odin-shot { max-width: 1152px; margin: 36px auto 0; padding: 0 24px; }
+.odin-shot img { width: 100%; border: 1px solid var(--vp-c-divider); border-radius: 14px; box-shadow: 0 30px 80px rgba(0,0,0,.45); }
+.odin-shot p { margin-top: 10px; font-family: var(--vp-font-family-mono); font-size: 12px; color: var(--vp-c-text-3); }
+.odin-exchange { max-width: 1152px; margin: 40px auto 56px; padding: 22px 26px; border: 1px solid rgba(195,148,72,.35); border-radius: 14px; background: linear-gradient(180deg, rgba(195,148,72,.07), rgba(195,148,72,0)); font-size: 14.5px; line-height: 1.7; }
+.odin-exchange .who { font-family: var(--vp-font-family-mono); font-size: 11.5px; letter-spacing: .06em; text-transform: uppercase; color: var(--vp-c-brand-1); }
+.odin-exchange p { margin: 6px 0 14px; color: var(--vp-c-text-1); }
+.odin-exchange small { color: var(--vp-c-text-3); font-family: var(--vp-font-family-mono); font-size: 11.5px; }
