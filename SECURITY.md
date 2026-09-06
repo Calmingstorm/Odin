@@ -10,8 +10,7 @@ Only the latest release on the `master` branch receives fixes. Upgrade before re
 
 Please do **not** open a public issue for a security problem.
 
-- Use GitHub's private vulnerability reporting on this repository (**Security → Report a vulnerability**), or
-- email the maintainer at the address on the [GitHub profile](https://github.com/Calmingstorm).
+- Use GitHub's private vulnerability reporting on this repository: **Security → Report a vulnerability**. It is enabled, and reports are visible only to the maintainer.
 
 Include the version, the configuration that matters (provider, permission tier, host access policy), and a reproduction that uses fake credentials and harmless commands. You will get an acknowledgement within a few days; fixes ship as a patch release with the advisory credited to you unless you prefer otherwise.
 

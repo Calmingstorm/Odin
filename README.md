@@ -22,9 +22,9 @@
   <a href="https://github.com/Calmingstorm/Odin/discussions">Discussions</a>
 </p>
 
-Odin is a self-hosted execution agent for Discord. Ask it to do something in a channel and it does the work: shell commands on the hosts you registered, repository changes, service operations, browser sessions, scheduled jobs, or a fan-out of sub-agents — then reports what actually happened, with the audit trail to prove it.
+Odin is a self-hosted execution agent for Discord. Ask it to do something in a channel and it does the work: shell commands on the hosts you registered, repository changes, service operations, browser sessions, scheduled jobs, or a fan-out of sub-agents — then reports what actually happened, with an audit record of every tool call it made.
 
-It is built for people who run real infrastructure and want an agent that **executes rather than describes**, inside limits they set: per-user host access, permission tiers, a command governor, secret redaction, and a tamper-evident audit log.
+It is built for people who run real infrastructure and want an agent that **executes rather than describes**, inside limits they set: per-user host access, permission tiers, a command governor, secret redaction, and an audit log with optional HMAC tamper evidence.
 
 | | |
 |---|---|
@@ -42,7 +42,7 @@ It is built for people who run real infrastructure and want an agent that **exec
 >
 > **Odin:** Probed `https://staging.example.internal/health` → 502 in 40 ms, upstream refused. `systemctl status api-staging` shows the unit flapping since 14:02; the journal ends in `address already in use :8080` — the previous worker was never reaped. Killed the orphan (PID 41822), restarted the unit, health is 200 in 12 ms across five probes. Validation bundle passed 4/4 (service active, port open, HTTP 200, no new errors in 60 s). Audit record `#8813`.
 
-The WebUI shows every tool Odin can reach, how often each has run, and lets you switch any of them off for the model:
+The WebUI shows every tool Odin can reach, how often each has run, and lets you switch any built-in tool off for the model:
 
 <p align="center">
   <img src="docs/images/webui-tools.png" alt="Odin WebUI — Capabilities → Tools" width="900">
@@ -50,7 +50,7 @@ The WebUI shows every tool Odin can reach, how often each has run, and lets you 
 
 ## Quick start
 
-Debian or Ubuntu, sixty seconds to a running service:
+Debian or Ubuntu. The package installs its dependencies during setup, which can take a few minutes:
 
 ```bash
 curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.93.0_amd64.deb
@@ -58,10 +58,12 @@ sudo apt install ./odin_3.93.0_amd64.deb
 sudoedit /etc/odin/.env          # DISCORD_TOKEN=...
 sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
   --credentials-path /var/lib/odin/codex_auth.json --device
-sudo systemctl start odin        # WebUI on http://localhost:3000
+sudoedit /etc/odin/config.yml    # set web.api_token; bind web.host to 127.0.0.1 unless it sits behind TLS;
+                                 # review permissions.default_tier (template: admin) and tools.hosts
+sudo systemctl start odin        # WebUI on the configured web.port (default 3000)
 ```
 
-Then invite the bot, register the hosts it may reach in **System → Hosts**, and ask it for something harmless first. The full walkthrough, including a source checkout for development, is under [Installation](#installation).
+The package also grants the `odin` service account passwordless sudo; restrict `/etc/sudoers.d/99-odin-passwordless` before the service is reachable from anywhere you do not control. Then invite the bot, register the hosts it may reach in **System → Hosts**, and ask it for something harmless first. The full walkthrough, including a source checkout for development, is under [Installation](#installation).
 
 ## Capabilities
 
@@ -131,7 +133,7 @@ For a normal Discord request:
 3. The active provider returns text, tool calls, or both.
 4. The tool loop validates and dispatches calls until the request completes or an iteration, time, or cancellation limit is reached.
 5. Tool results are recorded and returned to the model for the next step.
-6. Successful mutations that require operational verification cause the tool loop to require `validate_action` before the final response.
+6. After a recognized mutation, the tool loop asks the model to run `validate_action` before the final response, retrying the request a bounded number of times; it does not hold finalization indefinitely.
 7. The final response and turn trajectory are persisted and delivered to Discord or the API caller.
 
 Odin supports three model backends:
@@ -174,7 +176,7 @@ The implementation includes the following controls:
 - **Secret handling:** model input, tool output, attachments, and stored records pass through secret-detection and redaction paths.
 - **Network request guards:** browser automation and general web-fetch paths validate destinations and redirect hops to reduce SSRF and DNS-rebinding risk. Individual integration tools may apply narrower policies appropriate to their purpose.
 - **Audit logging:** tool calls are written to append-only JSONL records. Optional HMAC chaining provides tamper evidence, and rotation limits unbounded growth.
-- **Post-change validation:** recognized mutations are marked as requiring follow-up validation before the tool loop can finish normally.
+- **Post-change validation:** recognized mutations are flagged for follow-up validation; the tool loop requests it with bounded retries before finalizing.
 - **Web authentication:** bearer-token and session authentication are available for the management API and interface.
 
 These are application controls, not a security boundary equivalent to a virtual machine. Skills execute in the Odin process as trusted plugins. The Debian installer also grants the `odin` service account passwordless sudo by default because host administration is a primary use case; production operators should restrict `/etc/sudoers.d/99-odin-passwordless` to the commands their deployment needs.
