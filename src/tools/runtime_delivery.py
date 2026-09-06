@@ -35,9 +35,7 @@ def deliver_runtime_output(executor, text, *, tool_name, tool_input, user_id,
                       user_id=user_id, channel_id=channel_id, status=status)
     # Embedded dispatchers may have no retention service. Never promise a
     # cursor or silently discard the middle in that configuration.
-    from ..llm.secret_scrubber import scrub_output_secrets
-
-    return deliver(scrub_output_secrets(text), tool=tool_name, status=status,
+    return deliver(text, tool=tool_name, status=status,
                    budget=get_delivery_budget(getattr(executor, "config", None)))
 
 

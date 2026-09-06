@@ -128,8 +128,12 @@ def test_status_separate_from_preview_and_valid_structured_envelope(tmp_path):
 def test_ranked_snapshot_full_matches_not_short_snippets(tmp_path):
     store = store_at(tmp_path)
     matches = tuple(f"rank {i}: " + str(i)*3500 for i in range(8))
-    result = json.loads(deliver(RankedOutput("short snippets", matches=matches),
-                                store=store, owner="alice", channel="room"))
+    initial = deliver(RankedOutput("short snippets", matches=matches),
+                      store=store, owner="alice", channel="room")
+    assert initial.startswith("short snippets\nfull matches: get_tool_output cursor=")
+    snap, offset = read(store, initial.rsplit("cursor=", 1)[1])
+    assert offset == 0
+    result = json.loads(render_page(snap, initial=True))
     assert result["matches"]["total_returned"] == 8
     assert result["matches"]["showing"] > 0
     assert not result["matches"]["fragment"]

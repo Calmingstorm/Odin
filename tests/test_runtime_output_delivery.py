@@ -60,7 +60,11 @@ def state():
 
 
 def reconstruct(executor, first):
-    page = json.loads(first)
+    if "\nfull matches: get_tool_output cursor=" in first:
+        assert first.startswith("old clipped preview\nfull matches:")
+        page = {"head": "", "cursor": first.rsplit("cursor=", 1)[1]}
+    else:
+        page = json.loads(first)
     parts = [page["head"]]
     while page["cursor"]:
         snapshot, offset = executor.store.read(

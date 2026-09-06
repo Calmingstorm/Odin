@@ -14,7 +14,7 @@ TOOLS_SECTION = [{
         "properties": {
             "cursor": {"type": "string",
                        "description": "Exact cursor returned by tool output delivery."},
-            "limit": {"type": "integer", "minimum": 1, "maximum": 8000, "default": 4000,
+            "limit": {"type": "integer", "minimum": 4, "maximum": 8000, "default": 4000,
                       "description": "Maximum code points; envelope budget may yield fewer."},
         },
         "required": ["cursor"],

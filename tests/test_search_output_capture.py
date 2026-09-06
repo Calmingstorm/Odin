@@ -48,7 +48,13 @@ async def test_ranked_snapshot_preserves_original_order_and_oversized_match(kind
     retained = OutputStore(tmp_path / "ranked.sqlite")
     initial = deliver(output, store=retained, owner="reader", channel="channel",
                       tool="search_history" if kind == "history" else "search_knowledge")
-    assert _reconstruct(initial, OutputStore(retained.path)) == "\n\n".join(snapshot)
+    assert initial.startswith(output + "\nfull matches: get_tool_output cursor=")
+    assert len(initial) < len(output) + 100
+    snap, offset = OutputStore(retained.path).read(
+        initial.rsplit("cursor=", 1)[1], owner="reader", channel="channel",
+        authorize=lambda *_: True)
+    assert offset == 0
+    assert _reconstruct(render_page(snap, initial=True), retained) == "\n\n".join(snapshot)
     search = sessions.search_history if kind == "history" else store.search_hybrid
     assert search.await_count == 1
 
@@ -96,7 +102,7 @@ async def test_short_history_and_background_formats_are_unchanged():
 def test_search_whole_match_counts_and_oversized_continuation(tmp_path):
     matches = ("first " + "a" * 1800, "second " + "b" * 1800,
                "oversized " + "漢é" * 10000, "last " + "z" * 800)
-    output = RankedOutput("short legacy snippets", matches=matches)
+    output = RankedOutput("legacy snippets " * 400, matches=matches)
     store = OutputStore(tmp_path / "matches.sqlite")
     initial = deliver(output, store=store, owner="reader", channel="channel",
                       tool="search_knowledge", budget=4000)

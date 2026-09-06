@@ -57,6 +57,24 @@ class OutputStore:
         if not owner:
             raise RetentionError("No originating authorization scope.")
         matches = getattr(text, "matches", ())
+        # Reject known-unretainable input before scrubbing. Bounded UTF-8
+        # encodings avoid allocating another full copy of oversized output.
+        raw_size = max(0, len(matches)-1)*2
+        for part in matches or (text,):
+            if raw_size + len(part) > self.per_result_bytes:
+                raise RetentionError("Per-result retention quota exceeded.")
+            for start in range(0, len(part), 65536):
+                raw_size += len(part[start:start+65536].encode("utf-8"))
+                if raw_size > self.per_result_bytes:
+                    raise RetentionError("Per-result retention quota exceeded.")
+        # Avoid full scrubbing when the global quota is already exhausted.
+        # The write transaction below still arbitrates concurrent admissions.
+        now = self.clock()
+        with self._db() as db:
+            used = db.execute("SELECT COALESCE(SUM(size),0) FROM outputs WHERE expires > ?",
+                              (now,)).fetchone()[0]
+            if used + raw_size > self.global_bytes:
+                raise RetentionError("Global retention quota exhausted.")
         boundaries = []
         if matches:
             parts = [scrub_output_secrets(str(part)) for part in matches]

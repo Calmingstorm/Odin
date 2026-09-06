@@ -132,7 +132,7 @@ EXPECTED_TOOL_HASHES = {
     "email_search": "3a7584b725d1c134",
     "email_read": "c88d947b915f9cf0",
     "email_list_recent": "f673907aa8906746",
-    "get_tool_output": "3ee31a72632ce3b4",
+    "get_tool_output": "b3e8c90fa03433ff",
 }
 
 

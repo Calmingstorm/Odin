@@ -13,7 +13,7 @@ class OutputTools:
         owner, channel = delivery_scope.get()
         owner = str(executor._current_user_id or owner or "")
         channel = request_delivery_channel.get() or channel
-        limit = inp.get("limit", 8000)
+        limit = inp.get("limit", 4000)
         if type(limit) is not int or not 4 <= limit <= 8000:
             return "Error: limit must be an integer from 4 through 8000."
         try:
