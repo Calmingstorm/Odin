@@ -176,17 +176,17 @@ async def test_remote_reply_validates_newly_observed_expiry_and_offset(expired):
     result = await reg.poll(info.pid, offset=4)
     assert ("expired" if expired else "exceeds retained") in result
     assert info.remote_lease is None and info.status == "completed"
-    assert lease.release_count == int(expired)
+    assert lease.release_count == 1
     assert info.output_revoked is expired
     reg._expire_output(info)
 
 
 async def test_failed_remote_expiry_still_revokes_local_evidence(tmp_path, caplog):
     remote = AsyncMock(side_effect=OSError("offline"))
-    reg = pm.ProcessRegistry(remote_exec=remote, retention_dir=tmp_path)
     lease = _Lease()
+    reg = pm.ProcessRegistry(remote_exec=remote, retention_dir=tmp_path,
+                             acquire_output_lease=lambda _: lease)
     info = _remote_info(None, status="completed")
-    info.output_lease = lease
     info.finished_at = time.time() - pm.OUTPUT_RETENTION_SECONDS - 1
     reg._persist_output(info)
     await reg._expire_output_at_deadline(info)

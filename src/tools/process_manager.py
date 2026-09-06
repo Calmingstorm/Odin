@@ -26,7 +26,8 @@ from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import TYPE_CHECKING, BinaryIO
 
-from ..llm.secret_scrubber import OUTPUT_SECRET_PATTERNS
+from ..llm.secret_scrubber import embedded_process_scrubber_source
+from ..llm.secret_scrubber import scrub_process_secrets as _scrub_process_bytes
 from ..observability.diagnostics import command_display, safe_error, safe_text
 from ..odin_log import get_logger
 from .workspace import WorkspaceError, workspace_env
@@ -40,48 +41,16 @@ log = get_logger("process_manager")
 _UNKNOWN = object()  # "could not determine" — never means "absent"
 
 
-def _scrub_process_bytes(data: bytes) -> bytes:
-    """Mask the complete captured snapshot, retaining original byte coordinates.
+def _scrub_process_tail(data: bytes, emitted: int) -> bytes:
+    """Keep recent complete lines even when the captured prefix is exhausted.
 
-    Never scrub page fragments: a credential may straddle any requested offset.
-    Surrogate escape preserves malformed bytes while matching the same patterns.
+    A clipped window may start halfway through a credential: discard at most
+    that first partial line, then mask the remaining lines before delivery.
     """
-    text = data.decode("utf-8", "surrogateescape")
-    spans = []
-    # Decode quoted keys rather than matching their spelling: JSON can escape
-    # any character in a credential key. Work on the full capture BEFORE paging.
-    decoder = json.JSONDecoder()
-    for match in re.finditer(r'"(?:[^"\\]|\\.)*"\s*:\s*', text):
-        try:
-            key, _ = decoder.raw_decode(match.group())
-        except ValueError:
-            continue
-        key = re.sub(r"[^a-z0-9]", "", key.lower())
-        if not (key in {"password", "passwd", "pwd", "secret", "token", "authorization",
-                        "apikey", "accesskey", "privatekey", "credential", "credentials"}
-                or key.endswith(("password", "secret", "token", "apikey", "privatekey"))):
-            continue
-        begin = match.end()
-        if text[begin:begin + 1] == "*":
-            continue  # already length-preservingly masked on capture finalization
-        try:
-            _, end = decoder.raw_decode(text, begin)
-        except ValueError:
-            # A capture cap / running snapshot may end halfway through a value.
-            end = len(text)
-        spans.append((len(text[:begin].encode("utf-8", "surrogateescape")),
-                      len(text[:end].encode("utf-8", "surrogateescape"))))
-    for pattern in OUTPUT_SECRET_PATTERNS:
-        for match in pattern.finditer(text):
-            start = len(text[:match.start()].encode("utf-8", "surrogateescape"))
-            end = len(text[:match.end()].encode("utf-8", "surrogateescape"))
-            spans.append((start, end))
-    if not spans:
-        return data
-    masked = bytearray(data)
-    for start, end in spans:
-        masked[start:end] = b"*" * (end - start)
-    return bytes(masked)
+    if len(data) < emitted:
+        boundary = re.search(rb"[\r\n]", data)
+        data = data[boundary.end():] if boundary else b""
+    return _scrub_process_bytes(data)
 
 _REMOTE_SUPERVISOR = r'''import base64,json,os,re,signal,subprocess,sys,threading,time
 PATTERNS=__PROCESS_SECRET_PATTERNS__
@@ -132,7 +101,7 @@ def drain_output():
             if remaining: out.write(chunk[:remaining]); output_state["bytes"]+=min(len(chunk),remaining)
             if len(chunk)>remaining: output_state["truncated"]=True
             output_state["emitted"]+=len(chunk)
-            tail=(tail+chunk)[-8000:]
+            tail=(tail+chunk)[-12000:]
             tmp=root+"/tail.tmp"
             open(tmp,"w").write(json.dumps({"emitted":output_state["emitted"],"tail":base64.b64encode(tail).decode()},separators=(",",":")))
             os.replace(tmp,root+"/tail.json")
@@ -164,14 +133,24 @@ if alive():
 try: proc.wait(timeout=1)
 except Exception: pass
 reader.join(timeout=2)
+output_masked=False
 try:
     with open(out_path,"r+b") as handle:
         masked=scrub(handle.read(4194304))
         handle.seek(0); handle.write(masked); handle.flush()
+    output_masked=True
 except OSError: pass
+try:
+    tail_record=json.load(open(root+"/tail.json"))
+    tail_bytes=_scrub_process_tail(base64.b64decode(tail_record["tail"]),output_state["emitted"])
+    tail_record.update(tail=base64.b64encode(tail_bytes).decode(),masked=True)
+    tmp=root+"/tail.tmp"
+    open(tmp,"w").write(json.dumps(tail_record,separators=(",",":")))
+    os.replace(tmp,root+"/tail.json")
+except (OSError,ValueError,KeyError): pass
 try: os.close(stdin_fd)
 except Exception: pass
-record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out,"output_truncated":output_state["truncated"],"emitted":output_state["emitted"],"finished_at":time.time()}
+record={"exit_code":rc,"empty":not alive(),"timed_out":timed_out,"output_truncated":output_state["truncated"],"emitted":output_state["emitted"],"finished_at":time.time(),"output_masked":output_masked}
 tmp=exit_path+".tmp"
 open(tmp,"w").write(json.dumps(record,separators=(",",":")))
 os.replace(tmp,exit_path)
@@ -229,10 +208,12 @@ if op=="status":
     capture_error=None
     try:
         with open(root+"/out","rb") as handle:
-            snapshot=scrub(handle.read(4194304)); total=len(snapshot)
+            snapshot=handle.read(4194304)
+            if not (exit_record or {}).get("output_masked"): snapshot=scrub(snapshot)
+            total=len(snapshot)
             captured=total; emitted=max(emitted,captured)
             if captured<min(emitted,4194304): capture_error="process output capture incomplete"
-            if exit_record is None:
+            if exit_record is None and not request.get("tail"):
                 snapshot=re.sub(rb"\S+\Z",b"",snapshot); total=len(snapshot)
             # Withhold only an incomplete final UTF-8 sequence, not malformed bytes.
             for width in range(1,min(4,total)+1):
@@ -243,15 +224,14 @@ if op=="status":
                     break
             if request.get("tail"):
                 if captured==emitted:
-                    data=snapshot[-8000:]; cursor=total-len(data)
+                    data=snapshot[-12000:]; cursor=total-len(data)
                 else:
                     complete_tail=base64.b64decode(tail.get("tail",""))
-                    if len(complete_tail)==emitted:
-                        data=scrub(complete_tail); cursor=0
+                    if complete_tail:
+                        data=complete_tail if tail.get("masked") else _scrub_process_tail(complete_tail,emitted)
+                        cursor=emitted-len(data)
                     else:
                         data=b""; cursor=0; tail_withheld=True
-                if exit_record is None:
-                    data=re.sub(rb"\S+\Z",b"",data)
             else:
                 data=snapshot[cursor:cursor+limit]
     except FileNotFoundError: pass
@@ -295,17 +275,15 @@ else:
 '''
 
 _REMOTE_SCRUBBER = (
-    "OUTPUT_SECRET_PATTERNS = [re.compile(pattern, flags) for pattern, flags in PATTERNS]\n"
-    + inspect.getsource(_scrub_process_bytes)
-    + "\nscrub = _scrub_process_bytes\n"
+    embedded_process_scrubber_source()
+    + "\n_scrub_process_bytes = scrub_process_secrets\n"
+    + "\n" + inspect.getsource(_scrub_process_tail)
 )
 _REMOTE_CONTROLLER = _REMOTE_CONTROLLER.replace("__PROCESS_SCRUBBER__", _REMOTE_SCRUBBER).replace(
-    "__PROCESS_SECRET_PATTERNS__",
-    repr([(pattern.pattern, int(pattern.flags)) for pattern in OUTPUT_SECRET_PATTERNS]),
+    "__PROCESS_SECRET_PATTERNS__", "()",
 )
 _REMOTE_SUPERVISOR = _REMOTE_SUPERVISOR.replace("__PROCESS_SCRUBBER__", _REMOTE_SCRUBBER).replace(
-    "__PROCESS_SECRET_PATTERNS__",
-    repr([(pattern.pattern, int(pattern.flags)) for pattern in OUTPUT_SECRET_PATTERNS]),
+    "__PROCESS_SECRET_PATTERNS__", "()",
 )
 
 _PR_SET_CHILD_SUBREAPER = 36
@@ -1412,6 +1390,8 @@ class ProcessInfo:
     spool: BinaryIO | None = field(default=None, repr=False)
     retained_bytes: int = 0
     output_tail: bytes = b""
+    output_masked: bool = False
+    output_tail_masked: bool = False
     finished_at: float | None = None
     capture_error: str | None = None
     # No command/stdin/signal API: reachable only by fixed output reads.
@@ -1436,6 +1416,7 @@ class ProcessRegistry:
             [HostTarget, str, int], Awaitable[tuple[int, str]]
         ] | None = None,
         retention_dir: str | Path | None = None,
+        acquire_output_lease: Callable[[ProcessInfo], HostLease | None] | None = None,
     ) -> None:
         self._processes: dict[int, ProcessInfo] = {}
         # Background starts share the foreground workspace. Without this,
@@ -1450,6 +1431,7 @@ class ProcessRegistry:
         # by a symlink into the install).
         self._workspace = workspace
         self._remote_exec = remote_exec
+        self._acquire_output_lease = acquire_output_lease
         # Public handles are namespace-separated from positive local OS PIDs.
         self._next_remote_handle = -1
         self._pending_remote_reservations = 0
@@ -1482,8 +1464,11 @@ class ProcessRegistry:
             "start_time", "status", "exit_code", "total_output_bytes", "retained_bytes",
             "finished_at", "capture_error", "remote", "remote_dir", "remote_token",
             "output_revoked",
+            "output_masked",
             "origin_channel", "scope_id", "host_binding", "reserved_bytes",
         )}
+        if info.output_tail_masked:
+            record["masked_tail"] = base64.b64encode(info.output_tail).decode("ascii")
         path = self._retention_dir / (info.generation + ".json")
         temp = path.with_suffix(".tmp")
         fd = os.open(temp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
@@ -1502,15 +1487,20 @@ class ProcessRegistry:
     async def _expire_output_at_deadline(self, info: ProcessInfo) -> None:
         deadline = (info.finished_at or time.time()) + OUTPUT_RETENTION_SECONDS
         await asyncio.sleep(max(0, deadline - time.time()))
-        lease = info.output_lease
-        remote_exec = self._remote_exec
-        if info.remote and lease is not None and remote_exec is not None:
-            try:
+        lease = None
+        try:
+            remote_exec = self._remote_exec
+            if info.remote and remote_exec is not None and self._acquire_output_lease is not None:
+                lease = self._acquire_output_lease(info)
+            if lease is not None:
                 command = self._remote_controller_command(info, "expire")
                 await lease.run(lambda: remote_exec(lease.target, command, 15))
-            except Exception:
-                log.warning("Remote process output expiry could not be confirmed")
-        self._expire_output(info)
+        except Exception:
+            log.warning("Remote process output expiry could not be confirmed")
+        finally:
+            if lease is not None:
+                lease.release()
+            self._expire_output(info)
 
     def _spool_quota_remaining(self) -> int:
         return max(0, OUTPUT_GLOBAL_QUOTA - self._pending_remote_reservations - sum(
@@ -1531,7 +1521,11 @@ class ProcessRegistry:
                 generation = record["generation"]
                 if not re.fullmatch(r"[a-f0-9]{32}", generation) or path.stem != generation:
                     continue
+                masked_tail = record.pop("masked_tail", None)
                 info = ProcessInfo(command="(retained output)", **record)
+                if masked_tail is not None:
+                    info.output_tail = base64.b64decode(masked_tail, validate=True)
+                    info.output_tail_masked = True
                 info.restored = True
                 if info.finished_at is None:
                     if info.remote:
@@ -1779,6 +1773,8 @@ class ProcessRegistry:
         offset: int | None = None, limit: int = OUTPUT_PAGE_DEFAULT,
         max_chars: int | None = None,
         authorized: Callable[[ProcessInfo], bool] | None = None,
+        output_lease: HostLease | None = None,
+        acquire_output_lease: Callable[[], HostLease | None] | None = None,
     ) -> str:
         """Return recent output lines from a process.
 
@@ -1825,7 +1821,11 @@ class ProcessRegistry:
             async with info._remote_lock:
                 if authorized is not None and not authorized(info):
                     return "Error: process access denied."
-                result = await self._poll_remote(info, wait_seconds, offset=offset, limit=limit, max_chars=max_chars)
+                # Another poll may discover exit while we wait for this lock.
+                if info.remote_lease is None and output_lease is None and acquire_output_lease is not None:
+                    output_lease = acquire_output_lease()
+                result = await self._poll_remote(info, wait_seconds, offset=offset, limit=limit, max_chars=max_chars,
+                                                 output_lease=output_lease)
                 if authorized is not None and not authorized(info):
                     return "Error: process access denied."
                 return result
@@ -1860,7 +1860,11 @@ class ProcessRegistry:
         if explicit:
             start = offset or 0
             data = b""
-            if info.spool is not None:
+            if info.spool is not None and info.output_masked:
+                info.spool.seek(start)
+                data = info.spool.read(limit)
+                view = info
+            elif info.spool is not None:
                 info.spool.seek(0)
                 snapshot = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
                 snapshot, _ = _utf8_boundary_split(snapshot)
@@ -1875,23 +1879,25 @@ class ProcessRegistry:
             return self._output_page(view, data, start, limit, max_chars, preview=False)
         full = b""
         if info.spool is not None:
-            info.spool.seek(0)
-            full = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
-        if len(full) == info.total_output_bytes:
+            if info.output_masked and info.retained_bytes == info.total_output_bytes:
+                info.spool.seek(max(0, info.retained_bytes - 12000))
+                tail = info.spool.read(12000)
+                data = b"".join(tail.splitlines(keepends=True)[-50:])
+                return self._output_page(info, data, info.total_output_bytes - len(data),
+                                         limit, max_chars, preview=True)
+            if not info.output_masked:
+                info.spool.seek(0)
+                full = _scrub_process_bytes(info.spool.read(OUTPUT_CAPTURE_BYTES))
+        if full and len(full) == info.total_output_bytes:
             tail = full[-12000:]
-        elif len(info.output_tail) == info.total_output_bytes:
-            # Quota/write loss can leave a complete small stream in memory.
-            # Only a COMPLETE stream establishes enclosing JSON secret context.
-            tail = _scrub_process_bytes(info.output_tail)
+        elif info.output_tail:
+            tail = (info.output_tail if info.output_tail_masked else
+                    _scrub_process_tail(info.output_tail, info.total_output_bytes))
         else:
-            # A clipped tail may begin inside a multiline credential object;
-            # masking just its first line cannot make the remaining lines safe.
             return self._output_page(info, b"", 0, limit, max_chars,
-                                     preview=True, tail_withheld=True)
+                                     preview=True, tail_withheld=bool(info.total_output_bytes))
         data = b"".join(tail.splitlines(keepends=True)[-50:])
         start = max(0, info.total_output_bytes - len(data))
-        if info.status == "running":
-            data = re.sub(rb"\S+\Z", b"", data)
         return self._output_page(info, data, start, limit, max_chars, preview=True)
 
     def _expire_output(self, info: ProcessInfo) -> None:
@@ -1944,8 +1950,8 @@ class ProcessRegistry:
             }
             text = chunk.decode("utf-8", "replace")
             if tail_withheld:
-                meta["tail_status"] = "withheld_unverifiable_secret_context"
-                text = "(tail withheld: incomplete capture cannot establish secret-masking context; retrieve the retained prefix using the cursor)"
+                meta["tail_status"] = "unavailable"
+                text = "(recent output unavailable; retrieve the retained prefix using the cursor)"
             if preview:
                 status = f"[PID {info.pid}] status={info.status}"
                 if info.exit_code is not None:
@@ -2130,8 +2136,9 @@ class ProcessRegistry:
     async def _poll_remote(
         self, info: ProcessInfo, wait_seconds: float, *, offset: int | None = None,
         limit: int = OUTPUT_PAGE_DEFAULT, max_chars: int = 12000,
+        output_lease: HostLease | None = None,
     ) -> str:
-        lease = info.remote_lease or info.output_lease
+        lease = info.remote_lease or output_lease
         remote_exec = self._remote_exec
         if lease is None or info.output_revoked or remote_exec is None:
             return "Error: remote process output lease is unavailable or revoked."
@@ -2188,7 +2195,7 @@ class ProcessRegistry:
 
     def _retire_execution_lease(self, info: ProcessInfo) -> None:
         if info.remote_lease is not None:
-            info.output_lease = info.remote_lease
+            info.remote_lease.release()
             info.remote_lease = None
         self._schedule_output_expiry(info)
 
@@ -2438,6 +2445,7 @@ class ProcessRegistry:
                     break
                 info.total_output_bytes += len(chunk)
                 info.output_tail = (info.output_tail + chunk)[-12000:]
+                info.output_masked = info.output_tail_masked = False
                 if info.capture_error is None and info.retained_bytes < OUTPUT_CAPTURE_BYTES:
                     try:
                         if not self._spool_quota_available():
@@ -2493,6 +2501,9 @@ class ProcessRegistry:
             info.spool.truncate()
             info.spool.flush()
             info.retained_bytes = len(snapshot)
+            info.output_masked = True
+        info.output_tail = _scrub_process_tail(info.output_tail, info.total_output_bytes)
+        info.output_tail_masked = True
         self._persist_output(info)
 
     async def _watch_exit(self, info: ProcessInfo) -> None:

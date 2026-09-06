@@ -26,7 +26,11 @@ async def test_remote_kill_then_poll_preserves_cause(monkeypatch, pid):
     assert "killed" in await registry.kill(pid)
     assert info.status == "killed"
     assert info.exit_code == -15
-    assert "killed" in await registry.poll(pid)
+    read_lease = _Lease()
+    try:
+        assert "killed" in await registry.poll(pid, output_lease=read_lease)
+    finally:
+        read_lease.release()
     assert info.status == "killed"
 
 

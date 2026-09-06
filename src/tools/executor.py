@@ -608,8 +608,19 @@ class ToolExecutor:
                 workspace=self._ensure_local_workspace,
                 remote_exec=self._exec_remote_target,
                 retention_dir=self._retention_root() / "process-output",
+                acquire_output_lease=self._acquire_process_cleanup_lease,
             )
         return self._process_registry
+
+    def _acquire_process_cleanup_lease(self, info):
+        """System-owned expiry pins only the original, still-targetable host."""
+        lease = self.host_registry.acquire(info.host_alias or info.host)
+        if lease is None:
+            return None
+        if not info.host_binding or host_binding(lease.target) != info.host_binding:
+            lease.release()
+            return None
+        return lease
 
     def _retention_root(self) -> Path:
         """Use the runtime's configured data anchor, never an install path."""
@@ -655,15 +666,12 @@ class ToolExecutor:
 
     def deliver_output(self, text, *, tool_name, tool_input, user_id,
                        channel_id=None, status="succeeded"):
-        from ..llm.secret_scrubber import scrub_output_secrets
-
         # These have their own byte-faithful or bounded retention contracts.
         # Do not re-scrub process byte offsets or persist a second spool copy.
         if tool_name == "read_file" or isinstance(text, DeliveredOutput):
             return text
         if tool_name == "manage_process" and tool_input.get("action") == "poll":
             return text
-        text = scrub_output_secrets(text)
         config = getattr(self, "config", None)
         if config is None:
             return deliver(text, tool=tool_name, status=status)
@@ -681,7 +689,8 @@ class ToolExecutor:
                          and self._builtin_policy.is_disabled("get_tool_output")))):
             from .output_delivery import delivery_failure
 
-            return delivery_failure("Retrieval is not authorized; no continuation exists.", status)
+            return delivery_failure("Retrieval is not authorized; no continuation exists.", status,
+                                    text=text, budget=get_delivery_budget(config))
         return deliver(text, store=self._ensure_output_store(), owner=owner, channel=channel,
                        tool=tool_name, hosts=hosts, status=status,
                        budget=get_delivery_budget(config))

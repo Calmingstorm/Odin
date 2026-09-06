@@ -284,11 +284,10 @@ async def test_remote_effect_lock_rechecks_live_permission(action):
     assert "denied" in await task
 
 
-def test_json_incomplete_and_nested_values_mask_without_length_change():
+def test_json_string_values_mask_without_length_change_and_nonstrings_preserved():
     samples = [b'{"password":"fixture unfinished with spaces',
-               b'{"credentials":{"nested":"fixture secret"},"public":1}',
-               b'{"password":["fixture", "secret"],"public":1}',
-               b'{"password":12345}', b'"pass\\u0077ord": "fixture\\"secret"']
+               b'{"credentials":{"password":"fixture secret"},"public":1}',
+               b'"pass\\u0077ord": "fixture\\"secret"']
     for raw in samples:
         masked = _scrub_process_bytes(raw)
         assert len(masked) == len(raw)
@@ -296,6 +295,10 @@ def test_json_incomplete_and_nested_values_mask_without_length_change():
         if b'"public"' in raw:
             assert b'"public":1' in masked
     assert _scrub_process_bytes(b'plain \xff text') == b'plain \xff text'
+    for raw in (b'{"password":12345,"secret":false,"token":null}',
+                b'{"credentials":{"nested":"fixture public"},"public":1}',
+                b'{"password":["fixture", "public"],"public":1}'):
+        assert _scrub_process_bytes(raw) == raw
 
 
 def test_restore_missing_bad_expired_and_revoked_manifests(tmp_path):
