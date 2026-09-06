@@ -2,6 +2,10 @@
 
 `manage_process poll` retains its default newest-50-lines view. Explicit
 offset/cursor reads use immutable job generations and bounded UTF-8 byte pages.
+When both are supplied, a non-empty cursor takes precedence and the offset is
+ignored, including `offset=0`. Blank or whitespace cursors mean no cursor;
+blank/absent offsets and limits use their defaults. Invalid non-empty cursors
+still fail rather than silently restarting retrieval from the offset.
 Output remains evidence, not permission to write stdin or signal an exited job.
 
 ## Authorization

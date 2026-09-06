@@ -103,9 +103,8 @@ EXPECTED_TOOL_HASHES = {
     "read_channel": "22d87d43b1ac97e2",
     "add_reaction": "f466eef6573b0166",
     "create_poll": "6fb64482c930284b",
-    # Updated 2026-07-31: wait_seconds param + monitoring guidance added to
-    # manage_process (deliberate schema change, PR fix/wait-polling).
-    "manage_process": "c1a892ebe57ce99e",
+    # Updated 2026-09-06: non-empty process cursors take precedence over offset.
+    "manage_process": "3be9bbbbfc759b72",
     "manage_list": "1fe50a2ac7a59952",
     "analyze_image": "8680a337769f8d09",
     "start_loop": "67faa086c9b0987f",

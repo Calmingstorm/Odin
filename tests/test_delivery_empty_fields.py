@@ -77,11 +77,13 @@ async def test_real_process_empty_fields_preserve_default_and_explicit_offset(tm
                                    offset=empty, limit=empty) == following
             assert json.loads(following)["shown_intervals"][0][0] == 4000
 
-        # Normalization must not hide real conflicts, bad limits, or access denial.
-        conflict = await ex.execute("manage_process", {
+        # A nonempty cursor owns the position even when a schema-filling caller
+        # also supplies zero. Limits and authorization still apply.
+        continuation = await ex.execute("manage_process", {
             "action": "poll", "pid": info.pid, "cursor": first["cursor"], "offset": 0,
         }, user_id="owner")
-        assert not conflict.ok and "not both" in conflict.output
+        assert continuation.ok, continuation.output
+        assert continuation.output == following
         invalid = await ex.execute("manage_process", {
             "action": "poll", "pid": info.pid, "cursor": "", "offset": 0, "limit": 0,
         }, user_id="owner")
@@ -90,6 +92,39 @@ async def test_real_process_empty_fields_preserve_default_and_explicit_offset(tm
             "action": "poll", "pid": info.pid, "cursor": "", "offset": 0, "limit": "",
         }, user_id="other")
         assert not denied.ok and "row-" not in denied.output
+
+
+@pytest.mark.parametrize("remote", [False, True])
+async def test_soak_poll_shape_real_cursor_with_zero_offset(tmp_path, remote):
+    text = "".join(f"row-{i:04d} 世界\n" for i in range(1200))
+    raw = text.encode()
+    async with job(tmp_path, f"print({text!r}, end='')", remote) as (ex, reg, info):
+        first = json.loads(await delivered(ex, info, cursor="", offset=0))
+        assert first["shown_bytes"] == 4000 and first["truncated"]
+        chunks = [first["text"]]
+        previous = first
+        while previous["truncated"]:
+            request = {
+                "action": "poll", "pid": info.pid, "cursor": previous["cursor"],
+                "offset": 0, "limit": 4000, "host": "", "command": "",
+                "input_text": "", "wait_seconds": 0,
+            }
+            result = await ex.execute("manage_process", request, user_id="owner")
+            assert result.ok, result.output
+            current = json.loads(result.output)
+            start, end = current["shown_intervals"][0]
+            assert start == previous["shown_intervals"][0][1]
+            assert start < end <= len(raw)
+            assert current["text"].encode() == raw[start:end]
+            assert result.output == await delivered(ex, info, cursor=previous["cursor"])
+            # Replay does not advance a shared position, locally or remotely.
+            assert result.output == await reg.poll(info.pid, cursor=previous["cursor"], offset=0)
+            denied = await ex.execute("manage_process", request, user_id="other")
+            assert not denied.ok and "row-" not in denied.output
+            chunks.append(current["text"])
+            previous = current
+        assert previous["cursor"] is None
+        assert "".join(chunks).encode() == raw
 
 
 @pytest.mark.parametrize("empty", EMPTY)

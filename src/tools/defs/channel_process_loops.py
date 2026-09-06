@@ -81,6 +81,7 @@ TOOLS_SECTION: list[dict] = [
             "and capture-loss metadata. Use poll with offset=0 or the returned "
             "generation-bound cursor and limit (default 4000, 4-8000 UTF-8 bytes) "
             "for repeatable retained-output pages; follow cursor until truncated=false. "
+            "A non-empty cursor takes precedence over offset. "
             "Reads never consume another reader's output. Local and remote capture "
             "retain at most 4 MiB. "
             "Output stays read-only for 24 hours after exit; access is rechecked on every read. "
@@ -126,14 +127,14 @@ TOOLS_SECTION: list[dict] = [
                     "type": "string",
                     "description": (
                         "Poll only: opaque job-generation output cursor; "
-                        "do not combine with offset."
+                        "a non-empty cursor takes precedence over offset; blank means no cursor."
                     ),
                 },
                 "offset": {
                     "type": "integer", "minimum": 0,
                     "description": (
                         "Poll only: retained-output UTF-8 byte offset "
-                        "(0 begins complete retrieval)."
+                        "(0 begins complete retrieval); ignored when cursor is non-empty."
                     ),
                 },
                 "limit": {

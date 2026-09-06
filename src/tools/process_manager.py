@@ -1806,8 +1806,8 @@ class ProcessRegistry:
             return "Error: limit must be an integer between 4 and 8000 bytes."
         explicit = cursor is not None or offset is not None
         if cursor is not None:
-            if offset is not None:
-                return "Error: provide cursor or offset, not both."
+            # Schema-filling callers may also send offset=0. The generation-bound
+            # cursor takes precedence; never restart a continuation from offset.
             try:
                 generation, encoded_offset = cursor.split(":")
                 if generation != info.generation:

@@ -51,17 +51,27 @@ async def test_invalid_offset_does_not_read_evidence(evidence, offset):
 
 
 @pytest.mark.parametrize("suffix", ["", ":no-number", ":0:extra"])
-async def test_malformed_cursor_cannot_fall_back_to_preview(evidence, suffix):
+@pytest.mark.parametrize("offset", [None, 0])
+async def test_malformed_cursor_cannot_fall_back_to_preview(evidence, suffix, offset):
     reg, info = evidence
-    response = await reg.poll(info.pid, cursor=info.generation + suffix)
+    response = await reg.poll(info.pid, cursor=info.generation + suffix, offset=offset)
     assert "invalid cursor" in response and "public" not in response
     assert page(await reg.poll(info.pid, offset=0))["text"] == "public 世界\n"
 
 
-async def test_conflicting_cursor_and_out_of_range_rejected_without_consumption(evidence):
+@pytest.mark.parametrize("offset", [0, 1, 10000, -1, True, 0.5, "invalid"])
+async def test_cursor_position_takes_precedence_over_any_offset(evidence, offset):
+    reg, info = evidence
+    cursor = info.generation + ":7"
+    expected = await reg.poll(info.pid, cursor=cursor)
+    assert page(expected)["text"] == "世界\n"
+    assert await reg.poll(info.pid, cursor=cursor, offset=offset) == expected
+    assert page(expected)["shown_intervals"] == [[7, info.retained_bytes]]
+
+
+async def test_out_of_range_rejected_without_consumption(evidence):
     reg, info = evidence
     cursor = info.generation + ":0"
-    assert "not both" in await reg.poll(info.pid, cursor=cursor, offset=0)
     assert "exceeds retained" in await reg.poll(info.pid, offset=info.retained_bytes + 1)
     assert "boundary" in await reg.poll(info.pid, offset=8)
     assert page(await reg.poll(info.pid, cursor=cursor))["text"] == "public 世界\n"
