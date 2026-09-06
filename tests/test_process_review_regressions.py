@@ -165,7 +165,8 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
             raw = await reg.poll(info.pid)
             assert "status=completed" in raw and "private-" not in raw
         for offset in (0, 8000, 16000):
-            raw = await reg.poll(info.pid, offset=offset, limit=8000)
+            raw = await reg.poll(info.pid, cursor=info.generation + f":{offset}",
+                                 offset=offset, limit=8000)
             page = json.loads(raw)
             assert page["shown_intervals"][0][0] == offset
             assert page["shown_bytes"] > 0 and "private-" not in page["text"]
@@ -177,7 +178,8 @@ async def test_finalized_spool_pages_and_previews_never_rescrub(tmp_path, monkey
             try:
                 assert retained.restored and retained.output_masked
                 for offset in (0, 8000, 16000):
-                    raw = await restored.poll(info.pid, offset=offset, limit=8000)
+                    raw = await restored.poll(info.pid, cursor=info.generation + f":{offset}",
+                                              offset=offset, limit=8000)
                     page = json.loads(raw)
                     assert page["shown_bytes"] > 0 and "private-" not in page["text"]
                 assert "status=completed" in await restored.poll(info.pid)
