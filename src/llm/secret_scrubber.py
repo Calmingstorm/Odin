@@ -111,8 +111,6 @@ def iter_secret_spans(text: str):
             return  # Short identifier-only JSON keys cannot match any pattern.
         for pattern in OUTPUT_SECRET_PATTERNS:
             for match in pattern.finditer(value, start, end):
-                if match.group() == "[REDACTED]" or not match.group().strip("*"):
-                    continue
                 left, right = match.span()
                 if boundaries is not None:
                     left, right = boundaries[left], boundaries[right]
