@@ -58,6 +58,15 @@ tools cannot delegate, schedule, create skills, or call another privileged route
 Desktop-derived output cannot reopen privileged tool access in that task, even
 after the session closes. General agents/loops/schedules remain denied.
 
+Implementation clarification, recorded before dispatch integration: the durable
+restriction applies to the entire conversation/channel, not only its original
+requester. Discord history is shared; a different participant must not inherit
+desktop observations with unrestricted tools. It remains effective after close,
+disable, and restart. Use a genuinely new empty conversation for unrelated
+privileged work. Clearing a session or changing principal is not an authority
+reset. An already queued mixed computer/privileged tool batch is restricted
+before any member begins, preventing admission races.
+
 Fix the confirmed spawned-agent image-dict stringification inline in Stage 3 as
 a narrow safety repair: unsupported image results become bounded, explicit
 capability failures, never `str(dict)` with base64. Do not add agent vision or
