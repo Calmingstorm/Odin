@@ -113,16 +113,18 @@ def test_long_plain_single_line_retains_tail_with_escaped_content(suffix, budget
     assert page['cursor'] is None and page['retention'] == 'failed'
 
 
-@pytest.mark.parametrize('length', [200, 11999, 12000, 12001])
-def test_ranked_clipped_list_stays_plain_until_list_exceeds_budget(tmp_path, length):
+@pytest.mark.parametrize('budget', [1024, 12000])
+@pytest.mark.parametrize('delta', [-800, -1, 0, 1])
+def test_ranked_clipped_list_stays_plain_until_list_exceeds_budget(tmp_path, budget, delta):
+    length = budget + delta
     text = RankedOutput('s' * length, matches=('full first ' * 2000, 'second'))
     store = OutputStore(tmp_path / 'rank.sqlite')
-    output = deliver(text, store=store, owner='owner', channel='room')
-    assert len(output) <= 12000 and truncate_tool_output(output) == output
-    if length <= 12000:
+    output = deliver(text, store=store, owner='owner', channel='room', budget=budget)
+    assert len(output) <= budget and truncate_tool_output(output, max_chars=budget) == output
+    if length <= budget:
         assert not output.startswith('{')
         preview, cursor = output.split('\nfull matches: get_tool_output cursor=')
-        assert preview.startswith('s' * min(length, 11000))
+        assert preview.startswith('s' * min(length, budget-100))
         snap, offset = store.read(cursor, owner='owner', channel='room', authorize=lambda *_: True)
         assert offset == 0
         assert snap.text == '\n\n'.join(text.matches)
