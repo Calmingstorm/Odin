@@ -37,6 +37,23 @@ server.middlewares.use(async (request, response, next) => {
   response.end(await server.transformIndexHtml(request.url, html));
 });
 let browser;
+async function assertBodyPlacement(row, firstLine, label) {
+  const state = await row.evaluate(el => {
+    const header = el.querySelector('.output-event-row'), preview = el.querySelector('.output-compact-preview');
+    const summary = el.querySelector('.output-inline-summary');
+    return { header: header.textContent, record: el.textContent, preview: preview?.textContent,
+      belowHeader: Boolean(preview && preview.getBoundingClientRect().top >= header.getBoundingClientRect().bottom),
+      bodySummary: [...summary.childNodes].filter(node => node.nodeType === Node.TEXT_NODE).map(node => node.textContent).join('').trim() };
+  });
+  assert.ok(state.preview, `${label}: body preview is present`);
+  assert.equal(state.bodySummary, '', `${label}: preview header has metadata only, no inline body text`);
+  assert.equal(state.belowHeader, true, `${label}: body starts below the event header`);
+  if (firstLine) {
+    assert.ok(state.preview.includes(firstLine), `${label}: preview retains its first body line`);
+    assert.ok(!state.header.includes(firstLine), `${label}: first body line never leaks into the header`);
+    assert.equal(state.record.split(firstLine).length - 1, 1, `${label}: first body line occurs exactly once in the entire record`);
+  }
+}
 async function assertControlColours(row, label) {
   const state = await row.evaluate(el => {
     const probe = document.createElement('span');
@@ -73,7 +90,7 @@ async function assertInlineControls(page, row, label) {
         decoration: s.textDecorationLine, size: parseFloat(s.fontSize) };
     });
     return { event: rect(event), summary: rect(summary), actions: rect(actions), buttons,
-      action: action ? rect(action) : null, hasSummary: Boolean(summary.textContent.trim()),
+      action: action ? rect(action) : null, hasSummary: Boolean(summary.textContent.trim() || el.querySelector('.output-compact-warning')),
       separators: separators.map(node => ({ ...rect(node), text: node.textContent, hidden: node.getAttribute('aria-hidden'),
         colour: getComputedStyle(node).color, dim: getComputedStyle(node).getPropertyValue('--hm-text-dim').trim() })),
       summarySeparators: summarySeparators.map(node => ({ ...rect(node), text: node.textContent, hidden: node.getAttribute('aria-hidden'),
@@ -156,6 +173,7 @@ try {
   assert.equal(await page.locator('[data-log-id="2"] img').count(), 0, 'agent labels are escaped');
   const body = await page.locator('[data-log-id="2"] pre').allTextContents();
   assert.ok(body.some(value => value.includes('first line\nsecond line with literal \\n')), 'real newline and literal escape must remain distinct');
+  await assertBodyPlacement(page.locator('[data-log-id="2"]'), 'first line', 'agent tool call');
   await page.mouse.move(0, 0);
   await assertInlineControls(page, page.locator('[data-log-id="2"]'), 'agent arguments');
   assert.equal(await page.locator('[data-log-id="2"] .log-compact-action').evaluate(el => {
@@ -175,6 +193,7 @@ try {
   const before = apiCalls;
   await page.locator('[data-log-id="2"] .output-expand').click();
   assert.match(await page.locator('[data-log-id="2"] .output-compact-detail').innerText(), /turn turn-one.*parent parent.*root root.*iteration 2.*call call-one/s);
+  await assertBodyPlacement(page.locator('[data-log-id="2"]'), 'first line', 'expanded grouped agent');
   assert.equal(apiCalls, before, 'local detail expansion must not retrieve');
   await page.setViewportSize({ width: 390, height: 844 });
   const widths = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
@@ -204,11 +223,19 @@ try {
   const login = { type: 'web_action', method: 'POST', path: '/api/auth/login', status: 200, success: true,
     ip: '192.0.2.1', execution_time_ms: 0, _hmac: 'a'.repeat(64), _prev_hmac: 'b'.repeat(64) };
   const empty = { kind: 'tool_output', status: 'unknown', retention: 'failed', error: 'unavailable', head: '', tail: { text: '' }, truncated: true, cursor: null };
+  const toolBody = 'TOOL-ENVELOPE-FIRST-LINE';
   const oneEnvelope = { kind: 'tool_output', status: 'succeeded', retention: 'retained', result_id: 'fixture',
-    total_chars: 1, total_bytes: 1, offset_unit: 'unicode_code_points', start: 0, end: 1, text: 'x', truncated: false, cursor: null };
+    total_chars: toolBody.length, total_bytes: toolBody.length, offset_unit: 'unicode_code_points', start: 0, end: toolBody.length, text: toolBody, truncated: false, cursor: null };
   const failedProcess = { kind: 'process_output', pid: 42, generation: 'fixture', status: 'completed', exit_code: 17,
     emitted_bytes: 0, retained_bytes: 0, shown_bytes: 0, capture_limit_loss_bytes: 0, not_retained_bytes: 0,
     shown_intervals: [], text: '', truncated: false, cursor: null };
+  const processBody = 'PROCESS-FIRST-LINE\nProcess second line';
+  const completedProcess = { ...failedProcess, pid: 2604481, exit_code: 0, text: processBody,
+    emitted_bytes: processBody.length, retained_bytes: processBody.length, shown_bytes: processBody.length, shown_intervals: [[0, processBody.length]] };
+  const agentBody = 'AGENT-RESULT-FIRST-LINE\nAgent result second line';
+  const agentResult = { id: 'result-agent', label: 'result fixture', status: 'completed', preview: agentBody,
+    original_bytes: agentBody.length, result_bytes: agentBody.length, error_bytes: 0, source_original_bytes: agentBody.length,
+    offset: 0, end: agentBody.length, tools_used: [], tools_omitted: 0, truncated: false, cursor: null };
   const longWrapped = Array.from({ length: 60 }, () => 'wrapped words').join(' ');
   const cases = [
     ['login', login, false], ['empty', { result_summary: '' }, false],
@@ -227,6 +254,10 @@ try {
     ['invalid-envelope', { message: '{"kind":"tool_output","text":"fake"}' }, false],
     ['empty-envelope', { tool_name: 'read_file', tool_input: { path: '/example/input' }, execution_time_ms: 20, success: true, result_summary: JSON.stringify(empty) }, false],
     ['one-envelope', { result_summary: JSON.stringify(oneEnvelope) }, true],
+    ['completed-process', { tool_name: 'manage_process', success: true, execution_time_ms: 25, result_summary: JSON.stringify(completedProcess) }, true],
+    ['agent-result', { tool_name: 'get_agent_results', result_summary: JSON.stringify(agentResult) }, true],
+    ['audit-preview', { result_summary: JSON.stringify({ kind: 'audit_preview', audit_clipped: true, preview: 'AUDIT-FIRST-LINE\nAudit second line' }) }, true],
+    ['promoted-context', { tool_name: 'run_command', success: true, execution_time_ms: 12, result_summary: 'CONTEXT-FIRST-LINE\nContext second line' }, true],
     ['empty-failed-process', { tool_name: 'manage_process', success: true, result_summary: JSON.stringify(failedProcess) }, false],
     ['failed-process', { tool_name: 'manage_process', success: true, result_summary: JSON.stringify({ ...failedProcess, text: 'failed', emitted_bytes: 6, retained_bytes: 6, shown_bytes: 6, shown_intervals: [[0, 6]] }) }, true],
     ['metadata-error', { detail: '', metadata: { status: 'failed', error: 'specific error reason', operator_detail: 'useful metadata' } }, false],
@@ -247,6 +278,7 @@ try {
   const noBody = new Set(['empty', 'empty-tool', 'context-only', 'arguments-only', 'agent-only', 'warnings-only', 'outcome-only', 'empty-envelope', 'empty-failed-process']);
   for (const [id, , promoted] of cases) {
     assert.equal(await row(id).locator('.output-compact-preview').count(), Number(promoted), `${id} promotion`);
+    if (promoted) await assertBodyPlacement(row(id), null, `${id} desktop`);
     assert.equal(await row(id).locator('.output-renderer').count(), 1, `${id} has no second card`);
     assert.equal(await row(id).locator('.output-summary').count(), 0, `${id} has no duplicated metadata header`);
     assert.equal(await row(id).locator('details').count(), 0, `${id} has no routine retained-record footer`);
@@ -255,14 +287,33 @@ try {
       [...(noBody.has(id) ? [] : ['Wrap', 'Raw', 'Copy']), promoted ? 'Expand' : 'Inspect'], `${id}: only applicable controls in requested order`);
     await assertInlineControls(page, row(id), `${id} desktop`);
   }
-  for (const id of ['empty', 'empty-tool', 'whitespace-only', 'warnings-only']) {
+  for (const id of ['empty', 'empty-tool', 'whitespace-only']) {
     assert.equal(await row(id).locator('.output-summary-separator').count(), 0, `${id}: no dangling em dash`);
     await row(id).locator('.output-expand').click();
     assert.equal(await row(id).locator('.output-summary-separator').count(), 0, `${id}: inspection does not manufacture trailing content`);
     await row(id).locator('.output-expand').click();
   }
-  for (const id of ['context-only', 'arguments-only', 'agent-only', 'outcome-only']) {
+  for (const id of ['context-only', 'arguments-only', 'agent-only', 'outcome-only', 'warnings-only', 'audit-preview']) {
     assert.equal(await row(id).locator('.output-summary-separator').count(), 1, `${id}: context/outcome is trailing content even without an output body`);
+  }
+  for (const id of ['two-lines', 'one-envelope', 'four-lines', 'five-lines', 'wrapped']) {
+    assert.equal(await row(id).locator('.output-summary-separator').count(), 0, `${id}: body-only promoted row has no dangling em dash`);
+    await row(id).locator('.output-expand').click();
+    assert.equal(await row(id).locator('.output-summary-separator').count(), 0, `${id}: body-only expanded row has no dangling em dash`);
+    await row(id).locator('.output-expand').click();
+  }
+  for (const [id, firstLine] of [['two-lines', 'one'], ['one-envelope', toolBody], ['completed-process', 'PROCESS-FIRST-LINE'],
+    ['agent-result', 'AGENT-RESULT-FIRST-LINE'], ['audit-preview', 'AUDIT-FIRST-LINE'], ['promoted-context', 'CONTEXT-FIRST-LINE']]) {
+    await assertBodyPlacement(row(id), firstLine, `${id} preview`);
+    await row(id).locator('.output-expand').click();
+    await assertBodyPlacement(row(id), firstLine, `${id} expanded`);
+    await row(id).locator('.output-expand').click();
+  }
+  assert.match(await row('completed-process').locator('.output-event-row').innerText(), /success.*25ms.*PID 2604481 completed exit 0/s);
+  assert.match(await row('promoted-context').locator('.output-event-row').innerText(), /success.*12ms/s);
+  for (const [id, content] of [['240', 'x'.repeat(240)], ['final-newline', 'one'], ['short-json', '{"ok":true,"n":1}'], ['invalid-json', '{not-json']]) {
+    assert.ok((await row(id).locator('.output-inline-summary').textContent()).includes(content), `${id}: inline content is unchanged`);
+    assert.equal((await row(id).textContent()).split(content).length - 1, 1, `${id}: inline body appears exactly once`);
   }
   assert.equal(await row('login').locator('.log-compact-action').evaluate(el => {
     const s = getComputedStyle(el);
@@ -321,13 +372,18 @@ try {
   await page.keyboard.press('Enter');
   assert.equal(await row('short-json').locator('.output-expand').getAttribute('aria-expanded'), 'true');
   assert.equal(await row('short-json').locator('pre').textContent(), '{\n  "ok": true,\n  "n": 1\n}');
+  await assertBodyPlacement(row('short-json'), '"ok": true', 'inline JSON inspected');
+  assert.equal(await row('short-json').locator('.output-summary-separator').count(), 0, 'Inspect moves inline body below header without leaving a dash');
   await page.keyboard.press('Space');
   assert.equal(await row('short-json').locator('pre').count(), 0);
+  assert.match(await row('short-json').locator('.output-inline-summary').textContent(), /\{"ok":true,"n":1\}/, 'collapse restores inline body');
+  assert.equal(await row('short-json').locator('.output-summary-separator').count(), 1, 'collapse restores the separator with inline content');
   await row('login').locator('.output-expand').click();
   await row('login').getByRole('button', { name: 'Raw', exact: true }).click();
   assert.equal(await row('login').getByRole('button', { name: 'Raw', exact: true }).getAttribute('aria-pressed'), 'true');
   await assertControlColours(row('login'), 'pressed Raw beside violet web action');
   assert.match(await row('login').locator('pre').textContent(), /_hmac.*a{64}/s);
+  await assertBodyPlacement(row('login'), null, 'inline login raw inspection');
   await row('login').getByRole('button', { name: 'Copy', exact: true }).click();
   const rawCopied = JSON.parse(await page.evaluate(() => window.copiedText));
   assert.equal(rawCopied._prev_hmac, login._prev_hmac);
@@ -342,6 +398,7 @@ try {
   await page.locator('h1').click();
   await page.mouse.move(0, 0);
   for (const [id] of cases) await assertInlineControls(page, row(id), `${id} mobile`);
+  for (const [id, , promoted] of cases) if (promoted) await assertBodyPlacement(row(id), null, `${id} mobile`);
   for (const id of ['empty-envelope', 'empty-failed-process']) {
     await row(id).scrollIntoViewIfNeeded();
     const visible = await row(id).locator('.output-compact-warning').evaluate(el => {
@@ -444,7 +501,7 @@ try {
   const exported = fs.readFileSync(await download.path(), 'utf8');
   assert.match(exported, /"_hmac": "fake"/, 'export retains integrity data, not compact projection');
   assert.deepEqual(errors, []);
-  console.log('live-log-browser: plain accent/violet actions, distinct info-coloured pressed controls, dim aria-hidden pipe and conditional em dash separators without dangling dashes, always-visible text controls in normal flow without summary overlap, applicable actions, compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
+  console.log('live-log-browser: metadata-only preview headers with first body lines rendered exactly once, unchanged inline content and collapse restoration, plain accent/violet actions, distinct info-coloured pressed controls, dim aria-hidden pipe and conditional em dash separators without dangling dashes, always-visible text controls in normal flow without summary overlap, applicable actions, compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
 } finally {
   if (browser) await browser.close();
   await server.close();

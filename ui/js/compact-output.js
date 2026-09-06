@@ -17,6 +17,9 @@ export default {
     const body = computed(() => rawMode.value ? rawText.value : model.value.formatted);
     const canExpand = computed(() => (model.value.promoted && model.value.preview.folded) || layoutFolded.value);
     const showBody = computed(() => expanded.value ? Boolean(body.value) : model.value.promoted);
+    // A visible preview owns the body, including inline records opened via Inspect.
+    // The event row keeps its context/outcome/warnings, never a second body copy.
+    const headerSummary = computed(() => showBody.value ? '' : model.value.summary);
     let observer;
     function measure() {
       // Do not change the fold affordance while inspecting full content.
@@ -43,7 +46,7 @@ export default {
     onMounted(() => { observer = new ResizeObserver(measure); observe(); });
     onUnmounted(() => observer?.disconnect());
     return { expanded, wrapped, rawMode, copyStatus, previewElement, summaryElement, model, body,
-      canExpand, showBody, toggleExpanded, toggleRaw, copyOutput };
+      canExpand, showBody, headerSummary, toggleExpanded, toggleRaw, copyOutput };
   },
   template: `
     <section class="output-renderer output-compact" :class="{ 'output-compact-expanded': expanded }" :aria-label="label">
@@ -61,7 +64,7 @@ export default {
               {{ expanded ? 'Collapse' : model.promoted ? 'Expand' : 'Inspect' }}
             </button>
           </div>
-          <span v-if="model.summary.trim() || model.outcome || hasContext" class="output-control-separator output-summary-separator" aria-hidden="true"> — </span>
+          <span v-if="headerSummary.trim() || model.outcome || hasContext || model.warnings.length" class="output-control-separator output-summary-separator" aria-hidden="true"> — </span>
         </div>
         <button v-if="model.warnings.length" type="button" class="output-compact-warning" @click="expanded = true"
                 @pointerdown.stop @keydown.stop :aria-label="model.warnings.join('; ') + ' — inspect record'" :title="model.warnings.join('; ')">
@@ -70,7 +73,7 @@ export default {
         <span ref="summaryElement" class="output-inline-summary">
           <slot name="context" />
           <span v-if="model.outcome" class="output-compact-outcome" :title="model.outcome">{{ model.outcome }}</span>
-          {{ model.summary }}
+          {{ headerSummary }}
         </span>
       </div>
       <pre v-if="showBody" ref="previewElement" class="output-body output-compact-preview"
