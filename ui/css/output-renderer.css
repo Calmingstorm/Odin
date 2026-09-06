@@ -17,22 +17,28 @@
    preview header. Inspector defaults above remain unchanged everywhere else. */
 .log-compact-line { border-bottom: 1px solid var(--hm-border-subtle); }
 .output-renderer.output-compact { border: 0; border-radius: 0; background: transparent; overflow: visible; }
-.output-event-row { display: flex; align-items: center; position: relative; min-width: 0; line-height: 1.5; }
-.output-event-heading { display: flex; align-items: center; gap: .5rem; min-width: 0; flex: 1; white-space: nowrap; overflow: hidden; }
+.output-event-row { display: flex; align-items: center; gap: .5rem; min-width: 0; line-height: 1.5; }
+/* The prefix and its controls occupy real layout space. Only the trailing
+   summary truncates; no overlay or hover-dependent geometry is involved. */
+.output-event-heading { display: flex; align-items: center; gap: .5rem; min-width: 0; flex: 0 0 auto; max-width: calc(100% - 4ch); white-space: nowrap; }
 .output-event-heading > * { flex-shrink: 0; }
-.output-event-heading .log-compact-action, .output-event-heading .log-compact-agent, .output-event-heading .log-compact-arguments { overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; max-width: 24ch; min-width: 3ch; }
-.output-event-heading .log-compact-arguments { max-width: 32ch; }
-.output-event-heading .output-inline-summary { flex: 1 1 12ch; min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.output-compact-outcome { color: var(--hm-text-muted); white-space: nowrap; flex: 0 1 auto; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; }
-.output-compact-warning { color: var(--hm-warning); white-space: nowrap; flex: 0 0 auto; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; padding: 0 .35rem; min-height: 24px; }
+.output-event-heading .log-compact-action { overflow: hidden; text-overflow: ellipsis; flex-shrink: 1; max-width: 24ch; min-width: 0; color: var(--hm-accent-hover); }
+.output-event-heading .log-compact-web-action { color: #a78bfa; }
+.output-inline-summary { flex: 1 1 4ch; min-width: 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.output-inline-summary > span { margin-right: .5rem; }
+.output-inline-summary .log-compact-agent, .output-inline-summary .log-compact-arguments { display: inline-block; vertical-align: bottom; overflow: hidden; text-overflow: ellipsis; max-width: 24ch; }
+.output-inline-summary .log-compact-arguments { max-width: 32ch; }
+.output-compact-outcome { color: var(--hm-text-muted); }
+.output-compact-warning { color: var(--hm-warning); white-space: nowrap; flex: 0 1 auto; max-width: 28ch; overflow: hidden; text-overflow: ellipsis; padding: 0; border: 0; background: transparent; cursor: pointer; }
 .output-warning-short { display: none; }
 .output-compact-warning-detail { color: var(--hm-warning); overflow-wrap: anywhere; }
 .output-compact-envelope-detail { color: var(--hm-text-muted); overflow-wrap: anywhere; }
-.output-compact-actions { display: flex; align-items: center; flex-shrink: 0; }
-.output-compact .output-controls { position: absolute; right: 5.5rem; top: 0; bottom: 0; padding: 0 .25rem; gap: .1rem; flex-wrap: nowrap; border: 0; background: var(--hm-bg); opacity: 0; pointer-events: none; }
-.output-compact:hover .output-controls, .output-compact:focus-within .output-controls, .output-compact-expanded .output-controls { opacity: 1; pointer-events: auto; }
-.output-compact .output-controls .btn, .output-compact .output-expand { min-height: 24px; padding: 0 .35rem; margin: 0; line-height: 24px; }
-.output-compact .output-expand { min-width: 5.5rem; }
+.output-compact-actions { display: flex; align-items: center; flex-shrink: 0; gap: .4rem; }
+.output-compact .output-controls { position: static; padding: 0; gap: .4rem; flex-wrap: nowrap; border: 0; background: transparent; }
+.output-compact-actions button { border: 0; border-radius: 0; background: transparent; min-width: 0; min-height: 0; padding: 0; margin: 0; font: inherit; font-size: .6875rem; line-height: inherit; color: var(--hm-text-muted); cursor: pointer; text-decoration: none; }
+.output-compact-actions button[aria-pressed="true"] { color: var(--hm-accent-hover); background: transparent; }
+.output-compact-actions button:hover, .output-compact-actions button:focus, .output-compact-warning:hover, .output-compact-warning:focus { text-decoration: underline; }
+.output-compact-actions button:focus-visible, .output-compact-warning:focus-visible { outline: 2px solid var(--hm-accent); outline-offset: 2px; }
 .output-compact .output-body { padding: 0; line-height: 18px; }
 .output-compact-preview { margin: 0 0 .25rem; }
 .output-compact .output-compact-folded { max-height: 72px; overflow: hidden; }
@@ -43,8 +49,16 @@
 @media (max-width: 600px) {
   .output-warning-full { display: none; }
   .output-warning-short { display: inline; }
-  .output-compact-outcome { max-width: 11ch; flex-shrink: 1; }
-  .output-event-heading { gap: .3rem; }
+  .output-event-row, .output-event-heading { gap: .3rem; }
+  .output-event-heading { font-size: .6875rem; }
   .output-event-heading .log-ts { max-width: 8ch; overflow: hidden; }
-  .output-event-heading .log-compact-arguments, .output-event-heading .log-compact-agent { max-width: 10ch; }
+  .output-event-heading .log-compact-action { max-width: 10ch; }
+  .output-inline-summary .log-compact-arguments, .output-inline-summary .log-compact-agent { max-width: 10ch; }
+}
+@media (max-width: 360px) {
+  .output-event-row, .output-event-heading { gap: .25rem; }
+  .output-event-heading, .output-compact-actions button { font-size: .625rem; }
+  .output-event-heading .log-ts { max-width: 6ch; }
+  .output-event-heading .log-compact-action { max-width: 6ch; }
+  .output-compact-actions, .output-compact .output-controls { gap: .25rem; }
 }

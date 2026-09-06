@@ -49,24 +49,27 @@ export default {
       <div class="output-event-row">
         <div class="output-event-heading">
           <slot name="header" />
-          <span ref="summaryElement" class="output-inline-summary">{{ model.summary }}</span>
+          <div class="output-compact-actions" @pointerdown.stop @keydown.stop>
+            <div v-if="model.chars > 0" class="output-controls">
+              <button type="button" :aria-pressed="wrapped" @click="wrapped = !wrapped">Wrap</button>
+              <button type="button" :aria-pressed="rawMode" @click="toggleRaw" title="Inspect raw retained record">Raw</button>
+              <button type="button" @click="copyOutput" :title="rawMode ? 'Copy raw retained record' : 'Copy complete display body'">Copy</button>
+            </div>
+            <button type="button" class="output-expand" :aria-expanded="expanded" @click="toggleExpanded"
+                    :title="canExpand ? 'More received text hidden locally — expand without retrieving' : 'Inspect already-loaded record'">
+              {{ expanded ? 'Collapse' : model.promoted ? 'Expand' : 'Inspect' }}
+            </button>
+          </div>
         </div>
-        <span v-if="model.outcome" class="output-compact-outcome" :title="model.outcome">{{ model.outcome }}</span>
         <button v-if="model.warnings.length" type="button" class="output-compact-warning" @click="expanded = true"
                 @pointerdown.stop @keydown.stop :aria-label="model.warnings.join('; ') + ' — inspect record'" :title="model.warnings.join('; ')">
           <span class="output-warning-full">{{ model.warnings.join('; ') }}</span><span class="output-warning-short" aria-hidden="true">Warning</span>
         </button>
-        <div class="output-compact-actions" @pointerdown.stop @keydown.stop>
-          <div class="output-controls">
-            <button type="button" class="btn btn-ghost" :aria-pressed="wrapped" @click="wrapped = !wrapped">Wrap</button>
-            <button type="button" class="btn btn-ghost" :aria-pressed="rawMode" @click="toggleRaw" title="Inspect raw retained record">Raw</button>
-            <button type="button" class="btn btn-ghost" @click="copyOutput" :title="rawMode ? 'Copy raw retained record' : 'Copy complete display body'">Copy</button>
-          </div>
-          <button type="button" class="btn btn-ghost output-expand" :aria-expanded="expanded" @click="toggleExpanded"
-                  :title="canExpand ? 'More received text hidden locally — expand without retrieving' : 'Inspect already-loaded record'">
-            {{ expanded ? 'Collapse' : canExpand ? 'Expand' : 'Inspect' }}
-          </button>
-        </div>
+        <span ref="summaryElement" class="output-inline-summary">
+          <slot name="context" />
+          <span v-if="model.outcome" class="output-compact-outcome" :title="model.outcome">{{ model.outcome }}</span>
+          {{ model.summary }}
+        </span>
       </div>
       <pre v-if="showBody" ref="previewElement" class="output-body output-compact-preview"
            :class="{ 'output-wrapped': wrapped, 'output-compact-folded': !expanded }">{{ expanded ? body : model.preview.text }}</pre>

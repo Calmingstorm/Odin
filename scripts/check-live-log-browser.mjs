@@ -37,6 +37,51 @@ server.middlewares.use(async (request, response, next) => {
   response.end(await server.transformIndexHtml(request.url, html));
 });
 let browser;
+// Check painted controls, not just DOM presence: the previous hover overlay
+// passed isVisible() while being transparent and stealing the summary's space.
+async function assertInlineControls(page, row, label) {
+  await row.locator('.output-event-row').scrollIntoViewIfNeeded();
+  const state = await row.evaluate(el => {
+    const event = el.querySelector('.output-event-row'), summary = el.querySelector('.output-inline-summary');
+    const actions = el.querySelector('.output-compact-actions'), controls = el.querySelector('.output-controls');
+    const rect = node => { const r = node.getBoundingClientRect(); return { left: r.left, right: r.right, top: r.top, bottom: r.bottom, width: r.width }; };
+    const buttons = [...actions.querySelectorAll('button')].map(button => {
+      const r = button.getBoundingClientRect(), s = getComputedStyle(button);
+      return { ...rect(button), visible: s.visibility === 'visible' && s.opacity === '1',
+        hit: button.contains(document.elementFromPoint(r.left + r.width / 2, r.top + r.height / 2)),
+        border: s.borderWidth, background: s.backgroundColor, padding: s.padding, minHeight: s.minHeight,
+        decoration: s.textDecorationLine, size: parseFloat(s.fontSize) };
+    });
+    return { event: rect(event), summary: rect(summary), actions: rect(actions), buttons,
+      headingOrder: [...el.querySelector('.output-event-heading').children].map(node => node.classList[0]),
+      opacity: controls ? getComputedStyle(controls).opacity : '1',
+      position: controls ? getComputedStyle(controls).position : 'static',
+      overflow: getComputedStyle(summary).overflow, ellipsis: getComputedStyle(summary).textOverflow };
+  });
+  assert.equal(state.opacity, '1', `${label}: controls painted without hover/focus`);
+  assert.equal(state.position, 'static', `${label}: controls occupy normal flow`);
+  assert.equal(state.headingOrder[0], 'log-ts');
+  assert.equal(state.headingOrder[1], 'log-level');
+  assert.equal(state.headingOrder.at(-1), 'output-compact-actions');
+  if (state.headingOrder.length === 4) assert.equal(state.headingOrder[2], 'log-compact-action');
+  assert.ok(state.summary.width > 0, `${label}: summary has a remaining-width lane: ${JSON.stringify(state)}`);
+  assert.ok(state.actions.right <= state.summary.left, `${label}: controls never overlap/cover the summary: ${JSON.stringify(state)}`);
+  assert.ok(state.summary.right <= state.event.right + 1, `${label}: summary truncates at the right edge`);
+  assert.ok(state.event.right <= page.viewportSize().width, `${label}: compact row stays inside viewport`);
+  assert.equal(state.overflow, 'hidden');
+  assert.equal(state.ellipsis, 'ellipsis');
+  for (const button of state.buttons) {
+    assert.ok(button.visible && button.hit, `${label}: text control is visible and hit-testable without hover`);
+    assert.ok(button.left >= state.event.left && button.right <= state.summary.left, `${label}: each control stays in the left block`);
+    assert.ok(button.top >= state.event.top && button.bottom <= state.event.bottom + 1, `${label}: controls stay on the event line`);
+    assert.equal(button.border, '0px', `${label}: no button border`);
+    assert.equal(button.background, 'rgba(0, 0, 0, 0)', `${label}: no button background, including pressed Wrap`);
+    assert.equal(button.padding, '0px');
+    assert.equal(button.minHeight, '0px');
+    assert.equal(button.decoration, 'none', `${label}: no underline until hover/focus`);
+    assert.ok(button.size <= 11, `${label}: small text controls`);
+  }
+}
 try {
   await server.listen();
   const executablePath = [process.env.CHROME_PATH, '/usr/bin/google-chrome', '/usr/bin/chromium', '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome']
@@ -67,6 +112,16 @@ try {
   assert.equal(await page.locator('[data-log-id="2"] img').count(), 0, 'agent labels are escaped');
   const body = await page.locator('[data-log-id="2"] pre').allTextContents();
   assert.ok(body.some(value => value.includes('first line\nsecond line with literal \\n')), 'real newline and literal escape must remain distinct');
+  await page.mouse.move(0, 0);
+  await assertInlineControls(page, page.locator('[data-log-id="2"]'), 'agent arguments');
+  assert.equal(await page.locator('[data-log-id="2"] .log-compact-action').evaluate(el => {
+    const probe = document.createElement('span');
+    probe.className = 'logs-tool-badge'; el.parentElement.append(probe);
+    const expected = getComputedStyle(probe).color;
+    probe.remove();
+    const style = getComputedStyle(el);
+    return style.color === expected && style.backgroundColor === 'rgba(0, 0, 0, 0)' && style.borderWidth === '0px';
+  }), true, 'tool name keeps badge accent as plain text, with no chip');
 
   await page.getByLabel('Group by turn / agent').check();
   assert.equal(await page.locator('[data-log-group]').count(), 1);
@@ -80,6 +135,9 @@ try {
   await page.setViewportSize({ width: 390, height: 844 });
   const widths = await page.evaluate(() => ({ client: document.documentElement.clientWidth, scroll: document.documentElement.scrollWidth }));
   assert.ok(widths.scroll <= widths.client, `grouped Logs widened a 390px viewport to ${widths.scroll}`);
+  await page.locator('h1').click();
+  await page.mouse.move(0, 0);
+  await assertInlineControls(page, page.locator('[data-log-id="2"]'), 'expanded grouped agent at 390px');
 
   await page.getByPlaceholder('Filter logs...').fill('/example/child.txt');
   assert.equal(await page.locator('.log-line').count(), 2, 'argument values are filterable');
@@ -126,19 +184,30 @@ try {
     ['wrapped', { message: longWrapped }, true],
     ['hostile', { message: '<img src=x onerror=alert(1)>\nliteral \\n' }, true],
     ['nested-integrity', { message: JSON.stringify({ nested: { _hmac: 'c'.repeat(64), _prev_hmac: 'd'.repeat(64), useful: 'yes' } }) }, false],
+    ['long-tool', { tool_name: 'a_very_long_tool_name_'.repeat(8), tool_input: { path: '/example/long/'.repeat(20) }, success: true, execution_time_ms: 12345, result_summary: 'summary '.repeat(80) }, true],
   ];
-  await page.evaluate(rows => rows.forEach(([id, record]) => emitLog({ ...record, fixture_id: id })), cases);
+  await page.evaluate(rows => rows.forEach(([, record]) => emitLog(record)), cases);
   const row = id => page.locator('.log-line').filter({ has: page.locator(`[data-fixture="${id}"]`) });
-  // Tag the actual retained rows without changing their values or presentation.
-  await page.evaluate(() => logView.logs.forEach(entry => {
-    document.querySelector(`[data-log-id="${entry.id}"] .output-event-row`).dataset.fixture = entry.record.fixture_id;
-  }));
+  // Tags stay outside the audit values, or a nominally empty record gains a body.
+  await page.evaluate(ids => logView.logs.forEach((entry, index) => {
+    document.querySelector(`[data-log-id="${entry.id}"] .output-event-row`).dataset.fixture = ids[index];
+  }), cases.map(([id]) => id));
+  await page.mouse.move(0, 0);
+  const noBody = new Set(['empty', 'empty-envelope', 'empty-failed-process']);
   for (const [id, , promoted] of cases) {
     assert.equal(await row(id).locator('.output-compact-preview').count(), Number(promoted), `${id} promotion`);
     assert.equal(await row(id).locator('.output-renderer').count(), 1, `${id} has no second card`);
     assert.equal(await row(id).locator('.output-summary').count(), 0, `${id} has no duplicated metadata header`);
     assert.equal(await row(id).locator('details').count(), 0, `${id} has no routine retained-record footer`);
+    assert.equal(await row(id).locator('.output-expand').innerText(), promoted ? 'Expand' : 'Inspect', `${id}: promotion determines action`);
+    assert.deepEqual(await row(id).locator('.output-compact-actions button').allTextContents(),
+      [...(noBody.has(id) ? [] : ['Wrap', 'Raw', 'Copy']), promoted ? 'Expand' : 'Inspect'], `${id}: only applicable controls in requested order`);
+    await assertInlineControls(page, row(id), `${id} desktop`);
   }
+  assert.equal(await row('login').locator('.log-compact-action').evaluate(el => {
+    const s = getComputedStyle(el);
+    return s.color === 'rgb(167, 139, 250)' && s.backgroundColor === 'rgba(0, 0, 0, 0)' && s.borderWidth === '0px';
+  }), true, 'web action retains violet text without chip chrome');
   assert.match(await row('login').innerText(), /POST \/api\/auth\/login.*200.*0ms/s);
   assert.ok((await row('login').boundingBox()).height <= 28, 'trivial web action is one scannable line');
   assert.doesNotMatch(await page.locator('[aria-label="Log output"]').innerText(), /_hmac|_prev_hmac|Complete retained record/);
@@ -153,16 +222,27 @@ try {
   assert.match(await row('metadata-error').locator('.log-compact-metadata').innerText(), /useful metadata/);
   await row('metadata-error').locator('.output-expand').click();
   assert.equal(await row('two-lines').locator('pre').textContent(), 'one\ntwo');
-  assert.equal(await row('four-lines').locator('.output-expand').innerText(), 'Inspect', 'no fold marker when all content fits');
+  assert.equal(await row('four-lines').locator('.output-expand').innerText(), 'Expand', 'all promoted rows offer expansion');
+  assert.doesNotMatch(await row('four-lines').locator('.output-expand').getAttribute('title'), /hidden/, 'no false fold indicator when all content fits');
   assert.equal(await row('five-lines').locator('.output-expand').innerText(), 'Expand');
   assert.equal(await row('five-lines').locator('pre').textContent(), 'line1\nline2\nline3\nline4');
-  assert.equal(await row('241').locator('.output-expand').innerText(), 'Inspect', '241 chars fit the wide preview without a false fold indicator');
+  assert.equal(await row('241').locator('.output-expand').innerText(), 'Expand');
+  assert.doesNotMatch(await row('241').locator('.output-expand').getAttribute('title'), /hidden/, '241 chars fit the wide preview without a false fold indicator');
   assert.equal(await row('hostile').locator('img, script').count(), 0);
   assert.match(await row('hostile').locator('pre').textContent(), /\nliteral \\n/);
   assert.equal(await row('one-envelope').evaluate(el => {
     const pre = el.querySelector('pre');
     return pre.previousElementSibling.classList.contains('output-event-row') && getComputedStyle(pre.parentElement).borderWidth === '0px';
   }), true, 'event row is the preview header, not a separate card');
+
+  // Revealing/focusing the old absolute-positioned controls covered the summary.
+  // Hover must now change only text decoration, never paint/layout ownership.
+  await row('long-tool').scrollIntoViewIfNeeded();
+  const beforeHover = await row('long-tool').locator('.output-inline-summary').boundingBox();
+  await row('long-tool').getByRole('button', { name: 'Copy', exact: true }).hover();
+  assert.equal(await row('long-tool').getByRole('button', { name: 'Copy', exact: true }).evaluate(el => getComputedStyle(el).textDecorationLine), 'underline');
+  assert.deepEqual(await row('long-tool').locator('.output-inline-summary').boundingBox(), beforeHover, 'hover cannot shift or clip the summary');
+  await page.mouse.move(0, 0);
 
   // Keyboard-only discovery, inspection, raw/copy and local expansion.
   await page.evaluate(() => {
@@ -171,9 +251,12 @@ try {
   });
   await page.mouse.move(0, 0);
   await page.locator('h1').click();
-  assert.equal(await row('short-json').locator('.output-controls').evaluate(el => getComputedStyle(el).opacity), '0');
+  assert.equal(await row('short-json').locator('.output-controls').evaluate(el => getComputedStyle(el).opacity), '1', 'controls are always painted before hover/focus');
   await row('short-json').locator('.output-expand').focus();
-  assert.equal(await row('short-json').locator('.output-controls').evaluate(el => getComputedStyle(el).opacity), '1', 'keyboard focus exposes controls');
+  assert.equal(await row('short-json').locator('.output-expand').evaluate(el => getComputedStyle(el).textDecorationLine), 'underline', 'keyboard focus underlines plain text control');
+  await page.keyboard.press('Shift+Tab');
+  assert.equal(await row('short-json').getByRole('button', { name: 'Copy', exact: true }).evaluate(el => el === document.activeElement), true, 'controls retain real sequential keyboard navigation');
+  await page.keyboard.press('Tab');
   const requestsBeforeControls = allRequests;
   await page.keyboard.press('Enter');
   assert.equal(await row('short-json').locator('.output-expand').getAttribute('aria-expanded'), 'true');
@@ -186,7 +269,7 @@ try {
   await row('login').getByRole('button', { name: 'Copy', exact: true }).click();
   const rawCopied = JSON.parse(await page.evaluate(() => window.copiedText));
   assert.equal(rawCopied._prev_hmac, login._prev_hmac);
-  assert.equal(await page.evaluate(() => logView.logs.find(e => e.record.fixture_id === 'login').record._hmac), login._hmac);
+  assert.equal(await page.evaluate(() => logView.logs.find(e => e.record.path === '/api/auth/login').record._hmac), login._hmac);
   await row('login').locator('.output-expand').click();
   assert.equal(await row('login').locator('pre').count(), 0);
   assert.equal(allRequests, requestsBeforeControls, 'expand, raw, copy and keyboard inspection make zero network requests');
@@ -194,6 +277,9 @@ try {
   // A single source line wraps into many visual lines at phone widths. The 4-line
   // CSS cap and overflow measurement both apply (not merely split on newline).
   await page.setViewportSize({ width: 390, height: 844 });
+  await page.locator('h1').click();
+  await page.mouse.move(0, 0);
+  for (const [id] of cases) await assertInlineControls(page, row(id), `${id} mobile`);
   for (const id of ['empty-envelope', 'empty-failed-process']) {
     await row(id).scrollIntoViewIfNeeded();
     const visible = await row(id).locator('.output-compact-warning').evaluate(el => {
@@ -206,7 +292,7 @@ try {
     assert.ok(await row(id).locator('.output-compact-warning-detail').isVisible(), 'keyboard reveals complete warning details');
     await row(id).locator('.output-expand').click();
   }
-  await page.waitForFunction(() => document.querySelector('[data-fixture="241"]').querySelector('.output-expand').textContent.trim() === 'Expand');
+  await page.waitForFunction(() => document.querySelector('[data-fixture="241"]').querySelector('.output-expand').title.includes('hidden'));
   const wrappedOnly = await row('241').locator('pre').evaluate(el => ({ height: el.clientHeight, full: el.scrollHeight, chars: el.textContent.length }));
   assert.equal(wrappedOnly.chars, 241, 'all source chars are loaded; only visual wrapping hides content');
   assert.ok(wrappedOnly.height <= 72 && wrappedOnly.full > 72, 'fold indicator accounts for rendered lines, not just logical lines/char budget');
@@ -232,9 +318,22 @@ try {
   assert.equal(allRequests, beforeExpansion, 'no retrieval on mobile expansion/wrap/copy/collapse');
   assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth));
 
+  // Check the tightest mobile lane and the desktop-prefix breakpoint as well.
+  await page.locator('h1').click();
+  await page.mouse.move(0, 0);
+  for (const width of [320, 600, 601, 768]) {
+    await page.setViewportSize({ width, height: 900 });
+    for (const id of ['login', 'long-tool', 'empty-envelope', 'failed-process']) {
+      await assertInlineControls(page, row(id), `${id} at ${width}px`);
+    }
+    // Row-specific geometry also covers 320px; the page-wide overflow pin
+    // stays at 390px and above, independently of the toolbar's layout.
+    if (width >= 390) assert.ok(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth), `no document overflow at ${width}px`);
+  }
+
   // Both modes of wrapping must update overflow detection when width changes.
   await page.setViewportSize({ width: 1400, height: 900 });
-  await page.waitForFunction(() => document.querySelector('[data-fixture="241"]').querySelector('.output-expand').textContent.trim() === 'Inspect');
+  await page.waitForFunction(() => !document.querySelector('[data-fixture="241"]').querySelector('.output-expand').title.includes('hidden'));
 
   // Touch-only has a persistent affordance even without hover.
   const touch = await browser.newContext({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
@@ -243,6 +342,7 @@ try {
   await touchPage.goto(page.url());
   await touchPage.waitForFunction(() => window.ready);
   await touchPage.evaluate(() => emitLog({ message: 'tap inspection' }));
+  await assertInlineControls(touchPage, touchPage.locator('.log-line'), 'touch before interaction');
   await touchPage.locator('.output-expand').tap();
   assert.equal(await touchPage.locator('.output-expand').getAttribute('aria-expanded'), 'true');
   assert.equal(await touchPage.locator('.output-controls').evaluate(el => getComputedStyle(el).opacity), '1');
@@ -280,7 +380,7 @@ try {
   const exported = fs.readFileSync(await download.path(), 'utf8');
   assert.match(exported, /"_hmac": "fake"/, 'export retains integrity data, not compact projection');
   assert.deepEqual(errors, []);
-  console.log('live-log-browser: compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
+  console.log('live-log-browser: plain accent/violet actions, always-visible text controls in normal flow without summary overlap, applicable actions, compact thresholds, integrated previews, 4 wrapped lines/600 chars, local keyboard/touch/raw/copy, integrity projection, arguments/grouping/filter/pause/scroll/export pass');
 } finally {
   if (browser) await browser.close();
   await server.close();

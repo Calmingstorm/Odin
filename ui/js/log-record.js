@@ -23,8 +23,11 @@ export default {
         <template #header>
           <button class="log-ts text-gray-500 hover:text-gray-300" @click="$emit('copy', entry)"
                   title="Copy complete retained record">{{ entry.ts }}</button>
-          <span :class="entry.level === 'ERROR' ? 'text-red-400' : 'text-blue-400'">{{ entry.level }}</span>
-          <span v-if="display.action" class="log-compact-action" :title="display.action">{{ display.action }}</span>
+          <span class="log-level" :class="entry.level === 'ERROR' ? 'text-red-400' : 'text-blue-400'">{{ entry.level }}</span>
+          <span v-if="display.action" class="log-compact-action"
+                :class="{ 'log-compact-web-action': entry.record?.type === 'web_action' }" :title="display.action">{{ display.action }}</span>
+        </template>
+        <template #context>
           <span v-if="display.status !== ''" class="text-gray-400">{{ display.status }}</span>
           <span v-if="display.duration !== null" class="text-gray-500">{{ display.duration }}ms</span>
           <span v-if="entry.attribution.agentId" class="log-compact-agent text-gray-400" :title="entry.attribution.agentId">{{ entry.attribution.label || entry.attribution.agentId }}</span>

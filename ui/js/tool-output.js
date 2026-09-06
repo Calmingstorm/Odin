@@ -39,6 +39,7 @@ export default {
   template: `
     <compact-output v-if="presentation === 'compact'" :value="value" :raw-value="rawValue" :label="label">
       <template #header><slot name="header" /></template>
+      <template #context><slot name="context" /></template>
       <template #details><slot name="details" /></template>
     </compact-output>
     <section v-else class="output-renderer" :aria-label="label">
