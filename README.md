@@ -1,12 +1,66 @@
-# Odin
+<p align="center">
+  <img src=".github/social-preview.png" alt="Odin — autonomous execution agent for Discord" width="760">
+</p>
 
-[![Tests](https://github.com/Calmingstorm/Odin/actions/workflows/test.yml/badge.svg)](https://github.com/Calmingstorm/Odin/actions/workflows/test.yml)
-[![WebUI](https://github.com/Calmingstorm/Odin/actions/workflows/ui.yml/badge.svg)](https://github.com/Calmingstorm/Odin/actions/workflows/ui.yml)
-[![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
+<h1 align="center">Odin</h1>
 
-Odin is a self-hosted execution agent for Discord. It gives a language model a controlled tool interface for infrastructure operations, software work, research, scheduled automation, and other operator-directed tasks. It also includes a web management interface and an HTTP API.
+<p align="center">
+  <a href="https://github.com/Calmingstorm/Odin/actions/workflows/test.yml"><img src="https://github.com/Calmingstorm/Odin/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <a href="https://github.com/Calmingstorm/Odin/actions/workflows/ui.yml"><img src="https://github.com/Calmingstorm/Odin/actions/workflows/ui.yml/badge.svg" alt="WebUI"></a>
+  <a href="https://github.com/Calmingstorm/Odin/releases/latest"><img src="https://img.shields.io/github/v/release/Calmingstorm/Odin?label=release&color=c39448" alt="Latest release"></a>
+  <a href="https://github.com/Calmingstorm/Odin/releases/latest"><img src="https://img.shields.io/badge/install-.deb-c39448" alt="Debian package"></a>
+  <img src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python 3.11+">
+  <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-blue.svg" alt="License: MIT"></a>
+</p>
 
-Odin is designed to execute work, not only describe it. A request can result in shell commands on managed hosts, repository changes, service operations, browser interaction, scheduled jobs, or a multi-agent workflow. Tool access is subject to permission, host-access, and command-governance controls; tool activity is recorded in the audit log.
+<p align="center">
+  <a href="https://odin-bot.net">Website</a> ·
+  <a href="https://odin-bot.net/install">Install guide</a> ·
+  <a href="https://odin-bot.net/docs">Operating reference</a> ·
+  <a href="https://github.com/Calmingstorm/Odin/releases">Releases</a> ·
+  <a href="https://github.com/Calmingstorm/Odin/discussions">Discussions</a>
+</p>
+
+Odin is a self-hosted execution agent for Discord. Ask it to do something in a channel and it does the work: shell commands on the hosts you registered, repository changes, service operations, browser sessions, scheduled jobs, or a fan-out of sub-agents — then reports what actually happened, with the audit trail to prove it.
+
+It is built for people who run real infrastructure and want an agent that **executes rather than describes**, inside limits they set: per-user host access, permission tiers, a command governor, secret redaction, and a tamper-evident audit log.
+
+| | |
+|---|---|
+| **74 built-in tools** | shell and SSH, files and patches, background processes, browser automation, web, scheduling, sub-agents, knowledge base, memory, email, Docker/Kubernetes/Terraform |
+| **Three model backends** | OpenAI Codex over a ChatGPT subscription (GPT-6 and GPT-5.x, multi-account), Kimi, or local Ollama — switch at runtime |
+| **Management WebUI** | live execution viewer, agents, loops, processes, schedules, audit, sessions, usage, tools, skills, knowledge, hosts, config, turn state — 211 REST routes behind it |
+| **Bounded autonomy** | iteration, lifetime, and nesting limits; durable turn state that survives model-capacity outages without replaying side effects |
+| **Tested** | 11,712 tests across 346 files, characterization pins on the tool catalog, API routes, and tool loop |
+
+## What it looks like
+
+*An illustrative exchange — the hostnames are invented, the behaviour is what Odin does.*
+
+> **operator:** the staging API is returning 502s since the deploy — find out why and fix it if it's safe
+>
+> **Odin:** Probed `https://staging.example.internal/health` → 502 in 40 ms, upstream refused. `systemctl status api-staging` shows the unit flapping since 14:02; the journal ends in `address already in use :8080` — the previous worker was never reaped. Killed the orphan (PID 41822), restarted the unit, health is 200 in 12 ms across five probes. Validation bundle passed 4/4 (service active, port open, HTTP 200, no new errors in 60 s). Audit record `#8813`.
+
+The WebUI shows every tool Odin can reach, how often each has run, and lets you switch any of them off for the model:
+
+<p align="center">
+  <img src="docs/images/webui-tools.png" alt="Odin WebUI — Capabilities → Tools" width="900">
+</p>
+
+## Quick start
+
+Debian or Ubuntu, sixty seconds to a running service:
+
+```bash
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.93.0_amd64.deb
+sudo apt install ./odin_3.93.0_amd64.deb
+sudoedit /etc/odin/.env          # DISCORD_TOKEN=...
+sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
+  --credentials-path /var/lib/odin/codex_auth.json --device
+sudo systemctl start odin        # WebUI on http://localhost:3000
+```
+
+Then invite the bot, register the hosts it may reach in **System → Hosts**, and ask it for something harmless first. The full walkthrough, including a source checkout for development, is under [Installation](#installation).
 
 ## Capabilities
 
@@ -50,30 +104,23 @@ The web interface provides grouped views for:
 - tools, skills, knowledge, memory, and learned context;
 - health, resources, logs, configuration, permissions, host access, and updates.
 
-The API currently exposes 188 decorated management routes plus health, metrics, webhook, WebSocket, and static-interface routes. Route parity is covered by characterization tests.
+The API exposes 211 REST routes (pinned in order by a characterization test) plus health, metrics, webhook, WebSocket, and static-interface routes.
 
 ## Execution model
 
-```text
-Discord / Web API / CLI
-          |
-          v
-  request admission and identity
-          |
-          v
-  selected LLM provider
-          |
-          v
-      tool loop
-          |
-          +---- built-in tool dispatcher ---- managed hosts and services
-          |
-          +---- native Discord handlers
-          |
-          +---- user-created skills
-          |
-          v
- audit, trajectory, and result delivery
+```mermaid
+flowchart TD
+    A["Discord · Web API · CLI"] --> B["Request admission & identity<br/>channel / user / mention / bot / permission policy"]
+    B --> C["Context assembly<br/>session history · context files · memory · tools for this requester"]
+    C --> D["LLM provider<br/>Codex (GPT-6 / GPT-5.x) · Kimi · Ollama"]
+    D --> E{"Tool loop"}
+    E -->|built-in tools| F["Managed hosts & services<br/>shell · SSH · files · processes · browser · web"]
+    E -->|native handlers| G["Discord, agents, schedules, loops"]
+    E -->|skills & MCP| H["Runtime skills · configured MCP servers"]
+    F --> E
+    G --> E
+    H --> E
+    E --> I["Validation · audit · trajectory · result delivery"]
 ```
 
 For a normal Discord request:
@@ -143,7 +190,7 @@ The following examples are drawn from completed operator sessions and repository
 - **Security review and remediation:** during review of a payout-transfer change, Odin identified an unauthenticated execution route, moved execution behind the administrative API and authenticated actor context, updated the API smoke test, reran the project checks, and merged the corrected change.
 - **Minecraft release operations:** Odin has prepared and published versioned modpack artifacts, updated AMP-managed servers while preserving worlds and local files, and validated application state, listening ports, mod loading, KubeJS checks, and server tick rate after restart.
 - **Infrastructure recovery:** Odin traced loss of apparent audit history to rotation and restart behavior, hardened a backup guard to treat active and rotated audit segments as one store, added JSON and high-water validation, and completed a subsequent Restic backup with the protected data included.
-- **Runtime extension:** deployment-specific skills have been added for AMP management, Cloudflare DNS, Linode operations, CurseForge publishing, Minecraft modpack updates, UPS status, and application-specific release workflows. These skills enforce their own confirmation and validation requirements in addition to the built-in tool controls.
+- **Runtime extension:** deployment-specific skills extend Odin for the services an operator actually runs — game-server panels, DNS and cloud providers, release publishing, hardware status — and enforce their own confirmation and validation requirements on top of the built-in tool controls.
 
 Operational results depend on credentials, host access, third-party availability, project state, and the quality of the selected model. Odin records tool outcomes so an operator can distinguish completed work from attempted or interrupted work.
 
