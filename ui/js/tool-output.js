@@ -1,11 +1,14 @@
 import { computed, ref, watch } from 'vue';
 import { parseOutput, foldText } from './output-format.js';
+import CompactOutput from './compact-output.js';
 export { parseOutput, foldText } from './output-format.js';
 
 /** Inert display: expansion reveals only already received text. */
 export default {
   name: 'ToolOutput',
-  props: { value: { default: '' }, label: { type: String, default: 'Output' } },
+  components: { CompactOutput },
+  props: { value: { default: '' }, label: { type: String, default: 'Output' },
+    presentation: { type: String, default: 'inspector' }, rawValue: { default: undefined } },
   setup(props) {
     const expanded = ref(false), wrapped = ref(true), rawMode = ref(false), copyStatus = ref('');
     const model = computed(() => parseOutput(props.value));
@@ -34,7 +37,11 @@ export default {
     return { expanded, wrapped, rawMode, copyStatus, model, foldedSections, canExpand, copyOutput };
   },
   template: `
-    <section class="output-renderer" :aria-label="label">
+    <compact-output v-if="presentation === 'compact'" :value="value" :raw-value="rawValue" :label="label">
+      <template #header><slot name="header" /></template>
+      <template #details><slot name="details" /></template>
+    </compact-output>
+    <section v-else class="output-renderer" :aria-label="label">
       <div class="output-summary">
         <strong>{{ model.kind }}</strong>
         <span v-for="(item, index) in model.header" :key="index">{{ item }}</span>
