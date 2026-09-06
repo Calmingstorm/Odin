@@ -198,6 +198,7 @@ class KnowledgeTools:
             has_error=has_error,
             min_duration_ms=min_dur,
             limit=min(inp.get("limit", 20), 50),
+            include_agent_events=False,
         )
         if not results:
             return "No audit log entries found matching the criteria."
@@ -213,6 +214,19 @@ class KnowledgeTools:
             err = entry.get("error")
             status = f"ERROR: {err}" if err else summary
             line = f"[{ts}] **{tool}** by {user} ({approved}, {elapsed}ms)\n  {status}"
+            if entry.get("agent_id"):
+                import json
+
+                attribution = {
+                    key: entry[key] for key in (
+                        "agent_id", "agent_label", "parent_agent_id", "root_agent_id",
+                        "originating_turn_id", "iteration", "call_id", "status",
+                    ) if key in entry
+                }
+                line += "\n  attribution=" + json.dumps(attribution, ensure_ascii=True)
+                line += "\n  tool_input=" + json.dumps(
+                    entry.get("tool_input", {}), ensure_ascii=True,
+                )
             meta = entry.get("audit_metadata")
             if isinstance(meta, dict) and meta:
                 # Structured record (e.g. which image backend actually ran).

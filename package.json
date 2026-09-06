@@ -11,7 +11,7 @@
     "check:templates": "node scripts/check-vue-templates.mjs",
     "check:template-bindings": "node scripts/check-template-bindings.mjs",
     "check:modal-race": "node scripts/check-modal-race.mjs",
-    "check": "npm run check:templates && npm run check:template-bindings && npm run check:w1-webui && npm run check:modal-race && npm run check:host-access-races && npm run check:socket-identity && npm run check:ws-lifecycle && npm run check:w2-freshness && npm run check:toggle-serialization && npm run check:search-races && npm run check:config-keydown && npm run check:css-tokens && npm run check:turn-state-webui && npm run check:audit-verify && npm run check:schedule-time && npm run check:schedule-report-format && npm run check:config-health && npm run check:config-center-ui2 && npm run check:mcp-webui && npm run check:tools-webui && npm run check:config-save-boundaries && npm run check:usage-activity && npm run build",
+    "check": "npm run check:templates && npm run check:template-bindings && npm run check:w1-webui && npm run check:modal-race && npm run check:host-access-races && npm run check:socket-identity && npm run check:ws-lifecycle && npm run check:w2-freshness && npm run check:toggle-serialization && npm run check:search-races && npm run check:config-keydown && npm run check:css-tokens && npm run check:turn-state-webui && npm run check:audit-verify && npm run check:schedule-time && npm run check:schedule-report-format && npm run check:config-health && npm run check:config-center-ui2 && npm run check:mcp-webui && npm run check:tools-webui && npm run check:config-save-boundaries && npm run check:usage-activity && npm run check:output-renderer && npm run check:live-logs && npm run build",
     "check:host-access-races": "node scripts/check-host-access-races.mjs",
     "check:socket-identity": "node scripts/check-socket-identity.mjs",
     "check:ws-lifecycle": "node scripts/check-ws-lifecycle.mjs",
@@ -30,7 +30,9 @@
     "check:css-tokens": "node scripts/check-css-tokens.mjs",
     "check:turn-state-webui": "node scripts/check-turn-state-webui.mjs",
     "check:audit-verify": "node scripts/check-audit-verify.mjs",
-    "check:usage-activity": "node scripts/check-usage-activity.mjs"
+    "check:usage-activity": "node scripts/check-usage-activity.mjs",
+    "check:output-renderer": "node scripts/check-output-renderer.mjs",
+    "check:live-logs": "node scripts/check-live-log-records.mjs && node scripts/check-live-log-browser.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.0",

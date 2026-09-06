@@ -1,0 +1,14 @@
+/* Shared display: the pre owns raw horizontal overflow, never the page. */
+.output-renderer { min-width: 0; max-width: 100%; border: 1px solid var(--hm-border); border-radius: var(--hm-radius-sm); background: var(--hm-bg-raised); color: var(--hm-text); font-size: .75rem; overflow: hidden; text-align: left; }
+.output-summary, .output-controls { display: flex; flex-wrap: wrap; align-items: center; gap: .3rem .65rem; padding: .35rem .5rem; }
+.output-summary { color: var(--hm-text-muted); overflow-wrap: anywhere; white-space: normal; line-height: 1.5; }
+.output-summary strong { color: var(--hm-text); }
+.output-summary span + span::before { content: '·'; margin-right: .65rem; color: var(--hm-text-dim); }
+.output-controls { border-bottom: 1px solid var(--hm-border-subtle); }
+.output-controls .btn, .output-expand { font-size: .75rem; padding: .25rem .5rem; min-height: 28px; }
+.output-controls [aria-pressed="true"] { color: var(--hm-accent-hover); background: var(--hm-accent-dim); }
+.output-section-label, .output-fold-note { display: block; padding: .35rem .5rem; color: var(--hm-text-muted); white-space: normal; overflow-wrap: anywhere; }
+.output-section + .output-section { border-top: 1px dashed var(--hm-border); }
+.output-body { margin: 0; padding: .5rem; max-width: 100%; overflow: auto; white-space: pre; font-family: var(--hm-font-mono); font-size: .75rem; line-height: 1.5; }
+.output-body.output-wrapped { white-space: pre-wrap; overflow-wrap: anywhere; word-break: normal; }
+.output-expand { margin: .35rem .5rem; }

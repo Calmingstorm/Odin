@@ -5,6 +5,9 @@
  */
 import { api, ws } from '../api.js';
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
+import ToolOutput from '../tool-output.js';
+import LogRecord from '../log-record.js';
+import { groupLogEntries, parseLogEntry, serializeLogRecord } from '../log-records.js';
 
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
@@ -29,6 +32,7 @@ const TIME_RANGES = [
 const SEARCH_LIMITS = [50, 100, 200, 500];
 
 export default {
+  components: { ToolOutput, LogRecord },
   template: `
     <div class="p-6 page-fade-in flex flex-col"
          style="height: calc(100vh - var(--hm-topbar-h) - var(--hm-section-tabs-h));">
@@ -113,6 +117,10 @@ export default {
             <input type="checkbox" v-model="autoScroll" @change="onAutoScrollToggle" class="rounded" />
             Auto-scroll
           </label>
+          <label class="flex items-center gap-1.5 text-xs text-gray-400 select-none cursor-pointer">
+            <input type="checkbox" v-model="groupByTurn" class="rounded" />
+            Group by turn / agent
+          </label>
         </div>
 
         <!-- Custom preset save bar -->
@@ -166,7 +174,7 @@ export default {
             <span class="ws-indicator" :class="'ws-' + wsState"></span>
             {{ wsStateLabel }}
           </div>
-          <span class="font-mono">{{ filteredLogs.length.toLocaleString() }} / {{ logs.length.toLocaleString() }} lines</span>
+          <span class="font-mono">{{ filteredLogs.length.toLocaleString() }} / {{ logs.length.toLocaleString() }} records</span>
           <span v-if="paused" class="badge badge-warning">Paused ({{ pauseBuffer.length }} buffered)</span>
           <span v-if="timeRange" class="badge badge-info">{{ timeRangeLabel }}</span>
           <span v-if="copiedIndex !== null" class="text-green-400">Copied!</span>
@@ -183,16 +191,18 @@ export default {
               <span class="empty-state-icon"><odin-icon :name="logs.length === 0 ? 'file' : 'search'" :size="23" /></span>
               <span class="empty-state-text">{{ logs.length === 0 ? 'Waiting for log entries...' : 'No entries match the current filter' }}</span>
             </div>
-            <div v-for="(entry, i) in filteredLogs" :key="i"
-                 class="log-line py-0.5 leading-relaxed whitespace-pre-wrap break-all"
-                 :class="logLineClass(entry)">
-              <span class="log-ts text-gray-600 cursor-pointer hover:text-gray-400"
-                    @click="copyLine(entry, i)"
-                    title="Click to copy line">{{ entry.ts || '' }}</span>
-              <span class="log-level mx-1" :class="levelClass(entry.level)">{{ entry.level || 'INFO' }}</span>
-              <span v-if="entry.tool" class="logs-tool-badge">{{ entry.tool }}</span>
-              <span>{{ entry.text || entry.raw || '' }}</span>
-            </div>
+            <template v-if="groupByTurn">
+              <section v-for="group in groupedLogs" :key="group.key" class="mb-3 min-w-0" data-log-group>
+                <h2 class="text-sm font-semibold text-gray-300 break-all">{{ group.title }} · {{ group.count }} records</h2>
+                <section v-for="section in group.sections" :key="section.key" class="pl-3 border-l border-gray-700 min-w-0" data-log-agent>
+                  <h3 class="text-xs text-gray-400 mt-2 break-all">{{ section.title }}<span v-if="section.parentId"> · parent {{ section.parentId }}</span><span v-if="section.rootId"> · root {{ section.rootId }}</span></h3>
+                  <log-record v-for="entry in section.entries" :key="entry.id" :entry="entry" @copy="copyLine" />
+                </section>
+              </section>
+            </template>
+            <template v-else>
+              <log-record v-for="entry in filteredLogs" :key="entry.id" :entry="entry" @copy="copyLine" />
+            </template>
           </div>
 
           <!-- Jump to bottom -->
@@ -371,15 +381,15 @@ export default {
                   </div>
                   <div v-if="entry.tool_input" class="mb-2">
                     <div class="text-gray-500 mb-1">Input:</div>
-                    <pre class="bg-gray-800 rounded p-2 overflow-x-auto" style="max-height:150px;">{{ formatJson(entry.tool_input) }}</pre>
+                    <tool-output :value="entry.tool_input" />
                   </div>
                   <div v-if="entry.result_summary">
                     <div class="text-gray-500 mb-1">Result:</div>
-                    <pre class="bg-gray-800 rounded p-2 overflow-x-auto whitespace-pre-wrap" style="max-height:200px;">{{ entry.result_summary }}</pre>
+                    <tool-output :value="entry.result_summary" />
                   </div>
                   <div v-if="entry.error" class="mt-2">
                     <div class="text-red-400 mb-1">Error:</div>
-                    <pre class="bg-red-900/20 rounded p-2 overflow-x-auto whitespace-pre-wrap" style="max-height:150px;">{{ entry.error }}</pre>
+                    <tool-output :value="entry.error" />
                   </div>
                 </div>
               </div>
@@ -395,6 +405,8 @@ export default {
 
     // ===== LIVE MODE STATE =====
     const logs = ref([]);
+    let nextLogId = 0;
+    const groupByTurn = ref(false);
     const paused = ref(false);
     const autoScroll = ref(true);
     const levelFilter = ref('');
@@ -545,9 +557,9 @@ export default {
         e._time && e._time.getTime() >= bucket.start.getTime() && e._time.getTime() < bucket.end.getTime()
       );
       if (idx >= 0 && logContainer.value) {
-        const lines = logContainer.value.querySelectorAll('.log-line');
-        if (lines[idx]) {
-          lines[idx].scrollIntoView({ behavior: 'smooth', block: 'center' });
+        const line = logContainer.value.querySelector('[data-log-id="' + filteredLogs.value[idx].id + '"]');
+        if (line) {
+          line.scrollIntoView({ behavior: 'smooth', block: 'center' });
           autoScroll.value = false;
         }
       }
@@ -573,7 +585,7 @@ export default {
           try {
             const re = new RegExp(textFilter.value, 'i');
             result = result.filter(e => {
-              const text = (e.text || e.raw || '');
+              const text = e.searchText;
               const tool = (e.tool || '');
               return re.test(text) || re.test(tool);
             });
@@ -581,7 +593,7 @@ export default {
         } else {
           const q = textFilter.value.toLowerCase();
           result = result.filter(e => {
-            const text = (e.text || e.raw || '').toLowerCase();
+            const text = e.searchText.toLowerCase();
             const tool = (e.tool || '').toLowerCase();
             return text.includes(q) || tool.includes(q);
           });
@@ -590,54 +602,10 @@ export default {
       return result;
     });
 
-    function parseLogEntry(data) {
-      if (data.type === 'log' && data.line) {
-        try {
-          const entry = typeof data.line === 'string' ? JSON.parse(data.line) : data.line;
-          const time = entry.timestamp ? new Date(entry.timestamp) : new Date();
-          return {
-            ts: time.toLocaleTimeString(),
-            _time: time,
-            level: entry.error ? 'ERROR' : 'INFO',
-            text: entry.tool_name
-              ? `[${entry.tool_name}] ${entry.result_summary || ''}`.trim()
-              : (entry.message || JSON.stringify(entry)),
-            tool: entry.tool_name || '',
-            raw: null,
-          };
-        } catch {
-          return { ts: new Date().toLocaleTimeString(), _time: new Date(), level: 'INFO', text: String(data.line), tool: '', raw: String(data.line) };
-        }
-      }
-      if (data.payload) {
-        const p = data.payload;
-        const time = p.timestamp ? new Date(p.timestamp) : new Date();
-        return {
-          ts: time.toLocaleTimeString(),
-          _time: time,
-          level: p.error ? 'ERROR' : 'INFO',
-          text: p.tool_name
-            ? `[${p.tool_name}] ${p.result_summary || ''}`.trim()
-            : (p.message || JSON.stringify(p)),
-          tool: p.tool_name || '',
-          raw: null,
-        };
-      }
-      if (typeof data === 'string') {
-        return { ts: new Date().toLocaleTimeString(), _time: new Date(), level: 'INFO', text: data, tool: '', raw: data };
-      }
-      return {
-        ts: new Date().toLocaleTimeString(),
-        _time: new Date(),
-        level: 'INFO',
-        text: JSON.stringify(data),
-        tool: '',
-        raw: null,
-      };
-    }
+    const groupedLogs = computed(() => groupLogEntries(filteredLogs.value));
 
     function onLog(data) {
-      const entry = parseLogEntry(data);
+      const entry = parseLogEntry(data, ++nextLogId);
       if (paused.value) {
         pauseBuffer.value.push(entry);
         return;
@@ -764,7 +732,7 @@ export default {
           return `${e.timestamp || ''} ${level} ${tool}${e.result_summary || e.message || ''}`;
         }).join('\n');
       } else {
-        text = filteredLogs.value.map(e => `${e.ts} ${e.level} ${e.text}`).join('\n');
+        text = filteredLogs.value.map(serializeLogRecord).join('\n\n');
       }
       const blob = new Blob([text], { type: 'text/plain' });
       const url = URL.createObjectURL(blob);
@@ -775,10 +743,10 @@ export default {
       URL.revokeObjectURL(url);
     }
 
-    function copyLine(entry, index) {
-      const line = `${entry.ts} ${entry.level} ${entry.text || entry.raw || ''}`;
+    function copyLine(entry) {
+      const line = serializeLogRecord(entry);
       navigator.clipboard.writeText(line).then(() => {
-        copiedIndex.value = index;
+        copiedIndex.value = entry.id;
         setTimeout(() => { copiedIndex.value = null; }, 1500);
       }).catch(() => {});
     }
@@ -1020,7 +988,7 @@ export default {
     return {
       mode,
       // Live mode
-      logs, paused, autoScroll, levelFilter, textFilter, useRegex,
+      logs, paused, autoScroll, levelFilter, textFilter, useRegex, groupByTurn, groupedLogs,
       subscribed, wsState, wsStateLabel, logContainer, filteredLogs, pauseBuffer,
       showJumpBottom, copiedIndex, regexError, levels,
       logPresets, timeRanges, timeRange,

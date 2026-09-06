@@ -40,6 +40,7 @@ from ..agents.wait_deadlines import (
     WAIT_FOR_AGENTS_NATIVE_GRACE_SECONDS,
     wait_for_agents_wrapper_timeout,
 )
+from ..audit.tool_context import get_agent_tool_context, observe_terminal, start_observer
 from ..error_presentation import format_user_facing_error
 from ..llm import CircuitOpenError
 from ..llm.context_budget import (
@@ -2615,7 +2616,7 @@ class ToolLoopRunner:
                 action=tool_name,
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
-                detail=result[:150],
+                detail=result,
                 metadata={
                     "elapsed_ms": elapsed_ms,
                     "error": error,
@@ -3648,26 +3649,138 @@ class ToolLoopRunner:
         a lightweight message proxy instead of a real Discord message.
         """
         t0 = time.monotonic()
-        result = await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
-        elapsed_ms = int((time.monotonic() - t0) * 1000)
+        attribution = None
         try:
+            attribution = get_agent_tool_context()
+        except Exception:
+            pass
+        result = None
+        failure = None
+        start = None
+        try:
+            try:
+                if attribution:
+                    # A new audit append must never consume the agent's tool
+                    # deadline or delay dispatch/stop when storage is stalled.
+                    start = start_observer(self._audit.log_event(
+                        event_type="loop_tool_start", action=tool_name, actor=user_id,
+                        channel_id=str(getattr(msg_proxy.channel, "id", "")),
+                        tool_input=_scrub_tool_input_for_storage(tool_name, tool_input),
+                        attribution=attribution,
+                        metadata={"status": "started"}, count_as_tool=False,
+                    ))
+            except Exception:
+                pass
+            result = await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
+            return result
+        except BaseException as exc:
+            failure = exc
+            raise
+        finally:
+            await observe_terminal(
+                self._audit_loop_tool_outcome(
+                    tool_name, tool_input, msg_proxy, user_id, result, failure,
+                    int((time.monotonic() - t0) * 1000), attribution, start,
+                ),
+                wait=attribution is None,
+            )
+
+    async def _audit_loop_tool_outcome(
+        self, tool_name, tool_input, msg_proxy, user_id, result, failure,
+        elapsed_ms, attribution, start=None,
+    ) -> None:
+        """Best-effort observer; returns no execution or lifecycle decisions."""
+        if start is not None:
+            try:
+                await asyncio.shield(start)
+            except (asyncio.CancelledError, Exception):
+                # Even an unavailable start sink must not suppress the outcome.
+                pass
+        if failure is not None and not attribution:
+            # Preserve the autonomous-loop outer writer's exception accounting.
+            return
+        try:
+            from ..tools.result_validator import _is_error_result
+
+            status, error = "succeeded", None
+            detail = str(result) if result is not None else ""
+            audit_metadata = None
+            if isinstance(result, ToolResult):
+                detail = result.output
+                audit_metadata = result.audit_metadata
+                if not result.ok:
+                    status, error = "failed", result.error or "tool reported failure"
+                if result.error in {"denied", "permission_denied", "host_denied"}:
+                    status = "denied"
+                if result.uncertain_outcome:
+                    status = "outcome_unknown"
+            elif _is_error_result(detail):
+                status, error = "failed", detail
+                if detail.startswith(("Denied", "Permission denied", "Unknown or disallowed host")):
+                    status = "denied"
+            if audit_metadata and audit_metadata.get("wait_interrupted") == "parent_message":
+                status = "interrupted_effect_free"
+            if failure is not None:
+                status = "cancelled" if isinstance(failure, asyncio.CancelledError) else "failed"
+                error = str(failure) or type(failure).__name__
+                detail = error
+            # Dispatch cancellation may be timeout, parent interruption or kill.
+            # Only the outer tool cycle knows which; don't invent a cause here.
+            audit_metadata = dict(audit_metadata or {})
+            if failure is not None:
+                audit_metadata["outcome_scope"] = "dispatch"
+                audit_metadata["uncertain_outcome"] = (
+                    isinstance(failure, asyncio.CancelledError) and tool_name != "wait_for_agents"
+                )
             metadata = {
                 "tool_input_keys": list((tool_input or {}).keys()),
                 "elapsed_ms": elapsed_ms,
+                "status": status,
+                "error": error,
+                "uncertain_outcome": (
+                    status == "outcome_unknown"
+                    or (status == "cancelled" and tool_name != "wait_for_agents")
+                ),
             }
-            if isinstance(result, ToolResult) and result.audit_metadata:
-                metadata.update(result.audit_metadata)
+            if audit_metadata:
+                metadata.update(audit_metadata)
+            cleaned_input = _scrub_tool_input_for_storage(tool_name, tool_input)
+            channel_id = str(getattr(msg_proxy.channel, "id", ""))
+            # Autonomous loops already write an execution in _run_one_loop_tool.
+            # Agent callbacks lack that outer writer: add exactly one here.
+            if attribution:
+                try:
+                    await self._audit.log_execution(
+                        user_id=user_id,
+                        user_name=str(getattr(msg_proxy.author, "display_name", user_id)),
+                        channel_id=channel_id, tool_name=tool_name,
+                        tool_input=cleaned_input, approved=True,
+                        result_summary=detail, execution_time_ms=elapsed_ms,
+                        error=error, audit_metadata=audit_metadata,
+                        attribution=attribution, status=status, count_as_tool=False,
+                    )
+                except asyncio.CancelledError:
+                    caller = asyncio.current_task()
+                    if failure is None and caller is not None and caller.cancelling():
+                        raise
+                except Exception:
+                    pass
             await self._audit.log_event(
                 event_type="loop_tool",
                 action=tool_name,
                 actor=user_id,
-                detail=str(result)[:200] if isinstance(result, str) else "",
-                channel_id=str(getattr(msg_proxy.channel, "id", "")),
+                detail=detail,
+                channel_id=channel_id,
                 metadata=metadata,
+                tool_input=cleaned_input,
+                attribution=attribution,
             )
+        except asyncio.CancelledError:
+            caller = asyncio.current_task()
+            if failure is None and caller is not None and caller.cancelling():
+                raise
         except Exception:
             pass
-        return result
 
     async def dispatch_loop_tool_inner(
         self,
