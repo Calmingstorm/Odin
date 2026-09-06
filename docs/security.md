@@ -6,7 +6,7 @@ The CommandGovernor sits between LLM tool decisions and shell execution. It runs
 
 ### Blocked (CRITICAL)
 
-These patterns are always blocked. The command never reaches a shell.
+These patterns are blocked before the command reaches a shell. With `tools.governor.admin_can_override: true` (the schema default and the tracked template), an admin-tier requester can override the block; the override is annotated in the output and recorded in the audit log. Set it to `false` to make the block absolute.
 
 | Pattern | Reason |
 |---------|--------|
@@ -60,10 +60,10 @@ Three tiers control tool access:
 | Tier | Tools | Use Case |
 |------|-------|----------|
 | `admin` | All 74 built-in tools | Operators |
-| `user` | Read-only subset | Team members |
+| `user` | 11 tools: ten read-only plus list management | Team members |
 | `guest` | None (chat only) | Restricted |
 
-User-tier tools: `run_command`, `search_history`, `search_knowledge`, `web_search`, `fetch_url`, `list_schedules`, `list_tasks`, `list_skills`, `list_knowledge`, `manage_list`, `parse_time`.
+User-tier tools: `get_tool_output`, `search_history`, `search_knowledge`, `web_search`, `fetch_url`, `list_schedules`, `list_tasks`, `list_skills`, `list_knowledge`, `manage_list`, `parse_time`. `run_command` is deliberately excluded (arbitrary shell execution). `manage_list` can change list state; the rest are read-only. Host access is enforced separately per user at execution time.
 
 Set default in config, override per-user via `set_permission` or web UI.
 
