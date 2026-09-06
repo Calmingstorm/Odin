@@ -399,12 +399,18 @@ def register_hosts(routes: web.RouteTableDef, bot) -> None:
             candidate,
             "passed" if candidate.tested else "failed",
         )
+        payload = {
+            "candidate_token": candidate.token,
+            "tested": candidate.tested,
+            "last_test": candidate.test_result,
+        }
+        if not candidate.tested:
+            # Use the already-sanitized diagnosis for generic API clients too.
+            payload["error"] = (
+                (candidate.test_result or {}).get("detail") or "connection test failed"
+            )
         return web.json_response(
-            {
-                "candidate_token": candidate.token,
-                "tested": candidate.tested,
-                "last_test": candidate.test_result,
-            },
+            payload,
             status=200 if candidate.tested else 424,
         )
 

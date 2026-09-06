@@ -47,7 +47,7 @@ export default {
         </div>
         <div v-if="step===2" class="space-y-3"><p class="text-sm">Install Odin's public key for <code>{{ form.ssh_user }}@{{ form.address }}</code>. Odin never accepts passwords or private keys here.</p><div v-if="keyInfo"><pre class="code-block whitespace-pre-wrap">{{ keyInfo.public_key }}</pre><pre class="code-block whitespace-pre-wrap">{{ keyInfo.authorized_keys_command }}</pre><p class="text-xs text-gray-500">Fingerprint: {{ keyInfo.fingerprint }}. {{ keyInfo.permissions }}</p></div><button class="btn btn-ghost text-xs" @click="loadKey">Load public key</button></div>
         <div v-if="step===3" class="space-y-3"><p class="text-sm">Verify the host key out of band. Run <code>ssh-keygen -lf /etc/ssh/ssh_host_ed25519_key.pub</code> on the target and paste its SHA256 fingerprint.</p><textarea class="hm-input" rows="3" v-model="fingerprintsText" placeholder="SHA256:..."></textarea><label v-if="form.trust_mode==='tofu'" class="text-xs flex gap-2"><input type="checkbox" v-model="form.confirm_tofu" /> Accept the exact scanned fingerprint under TOFU</label><button class="btn btn-primary text-xs" @click="prepare">Scan and compare</button><div v-if="observed.length" class="text-xs text-gray-400">Observed: {{ observed.join(', ') }}</div></div>
-        <div v-if="step===4" class="space-y-3"><p class="text-sm">Test non-interactive authentication and platform identity before activation.</p><button class="btn btn-primary text-xs" @click="testConnection">Test connection</button><pre v-if="testResult" class="code-block">{{ JSON.stringify(testResult,null,2) }}</pre></div>
+        <div v-if="step===4" class="space-y-3"><p class="text-sm">Test non-interactive authentication and platform identity before activation.</p><button class="btn btn-primary text-xs" @click="testConnection">Test connection</button><pre v-if="testResult" class="code-block whitespace-pre-wrap" role="status">{{ JSON.stringify(testResult,null,2) }}</pre></div>
         <div v-if="step===5" class="space-y-3"><p class="text-sm">Activation is live. Users with <code>allowed_hosts: null</code> gain this host automatically. Review grants on Host Access after saving.</p><button class="btn btn-primary" :disabled="!tested" @click="commit">Save and activate</button><a class="btn btn-ghost text-xs" href="#/system?tab=host-access">Open Host Access</a></div>
         <div class="flex justify-between"><button class="btn btn-ghost text-xs" :disabled="step===1" @click="step--">Back</button><button v-if="step<5 && step!==3 && step!==4" class="btn btn-ghost text-xs" @click="step++">Next</button></div>
       </div>
@@ -65,7 +65,23 @@ export default {
     async function loadKey(){try{keyInfo.value=await api.get('/api/hosts/public-key');}catch(e){toast.error(e.message);}}
     async function importLegacy(h){try{const r=await api.post('/api/hosts/'+encodeURIComponent(h.alias)+'/import-legacy',{});editing.value=true;form.value={...blank(),...h,trust_mode:'pinned'};reset();candidate.value=r.candidate_token;observed.value=r.fingerprints||[];fingerprintsText.value=observed.value.join('\n');step.value=4;toast.info('Imported existing known_hosts trust. Test before activation.');}catch(e){toast.error(e.message);}}
     async function prepare(){try{const expected=fingerprintsText.value.split(/\s+/).filter(Boolean);const body={...form.value,expected_fingerprints:expected,candidate_fingerprints:observed.value};const r=await api.post('/api/hosts/candidates',body);candidate.value=r.candidate_token;observed.value=r.fingerprints||[];if(form.value.trust_mode==='tofu'&&body.candidate_fingerprints.length===0){form.value.confirm_tofu=false;toast.info('Fingerprint scanned. Review it, tick confirmation, then scan again.');return;}step.value=4;}catch(e){toast.error(e.message);}}
-    async function testConnection(){try{const r=await api.post('/api/hosts/candidates/'+candidate.value+'/test',{});tested.value=!!r.tested;testResult.value=r.last_test;if(tested.value)step.value=5;}catch(e){toast.error(e.message);}}
+    async function testConnection(){
+      tested.value=false;
+      testResult.value=null;
+      try{
+        const r=await api.post('/api/hosts/candidates/'+candidate.value+'/test',{});
+        tested.value=!!r.tested;
+        testResult.value=r.last_test;
+        if(tested.value)step.value=5;
+      }catch(e){
+        // A failed test is HTTP 424, but its sanitized diagnosis is still in
+        // the response. Retain it in the wizard as well as the transient toast.
+        const result=e.data?.last_test;
+        if(result && typeof result==='object' && !Array.isArray(result))testResult.value=result;
+        const detail=testResult.value?.detail;
+        toast.error(typeof detail==='string' && detail.trim() ? detail : e.message);
+      }
+    }
     async function commit(){try{await api.post('/api/hosts/candidates/'+candidate.value+'/commit',{});toast.success('Host saved and published live');wizard.value=false;await load();}catch(e){toast.error(e.message);}}
     async function toggle(h){try{await api.post('/api/hosts/'+encodeURIComponent(h.alias)+'/enabled',{enabled:!h.enabled});await load();}catch(e){toast.error(e.message);}}
     async function remove(h){if(!await confirmDialog('Delete host '+h.alias+'? Dependencies will block deletion.'))return;pendingReferences.value=[];try{await api.del('/api/hosts/'+encodeURIComponent(h.alias));await load();}catch(e){pendingReferences.value=Array.isArray(e.data?.pending_references)?e.data.pending_references:[];toast.error(e.message);}}

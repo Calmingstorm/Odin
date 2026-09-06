@@ -26,6 +26,7 @@ from src.tools.hosts.control import (
     scan_host_references,
     validate_host_details,
 )
+from src.tools.hosts.trust import normalize_public_key
 from src.tools.process_manager import ProcessRegistry
 
 
@@ -356,22 +357,75 @@ async def test_enrollment_failure_diagnostics_and_local_test(monkeypatch, tmp_pa
     assert (await manager.test(local.token)).tested is True
 
 
-async def test_public_key_info_and_authorized_key_command_are_hermetic(monkeypatch, tmp_path):
+async def test_public_key_info_and_authorized_key_command_are_hermetic(tmp_path):
     private = tmp_path / "id_ed25519"
-    private.write_text("placeholder")
-    key = _key(b"public")
-
-    async def fake(argv, _timeout, **_kwargs):
-        assert argv == ["ssh-keygen", "-y", "-f", str(private)]
-        return 0, (key + " comment").encode()
-
-    monkeypatch.setattr(control, "_run_argv", fake)
+    # Real OpenSSH output, not a mock that accidentally omits its final LF.
+    # All key material is disposable and no SSH connection is made.
+    code, _ = await control._run_argv(
+        [
+            "ssh-keygen", "-q", "-t", "ed25519", "-N", "",
+            "-C", "enrollment-test", "-f", str(private),
+        ],
+        8.0,
+    )
+    assert code == 0
+    code, output = await control._run_argv(["ssh-keygen", "-y", "-f", str(private)], 8.0)
+    assert code == 0 and output.endswith(b"\n")
+    key = " ".join(output.decode("ascii").split()[:2])
     info = await public_key_info(str(private))
     assert info["public_key"] == key
+    code, fingerprint = await control._run_argv(
+        ["ssh-keygen", "-lf", str(private) + ".pub", "-E", "sha256"], 8.0
+    )
+    assert code == 0
+    assert info["fingerprint"] == fingerprint.decode("ascii").split()[1]
+    assert key in info["authorized_keys_command"]
     assert "authorized_keys" in info["authorized_keys_command"]
     assert "grep -qxF" in authorized_keys_command(key)
     with pytest.raises(HostTrustError, match="does not exist"):
         await public_key_info(str(tmp_path / "missing"))
+
+
+@pytest.mark.parametrize("padding", ["\n", "\r\n", " \t\n"])
+def test_public_key_normalization_strips_surrounding_whitespace(padding):
+    assert normalize_public_key(padding + _key() + " comment" + padding) == _key()
+
+
+@pytest.mark.parametrize("char", [chr(code) for code in range(32)] + [chr(127)])
+def test_public_key_normalization_rejects_embedded_controls(char):
+    for value in (_key().replace(" ", char), _key() + " comment" + char + "suffix"):
+        with pytest.raises(HostTrustError, match="control characters"):
+            normalize_public_key(value)
+
+
+@pytest.mark.parametrize("value", [None, b"ssh-ed25519 AAAA", 1])
+def test_public_key_normalization_rejects_non_strings(value):
+    with pytest.raises(HostTrustError):
+        normalize_public_key(value)
+
+
+@pytest.mark.parametrize(
+    ("selected", "observed"), [("linux", "macos"), ("macos", "linux"), ("linux", "unknown")]
+)
+async def test_connection_platform_mismatch_names_observed_and_selected_os(
+    monkeypatch, tmp_path, selected, observed
+):
+    manager = HostEnrollmentManager(HostRegistry({}, trust_dir=tmp_path))
+    host = _host(os=selected, trust_mode="legacy", host_keys=[])
+    candidate = await manager.prepare(
+        "build", {**host.model_dump()}, allow_tofu=False, existing=host
+    )
+    monkeypatch.setattr(
+        control, "_run_argv", AsyncMock(return_value=(0, f"odin-host-test {observed}\n".encode()))
+    )
+    tested = await manager.test(candidate.token)
+    assert tested.tested is False
+    assert tested.test_result["platform"] == observed
+    assert tested.test_result["detail"] == (
+        f"platform mismatch: observed {observed}; selected {selected}"
+    )
+    with pytest.raises(HostTrustError, match="must pass"):
+        manager.consume(candidate.token)
 
 
 def test_scan_host_references_finds_control_plane_dependencies():

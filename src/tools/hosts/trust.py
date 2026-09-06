@@ -28,9 +28,14 @@ _KEY_TYPES = frozenset(
 
 def normalize_public_key(value: str) -> str:
     """Return ``type base64`` for an OpenSSH public key or keyscan line."""
-    if not isinstance(value, str) or any(ord(c) < 32 or ord(c) == 127 for c in value):
+    if not isinstance(value, str):
+        raise HostTrustError("host key must be a string")
+    # ssh-keygen emits a trailing newline. As with _clean_line, tolerate
+    # surrounding whitespace but never embedded control characters.
+    text = value.strip()
+    if any(ord(c) < 32 or ord(c) == 127 for c in text):
         raise HostTrustError("host key contains control characters")
-    parts = value.strip().split()
+    parts = text.split()
     key_index = next((i for i, part in enumerate(parts) if part in _KEY_TYPES), -1)
     if key_index < 0 or key_index + 1 >= len(parts):
         raise HostTrustError("unsupported or malformed OpenSSH public key")

@@ -342,15 +342,19 @@ class HostEnrollmentManager:
             text = sanitized_diagnostic(output)
             observed = text.rsplit(" ", 1)[-1].strip() if text else ""
             ok = code == 0 and text.startswith("odin-host-test ") and observed == candidate.os
+            if ok:
+                detail = "authentication and platform verified"
+            elif code == 0 and text.startswith("odin-host-test "):
+                detail = sanitized_diagnostic(
+                    f"platform mismatch: observed {observed}; selected {candidate.os}"
+                )
+            else:
+                detail = text or f"ssh exit {code}"
             result = {
                 "ok": ok,
                 "checked_at": time.time(),
                 "platform": observed,
-                "detail": (
-                    "authentication and platform verified"
-                    if ok
-                    else text or f"ssh exit {code}"
-                ),
+                "detail": detail,
             }
         active = self.registry.get(candidate.alias)
         mismatch = not result["ok"] and _is_host_key_mismatch(
