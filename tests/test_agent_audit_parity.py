@@ -441,3 +441,40 @@ async def test_stalled_start_audit_never_blocks_dispatch_completion_or_stop(tmp_
         "loop_tool_start", "execution", "loop_tool",
     ]
     assert records[1]["status"] == ("cancelled" if stop else "succeeded")
+
+
+@pytest.mark.parametrize("boundary", ["attribution", "start"])
+async def test_broken_audit_adapter_cannot_prevent_dispatch(tmp_path, monkeypatch, boundary):
+    runner, proxy, agent = harness(tmp_path)
+    if boundary == "attribution":
+        def broken_context():
+            raise ValueError("bad diagnostic context")
+        monkeypatch.setattr("src.discord.tool_loop.get_agent_tool_context", broken_context)
+    else:
+        original = runner._audit.log_event
+
+        def broken_start(**kwargs):
+            if kwargs["event_type"] == "loop_tool_start":
+                raise ValueError("start adapter failed synchronously")
+            return original(**kwargs)
+
+        runner._audit.log_event = broken_start
+    results = await invoke(runner, proxy, agent)
+    assert results[0]["ok"] is True
+    assert results[0]["result"] == "ok"
+    runner.dispatch_loop_tool_inner.assert_awaited_once()
+    entries = await runner._audit.search()
+    assert any(entry.get("type") == "loop_tool" for entry in entries)
+
+
+@pytest.mark.parametrize("raw,expected", [
+    (ToolResult(output="unknown", ok=False, uncertain_outcome=True), "outcome_unknown"),
+    (ToolResult(output="parent correction", ok=True,
+                audit_metadata={"wait_interrupted": "parent_message"}), "interrupted_effect_free"),
+    ("Permission denied for this tool", "denied"),
+])
+async def test_agent_audit_status_is_dispatch_evidence_only(tmp_path, raw, expected):
+    runner, proxy, agent = harness(tmp_path, raw)
+    await invoke(runner, proxy, agent)
+    execution = (await runner._audit.search(include_agent_events=False))[0]
+    assert execution["status"] == expected

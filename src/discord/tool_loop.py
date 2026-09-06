@@ -3716,8 +3716,10 @@ class ToolLoopRunner:
                     status = "outcome_unknown"
             elif _is_error_result(detail):
                 status, error = "failed", detail
-                if detail.startswith(("Denied", "Permission denied", "Unknown or disallowed host")):
-                    status = "denied"
+            if isinstance(result, str) and detail.startswith(
+                ("Denied", "Permission denied", "Unknown or disallowed host")
+            ):
+                status, error = "denied", detail
             if audit_metadata and audit_metadata.get("wait_interrupted") == "parent_message":
                 status = "interrupted_effect_free"
             if failure is not None:
