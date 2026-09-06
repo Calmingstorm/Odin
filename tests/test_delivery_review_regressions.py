@@ -100,6 +100,19 @@ def test_failure_preview_secret_at_slice_edges():
     assert 'TAIL' in json.loads(result)['tail']['text']
 
 
+@pytest.mark.parametrize('suffix', ['LAST-LINE-SENTINEL',
+                                    '\\n\\t\\"escaped\\" LAST-LINE-SENTINEL'])
+@pytest.mark.parametrize('budget', [1024, 12000])
+def test_long_plain_single_line_retains_tail_with_escaped_content(suffix, budget):
+    body = 'HEAD-SENTINEL' + 'x' * 5000000 + suffix
+    result = deliver(body, budget=budget)
+    page = json.loads(result)
+    assert len(result) <= budget
+    assert 'HEAD-SENTINEL' in page['head']
+    assert 'LAST-LINE-SENTINEL' in page['tail']['text']
+    assert page['cursor'] is None and page['retention'] == 'failed'
+
+
 @pytest.mark.parametrize('length', [200, 11999, 12000, 12001])
 def test_ranked_clipped_list_stays_plain_until_list_exceeds_budget(tmp_path, length):
     text = RankedOutput('s' * length, matches=('full first ' * 2000, 'second'))

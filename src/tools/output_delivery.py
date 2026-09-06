@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import contextvars
 import json
+import re
 import sqlite3
 from datetime import UTC, datetime
 
@@ -44,15 +45,26 @@ def delivery_failure(reason, status="unknown", *, text="", budget=12000):
     """Keep bounded scrubbed evidence without a misleading continuation.
 
     A bounded head lookahead covers secret-pattern minimum lengths before
-    clipping. Drop the partial tail line whose identifying prefix is unknown.
+    clipping. Preserve a partial tail line when a bounded-state prefix scan can
+    rule out credential context; otherwise drop only that uncertain line.
     """
     text = str(text)
     head, tail = text[:budget+256], text[-budget:]
     if len(text) > budget:
         if text[-budget-1] != "\n":
-            newline = tail.find("\n")
-            tail = tail[newline+1:] if newline >= 0 else ""
-            tail = "[partial line omitted]\n" + tail
+            start = max(0, len(text)-budget-256)
+            line_start = text.rfind("\n", 0, start) + 1
+            # Scan without copying/scrubbing the unretained prefix, even for
+            # one enormous line. Ambiguous quoted/assigned/token context fails
+            # closed; context-free plain text keeps its newest output.
+            possible_context = re.compile(
+                r'''["'\\:=./]|sk-|gh[pousr]_|AKIA|AIza|[sr]k_(?:live|test)_|xox[boaprs]-|eyJ''')
+            if not possible_context.search(text, line_start, start):
+                tail = scrub_output_secrets(text[start:])[-budget:]
+            else:
+                newline = tail.find("\n")
+                tail = tail[newline+1:] if newline >= 0 else ""
+                tail = "[partial line omitted]\n" + tail
     head, tail = scrub_output_secrets(head)[:budget], scrub_output_secrets(tail)
 
     metadata = {"kind": "tool_output", "status": status, "retention": "failed",
