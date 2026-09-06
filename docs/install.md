@@ -5,8 +5,8 @@ Odin ships as an amd64 Debian package and as a source checkout. The package path
 ## Debian or Ubuntu package
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.93.0_amd64.deb
-sudo apt install ./odin_3.93.0_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.94.0_amd64.deb
+sudo apt install ./odin_3.94.0_amd64.deb
 ```
 
 The package installs a dedicated `odin` system user, a Python virtual environment with dependencies, the configuration files, and a systemd service. The service is enabled but left stopped until it is configured.

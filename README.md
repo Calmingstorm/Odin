@@ -53,8 +53,8 @@ The WebUI shows every tool Odin can reach, how often each has run, and lets you 
 Debian or Ubuntu. The package installs its dependencies during setup, which can take a few minutes:
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.93.0_amd64.deb
-sudo apt install ./odin_3.93.0_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.94.0_amd64.deb
+sudo apt install ./odin_3.94.0_amd64.deb
 sudoedit /etc/odin/.env          # DISCORD_TOKEN=...
 sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
   --credentials-path /var/lib/odin/codex_auth.json --device
