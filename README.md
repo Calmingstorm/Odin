@@ -17,6 +17,7 @@
   <a href="https://odin-bot.net">Website</a> ·
   <a href="https://odin-bot.net/install">Install guide</a> ·
   <a href="https://odin-bot.net/docs">Operating reference</a> ·
+  <a href="https://calmingstorm.github.io/Odin/">Developer hub</a> ·
   <a href="https://github.com/Calmingstorm/Odin/releases">Releases</a> ·
   <a href="https://github.com/Calmingstorm/Odin/discussions">Discussions</a>
 </p>
@@ -158,7 +159,7 @@ The current release registers 74 built-in tools, 23 of them core tools. The regi
 | Skills | create, edit, invoke, import, export, inspect, enable, disable, and delete skills |
 | Communication and media | Discord operations, email, PDF and image analysis, image generation |
 
-The complete catalog is defined in [`src/tools/registry.py`](src/tools/registry.py) and [`src/tools/defs/`](src/tools/defs/).
+The complete catalog is defined in [`src/tools/registry.py`](src/tools/registry.py) and [`src/tools/defs/`](src/tools/defs/), and rendered with every parameter in the [tool reference](https://calmingstorm.github.io/Odin/reference/tools) on the developer hub, alongside the [REST API reference](https://calmingstorm.github.io/Odin/reference/api) and an [architecture guide](https://calmingstorm.github.io/Odin/architecture).
 
 ## Safety and access control
 
