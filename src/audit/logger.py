@@ -74,6 +74,125 @@ async def _iter_lines_reverse(
             yield tail
 
 
+def _audit_preview(
+    text: str, cap: int, *, source: dict | None = None, original_chars: int | None = None,
+) -> dict:
+    """Bound the complete serialized preview, not just its text fragment.
+
+    ``audit_clipped`` describes this storage copy only. Source envelope flags
+    remain separately named under ``source`` and are never inferred from size.
+    """
+    preview = {
+        "kind": "audit_preview", "audit_clipped": True,
+        "original_chars": len(text) if original_chars is None else original_chars, "preview": "",
+    }
+    if source:
+        preview["source"] = source
+    def size(value):
+        return len(json.dumps(value, ensure_ascii=True))
+    if size(preview) > cap:
+        preview.pop("source", None)
+    if size(preview) > cap:
+        preview.pop("original_chars")
+    if size(preview) > cap:
+        preview.pop("preview")
+    if size(preview) > cap:
+        # Pathologically small configured caps cannot fit the full contract.
+        return {"audit_clipped": True} if cap >= 23 else {}
+    if "preview" in preview:
+        low, high = 0, min(len(text), cap)
+        while low < high:
+            mid = (low + high + 1) // 2
+            preview["preview"] = text[:mid]
+            if size(preview) <= cap:
+                low = mid
+            else:
+                high = mid - 1
+        preview["preview"] = text[:low]
+    return preview
+
+
+def _cap_audit_text(text: str, cap: int) -> str:
+    """Scrub parsed JSON structurally, then clip into valid bounded JSON."""
+    process_body = None
+    try:
+        parsed = json.loads(text)
+    except (ValueError, TypeError):
+        parsed = None
+        cleaned = scrub_diagnostic(text)
+        if isinstance(text, str) and "\n[output retention] " in text:
+            body, _, metadata = text.rpartition("\n[output retention] ")
+            try:
+                candidate = json.loads(metadata)
+            except ValueError:
+                pass
+            else:
+                if (isinstance(candidate, dict) and candidate.get("kind") == "process_output"
+                        and isinstance(candidate.get("pid"), int)
+                        and isinstance(candidate.get("retained_bytes"), int)):
+                    parsed = candidate
+                    process_body = scrub_diagnostic(body)
+                    cleaned = process_body + "\n[output retention] " + json.dumps(
+                        scrub_diagnostic(candidate), ensure_ascii=True,
+                    )
+    else:
+        scrubbed = scrub_diagnostic(parsed)
+        cleaned = text if scrubbed == parsed else json.dumps(scrubbed, ensure_ascii=True)
+    if len(cleaned) <= cap:
+        return cleaned
+    source = None
+    if isinstance(parsed, dict):
+        # Only bounded scalar envelope facts; never copy arbitrary nested payloads.
+        source = {
+            key: value for key, value in scrub_diagnostic(parsed).items()
+            if key in {
+                "kind", "status", "truncated", "retention", "capture_loss",
+                "capture_lost_bytes", "total_bytes", "total_chars", "retained_bytes",
+                "emitted_bytes", "shown_bytes", "offset_unit", "capture_error",
+                "dropped_bytes", "output_lost", "capture_truncated",
+                "capture_limit_loss_bytes", "not_retained_bytes", "pid", "exit_code",
+                "start", "end", "tail_status", "retention_seconds_after_exit",
+                "original_bytes", "result_bytes", "error_bytes", "offset",
+                "source_original_bytes", "id",
+            } and isinstance(value, (bool, int, float, type(None), str))
+            and (not isinstance(value, str) or len(value) <= 100)
+        }
+        if "cursor" in parsed:
+            source["cursor_present"] = isinstance(parsed["cursor"], str) and bool(parsed["cursor"])
+        if parsed.get("kind") == "process_output" or (
+            "original_bytes" in parsed and "result_bytes" in parsed
+        ):
+            source.setdefault("offset_unit", "utf8_bytes")
+    body = cleaned if process_body is None else process_body
+    if isinstance(parsed, dict):
+        envelope = scrub_diagnostic(parsed)
+        known = (
+            envelope.get("kind") == "tool_output"
+            and isinstance(envelope.get("status"), str)
+            and "retention" in envelope
+        ) or (
+            envelope.get("kind") == "process_output"
+            and isinstance(envelope.get("pid"), int)
+            and "retained_bytes" in envelope
+        ) or (
+            isinstance(envelope.get("id"), str)
+            and isinstance(envelope.get("truncated"), bool)
+            and isinstance(envelope.get("original_bytes"), int)
+            and isinstance(envelope.get("result_bytes"), int)
+        )
+        if known:
+            for key in ("head", "text", "preview", "output", "result"):
+                if isinstance(envelope.get(key), str):
+                    body = envelope[key]
+                    tail = envelope.get("tail")
+                    if isinstance(tail, dict) and isinstance(tail.get("text"), str):
+                        body = "[Head]\n" + body + "\n[Tail — context only]\n" + tail["text"]
+                    break
+    return json.dumps(
+        _audit_preview(body, cap, source=source, original_chars=len(cleaned)), ensure_ascii=True,
+    )
+
+
 def _cap_tool_input(tool_input: dict, cap: int) -> dict | str:
     """Bound the serialized size of an audit entry's tool_input."""
     try:
@@ -82,7 +201,7 @@ def _cap_tool_input(tool_input: dict, cap: int) -> dict | str:
         return "<unserializable tool_input>"
     if len(blob) <= cap:
         return tool_input
-    return f"<tool_input truncated: {len(blob)} bytes>" + blob[:cap]
+    return _audit_preview(blob, cap)
 
 
 class AuditLogger:
@@ -256,7 +375,12 @@ class AuditLogger:
         best-effort side effect and runs AFTER the lock — the signed append has
         already durably happened, so a slow or failing callback can neither
         stall other persists nor affect the persisted result."""
+        # Generic string scrubbing can invalidate JSON credential assignments.
+        # These fields are scrubbed structurally and serialized *after* that pass.
+        texts = {key: entry[key] for key in ("result_summary", "detail") if key in entry}
         entry = scrub_diagnostic(entry)
+        for key, value in texts.items():
+            entry[key] = _cap_audit_text(value, self._result_cap)
         if not self._chain_initialized:
             await self.initialize_chain()
         async with self._persist_lock:
@@ -361,6 +485,9 @@ class AuditLogger:
         risk_level: str | None = None,
         risk_reason: str | None = None,
         audit_metadata: dict | None = None,
+        attribution: dict | None = None,
+        status: str | None = None,
+        count_as_tool: bool = True,
     ) -> None:
         entry = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -370,10 +497,16 @@ class AuditLogger:
             "tool_name": tool_name,
             "tool_input": _cap_tool_input(scrub_diagnostic(tool_input), self._tool_input_cap),
             "approved": approved,
-            "result_summary": scrub_diagnostic(result_summary)[:self._result_cap],
+            "result_summary": _cap_audit_text(result_summary, self._result_cap),
             "execution_time_ms": execution_time_ms,
             "error": error,
         }
+        if attribution:
+            entry.update(attribution)
+        if status:
+            entry["status"] = status
+        if not count_as_tool:
+            entry["audit_observer"] = True
         if error and self._classify_failures:
             # Write-time heuristic classification (observability). The raw
             # error string is classified here; aggregates never re-store it.
@@ -404,6 +537,9 @@ class AuditLogger:
         detail: str = "",
         channel_id: str = "",
         metadata: dict | None = None,
+        tool_input: dict | None = None,
+        attribution: dict | None = None,
+        count_as_tool: bool = True,
     ) -> None:
         """Log a generic state-changing event (agents, schedules, permissions, etc.)."""
         elapsed = (metadata or {}).get("elapsed_ms")
@@ -412,10 +548,21 @@ class AuditLogger:
             "type": event_type,
             "action": action,
             "actor": actor,
-            "detail": scrub_diagnostic(detail)[:self._result_cap],
+            "detail": _cap_audit_text(detail, self._result_cap),
             "tool_name": action,
             "user_id": actor,
         }
+        if tool_input is not None:
+            entry["tool_input"] = _cap_tool_input(
+                scrub_diagnostic(tool_input), self._tool_input_cap,
+            )
+        if attribution:
+            entry.update(attribution)
+        if not count_as_tool:
+            entry["audit_observer"] = True
+        turn = get_turn()
+        if turn:
+            entry["turn"] = turn
         if elapsed is not None:
             entry["execution_time_ms"] = elapsed
         if channel_id:
@@ -501,7 +648,7 @@ class AuditLogger:
                         except json.JSONDecodeError:
                             continue
                         name = entry.get("tool_name")
-                        if name:
+                        if name and not entry.get("audit_observer"):
                             counts[name] = counts.get(name, 0) + 1
                     offset = stat.st_size
                 self._tool_count_cache[identity] = (offset, tail, counts)
@@ -549,6 +696,7 @@ class AuditLogger:
         has_error: bool | None = None,
         min_duration_ms: int | None = None,
         limit: int = 20,
+        include_agent_events: bool = True,
     ) -> list[dict]:
         """Search audit log (most recent first). Filters are ANDed.
 
@@ -558,6 +706,10 @@ class AuditLogger:
         - min_duration_ms: only entries with duration_ms >= this value
         """
         def _match(entry: dict) -> bool:
+            if not include_agent_events and entry.get("agent_id") and entry.get("type") in {
+                "loop_tool_start", "loop_tool",
+            }:
+                return False
             if tool_name and entry.get("tool_name") != tool_name:
                 return False
             if user and user.lower() not in (

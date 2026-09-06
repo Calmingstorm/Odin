@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { baseParse, compile, NodeTypes } from '@vue/compiler-dom';
 import * as Vue from 'vue';
+import { renderToString } from '@vue/server-renderer';
 
 // Compile the production modal against both historical and additive records.
 async function checkAgentRecordRendering() {
@@ -10,23 +11,21 @@ async function checkAgentRecordRendering() {
   console.warn = () => {};
   try {
     const state = page.setup();
-    const render = new Function('Vue', compile(page.template, { mode: 'function' }).code)(Vue);
-    const text = node => {
-      if (typeof node === 'string') return node;
-      if (Array.isArray(node)) return node.map(text).join(' ');
-      return node && typeof node === 'object' ? text(node.children) : '';
-    };
+    // Render actual children too: a shallow VNode walker drops child props.
+    const render = async () => renderToString(Vue.createSSRApp({
+      template: page.template, components: page.components, setup: () => state,
+    }).component('odin-icon', { template: '<span></span>' }).directive('modal-focus', {}));
     state.loading.value = false;
     state.detailId.value = 'fixture';
     const legacy = {id: 'fixture', label: 'worker', status: 'completed', result: 'legacy result',
       goal: 'goal', error: '', iteration_count: 2, runtime_seconds: 1, tools_used: []};
     state.detail.value = legacy;
-    let output = text(render(Vue.proxyRefs(state), []));
+    let output = await render();
     assert.match(output, /legacy result/);
     assert.match(output, /Not recorded/);
     state.detail.value = {...legacy, result: 'native result', activity: 'waiting for children for 180s',
       tool_execution_count: 4, pending_inbox_count: 2, last_consumed_sequence: 3};
-    output = text(render(Vue.proxyRefs(state), []));
+    output = await render();
     assert.match(output, /native result/);
     assert.match(output, /waiting for children for 180s/);
     assert.match(output, /2 queued; consumed sequence 3/);

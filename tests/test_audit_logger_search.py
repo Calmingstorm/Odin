@@ -7,6 +7,8 @@ log rotation. SAFE: real file I/O in tmp only; no network, no tool dispatch.
 """
 from __future__ import annotations
 
+import json
+
 import pytest
 
 from src.audit.logger import AuditLogger, _cap_tool_input
@@ -32,7 +34,8 @@ class TestCapToolInput:
 
     def test_oversized_truncated(self):
         out = _cap_tool_input({"blob": "x" * 200}, 20)
-        assert isinstance(out, str) and out.startswith("<tool_input truncated")
+        assert isinstance(out, dict)
+        assert len(json.dumps(out)) <= 20
 
 
 class TestSearchFilters:

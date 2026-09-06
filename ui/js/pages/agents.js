@@ -8,9 +8,11 @@ import { confirmDialog } from '../confirm.js';
 import { formatTs, formatDuration } from '../utils.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 import { createAgentAutoRefresh, createAgentDetailController } from '../agent-detail-state.js';
+import ToolOutput from '../tool-output.js';
 
 
 export default {
+  components: { ToolOutput },
   template: `
     <div class="p-6 page-fade-in">
       <div class="flex items-center justify-between mb-4 flex-wrap gap-2">
@@ -278,7 +280,7 @@ export default {
                   {{ copied === 'result' ? 'Copied' : 'Copy' }}
                 </button>
               </div>
-              <pre class="ag-detail-text">{{ detail.result }}</pre>
+              <tool-output :value="detail.result" label="Agent result" />
             </div>
             <div v-else-if="detail.status === 'running'" class="ag-detail-section">
               <span class="ag-result-label">Result</span>
@@ -292,7 +294,7 @@ export default {
                   {{ copied === 'error' ? 'Copied' : 'Copy' }}
                 </button>
               </div>
-              <pre class="ag-detail-text text-red-400">{{ detail.error }}</pre>
+              <tool-output :value="detail.error" label="Agent error" />
             </div>
           </template>
         </div>

@@ -3,6 +3,7 @@
 import asyncio
 import time
 
+from ..audit.tool_context import agent_tool_context
 from ..llm.secret_scrubber import scrub_output_secrets
 from ..tools.result_validator import ToolResult, _is_error_result
 from .execution_context import waiting_agent
@@ -73,7 +74,8 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                 agent.tool_execution_count += 1
                 if name not in agent.tools_used:
                     agent.tools_used.append(name)
-                return await execute(name, arguments)
+                with agent_tool_context(agent, call):
+                    return await execute(name, arguments)
 
             context_token = waiting_agent.set(agent if name == "wait_for_agents" else None)
             try:

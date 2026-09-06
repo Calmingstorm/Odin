@@ -26,9 +26,9 @@ def test_small_tool_input_unchanged():
 def test_large_tool_input_truncated():
     inp = {"content": "x" * 100_000}
     capped = _cap_tool_input(inp, 4000)
-    assert isinstance(capped, str)
-    assert capped.startswith("<tool_input truncated:")
-    assert len(capped) < 100_000
+    assert isinstance(capped, dict)
+    assert capped["audit_clipped"] is True
+    assert len(json.dumps(capped)) <= 4000
 
 
 async def test_logged_tool_input_is_capped(tmp_path):
@@ -40,8 +40,9 @@ async def test_logged_tool_input_is_capped(tmp_path):
     )
     line = (tmp_path / "audit.jsonl").read_text().strip()
     entry = json.loads(line)
-    assert isinstance(entry["tool_input"], str)
-    assert "truncated" in entry["tool_input"]
+    assert isinstance(entry["tool_input"], dict)
+    assert entry["tool_input"]["audit_clipped"] is True
+    assert len(json.dumps(entry["tool_input"])) <= 200
 
 
 # ---------------------------------------------------------------------------

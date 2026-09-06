@@ -4,8 +4,10 @@
  */
 import { api, ws } from '../api.js';
 import { computed, onActivated, onDeactivated, onMounted, onUnmounted, ref } from 'vue';
+import ToolOutput from '../tool-output.js';
 
 export default {
+  components: { ToolOutput },
   setup() {
     const activeTasks = ref([]);
     const recentHistory = ref([]);
@@ -15,9 +17,16 @@ export default {
     function handleEvent(event) {
       const payload = event.payload || event;
       const type = payload.type || event.type;
+      // Old autonomous loop terminal events have no start/call identity and
+      // must never close a main-thread card through the legacy name fallback.
+      if (['loop_tool_start', 'loop_tool'].includes(type)
+          && !(payload.agent_id || payload.metadata?.agent_id)) return;
+      if (['loop_tool_start', 'loop_tool'].includes(type)
+          && !(payload.call_id || payload.metadata?.call_id)) return;
 
-      if (type === 'tool_start') {
-        const callId = payload.metadata?.call_id || null;
+      if (type === 'tool_start' || type === 'loop_tool_start') {
+        const callId = payload.call_id || payload.metadata?.call_id || null;
+        const agentId = payload.agent_id || payload.metadata?.agent_id || '';
         const task = {
           // The model's tool_use id when the backend supplies it. Pairing
           // start with end by tool NAME cannot distinguish concurrent
@@ -25,11 +34,14 @@ export default {
           // newest card, FIFO closes the oldest, and both are wrong whenever a
           // later call finishes first.
           callId,
-          id: callId || `${payload.action}-${Date.now()}`,
+          agentId,
+          agentLabel: payload.agent_label || payload.metadata?.agent_label || '',
+          toolInput: payload.tool_input,
+          id: callId ? `${agentId}:${callId}` : `${payload.action}-${Date.now()}`,
           tool: payload.action,
           actor: payload.actor || '',
           channel: payload.channel_id || '',
-          iteration: payload.metadata?.iteration ?? 0,
+          iteration: payload.iteration ?? payload.metadata?.iteration ?? 0,
           startTime: Date.now(),
           elapsed: 0,
           status: 'running',
@@ -40,13 +52,14 @@ export default {
         return;
       }
 
-      if (type === 'tool_end') {
+      if (type === 'tool_end' || type === 'loop_tool') {
         // Pair by call id — the only identity that survives concurrency.
-        const endCallId = payload.metadata?.call_id || null;
+        const endCallId = payload.call_id || payload.metadata?.call_id || null;
+        const endAgentId = payload.agent_id || payload.metadata?.agent_id || '';
         let idx = -1;
         if (endCallId) {
           idx = activeTasks.value.findIndex(
-            t => t.callId === endCallId && t.status === 'running'
+            t => t.callId === endCallId && t.agentId === endAgentId && t.status === 'running'
           );
         }
         if (idx < 0 && !endCallId) {
@@ -55,13 +68,13 @@ export default {
           // only mispair events that were already unpairable.
           for (let i = activeTasks.value.length - 1; i >= 0; i--) {
             const t = activeTasks.value[i];
-            if (t.tool === payload.action && t.status === 'running') { idx = i; break; }
+            if (t.tool === payload.action && t.agentId === endAgentId && t.status === 'running') { idx = i; break; }
           }
         }
         if (idx >= 0) {
           const task = activeTasks.value[idx];
-          task.status = payload.metadata?.error ? 'error' : 'success';
-          task.elapsed = payload.metadata?.elapsed_ms || (Date.now() - task.startTime);
+          task.status = payload.error || payload.metadata?.error || ['error', 'failed', 'cancelled', 'denied', 'outcome_unknown'].includes(payload.status || payload.metadata?.status) ? 'error' : 'success';
+          task.elapsed = payload.duration_ms ?? payload.metadata?.elapsed_ms ?? (Date.now() - task.startTime);
           task.result = payload.detail || '';
           task.fadingOut = true;
           setTimeout(() => {
@@ -173,12 +186,14 @@ export default {
               <span v-else class="animate-pulse text-blue-400"><odin-icon name="clock" :size="17" /></span>
               <span class="text-white font-mono text-sm font-bold">{{ task.tool }}</span>
               <span class="text-gray-500 text-xs">iter {{ task.iteration }}</span>
+              <span v-if="task.agentId" class="text-gray-400 text-xs">agent {{ task.agentLabel || task.agentId }}</span>
             </div>
             <span :class="task.fadingOut ? 'text-gray-400' : 'text-blue-400'" class="font-mono text-sm">{{ formatMs(task.elapsed) }}</span>
           </div>
           <!-- Streaming output for this tool -->
-          <div v-if="streamOutput[task.callId || task.tool]"
-               class="bg-black rounded p-2 mt-2 max-h-48 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap break-all">{{ streamOutput[task.callId || task.tool] }}</div>
+          <details v-if="task.toolInput"><summary class="text-xs text-gray-400">Arguments</summary><tool-output :value="task.toolInput" label="Tool arguments" /></details>
+          <tool-output v-if="streamOutput[task.callId || task.tool]" :value="streamOutput[task.callId || task.tool]" label="Streaming tool output" />
+          <tool-output v-if="task.result" :value="task.result" label="Tool result" />
         </div>
       </div>
 
@@ -191,7 +206,7 @@ export default {
           <!-- break-all: one long unbroken token (a URL, a base64 blob, a deep
                path) widened this div past the viewport and scrolled the whole
                Operations page sideways on a phone. -->
-          <div class="max-h-64 overflow-y-auto font-mono text-xs text-green-400 whitespace-pre-wrap break-all">{{ output }}</div>
+          <tool-output :value="output" label="Live tool output" />
         </div>
       </div>
 
@@ -204,11 +219,13 @@ export default {
           No recent executions
         </div>
         <div v-for="task in recentHistory" :key="task.id"
-             class="flex items-center gap-3 py-2 border-b border-gray-700/50 last:border-0">
+             class="flex flex-wrap items-center gap-3 py-2 border-b border-gray-700/50 last:border-0">
           <span class="text-lg"><odin-icon :name="statusIcon(task.status)" :size="17" /></span>
           <span class="text-white font-mono text-sm flex-1">{{ task.tool }}</span>
-          <span class="text-gray-400 text-xs max-w-md truncate">{{ task.result }}</span>
+          <span v-if="task.agentId" class="text-gray-400 text-xs">agent {{ task.agentLabel || task.agentId }}</span>
           <span class="text-gray-500 font-mono text-xs whitespace-nowrap">{{ formatMs(task.elapsed) }}</span>
+          <details v-if="task.toolInput" class="w-full"><summary class="text-xs text-gray-400">Arguments</summary><tool-output :value="task.toolInput" label="Recent tool arguments" /></details>
+          <tool-output class="w-full" :value="task.result" label="Recent tool result" />
         </div>
       </div>
     </div>

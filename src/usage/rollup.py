@@ -528,7 +528,7 @@ class UsageRollup:
         # Generic audit events also carry ``tool_name=action`` for search
         # compatibility. They are not tool executions and must not inflate the
         # Usage screen. AuditLogger.log_execution has no ``type`` field.
-        if record.get("type") not in (None, "tool_execution"):
+        if record.get("type") not in (None, "tool_execution") or record.get("audit_observer"):
             return None
         tool_name = record.get("tool_name")
         occurred = _parse_timestamp(record.get("timestamp"))
