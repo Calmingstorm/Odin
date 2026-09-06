@@ -16,7 +16,7 @@ const CATEGORY_GROUPS = [
   { key: 'models', label: 'Models & AI', icon: 'brain', sections: ['image', 'llm_recovery'] },
   { key: 'runtime', label: 'Runtime', icon: 'activity', sections: ['context', 'sessions', 'agents', 'turn_state'] },
   { key: 'data', label: 'Data & Storage', icon: 'database', sections: ['learning', 'search', 'usage', 'audit', 'attachments'] },
-  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'comfyui', 'slack', 'mcp'] },
+  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'computer', 'comfyui', 'slack', 'mcp'] },
   { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks', 'issue_tracker'] },
   { key: 'infrastructure', label: 'Infrastructure', icon: 'server', sections: ['tools', 'web'] },
 ];
@@ -326,7 +326,7 @@ export default {
                 </button>
 
                 <div v-if="isSectionExpanded(section)" :id="'cfgc-section-' + section" class="cfgc-section-body">
-                  <div v-if="section !== 'mcp' && searchQuery && sectionSearchHits(section).length" class="cfgc-search-hits">
+                  <div v-if="!['mcp', 'computer'].includes(section) && searchQuery && sectionSearchHits(section).length" class="cfgc-search-hits">
                     <span>Matched</span>
                     <button v-for="hit in sectionSearchHits(section).slice(0, 5)" :key="hit.path" type="button" @click="focusField(hit.path)">
                       {{ hit.label }} <code>{{ hit.path }}</code>
@@ -346,6 +346,13 @@ export default {
                     <router-link class="btn btn-ghost text-xs" :to="{ path: '/capabilities', query: { tab: 'mcp-servers' } }">
                       Open MCP Servers <odin-icon name="chevronRight" :size="14" />
                     </router-link>
+                  </div>
+
+                  <div v-else-if="section === 'computer'" class="cfgc-mcp-owner">
+                    <div>
+                      <strong>Computer use is under development</strong>
+                      <p>This review increment provides contracts and isolated feasibility tests, not an enabled desktop capability. Assisted-session input remains unavailable until capture consent and independent input are verified.</p>
+                    </div>
                   </div>
 
                   <div v-else class="cfgc-field-groups">
