@@ -36,10 +36,13 @@ class _Processes:
     def cleanup(self) -> None:
         pass
 
-    async def poll(self, _pid: int, *, wait_seconds: float) -> str:
+    def output_info(self, _pid, cursor=None):
+        return None
+
+    async def poll(self, _pid: int, *, wait_seconds: float, **kwargs) -> str:
         return f"polled after {wait_seconds}"
 
-    def list_all(self) -> str:
+    def list_all(self, **kwargs) -> str:
         return "[]"
 
 

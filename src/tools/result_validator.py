@@ -162,11 +162,10 @@ def _is_error_result(text: str) -> bool:
 
 
 def _truncate_smart(text: str, max_chars: int) -> str:
-    if len(text) <= max_chars:
-        return text
-    half = max_chars // 2
-    omitted = len(text) - max_chars
-    return text[:half] + f"\n\n[... {omitted} characters omitted ...]\n\n" + text[-half:]
+    from .output_delivery import deliver
+
+    return deliver(text, budget=max_chars,
+                   status="failed" if _is_error_result(text) else "succeeded")
 
 
 def validate_tool_result(
@@ -203,7 +202,10 @@ def validate_tool_result(
             stats.coerced_type += 1
 
     # --- 2. Whitespace normalisation ----------------------------------------
-    text = text.strip()
+    from .output_delivery import DeliveredOutput, RankedOutput
+
+    if tool_name != "read_file" and not isinstance(text, (DeliveredOutput, RankedOutput)):
+        text = text.strip()
 
     # --- 3. Empty check -----------------------------------------------------
     if not text and not s.allow_empty and not _is_error_result(text):
@@ -213,7 +215,8 @@ def validate_tool_result(
             stats.replaced_empty += 1
 
     # --- 4. Truncation ------------------------------------------------------
-    if len(text) > s.max_chars:
+    if (len(text) > s.max_chars and tool_name != "read_file"
+            and not isinstance(text, DeliveredOutput)):
         text = _truncate_smart(text, s.max_chars)
         violations.append("truncated")
         if stats is not None:

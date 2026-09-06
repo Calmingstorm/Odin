@@ -59,7 +59,7 @@ Three tiers control tool access:
 
 | Tier | Tools | Use Case |
 |------|-------|----------|
-| `admin` | All 73 built-in tools | Operators |
+| `admin` | All 74 built-in tools | Operators |
 | `user` | Read-only subset | Team members |
 | `guest` | None (chat only) | Restricted |
 

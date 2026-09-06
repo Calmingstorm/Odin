@@ -100,7 +100,6 @@ from .response_guards import (
     detect_promise_without_action,
     detect_tool_unavailable,
     is_wait_iteration,
-    truncate_tool_output,
     wait_iteration_fingerprint,
     wait_target_alive,
 )
@@ -269,7 +268,7 @@ def _unwrap_native_result(result):
     audit_metadata) or a plain string/dict. Return ``(tool_result_or_None,
     output)`` so the caller audits the metadata and sends the string."""
     if isinstance(result, ToolResult):
-        return result, str(result)
+        return result, result.output
     return None, result
 
 
@@ -2364,6 +2363,15 @@ class ToolLoopRunner:
         return ("done", (_final, False, False, st.tools_used_in_loop, False))
 
     async def _run_one_tool(self, st: _ChatTurn, block) -> dict:
+        from ..tools.runtime_delivery import execution_delivery_scope
+
+        with execution_delivery_scope(
+            st.user_id, str(st.message.channel.id),
+            allowed_tools=getattr(st.message, "allowed_tools", None),
+        ):
+            return await self._run_one_tool_captured(st, block)
+
+    async def _run_one_tool_captured(self, st: _ChatTurn, block) -> dict:
         """Execute a single tool call: RBAC gate, native/executor dispatch,
         failure visibility, audit, recent-action tracking, validation
         bookkeeping. (The old `_run_tool` closure.)"""
@@ -2456,7 +2464,7 @@ class ToolLoopRunner:
                 # same OUTCOME_UNKNOWN ledger path as timeouts — never
                 # confidently failed, never replayed.
                 tool_result = await dispatch_mcp_tool(self._mcp_manager, tool_name, tool_input)
-                result = str(tool_result)
+                result = tool_result.output
                 if not tool_result.ok:
                     error = tool_result.error or f"MCP tool {tool_name} failed"
                 if _mcp_uncertain(tool_result):
@@ -2473,7 +2481,7 @@ class ToolLoopRunner:
                     )
                 finally:
                     _current_call_id.reset(_call_token)
-                result = str(tool_result)
+                result = tool_result.output
         except TimeoutError as e:
             error = str(e)
             result = f"Tool {tool_name} timed out: {e}"
@@ -2502,9 +2510,6 @@ class ToolLoopRunner:
             st.pending_image_blocks.append(result["__image_block__"])
             result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
 
-        # Scrub secrets from tool output
-        result = scrub_output_secrets(result)
-
         # Use structured metadata from ToolResult when available
         if tool_result is not None:
             elapsed_ms = tool_result.duration_ms or elapsed_ms
@@ -2515,7 +2520,13 @@ class ToolLoopRunner:
             if not tool_result.ok and not error:
                 error = "tool reported failure"
             result = ensure_failure_visible(result, tool_result.ok)
+        from ..tools.runtime_delivery import deliver_runtime_output
 
+        result = deliver_runtime_output(
+            self._tool_executor, result, tool_name=tool_name, tool_input=tool_input,
+            user_id=st.user_id, channel_id=str(st.message.channel.id),
+            status="outcome_unknown" if uncertain_outcome else "failed" if error else "succeeded",
+        )
         await self._audit_tool_outcome(
             st,
             tool_name,
@@ -2544,7 +2555,7 @@ class ToolLoopRunner:
             st._pending_validations.append(f"{tool_name}: {tool_result.validation_reason}")
 
         # Truncate large outputs before sending back to the LLM.
-        tool_content = truncate_tool_output(result)
+        tool_content = result
 
         # WI-3: settle the op right after completion. ok → APPLIED;
         # a tool-reported failure → DEFINITELY_FAILED; an exception mid-
@@ -3481,9 +3492,16 @@ class ToolLoopRunner:
             _audit_meta = raw.audit_metadata
             if not raw.ok and not error:
                 error = raw.error or "tool reported failure"
-            raw = ensure_failure_visible(str(raw), raw.ok)
+            raw = ensure_failure_visible(raw.output, raw.ok)
 
-        result = truncate_tool_output(scrub_output_secrets(str(raw)))
+        from ..tools.runtime_delivery import deliver_runtime_output
+
+        result = deliver_runtime_output(
+            getattr(self, "_tool_executor", None), raw,
+            tool_name=tool_name, tool_input=tool_input,
+            user_id=st.user_id, channel_id=st.channel_id_str,
+            status="failed" if error else "succeeded",
+        )
 
         # Audit log
         try:
@@ -3652,6 +3670,26 @@ class ToolLoopRunner:
         return result
 
     async def dispatch_loop_tool_inner(
+        self,
+        tool_name: str,
+        tool_input: dict,
+        msg_proxy: _LoopMessageProxy,
+        user_id: str,
+    ) -> str | dict | ToolResult:
+        from ..tools.runtime_delivery import deliver_runtime_result, execution_delivery_scope
+
+        channel_id = str(getattr(msg_proxy.channel, "id", ""))
+        with execution_delivery_scope(
+            user_id, channel_id, allowed_tools=getattr(msg_proxy, "allowed_tools", None),
+        ):
+            raw = await ToolLoopRunner._dispatch_loop_tool_captured(self,
+                tool_name, tool_input, msg_proxy, user_id)
+            return deliver_runtime_result(
+                self._tool_executor, raw, tool_name=tool_name, tool_input=tool_input,
+                user_id=user_id, channel_id=channel_id,
+            )
+
+    async def _dispatch_loop_tool_captured(
         self,
         tool_name: str,
         tool_input: dict,

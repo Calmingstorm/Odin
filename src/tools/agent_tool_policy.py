@@ -33,6 +33,23 @@ from .defs.agents import (
 _SPAWN_TOOLS = ("spawn_agent", "spawn_loop_agents")
 
 
+def apply_agent_limits(defs: list[dict], config) -> list[dict]:
+    """Render limits from live enforcement config, on clones after axis policy."""
+    agents = config.agents
+    static = "Max 5/channel; lifetime limit for NEW agents: 14400 seconds."
+    live = (
+        f"Max {agents.max_concurrent_agents}/channel; lifetime limit for NEW agents: "
+        f"{agents.max_lifetime_seconds} seconds."
+    )
+    out = []
+    for tool in defs:
+        if tool.get("name") == "spawn_agent":
+            tool = copy.deepcopy(tool)
+            tool["description"] = tool["description"].replace(static, live)
+        out.append(tool)
+    return out
+
+
 def agent_axis_modes(config) -> tuple[str, str]:
     """Return ``(model_mode, effort_mode)`` for the live agent config axes."""
     codex = getattr(config, "openai_codex", None)

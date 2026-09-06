@@ -86,14 +86,13 @@ class TestSeamMapping:
         assert "not currently published" in result.output
         assert result.audit_metadata["outcome"] == "failed"
 
-    async def test_model_facing_cap_applies(self):
+    async def test_seam_preserves_full_result_for_runtime_retention(self):
         manager = await _connected_manager()
         try:
             big = "y" * (MODEL_RESULT_CAP + 500)
             result = await dispatch_mcp_tool(manager, "mcp_fake_echo", {"text": big})
-            assert result.truncated
-            assert len(result.output) <= MODEL_RESULT_CAP + 64
-            assert "truncated" in result.output
+            assert not result.truncated
+            assert result.output == "echo: " + big
         finally:
             await manager.shutdown()
 

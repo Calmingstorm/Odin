@@ -40,7 +40,8 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Reads a URL's text content (renders JavaScript). Returns 'Title (url)\\n\\ntext'. "
             "Works on SPAs/dynamic pages unlike fetch_url. Scope via CSS selector. For tables, use "
-            "browser_read_table. For screenshots, use browser_screenshot."
+            "browser_read_table. For screenshots, use browser_screenshot. Large results have "
+            "retained previews; use get_tool_output(cursor=...) without reloading the page."
         ),
         "input_schema": {
             "type": "object",
@@ -61,7 +62,10 @@ TOOLS_SECTION: list[dict] = [
                 },
                 "max_chars": {
                     "type": "integer",
-                    "description": "Max characters to return (default 4000, max 8000)",
+                    "description": (
+                        "Legacy direct-helper text limit (default 16000, max 32000); "
+                        "retained tool delivery uses the shared preview budget."
+                    ),
                 },
             },
             "required": ["url"],
@@ -71,7 +75,8 @@ TOOLS_SECTION: list[dict] = [
         "name": "browser_read_table",
         "description": (
             "Extracts an HTML table from a URL as markdown (| col | col |). Renders JavaScript. "
-            "For text, use browser_read_page."
+            "For text, use browser_read_page. Large tables have retained previews; "
+            "use get_tool_output(cursor=...) without reloading the page."
         ),
         "input_schema": {
             "type": "object",
@@ -153,7 +158,8 @@ TOOLS_SECTION: list[dict] = [
         "name": "browser_evaluate",
         "description": (
             "Evaluates JavaScript on a URL and returns the result. For custom scraping or "
-            "interaction."
+            "interaction. Large results have retained previews; use get_tool_output(cursor=...) "
+            "without re-running the expression."
         ),
         "input_schema": {
             "type": "object",
@@ -203,7 +209,8 @@ TOOLS_SECTION: list[dict] = [
         "name": "fetch_url",
         "description": (
             "Fetches a URL and returns text (HTML→readable text, JSON passed through). Static only "
-            "— for JS-rendered pages use browser_read_page."
+            "— for JS-rendered pages use browser_read_page. Large results have retained previews; "
+            "use get_tool_output(cursor=...) without fetching again."
         ),
         "input_schema": {
             "type": "object",
@@ -243,7 +250,8 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "analyze_pdf",
         "description": (
-            "Extracts text from a PDF (URL or host:path). Returns markdown text (max 12000 chars). "
+            "Extracts text from a PDF (URL or host:path). Returns markdown text; large results "
+            "have retained previews and get_tool_output(cursor=...) continuation. "
             "For image-heavy PDFs, use browser_screenshot."
         ),
         "input_schema": {

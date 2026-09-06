@@ -67,9 +67,9 @@ class ToolCatalog:
         # Per-spawn agent model/effort catalogue: expose each axis's field +
         # clause on spawn_agent/spawn_loop_agents only when that agent config
         # axis is "auto" (operates on clones — never mutates the shared defs).
-        from ..tools.agent_tool_policy import apply_agent_axis_policy
+        from ..tools.agent_tool_policy import apply_agent_axis_policy, apply_agent_limits
 
-        builtin = apply_agent_axis_policy(builtin, config)
+        builtin = apply_agent_limits(apply_agent_axis_policy(builtin, config), config)
         skill_defs = [
             t for t in self.skill_manager.get_tool_definitions() if t["name"] not in static_names
         ]

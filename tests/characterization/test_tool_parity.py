@@ -28,7 +28,7 @@ from src.tools.registry import (
     invalidate_tool_defs_cache,
 )
 
-# The exact TOOLS order on the deliberate editor/tool cleanup (73 tools). A failure here means
+# The exact TOOLS order after recoverable output delivery (74 tools). A failure here means
 # a tool was added, removed, renamed, or REORDERED — all of which are
 # out of scope for RFC-004 and must be deliberate, reviewed changes.
 EXPECTED_TOOL_ORDER = [
@@ -48,13 +48,14 @@ EXPECTED_TOOL_ORDER = [
     "spawn_loop_agents", "collect_loop_agents", "git_ops", "kubectl", "docker_ops",
     "terraform_ops", "http_probe", "issue_tracker", "generate_image", "validate_action",
     "email_send", "email_search", "email_read", "email_list_recent",
+    "get_tool_output",
 ]
 
 # sha256[:16] of each tool's canonical JSON (sort_keys, compact separators).
 # Deep-equality pin: ANY edit to a tool's schema/description flips its hash.
 EXPECTED_TOOL_HASHES = {
-    "run_command": "b728134d466ebd02",
-    "run_script": "a17a100ac4ff7838",
+    "run_command": "1bacb41b648893ec",
+    "run_script": "1fae14b001a37232",
     "run_command_multi": "e671605db0c26dd0",
     "read_file": "627d738ddf708a6d",
     "apply_patch": "f1fe944c3bc09b9f",
@@ -68,7 +69,7 @@ EXPECTED_TOOL_HASHES = {
     "update_schedule": "4635df8029e5e548",
     "delete_schedule": "01e54d37b70471a8",
     "parse_time": "6ae3f4c04138a2cd",
-    "search_history": "d3d173bfe5262866",
+    "search_history": "72aaa6b1024b0fc0",
     "memory_manage": "f7aa460db948c1d5",
     "search_audit": "6fcb11f91a34bcb6",
     "create_skill": "9eaddf122cc9c67d",
@@ -84,39 +85,38 @@ EXPECTED_TOOL_HASHES = {
     "delegate_task": "05c99b6f11821d1c",
     "list_tasks": "a81136a21dc48a2b",
     "cancel_task": "aaffe5a4cdfa32e0",
-    "search_knowledge": "3e5555a61c0509da",
+    "search_knowledge": "a83eb80681b6acc1",
     "ingest_document": "14ece56caaf4fcd2",
     "bulk_ingest_knowledge": "db9fc05af1e13cdf",
     "list_knowledge": "4ea7f4f545878fdc",
     "delete_knowledge": "73268085bef06627",
     "browser_screenshot": "89e8d695b035d5f2",
-    "browser_read_page": "114732e75e12d257",
-    "browser_read_table": "dab744148b75846c",
+    "browser_read_page": "56cdc41f6ee5b6f1",
+    "browser_read_table": "ca6a51b54774f3a5",
     "browser_click": "836c03f7acbc9f6d",
     "browser_fill": "6c3832a67ec9f31e",
-    "browser_evaluate": "10ab6fb73e39e4b0",
+    "browser_evaluate": "03b5e7487d394311",
     "web_search": "387c3cf486568b5d",
-    "fetch_url": "15aa90cb901577fa",
+    "fetch_url": "c98dffed630bc8c8",
     "set_permission": "c12a0a66bb423d59",
-    "analyze_pdf": "7006855cb4bf0b85",
+    "analyze_pdf": "cbc3dc6146123fcb",
     "read_channel": "22d87d43b1ac97e2",
     "add_reaction": "f466eef6573b0166",
     "create_poll": "6fb64482c930284b",
-    # Updated 2026-07-31: wait_seconds param + monitoring guidance added to
-    # manage_process (deliberate schema change, PR fix/wait-polling).
-    "manage_process": "7a4baafdba163d48",
+    # Updated 2026-09-06: zero offset selects status; generation:0 starts paging.
+    "manage_process": "7878b41ea2f80e09",
     "manage_list": "1fe50a2ac7a59952",
     "analyze_image": "8680a337769f8d09",
     "start_loop": "67faa086c9b0987f",
     "stop_loop": "d098afff69b3da0a",
     "list_loops": "c811f88df56a3005",
-    "spawn_agent": "ef5e3c728175def9",
+    "spawn_agent": "d1e71b86f395b2d8",
     # Parent-control contract: queued acknowledgement and interruptible child waits.
     "send_to_agent": "cbd6fb681bca2543",
     "list_agents": "89bed3253e8298d8",
     "kill_agent": "2543a3eeb5720fdf",
-    "get_agent_results": "fe7d43d1328fa712",
-    "wait_for_agents": "f04627146b090818",
+    "get_agent_results": "4742878b8c825633",
+    "wait_for_agents": "c6c21343f9b82b90",
     "spawn_loop_agents": "f221de14d29ddc02",
     "collect_loop_agents": "b4eddcf0e4e2edca",
     "git_ops": "e87a7ab5d999cef3",
@@ -131,6 +131,7 @@ EXPECTED_TOOL_HASHES = {
     "email_search": "3a7584b725d1c134",
     "email_read": "c88d947b915f9cf0",
     "email_list_recent": "f673907aa8906746",
+    "get_tool_output": "b3e8c90fa03433ff",
 }
 
 
@@ -143,7 +144,7 @@ def _canonical_hash(tool_def: dict) -> str:
 class TestToolParity:
     def test_exact_names_and_order(self):
         actual = [t["name"] for t in TOOLS]
-        assert len(actual) == len(EXPECTED_TOOL_ORDER) == 73
+        assert len(actual) == len(EXPECTED_TOOL_ORDER) == 74
         missing = set(EXPECTED_TOOL_ORDER) - set(actual)
         added = set(actual) - set(EXPECTED_TOOL_ORDER)
         assert not missing and not added, (

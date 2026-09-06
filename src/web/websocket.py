@@ -520,6 +520,12 @@ class WebSocketManager:
         return ws
 
     async def _handle_chat(self, ws: web.WebSocketResponse, data: dict) -> None:
+        from ..tools.output_authorization import websocket_output_scope
+
+        with websocket_output_scope(self, ws):
+            await self._handle_chat_scoped(ws, data)
+
+    async def _handle_chat_scoped(self, ws: web.WebSocketResponse, data: dict) -> None:
         """Handle an incoming chat message from a WebSocket client."""
         async with self._policy_lock:
             if not self._policy_authorized(ws):

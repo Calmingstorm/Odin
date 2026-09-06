@@ -98,7 +98,9 @@ TOOLS_SECTION: list[dict] = [
             "Searches ingested knowledge base (docs, runbooks, configs). "
             "Returns ranked '[source] (score: N) content'. "
             "Search here FIRST before web_search. To add, use ingest_document. To list, use "
-            "list_knowledge."
+            "list_knowledge. Large results preserve the original returned ranking and whole "
+            "matches with showing/deferred counts; use get_tool_output(cursor=...) for "
+            "deferred matches or an oversized match, without re-running search."
         ),
         "input_schema": {
             "type": "object",

@@ -293,6 +293,7 @@ DEFAULT_LOCAL_WORKING_DIR = "/var/lib/odin-workspace"
 
 class ToolsConfig(BaseModel):
     enabled: bool = True
+    tool_output_max_chars: int = Field(default=12000, ge=1024, le=12000)
     governor: GovernorConfig = GovernorConfig()
     ssh_key_path: str = "/app/.ssh/id_ed25519"
     ssh_known_hosts_path: str = "/app/.ssh/known_hosts"

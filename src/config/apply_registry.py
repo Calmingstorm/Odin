@@ -1085,6 +1085,15 @@ FIELDS: dict[str, FieldSpec] = {
             ),
         ),
     ),
+    "tools.tool_output_max_chars": FieldSpec(
+        apply_mode="restart",
+        description="Complete serialized tool-output delivery budget.",
+        restart_reason="The executor and result delivery share the budget loaded at startup.",
+        consumers=(Consumer(
+            "Tool output delivery", "restart",
+            "All delivery envelopes use this ceiling, independent of model context size.",
+        ),),
+    ),
     "tools.tool_timeouts": FieldSpec(
         apply_mode="restart",
         description="Per-tool timeout overrides.",

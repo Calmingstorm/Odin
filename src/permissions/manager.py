@@ -25,6 +25,7 @@ _request_tier: contextvars.ContextVar[str | None] = contextvars.ContextVar(
 # gate now wired into ToolExecutor, leaving it would grant every user-tier
 # caller a shell (subject to host_access/governor, but still).
 USER_TIER_TOOLS = frozenset({
+    "get_tool_output",
     "search_history",
     "search_knowledge",
     "web_search",

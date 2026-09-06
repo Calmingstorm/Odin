@@ -937,13 +937,16 @@ class TestAgentHandlers:
             "tools_used": ["grep"], "result": "x" * 2000, "error": "boom"}
         out = await t._handle_get_agent_results({"agent_id": "a"}, user_id="admin")
         assert "failed" in out and '"original_bytes": 2004' in out
-        assert '"truncated": true' in out
+        assert '"truncated": false' in out
+        assert '"end": 2004' in out  # default is now a 4,000-byte ceiling
 
     async def test_wait_for_agents(self):
         t = _tools()
         t._tool_executor._permission_manager.get_tier.return_value = "admin"
         assert "required" in await t._handle_wait_for_agents({})
         assert "must be a list" in await t._handle_wait_for_agents({"agent_ids": "notalist"})
+        t._agent_manager.get_results.return_value = {
+            "id": "a1", "status": "running", "label": "w", "iteration_count": 0}
         t._agent_manager.wait_for_agents = AsyncMock(return_value={
             "a1": {"status": "completed", "label": "w", "result": "x" * 1000}})
         out = await t._handle_wait_for_agents(
@@ -957,6 +960,8 @@ class TestAgentHandlers:
         Runtime stays excluded (it would make a hung agent immortal)."""
         t = _tools()
         t._tool_executor._permission_manager.get_tier.return_value = "admin"
+        t._agent_manager.get_results.return_value = {
+            "id": "a1", "status": "running", "label": "w", "iteration_count": 6}
         t._agent_manager.wait_for_agents = AsyncMock(return_value={
             "a1": {"status": "running", "label": "w", "iteration_count": 7,
                    "runtime_seconds": 123.4, "result": ""}})

@@ -107,7 +107,10 @@ async def test_read_error_is_bounded_by_handler(tmp_path):
 
     assert result.ok is False
     assert len(result.output) < 12_000
-    assert result.output.endswith("[read_file error truncated by handler output budget]")
+    assert result.output == (
+        "Error: read_file envelope exceeds the delivery budget; no lines returned."
+    )
+    assert "e" * 100 not in result.output
     assert "characters omitted" not in result.output
 
 
@@ -143,7 +146,10 @@ async def test_overbudget_transport_output_is_bounded_by_handler(tmp_path):
 
     assert result.ok is False
     assert len(result.output) < 12_000
-    assert result.output.endswith("[read_file error truncated by handler output budget]")
+    assert result.output == (
+        "Error: read_file envelope exceeds the delivery budget; no lines returned."
+    )
+    assert "h" * 100 not in result.output
 
 _RAW_HEADER = "<<<ODIN_READ_FILE_RAW_V1 "
 _RAW_SEPARATOR = ">>>\n<<<ODIN_READ_FILE_RAW_CONTENT_V1>>>\n"

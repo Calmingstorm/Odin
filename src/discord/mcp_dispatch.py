@@ -77,9 +77,8 @@ async def dispatch_mcp_tool(
     outcome = await manager.execute(tool_name, dict(tool_input or {}))
     duration_ms = int((time.monotonic() - started) * 1000)
     text = outcome.text or "(no output)"
-    truncated = len(text) > MODEL_RESULT_CAP
-    if truncated:
-        text = text[:MODEL_RESULT_CAP] + "\n… [truncated at 12000 chars]"
+    # Dispatch owners retain/cap after this seam. Cutting here would make
+    # continuation permanently miss the MCP result's middle and tail.
     metadata = {
         "mcp_server": _bounded_audit_identifier(outcome.server),
         "mcp_tool": _bounded_audit_identifier(outcome.tool),
@@ -91,7 +90,7 @@ async def dispatch_mcp_tool(
         output=text,
         ok=outcome.ok,
         error=None if outcome.ok else text,
-        truncated=truncated,
+        truncated=False,
         duration_ms=duration_ms,
         tool_name=tool_name,
         audit_metadata=metadata,

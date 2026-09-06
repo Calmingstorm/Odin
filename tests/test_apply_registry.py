@@ -186,7 +186,7 @@ class TestResolution:
         from src.config.apply_registry import schema_facts
 
         facts = schema_facts()
-        assert len(facts) == 273
+        assert len(facts) == 274
         assert "graceful_degradation.enabled" not in facts
         assert "grafana_alerts.enabled" not in facts
         for path in (

@@ -978,6 +978,29 @@ async def test_cancelled_failed_personality_write_does_not_publish(
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [False, True])
+async def test_agent_limits_publication_invalidates_only_after_persistence(monkeypatch, failure):
+    async def persist(_changes):
+        return (OSError("disk full") if failure else None), False
+
+    monkeypatch.setattr("src.web.api.config_admin.persist_config_paths_locked", persist)
+    app, bot = _app(register_discord_config)
+    before = bot.config.agents.model_copy(deep=True)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.put("/api/config", json={"agents": {
+            "max_concurrent_agents": 13, "max_lifetime_seconds": 12345,
+        }})
+    assert response.status == (500 if failure else 200)
+    if failure:
+        assert bot.config.agents == before
+        bot.tool_catalog.invalidate.assert_not_called()
+    else:
+        assert bot.config.agents.max_concurrent_agents == 13
+        assert bot.config.agents.max_lifetime_seconds == 12345
+        bot.tool_catalog.invalidate.assert_called_once()
+
+
+@pytest.mark.asyncio
 async def test_cancelled_failed_generic_write_does_not_publish(monkeypatch):
     async def cancelled_failure(_changes):
         return OSError("disk full"), True

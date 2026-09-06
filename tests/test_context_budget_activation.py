@@ -679,12 +679,15 @@ class TestIntegrationAgentGenerationSeams:
             return {"text": "done", "tool_calls": []}
 
         async def tool_executor(*_args, **_kwargs):
-            return "x" * 500_000
+            return "tool completed"
 
         manager = AgentManager()
         agent_id = manager.spawn(
             label="single-snapshot",
-            goal="g",
+            # Input context, unlike tool output, is not reduced by the delivery
+            # cap. Keep the real delivery guard while crossing the second
+            # generation's soft-compaction threshold.
+            goal="g" * 500_000,
             channel_id="c",
             requester_id="u",
             requester_name="user",

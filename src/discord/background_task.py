@@ -261,7 +261,7 @@ async def run_background_task(
                 # Same canonical marking the chat/loop pipelines apply: a
                 # structurally-failed result gets an explicit Error prefix so
                 # the posted step output cannot read as success.
-                output = ensure_failure_visible(str(output), output.ok)
+                output = ensure_failure_visible(output.output, output.ok)
             output = scrub_output_secrets(output)
             prev_output = output
 
@@ -444,6 +444,30 @@ async def _execute_tool(
     mcp_manager: MCPManager | None = None,
     requester_id: str = "",
 ) -> str | ToolResult:
+    from ..tools.runtime_delivery import deliver_runtime_result, execution_delivery_scope
+
+    with execution_delivery_scope(requester_id):
+        result = await _execute_tool_captured(
+            tool_name, tool_input, executor, skill_manager, knowledge_store,
+            embedder, requester, step_desc, mcp_manager, requester_id)
+        return deliver_runtime_result(
+            executor, result, tool_name=tool_name, tool_input=tool_input,
+            user_id=requester_id,
+        )
+
+
+async def _execute_tool_captured(
+    tool_name: str,
+    tool_input: dict,
+    executor: ToolExecutor,
+    skill_manager: SkillManager,
+    knowledge_store: KnowledgeStore | None,
+    embedder: LocalEmbedder | None,
+    requester: str,
+    step_desc: str = "",
+    mcp_manager: MCPManager | None = None,
+    requester_id: str = "",
+) -> str | ToolResult:
     """Execute a single tool, routing to the right handler.
 
     Executor and explicit failure paths return structured ToolResult values
@@ -505,12 +529,23 @@ async def _execute_tool(
             return "Search failed while searching the knowledge base."
         if not results:
             return f"No results for '{query}'."
+        from ..tools.output_delivery import RankedOutput
+
         lines = [
             f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
             f"{r['content'][:200]}"
             for r in results
         ]
-        return "\n".join(lines)
+        formatted = "\n".join(lines)
+        return RankedOutput(
+            formatted,
+            matches=tuple(
+                f"[{r['source']}] (score: {r.get('score', r.get('rrf_score', 0))}): "
+                f"{r['content']}"
+                for r in results
+            ),
+            recovery_required=any(len(r["content"]) > 200 for r in results),
+        )
 
     if tool_name == "list_knowledge" and knowledge_store:
         sources = knowledge_store.list_sources()

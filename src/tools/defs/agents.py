@@ -18,7 +18,8 @@ SPAWN_AGENT_BASE_DESC = (
     "Spawns an autonomous agent for a sub-task. Runs silently in background with "
     "isolated context; it may spawn its own sub-agents up to the nesting limit. "
     "Results are NOT posted to Discord — use wait_for_agents to collect results, then "
-    "deliver a cohesive summary yourself. Max 5/channel, 4h lifetime. Budget warnings "
+    "deliver a cohesive summary yourself. Max 5/channel; lifetime limit for NEW agents: "
+    "14400 seconds. Budget warnings "
     "injected near iteration limit."
 )
 SPAWN_LOOP_BASE_DESC = "Spawns agents from a loop iteration with context. Max 3/iter, 10/loop."
@@ -178,7 +179,8 @@ TOOLS_SECTION: list[dict] = [
                 "agent_id": {"type": "string", "description": "Agent ID"},
                 "cursor": {"type": "string", "description": "Continuation from previous page"},
                 "limit": {"type": "integer", "minimum": 4, "maximum": 8000,
-                          "description": "UTF-8 bytes per page (default 1500, max 8000)"},
+                          "description": "UTF-8 byte ceiling per page (default 4000, max 8000); "
+                                         "may be smaller to fit serialized delivery budget"},
             },
             "required": ["agent_id"],
         },
@@ -186,10 +188,13 @@ TOOLS_SECTION: list[dict] = [
     {
         "name": "wait_for_agents",
         "description": (
-            "Waits for one or more agents to complete and returns their results. "
+            "Waits for one or more agents to complete. "
             "Essential for fan-out (spawn N agents → wait → collect results) and "
             "pipeline (spawn A → wait → spawn B with A's output) coordination patterns. "
             "Returns a snapshot for every requested agent once all finish or timeout. "
+            "Returns status snapshots with up to 800 UTF-8 bytes of result preview per agent, "
+            "possibly less under the aggregate budget. Use get_agent_results and follow its "
+            "cursor until truncated=false for complete output. "
             "Inside an agent, a parent message interrupts the wait; children continue."
         ),
         "input_schema": {

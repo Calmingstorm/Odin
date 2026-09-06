@@ -14,7 +14,9 @@ TOOLS_SECTION: list[dict] = [
         "description": (
             "Searches past conversation history and full channel message logs from all users. Uses "
             "keyword, semantic, and FTS matching. Returns '[date] (role): content'. For ingested "
-            "docs, use search_knowledge."
+            "docs, use search_knowledge. Large results preserve the original returned ranking "
+            "and whole matches with showing/deferred counts; use get_tool_output(cursor=...) "
+            "for deferred matches or an oversized match, without re-running search."
         ),
         "input_schema": {
             "type": "object",

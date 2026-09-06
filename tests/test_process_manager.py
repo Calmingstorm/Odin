@@ -113,6 +113,8 @@ class TestProcessRegistryPoll:
         info = ProcessInfo(pid=1, command="test", host="local", start_time=time.time())
         info.output_buffer.append("hello world\n")
         info.output_buffer.append("second line\n")
+        info.output_tail = b"hello world\nsecond line\n"
+        info.total_output_bytes = len(info.output_tail)
         reg._processes[1] = info
         result = await reg.poll(1)
         assert "hello world" in result
@@ -210,6 +212,12 @@ class TestPollWaitSeconds:
         h._process_registry = lambda: reg
 
         for bad in (-1, 121, float("nan"), float("inf"), "60", True, None):
+            from types import SimpleNamespace
+            h._deps = SimpleNamespace(
+                host_registry=lambda: SimpleNamespace(get=lambda *a, **kw: None),
+                current_user_id=lambda: None, config=lambda: SimpleNamespace(),
+            )
+            h._resolve_host = lambda alias: ("localhost", "", "linux")
             result = await h._handle_manage_process(
                 {"action": "poll", "pid": 1, "wait_seconds": bad}
             )
@@ -226,6 +234,12 @@ class TestPollWaitSeconds:
         h._process_registry = lambda: reg
 
         # Omitted → default 0 → immediate report, exit 0.
+        from types import SimpleNamespace
+        h._deps = SimpleNamespace(
+            host_registry=lambda: SimpleNamespace(get=lambda *a, **kw: None),
+            current_user_id=lambda: None, config=lambda: SimpleNamespace(),
+        )
+        h._resolve_host = lambda alias: ("localhost", "", "linux")
         out, code = await h._handle_manage_process({"action": "poll", "pid": 1})
         assert code == 0 and "status=running" in out
         # Boundary values accepted.
@@ -565,6 +579,7 @@ class TestProcessRegistryCleanup:
             pid=1, command="test", host="local",
             start_time=time.time() - MAX_LIFETIME_SECONDS - 100,
             status="completed",
+            finished_at=time.time() - 86401,
         )
         removed = reg.cleanup()
         assert removed == 1
@@ -623,7 +638,8 @@ class TestRound2Blockers:
         await asyncio.sleep(0)
         info = ProcessInfo(
             pid=1, command="test", host="local",
-            start_time=time.time() - 7200,  # old enough to be eligible
+            start_time=time.time() - 90000,
+            finished_at=time.time() - 86401,
             status="completed", exit_code=0,
         )
         info._exit_task = task
@@ -652,6 +668,8 @@ class TestRound2Blockers:
         async def late_drain():
             await asyncio.sleep(0.3)
             info.output_buffer.append("the final tail\n")
+            info.output_tail = b"the final tail\n"
+            info.total_output_bytes = len(info.output_tail)
 
         info._reader_task = asyncio.create_task(late_drain())
         reg._processes[1] = info

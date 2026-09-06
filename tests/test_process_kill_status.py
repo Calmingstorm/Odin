@@ -9,10 +9,16 @@ from src.tools.process_manager import ProcessInfo, ProcessRegistry
 
 @pytest.mark.parametrize("pid", [17, -17])
 async def test_remote_kill_then_poll_preserves_cause(monkeypatch, pid):
+    from tests.test_remote_processes import _Lease
+
     registry = ProcessRegistry()
     info = ProcessInfo(pid=pid, command="test", start_time=0, remote=True,
                        host="test-host", remote_dir="/tmp/test-job")
     registry._processes[pid] = info
+    info.remote_lease = _Lease()
+    registry._remote_exec = AsyncMock(return_value=(0, json.dumps({
+        "ok": True, "status": "exited", "exit": {"exit_code": -15},
+    })))
     monkeypatch.setattr(registry, "_remote_call", AsyncMock(side_effect=[
         (0, json.dumps({"ok": True, "killed": True, "exit": {"exit_code": -15}})),
         (0, json.dumps({"ok": True, "status": "exited", "exit": {"exit_code": -15}})),
@@ -20,7 +26,11 @@ async def test_remote_kill_then_poll_preserves_cause(monkeypatch, pid):
     assert "killed" in await registry.kill(pid)
     assert info.status == "killed"
     assert info.exit_code == -15
-    assert "killed" in await registry.poll(pid)
+    read_lease = _Lease()
+    try:
+        assert "killed" in await registry.poll(pid, output_lease=read_lease)
+    finally:
+        read_lease.release()
     assert info.status == "killed"
 
 

@@ -136,3 +136,27 @@ class TestLiveAgentAdmissionSource:
         updated.agents.max_concurrent_agents = 6
         bot.config = updated
         assert provider() == 6
+
+    def test_catalog_limits_share_live_admission_source(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        from src.tools import get_tool_definitions
+        from tests.fakes import make_bot
+
+        bot = make_bot()
+        static = next(t for t in get_tool_definitions() if t["name"] == "spawn_agent")
+        original = static["description"]
+
+        def description():
+            return next(t["description"] for t in bot.tool_catalog.merged_definitions()
+                        if t["name"] == "spawn_agent")
+
+        assert "Max 5/channel" in description()
+        updated = bot.config.model_copy(deep=True)
+        updated.agents.max_concurrent_agents = 17
+        updated.agents.max_lifetime_seconds = 12345
+        bot.config = updated
+        bot.tool_catalog.invalidate()
+        assert bot.agent_manager._max_concurrent_agents_provider() == 17
+        assert "Max 17/channel" in description()
+        assert "lifetime limit for NEW agents: 12345 seconds" in description()
+        assert static["description"] == original

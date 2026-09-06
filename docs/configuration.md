@@ -249,7 +249,7 @@ Runtime overrides persist in `data/permissions.json` and take precedence.
 
 | Tier | Access |
 |------|--------|
-| admin | All 73 built-in tools |
+| admin | All 74 built-in tools |
 | user | Read-only: run_command, search_*, list_*, web_search, fetch_url, parse_time |
 | guest | Conversation only, no tools |
 

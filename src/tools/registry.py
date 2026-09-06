@@ -7,6 +7,7 @@ from .defs.devops import TOOLS_SECTION as _DEVOPS
 from .defs.integrations_email import TOOLS_SECTION as _INTEGRATIONS_EMAIL
 from .defs.media_scheduling import TOOLS_SECTION as _MEDIA_SCHEDULING
 from .defs.memory_skills import TOOLS_SECTION as _MEMORY_SKILLS
+from .defs.output_delivery import TOOLS_SECTION as _OUTPUT_DELIVERY
 from .defs.system_files import TOOLS_SECTION as _SYSTEM_FILES
 from .defs.tasks_knowledge import TOOLS_SECTION as _TASKS_KNOWLEDGE
 
@@ -24,6 +25,7 @@ TOOLS: list[dict] = [
     *_AGENTS,
     *_DEVOPS,
     *_INTEGRATIONS_EMAIL,
+    *_OUTPUT_DELIVERY,
 ]
 
 TOOL_MAP: dict[str, dict] = {t["name"]: t for t in TOOLS}

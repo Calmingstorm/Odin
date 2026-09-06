@@ -196,10 +196,11 @@ async def test_reactive_codex_transport_failure_scrubbed(tmp_path, caplog, secre
 @pytest.mark.parametrize("action", ["poll", "write", "kill"])
 @pytest.mark.parametrize("secret", synthetic_patterns())
 async def test_remote_process_transport_descriptors_scrubbed(action, secret):
-    from src.tools.process_manager import ProcessRegistry
+    from src.tools.process_manager import ProcessInfo, ProcessRegistry
 
-    registry = ProcessRegistry()
-    info = SimpleNamespace(pid=-1, status="running", remote_lease=object(), remote_cursor=0)
+    registry = ProcessRegistry(remote_exec=AsyncMock())
+    info = ProcessInfo(pid=-1, command="fixture", host="fixture", start_time=0,
+                       remote_lease=SimpleNamespace(run=AsyncMock(side_effect=OSError(secret))))
     with patch.object(registry, "_remote_controller_command", return_value="inert"), patch.object(
         registry, "_remote_call", AsyncMock(side_effect=OSError(secret)),
     ):
