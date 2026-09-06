@@ -1024,6 +1024,15 @@ class AgentTaskTools:
             )
             if isinstance(result, ToolResult):
                 return result
+            if isinstance(result, dict) and "__image_block__" in result:
+                # Agent callbacks have no native pixel transport. The foreground
+                # marker bypasses text caps, so never stringify any part of it.
+                return ToolResult(
+                    "Error: image results are unsupported in spawned agents; "
+                    "native vision requires a supported foreground conversation.",
+                    ok=False,
+                    error="unsupported_agent_image",
+                )
             return str(result) if result is not None else ""
 
         # Determine iteration cap from config — scheduled spawns get a higher budget
