@@ -148,7 +148,7 @@ async def test_backend_action_receipt_survives_controller_verification(tmp_path,
     controller = ComputerController(store, lambda _: adapter, lambda _: True, enabled=True)
     ctx = RequestContext("owner", "channel", "turn", "host")
     try:
-        session = await controller.session(ctx, {"operation": "start", "app": "xed"})
+        session = await controller.session(ctx, {"operation": "start"})
         assert session["input_supported"], session.get("input_admission")
         observation = await controller.observe(ctx, {"session_id": session["session_id"],
                                                      "generation": session["generation"]})

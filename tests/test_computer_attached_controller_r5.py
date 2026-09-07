@@ -43,7 +43,7 @@ async def test_attachment_capture_select_and_no_devices_cleanup(tmp_path):
     controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
     context = RequestContext("owner", "channel", "turn", "host")
     try:
-        grant = await controller.session(context, {"operation": "start", "app": "xed"})
+        grant = await controller.session(context, {"operation": "start"})
         assert grant["input_supported"] is False
         assert len(grant["sources"]) == 2
         args = {"session_id": grant["session_id"], "generation": 1}
@@ -70,7 +70,7 @@ async def test_attachment_input_flag_without_release_evidence_refused_before_sta
     try:
         with pytest.raises(ComputerError, match="lifecycle_unproven"):
             await controller.session(RequestContext("o", "c", "t", "h"),
-                                     {"operation": "start", "app": "xed"})
+                                     {"operation": "start"})
         assert not controller._live
     finally:
         await controller.close()
@@ -85,7 +85,7 @@ async def test_not_created_claim_requires_backend_no_device_contract(tmp_path, c
     controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
     context = RequestContext("o", "c", "t", "h")
     try:
-        grant = await controller.session(context, {"operation": "start", "app": "xed"})
+        grant = await controller.session(context, {"operation": "start"})
         closed = await controller.session(context, {"operation": "close",
                                                     "session_id": grant["session_id"]})
         assert closed["state"] == "quarantined"

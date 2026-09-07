@@ -203,7 +203,7 @@ async def test_controller_close_cancellation_keeps_receipt_owner(tmp_path, cance
         await release.wait()
         return await original()
     try:
-        grant = await c.session(ctx, {"operation": "start", "app": "xed"})
+        grant = await c.session(ctx, {"operation": "start"})
         native.detach = detach
         close = asyncio.create_task(c.session(ctx, {
             "operation": "close", "session_id": grant["session_id"]}))

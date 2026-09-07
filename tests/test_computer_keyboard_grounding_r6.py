@@ -82,7 +82,10 @@ async def fixture(tmp_path, monkeypatch, *, environment="existing_session", plat
     controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
     context = RequestContext("owner", "channel", "turn", "host")
     try:
-        grant = await controller.session(context, {"operation": "start", "app": "xed"})
+        start = {"operation": "start"}
+        if environment == "isolated":
+            start["app"] = "xed"
+        grant = await controller.session(context, start)
         observed = await controller.observe(context, {"session_id": grant["session_id"],
                                                        "generation": 1})
         obs = controller._live[grant["session_id"]].observations[observed["observation_id"]]
