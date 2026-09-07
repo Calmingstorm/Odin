@@ -365,6 +365,9 @@ class Guardian:
 def input_steps(action, native):
     """Fixed action vocabulary. No model-supplied native code or arbitrary chord."""
     kind = action["type"]
+    if kind == "replace_field_pixels":
+        from src.computer.runtime.pixel_fields import pixel_field_steps
+        return pixel_field_steps(action, native, error=GuardianFailure)
     modifier_codes = []
     if kind in {"click", "double_click", "right_click", "middle_click", "scroll", "polyline"}:
         modifiers = action.get("modifiers", [])
@@ -491,6 +494,9 @@ def _execute(request, *, controller_fd=0, authorize=None):
                      else input_steps(request["action"], native))
             if dispatch_budget(steps) >= DISPATCH_SECONDS:
                 raise GuardianFailure("input_dispatch_expired")
+            if request["action"]["type"] == "replace_field_pixels":
+                from src.computer.runtime.pixel_fields import pixel_field_bounds
+                pixel_field_bounds(request["action"], expected, monitor, error=GuardianFailure)
             # Validate every vertex before pressing. Dispatch rechecks scope.
             if request["action"]["type"] == "polyline":
                 rx, ry, rw, rh = expected["rect"]
@@ -544,7 +550,9 @@ def _execute(request, *, controller_fd=0, authorize=None):
                     if native.pointer() != pointer[0]:
                         raise GuardianFailure("shared_pointer_changed")
                     scope.assert_snapshot(expected, monitor, point=pointer[0],
-                                          pointer_query=native.query_pointer)
+                                          pointer_query=native.query_pointer,
+                                          require_focused_window=(
+                                              request["action"]["type"] == "replace_field_pixels"))
                 else:
                     scope.assert_snapshot(expected, monitor)
         helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]),

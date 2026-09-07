@@ -13,31 +13,87 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 
-def _target(settings):
+async def _loginctl(*arguments):
+    """Read logind's bounded session metadata, never process environments."""
+    process = await asyncio.create_subprocess_exec(
+        "/usr/bin/loginctl", *arguments, stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"}, limit=16384)
+    try:
+        assert process.stdout is not None
+        output = await asyncio.wait_for(process.stdout.read(16385), 1)
+        if len(output) > 16384:
+            raise ValueError("session_metadata_limit")
+        await asyncio.wait_for(process.wait(), 1)
+        if process.returncode != 0:
+            raise ValueError("session_metadata_unavailable")
+        return output.decode("utf-8")
+    finally:
+        if process.returncode is None:
+            try:
+                process.kill()
+            except ProcessLookupError:
+                pass
+            await process.wait()
+
+
+async def _x11_uid(settings):
+    # Root-owned or /dev/null authority is valid with explicit runtime sudo.
+    # Bind it through logind's exact active local X display, not an arbitrary
+    # logged-in account or the service account's own session bus.
+    display = settings.display_name
+    sessions = await _loginctl("list-sessions", "--no-legend", "--no-pager")
+    matches = set()
+    rows = sessions.splitlines()
+    if len(rows) > 16:
+        return None
+    for row in rows:
+        parts = row.split()
+        if not parts:
+            continue
+        info = dict(line.split("=", 1) for line in (await _loginctl(
+            "show-session", parts[0], "-p", "User", "-p", "Display", "-p", "Type",
+            "-p", "Remote", "-p", "Active")).splitlines() if "=" in line)
+        if (info.get("Display") == display and info.get("Type") == "x11"
+                and info.get("Remote") == "no" and info.get("Active") == "yes"):
+            uid = int(info.get("User", "0"))
+            if uid > 0:
+                matches.add(uid)
+    return matches.pop() if len(matches) == 1 else None
+
+
+async def _target(settings):
     if getattr(settings, "environment", None) != "existing_session":
         return None
     if settings.platform == "wayland":
         uid = settings.wayland_uid
         address = settings.wayland_bus_address
     elif settings.platform == "x11":
-        # This is the explicit configured authority file, not a guessed logged-in
-        # user. Root-owned/missing authority cannot establish an operator identity.
+        # Prefer an explicit nonroot-owned authority; privileged display access
+        # otherwise needs an unambiguous logind binding to this exact display.
         authority = Path(settings.xauthority)
-        if not settings.xauthority or not authority.is_absolute():
+        info = authority.stat() if settings.xauthority and authority.is_absolute() else None
+        uid = (info.st_uid if info and stat.S_ISREG(info.st_mode) and info.st_uid > 0
+               else await _x11_uid(settings))
+        if uid is None:
             return None
-        info = authority.stat()
-        if not stat.S_ISREG(info.st_mode):
-            return None
-        uid = info.st_uid
         address = f"unix:path=/run/user/{uid}/bus"
     else:
         return None
     if type(uid) is not int or uid <= 0 or not address.startswith("unix:path=/"):
         return None
     bus = Path(address.removeprefix("unix:path="))
-    info = bus.stat()
-    if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid:
-        return None
+    try:
+        info = bus.stat()
+        if not stat.S_ISSOCK(info.st_mode) or info.st_uid != uid:
+            return None
+    except PermissionError:
+        # /run/user/UID is deliberately private. The explicit sudo transport
+        # authenticates as that UID; only its canonical runtime bus is allowed
+        # without the service account's own stat access.
+        if (not getattr(settings, "runtime_sudo", False)
+                or address != f"unix:path=/run/user/{uid}/bus"):
+            return None
     return uid, pwd.getpwuid(uid).pw_gid, address
 
 
@@ -46,13 +102,13 @@ async def read_accessibility_status(settings):
     result = {"enabled": None, "state": "unknown", "reason": "target_unavailable"}
     process = None
     try:
-        target = _target(settings)
+        target = await asyncio.wait_for(_target(settings), 2)
         if target is None:
             return result
         uid, gid, address = target
         argv = ["/usr/bin/busctl", "--auto-start=no", "--timeout=1s",
                 f"--address={address}", "get-property", "org.a11y.Bus",
-                "/org/a11y/status", "org.a11y.Status", "IsEnabled"]
+                "/org/a11y/bus", "org.a11y.Status", "IsEnabled"]
         identity = {}
         if os.geteuid() == 0:
             identity = {"user": uid, "group": gid, "extra_groups": []}
@@ -70,6 +126,7 @@ async def read_accessibility_status(settings):
             limit=256, **identity)
 
         async def bounded_read():
+            assert process.stdout is not None
             output = await process.stdout.read(129)
             if len(output) > 128:
                 return None
