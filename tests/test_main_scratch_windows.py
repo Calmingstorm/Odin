@@ -1,4 +1,5 @@
 """Metadata-only fakes. No Display connection or desktop access."""
+import copy
 import importlib.util
 import os
 from pathlib import Path
@@ -15,7 +16,8 @@ spec.loader.exec_module(m)
 
 
 def baseline():
-    atoms = {name: i + 100 for i, name in enumerate(sorted(m.MUTABLE | m.COMPUTED))}
+    atoms = {name: i + 100 for i, name in enumerate(sorted(
+        m.MUTABLE | m.COMPUTED | m.IMMUTABLE | m.SURFACE_TYPES))}
     def record(wid):
         return {"identity": {"xid": wid, "pid": 4, "uid": 1000, "start_ticks": 50},
                           "geometry": (20, 30, 500, 400), "border": 0, "extents": (2, 2, 20, 2),
@@ -136,16 +138,21 @@ def test_exact_child_focus_and_pointer_independently(monkeypatch):
     b, calls = baseline(), []
     root = NS(id=1, query_pointer=lambda: NS(mask=0, root_x=50, root_y=70),
               warp_pointer=lambda x, y: calls.append(("pointer", x, y)))
+    focus_state = NS(focus=NS(id=99), revert_to=1)
     d = NS(screen=lambda: NS(root=root), query_keymap=lambda: [0] * 32,
-           sync=lambda: None, get_input_focus=lambda: NS(focus=NS(id=11)))
+           sync=lambda: None, get_input_focus=lambda: focus_state)
     monkeypatch.setattr(m, "_prop", lambda d, root, name, *args, **kw:
                        (0,) if name == "_NET_CURRENT_DESKTOP" else (10,))
     monkeypatch.setattr(m, "_owned", lambda d, ident, action: action())
+    monkeypatch.setattr(m, "identity", lambda d, wid: b["focus_identity"])
+    def set_focus(revert, timestamp):
+        calls.append(("focus", 11))
+        focus_state.focus.id = 11
     monkeypatch.setattr(m, "_window", lambda d, wid: NS(
-        set_input_focus=lambda revert, timestamp: calls.append(("focus", wid))))
+        set_input_focus=set_focus))
     result = m.restore_focus_pointer(d, b)
     assert not result["errors"]
-    assert calls == [("focus", 11), ("pointer", 50, 70)]
+    assert calls == [("focus", 11)]
 
 
 def test_held_input_refuses_focus_and_pointer_no_release():
@@ -193,10 +200,164 @@ def test_reused_child_does_not_prevent_pointer_restore(monkeypatch):
     d = NS(screen=lambda: NS(root=root), query_keymap=lambda: [0] * 32, sync=lambda: None)
     monkeypatch.setattr(m, "_prop", lambda d, root, name, *args, **kw:
                        (0,) if name == "_NET_CURRENT_DESKTOP" else (10,))
-    def refuse(*args):
-        raise RuntimeError("identity changed")
-    monkeypatch.setattr(m, "_owned", refuse)
+    monkeypatch.setattr(m, "identity", lambda d, wid: {})
     result = m.restore_focus_pointer(d, b)
-    assert result["errors"] == [{"stage": "focus", "detail": "identity changed"}]
+    assert result["errors"] == [{"stage": "focus", "detail": "focus identity changed; untouched"}]
     assert "pointer" in result["restored"]
-    assert calls == [(50, 70)]
+    assert calls == []
+
+
+def idle_baseline():
+    b = baseline()
+    b["active"] = (0,)
+    for w in b["windows"].values():
+        w["states"] = tuple(b["atoms"][n] for n in m.IMMUTABLE)
+    return b
+
+
+@pytest.mark.parametrize("map_state", [m.X.IsUnmapped, m.X.IsUnviewable, m.X.IsViewable])
+def test_hidden_sticky_idle_baseline_is_immutable_even_when_viewable(monkeypatch, map_state):
+    b = idle_baseline()
+    for w in b["windows"].values():
+        w["map_state"] = map_state
+    m.validate(b)
+    monkeypatch.setattr(m, "identity", lambda d, wid: b["windows"][wid]["identity"])
+    monkeypatch.setattr(m, "_record", lambda d, wid, atoms: copy.deepcopy(b["windows"][wid]))
+    monkeypatch.setattr(m, "_owned", lambda *args: pytest.fail("unexpected mutation"))
+    result = m.restore_windows(None, b)
+    assert result == {"restored": [], "unchanged": [10, 20], "skipped": [], "errors": []}
+
+
+@pytest.mark.parametrize("change", ["visible", "empty", "root", "managed", "missing_identity",
+                                   "wrong_xid", "dead_pid", "missing_start", "key", "button"])
+def test_idle_absent_active_requires_known_all_hidden_and_nonclient_identity(change):
+    b = idle_baseline()
+    if change == "visible":
+        b["windows"][10]["states"] = ()
+    elif change == "empty":
+        b["clients"], b["stacking"], b["windows"] = (), (), {}
+    elif change == "root":
+        b["focus"] = 1
+    elif change == "managed":
+        b["focus"] = 10
+    elif change == "missing_identity":
+        b["focus_identity"] = None
+    elif change == "wrong_xid":
+        b["focus_identity"]["xid"] = 12
+    elif change == "dead_pid":
+        b["focus_identity"]["pid"] = 0
+    elif change == "missing_start":
+        b["focus_identity"].pop("start_ticks")
+    elif change == "key":
+        b["keymap"][0] = 1
+    elif change == "button":
+        b["pointer"][2] = 0x100
+    with pytest.raises(m.PreflightError):
+        m.validate(b)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("geometry", (1, 2, 3, 4)), ("workspace", (1,)), ("states", ()),
+    ("border", 1), ("extents", (1, 1, 1, 1)), ("map_state", m.X.IsUnmapped),
+])
+def test_changed_immutable_baseline_refuses_repair(monkeypatch, field, value):
+    b = idle_baseline()
+    current = copy.deepcopy(b["windows"])
+    current[10][field] = value
+    monkeypatch.setattr(m, "identity", lambda d, wid: b["windows"][wid]["identity"])
+    monkeypatch.setattr(m, "_record", lambda d, wid, atoms: current[wid])
+    monkeypatch.setattr(m, "_owned", lambda *args: pytest.fail("immutable mutation"))
+    result = m.restore_windows(None, b)
+    assert result["unchanged"] == [20]
+    assert result["errors"][0]["xid"] == 10
+    assert "immutable window untouched" in result["errors"][0]["detail"]
+    assert not result["restored"]
+
+
+@pytest.mark.parametrize("active,identity_ok", [(0, True), (10, True), (0, False)])
+def test_idle_focus_waits_for_wm_never_forges_active(monkeypatch, active, identity_ok):
+    b, calls = idle_baseline(), []
+    f = NS(focus=NS(id=99), revert_to=1)
+    root = NS(id=1, query_pointer=lambda: NS(mask=0, root_x=50, root_y=70),
+              warp_pointer=lambda *args: pytest.fail("unnecessary pointer mutation"))
+    d = NS(screen=lambda: NS(root=root), query_keymap=lambda: [0] * 32,
+           get_input_focus=lambda: f, sync=lambda: None)
+    monkeypatch.setattr(m, "_prop", lambda d, root, name, *args, **kwargs:
+                        (0,) if name == "_NET_CURRENT_DESKTOP" else (active,))
+    monkeypatch.setattr(m, "_send", lambda *args: pytest.fail("EWMH mutation"))
+    monkeypatch.setattr(m, "identity", lambda d, wid: b["focus_identity"] if identity_ok else {})
+    monkeypatch.setattr(m, "_owned", lambda d, ident, action: action())
+    def set_focus(revert, timestamp):
+        calls.append("focus")
+        f.focus.id, f.revert_to = b["focus"], revert
+    monkeypatch.setattr(m, "_window", lambda d, wid: NS(set_input_focus=set_focus))
+    result = m.restore_focus_pointer(d, b)
+    assert calls == (["focus"] if identity_ok else [])
+    assert bool(result["errors"]) == (active != 0 or not identity_ok)
+
+
+@pytest.mark.parametrize("kind", sorted(m.SURFACE_TYPES))
+def test_idle_typed_sticky_surfaces_allowed(kind):
+    b = idle_baseline()
+    w = b["windows"][10]
+    w["states"] = tuple(b["atoms"][n] for n in (
+        "_NET_WM_STATE_STICKY", "_NET_WM_STATE_SKIP_TASKBAR", "_NET_WM_STATE_SKIP_PAGER"))
+    w["window_types"] = (b["atoms"][kind],)
+    m.validate(b)
+    for invalid in ((), (999,), (b["atoms"][kind], 999)):
+        w["window_types"] = invalid
+        with pytest.raises(m.PreflightError):
+            m.validate(b)
+    w["window_types"] = (b["atoms"][kind],)
+    w["states"] = (b["atoms"]["_NET_WM_STATE_STICKY"],)
+    with pytest.raises(m.PreflightError):
+        m.validate(b)
+
+
+def test_immutable_computed_focus_state_change_is_not_ignored(monkeypatch):
+    b = idle_baseline()
+    current = copy.deepcopy(b["windows"])
+    current[10]["states"] += (b["atoms"]["_NET_WM_STATE_FOCUSED"],)
+    monkeypatch.setattr(m, "identity", lambda d, wid: b["windows"][wid]["identity"])
+    monkeypatch.setattr(m, "_record", lambda d, wid, atoms: current[wid])
+    monkeypatch.setattr(m, "_owned", lambda *args: pytest.fail("immutable mutation"))
+    result = m.restore_windows(None, b)
+    assert result["unchanged"] == [20]
+    assert result["errors"][0]["xid"] == 10
+
+
+def test_idle_exact_focus_and_pointer_do_not_receive_redundant_requests(monkeypatch):
+    b = idle_baseline()
+    root = NS(id=1, query_pointer=lambda: NS(mask=0, root_x=50, root_y=70),
+              warp_pointer=lambda *args: pytest.fail("redundant pointer request"))
+    d = NS(screen=lambda: NS(root=root), query_keymap=lambda: [0] * 32,
+           get_input_focus=lambda: NS(focus=NS(id=11), revert_to=1))
+    monkeypatch.setattr(m, "_prop", lambda *args, **kwargs: (0,))
+    monkeypatch.setattr(m, "identity", lambda d, wid: b["focus_identity"])
+    monkeypatch.setattr(m, "_owned", lambda *args: pytest.fail("redundant focus request"))
+    assert not m.restore_focus_pointer(d, b)["errors"]
+
+
+def test_idle_wm_derives_zero_active_after_exact_original_focus(monkeypatch):
+    """Observed Cinnamon behavior: scratch exit focuses the desktop until restored."""
+    b, calls = idle_baseline(), []
+    active = [10]
+    f = NS(focus=NS(id=99), revert_to=2)
+    root = NS(id=1, query_pointer=lambda: NS(mask=0, root_x=50, root_y=70),
+              warp_pointer=lambda *args: pytest.fail("unnecessary pointer request"))
+    d = NS(screen=lambda: NS(root=root), query_keymap=lambda: [0] * 32,
+           get_input_focus=lambda: f, sync=lambda: None)
+    monkeypatch.setattr(m, "_prop", lambda d, root, name, *args, **kwargs:
+                        (0,) if name == "_NET_CURRENT_DESKTOP" else tuple(active))
+    monkeypatch.setattr(m, "_send", lambda *args: pytest.fail("do not forge WM properties"))
+    monkeypatch.setattr(m, "identity", lambda d, wid: b["focus_identity"])
+    monkeypatch.setattr(m, "_owned", lambda d, ident, action: action())
+
+    def set_focus(revert, timestamp):
+        calls.append("focus")
+        f.focus.id, f.revert_to = b["focus"], revert
+        active[0] = 0
+
+    monkeypatch.setattr(m, "_window", lambda d, wid: NS(set_input_focus=set_focus))
+    assert not m.restore_focus_pointer(d, b)["errors"]
+    assert calls == ["focus"]

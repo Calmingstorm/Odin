@@ -148,7 +148,7 @@ def test_main_worker_failure_attempts_every_cleanup(tmp_path, monkeypatch, capsy
     monkeypatch.setattr(randr, "monitor_geometry",
                         lambda *_: {"x": 0, "y": 0, "width": 1280, "height": 900})
     monkeypatch.setattr(randr, "restore", lambda *_: calls.append("randr_restore"))
-    session = {"windows": {}, "pointer": [0, 0, 0], "keymap": [0] * 32}
+    session = {"windows": {}, "pointer": [0, 0, 0], "keymap": [0] * 32, "active": [0]}
     monkeypatch.setattr(windows, "snapshot",
                         lambda _: {**session, "windows": {42: {}}} if launched else session)
     monkeypatch.setattr(windows, "validate", lambda _: None)
@@ -195,7 +195,7 @@ def test_main_worker_failure_attempts_every_cleanup(tmp_path, monkeypatch, capsy
     finally:
         os.umask(old_umask)
     assert calls == ["controller_close", "purge", "integration_close", "terminate_xed",
-                     "terminate_bus", "randr_restore", "window_restore", "focus_restore",
+                     "terminate_bus", "randr_restore", "focus_restore", "window_restore",
                      "display_close"]
     report = json.loads(capsys.readouterr().out)
     assert not report["passed"]

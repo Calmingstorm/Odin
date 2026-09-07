@@ -54,7 +54,10 @@ async def run(args):
     principal = pwd.getpwnam(args.session_user)
     if principal.pw_uid != 1000:
         raise RuntimeError("operator_uid_must_be_1000")
-    base = Path(tempfile.mkdtemp(prefix="assisted-session-r5-", dir="/home/odin"))
+    # /home/odin is deliberately not traversable by the desktop user. Keep the
+    # exact private scratch directory beneath /tmp, with a per-directory ACL,
+    # rather than changing the service user's home permissions.
+    base = Path(tempfile.mkdtemp(prefix="assisted-session-r5-", dir="/tmp"))
     home = base / "scratch-home"
     home.mkdir(mode=0o700)
     command("sudo", "-n", "chown", f"{principal.pw_uid}:{principal.pw_gid}", str(home))
@@ -228,16 +231,22 @@ async def run(args):
             await stage(stages, base, "controller_close", service.controller.close)
             await stage(stages, base, "purge_evidence", service.controller.store.purge_evidence)
             await stage(stages, base, "integration_close", service.close)
+        if app_identity and not before["windows"]["active"][0]:
+            def minimize_scratch():
+                for window in app_windows:
+                    if windows.identity(d, window) == {"xid": window, **app_identity}:
+                        command("xdotool", "windowminimize", str(window))
+            await stage(stages, base, "minimize_only_scratch", minimize_scratch)
         await stage(stages, base, "terminate_gated_xed",
                     lambda: terminate("xed", args, home, processes))
         await stage(stages, base, "terminate_private_bus",
                     lambda: terminate("bus", args, home, processes))
         if processes.get("xed", {}).get("identity"):
             await stage(stages, base, "restore_randr", lambda: randr.restore(d, before["randr"]))
-            await stage(stages, base, "restore_existing_windows",
-                        lambda: windows.restore_windows(d, before["windows"]))
             await stage(stages, base, "restore_focus_pointer",
                         lambda: windows.restore_focus_pointer(d, before["windows"]))
+            await stage(stages, base, "restore_existing_windows",
+                        lambda: windows.restore_windows(d, before["windows"]))
         await asyncio.sleep(.5)
         def compare():
             after = {"randr": randr.capture(d), "windows": windows.snapshot(d),
