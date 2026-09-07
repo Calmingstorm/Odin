@@ -184,6 +184,34 @@ requires new consent/start; the runtime must not guess a new input transform.
 
 ## Recovery, privacy and rollback
 
+### What cleanup does automatically, and what it cannot reconstruct
+
+Normal attached Stop/cancellation owns its worker lifetime independently of the
+caller and screenshot. It closes input authority, drains release receipts and
+reaps workers without waiting for an awake/stable display. The input lease stays
+two seconds; attached cleanup has a nine-second drain inside a ten-second controller
+budget. A timeout is quarantined, not success. Unknown actions are never replayed.
+See [RUNTIME-CLEANUP-R7.md](RUNTIME-CLEANUP-R7.md).
+
+The developer-only scratch harness now orders topology, windows, focus/pointer,
+power and exact verification after verified input/process teardown. Private actual
+RandR recovery passed; physical DPMS cannot be established by Xvfb or Xephyr.
+**The R7 main-session hardware wake check still required manual baseline recovery.**
+Production owned cleanup and power restoration passed, but changed output metadata
+and recreated desktop XIDs correctly blocked exact-baseline restoration. It is not
+an automatic Cinnamon repair and is not being claimed fully unattended.
+See [MAIN-SESSION-R7.md](MAIN-SESSION-R7.md) and
+[RECOVERY-QUALIFICATION-R7.md](RECOVERY-QUALIFICATION-R7.md).
+
+| Situation | Aaron's required action |
+| --- | --- |
+| Normal completed/failed task with `cleanup.complete=true` | No resource cleanup needed. Keep intended document edits; handle document close/reopen yourself when that workflow is not offered. |
+| Monitor sleep, capture loss or changed layout but clean owned cleanup | Do not replay. Wake normally if needed, inspect the intended layout and start a freshly authorized task after it settles. |
+| This machine's wake incident changes output metadata or recreates desktop surfaces | Stop/Disable. Restore the intended layout through normal display controls; inspect displaced windows. Exact old native identities cannot be reconstructed. No Odin/Cinnamon restart or guessed topology command is required or authorized by this runbook. |
+| Cleanup still quarantined after its bounded drain | Leave automation disabled, retain receipts, inspect exact owned processes, then Stop/status again after owners settle. Reconcile recorded workload is read-only, not proof of input release. |
+| Permanently blocked X server, replaced input endpoint or uncatchable release-guardian death | There is no proven non-disruptive automated recovery. Protect unsaved work and seek separately authorized external maintenance. Never delete receipts, kill the graphical session or send global releases to manufacture success. |
+| Developer scratch worker lost or a restoration stage failed | Read its `handoff.json`, `supervisor.json`, `before.json` and `after.json`. Recover only verified baseline state; process absence does not prove desktop restoration. |
+
 - Lost response or unknown input: **never replay the action**, even if no visible
   change is apparent. Pause/Stop and refresh status. For quarantined sessions use
   **Reconcile recorded workload**; this inspects recorded identities only, sends
