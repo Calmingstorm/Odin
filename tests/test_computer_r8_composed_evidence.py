@@ -20,7 +20,8 @@ def successful_evidence(tmp_path):
     (tmp_path / 'r8-composed-scratch.svg').write_bytes(svg)
     Image.new('RGB', (20, 20), 'white').save(tmp_path / 'after-save.png')
     admission = dict(state='eligible', code='same_stack_button_release_verified',
-                     probe_scope='same_stack_disposable', checks=['fixture_only'],
+                     probe_scope='same_stack_disposable',
+                     checks=sorted(evidence.REQUIRED_CHECKS),
                      compositor={'name': 'fixture_not_real_evidence'})
     rows = [dict(kind='started', result=dict(input_supported=True, input_admission=admission))]
     rows.extend(dict(kind='action', label=label, result=dict(status='executed', released=True))
@@ -51,6 +52,14 @@ def test_complete_fixture_is_verifier_input_only(successful_evidence):
 def test_capture_only_is_not_task_success(successful_evidence):
     root, rows, save = successful_evidence
     rows[0]['result']['input_supported'] = False
+    save(rows)
+    with pytest.raises(ValueError, match='actual_production_qualification_required'):
+        evidence.analyze(root)
+
+
+def test_incomplete_qualifier_checks_rejected(successful_evidence):
+    root, rows, save = successful_evidence
+    rows[0]['result']['input_admission']['checks'] = ['held_button_received']
     save(rows)
     with pytest.raises(ValueError, match='actual_production_qualification_required'):
         evidence.analyze(root)

@@ -5,6 +5,12 @@ import sys
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
+REQUIRED_CHECKS = {
+    'held_button_received', 'held_key_received', 'sole_sender_eof',
+    'button_release_received', 'key_release_received', 'same_receiver_fresh_input',
+    'private_compositor_survived', 'exact_mapped_stack', 'private_cleanup_reaped',
+}
+
 
 def analyze(directory):
     directory = Path(directory)
@@ -20,7 +26,7 @@ def analyze(directory):
     if (started['input_supported'] is not True or admission['state'] != 'eligible'
             or admission['probe_scope'] != 'same_stack_disposable'
             or admission['code'] != 'same_stack_button_release_verified'
-            or not admission['checks']):
+            or not REQUIRED_CHECKS.issubset(admission['checks'])):
         raise ValueError('actual_production_qualification_required')
     if any(row['kind'] == 'failure' for row in rows):
         raise ValueError('failed_task_not_qualified')
