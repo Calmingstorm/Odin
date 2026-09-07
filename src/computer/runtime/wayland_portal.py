@@ -60,7 +60,9 @@ def _send(sock, lock, message, image=b"", fd=None, transfer=False):
     if len(encoded) > 1024 * 1024 or len(image) > MAX_BYTES:
         raise PortalError("portal transport bound exceeded")
     header = struct.pack("!II", len(encoded), len(image))
-    ancillary = [] if fd is None else [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))]
+    ancillary = (
+        [] if fd is None else [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [fd]))]
+    )
     with lock:
         try:
             sent = sock.sendmsg([header], ancillary)
@@ -122,7 +124,8 @@ def _source_metadata(node, props, session):
         raise PortalError("monitor source_type required")
     position, size = props.get("position"), props.get("size")
     for value in (position, size):
-        if not isinstance(value, (list, tuple)) or len(value) != 2 or any(type(v) is not int for v in value):
+        if (not isinstance(value, (list, tuple)) or len(value) != 2
+                or any(type(v) is not int for v in value)):
             raise PortalError("trusted portal logical geometry unavailable")
     if any(v <= 0 or v > 8192 for v in size):
         raise PortalError("portal geometry exceeds bound")
@@ -161,17 +164,20 @@ def _frame_time(pts_running, base, clock_before, clock_after, requested, now):
 def _png_rgb(raw, width, height, stride, offset=0):
     if not 0 < width <= 8192 or not 0 < height <= 8192 or width * height > MAX_PIXELS:
         raise PortalError("capture dimensions exceed bound")
-    if stride < width * 3 or offset < 0 or len(raw) > MAX_BYTES or offset + (height - 1) * stride + width * 3 > len(raw):
+    if (stride < width * 3 or offset < 0 or len(raw) > MAX_BYTES
+            or offset + (height - 1) * stride + width * 3 > len(raw)):
         raise PortalError("invalid capture buffer layout")
     def chunk(kind, content):
-        return struct.pack("!I", len(content)) + kind + content + struct.pack("!I", zlib.crc32(kind + content))
+        return (struct.pack("!I", len(content)) + kind + content
+                + struct.pack("!I", zlib.crc32(kind + content)))
     encoder = zlib.compressobj(3)
     compressed = bytearray()
     for y in range(height):
         start = offset + y * stride
         compressed.extend(encoder.compress(b"\0" + raw[start:start + width * 3]))
     compressed.extend(encoder.flush())
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0))
+    return (b"\x89PNG\r\n\x1a\n"
+            + chunk(b"IHDR", struct.pack("!IIBBBBB", width, height, 8, 2, 0, 0, 0))
             + chunk(b"IDAT", bytes(compressed)) + chunk(b"IEND", b""))
 
 
@@ -179,7 +185,8 @@ class WaylandPortalSession:
     """One-shot session. The EIS FD returned by connect_eis belongs to caller."""
 
     def __init__(self, bus_address: str, expected_uid: int, runtime_identity_callback=None):
-        if not isinstance(bus_address, str) or not bus_address.startswith("unix:") or "\x00" in bus_address:
+        if (not isinstance(bus_address, str) or not bus_address.startswith("unix:")
+                or "\x00" in bus_address):
             raise ValueError("explicit Unix session bus address required")
         if type(expected_uid) is not int or expected_uid < 0:
             raise ValueError("expected_uid must be a nonnegative integer")
@@ -226,9 +233,12 @@ class WaylandPortalSession:
                 if os.geteuid() != self.expected_uid:
                     if os.geteuid() != 0:
                         raise PortalError("cannot assume requested desktop UID")
-                    credentials = {"user": self.expected_uid, "group": account.pw_gid, "extra_groups": []}
+                    credentials = {
+                        "user": self.expected_uid, "group": account.pw_gid, "extra_groups": []
+                    }
                 self._process = subprocess.Popen(
-                    ["/usr/bin/python3", "-I", str(Path(__file__).resolve()), "--helper", str(child.fileno()),
+                    ["/usr/bin/python3", "-I", str(Path(__file__).resolve()),
+                     "--helper", str(child.fileno()),
                      self.bus_address, str(self.expected_uid)], pass_fds=(child.fileno(),),
                     stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                     close_fds=True, start_new_session=True,
@@ -242,7 +252,9 @@ class WaylandPortalSession:
                     value = self.runtime_identity_callback(dict(self._process_identity))
                     if inspect.isawaitable(value):
                         await value
-                threading.Thread(target=self._reader, name="wayland-portal-reader", daemon=True).start()
+                threading.Thread(
+                    target=self._reader, name="wayland-portal-reader", daemon=True
+                ).start()
             except BaseException:
                 parent.close()
                 if self._process is not None:
@@ -297,11 +309,15 @@ class WaylandPortalSession:
         with self._lock:
             self._pending[ident] = future
         try:
-            await asyncio.to_thread(_send, self._sock, self._write_lock, {"id": ident, "action": action, **fields})
+            await asyncio.to_thread(
+                _send, self._sock, self._write_lock, {"id": ident, "action": action, **fields}
+            )
             return await asyncio.wait_for(asyncio.shield(asyncio.wrap_future(future)), timeout)
         except BaseException:
             try:
-                await asyncio.to_thread(_send, self._sock, self._write_lock, {"action": "cancel", "id": ident})
+                await asyncio.to_thread(
+                    _send, self._sock, self._write_lock, {"action": "cancel", "id": ident}
+                )
             except Exception:
                 pass
             def dispose(done):
@@ -319,7 +335,9 @@ class WaylandPortalSession:
         if not math.isfinite(timeout_seconds) or not 0 < timeout_seconds <= 300:
             raise ValueError("portal timeout must be in (0, 300]")
         try:
-            result = await self._rpc("open", timeout=timeout_seconds + 8, timeout_seconds=timeout_seconds)
+            result = await self._rpc(
+                "open", timeout=timeout_seconds + 8, timeout_seconds=timeout_seconds
+            )
             with self._lock:
                 if self._generation > result["generation"]:
                     raise PortalError("portal owner lost during open")
@@ -413,7 +431,9 @@ class _PortalWorker:
         self.subscriptions = []
         self.eis_used = False
         self.bus = Gio.DBusConnection.new_for_address_sync(
-            bus_address, Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
+            bus_address,
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION,
             None, None)
         self.bus.set_exit_on_close(False)
         self.bus.connect("closed", lambda *_: self.fence())
@@ -425,9 +445,10 @@ class _PortalWorker:
             self.context.iteration(False)
 
     def dbus(self, method, name):
-        return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-                                  method, self.GLib.Variant("(s)", (name,)), None,
-                                  self.Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+        return self.bus.call_sync(
+            "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+            method, self.GLib.Variant("(s)", (name,)), None,
+            self.Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
 
     def owner(self, name):
         unique = self.dbus("GetNameOwner", name)
@@ -454,8 +475,9 @@ class _PortalWorker:
             raise PortalError("portal session cancelled or owner lost")
 
     def call(self, interface, method, args, path=PATH, timeout=3000):
-        return self.bus.call_sync(self.identity["portal"]["owner"], path, interface, method, args, None,
-                                  self.Gio.DBusCallFlags.NONE, timeout, None)
+        return self.bus.call_sync(
+            self.identity["portal"]["owner"], path, interface, method, args, None,
+            self.Gio.DBusCallFlags.NONE, timeout, None)
 
     def request(self, interface, method, make_args, deadline):
         self.check()
@@ -463,14 +485,18 @@ class _PortalWorker:
         sender = self.bus.get_unique_name()[1:].replace(".", "_")
         path = f"{PATH}/request/{sender}/{token}"
         response = []
-        sub = self.bus.signal_subscribe(self.identity["portal"]["owner"], REQUEST, "Response", path, None,
-                self.Gio.DBusSignalFlags.NONE, lambda _b, _s, _p, _i, _n, params: response.append(params.unpack()))
+        sub = self.bus.signal_subscribe(
+            self.identity["portal"]["owner"], REQUEST, "Response", path, None,
+            self.Gio.DBusSignalFlags.NONE,
+            lambda _b, _s, _p, _i, _n, params: response.append(params.unpack()))
         complete = False
         try:
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise PortalError("portal consent timed out")
-            actual = self.call(interface, method, make_args(token), timeout=max(1, min(3000, int(remaining * 1000)))).unpack()[0]
+            actual = self.call(
+                interface, method, make_args(token),
+                timeout=max(1, min(3000, int(remaining * 1000)))).unpack()[0]
             if actual != path:
                 raise PortalError("unexpected portal request path")
             while not response:
@@ -505,25 +531,32 @@ class _PortalWorker:
                 _, old, new = params.unpack()
                 if old == expected and new != expected:
                     self.fence()
-            self.subscriptions.append(self.bus.signal_subscribe("org.freedesktop.DBus", "org.freedesktop.DBus",
-                "NameOwnerChanged", "/org/freedesktop/DBus", name, self.Gio.DBusSignalFlags.NONE, changed))
-        if self.owner(DEST) != self.identity["portal"] or self.owner("org.gnome.Shell") != self.identity["shell"]:
+            self.subscriptions.append(self.bus.signal_subscribe(
+                "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
+                "/org/freedesktop/DBus", name, self.Gio.DBusSignalFlags.NONE, changed))
+        if (self.owner(DEST) != self.identity["portal"]
+                or self.owner("org.gnome.Shell") != self.identity["shell"]):
             raise PortalError("portal/compositor identity changed")
         deadline = time.monotonic() + timeout_seconds
         data = self.request(RD, "CreateSession", lambda t: variant("(a{sv})", ({
-            "handle_token": variant("s", t), "session_handle_token": variant("s", "session_" + uuid.uuid4().hex)},)), deadline)
+            "handle_token": variant("s", t),
+            "session_handle_token": variant("s", "session_" + uuid.uuid4().hex)},)), deadline)
         self.session = data.get("session_handle")
         prefix = f"{PATH}/session/{self.bus.get_unique_name()[1:].replace('.', '_')}/"
         if not isinstance(self.session, str) or not self.session.startswith(prefix):
             raise PortalError("invalid portal session path")
-        self.subscriptions.append(self.bus.signal_subscribe(self.identity["portal"]["owner"], SESSION, "Closed",
+        self.subscriptions.append(self.bus.signal_subscribe(
+            self.identity["portal"]["owner"], SESSION, "Closed",
             self.session, None, self.Gio.DBusSignalFlags.NONE, lambda *_: self.fence()))
         self.request(RD, "SelectDevices", lambda t: variant("(oa{sv})", (self.session, {
-            "handle_token": variant("s", t), "types": variant("u", 3), "persist_mode": variant("u", 0)})), deadline)
+            "handle_token": variant("s", t), "types": variant("u", 3),
+            "persist_mode": variant("u", 0)})), deadline)
         self.request(SC, "SelectSources", lambda t: variant("(oa{sv})", (self.session, {
-            "handle_token": variant("s", t), "types": variant("u", 1), "multiple": variant("b", True),
+            "handle_token": variant("s", t), "types": variant("u", 1),
+            "multiple": variant("b", True),
             "cursor_mode": variant("u", 2)})), deadline)
-        result = self.request(RD, "Start", lambda t: variant("(osa{sv})", (self.session, "", {"handle_token": variant("s", t)})), deadline)
+        result = self.request(RD, "Start", lambda t: variant(
+            "(osa{sv})", (self.session, "", {"handle_token": variant("s", t)})), deadline)
         streams = result.get("streams", [])
         if not streams or len(streams) > 32:
             raise PortalError("no granted streams or excessive stream count")
@@ -536,14 +569,16 @@ class _PortalWorker:
             raise PortalError("keyboard and pointer consent required")
         self.check()
         self.alive = True
-        return {"streams": streams, "devices": devices, "identity": self.identity, "generation": self.generation}
+        return {"streams": streams, "devices": devices, "identity": self.identity,
+                "generation": self.generation}
 
     def descriptor(self, interface, method):
         self.check()
         if not self.alive:
             raise PortalError("portal session is not alive")
-        value, fds = self.bus.call_with_unix_fd_list_sync(self.identity["portal"]["owner"], PATH, interface,
-            method, self.GLib.Variant("(oa{sv})", (self.session, {})), self.GLib.VariantType.new("(h)"),
+        value, fds = self.bus.call_with_unix_fd_list_sync(
+            self.identity["portal"]["owner"], PATH, interface, method,
+            self.GLib.Variant("(oa{sv})", (self.session, {})), self.GLib.VariantType.new("(h)"),
             self.Gio.DBusCallFlags.NONE, 3000, None, None)
         fd = _take_fd(fds, value.unpack()[0])
         try:
@@ -560,7 +595,8 @@ class _PortalWorker:
         fd = self.descriptor(RD, "ConnectToEIS")
         sock = socket.socket(fileno=fd)
         try:
-            pid, uid, gid = struct.unpack("3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+            pid, uid, gid = struct.unpack(
+                "3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
             shell = self.owner("org.gnome.Shell")
             if shell != self.identity["shell"] or (pid, uid) != (shell["pid"], self.expected_uid):
                 raise PortalError("EIS creator differs from measured compositor")
@@ -583,7 +619,8 @@ class _PortalWorker:
         try:
             requested = time.monotonic()
             pipeline = Gst.parse_launch(
-                f"pipewiresrc name=source fd={fd} path={node_id} do-timestamp=false ! videoconvert ! "
+                f"pipewiresrc name=source fd={fd} path={node_id} "
+                "do-timestamp=false ! videoconvert ! "
                 "video/x-raw,format=RGB,width=[1,8192],height=[1,8192] ! "
                 "appsink name=capture sync=false max-buffers=2 drop=true enable-last-sample=false")
             oversized = threading.Event()
@@ -593,8 +630,9 @@ class _PortalWorker:
                     if event.type == Gst.EventType.CAPS:
                         caps = event.parse_caps().get_structure(0)
                         width, height = caps.get_value("width"), caps.get_value("height")
-                        if (type(width) is not int or type(height) is not int or
-                                not 0 < width <= 8192 or not 0 < height <= 8192 or width * height > MAX_PIXELS):
+                        if (type(width) is not int or type(height) is not int
+                                or not 0 < width <= 8192 or not 0 < height <= 8192
+                                or width * height > MAX_PIXELS):
                             oversized.set()
                 if probe.type & Gst.PadProbeType.BUFFER:
                     buffer = probe.get_buffer()
@@ -637,14 +675,16 @@ class _PortalWorker:
                 before = time.monotonic()
                 after_bracket = (before, clock.get_time() / Gst.SECOND, time.monotonic())
                 try:
-                    captured, uncertainty = _frame_time(running / Gst.SECOND, base / Gst.SECOND,
-                                                       first, after_bracket, requested, time.monotonic())
+                    captured, uncertainty = _frame_time(
+                        running / Gst.SECOND, base / Gst.SECOND,
+                        first, after_bracket, requested, time.monotonic())
                 except PortalError as exc:
                     last_reason = str(exc)
                     continue
                 info = GstVideo.VideoInfo.new_from_caps(sample.get_caps())
                 width, height = info.width, info.height
-                if not 0 < width <= 8192 or not 0 < height <= 8192 or width * height > MAX_PIXELS or buf.get_size() > MAX_BYTES:
+                if (not 0 < width <= 8192 or not 0 < height <= 8192
+                        or width * height > MAX_PIXELS or buf.get_size() > MAX_BYTES):
                     raise PortalError("capture frame exceeds resource bounds")
                 mapped, view = buf.map(Gst.MapFlags.READ)
                 if not mapped:
@@ -654,9 +694,11 @@ class _PortalWorker:
                 finally:
                     buf.unmap(view)
                 self.check()
-                return {"width": width, "height": height, "captured_at": captured, "clock_verified": True,
-                        "clock_uncertainty_seconds": uncertainty, "clock_source": "pipewire_pts_segment_gstclock_monotonic_brackets",
-                        "source_metadata": self.streams[node_id], "generation": self.generation}, image
+                return {"width": width, "height": height, "captured_at": captured,
+                        "clock_verified": True, "clock_uncertainty_seconds": uncertainty,
+                        "clock_source": "pipewire_pts_segment_gstclock_monotonic_brackets",
+                        "source_metadata": self.streams[node_id],
+                        "generation": self.generation}, image
             raise PortalError(last_reason)
         finally:
             if pipeline is not None:

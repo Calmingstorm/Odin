@@ -24,7 +24,8 @@ SPEC.loader.exec_module(portal)
 
 def test_import_is_lazy():
     result = subprocess.run(["/usr/bin/python3", "-I", "-c",
-        "import runpy,sys; runpy.run_path(sys.argv[1]); assert 'gi' not in sys.modules", str(SOURCE)],
+        "import runpy,sys; runpy.run_path(sys.argv[1]); assert 'gi' not in sys.modules",
+        str(SOURCE)],
         capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr
 
@@ -110,7 +111,8 @@ def test_png_stride_and_dimensions():
         (255, 0, 0), (0, 255, 0), (0, 0, 255), (255, 255, 255)]
 
 
-@pytest.mark.parametrize("width,height,stride", [(8193, 1, 24579), (8192, 8192, 24576), (1, 1, 2), (0, 1, 0)])
+@pytest.mark.parametrize(
+    "width,height,stride", [(8193, 1, 24579), (8192, 8192, 24576), (1, 1, 2), (0, 1, 0)])
 def test_png_resource_bounds(width, height, stride):
     with pytest.raises(portal.PortalError):
         portal._png_rgb(b"abc", width, height, stride)
@@ -138,7 +140,8 @@ def test_unverified_stale_future_clock_refused(running, base, first, last, reque
 
 
 def test_trusted_source_geometry_copy():
-    props = {"source_type": 1, "position": [-1920, 0], "size": [1920, 1080], "mapping_id": "trusted"}
+    props = {"source_type": 1, "position": [-1920, 0], "size": [1920, 1080],
+             "mapping_id": "trusted"}
     value = portal._source_metadata(10, props, "/session/private")
     props["size"][0] = 12
     assert value == {"node_id": 10, "session_handle": "/session/private", "source_type": 1,
@@ -187,7 +190,8 @@ def test_request_subscribed_before_call_and_authenticated_response():
                                    SimpleNamespace(unpack=lambda: (0, {"answer": "trusted"})))
         return SimpleNamespace(unpack=lambda: (path,))
     worker.call = call
-    assert worker.request(portal.RD, "Start", lambda t: t, time.monotonic() + 1) == {"answer": "trusted"}
+    assert worker.request(portal.RD, "Start", lambda t: t, time.monotonic() + 1) == {
+        "answer": "trusted"}
     assert len(worker.bus.unsubscribed) == 1
 
 
@@ -212,7 +216,8 @@ def test_consent_denial_is_not_grant():
     worker = request_worker()
     def call(*args, **kwargs):
         path = next(iter(worker.bus.callbacks))
-        worker.bus.callbacks[path](None, None, None, None, None, SimpleNamespace(unpack=lambda: (1, {})))
+        worker.bus.callbacks[path](
+            None, None, None, None, None, SimpleNamespace(unpack=lambda: (1, {})))
         return SimpleNamespace(unpack=lambda: (path,))
     worker.call = call
     with pytest.raises(portal.PortalError, match="consent response 1"):
@@ -263,7 +268,8 @@ def test_helper_inert_until_identity_callback_and_reaped(tmp_path):
             identities.append(identity)
             assert Path(f"/proc/{identity['pid']}").exists()
             await asyncio.sleep(.05)
-        session = portal.WaylandPortalSession("unix:path=" + str(tmp_path / "nonexistent-bus"), os.getuid(), callback)
+        session = portal.WaylandPortalSession(
+            "unix:path=" + str(tmp_path / "nonexistent-bus"), os.getuid(), callback)
         await session._start()
         assert identities == [session.process_identity]
         assert session._process.poll() is None
@@ -290,7 +296,8 @@ def test_cancelled_identity_callback_never_abandons_helper(tmp_path):
         async def callback(identity):
             ready.set()
             await asyncio.Future()
-        session = portal.WaylandPortalSession("unix:path=" + str(tmp_path / "missing"), os.getuid(), callback)
+        session = portal.WaylandPortalSession(
+            "unix:path=" + str(tmp_path / "missing"), os.getuid(), callback)
         task = asyncio.create_task(session.open())
         await ready.wait()
         task.cancel()
@@ -372,7 +379,8 @@ def test_open_preserves_authenticated_start_geometry_only():
     assert result["streams"][0][0] == 52
     assert worker.streams[52]["session_handle"] == path
     assert worker.streams[52]["position"] == [1920, 0]
-    assert [method for method, _ in calls] == ["CreateSession", "SelectDevices", "SelectSources", "Start"]
+    assert [method for method, _ in calls] == [
+        "CreateSession", "SelectDevices", "SelectSources", "Start"]
     sources = next(args for method, args in calls if method == "SelectSources")
     assert sources[1]["multiple"] is True
     assert sources[1]["types"] == 1
@@ -406,7 +414,8 @@ from gi.repository import Gst,GstVideo,GstApp
 spec=importlib.util.spec_from_file_location("portal",sys.argv[1])
 m=importlib.util.module_from_spec(spec);spec.loader.exec_module(m)
 Gst.init(None)
-pipe=Gst.parse_launch("videotestsrc is-live=true ! video/x-raw,format=RGB,width=8,height=8 ! appsink name=sink sync=false")
+pipe=Gst.parse_launch("videotestsrc is-live=true ! video/x-raw,format=RGB,width=8,height=8 ! "
+                      "appsink name=sink sync=false")
 try:
     requested=time.monotonic()
     pipe.set_state(Gst.State.PLAYING)
@@ -428,9 +437,11 @@ try:
     print("synthetic_gst_clock_png_ok")
 finally: pipe.set_state(Gst.State.NULL)
 '''
-    check = subprocess.run(["/usr/bin/python3", "-I", "-c", "import gi"], capture_output=True, timeout=5)
+    check = subprocess.run(
+        ["/usr/bin/python3", "-I", "-c", "import gi"], capture_output=True, timeout=5)
     if check.returncode:
         pytest.skip("optional system GI unavailable")
-    result = subprocess.run(["/usr/bin/python3", "-I", "-c", code, str(SOURCE)], capture_output=True, timeout=10)
+    result = subprocess.run(
+        ["/usr/bin/python3", "-I", "-c", code, str(SOURCE)], capture_output=True, timeout=10)
     assert result.returncode == 0, result.stderr.decode()
     assert b"synthetic_gst_clock_png_ok" in result.stdout

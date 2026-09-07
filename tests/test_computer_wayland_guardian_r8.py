@@ -8,11 +8,11 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
-from pathlib import Path
 import select
 import signal
 import subprocess
 import time
+from pathlib import Path
 
 import pytest
 
@@ -44,7 +44,8 @@ uint32_t ei_event_keyboard_get_xkb_group(struct ei_event *);
 LIBRARY = fixture.LIBRARY.replace(
     '#include "libei.h"', '#include "libei.h"\n#include <xkbcommon/xkbcommon.h>'
 ).replace(
-    "static struct ei_region region;", "static struct ei_region region, second; static int region_gone, changed;"
+    "static struct ei_region region;",
+    "static struct ei_region region, second; static int region_gone, changed;"
 ).replace(
     "static uint64_t clock_us=1000000;", "static uint64_t clock_us=1000000;"
 ).replace(
@@ -53,10 +54,12 @@ LIBRARY = fixture.LIBRARY.replace(
     "(void)d;(void)x;(void)y;", '(void)d;emit("MOVE %.3f %.3f\\n",x,y);'
 ).replace(
     "(void)d; return n==0 ? &region : NULL;",
-    '(void)d; if(region_gone)return NULL; if(n==1 && getenv("FAKE_MULTI"))return &second; return n==0 ? &region : NULL;'
+    '(void)d; if(region_gone)return NULL; if(n==1 && getenv("FAKE_MULTI"))return &second; '
+    'return n==0 ? &region : NULL;'
 ).replace(
     '(void)r; const char *mode=getenv("FAKE_MAPPING");',
-    'if(r==&second){return getenv("FAKE_DUPLICATE")?"source-1":"source-2";} const char *mode=getenv("FAKE_MAPPING");'
+    'if(r==&second){return getenv("FAKE_DUPLICATE")?"source-1":"source-2";} '
+    'const char *mode=getenv("FAKE_MAPPING");'
 ).replace(
     "(void)r;return 100;", "return r==&second?1000:100;"
 ).replace(
@@ -190,7 +193,8 @@ def test_readiness_and_single_fd_owner(guardian):
     assert g.finish()[0] == 0
 
 
-@pytest.mark.parametrize("ending", [b"R\n", b"C\n", b"R\nH 31 273 160 260 2000\n", b"C\nH 31 273 160 260 2000\n", None, "signal"])
+@pytest.mark.parametrize("ending", [
+    b"R\n", b"C\n", b"R\nH 31 273 160 260 2000\n", b"C\nH 31 273 160 260 2000\n", None, "signal"])
 def test_legacy_exact_ledger_and_fence(guardian, ending):
     g = guardian()
     g.hold()
@@ -201,7 +205,8 @@ def test_legacy_exact_ledger_and_fence(guardian, ending):
     else:
         g.send(ending)
     assert g.finish()[0] == 0
-    assert g.inputs() == [["BUTTON", "272", "1"], ["KEY", "30", "1"], ["KEY", "30", "0"], ["BUTTON", "272", "0"]]
+    assert g.inputs() == [
+        ["BUTTON", "272", "1"], ["KEY", "30", "1"], ["KEY", "30", "0"], ["BUTTON", "272", "0"]]
     release = next(i for i, s in enumerate(g.lines) if s.startswith("BUTTON 272 0"))
     assert all(i > release for i, s in enumerate(g.lines) if s.startswith("STOP"))
 
@@ -216,7 +221,11 @@ def test_independent_lease_nonblocking_observer(guardian, output):
     assert 60000 <= int(keys[1][3]) - int(keys[0][3]) <= 65000
 
 
-@pytest.mark.parametrize("command", [b"F\n", b"B 2001\n", b"B 0\n", b"B -1\n", b"B 9 extra\n", b"B 100\nB 100\n", b"B 100\nM nan 0\n", b"B 100\nM 800 1\n", b"B 100\nM 1 600\n", b"B 100\nP 271 0 0\n", b"B 100\nK 2 30 30\n", b"B 100\nD 272 257\n", b"B 100\nT 00\n", b"B 100\nT zz\n", b"B 100\nT 7f\n", b"B 100\nT " + b"61" * 257 + b"\n", b"\x00", b"x" * 32768, b"\r\n"])
+@pytest.mark.parametrize("command", [
+    b"F\n", b"B 2001\n", b"B 0\n", b"B -1\n", b"B 9 extra\n", b"B 100\nB 100\n",
+    b"B 100\nM nan 0\n", b"B 100\nM 800 1\n", b"B 100\nM 1 600\n", b"B 100\nP 271 0 0\n",
+    b"B 100\nK 2 30 30\n", b"B 100\nD 272 257\n", b"B 100\nT 00\n", b"B 100\nT zz\n",
+    b"B 100\nT 7f\n", b"B 100\nT " + b"61" * 257 + b"\n", b"\x00", b"x" * 32768, b"\r\n"])
 def test_malformed_never_injects(guardian, command):
     g = guardian()
     g.send(command)
@@ -234,7 +243,9 @@ def test_bad_repeated_hold_releases_original(guardian):
 
 def test_multiaction_same_ei_context(guardian):
     g = guardian()
-    for n, cmd in enumerate([b"M 10 20", b"P 272 30 40", b"D 273 3 1 2 3 4 5 6", b"K 2 29 30", b"T 6141"], 1):
+    for n, cmd in enumerate(
+        [b"M 10 20", b"P 272 30 40", b"D 273 3 1 2 3 4 5 6", b"K 2 29 30", b"T 6141"], 1
+    ):
         g.send(b"B 1000\n" + cmd + b"\n")
         g.event("action_done", n)
         assert g.proc.poll() is None
@@ -348,7 +359,8 @@ def test_idle_heartbeat_not_permanent_authority(guardian):
     assert g.receipts[-1]["reason"] == "controller-timeout"
 
 
-@pytest.mark.parametrize("program", [b"D 272 256 " + b"10 20 " * 255 + b"30 40", b"T " + b"61" * 256])
+@pytest.mark.parametrize(
+    "program", [b"D 272 256 " + b"10 20 " * 255 + b"30 40", b"T " + b"61" * 256])
 def test_maximum_program_completes_within_nonrenewed_lease(guardian, program):
     g = guardian()
     g.send(b"B 2000\n" + program + b"\n")
@@ -397,7 +409,8 @@ def test_named_modifier_follows_current_caps_control_swap(guardian, monkeypatch)
     assert ["KEY", "29", "1"] not in g.inputs()
 
 
-@pytest.mark.parametrize("chord", [b"ctrl+NotAKey", b"ctrl+ctrl+a", b"hyper+a", b"ctrl+", b"ctrl++a"])
+@pytest.mark.parametrize(
+    "chord", [b"ctrl+NotAKey", b"ctrl+ctrl+a", b"hyper+a", b"ctrl+", b"ctrl++a"])
 def test_named_chord_refuses_unknown_or_malformed(guardian, chord):
     g = guardian()
     g.send(b"B 1000\nJ " + chord + b"\n")
