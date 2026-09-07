@@ -20,10 +20,11 @@ def test_capture_discards_raced_pixels_without_weakening_binding(
     connection = Mock(spec=worker.AttachedConnection, _display=object())
     connection.named_sources.return_value = [selected]
     backend = Mock(_connection=connection)
-    backend.topology.return_value = SimpleNamespace(monitors=[object()])
+    backend.topology.return_value = SimpleNamespace(monitors=[object()], event_revision=1)
+    backend.power_status.return_value = "on"
     frames = [SimpleNamespace(source=SimpleNamespace(pixel_width=100, pixel_height=100),
         width=100, height=100, delivered_to_source=AffineTransform(), resize_scale=(1, 1),
-        image_bytes=bytes([n])) for n in range(3)]
+        image_bytes=bytes([n]), crop=None) for n in range(3)]
     backend.capture.side_effect = frames
     scope = Mock()
     scope.snapshot.side_effect = snapshots

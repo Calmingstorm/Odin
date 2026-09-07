@@ -108,7 +108,7 @@ def test_context_revocation_hook_rechecked_with_host_and_tool_authority():
     assert not service._authorize(context)
 
 
-def test_attached_factory_enables_only_native_xed_with_pinned_operator_settings():
+def test_attached_factory_is_generic_with_pinned_operator_settings():
     service, _ = fixture(SimpleNamespace())
     service.settings.environment = "existing_session"
     service.settings.platform = "x11"
@@ -116,8 +116,9 @@ def test_attached_factory_enables_only_native_xed_with_pinned_operator_settings(
     service.settings.xauthority = ""
     service.settings.monitor_names = ["fixture"]
     service.settings.runtime_sudo = True
-    xed = service._backend("xed")
+    xed = service._backend()
     drawing = service._backend("drawing")
     assert xed._input_enabled and xed._runtime_sudo
-    assert not drawing._input_enabled
+    assert drawing._input_enabled and drawing._runtime_sudo
+    assert "app_profile" not in xed._config and "app_profile" not in drawing._config
     assert not xed._children and not drawing._children
