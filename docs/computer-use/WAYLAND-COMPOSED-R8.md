@@ -95,3 +95,46 @@ First verifier suite: **8 passed**, 0.42s, command exit0 and standalone supervis
 cleanup true. Log `/home/odin/tmp/r8-composed-unit1.log`, receipt
 `/home/odin/tmp/r8-composed-unit1-owned.json`. This is verifier testing only,
 not successful application proof.
+
+Latest controller-aware verifier suite: **10 passed**,0.41s, command exit0,
+cleanup true, no residuals or signals. Log `r8-composed-unit4.log`, receipt
+`r8-composed-unit4-owned.json` under `/home/odin/tmp`. Focused Ruff for all three
+new Python files and git diff-check passed. Full project tests were not run here.
+
+All native1-6 outer commands returned1. Each standalone receipt has
+`cleanup_ok=true`, no residuals/signals and complete census; each exact host
+cleanup report has no owned process or new helper residual, absent cgroup,
+complete baseline/final scan and no census errors. Native1-5 live health checks
+passed2/2. Native6 ended before the live check, so the container-running check
+correctly FAILED (1/2); its later exact cleanup evidence is separate, not a
+retroactive healthy runtime claim.
+
+## Reproduction / continuation
+
+From the qualification worktree, build with these contexts (no deploy paths):
+
+```sh
+docker buildx build --load --progress plain \
+  --build-context runtime=/home/odin/odin-dev \
+  --build-context probe=/home/odin/odin-dev \
+  --build-context portal=/home/odin/reviews/computer-use-r8-portal-fix \
+  -f scripts/computer-feasibility/r8-composed.Containerfile \
+  -t localhost/odin-wayland-composed:r8-next .
+```
+
+The actual run must have a NEW evidence directory, bounded standalone outer
+subreaper, Docker --init and exact cgroup cleanup. Use the following shape with
+unique names (existing outputs are not overwritten):
+
+```sh
+python3 scripts/computer-feasibility/owned-test-supervisor-r6.py \
+  --deadline 420 --grace 5 --report /home/odin/tmp/r8-composed-next-owned.json -- \
+  bash scripts/computer-feasibility/r8-composed-lab.sh \
+  --isolated-production-composition localhost/odin-wayland-composed:r8-next \
+  /home/odin/tmp/r8-composed-next-20260907
+```
+
+Only after an actual successful run may `r8-composed-evidence.py EVIDENCE_DIR`
+be used to certify the narrow saved-rectangle task. Currently no directory
+passes that verifier. All module/source/image identifiers are preserved in each
+directory; build5/r8e source snapshot must not be conflated with later parent edits.
