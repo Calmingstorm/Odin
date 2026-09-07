@@ -146,7 +146,7 @@ class ComputerStore:
         with self.lock:
             current = self.get_session(grant.session_id)
             if (current.generation != grant.generation
-                    or current.state not in {'starting', 'active'}):
+                    or current.state not in {'starting', 'active', 'paused'}):
                 raise ComputerError('grant_revoked')
             previous = self.runtime_descriptor(grant.session_id)
             if previous is not None:

@@ -1210,7 +1210,8 @@ class ComputerUseConfig(BaseModel):
     @classmethod
     def validate_wayland_bus_address(cls, value: str) -> str:
         if value and (len(value) > 512 or not re.fullmatch(r"unix:path=/[^,;\s\x00]+", value)):
-            raise ValueError("computer.wayland_bus_address must name one explicit local session bus")
+            raise ValueError(
+                "computer.wayland_bus_address must name one explicit local session bus")
         return value
 
     @field_validator("wayland_guardian_binary")

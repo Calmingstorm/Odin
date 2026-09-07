@@ -168,6 +168,15 @@ async def test_backend_action_receipt_survives_controller_verification(tmp_path,
         # fabricated visual success. Execution evidence still survives transport.
         assert result["status"] == "not_satisfied"
         assert result["execution"] == {"injected": True, "released": True}
+        paused = await controller.session(ctx, {"operation": "pause",
+                                                "session_id": session["session_id"]})
+        assert paused["state"] == "paused"
+        resumed = await controller.session(ctx, {"operation": "resume",
+                                                 "session_id": session["session_id"],
+                                                 "generation": paused["generation"]})
+        assert resumed["state"] == "active"
+        assert resumed["input_supported"] is True
+        assert resumed["consent_generation"] > session["consent_generation"]
     finally:
         await controller.close()
         store.close()

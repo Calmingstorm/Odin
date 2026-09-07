@@ -1,5 +1,10 @@
 # PR350 final consolidation, 2026-09-07
 
+**Superseded by R8:** this records the earlier X11-only handoff and its gate
+failures. The subsequent explicit Wayland requirement is implemented and measured
+in R8. Read WAYLAND-OPERATOR-R8.md and REVIEW-CHECKPOINT-R8.md for current status.
+The blanket refusal below is historical; previous coverage failures remain recorded.
+
 **Scope frozen. Remains draft for Claudia's review and Aaron's local deployment
 decision. No deployment, restart, merge, tag or GitHub/release pipeline.**
 

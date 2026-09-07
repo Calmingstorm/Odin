@@ -1991,6 +1991,26 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
         "not a shell; containment depends on worker/profile, not this helper alone"
     ),
     "src/web/api/self_update.py": "argv-form git/gh during self-update, inside the install",
+    "src/computer/runtime/wayland_guardian.py": (
+        "operator-pinned trusted native guardian and inherited EI FD; absolute argv, "
+        "sanitized environment, UID drop, no shell or arbitrary command; writes only IPC"
+    ),
+    "src/computer/runtime/wayland_portal.py": (
+        "fixed absolute system-Python helper, private socketpair, explicit bus/UID binding; "
+        "no arbitrary program or shell, reads source only and writes bounded IPC"
+    ),
+    "src/computer/runtime/wayland_probe.py": (
+        "fixed installed inert probe gate with generated private marker; absolute helper "
+        "argv, private tempdir and bwrap-owned cwd, no caller-provided commands"
+    ),
+    "src/computer/runtime/assets/wayland_probe_gate.py": (
+        "private parent-owned launch gate for fixed bwrap argv; subreaper and parent-death "
+        "fence; launched workload has private namespaces and /home/probe cwd"
+    ),
+    "src/computer/runtime/assets/wayland_probe_session.py": (
+        "only inside verified private bwrap namespace, fixed GNOME/Xvfb/GTK probe argv; "
+        "private /home/probe cwd, no host display/bus/devices or arbitrary command input"
+    ),
     "src/packaging/validate.py": "build-time packaging check, not a runtime path",
     "src/restart.py": "os.execve re-exec of Odin himself",
     # --- legacy CLI surface, unreachable from Discord (pinned separately) ----

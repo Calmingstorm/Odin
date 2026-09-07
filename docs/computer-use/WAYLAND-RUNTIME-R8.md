@@ -1,5 +1,13 @@
 # R8 production runtime implementation and evidence boundary
 
+**Integration update:** historical work-in-progress statements below describe the
+runtime-agent handoff. Parent integration fixed new lint/type findings, late-write
+and stale-focus races, cleanup/cancellation, portal transport and close receipts,
+EI keymap termination and actual-controller identity/receipt mismatches. Startup
+now permits 180 seconds; the 90-second qualifier wait encloses its 86-second
+deadline. Input leases stay two seconds. Frozen producer 88c126a completed the
+native Inkscape controller task documented in WAYLAND-COMPOSED-R8.md.
+
 Parent integration: `WaylandRuntimeBackend` in `wayland_backend.py`, constructor
 `enabled=False`, `app_profile='xed'`, `environment='existing_session'`,
 `config: WaylandSessionConfig`, `qualify: async callable(identity)->InputAdmission`.
