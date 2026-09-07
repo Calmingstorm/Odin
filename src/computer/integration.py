@@ -78,7 +78,7 @@ class ComputerIntegration:
                              environment="isolated")
         if getattr(self.settings, "platform", "x11") == "wayland":
             from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
-            from .runtime.wayland_probe import GnomeSameStackQualifier
+            from .runtime.wayland_probe import SameStackQualifier
 
             return WaylandRuntimeBackend(
                 enabled=self.enabled,
@@ -87,7 +87,7 @@ class ComputerIntegration:
                     bus_address=self.settings.wayland_bus_address,
                     expected_uid=self.settings.wayland_uid,
                     guardian_binary=self.settings.wayland_guardian_binary),
-                qualify=GnomeSameStackQualifier())
+                qualify=SameStackQualifier())
         if getattr(self.settings, "environment", "isolated") == "existing_session":
             from .runtime.x11_attached import X11AttachedBackend
 

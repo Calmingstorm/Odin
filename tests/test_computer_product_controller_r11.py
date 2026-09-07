@@ -17,8 +17,10 @@ class Desktop(Stub):
     capabilities = BackendCapabilities("x11", "existing_session", "shared", "shared",
                                        "verified", "verified")
     input_supported = True
-    application_provenance = {"pid": 42, "exe_basename": "user-application",
-                              "trusted_executable": False}
+    application_provenance = {
+        "pid": 42, "uid": 1000, "start_ticks": 123, "exe_basename": "user-application",
+        "exe_identity": [1, 42], "cmdline_digest": "a" * 64,
+        "trusted_executable": False, "wm_class": "UserApplication", "script_identity": None}
 
     def __init__(self):
         super().__init__()

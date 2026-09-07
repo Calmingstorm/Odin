@@ -274,6 +274,12 @@ class ComputerStore:
 
     def begin_action(self, grant: SessionGrant, action_id: str, payload_hash: str,
                      max_actions: int, *, provenance: dict | None = None) -> dict | None:
+        if provenance is not None:
+            from .provenance import validate_application_provenance
+
+            provenance = validate_application_provenance(provenance)
+            if provenance is None:
+                raise ComputerError("invalid_application_provenance")
         initial = {} if provenance is None else {"application_provenance": provenance}
         encoded = json.dumps(initial, allow_nan=False)
         if len(encoded.encode("utf-8")) > 16384:
