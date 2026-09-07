@@ -37,6 +37,10 @@ dev = [
     "ruff",
     "aioresponses>=0.7",
     "Pillow>=12.3,<13",
+    # Computer contract tests import protocol clients, never a real desktop.
+    # Keep these aligned with the computer extra so clean CI .[dev] installs work.
+    "python-xlib>=0.33,<1; sys_platform == 'linux'",
+    "dbus-next>=0.2.3,<1; sys_platform == 'linux'",
     # Type gate (RFC-005): checker + stubs pinned so CI findings are
     # deterministic — upgrades are deliberate PRs, never ambient drift.
     "mypy==2.1.0",
