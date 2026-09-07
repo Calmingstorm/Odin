@@ -35,6 +35,7 @@ from .policy import (
     owned,
 )
 from .store import FRAME_MAX_PIXELS, ComputerStore, canonical_hash
+from .task_context import TaskContext, context_arguments
 
 
 def _text(value, maximum=4096) -> str:
@@ -478,6 +479,8 @@ class ComputerController:
         if live is None:
             return self._public_session(self.store.set_state(sid, "quarantined"))
         live.observations.clear()
+        if live.task_context is not None:
+            live.task_context.invalidate("session_paused")
         pause = getattr(live.backend, "pause", None)
         if pause is None:
             return await self._stop(sid, "cancelled")
@@ -506,6 +509,8 @@ class ComputerController:
                             "capture_revoked", "portal_closed"}:
                 live.observations.clear()
                 self._delivered_observations.pop(grant.session_id, None)
+                if live.task_context is not None:
+                    live.task_context.invalidate(exc.code)
             raise
         self._active(grant)
         if not 0 <= self.monotonic() - captured <= FRAME_FRESH_SECONDS:
@@ -541,13 +546,19 @@ class ComputerController:
                           raw.modal_kind, raw.accessibility)
         live.observations.clear()
         live.observations[obs.observation_id] = obs
+        if live.task_context is None:
+            live.task_context = TaskContext()
+        if live.task_context.last_view_id is not None and not raw.focused:
+            live.task_context.invalidate("human_focus_changed")
+        live.task_context.captured(obs)
         if acknowledge_modal:
             live.modal_identity = obs.modal
         return obs, raw.image_bytes
 
     async def observe(self, context, inp):
-        exact_keys(inp, {"session_id", "generation", "source_id", "crop"},
+        exact_keys(inp, {"session_id", "generation", "source_id", "crop", "task_context"},
                    {"session_id", "generation"})
+        hints = context_arguments(inp["task_context"]) if "task_context" in inp else None
         crop = inp.get("crop")
         if "crop" in inp:
             crop = crop_arguments(crop)
@@ -583,6 +594,7 @@ class ComputerController:
                 raise ComputerError("stale_observation")
         live = self._active(grant)
         return {**obs.public(), "image_bytes": image, **self._input_status(live, grant),
+                "task_context": self._task_context(live, hints),
                 "sources": (live.backend.sources()
                             if callable(getattr(live.backend, "sources", None)) else []),
                 "backend_capabilities": (live.capabilities.public()
@@ -600,6 +612,16 @@ class ComputerController:
                 or self._delivered_observations.get(grant.session_id) == obs.observation_id):
             raise ComputerError("stale_observation")
         self._delivered_observations[grant.session_id] = obs.observation_id
+        if live.task_context is not None:
+            live.task_context.delivered(obs.observation_id)
+
+    @staticmethod
+    def _task_context(live, hints=None):
+        if live.task_context is None:
+            live.task_context = TaskContext()
+        if hints is not None:
+            live.task_context.describe(hints, delivered_observation_id=None)
+        return live.task_context.public()
 
     async def validate_action_binding(self, grant, observation_id):
         return await self._validate_action_binding(grant, observation_id)
@@ -811,6 +833,8 @@ class ComputerController:
             # Pending is now durable, before even constructing the input coroutine.
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
+            if live.task_context is not None:
+                live.task_context.invalidate("action_may_change_ui_state")
             next_observation = None
             try:
                 self._active(grant)
@@ -898,6 +922,7 @@ class ComputerController:
                     # before its observation can authorize another action.
                     next_observation = {
                         **after.public(), "image_bytes": after_image,
+                        "task_context": self._task_context(live),
                         **self._input_status(live, grant),
                         "sources": (live.backend.sources()
                                     if callable(getattr(live.backend, "sources", None)) else []),

@@ -213,3 +213,4 @@ class LiveSession:
     observations: dict[str, Observation] = field(default_factory=dict)
     modal_identity: Any = None
     capabilities: BackendCapabilities | None = None
+    task_context: Any = None  # Descriptive only; never used by authorization.
