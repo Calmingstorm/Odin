@@ -12,6 +12,30 @@ Those historical failures remain recorded in MAIN-SESSION-R6.md. Aaron confirmed
 the wake/topology incident is his longstanding Cinnamon issue, not an Odin defect.
 R7 separates production owned-resource cleanup from the opt-in scratch harness's
 stricter exact-baseline restoration. See the R7 evidence before repeating a test.
+Final consolidation and the fresh validation limitations are recorded in
+[FINAL-CONSOLIDATION.md](FINAL-CONSOLIDATION.md). The ordinary suite and local
+lint/type/UI checks pass, but the coverage-instrumented run and coverage ratchet
+do not. This handoff is not an all-gates-green or merge/release approval.
+
+## Start here: first use without the build history
+
+For help on **your own screen**, use target **B, existing-session X11**, below.
+Target A opens an isolated application, not your desktop. Choose and provision the
+target before your external deployment/restart, leave it disabled, then follow
+section 3. No developer feasibility script is part of ordinary operator setup.
+
+The safe first test is a new blank Xed document, a short unsaved note, and Stop.
+Keep **System > Computer** open under the same authenticated owner as the task.
+Check the displayed Owner and Session; this inspector selects that owner's latest
+local session, not another administrator's task. Using WebUI chat and its inspector
+under the same login avoids a Discord/WebUI identity mismatch. Keep the global
+administrator **Disable computer use** control available as well.
+
+First-deploy prerequisites are independent: installed runtime/assets and dependencies,
+private service-owned storage, explicit display/monitor access, foreground tool
+authorization, supported native-image transport, and a focused qualified application.
+An Enabled label proves none of the last three. The checklist below deliberately
+keeps these separate rather than treating a successful toggle as acceptance.
 
 ## First increment and evidence boundary
 
@@ -53,6 +77,12 @@ limits are operationally significant, not just theoretical caveats.
    Python runtime assets and WebUI through the normal externally owned deployment
    process. Do not test inside the live install or treat a checkout SHA as proof
    of the running version. Retain the previous release/configuration for rollback.
+   Include the whole `src/computer/runtime/assets/` tree (including
+   `services/org.a11y.Bus.service`) and the matching committed `ui/dist`, not just
+   Python files. Inspect the actual deployed artifact: installation of the Python
+   extra does not establish that non-Python assets or WebUI files were packaged.
+   `/opt/odin-computer-runtime` in the sandbox launcher is a transient-unit mount
+   alias for the installed runtime directory, not another directory to create.
 2. Provision `/var/lib/odin/computer` (or another absolute directory outside the
    live install), owned by the **service UID**, mode **0700**, with no symlink
    components. For a root-run service this means root-owned, not desktop-user-owned.
@@ -83,6 +113,12 @@ limits are operationally significant, not just theoretical caveats.
    least-privilege policy with the actual service UID; do not grant blanket sudo
    or relax desktop, namespace, accessibility or security settings to force a pass.
 
+The isolated target checks **both** Drawing and Xed executables at Enable, even
+when the first task requests only Xed. The attached target does not require that
+isolated desktop stack; it needs the service's computer extra, X11 libraries and
+extensions, authorization, and the selected installed native application. Do not
+install or launch an isolated desktop just to help in an existing application.
+
 ## 2. Choose exactly one restart-pinned target
 
 These are alternative `computer` blocks, not two selectable live profiles.
@@ -109,12 +145,20 @@ computer:
 ### B. Existing-session X11 test
 
 Before provisioning this alternative, the operator explicitly identifies the
-local X11 display and an authorized Xauthority path. In that authorized session,
+local X11 display and its authorized access mechanism. In that authorized session,
 measure topology with `xrandr --listmonitors` and `xrandr --query`; use exact
 monitor names from the measurement, not guessed connector names, hostnames or a
 desktop-wide bounding rectangle. Review which pixels each granted monitor exposes.
 No cookie contents belong in config, logs, chat or this document. Blank authority
 means `/dev/null`, not automatic ambient-cookie discovery.
+
+An existing explicit X-server access grant can work with `xauthority: ""`; verify
+read-only access as the actual service UID instead of creating or copying a cookie
+unnecessarily. Do not use `xhost +`. On Aaron's machine the final read-only census
+on 2026-09-07 measured `:0` with primary `DP-4` (3440x1440), `HDMI-0`
+(1920x1080), `DP-0` (2560x1440), and `DP-2` (1920x1080). Those are historical
+measurements, not a new grant or a substitute for checking the current topology.
+The `:1` and `DP-1` values below are placeholders, **not Aaron's configuration**.
 
 ```yaml
 computer:
@@ -146,9 +190,18 @@ requires new consent/start; the runtime must not guess a new input transform.
    Check **Configured**, **Runtime lifecycle**, generation and restart-required
    settings separately. Configured=true is intent, runtime=true is lifecycle
    adoption, and neither proves input readiness. With no session, input is Unknown.
+   The owner needs `localhost` host access and permission for all three computer
+   tools. Scoped web credentials must allow that host and all three tools too;
+   administrator status by itself does not bypass these checks. Computer actions
+   run in foreground chat, not agents, loops, schedules or background workflows.
 3. Select **Enable computer use**, then read status back. Resolve preflight failures
    offline rather than repeatedly toggling. Enabling must not launch an application
    or capture the desktop. Opening/refreshing the inspector fetches no screenshot.
+   The active foreground connection must pass native-image transport admission;
+   a configured model name is not proof. A rejected visual transport must remain
+   a refusal, never become blind input or a prose-only screenshot substitute.
+   No computer tools in the next new foreground turn means check lifecycle,
+   authorization and transport separately; do not bypass a refusal with shell input.
 4. Start a new foreground scratch task through authorized chat. For isolated mode,
    request a new Xed profile. For attached mode, first explicitly authorize this
    bounded task, manually open a **new blank native Xed, Inkscape or Writer window**, place it wholly
@@ -161,10 +214,23 @@ requires new consent/start; the runtime must not guess a new input transform.
    acting. A capture-only result is not a failed action to bypass.
 6. Watch the scratch document and compare the exact text and line break. Request
    **Observe / view frame** only when needed. A visual-change receipt proves pixels
-   changed, not correct text or a saved file. For isolated save QA, explicitly request
-   GUI save to a new workspace basename, close the saved tab, create blank, reopen,
-   then **Prepare export / Download** and independently compare bytes. Attached
-   workspace export is unavailable; inspect the scratch document directly.
+   changed, not correct text or a saved file. For isolated Xed save QA, explicitly
+   request GUI save to `/workspace/exports/local-qa.txt`, close the saved tab,
+   create blank and reopen that exact path. Ask Odin to prepare the export before
+   ending the task, or use **Prepare export** while it is alive. Enter only
+   `local-qa.txt` in the export form, then **Download** and independently compare
+   bytes. Files saved to the default home folder are not exportable; the export
+   root is `/workspace/exports`, not arbitrary workspace files. Attached workspace
+   export is unavailable even though the shared inspector still displays the form;
+   inspect the scratch document directly and save only to a new, explicitly
+   authorized filename. Keep attached paths short enough for the input lease.
+   The inspector does not list exports prepared by chat or rediscover them after
+   page reload. For the all-WebUI path, Prepare export and Download while the task
+   is alive. If chat already returned an `artifact_id`, retain that receipt and
+   use the authenticated `GET /api/computer/download/<artifact_id>` route with
+   the same owner credential before expiry/disable. This is an authenticated API
+   download, not a public link or an automatic Discord attachment. An unexported
+   isolated file is lost when its task ends; a later turn cannot reopen that sandbox.
 7. Inspect full tool-result/action receipts in the task conversation, not just the
    inspector's last-action summary. Ask for `computer_session` status for the full
    cleanup receipt after Stop. Distinguish executed, verified, not_satisfied,
@@ -237,9 +303,12 @@ See [MAIN-SESSION-R7.md](MAIN-SESSION-R7.md) and
 
 ## Authoritative review references
 
-Read [PRODUCTION-WIRING-R5.md](PRODUCTION-WIRING-R5.md), [OPERATOR-R5.md](OPERATOR-R5.md)
-and [CONTRACT.md](CONTRACT.md); later R5 platform evidence supersedes historical
-capture-only conclusions. Actual evidence: [MODEL-GUI-R5.md](MODEL-GUI-R5.md),
+Start with [REVIEW-CHECKPOINT-R7.md](REVIEW-CHECKPOINT-R7.md) and this handoff for
+current scope. R7 application/cleanup evidence supersedes earlier offering and
+restoration claims; R5/R6 reports retain the exact historical outcomes, not current
+instructions to run their developer harnesses. Architecture references:
+[PRODUCTION-WIRING-R5.md](PRODUCTION-WIRING-R5.md), [OPERATOR-R5.md](OPERATOR-R5.md)
+and [CONTRACT.md](CONTRACT.md). Historical evidence: [MODEL-GUI-R5.md](MODEL-GUI-R5.md),
 [R5-DRAWING-FINAL.md](R5-DRAWING-FINAL.md), [R5-ACCEPTANCE-30.md](R5-ACCEPTANCE-30.md),
 [R5-ACCEPTANCE-30-DRAWING.md](R5-ACCEPTANCE-30-DRAWING.md),
 [FEASIBILITY-X11-R5.md](FEASIBILITY-X11-R5.md),
