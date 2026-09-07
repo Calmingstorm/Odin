@@ -26,6 +26,7 @@ from .policy import (
     STOP_TIMEOUT_SECONDS,
     exact_keys,
     foreground,
+    input_eligible,
     observation_input,
     owned,
 )
@@ -145,11 +146,14 @@ class ComputerController:
             result = await _bounded(operation(), STOP_TIMEOUT_SECONDS)
             clean = isinstance(result, dict) and result.get("stopped") is True
             if clean and live.capabilities.environment == "existing_session":
+                device_state = result.get("owned_devices")
+                no_devices = (device_state == "not_created"
+                              and getattr(live.backend, "creates_devices", None) is False)
                 clean = (result.get("released") is True
                          and result.get("applications_preserved") is True
                          and result.get("input_revoked") is True
                          and result.get("capture_revoked") is True
-                         and result.get("owned_devices") in {"removed", "retained_inactive"})
+                         and (device_state in {"removed", "retained_inactive"} or no_devices))
         except (Exception, asyncio.CancelledError):
             clean = False
         # Commit the cleanup evidence BEFORE dropping the live adapter. Inactive
@@ -183,9 +187,17 @@ class ComputerController:
     def _public_session(self, grant):
         live = self._live.get(grant.session_id)
         capabilities = live.capabilities if live is not None else None
-        return {**grant.public(), "backend_capabilities": (
+        result = {**grant.public(), "backend_capabilities": (
             capabilities.public() if capabilities is not None else None),
                 "cleanup": self.store.cleanup(grant.session_id)}
+        if live is not None:
+            sources = getattr(live.backend, "sources", None)
+            if callable(sources):
+                result["sources"] = sources()
+            supported = getattr(live.backend, "input_supported", None)
+            if type(supported) is bool:
+                result["input_supported"] = supported
+        return result
 
     async def session(self, context: RequestContext, inp: dict) -> dict:
         exact_keys(inp, {"operation", "session_id", "generation", "app", "name"}, {"operation"})
@@ -201,8 +213,12 @@ class ComputerController:
             capabilities = getattr(backend, "capabilities", None)
             if type(capabilities) is not BackendCapabilities:
                 raise ComputerError("backend_capabilities_unknown")
-            if capabilities.environment != "isolated":
-                raise ComputerError("attachment_unavailable")
+            if capabilities.environment == "existing_session":
+                supported = getattr(backend, "input_supported", None)
+                if type(supported) is not bool:
+                    raise ComputerError("attachment_unavailable")
+                if supported:
+                    input_eligible(capabilities)
             grant = self.store.create_session(context, inp["app"],
                                               platform=capabilities.platform,
                                               environment=capabilities.environment)
@@ -347,10 +363,23 @@ class ComputerController:
         return obs, raw.image_bytes
 
     async def observe(self, context, inp):
-        exact_keys(inp, {"session_id", "generation"}, {"session_id", "generation"})
+        exact_keys(inp, {"session_id", "generation", "source_id"}, {"session_id", "generation"})
         await self._auth(context)
         grant = self._grant(context, inp)
         async with self._actions:
+            if "source_id" in inp:
+                source_id = inp["source_id"]
+                if not isinstance(source_id, str) or not 1 <= len(source_id) <= 128:
+                    raise ComputerError("invalid_source_selection")
+                live = self._active(grant)
+                select = getattr(live.backend, "select_source", None)
+                if not callable(select):
+                    raise ComputerError("source_selection_unavailable")
+                self._delivered_observations.pop(grant.session_id, None)
+                live.observations.clear()
+                await _bounded(select(source_id), FRAME_FRESH_SECONDS)
+                self._active(grant)
+                await self._auth(context)
             obs, image = await self._capture(grant)
             await self._auth(context)
             self._active(grant)
@@ -475,9 +504,9 @@ class ComputerController:
                 return existing
             grant = self._grant(context, inp)
             live = self._active(grant)
-            if (grant.environment != "isolated" or live.capabilities is None
-                    or live.capabilities.environment != "isolated"):
+            if live.capabilities is None or live.capabilities.environment != grant.environment:
                 raise ComputerError("attachment_unavailable")
+            input_eligible(live.capabilities)
             if self._delivered_observations.get(grant.session_id) != inp["observation_id"]:
                 raise ComputerError("observation_not_delivered")
             original = live.observations.get(inp["observation_id"])
