@@ -94,3 +94,24 @@ asserts no blob writer calls for computer-only pixels, no blob reader calls for
 old tagged references, unchanged legacy-image round trips and unchanged input
 objects. This fixes new copies and use of old references, not deletion of any
 historical deployment blobs; no live data or configuration was touched.
+
+## Parent actual upstream synthetic-image smoke
+
+`scripts/computer-feasibility/vision-smoke.py` adds a separate explicit, bounded
+live probe. It uses the development client, an existing credential in read-only
+mode (no refresh, copy, write or printing), generated pixels only and a single
+request. No screenshot, desktop connection or live configuration change occurs.
+
+Observed 2026-09-07 around03:17UTC: current configured model family `gpt-6-astra`
+returned the correct six-color row-major array for a newly randomized six-tile
+480x320PNG. The expected color order was not in the prompt or frame metadata.
+Native PNG SHA256 `be1124be6505fe3919612a39b36521e17d09e1877644d3f80ea58c9639c8f6b3`.
+Actual aiohttp serialized-request trace verified one native image, no duplicate
+pixel text, `store=false`,2275body bytes. Response2.928seconds, process exit0.
+
+This establishes one actual image-acceptance and visual-answer sample for that
+endpoint/account/model at that time, beyond the earlier loopback serializer tests.
+It is not evidence of GUI task competence, universal model support, or future
+availability. The production capability canary therefore still truthfully reports
+upstream acceptance as unverified per request; input never gets permission from
+this historical sample. No credentials or upstream response body are retained.
