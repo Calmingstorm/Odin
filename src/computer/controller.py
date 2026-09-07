@@ -678,6 +678,20 @@ class ComputerController:
         crop = (asdict(obs.frame_metadata.crop) if obs.frame_metadata is not None
                 and obs.frame_metadata.crop is not None else None)
         current, _ = await self._capture(grant, crop=crop)
+        # Brief human focus excursions can settle without another model round
+        # trip. Only wait before dispatch, and require the EXACT original binding
+        # to return. Never focus a window, rebase coordinates or retry input.
+        if grant.environment == "existing_session" and current.modal is None:
+            for _ in range(3):
+                if current.geometry == obs.geometry:
+                    break
+                if self.monotonic() - obs.captured_at >= DELIVERED_GROUNDING_SECONDS - 0.15:
+                    break
+                await asyncio.sleep(0.15)
+                self._active(grant)
+                current, _ = await self._capture(grant, crop=crop)
+                if current.modal is not None:
+                    break
         now = self.monotonic()
         if (not 0 <= now - obs.captured_at <= DELIVERED_GROUNDING_SECONDS
                 or not 0 <= now - current.captured_at <= FRAME_FRESH_SECONDS):

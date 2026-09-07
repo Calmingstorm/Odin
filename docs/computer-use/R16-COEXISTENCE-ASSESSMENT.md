@@ -41,7 +41,14 @@ master lifecycle, physical attachment or cleanup code is changed here.
 
 ## Item 4: implemented narrowly
 
-In `ComputerController.act()`, an existing-session `stale_source_binding` detected
+Before dispatch, existing-session validation now allows three 150ms settling
+intervals for the exact original geometry, scope, focus and modal binding to
+return. It captures again during that bounded interval; it never changes focus
+or sends input while waiting. Original observation freshness still applies and
+a new modal stops the settling loop. This handles brief focus excursions, not
+continuous background input or arbitrary window reacquisition.
+
+In `ComputerController.act()`, an existing-session `stale_source_binding` still detected
 during the fresh, pre-dispatch validation capture now returns a durable
 `unavailable` receipt rather than an opaque exception. It records no injection,
 marks recovery possible, and points to fresh capture evidence when available.
@@ -76,7 +83,7 @@ it is not a fix for a proven pre-dispatch cancellation. Exceptions after dispatc
 with uncertain input/release still become unknown and invoke unchanged stop and
 cleanup. Focus loss mid-gesture is not made recoverable by replay.
 
-No native application identity is pinned across the explicit reacquisition step.
+No native application identity is pinned across the explicit caller reacquisition step.
 The caller must recognize the intended application from fresh evidence, as in the
 existing observation contract. This patch deliberately refuses input when it
 cannot ensure the old target; it does not claim automatic same-app reacquisition
