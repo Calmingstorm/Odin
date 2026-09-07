@@ -24,6 +24,15 @@ from src.computer.vision import observation_image  # noqa: E402
 
 class EvidenceBackend(LinuxDesktopBackend):
     """Record native errors without changing admission, behavior, or receipts."""
+    async def _rpc(self, operation, **kwargs):
+        result = await super()._rpc(operation, **kwargs)
+        if operation == 'observe' and 'observation' in result:
+            o = result['observation']
+            self.last_native_observation = o
+            self.evidence_record('private_native_observe', observation={
+                k: v for k, v in o.items() if k != 'image'})
+        return result
+
     async def act(self, action):
         try:
             result = await super().act(action)
@@ -272,6 +281,11 @@ class Corpus:
             obs = await self.observe()
             if obs.modal:
                 assert obs.modal_kind == 'safe_application'
+                for _ in range(8):
+                    fresh = await self.observe()
+                    assert fresh.modal == obs.modal
+                    assert fresh.modal_kind == 'safe_application'
+                self.record('startup_stability', captures=9, modal=obs.modal)
                 await self.key('Return')
         else:
             await self.key('ctrl+n')
@@ -283,6 +297,11 @@ class Corpus:
             await self.act('drag', points=path, duration=.25)
         if number % 3 == 0:
             await self.pause_resume()
+            await self.key('ctrl+s')
+            await self.modal(True)
+            await self.key('Escape')
+            await self.modal(False)
+            self.record('save_cancel_recovered')
         name = f'drawing-{number:02d}.png'
         await self.save_as(name)
         blob = await self.export(name)
@@ -292,7 +311,26 @@ class Corpus:
             pixels = im.convert('RGB').tobytes()
             ink = sum(1 for r, g, b in im.convert('RGB').getdata() if min(r, g, b) < 100)
             assert ink > 500, ink
-        await self.key('ctrl+n')
+        # Ctrl+N is a new top-level Drawing window. Select New Tab via GUI.
+        await self.act('click', x=95, y=22)
+        menu = await self.observe()
+        self.record('drawing_menu', nodes=menu.accessibility)
+        # Pixel-observed menu label at (30..123,77..90) in this fixed fixture.
+        await self.act('click', x=77, y=83)
+        await self.observe()
+        (self.out / 'new-blank.png').write_bytes((self.out / 'current.png').read_bytes())
+        assert self.backend.last_native_observation['window']['title'] == 'Unsaved file'
+        with Image.open(self.out / 'new-blank.png') as blank:
+            assert not any(min(pixel) < 100 for pixel in blank.convert('RGB').crop(
+                (300, 280, 500, 500)).getdata()), 'new canvas is not blank'
+        self.record('new_blank_created', title='Unsaved file', ink_roi_empty=True)
+        # Exact saved-tab close icon observed at x611..619,y61..69.
+        await self.act('click', x=615, y=65)
+        await self.observe()
+        (self.out / 'closed-saved-tab.png').write_bytes((self.out / 'current.png').read_bytes())
+        native = self.backend.last_native_observation
+        assert native['window']['title'] == 'Unsaved file'
+        self.record('saved_tab_closed', native_window=native['window'])
         await self.reopen(name)
         await self.observe()
         with Image.open(self.out / 'current.png') as screen:
@@ -308,7 +346,9 @@ class Corpus:
                 if matched:
                     break
             assert matched, 'reopened screenshot canvas not pixel-equal to export'
-        return dict(artifact=name, ink_pixels=ink, reopen_pixels_equal=True)
+        return dict(artifact=name, ink_pixels=ink, reopen_pixels_equal=True,
+                    saved_tab_closed=True, blank_intermediate=True,
+                    canvas_origin=[x, y], decoded_rgb_sha256=hashlib.sha256(pixels).hexdigest())
 
     async def run(self):
         try:
@@ -339,6 +379,9 @@ class Corpus:
                 self.record('task_result', **row)
                 Path('/tmp/gui-corpus-r5-status.txt').write_text(json.dumps(dict(
                     evidence=str(self.out), ledger=self.ledger), indent=2))
+                if self.args.app == 'drawing':
+                    Path('/tmp/drawing-final-r5-status.txt').write_text(json.dumps(dict(
+                        evidence=str(self.out), ledger=self.ledger), indent=2))
         finally:
             if self.sid:
                 started = time.monotonic()

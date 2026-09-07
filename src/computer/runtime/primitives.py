@@ -117,6 +117,7 @@ class NativeDesktop:
         self._profile = None
         self._modal_kind = None
         self._startup_modal = None
+        self._startup_approval = None
 
     def _same_app_transient(self, window):
         from Xlib import display as xdisplay  # type: ignore[import-untyped]
@@ -129,13 +130,16 @@ class NativeDesktop:
         finally:
             display.close()
 
-    def _classify_modal(self, window, nodes):
+    def _classify_modal(self, window, nodes, raster_digest=None):
         if not window["modal"]:
+            self._startup_approval = None
+            self._startup_modal = None
             return None
         if (self._profile not in PROFILES or not nodes
                 or not self._same_app_transient(window)):
             return "unknown"
         labels = " ".join(str(n.get("name", "")) + " " + str(n.get("role", ""))
+                          + " " + str(n.get("text", ""))
                           for n in nodes).casefold()
         if any(word in labels for word in ("password", "authentication", "permission",
                                             "terminal", "administrator", "odin", "security")):
@@ -147,6 +151,18 @@ class NativeDesktop:
         if startup and self._source_fingerprint is None:
             self._startup_modal = identity
         startup = startup and self._startup_modal == identity
+        signature = frozenset((str(n.get("role", "")), str(n.get("name", "")),
+                               str(n.get("text", ""))) for n in nodes)
+        if startup and raster_digest is not None:
+            self._startup_approval = (identity, raster_digest, signature)
+        elif (raster_digest is not None and self._startup_approval is not None
+              and nodes[0].get("role") == "alert"
+              and nodes[0].get("name") == "Information"):
+            # Retain proven startup approval across incomplete AT-SPI traversal
+            # only with identical pixels/identity and no new accessible labels.
+            approved_identity, approved_raster, approved_nodes = self._startup_approval
+            startup = (identity == approved_identity and raster_digest == approved_raster
+                       and signature <= approved_nodes)
         file_dialog = (nodes[0].get("role") in ("dialog", "file chooser")
                        and window["title"] in {
                            "Save As", "Save As…", "Save Image", "Save", "Open", "Open Image",
@@ -395,7 +411,7 @@ class NativeDesktop:
                     and window["modal"] and self._same_app_transient(window)):
                 self._startup_modal = (window["id"], window["pid"], identity)
             nodes, status = self._a11y.snapshot(window, observation, self._guard)
-            modal_kind = self._classify_modal(window, nodes)
+            modal_kind = self._classify_modal(window, nodes, hashlib.sha256(image).digest())
             if self._root_extent is not None:
                 extent = tuple(int(v) for v in self._run("getdisplaygeometry").split())
                 if extent != (width, height):
