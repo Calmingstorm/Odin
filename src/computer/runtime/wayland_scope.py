@@ -173,6 +173,8 @@ class GNOMEWaylandScopeProvider:
             if self._bus is None:
                 self._bus = await asyncio.wait_for(
                     MessageBus(bus_address=self.bus_address).connect(), 2)
+            if self._bus is None:
+                raise WaylandScopeFailure("wayland_scope_unavailable")
             reply = await asyncio.wait_for(self._bus.call(Message(
                 destination=destination, path=path, interface=interface, member=member,
                 signature=signature, body=body or [])), 2)

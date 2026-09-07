@@ -7,12 +7,19 @@ import json
 import os
 import pwd
 import stat
+from typing import Any, TypedDict
 
 from ..models import ComputerError
 
 
 class WaylandGuardianError(ComputerError):
     """Static failure; a sent action may have an unknown outcome."""
+
+
+class _Credentials(TypedDict, total=False):
+    user: int
+    group: int
+    extra_groups: list[int]
 
 
 def trusted_binary(path: str) -> None:
@@ -37,15 +44,17 @@ def _mapping(value):
 class WaylandGuardian:
     def __init__(self, binary: str, expected_uid: int, on_spawn=None):
         self.binary, self.expected_uid, self.on_spawn = binary, expected_uid, on_spawn
-        self._child = None
-        self._waiter = None
-        self._reader = self._heartbeat = self._cleanup = None
-        self._events = asyncio.Queue(maxsize=128)
+        self._child: asyncio.subprocess.Process | None = None
+        self._waiter: asyncio.Task[int] | None = None
+        self._reader: asyncio.Task[None] | None = None
+        self._heartbeat: asyncio.Task[None] | None = None
+        self._cleanup: asyncio.Task[dict[str, bool]] | None = None
+        self._events: asyncio.Queue[dict[str, Any]] = asyncio.Queue(maxsize=128)
         self._write_lock = asyncio.Lock()
         self._action_lock = asyncio.Lock()
         self._closing = self._failed = self._active = False
         self._closed_receipt = self._release_submitted = False
-        self._ready = {}
+        self._ready: dict[str, Any] = {}
 
     @property
     def ready(self):
@@ -68,7 +77,7 @@ class WaylandGuardian:
             if self._child is not None or self._closing:
                 raise WaylandGuardianError("wayland_guardian_single_use")
             _mapping(mapping_id)
-            credentials = {}
+            credentials: _Credentials = {}
             if self.expected_uid != os.geteuid():
                 if os.geteuid() != 0:
                     raise WaylandGuardianError("wayland_guardian_uid_unavailable")
@@ -96,8 +105,10 @@ class WaylandGuardian:
             await self.close()
             raise
 
-    async def _read(self):
+    async def _read(self) -> None:
         try:
+            if self._child is None or self._child.stdout is None:
+                raise WaylandGuardianError("wayland_guardian_disconnected")
             while line := await self._child.stdout.readline():
                 if len(line) > 4096:
                     raise ValueError("oversized guardian receipt")
@@ -122,6 +133,7 @@ class WaylandGuardian:
             if self._closing and data != "C\n":
                 raise WaylandGuardianError("wayland_guardian_revoked")
             if (self._child is None or self._child.returncode is not None
+                    or self._child.stdin is None
                     or self._child.stdin.is_closing()):
                 raise WaylandGuardianError("wayland_guardian_disconnected")
             self._child.stdin.write(data.encode("ascii"))
@@ -139,7 +151,7 @@ class WaylandGuardian:
                     raise WaylandGuardianError("wayland_guardian_unexpected_receipt")
         return await asyncio.wait_for(receive(), timeout)
 
-    async def _heartbeats(self):
+    async def _heartbeats(self) -> None:
         try:
             while self.alive:
                 await asyncio.sleep(0.4)
@@ -175,7 +187,7 @@ class WaylandGuardian:
                 await self.close()
                 raise
 
-    async def _close(self):
+    async def _close(self) -> dict[str, bool]:
         self._closing = True
         if self._heartbeat:
             self._heartbeat.cancel()
@@ -187,7 +199,12 @@ class WaylandGuardian:
             await asyncio.wait_for(self._send("C\n"), 0.2)
         except Exception:
             pass
-        self._child.stdin.close()
+        if self._child.stdin is not None:
+            self._child.stdin.close()
+        if self._waiter is None:
+            # A missing owner waiter cannot establish reaping or release.
+            return {"process_reaped": False, "release_submitted": False,
+                    "input_was_sent": self._active}
         try:
             await asyncio.wait_for(asyncio.shield(self._waiter), 3)
         except TimeoutError:

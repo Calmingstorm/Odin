@@ -10,8 +10,10 @@ import math
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
+from typing import Any
 
 from ..admission import InputAdmission, InputAdmissionError
 from ..app_profiles import validate_profile_action
@@ -19,7 +21,7 @@ from ..geometry import AffineTransform, SourceGeometry
 from ..models import BackendCapabilities, BackendObservation, CaptureScope, ComputerError
 from .profile import validate_session
 from .wayland_guardian import WaylandGuardian
-from .wayland_identity import capture_identity, revalidate_identity
+from .wayland_identity import CompositorRuntimeIdentity, capture_identity, revalidate_identity
 from .wayland_portal import WaylandPortalSession
 from .wayland_scope import GNOMEWaylandScopeProvider
 
@@ -63,11 +65,11 @@ def _bounded_png(data: bytes, width: int, height: int):
             or max(width, height) > 16384 or width * height > 32_000_000
             or type(data) is not bytes or len(data) > 128 * 1024 * 1024):
         raise ComputerError("wayland_capture_allocation_limit")
-    with Image.open(io.BytesIO(data)) as image:
-        if image.format != "PNG" or image.size != (width, height):
+    with Image.open(io.BytesIO(data)) as opened:
+        if opened.format != "PNG" or opened.size != (width, height):
             raise ComputerError("wayland_capture_dimensions_changed")
-        image.load()
-        image = image.convert("RGB")
+        opened.load()
+        image = opened.convert("RGB")
         scale = min(1, math.sqrt(2_000_000 / (width * height)))
         image = image.resize((max(1, int(width * scale)), max(1, int(height * scale))))
         for _ in range(10):
@@ -82,7 +84,7 @@ def _bounded_png(data: bytes, width: int, height: int):
 class WaylandRuntimeBackend:
     startup_timeout_seconds = 180
     input_supported = False
-    input_blocker = "wayland_session_not_qualified"
+    input_blocker: str | None = "wayland_session_not_qualified"
     input_limits = {"lease_seconds": 2, "text": "printable_ascii_current_keymap",
                     "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app"}
 
@@ -100,23 +102,28 @@ class WaylandRuntimeBackend:
             "Consent, source identity and release behavior are unmeasured for this session.",
             "Start an explicitly authorized task and respond to the portal consent prompt.")
         self._qualify = qualify
-        self._portal = self._scope_provider = self._guardian = self._identity = None
+        self._portal: WaylandPortalSession | None = None
+        self._scope_provider: GNOMEWaylandScopeProvider | None = None
+        self._guardian: WaylandGuardian | None = None
+        self._identity: CompositorRuntimeIdentity | None = None
         self._generation = 1
         self._revision = 0
         self._portal_generation = 0
         self._started = self._closed = self._paused = False
-        self._frame = self._scope = self._fingerprint = None
+        self._frame: BackendObservation | None = None
+        self._scope: dict[str, Any] | None = None
+        self._fingerprint: str | None = None
         self._captured_at = 0.0
-        self._sources = {}
-        self._selected = None
-        self._descriptor = None
-        self.runtime_identity_callback = None
+        self._sources: dict[str, dict[str, Any]] = {}
+        self._selected: str | None = None
+        self._descriptor: dict[str, Any] | None = None
+        self.runtime_identity_callback: Callable[[dict[str, Any]], None] | None = None
         self._lock = asyncio.Lock()
         self._stop_lock = asyncio.Lock()
         self._release_failed = False
-        self._jobs = set()
-        self._cleanup_task = None
-        self._cleanup_evidence = {}
+        self._jobs: set[asyncio.Task[None]] = set()
+        self._cleanup_task: asyncio.Task[bool] | None = None
+        self._cleanup_evidence: dict[str, bool] = {}
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -220,6 +227,8 @@ class WaylandRuntimeBackend:
                 self.input_blocker = None
                 self.capabilities = BackendCapabilities("wayland", "existing_session", "shared",
                                                          "shared", "verified", "verified")
+                if self._descriptor is None:
+                    raise ComputerError("wayland_runtime_identity_missing")
                 self._descriptor["input_was_enabled"] = True
                 if self.runtime_identity_callback:
                     self.runtime_identity_callback(copy.deepcopy(self._descriptor))
@@ -263,6 +272,8 @@ class WaylandRuntimeBackend:
 
     async def _capture(self):
         self._active()
+        if self._portal is None or self._selected is None:
+            raise ComputerError("wayland_session_revoked")
         generation = self._generation
         result = await self._portal.capture(self._sources[self._selected]["node_id"])
         self._active()
@@ -285,7 +296,8 @@ class WaylandRuntimeBackend:
         async with self._lock:
             result, metadata, image, width, height = await self._capture()
             scope = None
-            if self.input_supported and self._guardian and self._guardian.alive:
+            if (self.input_supported and self._guardian and self._guardian.alive
+                    and self._scope_provider is not None):
                 try:
                     scope = await self._scope_provider.snapshot(metadata, self.app_profile)
                     ready = await self._guardian.select(metadata["mapping_id"])
@@ -306,6 +318,8 @@ class WaylandRuntimeBackend:
                 mapping = {"input_region_id": self._selected, "input_width": iw,
                            "input_height": ih, "pixel_to_input": AffineTransform(
                                a=Fraction(iw, result["width"]), e=Fraction(ih, result["height"]))}
+            if self._selected is None:
+                raise ComputerError("wayland_session_revoked")
             source = SourceGeometry(self._selected, self._revision, self._generation,
                                     result["width"], result["height"], **mapping)
             consent = CaptureScope(self._generation, frozenset({self._selected}),
@@ -367,8 +381,10 @@ class WaylandRuntimeBackend:
             raise ComputerError("wayland_invalid_polyline")
         return f"D 272 {len(points)} " + " ".join(point(p) for p in points)
 
-    async def _watch_action(self, metadata, original_scope, generation):
+    async def _watch_action(self, metadata, original_scope, generation) -> None:
         try:
+            if self._scope_provider is None:
+                raise ComputerError("wayland_session_revoked")
             while True:
                 await asyncio.sleep(0.05)
                 self._active()
@@ -391,6 +407,8 @@ class WaylandRuntimeBackend:
             frame, scope = self._frame, self._scope
             if (not self.input_supported or self.input_admission.state != "eligible"
                     or not self._guardian or not self._guardian.alive or self._release_failed
+                    or self._scope_provider is None or self._identity is None
+                    or self._portal is None
                     or frame is None or not frame.focused or scope is None
                     or not 0 <= time.monotonic() - self._captured_at <= 5):
                 raise ComputerError("wayland_fresh_qualified_application_observation_required")
@@ -426,7 +444,7 @@ class WaylandRuntimeBackend:
                 delivered = await self._guardian.act(command)
                 if self._paused or self._closed or delivered.get("event") != "action_done":
                     raise ComputerError("wayland_action_revoked_outcome_unknown")
-                receipt = {"status": "executed", "released": True,
+                receipt: dict[str, Any] = {"status": "executed", "released": True,
                     "release_basis": "guardian_owned_ledger_and_qualified_compositor",
                     "postcondition": {"type": "visual_change", "status": "unavailable",
                         "source_id": frame.source.source_id,
@@ -464,7 +482,7 @@ class WaylandRuntimeBackend:
             self._cleanup_task = asyncio.create_task(self._cleanup_all())
         return await asyncio.shield(self._cleanup_task)
 
-    async def _cleanup_all(self):
+    async def _cleanup_all(self) -> bool:
         for job in tuple(self._jobs):
             job.cancel()
         if self._jobs:
