@@ -48,6 +48,12 @@ or sends input while waiting. Original observation freshness still applies and
 a new modal stops the settling loop. This handles brief focus excursions, not
 continuous background input or arbitrary window reacquisition.
 
+Important X11 limitation: its source revision advances when the input-scope
+fingerprint changes. If an intermediate capture has seen a different scope,
+returning focus does not restore the old revision, so exact-binding settling
+cannot automatically admit that action. Such cases still take the recoverable
+receipt path below. This is not a completed automatic-reacquisition fix.
+
 In `ComputerController.act()`, an existing-session `stale_source_binding` still detected
 during the fresh, pre-dispatch validation capture now returns a durable
 `unavailable` receipt rather than an opaque exception. It records no injection,
