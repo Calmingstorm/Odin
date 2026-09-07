@@ -1,5 +1,14 @@
 # R6 actual main-session Inkscape evidence, 2026-09-07
 
+## Subsequent operator correction (R7)
+
+Aaron confirmed that the monitor wake/layout incident is a longstanding Cinnamon
+issue on his machine, unrelated to Odin. Claudia reports Muffin runtime checks at
+03:09 and that Cinnamon never restarted. The causal uncertainty statements below
+record what was known during R6, not a current attribution to this capability.
+R7 adds generic, exact-baseline scratch cleanup, not defensive Cinnamon code or
+compositor repair. The historical failed R6 CLI results remain failed results.
+
 Only the parent executed the operator-authorized main-session tests. No agent
 accessed that display. Both runs used a new native Inkscape process, private HOME,
 non-activating session bus, root standalone subreaper, exact XRes identity checks,
