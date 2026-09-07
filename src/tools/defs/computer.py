@@ -100,7 +100,7 @@ _DEFINITIONS = [
             "observation_id": {"type": "string"},
             "operation": {"type": "string", "enum": [
                 "click", "double_click", "right_click", "middle_click", "scroll",
-                "type", "key", "drag", "polyline",
+                "type", "key", "drag", "polyline", "replace_field",
             ]},
             "generation": {"type": "integer", "minimum": 1},
             "consent_generation": {"type": "integer", "minimum": 1},
@@ -110,7 +110,7 @@ _DEFINITIONS = [
                   "description": "Delivered pixel index; mapped at center."},
             "y": {"type": "integer", "minimum": 0,
                   "description": "Delivered pixel index; mapped at center."},
-            "text": {"type": "string", "minLength": 1, "maxLength": 512,
+            "text": {"type": "string", "minLength": 0, "maxLength": 512,
                      "description": "Text for the grounded application field, never commands."},
             "key": {"type": "string", "minLength": 1, "maxLength": 128,
                     "pattern": "^(?:(?:ctrl|alt|shift|super)\\+){0,4}[A-Za-z0-9_]+$(?![\\s\\S])",
@@ -118,6 +118,17 @@ _DEFINITIONS = [
                     "at most once; e.g. ctrl+shift+s, F12, XF86AudioMute."},
             "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
             "count": {"type": "integer", "minimum": 1, "maximum": 20},
+            "modifiers": {"type": "array", "maxItems": 4, "uniqueItems": True,
+                          "items": {"type": "string", "enum": ["ctrl", "alt", "shift", "super"]}},
+            "target": {"type": "string", "description":
+                       "Fresh observed accessible target handle; replace_field only."},
+            "region": {"type": "object", "description":
+                       "Delivered-pixel rectangle; center is clicked. Use instead of x,y.",
+                       "properties": {"x": {"type": "integer", "minimum": 0},
+                                      "y": {"type": "integer", "minimum": 0},
+                                      "width": {"type": "integer", "minimum": 1},
+                                      "height": {"type": "integer", "minimum": 1}},
+                       "required": ["x", "y", "width", "height"], "additionalProperties": False},
             "expected_modal": {"type": "string", "maxLength": 128,
                                "description": "Exact observed safe-application modal ID. "
                                "Never authorizes a security prompt or an unknown dialog."},
@@ -136,9 +147,15 @@ _DEFINITIONS = [
                 "Use {type:visual_change} for GUI work or {type:pointer_at,x,y} for a click's "
                 "pointer location only. Fresh evidence, not input exit status, decides the result.",
                 "properties": {
-                    "type": {"type": "string", "enum": ["visual_change", "pointer_at"]},
+                    "type": {"type": "string", "enum": [
+                        "visual_change", "pointer_at", "region_changed", "dialog_appeared",
+                        "menu_appeared", "window_gone", "field_text_equals"]},
                     "x": {"type": "integer", "minimum": 0},
                     "y": {"type": "integer", "minimum": 0},
+                    "width": {"type": "integer", "minimum": 1},
+                    "height": {"type": "integer", "minimum": 1},
+                    "target": {"type": "string"},
+                    "text": {"type": "string", "maxLength": 512},
                 },
                 "required": ["type"], "additionalProperties": False,
             },
@@ -153,6 +170,7 @@ _ACTION_FIELDS = {
     "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
     "type": {"text"}, "key": {"key"}, "drag": {"points", "duration"},
     "polyline": {"points", "duration"},
+    "replace_field": {"target", "text"},
 }
 _ACTION_SCHEMA = _DEFINITIONS[2]["input_schema"]
 _ACTION_SCHEMA["oneOf"] = [
@@ -165,6 +183,20 @@ _ACTION_SCHEMA["properties"]["key"]["allOf"] = [
     {"not": {"pattern": rf"(?:^|\+){modifier}\+(?:.*\+)?{modifier}\+"}}
     for modifier in ("ctrl", "alt", "shift", "super")
 ]
+
+
+for _case, (_operation, _fields) in zip(
+        _ACTION_SCHEMA["oneOf"], _ACTION_FIELDS.items(), strict=True):
+    if _operation in {"click", "double_click", "right_click", "middle_click"}:
+        _case["properties"].pop("count", None)
+        _case["properties"]["count"] = {"type": "integer", "minimum": 1, "maximum": 3}
+        _case["required"] = []
+        _case["oneOf"] = [{"required": ["x", "y"], "properties": {"region": False}},
+                          {"required": ["region"], "properties": {"x": False, "y": False}}]
+    else:
+        _case["properties"].update(modifiers=False, region=False)
+    if _operation == "type":
+        _case["properties"]["text"] = {"type": "string", "minLength": 1, "maxLength": 512}
 
 
 def computer_definitions():

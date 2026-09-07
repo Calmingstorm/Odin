@@ -74,7 +74,12 @@ class X11AttachedBackend:
     creates_devices = False
     input_limits = {"text": "unicode_existing_keymap_only", "lease_seconds": 2,
                     "widget_focus": "shared_within_window",
-                    "keyboard_overlap": "uncertain_no_replay"}
+                    "keyboard_overlap": "uncertain_no_replay",
+                    "click_count": {"minimum": 1, "maximum": 3},
+                    "click_modifiers": ["ctrl", "alt", "shift", "super"],
+                    "accessible_targets": "unavailable", "replace_field": "unavailable",
+                    "effect_expectations": ["visual_change", "pointer_at", "region_changed",
+                                            "dialog_appeared", "menu_appeared", "window_gone"]}
     capabilities = BackendCapabilities("x11", "existing_session", "unknown", "unknown",
                                        "unknown", "verified")
     input_supported = False
@@ -822,9 +827,12 @@ class X11AttachedBackend:
                       "type": {"text"}, "key": {"chord"},
                       "polyline": {"points", "duration"}}
             required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
+            clicks = {"click", "double_click", "right_click", "middle_click"}
+            optional = {"expected_modal"} | ({"count", "modifiers"}
+                        if type(action) is dict and action.get("type") in clicks else set())
             if (type(action) is not dict or type(action.get("type")) is not str
                     or action["type"] not in fields
-                    or set(action) - {"expected_modal"} != required | fields[action["type"]]):
+                    or set(action) - optional != required | fields[action["type"]]):
                 raise AttachedFailure("unsupported_grounded_action")
             for key in ("source_id", "source_revision", "consent_generation"):
                 if (type(action[key]) is not type(getattr(frame.source, key))
@@ -838,9 +846,23 @@ class X11AttachedBackend:
                 raise AttachedFailure("stale_modal_binding")
             pointer_expected = (action["type"] == "click" and action["expected"] == {
                 "type": "pointer_at", "x": action.get("x"), "y": action.get("y")})
-            if action["expected"] != {"type": "visual_change"} and not pointer_expected:
+            from ..effects import expectation_arguments
+            expectation_arguments(action["expected"])
+            if (action["expected"]["type"] in {"pointer_at", "field_text_equals"}
+                    and not pointer_expected):
                 raise AttachedFailure("unsupported_postcondition")
             payload = {"type": action["type"]}
+            if action["type"] in clicks:
+                from ..policy import integer
+                integer(action.get("count", 2 if action["type"] == "double_click" else 1), 1, 3)
+                modifiers = action.get("modifiers", [])
+                if (type(modifiers) is not list or len(modifiers) > 4
+                        or any(type(m) is not str or m not in {"ctrl", "alt", "shift", "super"}
+                               for m in modifiers) or len(set(modifiers)) != len(modifiers)):
+                    raise AttachedFailure("invalid_modifiers")
+                for key in ("count", "modifiers"):
+                    if key in action:
+                        payload[key] = action[key]
             if action["type"] == "type":
                 text = action["text"]
                 if (type(text) is not str or not 1 <= len(text) <= 512
@@ -895,7 +917,9 @@ class X11AttachedBackend:
             if receipt.get("released") is not True:
                 self._release_failed = True
                 self._paused = True
-            receipt["postcondition"] = {"type": action["expected"]["type"], "status": "unavailable",
+            receipt["postcondition"] = {"type": ("pointer_at" if pointer_expected
+                                                 else "visual_change"),
+                                         "status": "unavailable",
                                          "source_id": frame.source.source_id,
                                          "source_revision": frame.source.source_revision,
                                          "consent_generation": frame.source.consent_generation}
@@ -929,6 +953,18 @@ class X11AttachedBackend:
                             self._scope, after.get("input_scope")),
                         actual={"before_sha256": hashlib.sha256(frame.image_bytes).hexdigest(),
                                 "after_sha256": hashlib.sha256(data).hexdigest()})
+                    after_scope = after.get("input_scope")
+                    if (type(after_scope) is dict
+                            and same_application_scope(self._scope, after_scope)):
+                        evidence["transition"] = {
+                            "method": "native_window_transition",
+                            "kind": after_scope.get("window_kind", "normal"),
+                            "appeared": (after_scope.get("window") != self._scope.get("window")
+                                         or after_scope.get("window_kind")
+                                         != self._scope.get("window_kind"))}
+                    if after.get("prior_target_state") in {"destroyed", "unmapped", "viewable"}:
+                        evidence.update(target_state=after["prior_target_state"],
+                                        target_state_method="native_window_state_after_release")
                     if after.get("prior_target_state") in {"destroyed", "unmapped"}:
                         evidence.update(target_disappeared=True,
                                         target_state=after["prior_target_state"],

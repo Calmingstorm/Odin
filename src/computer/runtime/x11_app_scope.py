@@ -270,6 +270,10 @@ class AppScope:
         if any(value not in allowed_types for value in types):
             raise ScopeFailure("application_scope_unavailable")
         transient = self._values(target, "WM_TRANSIENT_FOR")
+        window_kind = ("menu" if any(self._atom("_NET_WM_WINDOW_TYPE_" + kind) in types
+                                    for kind in ("MENU", "DROPDOWN_MENU", "POPUP_MENU"))
+                       else "dialog" if self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types
+                       or self._atom("_NET_WM_STATE_MODAL") in states else "normal")
         modal = bool(transient or self._atom("_NET_WM_STATE_MODAL") in states
                      or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
         chain, chain_metadata, seen = [], [], {_xid(target)}
@@ -306,7 +310,7 @@ class AppScope:
                     "focus_path": path, "ancestor_path": [_xid(w) for w in ancestors],
                     "focus_metadata": focus_metadata, "transient_metadata": chain_metadata,
                     "window_rect": rect, "rect": [left, top, right-left, bottom-top],
-                    "focused": True, "modal": modal,
+                    "focused": True, "modal": modal, "window_kind": window_kind,
                     "modal_kind": (None if not modal else
                                    "safe_application"),
                     "modal_title_digest": (hashlib.sha256(title.encode()).hexdigest()

@@ -198,6 +198,8 @@ class Observation:
                 "capture_time_basis": "request_start_lower_bound",
                 "source": self.source.public(), "modal": self.modal, "focused": self.focused,
                 "modal_kind": self.modal_kind,
+                "accessible_targets": [dict(node) for node in self.accessibility],
+                "accessibility_status": "available" if self.accessibility else "unavailable",
                 "consent_generation": self.scope.consent_generation,
                 "capture_sources": sorted(self.scope.capture_sources),
                 "input_sources": sorted(self.scope.input_sources),

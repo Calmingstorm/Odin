@@ -27,6 +27,10 @@ def pointer_anchor(action):
     """
     if action["operation"] in STROKE_OPERATIONS:
         return action["points"][0]
+    if "region" in action:
+        region = action["region"]
+        return (region["x"] + (region["width"] - 1) // 2,
+                region["y"] + (region["height"] - 1) // 2)
     return action["x"], action["y"]
 
 
