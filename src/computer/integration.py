@@ -259,7 +259,7 @@ class ComputerIntegration:
         await self.controller.session(context, {"operation": "stop"})
 
     async def finish_turn(self, st):
-        await self.controller.finish_turn(self._context(st))
+        return await self.controller.finish_turn(self._context(st))
 
     async def stop_channel(self, owner_id, channel_id):
         from .models import RequestContext

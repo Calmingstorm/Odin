@@ -86,7 +86,7 @@ class ComputerLifecycle:
         if not self.bot.config.computer.enabled or self._active:
             return
         async with config_transaction():
-            if self._active:
+            if self._active or not self.bot.config.computer.enabled:
                 return
             if self._closing or self._service is not None:
                 raise RuntimeError("Computer lifecycle unavailable for startup")
@@ -136,11 +136,12 @@ class ComputerLifecycle:
                 raise
             self._service = None
 
-    def _start_janitor(self):
+    def _start_janitor(self, *, already_pruned=False):
         store = getattr(self._service.controller, "store", None)
         if store is None:
             return
-        store.prune()
+        if not already_pruned:
+            store.prune()
 
         async def sweep():
             while True:
@@ -155,6 +156,13 @@ class ComputerLifecycle:
                     return
 
         self._janitor = asyncio.create_task(sweep(), name="computer-evidence-expiry")
+
+    @staticmethod
+    def _prune_candidate(candidate):
+        """Initial retention validation is part of preflight, before enabling is saved."""
+        store = getattr(candidate.controller, "store", None)
+        if store is not None:
+            store.prune()
 
     @staticmethod
     async def _settle(operation):
@@ -189,6 +197,13 @@ class ComputerLifecycle:
                 except Exception:
                     self.error = "enable_preflight_failed"
                     raise
+                try:
+                    self._prune_candidate(candidate)
+                except Exception:
+                    self._service = candidate
+                    self.error = "evidence_cleanup_failed"
+                    await self._discard()
+                    raise
                 exc, cancelled = await self._persist([(("computer", "enabled"), True)])
                 if exc is not None:
                     self._service = candidate
@@ -207,7 +222,7 @@ class ComputerLifecycle:
                     await self._discard()
                 else:
                     try:
-                        self._start_janitor()
+                        self._start_janitor(already_pruned=True)
                     except Exception:
                         self._active = False
                         self.error = "evidence_cleanup_failed"
@@ -359,7 +374,17 @@ class ComputerLifecycle:
                     valid = False
                 if not valid:
                     self._web_grants.pop(key, None)
-                    await service.finish_turn(st)
+                    result = await service.finish_turn(st)
+                    if isinstance(result, dict) and (
+                            result.get("state") == "quarantined"
+                            or (isinstance(result.get("cleanup"), dict)
+                                and result["cleanup"].get("complete") is not True)):
+                        self.error = "authority_cleanup_unverified"
+                        self._active = False
+                        self._invalidate()
+                        # Retain the controller for explicit emergency cleanup,
+                        # and stop its own authority/heartbeats wherever possible.
+                        await service.set_enabled(False)
                     return
         except Exception:
             self.error = "authority_cleanup_unverified"
