@@ -9,9 +9,8 @@ from src.config.schema import Config
 
 @pytest.mark.parametrize("environment,platform,expected", [
     ("isolated", "x11", {"drawing": "supported", "xed": "supported"}),
-    ("existing_session", "x11", {"drawing": "capture_only", "xed": "supported",
-                                 "inkscape": "supported", "writer": "supported"}),
-    ("existing_session", "wayland", {"inkscape": "supported"}),
+    ("existing_session", "x11", {}),
+    ("existing_session", "wayland", {}),
 ])
 def test_profile_status_is_pure_declaration(environment, platform, expected):
     config = Config(discord={"token": "fixture-only"})
@@ -31,9 +30,6 @@ def test_profile_status_is_pure_declaration(environment, platform, expected):
     assert manager._service is None
     assert manager._janitor is None
     assert not manager._watchers
-    if environment == "existing_session" and platform == "x11":
-        drawing = next(p for p in snapshot["application_profiles"] if p["id"] == "drawing")
-        assert drawing["reason"] == "attached_application_provenance_unavailable"
 
 
 def test_profile_status_uses_pinned_environment_not_pending_configuration():

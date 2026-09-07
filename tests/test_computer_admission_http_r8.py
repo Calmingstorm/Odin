@@ -51,7 +51,7 @@ async def test_http_exposes_bounded_reason_and_remedy_with_actual_auth(tmp_path)
         assert h.backend.calls == ["status"]
 
 
-async def test_http_profiles_are_canonical_and_not_backend_html(tmp_path):
+async def test_http_attached_has_no_application_allowlist(tmp_path):
     async with harness(tmp_path) as h:
         original = h.backend.operator_status
 
@@ -66,4 +66,4 @@ async def test_http_profiles_are_canonical_and_not_backend_html(tmp_path):
         response = await h.client.get("/api/computer", headers=h.headers)
         assert response.status == 200
         profiles = (await response.json())["application_profiles"]
-        assert len(profiles) == 1 and profiles[0]["label"] == "Xed"
+        assert profiles == []

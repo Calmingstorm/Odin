@@ -129,7 +129,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             "available": bool(value.get("available", True)),
             "state": state if state in known else "unknown",
         }
-        for key in ("owner_id", "session_id", "app", "last_action", "last_verification"):
+        for key in ("owner_id", "session_id", "last_action", "last_verification"):
             item = value.get(key) or ""
             if not isinstance(item, str):
                 raise ValueError
@@ -145,6 +145,11 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         if isinstance(restart, list) and all(isinstance(k, str) for k in restart):
             result["restart_required"] = [k[:64] for k in restart[:16]]
         backend = value.get("backend")
+        attached = isinstance(backend, dict) and backend.get("environment") == "existing_session"
+        app = value.get("app") or ""
+        if not attached and not isinstance(app, str):
+            raise ValueError
+        result["app"] = None if attached else app[:160]
         if isinstance(backend, dict):
             result["backend"] = {
                 "platform": backend.get("platform") if backend.get("platform") in {
@@ -155,6 +160,60 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                     backend.get("input_supported")) is bool else None,
                 "readiness": str(backend.get("readiness", "not_checked"))[:64],
             }
+            for key, allowed in {
+                "pointer": {"independent", "shared", "unknown"},
+                "keyboard_focus": {"independent_per_window", "shared", "unknown"},
+                "widget_focus": {"shared_within_window", "shared", "unknown"},
+            }.items():
+                item = backend.get(key)
+                capabilities = value.get("backend_capabilities")
+                limits = value.get("input_limits")
+                if item is None and isinstance(limits, dict):
+                    item = limits.get(key)
+                if item is None and isinstance(capabilities, dict):
+                    item = capabilities.get("pointer_separation" if key == "pointer" else key)
+                result["backend"][key] = (
+                    item if isinstance(item, str) and item in allowed else "unknown")
+            for key in ("shared_pointer", "shared_keyboard"):
+                if type(backend.get(key)) is bool:
+                    result["backend"][key] = backend[key]
+        provenance = value.get("application_provenance")
+        if attached and isinstance(provenance, dict):
+            public = {}
+            if type(provenance.get("pid")) is int and 0 < provenance["pid"] <= 2**31 - 1:
+                public["pid"] = provenance["pid"]
+            for key in ("exe_basename", "wm_class", "script_identity"):
+                item = provenance.get(key)
+                if key == "exe_basename" and isinstance(item, str) and "/" in item:
+                    continue
+                if isinstance(item, str) and len(item) <= 256 and not any(
+                        ord(char) < 32 or 0xD800 <= ord(char) <= 0xDFFF for char in item):
+                    public[key] = item
+            if type(provenance.get("trusted_executable")) is bool:
+                public["trusted_executable"] = provenance["trusted_executable"]
+            script = provenance.get("script_identity")
+            if isinstance(script, dict):
+                safe_script = {}
+                interpreter = script.get("interpreter_basename")
+                if isinstance(interpreter, str) and re.fullmatch(
+                        r"[A-Za-z0-9_.+-]{1,100}", interpreter):
+                    safe_script["interpreter_basename"] = interpreter
+                digest = script.get("argv_digest")
+                if isinstance(digest, str) and re.fullmatch(r"[a-f0-9]{64}", digest):
+                    safe_script["argv_digest"] = digest
+                if type(script.get("verified")) is bool:
+                    safe_script["verified"] = script["verified"]
+                if safe_script:
+                    public["script_identity"] = safe_script
+            result["application_provenance"] = public
+        limits = value.get("input_limits")
+        if isinstance(limits, dict):
+            public_limits = {}
+            for key in ("max_text_chars", "max_scroll_count", "max_points", "lease_seconds"):
+                item = limits.get(key)
+                if type(item) in (int, float) and 0 < item <= 10000:
+                    public_limits[key] = item
+            result["input_limits"] = public_limits
         if isinstance(value.get("error"), str):
             result["error"] = value["error"][:120]
         from ...computer.admission import public_admission
@@ -164,7 +223,9 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         if admission is not None:
             result["input_admission"] = admission
         profiles = value.get("application_profiles")
-        if isinstance(profiles, list) and isinstance(backend, dict):
+        if attached:
+            result["application_profiles"] = []
+        elif isinstance(profiles, list) and isinstance(backend, dict):
             offered = []
             for profile in profiles[:16]:
                 if not isinstance(profile, dict) or type(profile.get("id")) is not str:

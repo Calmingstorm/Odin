@@ -276,7 +276,7 @@ class ComputerLifecycle:
         await self._settle(cleanup())
 
     def snapshot(self):
-        from .app_profiles import ATTACHED_PROFILES, ISOLATED_PROFILES, application_profile
+        from .app_profiles import ISOLATED_PROFILES, application_profile
 
         desired = self.bot.config.computer
         restart = [name for name, value in self.settings.model_dump().items()
@@ -285,7 +285,7 @@ class ComputerLifecycle:
         # from operator status, including disabled startup. Eligibility is not
         # installation, focus, task authorization or measured input readiness.
         attached = self.settings.environment == "existing_session"
-        profiles = (ATTACHED_PROFILES if attached else ISOLATED_PROFILES)
+        profiles = () if attached else ISOLATED_PROFILES
         applications = []
         for app in sorted(profiles):
             profile = application_profile(

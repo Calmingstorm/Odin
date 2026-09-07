@@ -46,7 +46,7 @@ export default {
         <p v-if="status.input_admission.probe_scope === 'same_stack_disposable'" class="page-lede">Behavior was tested in a separate disposable compositor with the matched stack, not by abandoning held input on your desktop.</p>
         <p class="page-lede">Eligibility evidence does not replace current portal consent, source mapping or application checks. Opening this page runs no input probe.</p>
       </section>
-      <section class="mb-4" aria-labelledby="computer-apps-title">
+      <section v-if="!attached" class="mb-4" aria-labelledby="computer-apps-title">
         <h2 id="computer-apps-title" class="font-semibold mb-2">Application profiles</h2>
         <ul v-if="applicationProfiles.length" class="mb-2">
           <li v-for="profile in applicationProfiles" :key="profile.id">
@@ -57,9 +57,23 @@ export default {
         </ul>
         <p v-else class="page-lede">No application profiles reported for this backend.</p>
         <p class="page-lede">Profiles describe supported scope, not installation, focus, permission or task success. Input readiness is checked against a fresh observation.</p>
-        <p v-if="status.backend?.environment === 'existing_session'" class="page-lede">Open and focus the application, then ask for help in ordinary chat. Apps stay open when the turn ends. Pointer and keyboard focus are shared. Unknown apps, terminals, security prompts and control-plane actions remain unavailable.</p>
-        <p v-if="status.backend?.environment === 'existing_session' && status.backend?.platform === 'x11'" class="page-lede">LibreOffice Calc/Draw and the generic LibreOffice profile are not offered. Writer is keyboard-only note/bold/save; document close/reopen, open/new and pointer/menu input are refused. Session Stop/Close only detaches, never closes a Writer document.</p>
-        <p v-if="status.backend?.platform === 'wayland'" class="page-lede">Wayland currently offers native Inkscape only. The operator opens the document. File dialogs and document open/new/close/reopen are refused. Input requires a successful same-stack release probe, portal consent and the explicitly installed GNOME scope provider.</p>
+      </section>
+      <section v-else class="mb-4" aria-labelledby="computer-attached-title" style="overflow-wrap:anywhere">
+        <h2 id="computer-attached-title" class="font-semibold mb-2">Attached application</h2>
+        <p class="page-lede">Focus the application you want help with, then ask in ordinary chat. There is no application allowlist. Normal dialogs, file pickers, menus and document open/new/close/reopen are ordinary use. Session Stop only detaches input; applications stay open.</p>
+        <p class="page-lede">Denied classes remain blocked: terminals, shells, authentication and password prompts, polkit, keyring, sudo and Odin control-plane windows. Session authorization, current target checks and input-release checks still apply.</p>
+        <dl class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+          <div><dt>Observed executable</dt><dd>{{ status.application_provenance?.exe_basename || 'Not observed' }}</dd></div>
+          <div><dt>Observed WM_CLASS</dt><dd>{{ status.application_provenance?.wm_class || 'Not observed' }}</dd></div>
+          <div><dt>Observed PID</dt><dd>{{ status.application_provenance?.pid ?? 'Not observed' }}</dd></div>
+          <div><dt>Trusted executable metadata</dt><dd>{{ status.application_provenance?.trusted_executable === true ? 'Yes' : status.application_provenance?.trusted_executable === false ? 'No' : 'Unknown' }}</dd></div>
+          <div v-if="status.application_provenance?.script_identity"><dt>Script identity evidence</dt><dd>{{ scriptIdentity }}</dd></div>
+          <div><dt>Pointer</dt><dd>{{ status.backend?.pointer || 'unknown' }}</dd></div>
+          <div><dt>Keyboard focus</dt><dd>{{ status.backend?.keyboard_focus || 'unknown' }}</dd></div>
+          <div><dt>Widget focus</dt><dd>{{ status.backend?.widget_focus || 'unknown' }}</dd></div>
+        </dl>
+        <p class="page-lede">Provenance describes the last observed target, not application approval or task success. Untrusted executable metadata is evidence, not an application refusal. Focus within one window may be shared even with an independent pointer. Unknown capabilities are not proof of independence.</p>
+        <p v-if="inputLimits" class="page-lede">Per-call input bounds: {{ inputLimits }}. These limits are not application restrictions.</p>
       </section>
       <p v-if="status.state === 'unavailable'" class="page-lede mb-4">Disabled or unavailable. Check configured state, lifecycle state and backend prerequisites separately.</p>
       <p v-if="status.state === 'paused'" class="page-lede mb-4">Agent input is revoked. This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</p>
@@ -73,7 +87,7 @@ export default {
       <dl class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
         <div><dt>Owner</dt><dd>{{ status.owner_id || '—' }}</dd></div>
         <div><dt>Session</dt><dd style="overflow-wrap:anywhere">{{ status.session_id || '—' }}</dd></div>
-        <div><dt>Application</dt><dd>{{ status.app || '—' }}</dd></div>
+        <div v-if="!attached"><dt>Application</dt><dd>{{ status.app || '—' }}</dd></div>
         <div><dt>Last action / verification</dt><dd>{{ status.last_action || '—' }} / {{ status.last_verification || 'unavailable' }}</dd></div>
       </dl>
       <div class="flex gap-3 flex-wrap mb-4">
@@ -108,6 +122,16 @@ export default {
     const name = ref(''), artifact = ref(null);
     let generation = 0, timer = null, active = false, token = api.token, lastRefresh = 0;
     const enabledLabel = value => value === true ? 'Enabled' : value === false ? 'Disabled' : 'Unknown';
+    const attached = computed(() => status.value.backend?.environment === 'existing_session');
+    const inputLimits = computed(() => Object.entries(status.value.input_limits || {})
+      .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
+      .map(([key, value]) => `${key}: ${value}`).join(', '));
+    const scriptIdentity = computed(() => {
+      const script = status.value.application_provenance?.script_identity;
+      if (typeof script === 'string') return script;
+      if (!script || typeof script !== 'object') return 'Not observed';
+      return `${script.interpreter_basename || 'Unknown interpreter'}; argv digest ${script.argv_digest || 'not recorded'}; ${script.verified === true ? 'verified' : 'not verified'}`;
+    });
     const applicationProfiles = computed(() => Array.isArray(status.value.application_profiles)
       ? status.value.application_profiles.filter(p => p && typeof p.id === 'string' && typeof p.label === 'string'
         && ['supported', 'capture_only'].includes(p.input)).slice(0, 16) : []);
@@ -241,6 +265,6 @@ export default {
     }
     function cleanup() { active = false; clearInterval(timer); timer = null; invalidate(); adminReady.value = false; }
     onMounted(start); onActivated(start); onDeactivated(cleanup); onUnmounted(cleanup);
-    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, applicationProfiles };
+    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, applicationProfiles, attached, scriptIdentity, inputLimits };
   },
 };

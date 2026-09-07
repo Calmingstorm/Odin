@@ -43,10 +43,10 @@ try {
   page.on('pageerror', e => errors.push(e.message));
   let state = 'active', code = 200, blocked = null, holdObserve = false;
   let enabled = false, runtimeEnabled = false, runtimeGeneration = 0, holdToggle = false, blockedToggle = null;
-  let sessionGeneration = 1, recovery, inputAdmission;
+  let sessionGeneration = 1, recovery, inputAdmission, applicationProvenance;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
   let applicationProfiles = [{ id: 'drawing', label: 'Drawing', input: 'supported' }, { id: 'xed', label: 'Xed', input: 'supported' }];
-  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, input_admission: inputAdmission, application_profiles: applicationProfiles, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: 'drawing', last_action: 'executed', last_verification: 'unknown' });
+  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, input_admission: inputAdmission, application_provenance: applicationProvenance, application_profiles: applicationProfiles, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: backend?.environment === 'existing_session' ? null : 'drawing', last_action: 'executed', last_verification: 'unknown' });
   const frame = () => ({ frame: { evidence_id: 'opaque-frame', captured_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3600000).toISOString(), fresh_for_ms: 1000 } });
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHj8AAAAASUVORK5CYII=', 'base64');
   await page.route('**/api/**', async route => {
@@ -99,7 +99,9 @@ try {
   assert.match(await applications.innerText(), /Drawing: Input eligible/);
   assert.match(await applications.innerText(), /not installation, focus, permission or task success/);
   assert.doesNotMatch(await applications.innerText(), /Inkscape|LibreOffice/);
-  backend = { platform: 'x11', environment: 'existing_session', input_supported: false };
+  backend = { platform: 'x11', environment: 'existing_session', input_supported: false,
+    pointer: 'independent', keyboard_focus: 'independent_per_window', widget_focus: 'shared_within_window' };
+  applicationProvenance = { pid: 4242, exe_basename: 'custom-editor', wm_class: '<b>CustomEditor</b>', trusted_executable: false };
   applicationProfiles = [
     { id: 'drawing', label: 'Drawing', input: 'capture_only' },
     { id: 'inkscape', label: 'Inkscape', input: 'supported' },
@@ -109,13 +111,22 @@ try {
   ];
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading && view.status.backend.environment === 'existing_session');
-  assert.match(await applications.innerText(), /Drawing: Capture only/);
-  assert.match(await applications.innerText(), /Inkscape: Input eligible/);
-  assert.match(await applications.innerText(), /LibreOffice Writer only: Input eligible/);
-  assert.match(await applications.innerText(), /Close\/reopen is not offered/);
-  assert.match(await applications.innerText(), /Calc\/Draw and the generic LibreOffice profile are not offered/);
-  assert.match(await applications.innerText(), /pointer\/menu input are refused/);
-  assert.match(await applications.innerText(), /Pointer and keyboard focus are shared/);
+  assert.equal(await applications.count(), 0);
+  const attached = page.getByRole('region', { name: 'Attached application', exact: true });
+  assert.match(await attached.innerText(), /no application allowlist/);
+  assert.match(await attached.innerText(), /Normal dialogs, file pickers, menus/);
+  assert.match(await attached.innerText(), /Denied classes remain blocked: terminals/);
+  assert.match(await attached.innerText(), /custom-editor/);
+  assert.match(await attached.innerText(), /<b>CustomEditor<\/b>/);
+  assert.equal(await attached.locator('b').count(), 0, 'provenance is escaped text');
+  assert.match(await attached.innerText(), /4242/);
+  assert.match(await attached.innerText(), /independent_per_window/);
+  assert.match(await attached.innerText(), /shared_within_window/);
+  assert.doesNotMatch(await attached.innerText(), /Writer|Inkscape|not offered/);
+  applicationProvenance.script_identity = { interpreter_basename: 'python3', argv_digest: 'a'.repeat(64), verified: false };
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.status.application_provenance?.script_identity);
+  assert.match(await attached.innerText(), /python3; argv digest a{64}; not verified/);
   assert.match(await lifecycle.innerText(), /Input unavailable/);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, 0, 'profile listing never captures');
   inputAdmission = {
@@ -128,6 +139,7 @@ try {
   backend = { platform: 'wayland', environment: 'existing_session', input_supported: false };
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading && view.status.input_admission?.state === 'refused');
+  assert.match(await attached.innerText(), /Pointer\s+unknown/);
   const admission = page.getByRole('region', { name: 'Input eligibility evidence', exact: true });
   assert.match(await admission.innerText(), /Mutter 46.2 \(nested-x11\)/);
   assert.match(await admission.innerText(), /sender EOF/);
