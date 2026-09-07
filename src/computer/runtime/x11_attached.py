@@ -13,6 +13,7 @@ import time
 import uuid
 from fractions import Fraction
 from pathlib import Path
+from typing import Any
 
 from ..geometry import AffineTransform, SourceGeometry
 from ..models import BackendCapabilities, BackendObservation, CaptureScope, ComputerError
@@ -72,7 +73,7 @@ def same_application_scope(before, after):
 
 class X11AttachedBackend:
     creates_devices = False
-    input_limits = {"text": "unicode_existing_keymap_only", "lease_seconds": 2,
+    input_limits: dict[str, Any] = {"text": "unicode_existing_keymap_only", "lease_seconds": 2,
                     "widget_focus": "shared_within_window",
                     "keyboard_overlap": "uncertain_no_replay",
                     "click_count": {"minimum": 1, "maximum": 3},

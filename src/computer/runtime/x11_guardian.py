@@ -463,7 +463,7 @@ def _execute(request, *, controller_fd=0, authorize=None):
                                       request["monitor_names"])
     connection = AttachedConnection(config["display_name"])
     native = helper = None
-    steps = []
+    steps: list[InputStep] = []
     dispatched = False
     try:
         if connection.power_status() == "display_asleep":

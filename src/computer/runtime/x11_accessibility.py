@@ -41,7 +41,8 @@ class AttachedAccessibility(Accessibility):
         if not re.fullmatch(r"unix:(?:path|abstract)=[/A-Za-z0-9_.-]{1,256}"
                             r"(?:,guid=[0-9a-f]{32})?", address):
             raise PrimitiveError("unsupported", "Accessibility bus transport unavailable")
-        import gi  # type: ignore[import-not-found]
+        from .gi_support import load_gi
+        gi = load_gi()
         gi.require_version("Gio", "2.0")
         from gi.repository import Gio, GLib  # type: ignore[import-not-found]
         self.gio, self.glib = Gio, GLib

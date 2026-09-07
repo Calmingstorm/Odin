@@ -88,7 +88,8 @@ class Accessibility:
 
     def _load(self):
         if self.api is None:
-            import gi  # type: ignore[import-not-found]  # Optional worker-local GI dependency.
+            from .gi_support import load_gi
+            gi = load_gi()
 
             gi.require_version("Atspi", "2.0")
             from gi.repository import Atspi  # type: ignore[import-not-found]  # Optional GI.
