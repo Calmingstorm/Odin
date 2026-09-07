@@ -53,16 +53,21 @@ text readback. It never silently turns into Ctrl+A. Region clicks remain the
 explicit pixel element-targeting vocabulary. An unavailable semantic node does
 not prohibit ordinary pixel interaction.
 
-Limitation: the compound replace_field_pixels operation is attached-X11-only in
-this increment. Wayland and isolated profiles retain ordinary grounded
-click/key/type actions but do not advertise an implemented compound operation.
+The explicit compound operation is also implemented in isolated X11 and
+Wayland. Isolated X11 preflights native keycodes and owns a potential-down
+ledger within its worker teardown boundary. Wayland preflights the complete
+keymap plan, then requires a fresh authenticated focus permit before each
+click/chord under the same nonrenewable two-second native lease. It requires
+the rebuilt guardian's pixel_fields_v1 capability; an old binary cannot claim
+support. All paths report pixel targeting and require visual readback.
+Long values may exceed native dispatch budgets and refuse before clicking.
 
 ## Qualification boundary
 
 UI distribution rebuilt. Python lint, targeted types, tool-reference generation,
 and whitespace checks performed. End-phase testing added explicit Num Lock,
 preflight handshake, unknown-release and pixel-plan regression coverage; the
-focused set passes 71 tests. Broad computer-suite runs were red: original
+focused integrated set passes 94 tests. Broad computer-suite runs were red: original
 83eeca99 baseline 164 failed/2444 passed, initial patched run 172 failed/2443
 passed. The eight additional failures exposed a missing durable targeting
 receipt field and an unnecessarily changed mock call shape; both were corrected.
