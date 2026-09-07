@@ -134,6 +134,44 @@ def test_geometry_static_gravity_and_negative_root_coordinates(monkeypatch):
     ]
 
 
+@pytest.mark.parametrize('change', ['position', 'size', 'state', 'identity', 'race'])
+def test_exclusive_hidden_position_repair_never_maps_or_resizes(monkeypatch, change):
+    b, calls = baseline(), []
+    b['windows'][10]['states'] = (b['atoms']['_NET_WM_STATE_HIDDEN'],)
+    current = copy.deepcopy(b['windows'])
+    current[10]['geometry'] = (21, 30, 500, 400)
+    if change == 'size':
+        current[10]['geometry'] = (21, 30, 501, 400)
+    if change == 'state':
+        current[10]['states'] += (b['atoms']['_NET_WM_STATE_ABOVE'],)
+    if change == 'identity':
+        current[10]['identity']['start_ticks'] += 1
+    monkeypatch.setattr(m, 'identity', lambda d, wid: current[wid]['identity'])
+    monkeypatch.setattr(m, '_record', lambda d, wid, atoms: copy.deepcopy(current[wid]))
+
+    def owned(d, ident, action):
+        if change == 'race':
+            current[10]['geometry'] = (22, 30, 500, 400)
+        action()
+
+    monkeypatch.setattr(m, '_owned', owned)
+
+    def send(d, wid, name, values):
+        calls.append((wid, name, values))
+        assert name == '_NET_MOVERESIZE_WINDOW'
+        assert values == [10 | (0x3 << 8) | (2 << 12), 20, 30, 0, 0]
+        current[wid]['geometry'] = (*values[1:3], *current[wid]['geometry'][2:])
+
+    monkeypatch.setattr(m, '_send', send)
+    result = m.restore_windows(None, b, restore_hidden_position=True)
+    if change == 'position':
+        assert result['restored'] == [10] and len(calls) == 1
+        assert current == b['windows']
+    else:
+        assert not calls and not result['restored']
+        assert result['errors'] or result['skipped']
+
+
 def test_exact_child_focus_and_pointer_independently(monkeypatch):
     b, calls = baseline(), []
     root = NS(id=1, query_pointer=lambda: NS(mask=0, root_x=50, root_y=70),

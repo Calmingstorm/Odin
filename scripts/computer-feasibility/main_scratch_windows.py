@@ -247,13 +247,16 @@ def _idle_window(w, before):
             and types[0] in {atoms[n] for n in SURFACE_TYPES})
 
 
-def restore_windows(d, before):
+def restore_windows(d, before, *, restore_hidden_position=False):
     """Restore changed baseline windows independently; never act on new clients.
 
     StaticGravity (10) positions the client origin in root coordinates, not the
     decoration's outer edge. Thus translated client coordinates are sent without
     subtracting frame extents. Nonzero client borders are refused in preflight.
     Stacking is retained as evidence, not rewritten across unrelated new windows.
+    restore_hidden_position is reserved for an exclusive, baseline-directed scratch
+    cleanup AFTER topology is restored. It permits only an exact same-window,
+    same-state, same-size position repair. It never maps or activates the window.
     """
     validate(before)
     result = {"restored": [], "unchanged": [], "skipped": [], "errors": []}
@@ -268,7 +271,25 @@ def restore_windows(d, before):
                 result["unchanged"].append(wid)
                 continue
             if _immutable(old, before) or _immutable(current, before):
-                raise RuntimeError("hidden/sticky baseline changed; immutable window untouched")
+                if not restore_hidden_position:
+                    raise RuntimeError("hidden/sticky baseline changed; immutable window untouched")
+                hidden = before["atoms"]["_NET_WM_STATE_HIDDEN"]
+                old_meta = {k: v for k, v in old.items() if k != "geometry"}
+                new_meta = {k: v for k, v in current.items() if k != "geometry"}
+                if (hidden not in old["states"] or hidden not in current["states"]
+                        or old_meta != new_meta or current["geometry"][2:] != old["geometry"][2:]
+                        or old["border"] or len(old["extents"]) != 4):
+                    raise RuntimeError("hidden baseline changed beyond position; untouched")
+                def position_only():
+                    if _record(d, wid, before["atoms"]) != current:
+                        raise RuntimeError("hidden client changed during recovery; untouched")
+                    _send(d, wid, "_NET_MOVERESIZE_WINDOW",
+                          [10 | (0x3 << 8) | (2 << 12), *old["geometry"][:2], 0, 0])
+                _owned(d, old["identity"], position_only)
+                _wait(lambda: identity(d, wid) == old["identity"]
+                      and _record(d, wid, before["atoms"]) == old)
+                result["restored"].append(wid)
+                continue
             if (not set(current["states"]) <= set(before["atoms"].values())
                     or current["map_state"] != X.IsViewable):
                 raise RuntimeError("current state unsupported; window untouched")

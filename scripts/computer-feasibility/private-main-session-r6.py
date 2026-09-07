@@ -4,12 +4,12 @@ import argparse
 import hashlib
 import json
 import os
-from pathlib import Path
 import shutil
 import subprocess
 import sys
 import tempfile
 import time
+from pathlib import Path
 
 from r6_reaper import Reaper
 
@@ -25,7 +25,7 @@ def outer():
              'x11-crossuid-bootstrap.sh', 'r6_reaper.py',
              'main-session-app-smoke-r6.py', 'main_scratch_launcher.py',
              'main_scratch_support.py', 'main_scratch_windows.py',
-             'main_scratch_randr.py', 'owned-test-supervisor-r6.py']
+             'main_scratch_randr.py', 'main_scratch_cleanup.py', 'owned-test-supervisor-r6.py']
     for name in files:
         shutil.copy2(source / name, harness / name)
     shutil.copy2(__file__, harness / 'x11-crossuid-corpus.py')
@@ -48,12 +48,14 @@ def outer():
     changes = {
         "'MemoryMax=1G'": "'MemoryMax=2G'",
         "'RuntimeMaxSec=120'": "'RuntimeMaxSec=300'",
-        "CAP_SYS_PTRACE CAP_AUDIT_WRITE CAP_KILL']": "CAP_SYS_PTRACE CAP_AUDIT_WRITE CAP_KILL CAP_FOWNER']",
+        "CAP_SYS_PTRACE CAP_AUDIT_WRITE CAP_KILL']":
+            "CAP_SYS_PTRACE CAP_AUDIT_WRITE CAP_KILL CAP_FOWNER']",
         "'--cap-add', 'CAP_AUDIT_WRITE', '--cap-add', 'CAP_KILL']":
             "'--cap-add', 'CAP_AUDIT_WRITE', '--cap-add', 'CAP_KILL', '--cap-add', 'CAP_FOWNER']",
         "'--size', '268435456', '--tmpfs', '/workspace',": "'--bind', '/r6-output', '/workspace',",
         "f'BindReadOnlyPaths={root}:/xi2-source']":
-            "f'BindReadOnlyPaths={root}:/xi2-source', 'BindPaths=" + str(workspace) + ":/r6-output']",
+            "f'BindReadOnlyPaths={root}:/xi2-source', 'BindPaths="
+            + str(workspace) + ":/r6-output']",
         "'--symlink', 'workspace/tmp', '/tmp'": "'--bind', '/r6-output/tmp', '/tmp'",
         "'--dir', '/code', '--ro-bind', '/capture-source', '/code/src'":
             "'--dir', '/code', '--ro-bind', '/capture-source', '/code/src', "
@@ -65,7 +67,9 @@ def outer():
         runner = runner.replace(old, new)
     (harness / 'x11-run.py').write_text(runner)
     digest = hashlib.sha256((source / 'main-session-app-smoke-r6.py').read_bytes()).hexdigest()
-    assert digest == hashlib.sha256((harness / 'main-session-app-smoke-r6.py').read_bytes()).hexdigest()
+    copied_digest = hashlib.sha256(
+        (harness / 'main-session-app-smoke-r6.py').read_bytes()).hexdigest()
+    assert digest == copied_digest
     reaper = Reaper()
     result = 1
     try:
@@ -144,7 +148,8 @@ def inner():
         os.environ.update(env)
         from Xlib import display
         d = display.Display(':177')
-        wait(lambda: d.screen().root.get_full_property(d.intern_atom('_NET_SUPPORTING_WM_CHECK'), 0))
+        wait(lambda: d.screen().root.get_full_property(
+            d.intern_atom('_NET_SUPPORTING_WM_CHECK'), 0))
         time.sleep(1)
         # Let Openbox establish its own idle active-window property via a wholly
         # disposable fixture window. Never synthesize WM-owned EWMH properties.

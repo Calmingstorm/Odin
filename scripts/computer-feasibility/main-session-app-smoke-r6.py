@@ -4,8 +4,8 @@
 Parent operator must review this file and successful private tests first. Fixed
 UID1000 gated native executable, private HOME/bus, exact XRes identity checks,
 production controller input only. Never touches an existing document/window.
-Only focus/pointer are restored; unexpected geometry/topology changes are failures
-and are NOT repaired by changing unrelated windows or session settings.
+Cleanup restores the durable baseline only when exact resource identities still
+match. Hotplug/replacement refuses repair; unknown actions are never replayed.
 
 Run as root through sudo so the standalone subreaper can clean its cross-UID
 descendants. The CLI always starts its worker under a finite owned supervisor.
@@ -25,6 +25,7 @@ import re
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from pathlib import Path
 from types import SimpleNamespace
@@ -35,6 +36,7 @@ sys.path.insert(0, str(ROOT))
 
 import main_scratch_randr as randr  # noqa: E402
 import main_scratch_windows as windows  # noqa: E402
+from main_scratch_cleanup import finish_cleanup, restore_desktop  # noqa: E402
 from main_scratch_launcher import identity  # noqa: E402
 from main_scratch_support import (  # noqa: E402
     bounded,
@@ -82,9 +84,11 @@ def restore_power(expected):
     if expected not in values or current not in values:
         raise RuntimeError('power_state_restoration_unavailable')
     command('xset', 'dpms', 'force', values[expected])
-    if power_state() != expected:
-        raise RuntimeError('power_state_not_restored')
-    return {'power': expected, 'changed': True}
+    for _ in range(20):
+        if power_state() == expected:
+            return {'power': expected, 'changed': True}
+        time.sleep(.05)
+    raise RuntimeError('power_state_not_restored')
 
 
 def validate_args(args):
@@ -131,7 +135,8 @@ def validate_private_fixture(args):
             or argv[argv.index(b'-nolisten') + 1] != b'tcp'):
         raise RuntimeError('private_xvfb_authorization_required')
     authority = Path(args.xauthority)
-    if authority.is_symlink() or authority.stat().st_uid != 1000 or authority.stat().st_mode & 0o077:
+    if (authority.is_symlink() or authority.stat().st_uid != 1000
+            or authority.stat().st_mode & 0o077):
         raise RuntimeError('private_xauthority_required')
 
 
@@ -228,11 +233,13 @@ async def run(args):
     app_windows = []
     artifact = failure = None
     restored = False
+    preflight_complete = False
     filename = home / 'scratch.svg'
 
     def snapshot():
         with bounded():
-            return {'randr': private_topology(d) if args.private_qualification else randr.capture(d),
+            topology = private_topology(d) if args.private_qualification else randr.capture(d)
+            return {'randr': topology,
                     'windows': windows.snapshot(d),
                     'power': power_state()}
 
@@ -314,6 +321,7 @@ async def run(args):
         if snapshot() != before:
             raise RuntimeError('preflight_session_changed')
         stages.append({'stage': 'preflight_durable_snapshot', 'ok': True})
+        preflight_complete = True
         # NEW scratch profile only: suppress the first-run welcome, not real settings.
         profile = home / 'config' / 'inkscape'
         profile.mkdir(parents=True)
@@ -392,43 +400,51 @@ async def run(args):
         failure = {'type': type(exc).__name__, 'code': str(exc)[:160]}
         stages.append({'stage': 'task', 'ok': False, 'error_type': type(exc).__name__})
     finally:
-        if service is not None:
-            await stage(stages, base, 'controller_close', service.controller.close)
-            await stage(stages, base, 'purge_evidence', service.controller.store.purge_evidence)
-            await stage(stages, base, 'integration_close', service.close)
-        if app_identity and before and not before['windows']['active'][0]:
-            def minimize_scratch():
-                for wid in app_windows:
-                    if windows.identity(d, wid) == {'xid': wid, **app_identity}:
-                        command('xdotool', 'windowminimize', str(wid))
-            await stage(stages, base, 'minimize_only_scratch', minimize_scratch)
-        for role in ('inkscape', 'bus'):
-            await stage(stages, base, 'terminate_' + role,
-                        lambda role=role: terminate(role, args, home, processes))
-        if before is not None:
-            await stage(stages, base, 'restore_focus_pointer',
-                        lambda: (restore_private_empty(d, before['windows'])
-                                 if args.private_qualification else
-                                 windows.restore_focus_pointer(d, before['windows'])))
-            await stage(stages, base, 'restore_monitor_power',
-                        lambda: restore_power(before['power']))
-            await asyncio.sleep(.5)
-            def compare():
-                after = snapshot()
-                durable_json(base / 'after.json', after)
-                if after != before:
-                    raise RuntimeError('session_not_exactly_restored')
-            restored = await stage(stages, base, 'compare_exact_session', compare)
-        if d is not None:
-            await stage(stages, base, 'close_x_connection', d.close)
-        # All content and screenshots go, including failed action evidence.
-        # Outer supervisor retries these removals after descendant cleanup too.
-        removable = ['private-state']
-        if all(e['wrapper'].returncode is not None for e in processes.values()):
-            removable.append('home')
-        for name in removable:
-            await stage(stages, base, 'remove_' + name,
-                lambda name=name: shutil.rmtree(base / name) if (base / name).exists() else None)
+        async def cleanup():
+            nonlocal restored
+            if service is not None:
+                await stage(stages, base, 'controller_close', service.controller.close)
+                await stage(stages, base, 'purge_evidence', service.controller.store.purge_evidence)
+                await stage(stages, base, 'integration_close', service.close)
+            if app_identity and before and not before['windows']['active'][0]:
+                def minimize_scratch():
+                    for wid in app_windows:
+                        if windows.identity(d, wid) == {'xid': wid, **app_identity}:
+                            command('xdotool', 'windowminimize', str(wid))
+                await stage(stages, base, 'minimize_only_scratch', minimize_scratch)
+            for role in ('inkscape', 'bus'):
+                await stage(stages, base, 'terminate_' + role,
+                            lambda role=role: terminate(role, args, home, processes))
+            if before is not None and preflight_complete:
+                def restore_topology():
+                    if args.private_qualification:
+                        if private_topology(d) != before['randr']:
+                            raise RuntimeError('private_topology_changed')
+                        return {'changed': False}
+                    return {'changed': randr.restore(d, before['randr'])}
+
+                restored = await restore_desktop(stages=stages, base=base, before=before,
+                    restore_topology=restore_topology,
+                    restore_windows=(lambda: None) if args.private_qualification else
+                        lambda: windows.restore_windows(d, before['windows'],
+                                                        restore_hidden_position=True),
+                    restore_focus=lambda: (restore_private_empty(d, before['windows'])
+                        if args.private_qualification else
+                        windows.restore_focus_pointer(d, before['windows'])),
+                    restore_power=lambda: restore_power(before['power']), snapshot=snapshot)
+            if d is not None:
+                await stage(stages, base, 'close_x_connection', d.close)
+            # All content and screenshots go, including failed action evidence.
+            # Outer supervisor retries removals after descendant cleanup too.
+            removable = ['private-state']
+            if all(e['wrapper'].returncode is not None for e in processes.values()):
+                removable.append('home')
+            for name in removable:
+                await stage(stages, base, 'remove_' + name,
+                    lambda name=name: shutil.rmtree(base / name)
+                    if (base / name).exists() else None)
+
+        await finish_cleanup(cleanup())
         report = {'passed': artifact is not None and restored and all(s['ok'] for s in stages),
                   'artifact': artifact, 'session_restored': restored, 'stages': stages,
                   'actions': actions, 'failure': failure,
