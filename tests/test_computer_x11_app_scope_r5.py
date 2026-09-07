@@ -385,4 +385,3 @@ def test_interpreted_application_cannot_self_attest_via_writable_argv():
     # naming the installed script cannot establish trusted launch provenance.
     with pytest.raises(ScopeFailure, match="provenance_unavailable"):
         _process_identity(os.getpid(), "drawing")
-

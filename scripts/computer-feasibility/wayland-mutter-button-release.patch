@@ -6,12 +6,10 @@ This does not change the separate EIS_EVENT_DEVICE_CLOSED/remove_device path.
 
 --- a/src/backends/meta-eis-client.c
 +++ b/src/backends/meta-eis-client.c
-@@ -153,7 +153,7 @@ drop_device (gpointer htkey,
- 
+@@ -154,5 +154,5 @@ drop_device (gpointer htkey,
    for (button = 0; button < MAX_BUTTON; button++)
      {
 -      if (bit_is_set (device->button_state, key))
 +      if (bit_is_set (device->button_state, button))
          notify_button (device, button, FALSE);
      }
- 
