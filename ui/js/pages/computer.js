@@ -1,8 +1,10 @@
 /** Private operator inspector and admin lifecycle controls. No direct input or automatic capture. */
 import { computed, onMounted, onUnmounted, onActivated, onDeactivated, ref } from 'vue';
 import { api } from '../api.js';
+import ComputerProvisioning from '../components/computer-provisioning.js';
 
 export default {
+  components: { ComputerProvisioning },
   template: `
     <div class="p-6 page-fade-in computer-page" role="region" aria-labelledby="computer-title">
       <header class="page-header mb-4">
@@ -61,6 +63,7 @@ export default {
         <p v-if="['application_uid_mismatch', 'application_process_unreadable'].includes(status.backend?.input_blocker)" class="page-lede">Display capture access is not application inspection access. Provision the worker under the desktop user's identity, or explicitly configure runtime_sudo and its restricted worker permissions. This page does not elevate privileges.</p>
         <p class="text-xs text-gray-500 mt-3">Runtime settings are generation-pinned. Pending restart-required settings are not live; this page does not restart Odin.</p>
       </section>
+      <computer-provisioning v-if="adminReady" @saved="refresh" />
       <section v-if="status.input_admission" class="hm-card text-break" aria-labelledby="computer-input-admission-title">
         <div class="section-card-header">
           <h2 id="computer-input-admission-title" class="text-sm font-semibold text-gray-300">Input eligibility evidence</h2>

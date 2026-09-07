@@ -16,7 +16,7 @@ const CATEGORY_GROUPS = [
   { key: 'models', label: 'Models & AI', icon: 'brain', sections: ['image', 'llm_recovery'] },
   { key: 'runtime', label: 'Runtime', icon: 'activity', sections: ['context', 'sessions', 'agents', 'turn_state'] },
   { key: 'data', label: 'Data & Storage', icon: 'database', sections: ['learning', 'search', 'usage', 'audit', 'attachments'] },
-  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'computer', 'comfyui', 'slack', 'mcp'] },
+  { key: 'services', label: 'Services', icon: 'link', sections: ['webhook', 'observability', 'email', 'browser', 'comfyui', 'slack', 'mcp'] },
   { key: 'automation', label: 'Automation', icon: 'workflow', sections: ['message_triggers', 'reaction_triggers', 'grafana_alerts', 'outbound_webhooks', 'issue_tracker'] },
   { key: 'infrastructure', label: 'Infrastructure', icon: 'server', sections: ['tools', 'web'] },
 ];
@@ -32,7 +32,7 @@ const APPLY_MODE_LABELS = {
 };
 
 const CONFIG_EXCLUDED_SECTIONS = new Set([
-  'llm_provider', 'openai_codex', 'ollama', 'kimi', 'personality', 'discord',
+  'llm_provider', 'openai_codex', 'ollama', 'kimi', 'personality', 'discord', 'computer',
 ]);
 
 const CONFIG_EXCLUDED_PATH_PREFIXES = Object.freeze([
@@ -349,15 +349,6 @@ export default {
                   </div>
 
                   <div v-else class="cfgc-field-groups">
-                    <div v-if="section === 'computer'" class="cfgc-mcp-owner">
-                      <div>
-                        <strong>Computer provisioning · restart required</strong>
-                        <p>Edit the desired target, storage and launcher policy below, then review and save. Odin keeps its startup settings until a restart, including across disable/enable cycles. Saving does not install dependencies, create storage, grant OS permissions, or start a desktop session. Enable/disable and session controls remain on the Computer page.</p>
-                      </div>
-                      <router-link class="btn btn-ghost text-xs" :to="{ path: '/system', query: { tab: 'computer' } }">
-                        Open Computer <odin-icon name="chevronRight" :size="14" />
-                      </router-link>
-                    </div>
                     <div v-if="section === 'tools' && hasHostsCollection()" class="cfgc-mcp-owner">
                       <span class="cfgc-mcp-owner-icon" aria-hidden="true"><odin-icon name="server" :size="18" /></span>
                       <div>
@@ -393,15 +384,7 @@ export default {
                           </div>
 
                           <div class="cfgc-field-control">
-                            <template v-if="field.path === 'computer.enabled'">
-                              <div class="cfgc-structured-summary">
-                                <span>{{ field.value ? 'Enabled' : 'Disabled' }}</span>
-                                <small>Read-only here. Use the Computer page to enable or revoke sessions safely.</small>
-                                <router-link class="btn btn-ghost text-xs" :to="{ path: '/system', query: { tab: 'computer' } }">Open Computer</router-link>
-                              </div>
-                            </template>
-
-                            <template v-else-if="field.structured_container || field.structured_container_child">
+                            <template v-if="field.structured_container || field.structured_container_child">
                               <div class="cfgc-structured-summary">
                                 <span v-if="field.sensitivity !== 'public'"><odin-icon name="shield" :size="15" /> {{ field.configured ? 'Configured value' : 'Not configured' }}</span>
                                 <span v-else>{{ compactValue(field.value) }}</span>
@@ -1034,7 +1017,7 @@ export default {
     }
 
     function setFieldValue(field, value, options = {}) {
-      if (field.path === 'computer.enabled') return;
+      if (CONFIG_EXCLUDED_SECTIONS.has(field.path.split('.')[0])) return;
       const [section, ...segments] = field.path.split('.');
       recordUndoForField(field.path, Boolean(options.coalesce));
       const current = ensureSectionDraft(section);
