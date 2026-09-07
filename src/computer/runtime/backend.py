@@ -47,6 +47,10 @@ class LinuxDesktopBackend:
         "replace_field": "available_nodes_only", "replace_field_max_chars": 512,
         "replace_field_requires": ["replace_field", "text_readable", "text_complete"],
         "field_text_equals": "independent_same_native_node_after_release",
+        "replace_field_pixels": "explicit_region_click_select_all_native_keycodes",
+        "pixel_field_requires": ["fresh_observed_complete_region", "single_line_text",
+                                 "whole_native_keyplan_before_input"],
+        "pixel_field_verification": "visual_only_not_semantic_readback",
         "effect_expectations": ["visual_change", "pointer_at", "region_changed",
                                 "field_text_equals"],
     }
@@ -272,7 +276,8 @@ class LinuxDesktopBackend:
                       "scroll": {"x", "y", "direction", "count"},
                       "type": {"text"}, "key": {"chord"},
                       "polyline": {"points", "duration"},
-                      "replace_field": {"target", "text"}}
+                      "replace_field": {"target", "text"},
+                      "replace_field_pixels": {"region", "text"}}
             required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
             optional = {"expected_modal"}
             if type(action) is dict and action.get("type") in {
@@ -360,6 +365,23 @@ class LinuxDesktopBackend:
                         frame.delivered_to_source, *cast(tuple[int, int], tuple(p)),
                         frame.width, frame.height)] for p in points]
                     payload["duration"] = action["duration"]
+                elif action["type"] == "replace_field_pixels":
+                    from ..gui_actions import crop_arguments
+                    from .isolated_pixels import validate_field
+                    validate_field(action)
+                    region = crop_arguments(action["region"], frame.width, frame.height)
+                    left, top = source.input_point(
+                        frame.delivered_to_source, region["x"], region["y"],
+                        frame.width, frame.height)
+                    right, bottom = source.input_point(
+                        frame.delivered_to_source, region["x"] + region["width"] - 1,
+                        region["y"] + region["height"] - 1, frame.width, frame.height)
+                    if right < left or bottom < top:
+                        raise RuntimeFailure("invalid_field_region")
+                    payload.update(region={"x": int(left), "y": int(top),
+                                           "width": int(right) - int(left) + 1,
+                                           "height": int(bottom) - int(top) + 1},
+                                   text=action["text"])
                 elif action["type"] == "type":
                     payload["text"] = bounded_text(action["text"])
                 elif action["type"] == "replace_field":
@@ -380,6 +402,8 @@ class LinuxDesktopBackend:
             self._frame = None  # Consume before sending, including lost/failed replies.
             self._last_window = None
             receipt = (await self._rpc("act", action=payload, timeout=5.0))["receipt"]
+            if action["type"] == "replace_field_pixels":
+                receipt["targeting_path"] = "explicit_pixel_region"
             if receipt.get("released") is not True:
                 self._paused = True  # Failed owned-input cleanup requires teardown.
             post = receipt.get("postcondition", {"type": expected["type"], "status": "unavailable"})

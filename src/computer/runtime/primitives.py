@@ -22,7 +22,7 @@ PROFILES = {"drawing": ("/usr/bin/drawing", "--new-window"),
             "xed": ("/usr/bin/xed", "--standalone", "--new-window")}
 KEY_PATTERN = r"(?:(?:ctrl|alt|shift|super)\+){0,4}[A-Za-z0-9_]+"
 PHYSICAL = frozenset({"move", "click", "double_click", "right_click", "middle_click",
-                      "scroll", "key", "type", "polyline"})
+                      "scroll", "key", "type", "polyline", "replace_field_pixels"})
 SEMANTIC = frozenset({"invoke", "focus", "set_text", "replace_field", "select", "value"})
 CLICKS = frozenset({"click", "double_click", "right_click", "middle_click"})
 MODIFIED_POINTER = CLICKS | {"scroll", "polyline"}
@@ -156,6 +156,8 @@ class NativeDesktop:
         self._modal_kind = None
         self._startup_modal = None
         self._startup_approval = None
+        self._pixel_input = None
+        self._pixel_focus_at_observation = None
 
     def _same_app_transient(self, window):
         from Xlib import display as xdisplay  # type: ignore[import-untyped]
@@ -442,6 +444,8 @@ class NativeDesktop:
             self._observation, self._window_at_observation = None, None
             window = self._window()
             identity = self._identity(window["pid"])
+            raw_focus = (int(self._run("getwindowfocus", "-f"))
+                         if self._runner is None else None)
             if identity is None:
                 raise PrimitiveError("rejected", "Observed app process disappeared")
             captured_at = self._clock()
@@ -463,11 +467,14 @@ class NativeDesktop:
                 extent = tuple(int(v) for v in self._run("getdisplaygeometry").split())
                 if extent != (width, height):
                     raise PrimitiveError("rejected", "Private source changed during capture")
-            if self._window() != window or self._identity(window["pid"]) != identity:
+            if (self._window() != window or self._identity(window["pid"]) != identity
+                    or (raw_focus is not None
+                        and int(self._run("getwindowfocus", "-f")) != raw_focus)):
                 raise PrimitiveError("rejected", "Window changed during observation")
             self._guard()
             self._observation, self._window_at_observation = observation, dict(window)
             self._observed_identity = identity
+            self._pixel_focus_at_observation = raw_focus
             fingerprint = (width, height, tuple(sorted(window.items())), identity)
             if fingerprint != self._source_fingerprint:
                 self._source_revision += 1
@@ -492,7 +499,8 @@ class NativeDesktop:
                       "middle_click": {"x", "y"},
                       "scroll": {"x", "y", "direction", "count"},
                       "polyline": {"points", "duration"},
-                      "replace_field": {"target", "text"}}
+                      "replace_field": {"target", "text"},
+                      "replace_field_pixels": {"region", "text"}}
             required = {"type", "source_revision", "expected_window", "observation_id", "expected"}
             optional = {"expected_modal"}
             if type(action) is dict and action.get("type") in CLICKS:
@@ -528,7 +536,10 @@ class NativeDesktop:
             if ((action["type"] == "replace_field" and not field)
                     or not visual and not pointer and not field):
                 raise PrimitiveError("rejected", "Unsupported independently measured postcondition")
-            if action["type"] in {"type", "replace_field"}:
+            if action["type"] == "replace_field_pixels":
+                from .isolated_pixels import validate_field
+                validate_field(action)
+            elif action["type"] in {"type", "replace_field"}:
                 bounded_text(action["text"])
             elif action["type"] == "key":
                 try:
@@ -551,6 +562,8 @@ class NativeDesktop:
             if action["type"] == "scroll":
                 self._scroll(action)
             # Recheck pixels after controller authorization awaits, before input.
+            # Consume before native work, including capture/preflight exceptions.
+            self._observation = None
             self._deadline, self._cancelled = self._clock() + 1.75, cancelled
             observed_extent = self._root_extent
             current = self._capture()
@@ -561,7 +574,10 @@ class NativeDesktop:
                 raise PrimitiveError("rejected", "Private pixels changed before input")
             self._guard()
             before_digest = self._raster_digest.hex()
-            receipt = self.execute(action, cancelled)
+            if action["type"] == "replace_field_pixels":
+                receipt = self.execute(action, cancelled, started=self._deadline - 1.75)
+            else:
+                receipt = self.execute(action, cancelled)
             self._observation = None
             receipt["postcondition"] = {"type": expected["type"], "status": "unavailable"}
             if not receipt["ok"] or not receipt["released"]:
@@ -666,7 +682,8 @@ class NativeDesktop:
         fields = {"move": {"x", "y"}, "click": {"x", "y"},
                   "double_click": {"x", "y"}, "right_click": {"x", "y"},
                   "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
-                  "key": {"chord"}, "type": {"text"}, "polyline": {"points", "duration"}}
+                  "key": {"chord"}, "type": {"text"}, "polyline": {"points", "duration"},
+                  "replace_field_pixels": {"region", "text"}}
         binding = {"type", "expected_window", "observation_id", "source_revision",
                    "expected", "expected_modal"}
         if kind in CLICKS:
@@ -675,7 +692,15 @@ class NativeDesktop:
             binding.add("modifiers")
         if set(action) - (binding | fields[kind]):
             raise PrimitiveError("rejected", "Unsupported native action fields")
-        if kind == "key":
+        if kind == "replace_field_pixels":
+            from .isolated_pixels import IsolatedPixelInput
+            from .x11_owned_device import X11DeviceError
+            try:
+                self._pixel_input = IsolatedPixelInput(self)
+                self._pixel_input.execute(action)
+            except X11DeviceError as exc:
+                raise PrimitiveError("unsupported", str(exc)) from None
+        elif kind == "key":
             chord = action.get("chord")
             try:
                 modifiers, keysym = parse_key_chord(chord)
@@ -807,9 +832,9 @@ class NativeDesktop:
             raise PrimitiveError("rejected", "Invalid scroll direction/count")
         return {"up": 4, "down": 5, "left": 6, "right": 7}[direction], count
 
-    def execute(self, action, cancelled):
+    def execute(self, action, cancelled, *, started=None):
         with self._lock:
-            started = self._clock()
+            started = self._clock() if started is None else started
             self._deadline, self._cancelled = started + 1.75, cancelled
             self._attempted, self._injected = False, False
             receipt = {"ok": False, "status": "rejected", "injected": False}
@@ -883,6 +908,13 @@ class NativeDesktop:
 
     def _release(self):
         clean = True
+        if self._pixel_input is not None:
+            try:
+                clean = self._pixel_input.release()
+                if clean:
+                    self._pixel_input = None
+            except Exception:
+                clean = False
         for command, held in (("mouseup", self._buttons), ("keyup", self._keys)):
             items = (list(dict.fromkeys(reversed(self._key_order))) if command == "keyup"
                      else list(held))
