@@ -82,8 +82,18 @@ static void load_keymap(struct guardian *g) {
   size_t size=ei_keymap_get_size(km); if(!size || size>4*1024*1024)return;
   void *data=mmap(NULL,size,PROT_READ,MAP_PRIVATE,ei_keymap_get_fd(km),0);
   if(data==MAP_FAILED)return;
+  /* EI keymap size is payload bytes; Mutter sends strlen(), without NUL.
+   * Own one bounded terminator instead of assuming the mapped file includes it.
+   * Embedded NUL followed by content remains invalid, never a silent prefix. */
+  char *text=malloc(size+1);
+  if(!text){munmap(data,size);return;}
+  memcpy(text,data,size);text[size]=0;
+  size_t content=size;
+  if(content && text[content-1]==0)content--;
+  bool valid=memchr(text,0,content)==NULL;
   g->xctx=xkb_context_new(XKB_CONTEXT_NO_FLAGS);
-  if(g->xctx && ((char *)data)[size-1]==0)g->keymap=xkb_keymap_new_from_string(g->xctx,data,XKB_KEYMAP_FORMAT_TEXT_V1,XKB_KEYMAP_COMPILE_NO_FLAGS);
+  if(g->xctx && valid)g->keymap=xkb_keymap_new_from_string(g->xctx,text,XKB_KEYMAP_FORMAT_TEXT_V1,XKB_KEYMAP_COMPILE_NO_FLAGS);
+  free(text);
   munmap(data,size);
 }
 static void ready_receipt(struct guardian *g,const char *event) {

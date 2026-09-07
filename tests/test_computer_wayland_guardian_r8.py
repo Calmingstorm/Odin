@@ -84,7 +84,7 @@ struct ei_keymap *ei_device_keyboard_get_keymap(struct ei_device *dev) {
  if(!map)_exit(96);
  char *text=xkb_keymap_get_as_string(map,XKB_KEYMAP_FORMAT_TEXT_V1);
  char path[]="/tmp/odin-guardian-fake-keymap-XXXXXX";
- km.fd=mkstemp(path);unlink(path);km.size=strlen(text)+1;
+ km.fd=mkstemp(path);unlink(path);km.size=strlen(text)+(getenv("FAKE_NO_NUL")?0:1);
  if(write(km.fd,text,km.size)!=(ssize_t)km.size)_exit(97);
  free(text);xkb_keymap_unref(map);xkb_context_unref(ctx);return &km;
 }
@@ -262,8 +262,11 @@ def test_multiaction_same_ei_context(guardian):
 
 
 @pytest.mark.parametrize("layout,expected", [("us", 21), ("de", 44), ("fr", 21)])
-def test_text_uses_current_ei_keymap(guardian, monkeypatch, layout, expected):
+@pytest.mark.parametrize("nul_terminated", [True, False])
+def test_text_uses_current_ei_keymap(guardian, monkeypatch, layout, expected, nul_terminated):
     monkeypatch.setenv("FAKE_LAYOUT", layout)
+    if not nul_terminated:
+        monkeypatch.setenv("FAKE_NO_NUL", "1")
     g = guardian()
     g.send(b"B 1000\nT 79\n")  # y, swaps physical position in German
     g.event("action_done")
