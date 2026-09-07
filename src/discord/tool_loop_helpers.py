@@ -72,14 +72,19 @@ def _scrub_tool_input_for_storage(tool_name: str, tool_input: dict) -> dict:
     ):
         # Desktop fields and expected text can contain a whole private document.
         # Keep attribution/IDs and shape; never retain text, pixels or a data URL.
-        def desktop_scrub(value, key=""):
-            if key in {"text", "value", "content", "data", "image_bytes", "text_equals"}:
+        def desktop_scrub(value, key="", depth=0):
+            if depth > 30:
+                return "[private desktop content: nesting limit]"
+            if key in {"text", "value", "content", "data", "image_bytes", "text_equals",
+                       "text_contains", "contains_text", "expected_text", "selected_text",
+                       "accessible_name", "accessible_description", "clipboard"}:
                 length = len(value) if isinstance(value, (str, bytes)) else 0
                 return f"[private desktop content: {length} chars]"
             if isinstance(value, dict):
-                return {name: desktop_scrub(item, name) for name, item in value.items()}
+                return {name: desktop_scrub(item, name, depth + 1)
+                        for name, item in value.items()}
             if isinstance(value, list):
-                return [desktop_scrub(item) for item in value]
+                return [desktop_scrub(item, depth=depth + 1) for item in value]
             return value
 
         return _deep_scrub_strings(desktop_scrub(tool_input))
