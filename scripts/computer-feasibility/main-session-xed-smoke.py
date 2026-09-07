@@ -57,8 +57,8 @@ async def run(args):
     # /home/odin is deliberately not traversable by the desktop user. Keep the
     # exact private scratch directory beneath /tmp, with a per-directory ACL,
     # rather than changing the service user's home permissions.
-    base = Path(tempfile.mkdtemp(prefix="assisted-session-r5-", dir="/tmp"))
-    home = base / "scratch-home"
+    base = Path(tempfile.mkdtemp(prefix="cu5-", dir="/tmp"))
+    home = base / "h"
     home.mkdir(mode=0o700)
     command("sudo", "-n", "chown", f"{principal.pw_uid}:{principal.pw_gid}", str(home))
     # Parent is traversable solely for the explicitly named session identity.
@@ -115,7 +115,7 @@ async def run(args):
     actions = []
     failure = None
     marker = "Assisted input verified " + uuid.uuid4().hex[:8]
-    filename = home / "verified-note.txt"
+    filename = home / "note.txt"
 
     def assert_owned_focus():
         from src.computer.runtime.x11_app_scope import AppScope
@@ -210,6 +210,7 @@ async def run(args):
         await act(grant, "type", text=marker)
         await act(grant, "key", key="ctrl+s")
         await act(grant, "key", key="ctrl+a")
+        # Explicit short absolute path; never assume the chooser's initial folder.
         await act(grant, "type", text=str(filename))
         await act(grant, "key", key="Return")
         for _ in range(30):

@@ -20,6 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 LEASE_SECONDS = 2.0
+DISPATCH_SECONDS = 1.75
 MAX_MESSAGE = 65536
 
 
@@ -133,6 +134,7 @@ class Guardian:
         self.native, self.helper, self.validate = native, helper, validate
         self.controller_fd, self.clock = controller_fd, clock
         self.deadline = clock() + lease_seconds
+        self.dispatch_deadline = min(self.deadline, clock() + DISPATCH_SECONDS)
         self.ledger = OwnedLedger(native)
         self.identity = native.identity()
         self.injected = False
@@ -162,23 +164,38 @@ class Guardian:
             self.ledger.uncertain |= self.injected
             raise GuardianFailure("human_input_overlap")
 
+    def dispatch_guard(self):
+        self.guard()
+        if self.clock() >= self.dispatch_deadline:
+            raise GuardianFailure("input_dispatch_expired")
+
     def run(self, steps):
         released = False
         try:
             for step in steps:
                 self.guard()
-                self.validate(step)
                 kind = step[0]
+                owned_release = (kind in {"key", "button"} and step[2] is False
+                                 and step[1] in (self.ledger.keys if kind == "key"
+                                                 else self.ledger.buttons))
+                # Shortcut key-down can open a modal. Own tracked release must
+                # not depend on old focus. All new input still needs that scope;
+                # revocation, overlap, identity and the hard lease apply to all.
+                if not owned_release:
+                    self.dispatch_guard()
+                    self.validate(step)
+                    self.dispatch_guard()
                 if kind == "wait":
-                    end = min(self.deadline + .01, self.clock() + step[1])
+                    end = min(self.dispatch_deadline + .01, self.clock() + step[1])
                     while self.clock() < end:
-                        self.guard()
+                        self.dispatch_guard()
                         time.sleep(.005)
                     continue
                 if kind in {"key", "button"}:
                     self.ledger.prepare(kind, step[1], step[2])
                 self.injected = True  # Dispatch may have effects even without ACK.
-                self.helper.exchange({"op": kind, "args": list(step[1:])}, self.guard)
+                self.helper.exchange({"op": kind, "args": list(step[1:])},
+                                     self.guard if owned_release else self.dispatch_guard)
                 if kind in {"key", "button"}:
                     self.ledger.acknowledged(kind, step[1], step[2])
                 self.guard()

@@ -20,7 +20,8 @@ _DENIED = re.compile(
     r"terminal|xterm|konsole|gnome-terminal|xfce4-terminal|alacritty|kitty|"
     r"password|passphrase|authentication|authenticate|polkit|security|"
     r"credential|pinentry|keyring|sudo|odin|command prompt|\bshell\b", re.I)
-_FILE_DIALOGS = frozenset({"open", "open file", "open image", "save", "save as", "save image"})
+_FILE_DIALOGS = frozenset({"open", "open file", "open image", "save", "save as", "save as…",
+                           "save image"})
 
 
 class ScopeFailure(RuntimeError):  # noqa: N818 - Scope adapter failure API.

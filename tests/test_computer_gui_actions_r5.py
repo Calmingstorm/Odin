@@ -62,6 +62,20 @@ async def test_ninety_second_model_turnaround_with_fresh_revalidation(tmp_path):
         assert (await controller.act(ctx, inp))["status"] == "verified"
 
 
+async def test_rpc_capture_overhead_may_exceed_native_lease(tmp_path):
+    from src.computer.policy import MAX_ACTION_RPC_SECONDS, MAX_INPUT_SECONDS
+    assert MAX_INPUT_SECONDS == 2.0 and MAX_ACTION_RPC_SECONDS == 5.0
+    async with setup(tmp_path) as (controller, backend, ctx, original):
+        inp = {k: v for k, v in original.items() if k not in {"x", "y", "operation", "expect"}}
+        inp.update(operation="key", key="ctrl+s", expect={"type": "visual_change"})
+        async def hook(payload):
+            # No input occurs in this stub. Simulate startup/capture overhead.
+            await asyncio.sleep(2.05)
+            return changed(payload)
+        backend.hook = hook
+        assert (await controller.act(ctx, inp))["status"] == "verified"
+
+
 @pytest.mark.parametrize("classification,acknowledge,allowed", [
     ("safe_application", True, True), ("safe_application", False, False),
     ("unrecognized", True, False), (None, True, False),

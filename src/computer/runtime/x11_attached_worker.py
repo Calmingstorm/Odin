@@ -7,6 +7,7 @@ import hashlib
 import json
 import signal
 import sys
+import time
 from dataclasses import asdict
 from pathlib import Path
 
@@ -53,9 +54,17 @@ def run(request):
             from src.computer.runtime.x11_app_scope import AppScope
             app_scope = AppScope(capture._connection._display, config["app_profile"])
         monitor = topology.monitors[selected["index"]]
-        binding = app_scope.snapshot(monitor) if app_scope else None
-        observation = capture.capture(topology, selected["index"])
-        if app_scope and binding != app_scope.snapshot(monitor):
+        # GUI save/close can settle focus and title in separate events. Discard
+        # every raced raster and take a wholly new bounded observation, never
+        # relax equality or replay the preceding input to obtain a stable frame.
+        for attempt in range(3):
+            binding = app_scope.snapshot(monitor) if app_scope else None
+            observation = capture.capture(topology, selected["index"])
+            if not app_scope or binding == app_scope.snapshot(monitor):
+                break
+            if attempt < 2:
+                time.sleep(.03)
+        else:
             raise ValueError("application changed during capture")
         return {"ok": True, "source_width": observation.source.pixel_width,
                 "source_height": observation.source.pixel_height,

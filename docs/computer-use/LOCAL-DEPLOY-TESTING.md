@@ -3,8 +3,9 @@
 This is a manual handoff, not a deployment record. Aaron deploys the reviewed
 revision and authorizes any service restart externally. Nothing in this runbook
 automatically deploys, edits live configuration, enables input, or runs a pipeline.
-Main-session acceptance remains pending; private laboratory results below do not
-establish that the deployed service or the operator's actual desktop works.
+The development driver has passed a scratch Xed save on the actual main session
+with exact before/after restoration; see R5-MAIN-SESSION.md. This does not establish
+that the externally deployed service works. Deployment QA remains operator-owned.
 
 ## First increment and evidence boundary
 
@@ -28,6 +29,11 @@ Private cross-UID X11 testing demonstrated actual native Xed actions and owned
 release through a distinct sudo wrapper. Its root-controller fixture does not
 prove a particular unprivileged service's sudo/PAM policy or physical-input safety.
 Capture permission is monitor-wide, not an application-only privacy boundary.
+Use short typing chunks and short explicit file paths: the independently enforced
+native input lease is two seconds, not permission to finish arbitrarily long text.
+Busy or animated screens can invalidate exact raster grounding before dispatch;
+refresh the observation and decide anew, never replay an unknown action. These
+limits are operationally significant, not just theoretical caveats.
 
 ## 1. Provision offline, before the manual restart
 
@@ -146,7 +152,11 @@ changes require new consent/start; the runtime must not guess a new input transf
    cleanup receipt after Stop. Distinguish executed, verified, not_satisfied,
    unavailable and unknown; record failures without upgrading them to success.
 8. Exercise **Pause / revoke input**, confirm revocation, then explicitly request
-   owner-authorized resume with renewed generation and fresh observation. Use
+   owner-authorized resume with renewed generation and fresh observation **while
+   the originating foreground task is still alive**. Finishing that turn closes
+   paused sessions too; a later message starts a new task, not a cross-turn resume.
+   Attached applications remain open, but isolated work must be exported before
+   ending its task. This does not restrict ordinary tools in either turn. Use
    **Stop** to finish or immediately on unexpected focus/input. Both controls are
    independent of model/observation waits. Attached Stop must leave Xed and the
    desktop alive; isolated Stop may remove its owned sandbox. Confirm cleanup,

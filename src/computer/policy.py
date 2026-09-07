@@ -5,6 +5,9 @@ from .models import BackendCapabilities, ComputerError, RequestContext, SessionG
 MAX_TASK_SECONDS = 1200
 MAX_ACTIONS = 200
 MAX_INPUT_SECONDS = 2.0
+# Native dispatch/release remains independently leased at <= MAX_INPUT_SECONDS.
+# Privileged startup and post-release capture are not injected input.
+MAX_ACTION_RPC_SECONDS = 5.0
 MAX_POINTS = 256
 MAX_BATCH = 8
 FRAME_FRESH_SECONDS = 5.0

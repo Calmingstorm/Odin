@@ -1,4 +1,54 @@
-# R5 main-session testing: capture passed, input not established
+# R5 main-session testing: scratch Xed save and exact restoration passed
+
+## Final acceptance, 2026-09-07 05:55 UTC
+
+The production attached backend and controller completed a real task on the
+authorized main X11 session: type a unique note, open Save As, enter a new private
+absolute path, save, and independently compare the exact file bytes. This was a
+deterministic development driver, not the deployed bot or a model-planned task.
+The separate isolated real-model GUI result is in MODEL-GUI-R5.md.
+
+Evidence: `/tmp/r5-main-xed-short-absolute.log`, private journal
+`/tmp/cu5-g2dpl7co`. Driver PID3705963 exit0,31seconds. Exact saved artifact SHA256:
+`d633fd3ab5ed747fe269cf4539c709af9c5159d5445f7478380e986744adce8a`.
+Five actions: type verified, Ctrl+S verified, Ctrl+A not_satisfied (no measured
+raster change), type verified, Return verified. The artifact assertion, not those
+visual receipts, proves the saved text. No uncertain input was replayed.
+
+All cleanup stages passed. Serialized before/after metadata compares byte-for-byte:
+four-monitor RandR topology/modes/transforms, seven pre-existing clients and their
+geometry/states/stacking, focus, active client, workspace, pointer and keymap.
+DP-4 remains the3440x1440 primary and all monitors remain off. No wake was needed.
+Only the newly gated scratch Xed and private bus were terminated; their private
+HOME and scratch artifact were removed, screenshots purged, controller closed.
+Independent validate_action verified the exact metadata files, absence of scratch
+HOME/driver, four monitors, primary, off state and idle active-client state.
+
+### Preserved later failures before the passing run
+
+- `/home/odin/assisted-session-r5-l5myxem8`: UID1000 could not traverse the service
+  user's home, so private bus launch failed before desktop effects. The helper now
+  creates a unique private /tmp directory and grants traversal only there.
+- `/tmp/assisted-session-r5-4wwfgwqq`: typing passed, Ctrl+S returned unknown. The
+  original receipt does not identify its cause. Scratch cleanup initially left
+  the desktop focused rather than the original nonclient WM focus. The exact
+  recorded focus identity was independently checked and restored; full RandR and
+  window metadata then matched. Subsequent cleanup performs that bounded identity-
+  checked focus restoration before comparing derived FOCUSED state. No WM active
+  property is forged, and no hidden application is activated.
+- `/tmp/assisted-session-r5-urnje4kj`: four fresh pre-input observations all changed
+  before dispatch; no input sent. Exact session restored.
+- `/tmp/assisted-session-r5-bpil3ftu`: long absolute filename typing returned unknown;
+  no replay. No causal native receipt was retained, so lease expiry is not claimed
+  as its established cause. Exact session restored.
+- `/tmp/assisted-session-r5-w8vwu8f3`: short basename input completed, but expected
+  file was absent. The helper had assumed the chooser's starting folder; that was
+  invalid. Exact session restored. Final run uses an explicit short absolute path.
+
+The helper's73 focused tests now include idle WM focus, immutable hidden/sticky
+clients, independent cleanup failures and unchanged-client preservation. This
+final evidence supersedes the earlier pending-input conclusion below, without
+erasing its failed attempts or the earlier topology-restoration evidence gap.
 
 Aaron's explicit overnight scratch-only permission was used. No existing document
 was edited, saved or closed; no terminal or Odin WebUI input was sent. The product

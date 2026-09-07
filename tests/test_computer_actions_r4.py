@@ -429,7 +429,7 @@ async def test_pending_failure_unknown_never_replayed(tmp_path, monkeypatch, fai
                 controller.authorize = lambda _: False
             return backend.result(payload)
         if failure == "timeout":
-            monkeypatch.setattr("src.computer.controller.MAX_INPUT_SECONDS", 0.01)
+            monkeypatch.setattr("src.computer.controller.MAX_ACTION_RPC_SECONDS", 0.01)
         backend.hook = action
         if failure == "cancel":
             with pytest.raises(asyncio.CancelledError):

@@ -182,7 +182,7 @@ def test_same_key_physical_race_is_unknown_and_never_repairs_physical_state():
     assert native.physical_keys == {38} and native.keys == set()
 
 
-def test_app_scope_failure_releases_previously_owned_input():
+def test_app_scope_failure_blocks_next_down_and_releases_previously_owned_input():
     count = [0]
 
     def validate(step):
@@ -191,10 +191,36 @@ def test_app_scope_failure_releases_previously_owned_input():
             raise RuntimeError("scope changed")
 
     native, helper, guard = rig(validate=validate)
-    receipt = guard.run([("button", 1, True), ("button", 1, False)])
+    receipt = guard.run([("button", 1, True), ("key", 38, True)])
     assert receipt["reason"] == "input_scope_or_native_failed"
     assert receipt["status"] == "unknown" and receipt["released"]
     assert not native.buttons and helper.fenced
+
+
+def test_ctrl_s_modal_on_down_allows_only_own_tracked_releases():
+    changed = [False]
+    def validate(step):
+        if changed[0]:
+            raise RuntimeError("modal changed old snapshot")
+    native, helper, guard = rig(validate=validate)
+    helper.after_send = lambda: changed.__setitem__(0, changed[0] or 39 in native.keys)
+    receipt = guard.run([("key", 37, True), ("key", 39, True),
+                         ("key", 39, False), ("key", 37, False)])
+    assert receipt["status"] == "executed" and receipt["released"]
+    assert not native.keys and not guard.ledger.keys and helper.fenced
+    assert native.calls == [("key", 37, True), ("key", 39, True),
+                            ("key", 39, False), ("key", 37, False), ("fence",)]
+
+
+def test_dispatch_budget_does_not_extend_native_lease():
+    now = [10.0]
+    native, helper, guard = rig(clock=lambda: now[0])
+    helper.after_send = lambda: now.__setitem__(0, 11.8)
+    receipt = guard.run([("key", 38, True), ("key", 38, False), ("key", 39, True)])
+    assert receipt["reason"] == "input_dispatch_expired"
+    assert receipt["status"] == "unknown" and receipt["released"]
+    assert ("key", 39, True) not in native.calls and not native.keys
+    assert guard.deadline == 12.0 and guard.dispatch_deadline == 11.75
 
 
 @pytest.mark.parametrize("failure", ["release", "fence"])
@@ -225,6 +251,9 @@ def backend(**kwargs):
 async def observed(monkeypatch):
     b = backend(input_enabled=True)
     state = {"binding": {"focused": True, "modal": None, "modal_kind": None,
+                         "process": {"pid": 17, "start_ticks": 300}, "window": 90,
+                         "topology": "fixture", "source_rect": [100, 200, 40, 20],
+                         "transient_chain": [],
                          "rect": [100, 200, 40, 20], "source_origin": [100, 200]},
              "image": b"before"}
     monitor = {"name": "fixture", "width": 40, "height": 20, "index": 0}
@@ -291,6 +320,41 @@ async def test_actor_maps_delivered_pixels_through_source_then_private_origin(mo
     assert result["postcondition"]["status"] == "observed"
     with pytest.raises(attached.AttachedFailure, match="fresh_app_scoped"):
         await b.act(click(frame))
+
+
+@pytest.mark.asyncio
+async def test_safe_modal_transition_verifies_same_app_but_consumes_old_binding(monkeypatch):
+    b, state, frame = await observed(monkeypatch)
+    async def act(request):
+        state["binding"].update(window=91, transient_chain=[90], modal=True,
+                                modal_kind="safe_application", rect=[100, 200, 30, 10])
+        state["image"] = b"dialog appeared"
+        return {"status": "executed", "released": True}
+    monkeypatch.setattr(b, "_input_worker", act)
+    result = await b.act(click(frame))
+    assert result["postcondition"]["target_application_matches"] is True
+    fresh = await b.observe()
+    assert fresh.modal is not None and fresh.modal_kind == "safe_application"
+    assert fresh.source.source_revision > frame.source.source_revision
+    with pytest.raises(attached.AttachedFailure, match="stale_source_binding"):
+        await b.act(click(frame))
+    with pytest.raises(attached.AttachedFailure, match="unexpected_modal"):
+        await b.act(click(fresh))
+
+
+@pytest.mark.parametrize("change", [
+    {"process": {"pid": 18, "start_ticks": 300}},
+    {"process": {"pid": 17, "start_ticks": 301}},
+    {"window": 92, "transient_chain": []}, {"topology": "changed"},
+    {"source_rect": [0, 0, 40, 20]}, {"source_origin": [0, 0]},
+    {"modal_kind": "unrecognized"}, {"focused": False}, {"process": None},
+])
+async def test_postcondition_rejects_other_app_or_source_or_unknown_modal(monkeypatch, change):
+    _, state, _ = await observed(monkeypatch)
+    before = state["binding"]
+    after = {**before, "window": 91, "transient_chain": [90],
+             "modal": True, "modal_kind": "safe_application", **change}
+    assert not attached.same_application_scope(before, after)
 
 
 @pytest.mark.asyncio

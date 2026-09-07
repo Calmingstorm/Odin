@@ -222,6 +222,8 @@ def test_bounded_property(app):
 
 
 @pytest.mark.parametrize("title,kind", [(b"Save As", "safe_application"),
+                                      ("Save As…".encode(), "safe_application"),
+                                      ("Save As… authentication".encode(), None),
                                       (b"Information", "unrecognized"),
                                       (b"Confirmation", "unrecognized")])
 def test_same_process_dialog_classification(app, title, kind):
@@ -237,6 +239,9 @@ def test_same_process_dialog_classification(app, title, kind):
         700 if name == "_NET_WM_WINDOW_TYPE_DIALOG" else original_atom(name))
     display.target.props["_NET_WM_WINDOW_TYPE"] = [700]
     result = checker.snapshot(monitor)
+    if kind is None:
+        assert result is None
+        return
     assert result is not None and result["modal"] and result["modal_kind"] == kind
     if kind == "unrecognized":
         with pytest.raises(scope.ScopeFailure):

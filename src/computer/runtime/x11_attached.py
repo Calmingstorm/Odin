@@ -53,6 +53,27 @@ def worker_environment(xauthority):
             "PYTHONDONTWRITEBYTECODE": "1"}
 
 
+def same_application_scope(before, after):
+    """Fresh trusted process/source and same top-level family, not exact focus.
+
+    Postcondition evidence only, never permission to reuse an observation.
+    Both scopes originate in AppScope's XRes/process and rejection checks.
+    """
+    if not isinstance(before, dict) or not isinstance(after, dict):
+        return False
+    if (not before.get("process") or before.get("process") != after.get("process")
+            or after.get("focused") is not True
+            or after.get("modal_kind") not in {None, "safe_application"}):
+        return False
+    for field in ("topology", "source_rect", "source_origin"):
+        if field not in before or before[field] != after.get(field):
+            return False
+    def root(scope):
+        chain = scope.get("transient_chain") or []
+        return chain[-1] if chain else scope.get("window")
+    return bool(root(before)) and root(before) == root(after)
+
+
 class X11AttachedBackend:
     creates_devices = False
     input_limits = {"text": "printable_ascii_existing_keymap_only", "lease_seconds": 2,
@@ -432,7 +453,8 @@ class X11AttachedBackend:
                     evidence = receipt["postcondition"]
                     evidence.update(
                         status="observed", method="raster_digest_after_release",
-                        target_application_matches=after.get("input_scope") == self._scope,
+                        target_application_matches=same_application_scope(
+                            self._scope, after.get("input_scope")),
                         actual={"before_sha256": hashlib.sha256(frame.image_bytes).hexdigest(),
                                 "after_sha256": hashlib.sha256(data).hexdigest()})
                 except Exception:

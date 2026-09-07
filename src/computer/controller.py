@@ -20,8 +20,8 @@ from .models import (
 from .policy import (
     DELIVERED_GROUNDING_SECONDS,
     FRAME_FRESH_SECONDS,
+    MAX_ACTION_RPC_SECONDS,
     MAX_ACTIONS,
-    MAX_INPUT_SECONDS,
     MAX_TASK_SECONDS,
     STOP_TIMEOUT_SECONDS,
     exact_keys,
@@ -617,7 +617,7 @@ class ComputerController:
             try:
                 self._active(grant)
                 raw = await _bounded(live.backend.act(payload),
-                                     min(MAX_INPUT_SECONDS, live.deadline - self.monotonic()))
+                                     min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
                 self._active(grant)
                 await self._auth(context)
                 self._active(grant)
