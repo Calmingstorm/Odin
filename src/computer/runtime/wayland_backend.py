@@ -115,6 +115,8 @@ class WaylandRuntimeBackend:
         self._stop_lock = asyncio.Lock()
         self._release_failed = False
         self._jobs = set()
+        self._cleanup_task = None
+        self._cleanup_evidence = {}
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -188,8 +190,19 @@ class WaylandRuntimeBackend:
             await self._guardian.start(transferred, mapping_id)
             qualifier = self._qualify
             if qualifier is None:
-                from .wayland_probe import qualify
-                qualifier = qualify
+                from .wayland_probe import GnomeSameStackQualifier
+
+                qualifier = GnomeSameStackQualifier()
+            from .wayland_probe import GnomeSameStackQualifier
+
+            if isinstance(qualifier, GnomeSameStackQualifier):
+                async def record_probe(pid):
+                    from .recovery import process_identity
+
+                    self._record_spawn(process_identity(pid))
+
+                self._record_spawn(None)
+                qualifier.record_spawn = record_probe
             admission = await asyncio.wait_for(qualifier(self._identity), 90)
             if type(admission) is not InputAdmission:
                 raise ComputerError("wayland_probe_evidence_invalid")
@@ -396,6 +409,12 @@ class WaylandRuntimeBackend:
             ready = await self._guardian.select(metadata["mapping_id"])
             if [ready["width"], ready["height"]] != metadata["size"]:
                 raise ComputerError("wayland_input_extent_mismatch")
+            # Identity hashing and region negotiation are awaited. Recheck focus
+            # after both, rather than letting their latency widen the input race.
+            fresh_scope = await self._scope_provider.snapshot(metadata, self.app_profile)
+            if _scope_binding(scope) != _scope_binding(fresh_scope):
+                self._frame = None
+                raise ComputerError("wayland_focus_changed_before_dispatch")
             self._active()
             if not 0 <= time.monotonic() - self._captured_at <= 5:
                 raise ComputerError("wayland_observation_expired")
@@ -439,18 +458,46 @@ class WaylandRuntimeBackend:
         raise ComputerError("existing_session_export_not_granted")
 
     async def _cleanup(self):
+        if self._cleanup_task is None or self._cleanup_task.done():
+            # Repeated Close is an explicit retry of incomplete cleanup. A
+            # cancelled waiter never cancels the resource owner's cleanup task.
+            self._cleanup_task = asyncio.create_task(self._cleanup_all())
+        return await asyncio.shield(self._cleanup_task)
+
+    async def _cleanup_all(self):
         for job in tuple(self._jobs):
             job.cancel()
         if self._jobs:
             await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
-        guardian = (await self._guardian.close() if self._guardian else
-                    {"process_reaped": True, "release_submitted": True})
-        portal = await self._portal.close() if self._portal else {"process_reaped": True}
+        guardian = {"process_reaped": self._guardian is None,
+                    "release_submitted": self._guardian is None}
+        portal = {"process_reaped": self._portal is None}
+        scope_closed = self._scope_provider is None
+        # Release the original EI owner before portal revocation, but never skip
+        # later resources when the earlier path fails or times out.
+        if self._guardian:
+            try:
+                guardian = await asyncio.wait_for(self._guardian.close(), 4)
+            except (Exception, asyncio.CancelledError):
+                pass
+        if self._portal:
+            try:
+                portal = await asyncio.wait_for(self._portal.close(), 4)
+            except (Exception, asyncio.CancelledError):
+                pass
         if self._scope_provider:
-            await self._scope_provider.close()
+            try:
+                await asyncio.wait_for(self._scope_provider.close(), 0.5)
+                scope_closed = True
+            except (Exception, asyncio.CancelledError):
+                pass
         self._release_failed |= not guardian.get("release_submitted", False)
-        return (guardian.get("process_reaped") is True and portal.get("process_reaped") is True
-                and not self._release_failed)
+        portal_closed = (portal.get("process_reaped") is True
+                         and not portal.get("cleanup_errors"))
+        ei_closed = guardian.get("process_reaped") is True
+        self._cleanup_evidence = {"portal_session_closed": portal_closed,
+                                  "ei_connection_closed": ei_closed}
+        return (ei_closed and portal_closed and scope_closed and not self._release_failed)
 
     async def pause(self):
         self._paused = True
@@ -483,7 +530,7 @@ class WaylandRuntimeBackend:
             clean = await self._cleanup()
         return {"stopped": clean, "released": clean, "applications_preserved": True,
                 "input_revoked": True, "capture_revoked": True,
-                "portal_session_closed": clean, "ei_connection_closed": clean,
+                **self._cleanup_evidence,
                 "owned_devices": "portal_owned_connections_closed" if clean else "unknown",
                 "state": "closed" if clean else "quarantined",
                 "recovery": None if clean else "wayland_owned_cleanup_unverified"}

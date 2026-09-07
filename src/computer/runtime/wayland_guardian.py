@@ -119,6 +119,8 @@ class WaylandGuardian:
 
     async def _send(self, data: str):
         async with self._write_lock:
+            if self._closing and data != "C\n":
+                raise WaylandGuardianError("wayland_guardian_revoked")
             if (self._child is None or self._child.returncode is not None
                     or self._child.stdin.is_closing()):
                 raise WaylandGuardianError("wayland_guardian_disconnected")
@@ -202,6 +204,9 @@ class WaylandGuardian:
                 "input_was_sent": self._active}
 
     async def close(self):
+        # Fence before scheduling cleanup, including writers already queued on
+        # the transport lock. Only the exact cancel message may cross this fence.
+        self._closing = True
         if self._cleanup is None or (self._cleanup.done() and self._child is not None
                                      and self._child.returncode is None):
             self._cleanup = asyncio.create_task(self._close())
