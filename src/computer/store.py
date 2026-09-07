@@ -243,11 +243,20 @@ class ComputerStore:
                    for key in ("stopped", "released", "applications_preserved",
                                "input_revoked", "capture_revoked", "input_was_enabled",
                                "portal_session_closed", "ei_connection_closed",
-                               "portal_connection_closed")}
+                               "portal_connection_closed", "physical_slaves_restored",
+                               "no_inflight_input", "no_active_grabs", "owned_masters_removed")}
         devices = values.get("owned_devices")
         receipt["owned_devices"] = (devices if type(devices) is str and devices in
                                     {"removed", "retained_inactive", "not_created",
                                      "portal_owned_connections_closed"} else "unknown")
+        grant = self.get_session(session_id)
+        if grant.environment == "existing_session":
+            if devices == "retained_inactive":
+                clean = False
+            if devices == "removed" and not all(receipt[key] is True for key in (
+                    "physical_slaves_restored", "no_inflight_input", "no_active_grabs",
+                    "owned_masters_removed")):
+                clean = False
         receipt["complete"] = clean is True
         with self.lock:
             self.db.execute("INSERT OR REPLACE INTO session_cleanup VALUES (?,?)",

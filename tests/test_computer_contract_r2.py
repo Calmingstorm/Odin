@@ -70,6 +70,8 @@ async def test_detach_device_disposition_survives_adapter_and_store_close(tmp_pa
     async def detach():
         result = await original()
         result["owned_devices"] = devices
+        result.update(physical_slaves_restored=True, no_inflight_input=True,
+                      no_active_grabs=True, owned_masters_removed=True)
         result["arbitrary_backend_text"] = "not public evidence"
         return result
 
@@ -77,11 +79,11 @@ async def test_detach_device_disposition_survives_adapter_and_store_close(tmp_pa
     controller._live[grant.session_id] = LiveSession(
         backend, 999999, capabilities=BackendCapabilities("x11", "existing_session"))
     stopped = await controller._stop(grant.session_id, "closed")
-    assert stopped["state"] == "closed"
+    assert stopped["state"] == ("closed" if devices == "removed" else "quarantined")
     assert stopped["cleanup"]["owned_devices"] == devices
-    assert stopped["cleanup"]["complete"] is True
+    assert stopped["cleanup"]["complete"] is (devices == "removed")
     assert "arbitrary_backend_text" not in stopped["cleanup"]
-    assert grant.session_id not in controller._live
+    assert (grant.session_id not in controller._live) is (devices == "removed")
     store.db.close()
     reopened = ComputerStore(tmp_path / "db", tmp_path / "evidence")
     recovered = ComputerController(reopened, None, lambda ctx: True, enabled=True)

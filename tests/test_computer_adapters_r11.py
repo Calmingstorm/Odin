@@ -101,7 +101,9 @@ async def test_persistent_cleanup_crash_unknown(monkeypatch):
                              "owned_devices": "persistent_idle", "pointer": "independent",
                              "keyboard_focus": "independent_per_window"})
     assert b.capabilities.pointer_separation == "independent"
-    assert (await b.detach())["owned_devices"] == "retained_inactive"
+    receipt = await b.detach()
+    assert receipt["owned_devices"] == "retained_inactive"
+    assert receipt["stopped"] is False and receipt["state"] == "quarantined"
     b._device_state = "persistent_release_unverified"
     assert (await b.detach())["state"] == "quarantined"
     descriptor = b.startup_descriptor("crash")

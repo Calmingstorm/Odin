@@ -75,6 +75,7 @@ async def fixture(tmp_path, monkeypatch, *, environment="existing_session", plat
                 "input_revoked": True, "capture_revoked": True, "owned_devices": "none_created"}
 
     monkeypatch.setattr(backend, "_read_worker", read)
+    monkeypatch.setattr(backend, "_start_device_lifecycle", lambda: read("input_capabilities"))
     monkeypatch.setattr(backend, "_start_topology", AsyncMock())
     monkeypatch.setattr(backend, "_input_worker", inject)
     monkeypatch.setattr(backend, "pause", pause)

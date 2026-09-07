@@ -1,7 +1,4 @@
-"""Attached capture and input with persistent XI2 devices and shared widget focus.
-
-No application/session is launched or destroyed, and devices are never removed.
-"""
+"""Attached capture with task-owned XI2 masters, removed on verified detach."""
 from __future__ import annotations
 
 import asyncio
@@ -9,6 +6,7 @@ import base64
 import copy
 import hashlib
 import json
+import os
 import re
 import sys
 import time
@@ -125,6 +123,12 @@ class X11AttachedBackend:
         self._spawn_lock = asyncio.Lock()
         self._lock = asyncio.Lock()
         self._stop_lock = asyncio.Lock()
+        self._lifecycle = None
+        self._lifecycle_job = None
+        self._session_lease_fd = None
+        self._session_prefix = "Odin session " + uuid.uuid4().hex
+        self._restoration = {}
+        self._detach_job = None
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -151,14 +155,19 @@ class X11AttachedBackend:
             raise AttachedFailure("input_device_identity_changed")
         if identity is not None:
             self._device_identity = copy.deepcopy(identity)
-        if receipt.get("persistent_input_devices") is True:
+        if receipt.get("session_input_devices") is True:
+            self.creates_devices = True
+            self._device_state = ("session_idle" if receipt.get("released") is True
+                                  else "session_release_unverified")
+        elif receipt.get("persistent_input_devices") is True:
             self.creates_devices = True
             self._persistent_devices = True
             self._device_state = ("retained_inactive" if receipt.get("released") is True
                                   and receipt.get("owned_devices") in {
                                       "persistent_idle", "retained_inactive"}
                                   else "persistent_release_unverified")
-        elif receipt.get("persistent_input_devices") is False and not self._persistent_devices:
+        elif (receipt.get("persistent_input_devices") is False and not self._persistent_devices
+              and not self.creates_devices):
             self._device_state = "not_created"
         pointer, keyboard = receipt.get("pointer"), receipt.get("keyboard_focus")
         if pointer in {"independent", "shared"} and keyboard in {
@@ -191,12 +200,16 @@ class X11AttachedBackend:
         self._runtime_descriptor = descriptor
 
     def _worker_argv(self, filename):
-        if filename not in {"x11_attached_worker.py", "x11_guardian.py"}:
+        if filename not in {"x11_attached_worker.py", "x11_guardian.py",
+                            "x11_session_lifecycle.py"}:
             raise AttachedFailure("unapproved_worker")
         argv = [sys.executable, "-I", str(Path(__file__).with_name(filename))]
         if self._runtime_sudo:
             # Explicit operator privilege, no fallback. Clear ambient X authority.
-            argv = ["/usr/bin/sudo", "-n", "--", "/usr/bin/env", "-i"] + [
+            preserve = (["-C", str(self._session_lease_fd + 1)]
+                        if self._session_lease_fd is not None
+                        and filename != "x11_attached_worker.py" else [])
+            argv = ["/usr/bin/sudo", "-n", *preserve, "--", "/usr/bin/env", "-i"] + [
                 f"{key}={value}" for key, value in
                 worker_environment(self._config["xauthority"]).items()] + argv + ["--identity-gate"]
         return argv
@@ -473,6 +486,78 @@ class X11AttachedBackend:
         finally:
             await self._reap(child)
 
+    async def _start_device_lifecycle(self):
+        ready = asyncio.get_running_loop().create_future()
+        self._session_lease_fd = os.memfd_create("odin-x11-lease", os.MFD_CLOEXEC)
+        os.write(self._session_lease_fd, b"0")
+        self._lifecycle_job = asyncio.create_task(self._own_device_lifecycle(ready))
+        self._lifecycle_job.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None)
+        return await asyncio.wait_for(asyncio.shield(ready), CAPTURE_TIMEOUT)
+
+    async def _own_device_lifecycle(self, ready):
+        child = None
+        try:
+            async with self._spawn_lock:
+                if self._closed:
+                    raise AttachedFailure("input_revoked")
+                self._record_spawn()
+                child = await asyncio.create_subprocess_exec(
+                    *self._worker_argv("x11_session_lifecycle.py"),
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    pass_fds=(self._session_lease_fd,),
+                    env=worker_environment(self._config["xauthority"]),
+                    start_new_session=True, limit=65536)
+                self._lifecycle = child
+            self._record_spawn(child, pending=self._runtime_sudo)
+            if self._runtime_sudo:
+                await self._worker_ready(child, "lifecycle")
+            if self._closed:
+                raise AttachedFailure("input_revoked")
+            child.stdin.write(json.dumps({**self._config,
+                "session_prefix": self._session_prefix,
+                "session_lease_fd": self._session_lease_fd}).encode() + b"\n")
+            await child.stdin.drain()
+            first = json.loads(await asyncio.wait_for(child.stdout.readline(), CAPTURE_TIMEOUT))
+            if first.get("ok") is not True or first.get("session_input_devices") is not True:
+                raise AttachedFailure("session_devices_unavailable")
+            ready.set_result(first)
+            while True:
+                receipt = json.loads(await child.stdout.readline())
+                self._restoration = receipt
+                if receipt.get("owned_devices") == "removed" and receipt.get("released") is True:
+                    break
+                self._device_state = "session_release_unverified"
+                self._paused = True
+                self.input_supported = False
+            await child.wait()
+            if child.returncode != 0 or (self._runtime_sudo
+                    and not await self._identities_gone(child)):
+                raise AttachedFailure("session_cleanup_unverified")
+            self._restoration = receipt
+            self._device_state = receipt.get("owned_devices", "unknown")
+        except Exception as exc:
+            self._device_state = "session_release_unverified"
+            self._paused = True
+            self._frame = None
+            self._revision += 1
+            self.input_supported = False
+            if self._session_lease_fd is not None:
+                os.pwrite(self._session_lease_fd, b"0", 0)
+            if not ready.done():
+                ready.set_exception(exc)
+        finally:
+            if child is not None:
+                child.stdin.close()
+                if child.returncode is None:
+                    try:
+                        await asyncio.wait_for(child.wait(), CLEANUP_TIMEOUT)
+                    except TimeoutError:
+                        self._release_failed = True
+            if not ready.done():
+                ready.set_exception(AttachedFailure("input_revoked"))
+
     async def start(self, session_id):
         if not self.enabled:
             raise AttachedFailure("capture_disabled")
@@ -515,8 +600,8 @@ class X11AttachedBackend:
                     "application_scope_unavailable"))
                 self.input_readiness = "target_available" if scope_ready else "no_input_target"
             if self._input_enabled:
-                self._device_state = "persistent_release_unverified"
-                device = await self._read_worker("input_capabilities")
+                self._device_state = "session_release_unverified"
+                device = await self._start_device_lifecycle()
                 self._accept_device_receipt(device)
                 if (device.get("released") is not True or self._device_identity is None
                         or self.capabilities.pointer_separation not in {"independent", "shared"}):
@@ -694,6 +779,8 @@ class X11AttachedBackend:
             request = {**self._config, "selected": monitor, "scope": self._scope, "action": payload}
             request["input_mode"] = self.capabilities.pointer_separation
             request["expected_device_identity"] = copy.deepcopy(self._device_identity)
+            request["session_prefix"] = self._session_prefix
+            request["session_lease_fd"] = self._session_lease_fd
             self._frame = None  # Consume before dispatch; lost replies are not retryable.
             receipt = await self._input_worker(request)
             if receipt.get("released") is not True:
@@ -736,6 +823,7 @@ class X11AttachedBackend:
                 stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.DEVNULL,
                 env=worker_environment(self._config["xauthority"]),
+                pass_fds=((self._session_lease_fd,) if self._session_lease_fd is not None else ()),
                 start_new_session=True, limit=65536)
             self._guardians.add(child)
             self._workers[revoked] = child
@@ -858,14 +946,44 @@ class X11AttachedBackend:
         return not self._children and not self._guardians
 
     async def detach(self):
+        if self._detach_job is None or self._detach_job.done():
+            self._detach_job = asyncio.create_task(self._detach_owned())
+            self._detach_job.add_done_callback(
+                lambda task: task.exception() if not task.cancelled() else None)
+        return await asyncio.shield(self._detach_job)
+
+    async def _detach_owned(self):
+        cleanup_deadline = time.monotonic() + 18
         self._closed = True
         self._paused = True
         self._frame = None
+        if self._session_lease_fd is not None:
+            os.pwrite(self._session_lease_fd, b"0", 0)
+        if self._lifecycle is not None:
+            self._lifecycle.stdin.close()
         async with self._stop_lock:
             settled = await self._cleanup_workers()
-            clean = (settled and not self._release_failed
-                     and self._device_state != "persistent_release_unverified")
+            if self._lifecycle_job is not None:
+                if self._lifecycle is not None:
+                    self._lifecycle.stdin.close()
+                _done, pending = await asyncio.wait({self._lifecycle_job}, timeout=max(
+                    0, cleanup_deadline - time.monotonic()))
+                settled = settled and not pending
+            restored = (self._restoration.get("owned_devices") == "removed" and all(
+                self._restoration.get(key) is True for key in (
+                    "released", "physical_slaves_restored", "no_inflight_input",
+                    "no_active_grabs", "owned_masters_removed")))
+            if restored:
+                self._device_state = "removed"
+            clean = (settled and (restored or (not self._release_failed
+                     and self._device_state == "not_created" and not self.creates_devices)))
+            if settled and self._session_lease_fd is not None:
+                os.close(self._session_lease_fd)
+                self._session_lease_fd = None
             return {"stopped": clean, "released": clean,
+                    **{key: self._restoration.get(key) is True for key in (
+                        "physical_slaves_restored", "no_inflight_input",
+                        "no_active_grabs", "owned_masters_removed")},
                     "applications_preserved": True,
                     "input_revoked": True, "capture_revoked": True,
                     "owned_devices": self._device_state, "input_was_enabled": self._input_enabled,

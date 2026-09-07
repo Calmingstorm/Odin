@@ -93,12 +93,14 @@ class OwnedLedger:
 
 class InjectionHelper:
     def __init__(self, display_name, environment, *, mode="shared",
-                 expected_device_identity=None, keyboard_mapping_identity=None):
+                 expected_device_identity=None, keyboard_mapping_identity=None,
+                 session_prefix=None, session_lease_fd=None):
         self.sock, child_sock = socket.socketpair()
         try:
             self.process = subprocess.Popen(
                 [sys.executable, "-I", __file__, "--injector", str(child_sock.fileno())],
-                pass_fds=(child_sock.fileno(),), stdin=subprocess.DEVNULL,
+                pass_fds=(child_sock.fileno(),) + ((session_lease_fd,)
+                          if session_prefix is not None else ()), stdin=subprocess.DEVNULL,
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, env=environment)
         except BaseException:
             self.sock.close()
@@ -108,7 +110,10 @@ class InjectionHelper:
         self.buffer = b""
         self.sock.sendall(json.dumps({"display_name": display_name, "mode": mode,
                                      "expected_device_identity": expected_device_identity,
-                                     "keyboard_mapping_identity": keyboard_mapping_identity
+                                     "keyboard_mapping_identity": keyboard_mapping_identity,
+                                     **({"session_prefix": session_prefix,
+                                         "session_lease_fd": session_lease_fd}
+                                        if session_prefix is not None else {})
                                      }).encode() + b"\n")
 
     def exchange(self, command, guard):
@@ -158,6 +163,9 @@ class Guardian:
 
     def guard(self):
         from src.computer.runtime import x11_worker_lifecycle
+        session_fd = vars(self.native).get("session_lease_fd")
+        if session_fd is not None and os.pread(session_fd, 1, 0) != b"1":
+            raise GuardianFailure("session_lease_revoked")
         if x11_worker_lifecycle.REVOKED:
             raise GuardianFailure("supervisor_parent_revoked")
         if self.clock() >= self.deadline:
@@ -315,6 +323,18 @@ def assert_admitted_identity(native, expected):
 
 
 def execute(request, *, controller_fd=0, authorize=None):
+    from src.computer.runtime.x11_session_lifecycle import input_lease
+    lease = (input_lease(request.get("session_lease_fd"))
+             if request.get("session_prefix") is not None else contextlib.nullcontext())
+    with lease:
+        receipt = _execute(request, controller_fd=controller_fd, authorize=authorize)
+    if request.get("session_prefix") is not None:
+        receipt["session_input_devices"] = True
+        receipt["persistent_input_devices"] = False
+    return receipt
+
+
+def _execute(request, *, controller_fd=0, authorize=None):
     from src.computer.runtime.x11_app_scope import AppScope
     from src.computer.runtime.x11_attached import attachment_configuration, worker_environment
     from src.computer.runtime.x11_attached_worker import AttachedConnection
@@ -342,7 +362,12 @@ def execute(request, *, controller_fd=0, authorize=None):
         mode = request.get("input_mode")
         if mode not in {"shared", "independent"}:
             raise GuardianFailure("input_mode_required")
-        native = open_input(config["display_name"], mode=mode)
+        if request.get("session_prefix") is not None:
+            from src.computer.runtime.x11_owned_device import SessionXTest
+            native = SessionXTest(config["display_name"], request["session_prefix"])
+            native.session_lease_fd = request["session_lease_fd"]
+        else:
+            native = open_input(config["display_name"], mode=mode)
         assert_admitted_identity(native, request.get("expected_device_identity"))
         if native.independent_pointer:
             native.focus(expected["focus_window"])
@@ -394,7 +419,10 @@ def execute(request, *, controller_fd=0, authorize=None):
                     scope.assert_snapshot(expected, monitor)
         helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]),
                                  mode=mode, expected_device_identity=native.identity(),
-                                 keyboard_mapping_identity=native.keyboard_mapping_identity)
+                                 keyboard_mapping_identity=native.keyboard_mapping_identity,
+                                 **({"session_prefix": request["session_prefix"],
+                                     "session_lease_fd": request["session_lease_fd"]}
+                                    if request.get("session_prefix") is not None else {}))
         if authorize is not None:
             authorize(helper)
         return Guardian(native, helper, validate, controller_fd=controller_fd).run(steps)
@@ -413,7 +441,18 @@ def injector(fd):
     sock = socket.socket(fileno=fd)
     stream = sock.makefile("rwb", buffering=0)
     first = json.loads(stream.readline(MAX_MESSAGE))
-    native = open_input(first["display_name"], mode=first.get("mode", "shared"))
+    lease = contextlib.ExitStack()
+    try:
+        if first.get("session_prefix") is not None:
+            from src.computer.runtime.x11_owned_device import SessionXTest
+            from src.computer.runtime.x11_session_lifecycle import input_lease
+            lease.enter_context(input_lease(first.get("session_lease_fd")))
+            native = SessionXTest(first["display_name"], first["session_prefix"])
+        else:
+            native = open_input(first["display_name"], mode=first.get("mode", "shared"))
+    except BaseException:
+        lease.close()
+        raise
     ledger = None
     deadline = time.monotonic() + LEASE_SECONDS
     if native.independent_pointer:
@@ -433,6 +472,9 @@ def injector(fd):
             from src.computer.runtime import x11_worker_lifecycle
             if x11_worker_lifecycle.REVOKED:
                 raise GuardianFailure("supervisor_parent_revoked")
+            session_fd = first.get("session_lease_fd")
+            if session_fd is not None and os.pread(session_fd, 1, 0) != b"1":
+                raise GuardianFailure("session_lease_revoked")
             if time.monotonic() >= deadline:
                 raise GuardianFailure("input_lease_expired")
             if select.select([stream], [], [], 0)[0]:
@@ -476,11 +518,16 @@ def injector(fd):
                 ledger.acknowledged(op, *args)
             stream.write(b'{"ok":true}\n')
     finally:
-        if ledger is not None:
-            ledger.release()
-        native.close()
-        stream.close()
-        sock.close()
+        try:
+            if ledger is not None:
+                ledger.release()
+        finally:
+            try:
+                native.close()
+            finally:
+                lease.close()
+                stream.close()
+                sock.close()
 
 
 if __name__ == "__main__":

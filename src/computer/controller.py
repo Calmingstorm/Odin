@@ -230,6 +230,9 @@ class ComputerController:
             timeout = (ATTACHED_STOP_TIMEOUT_SECONDS
                        if live.capabilities.environment == "existing_session"
                        else STOP_TIMEOUT_SECONDS)
+            if (live.capabilities.environment == "existing_session"
+                    and live.capabilities.platform == "x11"):
+                timeout = max(timeout, 20)
             result = await _bounded(operation(), timeout)
             clean = isinstance(result, dict) and result.get("stopped") is True
             if clean and live.capabilities.environment == "existing_session":
@@ -245,7 +248,10 @@ class ComputerController:
                          and result.get("applications_preserved") is True
                          and result.get("input_revoked") is True
                          and result.get("capture_revoked") is True
-                         and (device_state in {"removed", "retained_inactive"}
+                         and ((device_state == "removed" and all(
+                             result.get(key) is True for key in (
+                                 "physical_slaves_restored", "no_inflight_input",
+                                 "no_active_grabs", "owned_masters_removed")))
                               or no_devices or portal_devices))
         except (Exception, asyncio.CancelledError):
             clean = False

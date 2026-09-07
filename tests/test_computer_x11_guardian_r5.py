@@ -275,6 +275,7 @@ async def observed(monkeypatch):
                 "image": base64.b64encode(state["image"]).decode()}
 
     monkeypatch.setattr(b, "_read_worker", read)
+    monkeypatch.setattr(b, "_start_device_lifecycle", lambda: read("input_capabilities"))
     monkeypatch.setattr(b, "_start_topology", AsyncMock())
     await b.start("guardian-stub")
     return b, state, await b.observe()
