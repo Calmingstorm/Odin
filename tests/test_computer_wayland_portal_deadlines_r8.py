@@ -207,6 +207,22 @@ def test_worker_cancellation_independent_of_glib_dispatch(cause):
     assert not guard.thread.is_alive()
 
 
+def test_successful_operation_deadline_reset_does_not_expire_session():
+    event, cancelled = threading.Event(), threading.Event()
+    gio = SimpleNamespace(Cancellable=SimpleNamespace(new=lambda: SimpleNamespace(
+        cancel=cancelled.set)))
+    guard = portal._WorkerCancellation(gio, event, time.monotonic() + .08)
+    try:
+        guard.deadline = guard.lifetime
+        assert not cancelled.wait(.15)
+        assert not event.is_set()
+        guard.deadline = time.monotonic() + .03
+        assert cancelled.wait(.3)
+    finally:
+        guard.close()
+    assert not guard.thread.is_alive()
+
+
 @pytest.mark.parametrize("session_fails,unsubscribe_fails,bus_fails", [
     (False, False, False), (True, False, False), (True, True, True)])
 def test_cleanup_receipt_distinguishes_ack_from_connection_close(
