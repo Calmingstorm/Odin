@@ -43,10 +43,10 @@ try {
   page.on('pageerror', e => errors.push(e.message));
   let state = 'active', code = 200, blocked = null, holdObserve = false;
   let enabled = false, runtimeEnabled = false, runtimeGeneration = 0, holdToggle = false, blockedToggle = null;
-  let sessionGeneration = 1, recovery;
+  let sessionGeneration = 1, recovery, inputAdmission;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
   let applicationProfiles = [{ id: 'drawing', label: 'Drawing', input: 'supported' }, { id: 'xed', label: 'Xed', input: 'supported' }];
-  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, application_profiles: applicationProfiles, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: 'drawing', last_action: 'executed', last_verification: 'unknown' });
+  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, input_admission: inputAdmission, application_profiles: applicationProfiles, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: 'drawing', last_action: 'executed', last_verification: 'unknown' });
   const frame = () => ({ frame: { evidence_id: 'opaque-frame', captured_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3600000).toISOString(), fresh_for_ms: 1000 } });
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHj8AAAAASUVORK5CYII=', 'base64');
   await page.route('**/api/**', async route => {
@@ -118,6 +118,33 @@ try {
   assert.match(await applications.innerText(), /Pointer and keyboard focus are shared/);
   assert.match(await lifecycle.innerText(), /Input unavailable/);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, 0, 'profile listing never captures');
+  inputAdmission = {
+    state: 'refused', code: 'owned_button_release_failed',
+    compositor: { name: 'Mutter', version: '46.2', backend: 'nested-x11', build_id: 'fixture-build' },
+    reason: 'Owned button release was not delivered after sender EOF.',
+    remedy: 'Install a compositor build containing the upstream button-release fix.',
+    probe_scope: 'same_stack_disposable', checks: ['sender_eof_button_release_failed'],
+  };
+  backend = { platform: 'wayland', environment: 'existing_session', input_supported: false };
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.status.input_admission?.state === 'refused');
+  const admission = page.getByRole('region', { name: 'Input eligibility evidence', exact: true });
+  assert.match(await admission.innerText(), /Mutter 46.2 \(nested-x11\)/);
+  assert.match(await admission.innerText(), /sender EOF/);
+  assert.match(await admission.innerText(), /Operator action: Install/);
+  assert.match(await admission.innerText(), /separate disposable compositor/);
+  assert.match(await admission.innerText(), /Opening this page runs no input probe/);
+  assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, 0, 'admission evidence never probes');
+  assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
+  inputAdmission = { ...inputAdmission, state: 'eligible', code: 'release_probe_passed',
+    reason: 'Measured lifecycle checks passed.', remedy: 'Reprobe after session change.' };
+  backend.input_supported = true;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.status.input_admission?.state === 'eligible');
+  assert.match(await admission.innerText(), /eligible: release_probe_passed/);
+  assert.doesNotMatch(await lifecycle.innerText(), /Input unavailable/);
+  inputAdmission = undefined;
+  backend = { platform: 'x11', environment: 'existing_session', input_supported: false };
   await enable.click();
   await page.waitForFunction(() => !view.toggling && view.status.runtime_enabled === true);
   assert.equal(await enable.isEnabled(), false);

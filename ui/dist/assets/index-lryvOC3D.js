@@ -6232,6 +6232,16 @@ ${u.text}`:u.text).join(`
         <p v-else class="page-lede">Backend reports input support; session authorization and startup checks still apply.</p>
         <p class="text-gray-400">Runtime settings are generation-pinned. Pending restart-required settings are not live; this page does not restart Odin.</p>
       </section>
+      <section v-if="status.input_admission" class="mb-4" aria-labelledby="computer-input-admission-title" style="overflow-wrap:anywhere">
+        <h2 id="computer-input-admission-title" class="font-semibold mb-2">Input eligibility evidence</h2>
+        <p><strong>{{ status.input_admission.state }}</strong>: {{ status.input_admission.code }}</p>
+        <p v-if="status.input_admission.compositor">Compositor: {{ status.input_admission.compositor.name }} {{ status.input_admission.compositor.version }} ({{ status.input_admission.compositor.backend }}). Build: {{ status.input_admission.compositor.build_id }}.</p>
+        <p>{{ status.input_admission.reason }}</p>
+        <p>Operator action: {{ status.input_admission.remedy }}</p>
+        <p>Probe scope: {{ status.input_admission.probe_scope }}.</p>
+        <p v-if="status.input_admission.probe_scope === 'same_stack_disposable'" class="page-lede">Behavior was tested in a separate disposable compositor with the matched stack, not by abandoning held input on your desktop.</p>
+        <p class="page-lede">Eligibility evidence does not replace current portal consent, source mapping or application checks. Opening this page runs no input probe.</p>
+      </section>
       <section class="mb-4" aria-labelledby="computer-apps-title">
         <h2 id="computer-apps-title" class="font-semibold mb-2">Application profiles</h2>
         <ul v-if="applicationProfiles.length" class="mb-2">
