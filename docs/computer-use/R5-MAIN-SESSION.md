@@ -54,7 +54,7 @@ Aaron's explicit overnight scratch-only permission was used. No existing documen
 was edited, saved or closed; no terminal or Odin WebUI input was sent. The product
 was not deployed and the live Odin process was not restarted or modified.
 
-## Attempts and observed results
+## Historical checkpoint: attempts and observed results before final acceptance
 
 1. The initial scratch harness refused before app launch because it incorrectly
    treated NumLock's modifier mask as held input. A read-only query found zero

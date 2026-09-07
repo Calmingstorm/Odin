@@ -20,7 +20,7 @@ The diagnostic hook records bounded exception type/code only in this private
 fixture, not production telemetry or operator pixels. Main-session acceptance is
 separately recorded in R5-MAIN-SESSION.md.
 
-## Observed evidence, not an inferred incident cause
+## Historical diagnosis checkpoint, not an inferred incident cause
 
 The first authorized MAIN scratch trial's persisted receipts in
 `/tmp/assisted-session-r5-4wwfgwqq/private-state/state.sqlite3` contain a verified
