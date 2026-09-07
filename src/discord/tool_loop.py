@@ -2615,25 +2615,25 @@ class ToolLoopRunner:
         if (tool_name in {"computer_session", "computer_observe", "computer_act"}
                 and isinstance(result, dict)
                 and ("__computer_frame__" in result or "__image_block__" in result)):
+            # The settled action outcome exists independently of whether its
+            # verification image can still be delivered. Preserve it before the
+            # delivery gate (which may reject an expired frame).
+            action_receipt = result.get("__computer_action_receipt__")
+            if isinstance(action_receipt, dict):
+                failed = action_receipt.get("status") in {
+                    "unavailable", "not_satisfied", "rejected", "failed", "unknown",
+                }
+                tool_result = ToolResult(
+                    json.dumps(action_receipt, ensure_ascii=True), ok=not failed,
+                    error="computer_not_satisfied" if failed else None,
+                    uncertain_outcome=action_receipt.get("status") == "unknown",
+                    tool_name=tool_name,
+                )
             try:
                 computer = self._computer_service()
                 if computer is None:
                     raise ValueError("Computer service unavailable")
                 await computer.validate_delivery(st, block, result)
-                # A post-action image is not proof that the action succeeded.
-                # Preserve the independently settled effect for audit/durability
-                # while delivering verification pixels through the normal gate.
-                action_receipt = result.get("__computer_action_receipt__")
-                if isinstance(action_receipt, dict):
-                    failed = action_receipt.get("status") in {
-                        "unavailable", "not_satisfied", "rejected", "failed", "unknown",
-                    }
-                    tool_result = ToolResult(
-                        json.dumps(action_receipt, ensure_ascii=True), ok=not failed,
-                        error="computer_not_satisfied" if failed else None,
-                        uncertain_outcome=action_receipt.get("status") == "unknown",
-                        tool_name=tool_name,
-                    )
                 st.pending_image_blocks.append(result["__image_block__"])
                 st._computer_frame_error = False
                 result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
