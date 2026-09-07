@@ -18,6 +18,9 @@ from typing import Any
 from ..admission import InputAdmission, InputAdmissionError
 from ..geometry import AffineTransform, SourceGeometry
 from ..models import BackendCapabilities, BackendObservation, CaptureScope, ComputerError
+from ..provenance import canonical_application_provenance
+from ..render import render_frame, source_allocation_bytes
+from ..vision import FrameCrop
 from .profile import validate_session
 from .wayland_guardian import WaylandGuardian, WaylandGuardianError
 from .wayland_identity import CompositorRuntimeIdentity, capture_identity, revalidate_identity
@@ -54,41 +57,41 @@ def _digest(value):
 
 
 def _scope_binding(scope):
-    return {k: scope[k] for k in ("source_digest", "focus_digest", "bounds_digest", "application",
-                                  "compositor")} if scope else None
+    keys = ("source_digest", "focus_digest", "bounds_digest", "application", "compositor",
+            "modal", "modal_kind", "modal_title_digest")
+    return {k: scope.get(k) for k in keys} if scope else None
 
 
-def _bounded_png(data: bytes, width: int, height: int, crop=None):
+def _bounded_png(data: bytes, width: int, height: int, crop=None, *, with_metadata=False):
     from PIL import Image
     if (type(width) is not int or type(height) is not int or min(width, height) < 1
             or max(width, height) > 16384 or width * height > 32_000_000
             or type(data) is not bytes or len(data) > 128 * 1024 * 1024):
         raise ComputerError("wayland_capture_allocation_limit")
+    # Bound decoded/packed source allocations BEFORE decoding an encoded raster.
+    source_allocation_bytes(width, height, "RGB")
+    rectangle = None
+    if crop is not None:
+        if (type(crop) is not dict or set(crop) != {"x", "y", "width", "height"}
+                or any(type(v) is not int for v in crop.values())
+                or min(crop["x"], crop["y"]) < 0
+                or min(crop["width"], crop["height"]) < 1
+                or crop["x"] + crop["width"] > width
+                or crop["y"] + crop["height"] > height):
+            raise ComputerError("invalid_observation_crop")
+        rectangle = FrameCrop(**crop)
     with Image.open(io.BytesIO(data)) as opened:
         if opened.format != "PNG" or opened.size != (width, height):
             raise ComputerError("wayland_capture_dimensions_changed")
         opened.load()
-        image = opened.convert("RGB")
-        if crop is not None:
-            if (type(crop) is not dict or set(crop) != {"x", "y", "width", "height"}
-                    or any(type(v) is not int for v in crop.values())
-                    or min(crop["x"], crop["y"]) < 0
-                    or min(crop["width"], crop["height"]) < 1
-                    or crop["x"] + crop["width"] > width
-                    or crop["y"] + crop["height"] > height):
-                raise ComputerError("invalid_observation_crop")
-            image = image.crop((crop["x"], crop["y"], crop["x"] + crop["width"],
-                                crop["y"] + crop["height"]))
-            width, height = image.size
-        scale = min(1, math.sqrt(2_000_000 / (width * height)))
-        image = image.resize((max(1, int(width * scale)), max(1, int(height * scale))))
-        for _ in range(10):
-            output = io.BytesIO()
-            image.save(output, format="PNG")
-            if len(output.getvalue()) <= 2 * 1024 * 1024:
-                return output.getvalue(), image.width, image.height
-            image = image.resize((max(1, image.width * 3 // 4), max(1, image.height * 3 // 4)))
-    raise ComputerError("wayland_delivered_image_limit")
+        with opened.convert("RGB") as image:
+            pixels = image.tobytes()
+    rendered = render_frame(pixels, SourceGeometry("capture", 1, 1, width, height),
+        mode="RGB", observation_id="capture", session_id="capture", generation=1,
+        captured_monotonic_ns=time.monotonic_ns(), crop=rectangle)
+    if with_metadata:
+        return rendered
+    return rendered.png, rendered.metadata.width, rendered.metadata.height
 
 
 class WaylandRuntimeBackend:
@@ -122,7 +125,7 @@ class WaylandRuntimeBackend:
         self._scope: dict[str, Any] | None = None
         self._fingerprint: str | None = None
         self._captured_at = 0.0
-        self._crop = None
+        self._crop: dict[str, int] | None = None
         self._sources: dict[str, dict[str, Any]] = {}
         self._selected: str | None = None
         self._descriptor: dict[str, Any] | None = None
@@ -133,7 +136,7 @@ class WaylandRuntimeBackend:
         self._jobs: set[asyncio.Task[None]] = set()
         self._cleanup_task: asyncio.Task[bool] | None = None
         self._cleanup_evidence: dict[str, bool] = {}
-        self._lifecycle_task = None
+        self._lifecycle_task: asyncio.Task | None = None
         self.lifecycle_reason = None
 
     def startup_descriptor(self, session_id):
@@ -277,7 +280,7 @@ class WaylandRuntimeBackend:
 
     @property
     def application_provenance(self):
-        return copy.deepcopy(self._scope["application"]) if self._scope else None
+        return canonical_application_provenance(self._scope)
 
     def _portal_event(self, event, portal=None):
         if self._closed or self._paused or (portal is not None and portal is not self._portal):
@@ -320,14 +323,14 @@ class WaylandRuntimeBackend:
         for key in ("node_id", "mapping_id", "position", "size", "source_type"):
             if metadata.get(key) != expected.get(key):
                 raise ComputerError("wayland_capture_source_changed")
-        image, width, height = await asyncio.to_thread(_bounded_png, result["image"],
-                                                      result["width"], result["height"], crop)
+        rendered = await asyncio.to_thread(_bounded_png, result["image"],
+            result["width"], result["height"], crop, with_metadata=True)
         self._active()
-        return result, metadata, image, width, height
+        return result, metadata, rendered
 
     async def observe(self, crop=None):
         async with self._lock:
-            result, metadata, image, width, height = await self._capture(crop)
+            result, metadata, rendered = await self._capture(crop)
             scope = None
             if (self.input_supported and self._guardian and self._guardian.alive
                     and self._scope_provider is not None):
@@ -357,12 +360,13 @@ class WaylandRuntimeBackend:
                                     result["width"], result["height"], **mapping)
             consent = CaptureScope(self._generation, frozenset({self._selected}),
                                    frozenset({self._selected}) if eligible else frozenset())
-            frame = BackendObservation(source, consent, width, height,
-                AffineTransform(a=Fraction(crop["width"] if crop else result["width"], width),
-                                e=Fraction(crop["height"] if crop else result["height"], height),
-                                c=Fraction(crop["x"] if crop else 0),
-                                f=Fraction(crop["y"] if crop else 0)),
-                image, focused=eligible)
+            fm = rendered.metadata
+            frame = BackendObservation(source, consent, fm.width, fm.height,
+                fm.delivered_to_source, rendered.png, focused=eligible,
+                crop=(fm.crop.x, fm.crop.y, fm.crop.width, fm.crop.height) if fm.crop else None,
+                resize_scale=fm.resize_scale, resize_rounding=fm.resize_rounding,
+                modal=scope.get("modal_title_digest") if scope and scope.get("modal") else None,
+                modal_kind=scope.get("modal_kind") if scope and scope.get("modal") else None)
             self._frame, self._scope, self._captured_at = frame, scope, result["captured_at"]
             self._crop = dict(crop) if crop else None
             return frame
@@ -377,8 +381,14 @@ class WaylandRuntimeBackend:
         required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
         if (type(action) is not dict or type(action.get("type")) is not str
                 or action["type"] not in fields
-                or set(action) != required | fields[action["type"]]):
+                or set(action) - {"expected_modal"} != required | fields[action["type"]]):
             raise ComputerError("wayland_unsupported_grounded_action")
+        if frame.modal is not None:
+            if (frame.modal_kind != "safe_application"
+                    or action.get("expected_modal") != frame.modal):
+                raise ComputerError("unexpected_modal")
+        elif "expected_modal" in action:
+            raise ComputerError("modal_not_present")
         for name in ("source_id", "source_revision", "consent_generation"):
             if (type(action[name]) is not type(getattr(frame.source, name))
                     or action[name] != getattr(frame.source, name)):
@@ -462,7 +472,8 @@ class WaylandRuntimeBackend:
                     or not 0 <= time.monotonic() - self._captured_at <= 5):
                 raise ComputerError("wayland_fresh_qualified_application_observation_required")
             command = self._command(action, frame, scope)
-            _, metadata, image, width, height = await self._capture(self._crop)
+            _, metadata, rendered = await self._capture(self._crop)
+            image, width, height = rendered.png, rendered.metadata.width, rendered.metadata.height
             fresh_scope = await self._scope_provider.snapshot(metadata)
             if (width != frame.width or height != frame.height or image != frame.image_bytes
                     or _scope_binding(scope) != _scope_binding(fresh_scope)):
@@ -494,7 +505,7 @@ class WaylandRuntimeBackend:
                 if self._paused or self._closed or delivered.get("event") != "action_done":
                     raise ComputerError("wayland_action_revoked_outcome_unknown")
                 receipt: dict[str, Any] = {"status": "executed", "injected": True, "released": True,
-                    "application_provenance": copy.deepcopy(scope["application"]),
+                    "application_provenance": canonical_application_provenance(scope),
                     "release_basis": "guardian_owned_ledger_and_qualified_compositor",
                     "postcondition": {"type": "visual_change", "status": "unavailable",
                         "source_id": frame.source.source_id,
@@ -504,9 +515,17 @@ class WaylandRuntimeBackend:
                 if (isinstance(exc, WaylandGuardianError)
                         and getattr(exc, "details", {}).get("event") == "action_rejected"
                         and getattr(exc, "details", {}).get("input_was_sent") is False):
-                    # Full native preflight failed before any event. Preserve the
-                    # structured per-character report; no unknown-outcome replay.
-                    raise
+                    # Return known no-input failure: dispatch exceptions become
+                    # unknown outcomes after the controller reserves an action ID.
+                    details = exc.details
+                    receipt = {"status": "unavailable", "injected": False, "released": True,
+                               "reason": details.get("reason", "unsupported_key")}
+                    if details.get("reason") == "unsupported_character":
+                        receipt["unsupported_characters"] = [
+                            {"index": row["index"], "codepoint": row["codepoint"],
+                             "reason": "unsupported_character"}
+                            for row in details.get("characters", [])]
+                    return receipt
                 self._paused = True
                 cleanup = await self._guardian.close()
                 self._release_failed |= not cleanup.get("release_submitted", False)
@@ -516,7 +535,8 @@ class WaylandRuntimeBackend:
                 await asyncio.gather(watchdog, return_exceptions=True)
                 self._jobs.discard(watchdog)
             try:
-                _, after_metadata, after_image, _, _ = await self._capture(self._crop)
+                _, after_metadata, after_rendered = await self._capture(self._crop)
+                after_image = after_rendered.png
                 after_scope = await self._scope_provider.snapshot(after_metadata)
                 receipt["postcondition"].update(
                     status="observed", method="raster_digest_after_release",

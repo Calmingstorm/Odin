@@ -162,6 +162,8 @@ export default class OdinScope extends Extension {
             refuse();
         return {protocol: 1, challenge: request.challenge,
             source_digest: request.source_digest, title, wm_class: appClass,
+            modal: [Meta.WindowType.DIALOG, Meta.WindowType.MODAL_DIALOG].includes(
+                focus.get_window_type()),
             native_wayland: true, safe_focus: true, pid,
             focus_serial: this._serial, focus_token: String(focus.get_stable_sequence()),
             bounds: {x: x - sx, y: y - sy, width: right - x, height: bottom - y}};

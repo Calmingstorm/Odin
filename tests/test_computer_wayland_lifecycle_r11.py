@@ -99,9 +99,10 @@ async def test_native_preflight_report_is_not_unknown_outcome(adapter):
         raise error
 
     adapter._guardian.act = reject
-    with pytest.raises(WaylandGuardianError) as caught:
-        await adapter.act(action(frame, "type", text="😀"))
-    assert caught.value.details == details
+    receipt = await adapter.act(action(frame, "type", text="😀"))
+    assert receipt == {"status": "unavailable", "injected": False, "released": True,
+                       "reason": "unsupported_character", "unsupported_characters": [
+                           {"index": 0, "codepoint": 128512, "reason": "unsupported_character"}]}
     assert adapter._guardian.alive and not adapter._paused
     assert adapter._frame is None
     await adapter.stop()

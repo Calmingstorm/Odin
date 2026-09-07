@@ -278,16 +278,15 @@ def test_extension_executable_private_mock_compositor_harness():
     harness = r'''
 const assert = require('node:assert/strict');
 const Meta = {is_wayland_compositor: () => true,
-    WindowClientType: {WAYLAND: 1}, WindowType: {NORMAL: 0}};
+    WindowClientType: {WAYLAND: 1}, WindowType: {NORMAL: 0, DIALOG: 1, MODAL_DIALOG: 2,
+        UTILITY: 3, MENU: 4, DROPDOWN_MENU: 5, POPUP_MENU: 6}};
 const Main = {sessionMode: {currentMode: 'user'}, screenShield: {}, overview: {},
     modalCount: 0, layoutManager: {monitors: [{x:-1920,y:0,width:1920,height:1080}]}};
 const workspace = {get_work_area_for_monitor:()=>({x:-1920,y:0,width:1920,height:1080})};
-let transient = false;
 const focus = {appears_focused:true, minimized:false,
     get_client_type:()=>1, get_window_type:()=>0, get_transient_for:()=>null,
     showing_on_its_workspace:()=>true, get_workspace:()=>workspace,
     get_pid:()=>800, get_title:()=> 'document', get_wm_class:()=> 'xed',
-    foreach_transient: cb => { if (transient) cb(focus); },
     get_frame_rect:()=>({x:-1900,y:20,width:800,height:600}),
     get_compositor_private:()=>actor, get_stable_sequence:()=>123};
 const actor = {visible:true, meta_window:focus};
@@ -297,7 +296,7 @@ global.stage = {get_key_focus:()=>null};
 global.get_window_actors = ()=>[actor];
 const provider = new OdinScope(); provider._serial=1;
 const request = {protocol:1,challenge:'a'.repeat(48),source_digest:'b'.repeat(64),
-    profile:'xed', source:{source_type:1,node_id:71,session_handle:'/a/b',
+    source:{source_type:1,node_id:71,session_handle:'/a/b',
         position:[-1920,0],size:[1920,1080]}};
 let passed = 0;
 function deny(mutate, restore) {
@@ -305,19 +304,28 @@ function deny(mutate, restore) {
 }
 assert.deepEqual(provider._snapshot(request).bounds,{x:20,y:20,width:800,height:600}); passed++;
 deny(()=>focus.get_client_type=()=>0, ()=>focus.get_client_type=()=>1);
-deny(()=>focus.get_window_type=()=>1, ()=>focus.get_window_type=()=>0);
+deny(()=>focus.get_window_type=()=>99, ()=>focus.get_window_type=()=>0);
 deny(()=>focus.get_pid=()=>0, ()=>focus.get_pid=()=>800);
-deny(()=>focus.get_title=()=> 'Authentication', ()=>focus.get_title=()=> 'document');
+// Titles/classes stay private IPC evidence; the shared Python policy denies
+// Authentication/terminal/etc. Do not duplicate a drifting second policy here.
+focus.get_title=()=> 'Authentication';
+assert.equal(provider._snapshot(request).title, 'Authentication'); passed++;
+focus.get_title=()=> 'document';
 deny(()=>Main.modalCount=1, ()=>Main.modalCount=0);
 deny(()=>Main.sessionMode.isLocked=true, ()=>Main.sessionMode.isLocked=false);
 deny(()=>Main.overview.visible=true, ()=>Main.overview.visible=false);
 deny(()=>global.stage.get_key_focus=()=>({}), ()=>global.stage.get_key_focus=()=>null);
-deny(()=>transient=true, ()=>transient=false);
+focus.get_window_type=()=>Meta.WindowType.DIALOG;
+focus.get_transient_for=()=>({});
+assert.equal(provider._snapshot(request).modal, true); passed++;
+focus.get_window_type=()=>Meta.WindowType.NORMAL;
+assert.equal(provider._snapshot(request).modal, false);
 deny(()=>request.source.position=[0,0], ()=>request.source.position=[-1920,0]);
 deny(()=>Main.layoutManager.monitors.push(Main.layoutManager.monitors[0]),
     ()=>Main.layoutManager.monitors.pop());
 deny(()=>request.source.source_type=2, ()=>request.source.source_type=1);
-deny(()=>request.profile='writer', ()=>request.profile='xed');
+focus.get_wm_class=()=> 'unlisted-user-app';
+assert.equal(provider._snapshot(request).wm_class, 'unlisted-user-app'); passed++;
 const overlay = {visible:true};
 overlay.meta_window = {...focus, get_compositor_private:()=>overlay};
 deny(()=>global.get_window_actors=()=>[actor,overlay], ()=>global.get_window_actors=()=>[actor]);

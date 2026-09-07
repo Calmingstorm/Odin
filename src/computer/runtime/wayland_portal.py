@@ -26,6 +26,7 @@ import threading
 import time
 import uuid
 import zlib
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -237,7 +238,7 @@ class WaylandPortalSession:
             raise ValueError("expected_uid must be a nonnegative integer")
         self.bus_address, self.expected_uid = bus_address, expected_uid
         self.runtime_identity_callback = runtime_identity_callback
-        self.lifecycle_callback = None
+        self.lifecycle_callback: Callable[[dict], object] | None = None
         self._generation, self._alive, self._closed = 0, False, False
         self._identity: dict[str, Any] = {}
         self._process_identity: dict[str, int] = {}
