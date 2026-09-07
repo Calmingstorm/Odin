@@ -10,7 +10,7 @@ from dataclasses import asdict
 
 from .actions import click_receipt
 from .app_profiles import application_profile
-from .gui_actions import action_arguments, action_payload, visual_receipt
+from .gui_actions import action_arguments, action_payload, crop_arguments, visual_receipt
 from .models import (
     BackendCapabilities,
     BackendObservation,
@@ -523,13 +523,7 @@ class ComputerController:
                    {"session_id", "generation"})
         crop = inp.get("crop")
         if "crop" in inp:
-            from .vision import FrameCrop, VisionError
-
-            exact_keys(crop, {"x", "y", "width", "height"}, {"x", "y", "width", "height"})
-            try:
-                FrameCrop(**crop)
-            except (VisionError, TypeError, ValueError):
-                raise ComputerError("invalid_source_crop") from None
+            crop = crop_arguments(crop)
         await self._auth(context)
         grant = self._grant(context, inp)
         async with self._actions:
@@ -749,8 +743,19 @@ class ComputerController:
                             and after.source.pixel_to_input == current.source.pixel_to_input
                             and after.source.input_region_id == current.source.input_region_id
                             and after.focused)
-                    if not binding_matches or not 0 <= age <= FRAME_FRESH_SECONDS:
+                    if not 0 <= age <= FRAME_FRESH_SECONDS:
                         raise ComputerError("postcondition_binding_changed")
+                    if not binding_matches:
+                        if not (visual and grant.environment == "existing_session"):
+                            raise ComputerError("postcondition_binding_changed")
+                        # A document/menu transition is not an unknown input
+                        # outcome after acknowledged injection and release.
+                        # Require NEW observation delivery before any further
+                        # input; never reuse authority for the changed target.
+                        result["status"] = "not_satisfied"
+                        result["verification"].update(
+                            status="not_satisfied", target_application_matches=False,
+                            reason="target_changed_observe_again")
                     result["observation_id"] = after.observation_id
                     result["verification"]["evidence_id"] = after.evidence_id
                 receipt = self.store.finish_action(grant.session_id, inp["action_id"], result)

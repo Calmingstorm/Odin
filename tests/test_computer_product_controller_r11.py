@@ -182,3 +182,41 @@ async def test_capture_lifecycle_failure_retires_delivered_pixels(tmp_path, reas
     finally:
         await controller.close()
         store.close()
+
+
+async def test_attached_document_transition_is_not_unknown_input(tmp_path):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    context = RequestContext("o", "c", "t", "h")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        sid = grant["session_id"]
+        observed = await controller.observe(context, {"session_id": sid, "generation": 1})
+        obs = controller._live[sid].observations[observed["observation_id"]]
+        await controller.validate_observation_delivery(
+            context, obs.frame_metadata, obs.image_sha256)
+
+        async def close_document(payload):
+            backend.source = replace(backend.source, source_revision=2)
+            backend.injected += 1
+            return {"status": "executed", "injected": True, "released": True}
+
+        backend.act = close_document
+        action = {"session_id": sid, "generation": 1, "action_id": "close",
+                  "observation_id": obs.observation_id, "consent_generation": 1,
+                  "source_id": "opaque", "source_revision": 1, "operation": "key",
+                  "key": "ctrl+w", "expect": {"type": "visual_change"}}
+        result = await controller.act(context, action)
+        assert result["status"] == "not_satisfied"
+        assert result["execution"] == {"injected": True, "released": True}
+        assert result["verification"]["reason"] == "target_changed_observe_again"
+        assert store.get_session(sid).state == "active"
+        assert sid not in controller._delivered_observations
+        assert await controller.act(context, action) == result
+        assert backend.injected == 1
+        with pytest.raises(ComputerError, match="observation_not_delivered"):
+            await controller.act(context, {**action, "action_id": "new"})
+    finally:
+        await controller.close()
+        store.close()
