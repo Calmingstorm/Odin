@@ -6200,52 +6200,82 @@ ${u.text}`:u.text).join(`
     </div>
   </div>
   `},kS={template:`
-    <section class="p-6 page-fade-in" aria-labelledby="computer-title">
-      <header class="flex items-start justify-between flex-wrap gap-3 mb-4" style="position:sticky;top:0;z-index:2;background:var(--bg-primary,#10141c);padding:12px 0">
-        <div><h1 id="computer-title" class="text-xl font-semibold">Computer operator</h1>
-          <p class="page-lede">Private session inspection. This page does not send mouse or keyboard input.</p></div>
-        <div class="flex gap-3 flex-wrap">
-          <button class="btn btn-danger" style="min-height:44px" @click="control('stop')" :disabled="stopping" aria-label="Stop computer session">{{ stopping ? 'Stopping…' : 'Stop' }}</button>
-          <button class="btn btn-ghost" style="min-height:44px" @click="control('pause')" :disabled="pausing" aria-label="Pause and revoke agent input">{{ pausing ? 'Pausing…' : 'Pause / revoke input' }}</button>
+    <div class="p-6 page-fade-in computer-page" role="region" aria-labelledby="computer-title">
+      <header class="page-header mb-4">
+        <div class="page-header-copy">
+          <h1 id="computer-title" class="text-xl font-semibold">Computer operator</h1>
+          <p class="page-lede">Private session inspection. This page does not send mouse or keyboard input.</p>
+        </div>
+        <div class="page-header-actions" aria-label="Emergency session controls">
+          <button class="btn btn-ghost btn-touch" @click="control('pause')" :disabled="pausing" aria-label="Pause and revoke agent input">
+            <odin-icon name="pause" :size="15" />
+            {{ pausing ? 'Pausing…' : 'Pause / revoke input' }}
+          </button>
+          <button class="btn btn-danger btn-touch" @click="control('stop')" :disabled="stopping" aria-label="Stop computer session">
+            <odin-icon name="error" :size="15" />
+            {{ stopping ? 'Stopping…' : 'Stop session' }}
+          </button>
         </div>
       </header>
-      <p role="alert" v-if="error" class="text-red-400 mb-4">{{ error }}</p>
-      <p role="status" aria-live="polite" class="mb-4">State: <strong>{{ status.state || 'unknown' }}</strong>{{ loading ? ' — checking status' : '' }}</p>
-      <section class="mb-4" aria-labelledby="computer-lifecycle-title">
-        <h2 id="computer-lifecycle-title" class="font-semibold mb-2">Administrator lifecycle controls</h2>
-        <dl class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+      <div v-if="error" class="hm-card border-red-900 error-state mb-4" role="alert">
+        <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
+        <p class="text-red-400">{{ error }}</p>
+      </div>
+      <div class="hm-card computer-status-card mb-4" role="status" aria-live="polite">
+        <div>
+          <div class="section-eyebrow">Current session</div>
+          <div class="computer-state">{{ status.state || 'unknown' }}</div>
+        </div>
+        <span class="badge badge-info">{{ loading ? 'Checking status' : 'Status current' }}</span>
+      </div>
+      <div class="space-y-4">
+      <section class="hm-card" aria-labelledby="computer-lifecycle-title">
+        <div class="section-card-header">
+          <div>
+            <h2 id="computer-lifecycle-title" class="text-sm font-semibold text-gray-300">Administrator lifecycle controls</h2>
+            <p class="page-lede">Configuration and runtime state are separate. Changes here never restart Odin.</p>
+          </div>
+        </div>
+        <dl class="detail-grid mb-4">
           <div><dt>Configured</dt><dd>{{ enabledLabel(status.configured_enabled ?? status.enabled) }}</dd></div>
           <div><dt>Runtime lifecycle</dt><dd>{{ enabledLabel(status.runtime_enabled) }}</dd></div>
           <div><dt>Runtime generation</dt><dd>{{ status.generation ?? 'Unknown' }}</dd></div>
           <div><dt>Backend platform / environment</dt><dd>{{ status.backend?.platform || 'Unknown' }} / {{ status.backend?.environment || 'Unknown' }}</dd></div>
           <div><dt>Restart-required settings</dt><dd>{{ restartSettings }}</dd></div>
         </dl>
-        <div v-if="adminReady" class="flex gap-3 flex-wrap mb-3">
-          <button class="btn btn-primary" style="min-height:44px" @click="setEnabled(true)" :disabled="toggling || stopping || pausing || (status.configured_enabled ?? status.enabled) === true">Enable computer use</button>
-          <button class="btn btn-danger" style="min-height:44px" @click="setEnabled(false)" :disabled="toggling || stopping || pausing">Disable computer use</button>
+        <div v-if="adminReady" class="action-row mb-3">
+          <button class="btn btn-primary btn-touch" @click="setEnabled(true)" :disabled="toggling || stopping || pausing || (status.configured_enabled ?? status.enabled) === true">Enable computer use</button>
+          <button class="btn btn-danger btn-touch" @click="setEnabled(false)" :disabled="toggling || stopping || pausing">Disable computer use</button>
         </div>
         <p v-else class="page-lede">Lifecycle controls require a successful authenticated administrator status check.</p>
-        <p v-if="toggling" role="status">Applying lifecycle change and checking status…</p>
+        <p v-if="toggling" class="text-sm text-amber-400" role="status">Applying lifecycle change and checking status…</p>
         <p class="page-lede">Enabling does not prove backend readiness or start a session. Session startup checks capabilities. Unavailable input remains unavailable.</p>
         <p v-if="status.backend?.input_supported === false" class="page-lede">Input unavailable: this backend cannot act. Enabling computer use does not grant mouse or keyboard control.</p>
         <p v-else-if="status.backend?.input_supported !== true" class="page-lede">Input capability is unknown. Do not assume this backend can act.</p>
         <p v-else class="page-lede">Backend reports input support; session authorization and startup checks still apply.</p>
-        <p class="text-gray-400">Runtime settings are generation-pinned. Pending restart-required settings are not live; this page does not restart Odin.</p>
+        <p class="text-xs text-gray-500 mt-3">Runtime settings are generation-pinned. Pending restart-required settings are not live; this page does not restart Odin.</p>
       </section>
-      <section v-if="status.input_admission" class="mb-4" aria-labelledby="computer-input-admission-title" style="overflow-wrap:anywhere">
-        <h2 id="computer-input-admission-title" class="font-semibold mb-2">Input eligibility evidence</h2>
-        <p><strong>{{ status.input_admission.state }}</strong>: {{ status.input_admission.code }}</p>
-        <p v-if="status.input_admission.compositor">Compositor: {{ status.input_admission.compositor.name }} {{ status.input_admission.compositor.version }} ({{ status.input_admission.compositor.backend }}). Build: {{ status.input_admission.compositor.build_id }}.</p>
-        <p>{{ status.input_admission.reason }}</p>
-        <p>Operator action: {{ status.input_admission.remedy }}</p>
-        <p>Probe scope: {{ status.input_admission.probe_scope }}.</p>
+      <section v-if="status.input_admission" class="hm-card text-break" aria-labelledby="computer-input-admission-title">
+        <div class="section-card-header">
+          <h2 id="computer-input-admission-title" class="text-sm font-semibold text-gray-300">Input eligibility evidence</h2>
+          <span class="badge badge-info">{{ status.input_admission.state }}</span>
+        </div>
+        <div class="detail-stack text-sm text-gray-300">
+          <p><strong>{{ status.input_admission.state }}</strong>: {{ status.input_admission.code }}</p>
+          <p v-if="status.input_admission.compositor">Compositor: {{ status.input_admission.compositor.name }} {{ status.input_admission.compositor.version }} ({{ status.input_admission.compositor.backend }}). Build: {{ status.input_admission.compositor.build_id }}.</p>
+          <p>{{ status.input_admission.reason }}</p>
+          <p>Operator action: {{ status.input_admission.remedy }}</p>
+          <p>Probe scope: {{ status.input_admission.probe_scope }}.</p>
+        </div>
         <p v-if="status.input_admission.probe_scope === 'same_stack_disposable'" class="page-lede">Behavior was tested in a separate disposable compositor with the matched stack, not by abandoning held input on your desktop.</p>
         <p class="page-lede">Eligibility evidence does not replace current portal consent, source mapping or application checks. Opening this page runs no input probe.</p>
       </section>
-      <section v-if="!attached" class="mb-4" aria-labelledby="computer-apps-title">
-        <h2 id="computer-apps-title" class="font-semibold mb-2">Application profiles</h2>
-        <ul v-if="applicationProfiles.length" class="mb-2">
-          <li v-for="profile in applicationProfiles" :key="profile.id">
+      <section v-if="!attached" class="hm-card" aria-labelledby="computer-apps-title">
+        <div class="section-card-header">
+          <h2 id="computer-apps-title" class="text-sm font-semibold text-gray-300">Application profiles</h2>
+        </div>
+        <ul v-if="applicationProfiles.length" class="profile-list mb-3">
+          <li v-for="profile in applicationProfiles" :key="profile.id" class="profile-list-item">
             <strong>{{ profile.label }}</strong>: {{ profile.input === 'supported' ? 'Input eligible' : 'Capture only' }}
             <span v-if="profile.input === 'capture_only'"> (application provenance unavailable)</span>
             <p v-if="profile.task_scope" class="page-lede">{{ profile.task_scope }}</p>
@@ -6254,11 +6284,13 @@ ${u.text}`:u.text).join(`
         <p v-else class="page-lede">No application profiles reported for this backend.</p>
         <p class="page-lede">Profiles describe supported scope, not installation, focus, permission or task success. Input readiness is checked against a fresh observation.</p>
       </section>
-      <section v-else class="mb-4" aria-labelledby="computer-attached-title" style="overflow-wrap:anywhere">
-        <h2 id="computer-attached-title" class="font-semibold mb-2">Attached application</h2>
+      <section v-else class="hm-card text-break" aria-labelledby="computer-attached-title">
+        <div class="section-card-header">
+          <h2 id="computer-attached-title" class="text-sm font-semibold text-gray-300">Attached application</h2>
+        </div>
         <p class="page-lede">Focus the application you want help with, then ask in ordinary chat. There is no application allowlist. Normal dialogs, file pickers, menus and document open/new/close/reopen are ordinary use. Session Stop only detaches input; applications stay open.</p>
         <p class="page-lede">Denied classes remain blocked: terminals, shells, authentication and password prompts, polkit, keyring, sudo and Odin control-plane windows. Session authorization, current target checks and input-release checks still apply.</p>
-        <dl class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-3">
+        <dl class="detail-grid mt-4 mb-3">
           <div><dt>Observed executable</dt><dd>{{ status.application_provenance?.exe_basename || 'Not observed' }}</dd></div>
           <div><dt>Observed WM_CLASS</dt><dd>{{ status.application_provenance?.wm_class || 'Not observed' }}</dd></div>
           <div><dt>Observed PID</dt><dd>{{ status.application_provenance?.pid ?? 'Not observed' }}</dd></div>
@@ -6271,43 +6303,70 @@ ${u.text}`:u.text).join(`
         <p class="page-lede">Provenance describes the last observed target, not application approval or task success. Untrusted executable metadata is evidence, not an application refusal. Focus within one window may be shared even with an independent pointer. Unknown capabilities are not proof of independence.</p>
         <p v-if="inputLimits" class="page-lede">Per-call input bounds: {{ inputLimits }}. These limits are not application restrictions.</p>
       </section>
-      <p v-if="status.state === 'unavailable'" class="page-lede mb-4">Disabled or unavailable. Check configured state, lifecycle state and backend prerequisites separately.</p>
-      <p v-if="status.state === 'paused'" class="page-lede mb-4">Agent input is revoked. This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</p>
-      <p v-if="status.state === 'unknown'" class="page-lede mb-4">Outcome is unknown. Refresh status; do not replay the last action.</p>
-      <section v-if="status.recovery" class="mb-4" aria-labelledby="computer-recovery-title">
-        <h2 id="computer-recovery-title" class="font-semibold">Recovery evidence</h2>
+      <div v-if="status.state === 'unavailable'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">Disabled or unavailable. Check configured state, lifecycle state and backend prerequisites separately.</div>
+      <div v-if="status.state === 'paused'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">Agent input is revoked. This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</div>
+      <div v-if="status.state === 'unknown'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">Outcome is unknown. Refresh status; do not replay the last action.</div>
+      <section v-if="status.recovery" class="hm-card" aria-labelledby="computer-recovery-title">
+        <div class="section-card-header">
+          <h2 id="computer-recovery-title" class="text-sm font-semibold text-gray-300">Recovery evidence</h2>
+          <span class="badge" :class="status.recovery.complete ? 'badge-success' : 'badge-warning'">{{ status.recovery.complete ? 'Verified' : 'Review required' }}</span>
+        </div>
         <p>{{ status.recovery.status }}: {{ status.recovery.reason }}. Cleanup {{ status.recovery.complete ? 'verified' : 'not verified' }}.</p>
         <p class="page-lede">Reconciliation only inspects the recorded workload. It never sends input, terminates applications or replays actions.</p>
-        <button v-if="status.state === 'quarantined'" class="btn btn-ghost" style="min-height:44px" @click="recover" :disabled="recovering || !adminReady">{{ recovering ? 'Checking recorded workload…' : 'Reconcile recorded workload' }}</button>
+        <button v-if="status.state === 'quarantined'" class="btn btn-ghost btn-touch mt-3" @click="recover" :disabled="recovering || !adminReady">{{ recovering ? 'Checking recorded workload…' : 'Reconcile recorded workload' }}</button>
       </section>
-      <dl class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
-        <div><dt>Owner</dt><dd>{{ status.owner_id || '—' }}</dd></div>
-        <div><dt>Session</dt><dd style="overflow-wrap:anywhere">{{ status.session_id || '—' }}</dd></div>
-        <div v-if="!attached"><dt>Application</dt><dd>{{ status.app || '—' }}</dd></div>
-        <div><dt>Last action / verification</dt><dd>{{ status.last_action || '—' }} / {{ status.last_verification || 'unavailable' }}</dd></div>
-      </dl>
-      <div class="flex gap-3 flex-wrap mb-4">
-        <button class="btn btn-ghost" style="min-height:44px" @click="refresh" :disabled="loading">Refresh status</button>
-        <button class="btn btn-primary" style="min-height:44px" @click="observe" :disabled="observing || !status.available">{{ observing ? 'Observing…' : 'Observe / view frame' }}</button>
-        <button v-if="frameUrl" class="btn btn-ghost" style="min-height:44px" @click="clearFrame">Hide frame</button>
-      </div>
-      <p class="text-gray-400 mb-4">Frames are captured only on request. Opening or refreshing this view never captures or posts an image.</p>
-      <figure v-if="frameUrl" class="mb-4">
-        <figcaption>{{ freshness }} · Captured {{ frame.captured_at }} · Private evidence expires {{ frame.expires_at }}</figcaption>
-        <img :src="frameUrl" alt="Requested frame from the authorized application; read-only" style="display:block;max-width:100%;max-height:65vh;object-fit:contain" />
-      </figure>
-      <p v-else-if="frameExpired" role="status">Frame expired. Observe again for current evidence.</p>
-      <form @submit.prevent="exportFile" class="mt-4" aria-labelledby="computer-export-title">
-        <h2 id="computer-export-title" class="font-semibold mb-2">Export a saved workspace file</h2>
-        <p class="text-gray-400 mb-2">Choose one exact filename, not a host path. Downloads are never executed.</p>
-        <label for="computer-export-name">Filename</label>
-        <div class="flex gap-3 flex-wrap mt-2">
-          <input id="computer-export-name" class="input" v-model="name" maxlength="100" required autocomplete="off" placeholder="drawing.png" style="min-height:44px;max-width:100%" />
-          <button class="btn btn-primary" style="min-height:44px" type="submit" :disabled="exporting || !status.available">{{ exporting ? 'Preparing…' : 'Prepare export' }}</button>
+      <section class="hm-card" aria-labelledby="computer-session-title">
+        <div class="section-card-header">
+          <h2 id="computer-session-title" class="text-sm font-semibold text-gray-300">Session details</h2>
         </div>
-      </form>
-      <p v-if="artifact" class="mt-4"><button class="btn btn-ghost" style="min-height:44px" @click="download" :disabled="downloading">Download {{ artifact.name }}</button> · Expires {{ artifact.expires_at }}</p>
-    </section>`,setup(){const e=f({state:"unknown",available:!1}),t=f(!1),s=f(!1),n=f(!1),a=f(!1),i=f(!1),l=f(!1),o=f(""),r=f(!1),c=f(!1),d=f(!1),u=f(null),p=f(""),h=f(!1),m=f(Date.now()),v=f(""),w=f(null);let R=0,x=null,g=!1,b=q.token,T=0;const S=$=>$===!0?"Enabled":$===!1?"Disabled":"Unknown",A=W(()=>{var $;return(($=e.value.backend)==null?void 0:$.environment)==="existing_session"}),C=W(()=>Object.entries(e.value.input_limits||{}).filter(([,$])=>typeof $=="number"&&Number.isFinite($)).map(([$,ie])=>`${$}: ${ie}`).join(", ")),y=W(()=>{var ie;const $=(ie=e.value.application_provenance)==null?void 0:ie.script_identity;return typeof $=="string"?$:!$||typeof $!="object"?"Not observed":`${$.interpreter_basename||"Unknown interpreter"}; argv digest ${$.argv_digest||"not recorded"}; ${$.verified===!0?"verified":"not verified"}`}),L=W(()=>Array.isArray(e.value.application_profiles)?e.value.application_profiles.filter($=>$&&typeof $.id=="string"&&typeof $.label=="string"&&["supported","capture_only"].includes($.input)).slice(0,16):[]),B=W(()=>{const $=e.value.restart_required;return Array.isArray($)?$.length?$.join(", "):"None reported":$===!0?"Pending; restart required":$===!1?"None reported":"Unknown"}),k=W(()=>{var ie,U;const $=Date.parse(((ie=u.value)==null?void 0:ie.captured_at)||"");return Number.isFinite($)&&m.value<$+Math.min(1e4,((U=u.value)==null?void 0:U.fresh_for_ms)||0)?"Fresh frame":"Stale frame — observe again before acting"});function P(){p.value&&URL.revokeObjectURL(p.value),p.value="",u.value=null}function V(){R++,P(),w.value=null,s.value=!1,i.value=!1,l.value=!1}function G($,ie){return g&&$===R&&ie===q.token}function D($){V(),c.value=!1;const ie=$.status||($.name==="AuthError"?401:0);e.value={available:!1,state:ie===503?"unavailable":"unknown"},o.value=ie===401||ie===403||ie===404?"Access unavailable or revoked. Authenticate as the session owner, then refresh.":ie===410?"Evidence or artifact expired. Observe or prepare the export again.":ie===503?"Computer use is disabled or unavailable.":"Request failed; outcome unknown. Refresh status. No action was replayed."}async function I(){if(t.value||r.value||n.value||a.value||d.value||!g)return;const $=R,ie=q.token;t.value=!0,T=Date.now();try{const U=await q.get("/api/computer");if(!G($,ie))return;O(U)}catch(U){G($,ie)&&D(U)}finally{t.value=!1}}function O($){(e.value.session_id&&e.value.session_id!==$.session_id||e.value.generation!=null&&e.value.generation!==$.generation||e.value.session_generation!=null&&e.value.session_generation!==$.session_generation)&&V(),e.value=$,c.value=!0,o.value=""}async function H($){if(!g||!c.value||r.value||n.value||a.value)return;V();const ie=R,U=q.token;r.value=!0;try{if(await q.post("/api/computer/enabled",{enabled:$}),!G(ie,U))return;const ee=await q.get("/api/computer");G(ie,U)&&O(ee)}catch(ee){G(ie,U)&&D(ee)}finally{r.value=!1}}async function J($){V();const ie=R,U=q.token,ee=$==="stop"?n:a;ee.value=!0;try{const ue=await q.post("/api/computer/"+$,{});if(G(ie,U)){e.value={...e.value,...ue};const Ae=await q.get("/api/computer");G(ie,U)&&O(Ae)}}catch(ue){G(ie,U)&&D(ue)}finally{ee.value=!1}}async function Z(){if(!g||!c.value||d.value||e.value.state!=="quarantined")return;const $={session_id:e.value.session_id,generation:e.value.session_generation};if(!$.session_id||!Number.isInteger($.generation))return;V();const ie=R,U=q.token;d.value=!0;try{const ee=await q.post("/api/computer/recover",$);G(ie,U)&&O(ee)}catch(ee){G(ie,U)&&D(ee)}finally{d.value=!1}}async function Y(){var U;P(),h.value=!1;const $=R,ie=q.token;s.value=!0;try{const ee=await q.post("/api/computer/observe",{});if(!G($,ie))return;if(!/^[A-Za-z0-9_-]{8,128}$/.test(((U=ee.frame)==null?void 0:U.evidence_id)||""))throw new Error("Invalid evidence");const ue=await q.getBlob("/api/computer/evidence/"+ee.frame.evidence_id);if(!G($,ie))return;if(!["image/png","image/jpeg"].includes(ue.type)||ue.size>2097152||!Number.isFinite(Date.parse(ee.frame.expires_at))||Date.parse(ee.frame.expires_at)<=Date.now())throw new Error("Invalid evidence");u.value=ee.frame,p.value=URL.createObjectURL(ue),o.value=""}catch(ee){G($,ie)&&D(ee)}finally{$===R&&(s.value=!1)}}async function ce(){w.value=null;const $=R,ie=q.token;i.value=!0;try{const U=await q.post("/api/computer/export",{name:v.value});G($,ie)&&(w.value=U,o.value="")}catch(U){G($,ie)&&D(U)}finally{$===R&&(i.value=!1)}}async function te(){const $=R,ie=q.token,U=w.value;l.value=!0;try{if(!/^[A-Za-z0-9_-]{8,128}$/.test((U==null?void 0:U.artifact_id)||""))throw new Error("Invalid export");const ee=await q.getBlob("/api/computer/download/"+U.artifact_id);if(!G($,ie))return;const ue=URL.createObjectURL(ee),Ae=document.createElement("a");Ae.href=ue,Ae.download=U.name,Ae.click(),setTimeout(()=>URL.revokeObjectURL(ue),1e3)}catch(ee){G($,ie)&&D(ee)}finally{$===R&&(l.value=!1)}}function de(){g||(g=!0,I(),x=setInterval(()=>{m.value=Date.now(),b!==q.token&&(b=q.token,V(),c.value=!1,e.value={state:"unknown",available:!1}),u.value&&Date.parse(u.value.expires_at)<=m.value&&(P(),h.value=!0),w.value&&Date.parse(w.value.expires_at)<=m.value&&(w.value=null),m.value-T>=5e3&&I()},500))}function Ne(){g=!1,clearInterval(x),x=null,V(),c.value=!1}return je(de),os(de),Yt(Ne),ht(Ne),{status:e,loading:t,observing:s,stopping:n,pausing:a,exporting:i,downloading:l,error:o,frame:u,frameUrl:p,frameExpired:h,freshness:k,name:v,artifact:w,refresh:I,control:J,observe:Y,clearFrame:P,exportFile:ce,download:te,toggling:r,adminReady:c,enabledLabel:S,restartSettings:B,setEnabled:H,recovering:d,recover:Z,applicationProfiles:L,attached:A,scriptIdentity:y,inputLimits:C}}},iv=[{id:"health",label:"Health",component:Ik},{id:"resources",label:"Resources",component:Ok},{id:"logs",label:"Logs",component:jk},{id:"config",label:"Config",component:tS},{id:"discord",label:"Discord",component:nS},{id:"hosts",label:"Hosts",component:lS},{id:"host-access",label:"Host Access",component:iS},{id:"api-tokens",label:"API Tokens",component:oS},{id:"llm",label:"LLM Config",component:vS},{id:"internals",label:"Internals",component:bS},{id:"turn-state",label:"Turn State",component:_S},{id:"computer",label:"Computer",component:kS},{id:"update",label:"Update",component:wS}],SS={components:{TabbedPage:Jo},setup(){return{tabs:iv}},template:'<tabbed-page :tabs="tabs" default-tab="health" group-label="System" />'},Ml=(e,t,s,n)=>n.map(({id:a,label:i})=>({group:e,label:i,icon:t,to:{path:s,query:{tab:a}}})),TS=[{group:"Workspace",label:"Dashboard",icon:"dashboard",to:{path:"/dashboard"}},{group:"Workspace",label:"Chat",icon:"chat",to:{path:"/chat"}},...Ml("Operations","operations","/operations",Jm),...Ml("History","history","/history",Ym),...Ml("Capabilities","capabilities","/capabilities",Qm),{group:"Manage",label:"Personality",icon:"personality",to:{path:"/personality"}},...Ml("System","system","/system",iv)],bs=ea({open:!1,query:"",selected:0});function mp(){bs.query="",bs.selected=0,bs.open=!0}function Tr(){bs.open=!1}function CS(e,t){const s=e.label.toLowerCase(),n=`${e.group} ${e.label}`.toLowerCase();return t?s.startsWith(t)?100:n.startsWith(t)?80:s.includes(t)?60:n.includes(t)?40:0:1}const ES={setup(){const e=zm(),t=f(null),s=W(()=>{const i=bs.query.trim().toLowerCase();return TS.map(l=>({...l,_score:CS(l,i)})).filter(l=>l._score>0).sort((l,o)=>o._score-l._score)});Pt(()=>bs.open,async i=>{var l;i&&(await Rt(),(l=t.value)==null||l.focus())}),Pt(()=>bs.query,()=>{bs.selected=0});function n(i){Tr(),e.push(i.to)}function a(i){if(i.key==="Escape"){i.preventDefault(),Tr();return}if(i.key==="ArrowDown")i.preventDefault(),bs.selected=Math.min(bs.selected+1,s.value.length-1);else if(i.key==="ArrowUp")i.preventDefault(),bs.selected=Math.max(bs.selected-1,0);else if(i.key==="Enter"){i.preventDefault();const l=s.value[bs.selected];l&&n(l)}}return{state:bs,results:s,inputEl:t,go:n,onKeydown:a,closePalette:Tr}},template:`
+        <dl class="detail-grid">
+          <div><dt>Owner</dt><dd>{{ status.owner_id || '—' }}</dd></div>
+          <div><dt>Session</dt><dd class="text-break">{{ status.session_id || '—' }}</dd></div>
+          <div v-if="!attached"><dt>Application</dt><dd>{{ status.app || '—' }}</dd></div>
+          <div><dt>Last action / verification</dt><dd>{{ status.last_action || '—' }} / {{ status.last_verification || 'unavailable' }}</dd></div>
+        </dl>
+      </section>
+
+      <section class="hm-card" aria-labelledby="computer-evidence-title">
+        <div class="section-card-header">
+          <div>
+            <h2 id="computer-evidence-title" class="text-sm font-semibold text-gray-300">Visual evidence</h2>
+            <p class="page-lede">Frames are captured only on request. Opening or refreshing this view never captures or posts an image.</p>
+          </div>
+          <div class="action-row">
+            <button class="btn btn-ghost btn-touch" @click="refresh" :disabled="loading"><odin-icon name="refresh" :size="15" /> Refresh status</button>
+            <button class="btn btn-primary btn-touch" @click="observe" :disabled="observing || !status.available"><odin-icon name="eye" :size="15" /> {{ observing ? 'Observing…' : 'Observe / view frame' }}</button>
+            <button v-if="frameUrl" class="btn btn-ghost btn-touch" @click="clearFrame">Hide frame</button>
+          </div>
+        </div>
+        <figure v-if="frameUrl" class="evidence-figure">
+          <figcaption class="text-xs text-gray-500 mb-3">{{ freshness }} · Captured {{ frame.captured_at }} · Private evidence expires {{ frame.expires_at }}</figcaption>
+          <img class="evidence-frame" :src="frameUrl" alt="Requested frame from the authorized application; read-only" />
+        </figure>
+        <p v-else-if="frameExpired" class="text-sm text-amber-400" role="status">Frame expired. Observe again for current evidence.</p>
+      </section>
+
+      <section class="hm-card" aria-labelledby="computer-export-title">
+        <form @submit.prevent="exportFile">
+          <div class="section-card-header">
+            <div>
+              <h2 id="computer-export-title" class="text-sm font-semibold text-gray-300">Export a saved workspace file</h2>
+              <p class="page-lede">Choose one exact filename, not a host path. Downloads are never executed.</p>
+            </div>
+          </div>
+          <label class="field-label" for="computer-export-name">Filename</label>
+          <div class="export-controls mt-2">
+            <input id="computer-export-name" class="hm-input export-name" v-model="name" maxlength="100" required autocomplete="off" placeholder="drawing.png" />
+            <button class="btn btn-primary btn-touch" type="submit" :disabled="exporting || !status.available">{{ exporting ? 'Preparing…' : 'Prepare export' }}</button>
+          </div>
+        </form>
+        <div v-if="artifact" class="artifact-row mt-4">
+          <button class="btn btn-ghost btn-touch" @click="download" :disabled="downloading"><odin-icon name="download" :size="15" /> Download {{ artifact.name }}</button>
+          <span class="text-xs text-gray-500">Expires {{ artifact.expires_at }}</span>
+        </div>
+      </section>
+      </div>
+    </div>`,setup(){const e=f({state:"unknown",available:!1}),t=f(!1),s=f(!1),n=f(!1),a=f(!1),i=f(!1),l=f(!1),o=f(""),r=f(!1),c=f(!1),d=f(!1),u=f(null),p=f(""),h=f(!1),m=f(Date.now()),v=f(""),w=f(null);let R=0,x=null,g=!1,b=q.token,T=0;const S=$=>$===!0?"Enabled":$===!1?"Disabled":"Unknown",A=W(()=>{var $;return(($=e.value.backend)==null?void 0:$.environment)==="existing_session"}),C=W(()=>Object.entries(e.value.input_limits||{}).filter(([,$])=>typeof $=="number"&&Number.isFinite($)).map(([$,ie])=>`${$}: ${ie}`).join(", ")),y=W(()=>{var ie;const $=(ie=e.value.application_provenance)==null?void 0:ie.script_identity;return typeof $=="string"?$:!$||typeof $!="object"?"Not observed":`${$.interpreter_basename||"Unknown interpreter"}; argv digest ${$.argv_digest||"not recorded"}; ${$.verified===!0?"verified":"not verified"}`}),L=W(()=>Array.isArray(e.value.application_profiles)?e.value.application_profiles.filter($=>$&&typeof $.id=="string"&&typeof $.label=="string"&&["supported","capture_only"].includes($.input)).slice(0,16):[]),B=W(()=>{const $=e.value.restart_required;return Array.isArray($)?$.length?$.join(", "):"None reported":$===!0?"Pending; restart required":$===!1?"None reported":"Unknown"}),k=W(()=>{var ie,U;const $=Date.parse(((ie=u.value)==null?void 0:ie.captured_at)||"");return Number.isFinite($)&&m.value<$+Math.min(1e4,((U=u.value)==null?void 0:U.fresh_for_ms)||0)?"Fresh frame":"Stale frame — observe again before acting"});function P(){p.value&&URL.revokeObjectURL(p.value),p.value="",u.value=null}function V(){R++,P(),w.value=null,s.value=!1,i.value=!1,l.value=!1}function G($,ie){return g&&$===R&&ie===q.token}function D($){V(),c.value=!1;const ie=$.status||($.name==="AuthError"?401:0);e.value={available:!1,state:ie===503?"unavailable":"unknown"},o.value=ie===401||ie===403||ie===404?"Access unavailable or revoked. Authenticate as the session owner, then refresh.":ie===410?"Evidence or artifact expired. Observe or prepare the export again.":ie===503?"Computer use is disabled or unavailable.":"Request failed; outcome unknown. Refresh status. No action was replayed."}async function I(){if(t.value||r.value||n.value||a.value||d.value||!g)return;const $=R,ie=q.token;t.value=!0,T=Date.now();try{const U=await q.get("/api/computer");if(!G($,ie))return;O(U)}catch(U){G($,ie)&&D(U)}finally{t.value=!1}}function O($){(e.value.session_id&&e.value.session_id!==$.session_id||e.value.generation!=null&&e.value.generation!==$.generation||e.value.session_generation!=null&&e.value.session_generation!==$.session_generation)&&V(),e.value=$,c.value=!0,o.value=""}async function H($){if(!g||!c.value||r.value||n.value||a.value)return;V();const ie=R,U=q.token;r.value=!0;try{if(await q.post("/api/computer/enabled",{enabled:$}),!G(ie,U))return;const ee=await q.get("/api/computer");G(ie,U)&&O(ee)}catch(ee){G(ie,U)&&D(ee)}finally{r.value=!1}}async function J($){V();const ie=R,U=q.token,ee=$==="stop"?n:a;ee.value=!0;try{const ue=await q.post("/api/computer/"+$,{});if(G(ie,U)){e.value={...e.value,...ue};const Ae=await q.get("/api/computer");G(ie,U)&&O(Ae)}}catch(ue){G(ie,U)&&D(ue)}finally{ee.value=!1}}async function Z(){if(!g||!c.value||d.value||e.value.state!=="quarantined")return;const $={session_id:e.value.session_id,generation:e.value.session_generation};if(!$.session_id||!Number.isInteger($.generation))return;V();const ie=R,U=q.token;d.value=!0;try{const ee=await q.post("/api/computer/recover",$);G(ie,U)&&O(ee)}catch(ee){G(ie,U)&&D(ee)}finally{d.value=!1}}async function Y(){var U;P(),h.value=!1;const $=R,ie=q.token;s.value=!0;try{const ee=await q.post("/api/computer/observe",{});if(!G($,ie))return;if(!/^[A-Za-z0-9_-]{8,128}$/.test(((U=ee.frame)==null?void 0:U.evidence_id)||""))throw new Error("Invalid evidence");const ue=await q.getBlob("/api/computer/evidence/"+ee.frame.evidence_id);if(!G($,ie))return;if(!["image/png","image/jpeg"].includes(ue.type)||ue.size>2097152||!Number.isFinite(Date.parse(ee.frame.expires_at))||Date.parse(ee.frame.expires_at)<=Date.now())throw new Error("Invalid evidence");u.value=ee.frame,p.value=URL.createObjectURL(ue),o.value=""}catch(ee){G($,ie)&&D(ee)}finally{$===R&&(s.value=!1)}}async function ce(){w.value=null;const $=R,ie=q.token;i.value=!0;try{const U=await q.post("/api/computer/export",{name:v.value});G($,ie)&&(w.value=U,o.value="")}catch(U){G($,ie)&&D(U)}finally{$===R&&(i.value=!1)}}async function te(){const $=R,ie=q.token,U=w.value;l.value=!0;try{if(!/^[A-Za-z0-9_-]{8,128}$/.test((U==null?void 0:U.artifact_id)||""))throw new Error("Invalid export");const ee=await q.getBlob("/api/computer/download/"+U.artifact_id);if(!G($,ie))return;const ue=URL.createObjectURL(ee),Ae=document.createElement("a");Ae.href=ue,Ae.download=U.name,Ae.click(),setTimeout(()=>URL.revokeObjectURL(ue),1e3)}catch(ee){G($,ie)&&D(ee)}finally{$===R&&(l.value=!1)}}function de(){g||(g=!0,I(),x=setInterval(()=>{m.value=Date.now(),b!==q.token&&(b=q.token,V(),c.value=!1,e.value={state:"unknown",available:!1}),u.value&&Date.parse(u.value.expires_at)<=m.value&&(P(),h.value=!0),w.value&&Date.parse(w.value.expires_at)<=m.value&&(w.value=null),m.value-T>=5e3&&I()},500))}function Ne(){g=!1,clearInterval(x),x=null,V(),c.value=!1}return je(de),os(de),Yt(Ne),ht(Ne),{status:e,loading:t,observing:s,stopping:n,pausing:a,exporting:i,downloading:l,error:o,frame:u,frameUrl:p,frameExpired:h,freshness:k,name:v,artifact:w,refresh:I,control:J,observe:Y,clearFrame:P,exportFile:ce,download:te,toggling:r,adminReady:c,enabledLabel:S,restartSettings:B,setEnabled:H,recovering:d,recover:Z,applicationProfiles:L,attached:A,scriptIdentity:y,inputLimits:C}}},iv=[{id:"health",label:"Health",component:Ik},{id:"resources",label:"Resources",component:Ok},{id:"logs",label:"Logs",component:jk},{id:"config",label:"Config",component:tS},{id:"discord",label:"Discord",component:nS},{id:"hosts",label:"Hosts",component:lS},{id:"host-access",label:"Host Access",component:iS},{id:"api-tokens",label:"API Tokens",component:oS},{id:"llm",label:"LLM Config",component:vS},{id:"internals",label:"Internals",component:bS},{id:"turn-state",label:"Turn State",component:_S},{id:"computer",label:"Computer",component:kS},{id:"update",label:"Update",component:wS}],SS={components:{TabbedPage:Jo},setup(){return{tabs:iv}},template:'<tabbed-page :tabs="tabs" default-tab="health" group-label="System" />'},Ml=(e,t,s,n)=>n.map(({id:a,label:i})=>({group:e,label:i,icon:t,to:{path:s,query:{tab:a}}})),TS=[{group:"Workspace",label:"Dashboard",icon:"dashboard",to:{path:"/dashboard"}},{group:"Workspace",label:"Chat",icon:"chat",to:{path:"/chat"}},...Ml("Operations","operations","/operations",Jm),...Ml("History","history","/history",Ym),...Ml("Capabilities","capabilities","/capabilities",Qm),{group:"Manage",label:"Personality",icon:"personality",to:{path:"/personality"}},...Ml("System","system","/system",iv)],bs=ea({open:!1,query:"",selected:0});function mp(){bs.query="",bs.selected=0,bs.open=!0}function Tr(){bs.open=!1}function CS(e,t){const s=e.label.toLowerCase(),n=`${e.group} ${e.label}`.toLowerCase();return t?s.startsWith(t)?100:n.startsWith(t)?80:s.includes(t)?60:n.includes(t)?40:0:1}const ES={setup(){const e=zm(),t=f(null),s=W(()=>{const i=bs.query.trim().toLowerCase();return TS.map(l=>({...l,_score:CS(l,i)})).filter(l=>l._score>0).sort((l,o)=>o._score-l._score)});Pt(()=>bs.open,async i=>{var l;i&&(await Rt(),(l=t.value)==null||l.focus())}),Pt(()=>bs.query,()=>{bs.selected=0});function n(i){Tr(),e.push(i.to)}function a(i){if(i.key==="Escape"){i.preventDefault(),Tr();return}if(i.key==="ArrowDown")i.preventDefault(),bs.selected=Math.min(bs.selected+1,s.value.length-1);else if(i.key==="ArrowUp")i.preventDefault(),bs.selected=Math.max(bs.selected-1,0);else if(i.key==="Enter"){i.preventDefault();const l=s.value[bs.selected];l&&n(l)}}return{state:bs,results:s,inputEl:t,go:n,onKeydown:a,closePalette:Tr}},template:`
     <transition name="modal">
       <div v-if="state.open" class="modal-overlay palette-overlay" @click.self="closePalette()" role="dialog" aria-modal="true" aria-label="Command palette">
         <div class="palette" v-modal-focus tabindex="-1">

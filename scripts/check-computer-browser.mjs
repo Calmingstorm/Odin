@@ -10,6 +10,11 @@ assert.match(systemSource, /id: ['"]computer['"], label: ['"]Computer['"], compo
 const configSource = fs.readFileSync('ui/js/pages/config.js', 'utf8');
 assert.match(configSource, /query: \{ tab: 'computer' \}/);
 assert.doesNotMatch(configSource, /Computer use is under development/);
+const computerSource = fs.readFileSync('ui/js/pages/computer.js', 'utf8');
+assert.match(computerSource, /class="page-header mb-4"/);
+assert.match(computerSource, /class="page-header-actions" aria-label="Emergency session controls"/);
+assert.ok((computerSource.match(/class="hm-card/g) || []).length >= 7, 'major computer sections use shared cards');
+assert.doesNotMatch(computerSource, /style=/, 'computer page must not regress to ad-hoc inline layout');
 
 // Isolated component harness: loopback test server + mocked API, no desktop.
 const server = await createServer({
@@ -18,7 +23,12 @@ const server = await createServer({
   define: { __VUE_OPTIONS_API__: 'true', __VUE_PROD_DEVTOOLS__: 'false', __VUE_PROD_HYDRATION_MISMATCH_DETAILS__: 'false' },
   server: { host: '127.0.0.1', port: 0, watch: null },
 });
-const html = `<!doctype html><html><body><div id="app"></div><script type="module">
+const html = `<!doctype html><html><head>
+  <link rel="stylesheet" href="/ui/css/fonts.css">
+  <link rel="stylesheet" href="/ui/css/tailwind.css">
+  <link rel="stylesheet" href="/ui/css/style.css">
+  <link rel="stylesheet" href="/ui/css/foundation.css">
+</head><body><div id="app"></div><script type="module">
   import { createApp, h, ref, nextTick } from 'vue';
   import Computer from '/ui/js/pages/computer.js';
   import { api } from '/ui/js/api.js';
@@ -85,6 +95,12 @@ try {
   await page.goto(`http://127.0.0.1:${server.httpServer.address().port}/__computer_test__.html`);
   await page.waitForFunction(() => window.ready && !view.loading);
   assert.deepEqual(requests, ['/api/computer']);
+  const emergencyControls = page.getByLabel('Emergency session controls');
+  assert.equal(await emergencyControls.locator('.btn').count(), 2);
+  const pauseControl = page.getByRole('button', { name: 'Pause and revoke agent input' });
+  assert.ok((await pauseControl.boundingBox()).height >= 44, 'pause/revoke remains a mobile-sized touch target');
+  assert.ok((await page.locator('.computer-page > .space-y-4 > .hm-card').count()) >= 4, 'computer sections render as shared cards');
+  assert.equal(await page.locator('.computer-page [style]').count(), 0, 'rendered computer page has no inline layout styles');
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, 0);
