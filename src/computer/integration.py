@@ -72,12 +72,21 @@ class ComputerIntegration:
 
     def _backend(self, app):
         from .app_profiles import ATTACHED_NATIVE_PROFILES, validate_profile
-        from .models import ComputerError
 
         validate_profile(app, platform=getattr(self.settings, "platform", "x11"),
                          environment=getattr(self.settings, "environment", "isolated"))
-        if getattr(self.settings, "platform", "x11") != "x11":
-            raise ComputerError("wayland_owned_input_lifecycle_unverified")
+        if getattr(self.settings, "platform", "x11") == "wayland":
+            from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
+            from .runtime.wayland_probe import GnomeSameStackQualifier
+
+            return WaylandRuntimeBackend(
+                enabled=self.enabled, app_profile=app,
+                environment=self.settings.environment,
+                config=WaylandSessionConfig(
+                    bus_address=self.settings.wayland_bus_address,
+                    expected_uid=self.settings.wayland_uid,
+                    guardian_binary=self.settings.wayland_guardian_binary),
+                qualify=GnomeSameStackQualifier())
         if getattr(self.settings, "environment", "isolated") == "existing_session":
             from .runtime.x11_attached import X11AttachedBackend
 

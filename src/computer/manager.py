@@ -53,9 +53,11 @@ class ComputerLifecycle:
             skills.get_tool_definitions() if skills is not None else [],
             mcp.get_tool_definitions() if mcp is not None else [])
         settings = self.settings
-        if settings.platform == "wayland":
-            raise ValueError("Wayland unavailable: owned-input release is not verified")
-        if settings.environment == "existing_session" and (
+        if settings.platform == "wayland" and (
+                settings.environment != "existing_session" or not settings.wayland_bus_address
+                or settings.wayland_uid is None):
+            raise ValueError("Wayland needs an explicit existing session bus and desktop UID")
+        if settings.platform == "x11" and settings.environment == "existing_session" and (
                 not settings.display or not settings.monitor_names):
             raise ValueError("Existing-session capture needs explicit display and monitor names")
         root = Path(settings.storage_dir)
@@ -68,7 +70,14 @@ class ComputerLifecycle:
             raise ValueError("Computer storage must be service-owned with mode 0700")
         factory = self._factory
         if factory is None:
-            if settings.environment == "isolated":
+            if settings.platform == "wayland":
+                import importlib.util
+
+                if importlib.util.find_spec("dbus_next") is None:
+                    raise ValueError("Wayland session-bus dependency unavailable")
+                # No bus connection, capture, consent prompt or input probe at
+                # Enable. Per-session qualification belongs to backend.start().
+            elif settings.environment == "isolated":
                 from .runtime.profile import preflight
 
                 preflight()

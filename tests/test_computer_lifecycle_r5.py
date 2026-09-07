@@ -153,7 +153,7 @@ async def test_restart_only_settings_pinned_across_toggles(tmp_path):
     await manager.close()
 
 
-async def test_collision_and_platform_failure_never_persist_or_construct(tmp_path):
+async def test_collision_and_missing_wayland_session_never_persist_or_construct(tmp_path):
     factory, persist = Mock(side_effect=fake_factory), AsyncMock(return_value=(None, False))
     bot, manager = owner(tmp_path, factory=factory, persist=persist)
     bot.skill_manager.get_tool_definitions = lambda: [{"name": "computer_act"}]
