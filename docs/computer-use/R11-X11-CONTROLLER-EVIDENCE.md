@@ -1,5 +1,19 @@
 # Full controller X11 evidence, R11
 
+## Parent integration recheck
+
+At integrated source `5f1bbd9`, the same complete 15-action harness passed again:
+`/tmp/cu-r11-parent-e2e/result.json` and `/tmp/cu-r11-parent-e2e-owned.json`.
+The supervisor completed with exit 0, cleanup_ok=true and no residual descendants.
+Core cursor remained (950,650), native held-key/button sets were empty, Xed stayed
+alive after Stop, and topology change rejected the old observation. This is
+disposable-stack evidence, not a new real-workstation test.
+
+The multiline mismatch recorded below was fixed by `5f1bbd9`: Return/Tab resolve
+through the existing native keymap, with unit tests for mixed Unicode/multiline
+text. The actual task still used an explicit Return call. Legacy fake-pointer
+and admission fixtures were repaired separately; no test exclusion was added.
+
 ## Final full-action result
 
 Run8 passed the COMPLETE controller/native/Xed task, including independent
@@ -109,6 +123,7 @@ six line-length findings; diff-check passed before final documentation.
 
 Current passing scope: full generic Xed task including independent double/right
 click, bounded scroll injection, crop/delivery, provenance and topology/Stop.
-Public multiline type mismatch remains; no multiline qualification is claimed.
+Multiline native resolution is unit-tested after the parent fix; no separate
+real-GUI multiline-typing run is claimed here.
 Not main-desktop qualification, exhaustive application support, remote support,
 hardware sleep/wake, release readiness or simultaneous-native-client-death safety.
