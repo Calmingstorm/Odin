@@ -58,6 +58,18 @@ or modifier-change event. Full exception/event evidence lives in
 with a fabricated US layout or waive the modifier/scope protections. Parent owns
 runtime fixes. Portal deadline followup f9df52b is ready for a final image rebuild.
 
+Native7/8 standalone and exact-container cleanup revalidated 2/2: no owned
+residuals, no new helpers, no signals, absent owned cgroup, complete baseline/final
+census without errors. This is outer isolation cleanup, **not** successful
+production detach: the runtime correctly reported quarantine and unverified
+release. Both same Inkscape PID/start identities remained alive before outer
+container teardown. Native7 live checks passed2/2; native8 passed1/1.
+
+Diagnostic harness focused Ruff and diff-check passed. Evidence-verifier suite
+remains **10 passed**,0.44s, supervised exit0/cleanup true:
+`/home/odin/tmp/r8-composed-unit5.log` and `r8-composed-unit5-owned.json`.
+No SVG or post-save screenshot is claimed for these failed attempts.
+
 Each of these is an **exit1 application failure**, not a successful task. Native1
 identified a true integration mismatch: probe case-insensitive `libGL` regexp
 also selected lowercase libglib while real runtime used case-sensitive basename
