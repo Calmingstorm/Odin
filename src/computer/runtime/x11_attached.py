@@ -923,6 +923,11 @@ class X11AttachedBackend:
                             if frame.crop else None)
                     after = await self._read_worker("capture", selected=monitor, crop=crop,
                                                   verify_scope=self._scope)
+                    # Preserve every sampled target transition for finite plans.
+                    # Same-app effect verification may accept a dialog opening,
+                    # but a later sample returning to the original target must
+                    # not erase the interruption observed here.
+                    receipt["sampled_target_changed"] = after.get("input_scope") != self._scope
                     if after.get("crop") != (list(frame.crop) if frame.crop else None):
                         raise AttachedFailure("postcondition_crop_mismatch")
                     data = base64.b64decode(after["image"], validate=True)

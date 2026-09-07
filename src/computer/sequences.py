@@ -125,7 +125,12 @@ async def execute_sequence(controller, context, inp):
             raise ComputerError("stale_observation")
         _preflight_backend(grant, steps)
         for step in steps:
-            action_payload(step, original)
+            try:
+                action_payload(step, original)
+            except ComputerError:
+                if original.modal is not None:
+                    await controller._pause(grant.session_id)
+                raise
         if not callable(getattr(live.backend, "act", None)):
             raise ComputerError("grounded_actions_unavailable")
         reserved = [(s["action_id"], canonical_hash({"sequence": inp["action_id"], "step": s}))
@@ -195,6 +200,8 @@ async def execute_sequence(controller, context, inp):
                 result.setdefault("verification", {}).update(evidence_id=latest.evidence_id)
                 result["observation_id"] = latest.observation_id
                 controller.store.finish_action(grant.session_id, step["action_id"], result)
+                if isinstance(raw, dict) and raw.get("sampled_target_changed") is True:
+                    raise ComputerError("sequence_sampled_target_changed")
                 if latest.geometry != original.geometry:
                     raise ComputerError("sequence_target_changed")
                 if result["status"] != "verified":
@@ -250,6 +257,12 @@ async def execute_sequence(controller, context, inp):
         if cancelled:
             raise asyncio.CancelledError
         receipt = controller.store.receipt(grant.session_id, inp["action_id"], payload_hash)
+        if (reason is not None and latest is not None and latest.modal is not None
+                and latest.modal != original.modal and not stop_required):
+            # Preserve ordinary-action unexpected-modal policy. Pausing revokes
+            # the old generation, so do not publish its frame as actionable.
+            await controller._pause(grant.session_id)
+            return receipt
         if latest is not None and latest_image is not None and not stop_required:
             # A known interruption yields its new view to the MODEL, not another
             # step. Only actual final/interruption delivery grants later authority.
