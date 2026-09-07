@@ -5,6 +5,48 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 Authority: Aaron's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
+## Revision R2 — overlap accepted, damage forbidden (2026-09-07)
+
+Authority: Claudia relayed Aaron's revised instruction: packages may be installed
+using judgement; prefer contained/rootless dependencies and record every host
+installation for reversal. Aaron accepts occasional overlap between his and
+Odin's input. This supersedes R1's absolute pointer/keyboard separation gate and
+per-package approval requirement, not its authority, consent or lifecycle rails.
+
+Shared widget focus is a supported, explicitly reported limitation rather than
+an automatic backend disqualification. Unknown separation must be reported as
+unknown, never independent. Input still requires a verified source mapping,
+bounded operations, task consent, observable focus evidence (including unknown),
+and honest receipts. Detected focus changes invalidate keyboard grounding; never
+claim atomic exclusive widget focus or blindly retry an uncertain text action.
+Neither a painted cursor nor moving/restoring the human pointer proves separation.
+
+Overlap does NOT authorize damage. Application-preserving detach and bounded
+owned-input release after client loss remain mandatory independent gates. Never
+release the human's held keys/buttons. A failed cleanup must report failure and
+deny further input, not silently delete a device while an application uses it.
+X11 is a candidate again; evaluate release-before-remove plus an independently
+supervised, explicitly owned device lifecycle. A safely disabled retained owned
+device may be investigated instead of unsafe removal, but must not be hidden as
+complete removal. Wayland remains a first-class candidate and needs its own
+measured release/disconnect/application-survival evidence. No runtime activation
+or real-session access follows from accepting overlap.
+
+R1 cleanup correction: empty container inventories and inactive fixture units
+did not establish host-process cleanup. Initial R2 inspection found one live
+Podman pause helper and three already-defunct conmon children adopted by the live
+Odin process. Cleanup must distinguish workload containers, helper processes,
+zombies, resources and retained evidence. Scope actions to exact recorded owned
+identities, never broad kill/prune or restart the live service to hide leftovers.
+Document residuals honestly when the parent cannot safely reap them. Future
+fixtures need an owned reaping supervisor and host-level postconditions.
+
+Sequence: record this amendment; correct admission/capability tests; repair
+fixture cleanup; evaluate X11 and Wayland lifecycle in disposable sessions before
+building grounded actions on either. No destructive demonstration, live install
+edit, live session automation, deploy, restart, merge, tag or pipeline. Existing
+R1 findings below remain historical evidence, not current eligibility rules.
+
 ## Revision R1 — assisted-session and platform correction (2026-09-06)
 
 Authority: accepted reassessment (`09-odin-replan.md`) and Claudia's subsequent
