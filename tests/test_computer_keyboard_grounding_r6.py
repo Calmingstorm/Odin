@@ -117,7 +117,7 @@ async def test_changed_pixels_keyboard_only_and_no_replay(tmp_path, monkeypatch,
     async with fixture(tmp_path, monkeypatch, environment=environment) as rig:
         c, ctx, action, _, calls = rig
         action.update(operation=operation, **fields)
-        if environment == "existing_session" and operation in {"type", "key"}:
+        if environment == "existing_session" and operation in {"type", "key", "click"}:
             result = await c.act(ctx, action)
             assert result["status"] == "verified"
             assert result["verification"]["scope"] == "raster_change_only"

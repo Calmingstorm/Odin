@@ -93,7 +93,7 @@ cleanup_ok=true, no residuals; private display socket removed.
 
 Earlier failed runs remain in `R13-COMPOSED-QUALIFICATION.md`. The native
 master-removal attempt and sudo `-C` failure are not rewritten as passing tests.
-Actual post-fix input on Aaron's workstation is **not** qualified by this isolated
+Actual post-fix input on the operator's workstation is **not** qualified by this isolated
 result; he controls that next supervised test after an authorized deployment.
 
 ## Validation
@@ -115,4 +115,4 @@ in-process lifecycle coverage; those failures are retained, not counted as green
 Read-only live baseline and final checks show service PID8385 still active with
 zero restarts. No test input was sent to `:0`, no live config or installation was
 changed, and no pipeline, merge or deploy was performed. This report is evidence
-for branch review, not a claim that the fixes are already active on Aaron's desktop.
+for branch review, not a claim that the fixes are already active on the operator's desktop.

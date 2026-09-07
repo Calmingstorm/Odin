@@ -670,17 +670,48 @@ class X11AttachedBackend:
                  "width": value["width"], "height": value["height"]}
                 for identity, value in self._sources.items()]
 
+    async def follow_focus(self):
+        """Choose the granted monitor containing current focus, not startup focus.
+
+        This read-only selection is for an explicit observation request only.
+        Action revalidation and post-action capture must stay on their bound
+        source. If a window spans monitors, keep the current source when eligible.
+        """
+        async with self._lock:
+            if self._closed or self._paused or not self._started:
+                raise AttachedFailure("capture_not_active")
+            if not self._input_enabled:
+                return
+            reply = await self._read_worker("scope_readiness")
+            rows = reply.get("scope_readiness")
+            names = {monitor["name"] for monitor in self._sources.values()}
+            if (type(rows) is not list or len(rows) != len(names)
+                    or any(type(row) is not dict or type(row.get("eligible")) is not bool
+                           or type(row.get("name")) is not str for row in rows)
+                    or {row["name"] for row in rows} != names):
+                raise AttachedFailure("scope_readiness_unavailable")
+            eligible = {row["name"] for row in rows if row["eligible"]}
+            if self._sources[self._selected]["name"] in eligible:
+                return
+            selected = next((identity for identity, monitor in self._sources.items()
+                             if monitor["name"] in eligible), self._selected)
+            if selected != self._selected:
+                self._select_source(selected)
+
+    def _select_source(self, source_id):
+        self._selected = source_id
+        self._frame = None
+        self.input_supported = False
+        self.input_readiness = "observation_required"
+        self.input_blocker = "fresh_observation_required"
+
     async def select_source(self, source_id):
         async with self._lock:
             if self._closed or self._paused or not self._started:
                 raise AttachedFailure("capture_not_active")
             if source_id not in self._sources:
                 raise AttachedFailure("capture_source_not_granted")
-            self._selected = source_id
-            self._frame = None
-            self.input_supported = False
-            self.input_readiness = "observation_required"
-            self.input_blocker = "fresh_observation_required"
+            self._select_source(source_id)
             return {"selected_source": source_id, "capture_only": not self._input_enabled}
 
     async def observe(self, crop=None):

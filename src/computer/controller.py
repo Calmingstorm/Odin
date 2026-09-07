@@ -567,6 +567,15 @@ class ComputerController:
                 await _bounded(select(source_id), FRAME_FRESH_SECONDS)
                 self._active(grant)
                 await self._auth(context)
+            else:
+                live = self._active(grant)
+                follow = getattr(live.backend, "follow_focus", None)
+                if callable(follow):
+                    self._delivered_observations.pop(grant.session_id, None)
+                    live.observations.clear()
+                    await _bounded(follow(), FRAME_FRESH_SECONDS)
+                    self._active(grant)
+                    await self._auth(context)
             obs, image = await self._capture(grant, crop=crop)
             await self._auth(context)
             self._active(grant)
@@ -574,6 +583,8 @@ class ComputerController:
                 raise ComputerError("stale_observation")
         live = self._active(grant)
         return {**obs.public(), "image_bytes": image, **self._input_status(live, grant),
+                "sources": (live.backend.sources()
+                            if callable(getattr(live.backend, "sources", None)) else []),
                 "backend_capabilities": (live.capabilities.public()
                                          if live.capabilities is not None else None)}
 
@@ -718,12 +729,22 @@ class ComputerController:
             # binding, not pixels that may change with a blinking caret. Geometry
             # (including source revision/native scope) was compared above. This
             # retains R2's shared-widget-focus limitation, not an exclusivity claim.
-            # Pointer targeting and every isolated action remain raster-exact.
+            # Attached pointer targets use a bounded neighbourhood, not unrelated
+            # clocks/carets elsewhere in the screenshot. Source/focus still match
+            # exactly above; native pointer-hit checks remain before injection.
             attached_keyboard = (grant.platform == "x11"
                                  and grant.environment == "existing_session"
                                  and inp["operation"] in {"type", "key"})
             if not attached_keyboard and current.image_sha256 != original.image_sha256:
-                raise ComputerError("visual_target_changed")
+                from .grounding import POINTER_OPERATIONS, pointer_target_stable
+                stable = False
+                if (grant.environment == "existing_session"
+                        and inp["operation"] in POINTER_OPERATIONS):
+                    before, _ = self.store.read_evidence(context, original.evidence_id)
+                    after, _ = self.store.read_evidence(context, current.evidence_id)
+                    stable = pointer_target_stable(before, after, inp["x"], inp["y"])
+                if not stable:
+                    raise ComputerError("visual_target_changed")
             payload, target = action_payload(inp, current)
             await self._auth(context)
             self._active(grant)
