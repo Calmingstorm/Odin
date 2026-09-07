@@ -5,7 +5,11 @@ failures. The subsequent explicit Wayland requirement is implemented and measure
 in R8. Read WAYLAND-OPERATOR-R8.md and REVIEW-CHECKPOINT-R8.md for current status.
 The blanket refusal below is historical; previous coverage failures remain recorded.
 
-**Scope frozen. Remains draft for Claudia's review and Aaron's local deployment
+> This is the earlier consolidation checkpoint, not R11 release readiness.
+> Historical app restrictions and suite/coverage results below apply to that
+> checkpoint only. See OPERATOR.md for the pending R11 implementation contract.
+
+**Historical scope frozen. Remains draft for review and operator-owned local deployment
 decision. No deployment, restart, merge, tag or GitHub/release pipeline.**
 
 This pass changes documentation only. All runtime code, tests, scripts, dependencies
@@ -19,7 +23,7 @@ Read all of LOCAL-DEPLOY-TESTING.md and cross-checked configuration, tools, runt
 operator UI, ownership, vision admission and export behavior. Independent read-only
 review `606bd7c1` identified the same key first-use gaps. The handoff now explains:
 
-- Existing-session target B is for Aaron's actual screen; target A is isolated.
+- Existing-session target B is for the user's actual screen; target A is isolated.
   No feasibility driver belongs in ordinary deployment/setup.
 - All runtime assets and matching `ui/dist` must be in the deployed artifact.
   The sandbox runtime path is a transient mount alias, not a host install task.
@@ -30,7 +34,7 @@ review `606bd7c1` identified the same key first-use gaps. The handoff now explai
 - The inspector selects its authenticated owner's latest local session. A different
   administrator/Discord identity does not automatically inspect that same task.
 - Measured monitor names, existing explicit X-server access versus Xauthority,
-  and the fact that the example display/connector are not Aaron's configuration.
+  and the fact that the example display/connector are not a deployment configuration.
 - Isolated GUI save must target `/workspace/exports/<basename>`. Export is prepared
   before the task ends. The inspector does not rediscover a chat-prepared artifact;
   that path requires its receipt and authenticated download route. Attached export
@@ -125,7 +129,7 @@ remained **424** across this consolidation; they were neither reaped nor cleared
 by restart. The source repair is not deployed. No immediate desktop cleanup or
 live-service intervention was indicated by these checks.
 
-Aaron's longstanding Cinnamon wake/topology incident is an environment limitation,
+The test machine's longstanding Cinnamon wake/topology incident is an environment limitation,
 not a demonstrated Odin defect. Production owned cleanup passed during it; exact
 scratch baseline restoration did not and required manual recovery. No Cinnamon
 workaround was added. The handoff states the manual display/window checks and the
@@ -134,4 +138,4 @@ hard limit on reconstructing replaced resource identities.
 **Disposition:** handoff and PR consolidated, no new capability work. Scoped local
 operator testing is distinct from merge/release readiness. Coverage validation is
 not green and must be resolved before claiming all gates pass. Stand down with the
-PR still draft; Claudia reviews and Aaron controls deployment/release decisions.
+PR still draft; the reviewer reviews and the operator controls deployment/release decisions.

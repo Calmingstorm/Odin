@@ -12,10 +12,11 @@
 
 This describes the current packaging contract. R9 exercised actual APT/dpkg/pip
 fresh installs and upgrades in disposable Debian 13 containers, with service
-operations recorded rather than executed. See [PACKAGING-R9.md](PACKAGING-R9.md).
+operations recorded rather than executed. The repository's PACKAGING-R9.md retains that evidence.
 Historical desktop qualification is separate from testing the `.deb`.
-See [LOCAL-DEPLOY-TESTING.md](LOCAL-DEPLOY-TESTING.md) for acceptance
-and [WAYLAND-OPERATOR-R8.md](WAYLAND-OPERATOR-R8.md) for exact qualified stacks.
+See [OPERATOR.md](OPERATOR.md) for setup and safe first use, and
+[RECOVERY.md](RECOVERY.md) for stop, privacy and recovery. Engineering records
+remain in the source repository, not in the installed operator documentation.
 
 ## One package, optional desktop dependencies
 
@@ -90,9 +91,10 @@ and runtime qualification still apply. This is not a zero-click desktop setup.
 
 ## Distribution and profile boundaries
 
-**Debian 13 is the official qualified Wayland stack path**, with the exact GNOME,
-Mutter and portal builds listed in the R8 handoff. That historical qualification
-is separate from the R9 package install/upgrade checks.
+**Historical R8 Wayland qualification used Debian 13, GNOME Shell/Mutter 48.7.**
+That result covers recorded fixtures, not every desktop, application or action.
+It is separate from R9 package checks and the R11 general attached-application
+implementation contract. Check runtime capability and release validation evidence.
 The guardian requires **libei >= 1.3.901**, reflected in the APT recommendation.
 Stock Ubuntu 24.04's older libei does not satisfy that requirement; Mint/Ubuntu
 availability varies with the base release and repositories. Missing or too-old
@@ -103,13 +105,14 @@ Existing-session X11 remains a separate option on a suitably provisioned stack.
 Xed is unavailable in some distribution repositories. Isolated Enable preflight
 checks common executables, and task start checks the selected Drawing or Xed
 profile. Missing Xed does **not** block Drawing. Availability of a recommended app
-does not qualify every workflow or make attached Drawing an input target.
+does not qualify every workflow. Fixed launch profiles belong to the isolated
+tier, not to the general attached-application product contract.
 
 ## Source deployments and release builds
 
 A source checkout or wheel install does not run `.deb` maintainer hooks. Manually
 provision the service environment, state root, OS dependencies and matching trusted
-helper/extension assets using the local and Wayland handoffs. The wheel explicitly
+helper/extension assets using [OPERATOR.md](OPERATOR.md). The wheel explicitly
 includes `src.computer.runtime` assets and `assets/services/*`; this is not a claim
 that pip installs `/usr/libexec` or activates GNOME extensions.
 

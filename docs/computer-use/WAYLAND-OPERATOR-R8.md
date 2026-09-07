@@ -1,6 +1,6 @@
 # Production Wayland operator handoff (R8)
 
-This supplements LOCAL-DEPLOY-TESTING.md. Aaron owns deployment, configuration and
+This historical handoff supplements LOCAL-DEPLOY-TESTING.md. The operator owns deployment, configuration and
 any service/session restart. The build did none of those. No automated probe or
 input was sent to his desktop for R8; all graphical evidence is from disposable
 sessions.

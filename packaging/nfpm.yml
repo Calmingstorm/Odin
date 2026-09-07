@@ -108,9 +108,13 @@ contents:
     dst: /usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/extension.js
   - src: ./assets/wayland-scope/metadata.json
     dst: /usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/metadata.json
-  - src: ./docs/computer-use
-    dst: /usr/share/doc/odin/computer-use
-    type: tree
+  # Ship operator guidance only; engineering records stay in the repository.
+  - src: ./docs/computer-use/PACKAGING.md
+    dst: /usr/share/doc/odin/computer-use/PACKAGING.md
+  - src: ./docs/computer-use/OPERATOR.md
+    dst: /usr/share/doc/odin/computer-use/OPERATOR.md
+  - src: ./docs/computer-use/RECOVERY.md
+    dst: /usr/share/doc/odin/computer-use/RECOVERY.md
 
   - dst: /etc/odin/
     type: dir

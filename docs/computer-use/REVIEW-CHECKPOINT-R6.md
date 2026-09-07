@@ -88,5 +88,5 @@ stale source/modal changes, no input on denial and no replay.
 Read LOCAL-DEPLOY-TESTING.md and its R6 links. Qualified work is bounded native
 drawing/document editing, not arbitrary apps. Calc/Draw have no task qualification,
 Wayland remains refused, text is short ASCII, and initial deploy tests should use
-an awake stable desktop with Aaron present. This is not an all-app/all-platform
+an awake stable desktop with the user present. This is not an all-app/all-platform
 or unattended sleep/topology recovery completion claim.

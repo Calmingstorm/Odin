@@ -2,8 +2,8 @@
 
 ## Subsequent operator correction (R7)
 
-Aaron confirmed that the monitor wake/layout incident is a longstanding Cinnamon
-issue on his machine, unrelated to Odin. Claudia reports Muffin runtime checks at
+The operator confirmed that the monitor wake/layout incident is a longstanding Cinnamon
+issue on the test machine, unrelated to Odin. The reviewer reports Muffin runtime checks at
 03:09 and that Cinnamon never restarted. The causal uncertainty statements below
 record what was known during R6, not a current attribution to this capability.
 R7 adds generic, exact-baseline scratch cleanup, not defensive Cinnamon code or
@@ -82,7 +82,7 @@ The actual main session completed an Inkscape drawing/save task, not only Xed
 typing. Neither main CLI run was an all-stages unattended pass. The second exposed
 an operational sleep/topology limitation, so do not rerun unattended scratch tests
 or claim automatic leave-as-found recovery for arbitrary display transitions.
-For operator deploy testing, use an awake stable topology with Aaron present,
+For operator deploy testing, use an awake stable topology with the user present,
 start with a new scratch document, stop on a changed-source refusal and inspect
 the desktop. Existing work must never be used as test material. No further main
 input was performed after baseline recovery.

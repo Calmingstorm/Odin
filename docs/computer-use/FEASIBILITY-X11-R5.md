@@ -186,7 +186,7 @@ socket or host home/deploy tree. It is NOT a main-session script.
 
 2026-09-07. This increment did not access the real session, create/remove XI
 devices, install packages, deploy, restart Odin, commit, push, or touch master.
-It is NOT Aaron's requested assisted-input acceptance. I could not complete a
+It is NOT the requested assisted-input acceptance. I could not complete a
 safe usable input backend cleanly within this increment. Input remains denied.
 
 ## Implemented artifact

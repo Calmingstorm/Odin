@@ -1,6 +1,6 @@
 # R6 development dependency changes (2026-09-07)
 
-Under Aaron's existing permission to install needed packages, installed Inkscape
+Under the operator's existing permission to install needed packages, installed Inkscape
 from the configured Ubuntu repositories for native GUI qualification. The dry run
 and actual installation both reported seven new packages, zero upgrades and zero
 removals. Recommended packages were excluded. No autoremove was run.

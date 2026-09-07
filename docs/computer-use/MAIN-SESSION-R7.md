@@ -26,7 +26,7 @@ Main evidence: `/tmp/cu-r6-sh7s3l7g/`, output `/tmp/r7-main-scratch.log`.
 - Standalone supervisor reports primary1, cleanup true, no owned residuals.
   **Process cleanup is not desktop restoration.**
 
-Aaron already identified this wake issue as longstanding Cinnamon behavior,
+The operator already identified this wake issue as longstanding Cinnamon behavior,
 unrelated to Odin. No Cinnamon workaround, restart, automatic inventory relaxation
 or production display repair was added. A test fixture pass cannot erase this
 failed main-session result.
@@ -66,7 +66,7 @@ repairing Cinnamon or changing the user's layout. That part passed on the actual
 session. However, **unattended exact desktop restoration through this machine's
 hardware wake incident is not qualified and did not complete automatically**.
 
-If it recurs during Aaron's local test: Stop/Disable computer use, retain the
+If it recurs during the operator's local test: Stop/Disable computer use, retain the
 cleanup receipt, let the display settle, and choose the intended layout in the
 normal display controls. Do not replay the interrupted action. If an output,
 resource identity or desktop window was replaced, start a fresh authorized task

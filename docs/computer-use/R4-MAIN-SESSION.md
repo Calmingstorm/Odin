@@ -1,7 +1,7 @@
 # R4: real-session capture, not input acceptance
 
-2026-09-07 UTC. Aaron explicitly authorized harmless main-session testing for
-this overnight window through Claudia. Decision R4 was committed before changes.
+2026-09-07 UTC. The operator explicitly authorized harmless main-session testing for
+this overnight window through the reviewer. Decision R4 was committed before changes.
 No deployment, live-install edits, restart, pipeline or standing authorization.
 
 ## What actually ran
@@ -77,7 +77,7 @@ was created, removed or disabled on the real session. The minimum credible futur
 design is a separately supervised, generation-fenced owner with ordered injection
 and an independently recoverable exact keycode/device ledger. Persistent enabled
 devices would need an explicit, truthful lifecycle contract, not relabeling them
-inactive or silently leaving them in Aaron's session. That contract was NOT
+inactive or silently leaving them in the user's session. That contract was NOT
 activated by this increment. Safe capture testing is useful progress; calling it
 assisted input would be false.
 

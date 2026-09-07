@@ -234,6 +234,7 @@ The package installs:
 | Precompiled root-owned Wayland guardian | `/usr/libexec/odin-computer-wayland-input` |
 | Inert GNOME scope extension (not enabled) | `/usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/` |
 | Computer-use installation handoff | `/usr/share/doc/odin/computer-use/PACKAGING.md` |
+| Computer-use setup and recovery | `/usr/share/doc/odin/computer-use/OPERATOR.md`, `RECOVERY.md` |
 
 The package installs the application files and systemd unit. Its post-install script creates the `odin` service account, virtual environment, SSH key, data directories, configuration links, and local command workspace. A new installation is enabled but is not started until credentials are configured. Upgrades preserve configuration and data and restart the service only if it was already running.
 
@@ -247,14 +248,23 @@ Direct `dpkg -i` does not resolve dependencies, so APT is recommended.
 Compositor/portal packages are **Suggests**, never an implicit new desktop.
 
 Desktop target configuration, grants, Wayland UID/session bus, GNOME extension
-activation and portal consent remain explicit operator choices. Debian 13 is the
-qualified Wayland stack path. Stock Ubuntu 24.04's older libei does not meet the
+activation and portal consent remain explicit operator choices. Historical Wayland
+qualification used specific Debian 13 GNOME fixtures, not every desktop or app.
+Stock Ubuntu 24.04's older libei does not meet the
 guardian's `libei >= 1.3.901` requirement; this is a dependency limitation, not a
 compositor diagnosis. Missing Xed on a distribution does not block isolated
 Drawing: common dependencies are checked at Enable, the selected app at start.
 See [PACKAGING.md](docs/computer-use/PACKAGING.md) for source versus package setup
 and exact evidence limits. R9 exercised local package install/upgrade in disposable
 containers, not a release pipeline or zero-click desktop setup.
+
+For supervised use on your own screen, start with the
+[operator guide](docs/computer-use/OPERATOR.md) and
+[recovery guide](docs/computer-use/RECOVERY.md). The R11 general attached-app/action
+and compositor expansion is an implementation contract pending its own validation,
+not a new qualification claim. Only the three operator handoffs ship in the package;
+engineering history stays in the repository. Remote worker transport is assessment
+only and is not implemented.
 
 ### First-time setup
 

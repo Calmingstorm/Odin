@@ -104,5 +104,5 @@ desktop. Retained test images/evidence are listed in the qualification reports.
 
 Operator entrypoint: **WAYLAND-OPERATOR-R8.md**, plus LOCAL-DEPLOY-TESTING.md targetC.
 Evidence: WAYLAND-QUALIFICATION-R8.md, WAYLAND-PROBE-R8-EVIDENCE.md and
-WAYLAND-COMPOSED-R8.md. Aaron owns local deployment/testing; Claudia reviews before
+WAYLAND-COMPOSED-R8.md. The operator owns local deployment/testing; review occurs before
 the PR leaves draft.

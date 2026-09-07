@@ -6,7 +6,7 @@ This document changes no source after that immutable-source full-suite run.
 
 ## Main session
 
-Aaron's overnight grant was used for **two capture-only experiments**, four
+The operator's overnight grant was used for **two capture-only experiments**, four
 monitors each. The current topology includes a3440x1440 primary in addition to
 the earlier three-monitor fixture, with a7920x2520 root extent. Every monitor
 was captured separately, decoded and rendered within delivered pixel/byte caps.
@@ -75,7 +75,7 @@ watchdog-loss release safety. Main-session access is not a reason to ignore that
   still four monitors, source clean/immutable. Each runtime probe also validated
   its exact unit/cgroup and recorded supervisors. Parent's later probe ledger is
   not an exhaustive process-birth census. Historical service-owned zombies remain
-  intentionally untouched, as Aaron instructed; no zombie-free host claim.
+  intentionally untouched, as the operator instructed; no zombie-free host claim.
 
 Only dependency installation: python-xlib0.33 in the development venv, reversible
 as documented. No system/global/live-bot package installation, deploy, restart,

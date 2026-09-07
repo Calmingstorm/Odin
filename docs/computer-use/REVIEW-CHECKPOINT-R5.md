@@ -65,7 +65,7 @@ UI distribution is rebuilt and committed; final rebuild produces no diff.
 Live browser revocation, generation boundaries, no-replay, native image transport,
 evidence expiry and safe recovered quarantine are tested. See PRODUCTION-WIRING-R5.md.
 
-## Scope Aaron must see before local testing
+## Scope the operator must see before local testing
 
 Read LOCAL-DEPLOY-TESTING.md. This increment supports isolated Drawing/Xed and
 focused native Xed input on explicitly granted existing X11 monitors. Existing
@@ -104,7 +104,7 @@ release gates or erase corpus failures to change that conclusion.
 
 No experiment units or containers remain running. Unrelated existing containers
 untouched. Live Odin still PID3254906,NRestarts0, health200. Historic service-owned
-zombies left alone under Aaron's ruling; no reaping injection/restart. No host
+zombies left alone under the operator's ruling; no reaping injection/restart. No host
 compositor or package was installed in this R5 turn; contained Wayland builds and
 development dependency evidence remain in their reports, with exact reversal.
 Private evidence paths are not published screenshots or live configuration.

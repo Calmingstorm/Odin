@@ -73,7 +73,7 @@ cgroups were cleaned and host process ledgers reported no survivors.
 
 ## Limits
 
-This proves private root-worker/cross-UID lifecycle, not Aaron's unprivileged sudo
+This proves private root-worker/cross-UID lifecycle, not an operator's unprivileged sudo
 PAM policy, physical hardware overlap, real desktop acceptance, server-hang
 recovery or saved-document semantics. Blocked native supervisor or externally
 killed guardian cannot prove release; quarantine remains mandatory. Parent owns

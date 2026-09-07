@@ -82,7 +82,7 @@ No live-install change, service restart, merge, tag or release/CI pipeline.
 The implementation is usable for the named native tasks, with substantially better
 owned cleanup and truthful refusals. **The requested automatic restoration through
 this machine's hardware wake incident is not achieved.** Do not call this arbitrary
-application completion or unattended desktop recovery. Aaron's handoff contains
+application completion or unattended desktop recovery. The operator handoff contains
 exact manual steps for changed-resource and permanently unresponsive-server cases.
 
 Read LOCAL-DEPLOY-TESTING.md, RUNTIME-CLEANUP-R7.md,

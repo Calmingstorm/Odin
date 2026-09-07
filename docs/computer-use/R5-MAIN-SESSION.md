@@ -50,7 +50,7 @@ clients, independent cleanup failures and unchanged-client preservation. This
 final evidence supersedes the earlier pending-input conclusion below, without
 erasing its failed attempts or the earlier topology-restoration evidence gap.
 
-Aaron's explicit overnight scratch-only permission was used. No existing document
+The operator's explicit overnight scratch-only permission was used. No existing document
 was edited, saved or closed; no terminal or Odin WebUI input was sent. The product
 was not deployed and the live Odin process was not restarted or modified.
 

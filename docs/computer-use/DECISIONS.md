@@ -2,12 +2,16 @@
 
 Status: build decisions, 2026-09-06. Base: `d5fc7eb` (v3.95.0), fetched and
 fast-forwarded from master before branching. Branch: `feat/isolated-computer-use`.
-Authority: Aaron's build authorization recorded in the review document of
+> Historical decision record. Current setup and the R11 implementation contract
+> live in OPERATOR.md. Past app restrictions and named machine artifacts are not
+> current capability gates or consent for another user's session.
+
+Authority: the operator's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
 ## Revision R8: compositor-specific Wayland input admission (2026-09-07)
 
-Aaron requires production Wayland support in this branch. Replace the blanket
+The product requirement is production Wayland support in this branch. Replace the blanket
 platform refusal with an actual input adapter and compositor-specific admission.
 Qualify at least one unmodified distribution compositor, not only the previously
 patched laboratory build. Preserve the X11 implementation and all ordinary tools.
@@ -69,7 +73,7 @@ Physical unplug/replacement, changed resource identity, concurrent user input,
 unresponsive X server, and unknowable guardian death cannot safely be made into
 verified restoration by retries. Report exact unfinished stages and required
 operator actions, retain uncertainty, and never replay the GUI task. Reproduce
-faults only in owned private displays or harmless stub primitives, never Aaron's
+faults only in owned private displays or harmless stub primitives, never the user's
 desktop. Application offerings must match measured tasks: unqualified Calc/Draw
 and Writer lifecycle operations must either gain independent qualification or
 cease to be offered. No deploy, restart, merge, tag, pipeline or live-install edit.
@@ -158,7 +162,7 @@ claim that the bot verified old workload or device removal. Ordinary stop/status
 cannot silently perform this acknowledgment. No existing session is tested or
 cleaned during development; deterministic fixtures exercise recovery.
 
-Aaron's current instruction requires a working end-to-end GUI task and active,
+The operator's instruction requires a working end-to-end GUI task and active,
 configured-only production wiring, not another preparatory checkpoint. Continue
 on this branch; no deployment, live-install edits, restart, master merge, tag or
 pipeline. Local validation and reviewable skip-CI commits remain the delivery path.
@@ -200,7 +204,7 @@ not a harness-only schema or silently scrubbed model arguments.
 
 ## Revision R4 — bounded overnight main-session testing (2026-09-07)
 
-Authority: Claudia relayed Aaron's current explicit authorization to test his main
+Authority: the reviewer relayed the operator's explicit authorization to test the main
 session overnight, including waking monitors if necessary, with nothing destructive.
 This supersedes the historical blanket display-0 prohibition for this testing
 window only. It is not deployment authorization or standing unattended access.
@@ -254,7 +258,7 @@ graphics setting. Failed startup must remain failed, not a fake ready receipt.
 
 ## Revision R3 — ordinary-turn tools, no conversation restriction (2026-09-07)
 
-Aaron's binding ruling in `10-ruling-no-channel-lock.md` and the current task
+The operator's binding ruling in `10-ruling-no-channel-lock.md` and the current task
 supersede Q5's restricted-actor/conversation mechanism completely. Computer tools
 run in an ordinary foreground turn alongside every other authorized tool. A
 desktop session is only an internal capture/input/application lifetime; starting,
@@ -284,9 +288,9 @@ do not modify the running service or its parent to manufacture complete reaping.
 
 ## Revision R2 — overlap accepted, damage forbidden (2026-09-07)
 
-Authority: Claudia relayed Aaron's revised instruction: packages may be installed
+Authority: the reviewer relayed the operator's revised instruction: packages may be installed
 using judgement; prefer contained/rootless dependencies and record every host
-installation for reversal. Aaron accepts occasional overlap between his and
+installation for reversal. The operator accepts occasional overlap between user and
 Odin's input. This supersedes R1's absolute pointer/keyboard separation gate and
 per-package approval requirement, not its authority, consent or lifecycle rails.
 
@@ -326,12 +330,12 @@ R1 findings below remain historical evidence, not current eligibility rules.
 
 ## Revision R1 — assisted-session and platform correction (2026-09-06)
 
-Authority: accepted reassessment (`09-odin-replan.md`) and Claudia's subsequent
-instruction on Aaron's behalf. The earlier Q1 X11-only staging and the earlier
+Authority: accepted reassessment (`09-odin-replan.md`) and the reviewer's subsequent
+instruction on the operator's behalf. The earlier Q1 X11-only staging and the earlier
 source-pixel interpretation of Q3 are superseded below, before dependent code.
 Existing commits remain; this is a requirement correction, not a silent rewrite
 of their history. Stages 7/8, deployment, release, and live desktop access remain
-unauthorized. No application or session on Aaron's desktop is a test target.
+unauthorized. No application or session on the user's desktop is a test target.
 
 The destination is on-demand assisted work in an operator's existing session,
 with the operator present. Isolation is the first safety/development tier of
@@ -365,7 +369,7 @@ revocation and device replacement invalidate bindings. Never retarget a stale
 frame to another source, even if its dimensions match.
 
 Multiple monitors with differing origins and scales are a day-one destination
-requirement. Claudia's read-only report of Aaron's layout is a synthetic test
+requirement. The reviewer's read-only report of the operator's layout is a synthetic test
 fixture, NOT permission to inspect or automate it: 1920x1080 at +2701+1440,
 2560x1440 at +5360+0, and 1920x1080 at +0+213 (7920-wide bounding span).
 Backend-private placement can describe this arrangement, but the span is not an
@@ -391,7 +395,7 @@ Wayland consent/capture/input path: RemoteDesktop + ScreenCast portals, PipeWire
 ConnectToEIS/libei, capability-negotiated. Missing components or compositor
 features produce precise unsupported/degraded results, never a pass. Prefer a
 private dependency prefix/container using existing facilities; any system-wide
-installation requires Aaron. Unsupported feasibility findings are reviewable
+installation requires the operator's authorization. Unsupported feasibility findings are reviewable
 results, not Stage 6 completion. Do not build atop an unverified input guarantee.
 
 R1 review clarification: the synchronous private capture adapter does not supply
@@ -419,7 +423,7 @@ Namespace isolation shares the host kernel; it is not a hostile-content VM.
 ## Q2 — Applications and showcase
 
 Use the installed Drawing application (GTK) and Xed editor for the initial
-profiles. Pinta is not installed; installing it system-wide needs Aaron, and is
+profiles. Pinta is not installed; installing it system-wide needs operator authorization, and is
 not necessary to prove this capability. App profiles are fixed executable/argv
 allowlists, not shell strings. The showcase is a GUI-created annotated drawing,
 saved/reopened PNG and companion editor note, plus harmless layout and modal
@@ -459,7 +463,7 @@ No held input across calls. Controller-loss lease is two seconds; target normal
 stop/release latency is 250 ms, isolated termination/quarantine within 3 seconds.
 These are acceptance targets until measured, not claims of observed performance.
 Resource enforcement is mandatory, not a model instruction. No system-wide
-package installation is authorized; use existing dependencies or ask Aaron.
+package installation is authorized; use existing dependencies or ask the operator.
 
 ## Q5 — Execution surfaces and the confirmed image defect (restriction superseded by R3)
 
@@ -497,7 +501,7 @@ fresh evidence; it never confers new authority. A future online tier needs its
 own grant/effect/approval design and is outside this branch. Existing-session
 attachment is the same product's destination, not a weakening of this tier;
 its architecture and disposable-session feasibility are in scope now, but
-authorization to operate Aaron's real session is not.
+authorization to operate the user's real session is not.
 
 ## Q7 — Acceptance and honesty
 

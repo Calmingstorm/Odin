@@ -1,6 +1,11 @@
 # Local deploy and operator testing (PR350)
 
-This is a manual handoff, not a deployment record. Aaron deploys the reviewed
+> Historical engineering handoff, not current operator instructions. Use
+> [OPERATOR.md](OPERATOR.md) for R11's implementation contract and setup.
+> App-specific refusals below describe the earlier revision only. Authorization
+> and machine measurements in this record do not apply to another user's desktop.
+
+This is a manual handoff, not a deployment record. The operator deploys the reviewed
 revision and authorizes any service restart externally. Nothing in this runbook
 automatically deploys, edits live configuration, enables input, or runs a pipeline.
 The development driver has passed a scratch Xed save on the actual main session
@@ -8,8 +13,8 @@ with exact before/after restoration; see R5-MAIN-SESSION.md. This does not estab
 that the externally deployed service works. Deployment QA remains operator-owned.
 R6 additionally completed main-session Inkscape drawing/save, but both scratch
 CLI runs reported restoration failures; parent restored the complete baseline.
-Those historical failures remain recorded in MAIN-SESSION-R6.md. Aaron confirmed
-the wake/topology incident is his longstanding Cinnamon issue, not an Odin defect.
+Those historical failures remain recorded in MAIN-SESSION-R6.md. The operator confirmed
+the wake/topology incident was a longstanding Cinnamon issue on that test machine.
 R7 separates production owned-resource cleanup from the opt-in scratch harness's
 stricter exact-baseline restoration. See the R7 evidence before repeating a test.
 Final consolidation and the fresh validation limitations are recorded in
@@ -176,11 +181,11 @@ means `/dev/null`, not automatic ambient-cookie discovery.
 
 An existing explicit X-server access grant can work with `xauthority: ""`; verify
 read-only access as the actual service UID instead of creating or copying a cookie
-unnecessarily. Do not use `xhost +`. On Aaron's machine the final read-only census
+unnecessarily. Do not use `xhost +`. On the historical test machine the read-only census
 on 2026-09-07 measured `:0` with primary `DP-4` (3440x1440), `HDMI-0`
 (1920x1080), `DP-0` (2560x1440), and `DP-2` (1920x1080). Those are historical
 measurements, not a new grant or a substitute for checking the current topology.
-The `:1` and `DP-1` values below are placeholders, **not Aaron's configuration**.
+The `:1` and `DP-1` values below are placeholders, **not a deployment configuration**.
 
 ```yaml
 computer:
@@ -242,7 +247,7 @@ libraries, missing namespaces/dependencies or unverified scope remain refused.
 
 ## 3. Manual deploy QA
 
-1. Aaron performs the approved deployment/restart through the external process.
+1. The operator performs the approved deployment/restart through the external process.
    Independently check service health and running-version evidence. Keep computer
    disabled initially; confirm ordinary chat and usual tools still work.
 2. Sign into the WebUI as an authorized administrator and open **System > Computer**.
@@ -328,7 +333,7 @@ an automatic Cinnamon repair and is not being claimed fully unattended.
 See [MAIN-SESSION-R7.md](MAIN-SESSION-R7.md) and
 [RECOVERY-QUALIFICATION-R7.md](RECOVERY-QUALIFICATION-R7.md).
 
-| Situation | Aaron's required action |
+| Situation | Operator's required action |
 | --- | --- |
 | Normal completed/failed task with `cleanup.complete=true` | No resource cleanup needed. Keep intended document edits; handle document close/reopen yourself when that workflow is not offered. |
 | Monitor sleep, capture loss or changed layout but clean owned cleanup | Do not replay. Wake normally if needed, inspect the intended layout and start a freshly authorized task after it settles. |
@@ -356,7 +361,7 @@ See [MAIN-SESSION-R7.md](MAIN-SESSION-R7.md) and
 - Roll back by **Disable computer use first**, then verify runtime revocation and
   cleanup, not just the saved boolean. Persistence failure must not restore input;
   configured/runtime divergence or cleanup failure requires investigation before
-  reenable. Only Aaron's external process may restore release/config and restart.
+  reenable. Only the authorized deployment process may restore release/config and restart.
   Never restart the graphical session, broadly kill processes, or delete receipts
   to manufacture a clean result. This runbook contains no destructive cleanup.
 

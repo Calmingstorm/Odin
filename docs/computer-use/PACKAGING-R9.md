@@ -110,11 +110,12 @@ No GUI/browser code changed; R8 qualification is not misrepresented as new GUI Q
 The smoke uses stubbed systemctl, so it proves **installation and hook intent**,
 not the externally deployed service's operational health or user-specific desktop
 permissions. No deploy, real service restart, merge, tag or pipeline occurred.
-No observation/input/settings operation targeted Aaron's desktop.
+No observation/input/settings operation targeted the operator's desktop.
 
 All test containers and supervised workloads were cleaned up. Live service remained
 PID3254906,NRestarts0,active. Census is consistently system-wide vs UID-specific:
-initial437total/350odin/70root/17calmingstorm; final440total/353odin/70root/17calmingstorm.
+initial437total/350service/70root/17desktop-user; final440total/353service/70root/17desktop-user.
+Account labels are genericized; the recorded counts are unchanged.
 The three new dead odin-owned children are one `gh` and two `dpkg-deb`, parented to
 the unchanged live service. The dpkg pair followed an unsupervised listing cut
 short by a pipe. They are reported, not cleared by restart/injection or attributed
