@@ -458,10 +458,6 @@ class ComputerLifecycle:
             result["session_generation"] = value.get("generation")
             result["generation"] = self.generation
             result["available"] = self.enabled
-            if value.get("state") == "quarantined":
-                result["backend"] = {**result["backend"], "input_supported": False,
-                                     "readiness": "inactive",
-                                     "input_blocker": "session_not_active"}
             capabilities = value.get("backend_capabilities")
             if isinstance(capabilities, dict):
                 input_supported = value.get("input_supported")
@@ -480,6 +476,10 @@ class ComputerLifecycle:
                     "readiness": value.get("input_readiness", "session_capabilities"),
                     "input_blocker": value.get("input_blocker"),
                 }
+            if value.get("state") == "quarantined":
+                result["backend"] = {**result["backend"], "input_supported": False,
+                                     "readiness": "inactive",
+                                     "input_blocker": "session_not_active"}
             return result
         if method == "observe" and "image_bytes" in value:
             _, metadata = await service.controller.read_evidence(

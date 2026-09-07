@@ -31,10 +31,35 @@ detach. Quarantine is a failure report, not proof that human input is restored.
 | Blocked X server or uncatchable guardian death | No proven universal non-disruptive recovery exists. Protect unsaved work; seek separately authorized maintenance. |
 | Permission/scope/portal/probe refusal | Fix the stated prerequisite under explicit authorization. Never bypass with shell input or relaxed desktop security. |
 
-Modern identity-bearing unknown cleanup has no override. Legacy records without
-runtime identity may have an authenticated acknowledgment path; acknowledgment
-archives uncertainty as `operator_acknowledged_unverified`, never verified release
-or replay permission. Process absence alone does not prove release after a crash.
+For persisted quarantine, **System > Computer** remains available even when input
+is disabled. Use the displayed **session generation**, not the subsystem's
+configuration generation. `POST /api/computer/recover` accepts `session_id` and
+integer `generation`, and performs owner-scoped automatic absence verification.
+It does not infer input release from process absence. `acknowledge_legacy` accepts
+the same fields plus the exact acknowledgment below, but only for records with
+no runtime identity; it cannot reconcile a modern descriptor.
+
+An authenticated administrator authorized for the target host can explicitly
+reconcile a stranded **existing-session** record using **Reconcile inspected
+desktop** or `POST /api/computer/reconcile`. First independently confirm no held
+keys/buttons, no stranded owned masters, physical devices on their normal core
+masters, and no remaining computer workers/guardians. Protect unsaved documents.
+The request fields are `session_id`, integer `generation`, and `acknowledgment`
+equal to `ACKNOWLEDGE UNVERIFIED CLEANUP <session_id>` with the actual ID substituted.
+
+This path refuses active/paused sessions, live controller adapters, isolated
+workloads, missing runtime identity, stale generations, surviving recorded
+processes/groups, and unavailable inspection. It can reconcile a foreign owner's
+stranded singleton without granting access to that owner's captures or documents.
+Historical pending launches may have unrecorded children and old descriptors do
+not identify the display: the operator's independent inspection is essential.
+No automatic restart/boot-sweep override is inferred from process disappearance.
+
+Reconciliation closes the admission blocker with a durable
+`operator_acknowledged_unverified` record and **complete=false**. Original failed
+cleanup, unknown actions and runtime identity remain intact. This is an explicit
+operator attestation, not manufactured verified release or replay permission.
+Request a new session and a fresh delivered observation before any further input.
 
 Evidence TTL is 24 hours, distinct from short-lived action grounding. Clean
 disable/shutdown purges evidence bytes but retains receipts/session records.
