@@ -9,10 +9,11 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import ApiTokenIdentity, Config
 from src.health.server import SessionManager, _make_auth_middleware
+from src.permissions.host_access import HostAccessManager
 from src.permissions.token_manager import ApiTokenManager
 from src.web.api.computer import register_computer
 from src.web.api.security import register_auth
-from src.web.computer_binding import operator_context_authorized
+from src.web.computer_binding import operator_binding, operator_context_authorized, operator_scope
 from tests.test_computer_api import Controller
 
 
@@ -307,3 +308,112 @@ async def test_static_legacy_login_and_rotation(tmp_path):
         assert (await h.client.get("/api/computer", headers=headers)).status == 200
         h.bot.config.web.api_token = "rotated-fixture"
         assert (await h.client.get("/api/computer", headers=headers)).status == 404
+
+
+@pytest.mark.parametrize("source", ["dynamic", "static"])
+async def test_credential_hosts_override_default_for_every_operator_route(tmp_path, source):
+    manager = HostAccessManager(str(tmp_path / "host-policy.json"),
+                                available_hosts=["localhost", "playground"])
+    await manager.set_default_policy(["playground"], "playground")
+    before = (tmp_path / "host-policy.json").read_bytes()
+    async with harness(tmp_path, source=source,
+                       scope={"allowed_hosts": ["localhost"]}) as h:
+        h.bot.host_access_manager = manager
+        for method, path, body in ROUTES:
+            response = await h.client.request(method, path, json=body, headers=h.headers)
+            assert response.status == 200, (path, await response.text())
+        assert not manager.has_user_entry("alice")
+        assert not manager.is_host_allowed("alice", "localhost")
+        assert (tmp_path / "host-policy.json").read_bytes() == before
+
+
+@pytest.mark.parametrize("hosts,entry,available,allowed", [
+    (["localhost"], "absent", ["localhost", "playground"], True),
+    (["localhost"], [], ["localhost", "playground"], False),
+    (["localhost"], ["playground"], ["localhost", "playground"], False),
+    (["localhost"], ["localhost"], ["localhost", "playground"], True),
+    (["localhost"], None, ["localhost", "playground"], True),
+    ([], "absent", ["localhost", "playground"], False),
+    (["playground"], ["localhost"], ["localhost", "playground"], False),
+    (None, "absent", ["localhost", "playground"], False),
+    (None, ["localhost"], ["localhost", "playground"], True),
+    (["localhost"], "absent", ["playground"], False),
+])
+async def test_operator_effective_host_policy(tmp_path, hosts, entry, available, allowed):
+    manager = HostAccessManager(str(tmp_path / "host-policy.json"), available_hosts=available)
+    await manager.set_default_policy(["playground"], "playground")
+    if entry != "absent":
+        await manager.set_user("alice", entry, "")
+    async with harness(tmp_path, scope={"allowed_hosts": hosts}) as h:
+        h.bot.host_access_manager = manager
+        response = await h.client.get("/api/computer", headers=h.headers)
+        assert response.status == (200 if allowed else 404)
+
+
+async def test_operator_scope_covers_real_integration_and_restores_on_exception(tmp_path):
+    from src.computer.integration import ComputerIntegration
+    from src.computer.models import RequestContext
+
+    manager = HostAccessManager(str(tmp_path / "host-policy.json"),
+                                available_hosts=["localhost", "playground"])
+    await manager.set_default_policy(["playground"], "playground")
+    async with harness(tmp_path, scope={"allowed_hosts": ["localhost"]}) as h:
+        h.bot.host_access_manager = manager
+        identity = h.sessions.get_identity(h.sid)
+        request = SimpleNamespace(_api_identity=identity, _session_id=h.sid,
+            _session_managed=True, app={"session_manager": h.sessions,
+                                       "token_manager": h.tokens}, query={})
+        binding = operator_binding(h.bot, request)
+        assert binding is not None
+        context = RequestContext("alice", ComputerIntegration.web_binding(h.sid),
+                                 "web-operator", "localhost", surface="webui")
+        integration = SimpleNamespace(bot=h.bot)
+        outer = HostAccessManager.set_request_host_scope(["playground"])
+        try:
+            assert binding[2]()
+            assert manager.get_allowed_hosts("alice") == ["playground"]
+            with pytest.raises(RuntimeError, match="fixture failure"):
+                with operator_scope(binding):
+                    assert ComputerIntegration._authorize(integration, context)
+                    await asyncio.sleep(0)
+                    assert ComputerIntegration._authorize(integration, context)
+                    raise RuntimeError("fixture failure")
+            assert manager.get_allowed_hosts("alice") == ["playground"]
+            assert not operator_context_authorized(context)
+            assert binding[2]()  # response delivery is outside operator_scope
+            await manager.set_user("alice", [], "")
+            assert not binding[2]()  # an explicit deny still revokes the grant
+        finally:
+            HostAccessManager.reset_request_host_scope(outer)
+        assert not manager.is_host_allowed("alice", "localhost")
+
+
+@pytest.mark.parametrize("revocation", ["policy", "credential", "inventory", "error"])
+async def test_real_host_scope_revalidated_after_await(tmp_path, revocation):
+    manager = HostAccessManager(str(tmp_path / "host-policy.json"),
+                                available_hosts=["localhost", "playground"])
+    await manager.set_default_policy(["playground"], "playground")
+    async with harness(tmp_path, scope={"allowed_hosts": ["localhost"]}) as h:
+        h.bot.host_access_manager = manager
+        original = h.backend.operator_status
+
+        async def revoked(**actor):
+            assert manager.is_host_allowed("alice", "localhost")
+            result = await original(**actor)
+            if revocation == "policy":
+                await manager.set_user("alice", [], "")
+            elif revocation == "credential":
+                await h.tokens.update_token("alice", allowed_hosts=["playground"])
+            elif revocation == "inventory":
+                manager.set_available_hosts(["playground"])
+            else:
+                def failed(*_):
+                    raise RuntimeError("fixture policy lookup failure")
+                manager.is_host_allowed = failed
+            return result
+
+        h.backend.operator_status = revoked
+        response = await h.client.get("/api/computer", headers=h.headers)
+        assert response.status == 404
+        assert await response.json() == {"error": "Not found or no longer authorized"}
+        assert manager.get_allowed_hosts("unrelated") == ["playground"]

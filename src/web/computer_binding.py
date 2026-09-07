@@ -9,6 +9,8 @@ from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import Any
 
+from ..permissions.host_access import HostAccessManager
+
 
 def browser_binding(bot, request):
     identity = getattr(request, "_api_identity", None)
@@ -82,6 +84,7 @@ def operator_binding(bot, request):
     identity = request._api_identity
     owner = str(identity.user_id)
     hosts = getattr(identity, "allowed_hosts", None)
+    hosts = None if hosts is None else tuple(hosts)
     tools = frozenset(getattr(identity, "allowed_tools", ()) or ())
     scoped = (hosts is None or "localhost" in hosts) and (not tools or _TOOLS <= tools)
 
@@ -89,23 +92,41 @@ def operator_binding(bot, request):
         try:
             host_manager = getattr(bot, "host_access_manager", None)
             executor = getattr(bot, "tool_executor", None)
-            return bool(scoped and credential_current()
-                        and host_manager is not None and executor is not None
-                        and host_manager.is_host_allowed(owner, "localhost")
-                        and all(not executor.check_permission(tool, owner) for tool in _TOOLS))
+            # Match webchat: credential hosts replace the default policy when
+            # there is no explicit user entry, and intersect one when present.
+            # Reapply for every revalidation, including response delivery after
+            # operator_scope has exited. Never persist a credential as a grant.
+            with _credential_host_scope(hosts):
+                return bool(scoped and credential_current()
+                            and host_manager is not None and executor is not None
+                            and host_manager.is_host_allowed(owner, "localhost")
+                            and all(not executor.check_permission(tool, owner) for tool in _TOOLS))
         except Exception:
             return False
 
-    return (owner, sid, current) if current() else None
+    return (owner, sid, current, hosts) if current() else None
+
+
+@contextmanager
+def _credential_host_scope(hosts):
+    token = (HostAccessManager.set_request_host_scope(list(hosts))
+             if hosts is not None else None)
+    try:
+        yield
+    finally:
+        if token is not None:
+            HostAccessManager.reset_request_host_scope(token)
 
 
 @contextmanager
 def operator_scope(binding):
-    owner, sid, current = binding
+    owner, sid, current, hosts = binding
     channel = "web:" + hashlib.sha256(sid.encode("utf-8")).hexdigest()
     token = _operator_grant.set((owner, channel, current, asyncio.current_task()))
     try:
-        yield
+        # The controller/integration also checks host access during the route.
+        with _credential_host_scope(hosts):
+            yield
     finally:
         _operator_grant.reset(token)
 
