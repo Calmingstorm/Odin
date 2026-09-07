@@ -233,7 +233,8 @@ class ComputerStore:
         receipt = {key: (values.get(key) if type(values.get(key)) is bool else None)
                    for key in ("stopped", "released", "applications_preserved",
                                "input_revoked", "capture_revoked", "input_was_enabled",
-                               "portal_session_closed", "ei_connection_closed")}
+                               "portal_session_closed", "ei_connection_closed",
+                               "portal_connection_closed")}
         devices = values.get("owned_devices")
         receipt["owned_devices"] = (devices if type(devices) is str and devices in
                                     {"removed", "retained_inactive", "not_created",

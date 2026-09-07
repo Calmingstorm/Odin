@@ -489,7 +489,9 @@ class WaylandRuntimeBackend:
             await asyncio.gather(*tuple(self._jobs), return_exceptions=True)
         guardian = {"process_reaped": self._guardian is None,
                     "release_submitted": self._guardian is None}
-        portal = {"process_reaped": self._portal is None}
+        portal = {"process_reaped": self._portal is None,
+                  "connection_closed": self._portal is None,
+                  "session_close_acknowledged": self._portal is None}
         scope_closed = self._scope_provider is None
         # Release the original EI owner before portal revocation, but never skip
         # later resources when the earlier path fails or times out.
@@ -511,9 +513,12 @@ class WaylandRuntimeBackend:
                 pass
         self._release_failed |= not guardian.get("release_submitted", False)
         portal_closed = (portal.get("process_reaped") is True
+                         and portal.get("session_close_acknowledged") is True
                          and not portal.get("cleanup_errors"))
         ei_closed = guardian.get("process_reaped") is True
         self._cleanup_evidence = {"portal_session_closed": portal_closed,
+                                  "portal_connection_closed": (
+                                      portal.get("connection_closed") is True),
                                   "ei_connection_closed": ei_closed}
         return (ei_closed and portal_closed and scope_closed and not self._release_failed)
 

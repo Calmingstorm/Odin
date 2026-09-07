@@ -18,10 +18,12 @@ def application_profile(app, *, platform, environment):
         return {"id": app, "label": "Inkscape", "input": "supported", "reason": None,
                 "qualification": "pending_composed_task",
                 "qualified_tasks": [],
-                "not_offered_tasks": ["File dialogs", "Open/new/close/reopen", "Other applications"],
+                "not_offered_tasks": ["File dialogs", "Open/new/close/reopen",
+                                      "Other applications"],
                 "task_scope": "Focused native Inkscape canvas and bounded keyboard input. "
                               "Operator opens the document. Dialogs are refused. "
-                              "Per-session compositor qualification and portal consent are required."}
+                              "Per-session compositor qualification and portal consent "
+                              "are required."}
     attached = environment == "existing_session"
     profiles = ATTACHED_PROFILES if attached else ISOLATED_PROFILES
     if (platform != "x11" or environment not in {"isolated", "existing_session"}

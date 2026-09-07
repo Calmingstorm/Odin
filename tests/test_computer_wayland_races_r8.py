@@ -84,7 +84,8 @@ async def test_every_cleanup_resource_attempted_when_one_fails(adapter, failure)
         calls.append("portal")
         if failure == "portal":
             raise RuntimeError("fixture")
-        return {"process_reaped": True,
+        return {"process_reaped": True, "session_close_acknowledged": True,
+                "connection_closed": True,
                 "cleanup_errors": ["TimeoutError"] if failure == "portal_receipt" else []}
 
     async def close_scope():
@@ -116,7 +117,8 @@ async def test_cancelled_detach_continues_all_owned_cleanup(adapter):
 
     async def portal_close():
         calls.append("portal")
-        return {"process_reaped": True}
+        return {"process_reaped": True, "session_close_acknowledged": True,
+                "connection_closed": True}
 
     async def scope_close():
         calls.append("scope")

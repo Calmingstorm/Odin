@@ -52,7 +52,8 @@ class Portal:
 
     async def close(self):
         self.alive = False
-        return {"process_reaped": True}
+        return {"process_reaped": True, "session_close_acknowledged": True,
+                "connection_closed": True, "cleanup_errors": []}
 
 
 class Scope:
