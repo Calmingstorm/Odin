@@ -101,7 +101,11 @@ class WaylandRuntimeBackend:
     input_blocker: str | None = "wayland_session_not_qualified"
     input_limits = {"lease_seconds": 2, "text": "unicode_current_keymap", "max_text_chars": 256,
                     "max_scroll_count": 20, "max_points": 256,
-                    "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app"}
+                    "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app",
+                    "effect_expectations": ["visual_change", "region_changed"],
+                    "accessible_targets": "unavailable", "replace_field": "unavailable",
+                    "click_count": "native_click_modifiers_v1_capability_required",
+                    "click_modifiers": "native_click_modifiers_v1_capability_required"}
 
     def __init__(self, *, enabled=False, app_profile=None, environment="existing_session",
                  config: WaylandSessionConfig, qualify=None):
@@ -401,7 +405,13 @@ class WaylandRuntimeBackend:
             if (type(action[name]) is not type(getattr(frame.source, name))
                     or action[name] != getattr(frame.source, name)):
                 raise ComputerError("wayland_stale_source_binding")
-        if action["expected"] != {"type": "visual_change"}:
+        from ..effects import expectation_arguments
+        expectation_arguments(action["expected"])
+        if action["expected"]["type"] == "region_changed":
+            from ..gui_actions import crop_arguments
+            crop_arguments({k: action["expected"][k] for k in ("x", "y", "width", "height")},
+                           frame.width, frame.height)
+        elif action["expected"] != {"type": "visual_change"}:
             raise ComputerError("wayland_visual_postcondition_required")
         if action["type"] == "type":
             text = action["text"]

@@ -98,6 +98,9 @@ _DEFINITIONS = [
         "no held keys "
         "across calls. Click variants require x,y; scroll requires x,y,direction,count; "
         "type requires text; key requires key; drag/polyline require points,duration. "
+        "Clicks accept count 1..3, modifier lists, or region instead of x,y. replace_field "
+        "requires an observed accessible target and text, with field_text_equals matching "
+        "target/text; unsupported accessibility never falls back to Ctrl+A. "
         "Supply only fields for that operation. Unicode typing and generic keysym chords "
         "depend on the active keyboard mapping; unsupported input is reported. "
         "No terminal, security-prompt or control-plane actions.",
@@ -152,7 +155,11 @@ _DEFINITIONS = [
             "expect": {
                 "type": "object", "description":
                 "Use {type:visual_change} for GUI work or {type:pointer_at,x,y} for a click's "
-                "pointer location only. Fresh evidence, not input exit status, decides the result.",
+                "pointer location only. region_changed needs x,y,width,height in delivered pixels. "
+                "dialog_appeared/menu_appeared require a measured same-app native transition. "
+                "window_gone explicitly checks the old native window; disappearance is not "
+                "generic visual success. field_text_equals needs target,text and AT-SPI evidence. "
+                "Consult input_limits for backend support. Fresh evidence decides the result.",
                 "properties": {
                     "type": {"type": "string", "enum": [
                         "visual_change", "pointer_at", "region_changed", "dialog_appeared",

@@ -42,6 +42,8 @@ class LinuxDesktopBackend:
         "replace_field": "available_nodes_only", "replace_field_max_chars": 512,
         "replace_field_requires": ["replace_field", "text_readable", "text_complete"],
         "field_text_equals": "independent_same_native_node_after_release",
+        "effect_expectations": ["visual_change", "pointer_at", "region_changed",
+                                "field_text_equals"],
     }
 
     def __init__(
@@ -287,6 +289,13 @@ class LinuxDesktopBackend:
                         or action[key] != getattr(source, key)):
                     raise RuntimeFailure("stale source binding")
             expected = action["expected"]
+            if type(expected) is dict and expected.get("type") == "region_changed":
+                from ..effects import expectation_arguments
+                from ..gui_actions import crop_arguments
+                expectation_arguments(expected)
+                crop_arguments({k: expected[k] for k in ("x", "y", "width", "height")},
+                               frame.width, frame.height)
+                expected = {"type": "visual_change"}
             visual = type(expected) is dict and expected == {"type": "visual_change"}
             pointer = (action["type"] == "click" and type(expected) is dict
                        and set(expected) == {"type", "x", "y"}

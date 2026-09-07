@@ -744,6 +744,9 @@ class ComputerController:
             if live.capabilities is None or live.capabilities.environment != grant.environment:
                 raise ComputerError("attachment_unavailable")
             input_eligible(live.capabilities)
+            supported_effects = getattr(live.backend, "input_limits", {}).get("effect_expectations")
+            if supported_effects is not None and inp["expect"]["type"] not in supported_effects:
+                raise ComputerError("unsupported_postcondition")
             if self._delivered_observations.get(grant.session_id) != inp["observation_id"]:
                 raise ComputerError("observation_not_delivered")
             original = live.observations.get(inp["observation_id"])
@@ -860,6 +863,7 @@ class ComputerController:
                 raw = await _bounded(live.backend.act(payload),
                                      min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
                 # Settle release before any later capture/auth/metadata failure.
+                settled_result = execution_receipt(raw, {"status": "unknown"})
                 settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
                 self._active(grant)
                 await self._auth(context)
@@ -927,7 +931,10 @@ class ComputerController:
                         inp["expect"]["type"] in {"dialog_appeared", "menu_appeared"}
                         and result["verification"].get("status") == "satisfied")
                     if (expected_transition
-                            and result["verification"].get("target_application_matches") is True):
+                            and result["verification"].get("target_application_matches") is True
+                            and provenance is not None
+                            and getattr(live.backend, "application_provenance", None)
+                            == provenance):
                         binding_matches = (after.source.source_id == current.source.source_id
                                            and after.scope.consent_generation
                                            == current.scope.consent_generation

@@ -1,5 +1,6 @@
 """Measured effect contracts, independent of dispatch and release acknowledgements."""
 from io import BytesIO
+from typing import Any
 
 from .models import ComputerError
 from .policy import exact_keys, integer
@@ -44,13 +45,21 @@ def execution_receipt(raw, result):
         result.update(status="interrupted", reason="effect_unknown_reconcile_no_replay")
     diagnostics = raw.get("diagnostics", {})
     diagnostics = diagnostics if type(diagnostics) is dict else {}
-    safe = {"phase": diagnostics.get("phase") if diagnostics.get("phase") in PHASES else
+    phase = diagnostics.get("phase")
+    safe: dict[str, Any] = {"phase": phase if type(phase) is str and phase in PHASES else
             ("verification" if injected else "dispatch"),
             "release": "confirmed" if released else "unknown", "replay_allowed": False}
     for key in ("steps_planned", "steps_completed"):
         value = diagnostics.get(key)
         if type(value) is int and 0 <= value <= 100_000:
             safe[key] = value
+    reason = raw.get("reason")
+    if type(reason) is str and reason in {
+            "complete", "input_dispatch_expired", "input_lease_expired", "controller_closed",
+            "application_scope_changed", "application_scope_unavailable", "human_input_overlap",
+            "input_cancelled", "invalid_polyline", "unsupported_character", "unsupported_key",
+            "native_input_failed", "input_scope_changed", "input_revoked"}:
+        safe["reason"] = reason
     if result["status"] in {"interrupted", "unknown"}:
         safe["next_action"] = "stop" if not released else "observe_and_reconcile"
     result["diagnostics"] = safe
@@ -78,7 +87,8 @@ def effect_receipt(raw, observation, expected, target=None):
                          for key in ("source_id", "source_revision", "consent_generation"))
     result["verification"] = {"status": "unavailable", "type": kind,
                               "target_application_matches": same_app}
-    if not result["execution"]["released"] or result["execution"]["injected"] is not True:
+    if (not result["execution"]["released"] or result["execution"]["injected"] is not True
+            or result["status"] == "interrupted"):
         return result
     satisfied = None
     method = None
