@@ -225,12 +225,19 @@ def test_reap_identity(worker, monkeypatch, mode):
     monkeypatch.setattr(w, 'dead', lambda _: mode in {'zombie', 'gone'})
     wait = Mock(side_effect=ChildProcessError() if mode == 'notchild' else None)
     monkeypatch.setattr(w.os, 'waitid', wait)
-    monkeypatch.setattr(w.os, 'close', Mock())
+    close = Mock()
+    monkeypatch.setattr(w.os, 'close', close)
     worker.reap()
     assert bool(worker.pins) is (mode != 'gone')
     assert worker.failed is (mode == 'error')
-    if mode == 'leader':
+    if mode in {'live', 'zombie', 'notchild'}:
+        wait.assert_called_once_with(w.os.P_PIDFD, 110, w.os.WEXITED | w.os.WNOHANG)
+    else:
         wait.assert_not_called()
+    if mode == 'gone':
+        close.assert_called_once_with(110)
+    else:
+        close.assert_not_called()
 
 
 @pytest.mark.parametrize('mode', ['normal', 'gone', 'error', 'timeout'])

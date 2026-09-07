@@ -71,10 +71,13 @@ async def test_resume_rebinds_turn_consent_and_exports_evidence(rig):
     paused = await controller.session(ctx, {'operation': 'pause', 'session_id': sid})
     assert paused['state'] == 'paused' and paused['generation'] > started['generation']
     next_ctx = replace(ctx, turn_id='next')
+    prior_consent = store.get_session(sid).consent_generation
     resumed = await controller.session(next_ctx, {'operation': 'resume', 'session_id': sid,
                                                  'generation': paused['generation']})
     assert resumed['state'] == 'active' and store.get_session(sid).turn_id == 'next'
-    backend.resume.assert_awaited_once_with(consent_generation=consent)
+    stored_consent = store.get_session(sid).consent_generation
+    assert stored_consent > prior_consent
+    backend.resume.assert_awaited_once_with(consent_generation=stored_consent)
     observation = await controller.session(next_ctx, {'operation': 'reconcile', 'session_id': sid,
                                                       'generation': resumed['generation']})
     assert observation['image_bytes'].startswith(b'\x89PNG')

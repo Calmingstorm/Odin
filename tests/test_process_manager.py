@@ -2055,11 +2055,13 @@ class TestSelectiveProvenanceErasure:
         """
         import src.tools.process_manager as pm
 
-        previously = pm.child_subreaper_active()
-        pm.set_child_subreaper(True)
+        # The session fixture establishes real containment in this disposable
+        # test process. Do not redundantly mutate its process-wide setting.
+        assert pm.child_subreaper_active() is True
         reg = ProcessRegistry()
         pidfile = None
         escaped = None
+        escaped_start = None
         try:
             import tempfile
 
@@ -2109,9 +2111,30 @@ time.sleep(45)
                 await asyncio.sleep(0.1)
             assert escaped is not None, "escapee never reported its pid"
             assert pm._read_job_token(escaped) == "forged-not-a-real-job"
-            assert pm._proc_starttime(escaped) is not None  # alive
+            escaped_start = pm._proc_starttime(escaped)
+            assert escaped_start is not None
 
             info = reg._processes[pid]
+            # ProcessRegistry owns a SupervisedShell; its dedicated worker,
+            # not pytest or the outer test supervisor, adopts this orphan.
+            from src.tools.local_supervisor import SupervisedShell
+
+            assert isinstance(info.process, SupervisedShell)
+            expected_owner = info.process._worker.pid
+            assert expected_owner != os.getpid()
+            owner_start = pm._proc_starttime(expected_owner)
+            assert owner_start is not None
+            deadline = asyncio.get_running_loop().time() + 6.0
+            while asyncio.get_running_loop().time() < deadline:
+                assert pm._proc_starttime(escaped) == escaped_start
+                ids = pm._proc_ids(escaped)
+                if ids is not None and ids[0] == expected_owner:
+                    break
+                await asyncio.sleep(0.05)
+            ids = pm._proc_ids(escaped)
+            assert ids is not None and ids[0] == expected_owner, "escapee was not adopted"
+            assert pm._proc_starttime(escaped) == escaped_start
+            assert pm._proc_starttime(expected_owner) == owner_start
             gone = await reg._kill_group_until_gone(info, timeout=15.0)
 
             assert gone is True  # teardown resolves adoption as ours…
@@ -2123,7 +2146,8 @@ time.sleep(45)
                 await asyncio.sleep(0.25)
             assert pm._proc_ids(escaped) is None, "forged escapee survived teardown"
         finally:
-            if escaped is not None:
+            if (escaped is not None and escaped_start is not None
+                    and pm._proc_starttime(escaped) == escaped_start):
                 try:
                     os.kill(escaped, 9)
                 except ProcessLookupError:
@@ -2135,7 +2159,6 @@ time.sleep(45)
                     except OSError:
                         pass
             await reg.shutdown()
-            pm.set_child_subreaper(previously)
 
     def test_live_cleanup_still_refuses_to_guess(self, monkeypatch):
         """Outside teardown the rule is unchanged: a forged/absent token
