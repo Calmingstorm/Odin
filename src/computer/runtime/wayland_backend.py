@@ -80,7 +80,7 @@ def _bounded_png(data: bytes, width: int, height: int):
 
 
 class WaylandRuntimeBackend:
-    startup_timeout_seconds = 120
+    startup_timeout_seconds = 180
     input_supported = False
     input_blocker = "wayland_session_not_qualified"
     input_limits = {"lease_seconds": 2, "text": "printable_ascii_current_keymap",
@@ -190,7 +190,7 @@ class WaylandRuntimeBackend:
             if qualifier is None:
                 from .wayland_probe import qualify
                 qualifier = qualify
-            admission = await asyncio.wait_for(qualifier(self._identity), 45)
+            admission = await asyncio.wait_for(qualifier(self._identity), 90)
             if type(admission) is not InputAdmission:
                 raise ComputerError("wayland_probe_evidence_invalid")
             if (admission.state == "eligible" and (admission.probe_scope == "unmeasured"
@@ -483,6 +483,7 @@ class WaylandRuntimeBackend:
             clean = await self._cleanup()
         return {"stopped": clean, "released": clean, "applications_preserved": True,
                 "input_revoked": True, "capture_revoked": True,
+                "portal_session_closed": clean, "ei_connection_closed": clean,
                 "owned_devices": "portal_owned_connections_closed" if clean else "unknown",
                 "state": "closed" if clean else "quarantined",
                 "recovery": None if clean else "wayland_owned_cleanup_unverified"}

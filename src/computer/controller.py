@@ -30,6 +30,7 @@ from .policy import (
     MAX_ACTIONS,
     MAX_TASK_SECONDS,
     STOP_TIMEOUT_SECONDS,
+    WAYLAND_START_TIMEOUT_SECONDS,
     exact_keys,
     foreground,
     input_eligible,
@@ -243,11 +244,17 @@ class ComputerController:
                 device_state = result.get("owned_devices")
                 no_devices = (device_state == "not_created"
                               and getattr(live.backend, "creates_devices", None) is False)
+                portal_devices = (
+                    live.capabilities.platform == "wayland"
+                    and device_state == "portal_owned_connections_closed"
+                    and result.get("portal_session_closed") is True
+                    and result.get("ei_connection_closed") is True)
                 clean = (result.get("released") is True
                          and result.get("applications_preserved") is True
                          and result.get("input_revoked") is True
                          and result.get("capture_revoked") is True
-                         and (device_state in {"removed", "retained_inactive"} or no_devices))
+                         and (device_state in {"removed", "retained_inactive"}
+                              or no_devices or portal_devices))
         except (Exception, asyncio.CancelledError):
             clean = False
         # Commit the cleanup evidence BEFORE dropping the live adapter. Inactive
@@ -337,7 +344,8 @@ class ComputerController:
                 self._prepare_runtime(grant, backend)
                 # Wayland portal consent is interactive. Only this fixed backend
                 # family gets a longer startup window; input leases stay two seconds.
-                timeout = 120 if capabilities.platform == "wayland" else 20
+                timeout = (WAYLAND_START_TIMEOUT_SECONDS
+                           if capabilities.platform == "wayland" else 20)
                 await _bounded(backend.start(grant.session_id), timeout)
                 measured = getattr(backend, "capabilities", None)
                 if (type(measured) is not BackendCapabilities
@@ -398,9 +406,21 @@ class ComputerController:
                 resume = getattr(live.backend, "resume", None)
                 if resume is None:
                     raise ComputerError("resume_unavailable")
-                await _bounded(
-                    resume(consent_generation=grant.consent_generation), STOP_TIMEOUT_SECONDS
-                )
+                timeout = (WAYLAND_START_TIMEOUT_SECONDS
+                           if grant.platform == "wayland" else STOP_TIMEOUT_SECONDS)
+                try:
+                    await _bounded(resume(consent_generation=grant.consent_generation), timeout)
+                    measured = getattr(live.backend, "capabilities", None)
+                    if (type(measured) is not BackendCapabilities
+                            or (measured.platform, measured.environment)
+                            != (grant.platform, grant.environment)):
+                        raise ComputerError("backend_capabilities_changed")
+                    if getattr(live.backend, "input_supported", False) is True:
+                        input_eligible(measured)
+                    live.capabilities = measured
+                except (Exception, asyncio.CancelledError):
+                    await self._stop(grant.session_id, "cancelled")
+                    raise
                 await self._auth(context)
                 current = self.store.get_session(grant.session_id)
                 if current.generation != grant.generation or current.state != "paused":

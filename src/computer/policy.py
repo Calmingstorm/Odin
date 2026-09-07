@@ -16,6 +16,9 @@ STOP_TIMEOUT_SECONDS = 3.0
 # Existing-session teardown must allow the privileged capture alarm (5s),
 # wrapper exit and exact-identity census. Isolated stop keeps its original bound.
 ATTACHED_STOP_TIMEOUT_SECONDS = 10.0
+# Portal consent plus isolated same-stack qualification are pre-input phases.
+# This never extends the independent two-second active input lease.
+WAYLAND_START_TIMEOUT_SECONDS = 180.0
 
 
 def foreground(context: RequestContext) -> None:

@@ -134,3 +134,41 @@ async def test_untyped_backend_admission_is_not_public(tmp_path):
     finally:
         await controller.close()
         store.close()
+
+
+@pytest.mark.parametrize("platform,portal_closed,ei_closed,complete", [
+    ("wayland", True, True, True), ("wayland", True, False, False),
+    ("wayland", False, True, False), ("x11", True, True, False),
+])
+async def test_portal_owned_device_receipt_requires_both_connections(
+        tmp_path, platform, portal_closed, ei_closed, complete):
+    from src.computer.controller import ComputerController
+    from src.computer.models import BackendCapabilities, LiveSession, RequestContext
+    from src.computer.store import ComputerStore
+    from tests.test_computer_contract_r1 import Stub
+
+    backend = Stub()
+    backend.capabilities = BackendCapabilities(platform, "existing_session")
+    original = backend.detach
+
+    async def detach():
+        return {**await original(), "owned_devices": "portal_owned_connections_closed",
+                "portal_session_closed": portal_closed, "ei_connection_closed": ei_closed}
+
+    backend.detach = detach
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    controller = ComputerController(store, None, lambda _: True, enabled=True)
+    grant = store.create_session(RequestContext("o", "c", "t", "h"), "xed",
+                                 platform=platform, environment="existing_session")
+    controller._live[grant.session_id] = LiveSession(backend, 99999999,
+                                                   capabilities=backend.capabilities)
+    try:
+        result = await controller._stop(grant.session_id, "closed")
+        assert result["cleanup"]["complete"] is complete
+        assert result["cleanup"]["owned_devices"] == "portal_owned_connections_closed"
+        assert result["cleanup"]["portal_session_closed"] is portal_closed
+        assert result["cleanup"]["ei_connection_closed"] is ei_closed
+    finally:
+        backend.detach = original
+        await controller.close()
+        store.close()
