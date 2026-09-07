@@ -74,6 +74,15 @@ is reported honestly until repaired. Cleanup failure retains the controller/stor
 and blocks reenable. Old foreground grants cannot target a replacement generation.
 Disable waits for bounded in-flight operations before closing storage.
 
+An admitted enable transaction is cancellation-settled, not revocation-transactional.
+If the browser credential is revoked after admission while the config lock is
+queued, the admitted enable may still persist, but the HTTP response is denied.
+This creates no desktop or input authority; the revoked credential cannot observe,
+act or retrieve evidence. Do not describe revocation as rollback of an already
+admitted configuration transaction or claim already-written network bytes can be
+recalled. Independent HTTP-to-manager-to-controller tests cover recovery and
+credential/scope revocation, including response preparation/body boundaries.
+
 An enabled-only janitor prunes on adoption and every1second; reads enforce exact
 expiry. Clean disable/shutdown purge remaining evidence bytes before closing state.
 Receipts/session records remain. Disabled boot does not inspect historical state.
