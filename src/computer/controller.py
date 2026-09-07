@@ -196,12 +196,14 @@ class ComputerController:
 
     async def _stop(self, sid, state):
         # Transport/turn cancellation must not cancel cleanup or its durable
-        # receipt. Later close/disable joins the same owner rather than racing it.
+        # receipt. A distinct request still gets its serialized retry after an
+        # earlier failure; joining the same failed receipt would regress Close.
         task = self._stops.get(sid)
-        if task is None or task.done():
-            task = asyncio.create_task(self._stop_serialized(sid, state))
-            self._stops[sid] = task
-            task.add_done_callback(_consume)
+        if task is not None and not task.done():
+            await asyncio.shield(task)
+        task = asyncio.create_task(self._stop_serialized(sid, state))
+        self._stops[sid] = task
+        task.add_done_callback(_consume)
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
