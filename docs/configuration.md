@@ -226,6 +226,15 @@ tool's reply.
 
 ## Web Management UI
 
+**Set a strong, private `web.api_token` before starting or exposing the service.**
+If it is empty and both `web.api_tokens` and the managed-token store have no
+entries, the general API authentication gate is disabled: routes relying on it
+are unauthenticated. A blank legacy token alone does not disable authentication
+when other token entries exist. Computer observation/evidence routes additionally
+require an authenticated admin identity; those checks do not protect the rest of
+a tokenless installation. Restrict `web.host` to loopback unless deliberately
+exposing it behind TLS and access controls.
+
 ```yaml
 web:
   enabled: true

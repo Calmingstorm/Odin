@@ -47,6 +47,14 @@ keeps these separate rather than treating a successful toggle as acceptance.
 
 ## First increment and evidence boundary
 
+**Before service start or exposure, set a strong, private `web.api_token`.**
+With empty `web.api_token`, no `web.api_tokens` entries and no managed tokens,
+the general API authentication gate is disabled and routes relying on it are
+unauthenticated. Desktop observation and stored evidence are sensitive: computer
+routes separately require an authenticated admin identity, but that does not
+secure the rest of a tokenless installation. See [the installation security
+warning](PACKAGING.md) and restrict network exposure before testing.
+
 Computer use is **disabled by default**. It adds `computer_session`,
 `computer_observe`, and `computer_act` to ordinary authorized foreground turns.
 All usual tools remain available under their existing permissions, including

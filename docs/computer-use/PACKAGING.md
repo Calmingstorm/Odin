@@ -1,5 +1,15 @@
 # Computer-use package installation handoff
 
+> **Before service start or network exposure, configure API authentication.**
+> With empty `web.api_token`, no `web.api_tokens` entries and no managed tokens,
+> the general API authentication gate is disabled and routes relying on it are
+> unauthenticated. Set a strong, private `web.api_token` to secure the installation;
+> restrict the listening address and use TLS and access controls for remote access.
+> Desktop observation and stored evidence make this review especially important.
+> Computer routes have an additional authenticated-admin requirement, but that
+> does not secure other routes in a tokenless installation. Desktop consent and
+> private evidence-directory permissions are not substitutes for API authentication.
+
 This describes the current packaging contract. R9 exercised actual APT/dpkg/pip
 fresh installs and upgrades in disposable Debian 13 containers, with service
 operations recorded rather than executed. See [PACKAGING-R9.md](PACKAGING-R9.md).

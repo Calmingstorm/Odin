@@ -50,6 +50,16 @@ The WebUI shows every tool Odin can reach, how often each has run, and lets you 
 
 ## Quick start
 
+> **Security warning: configure API authentication before starting or exposing Odin.**
+> With no API token configured (empty `web.api_token`, no `web.api_tokens`
+> entries, and no managed tokens), the general API authentication gate is
+> disabled: API routes relying on that gate are unauthenticated. Set a strong,
+> private `web.api_token` to secure the installation, and restrict `web.host`
+> to loopback unless deliberately exposing it behind TLS and access controls.
+> This matters especially when enabling desktop observation and stored evidence.
+> Computer routes additionally require an authenticated admin identity; their
+> separate checks do not secure the rest of a tokenless installation.
+
 Debian or Ubuntu. APT resolves dependencies and the package installs Python extras
 during setup, which can take a few minutes. Optional computer-use support has
 distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
@@ -247,6 +257,10 @@ and exact evidence limits. R9 exercised local package install/upgrade in disposa
 containers, not a release pipeline or zero-click desktop setup.
 
 ### First-time setup
+
+**Before starting the service:** follow the [Quick start security warning](#quick-start).
+Set `web.api_token` and review the listening address before exposing the WebUI/API,
+including installations intended for desktop observation and evidence access.
 
 1. Create a Discord application and bot in the [Discord developer portal](https://discord.com/developers/applications). Enable **Message Content Intent**.
 2. Set the Discord token:
