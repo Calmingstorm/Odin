@@ -115,6 +115,12 @@ contents:
     dst: /usr/share/doc/odin/computer-use/OPERATOR.md
   - src: ./docs/computer-use/RECOVERY.md
     dst: /usr/share/doc/odin/computer-use/RECOVERY.md
+  # KWin uses a private compositor ABI. Ship its opt-in companion sources;
+  # the separate version-bound companion package carries the compiled plugin.
+  # No main-package hook builds, loads, enables or reloads a desktop plugin.
+  - src: ./assets/kwin-scope
+    dst: /usr/share/odin/kwin-scope
+    type: tree
 
   - dst: /etc/odin/
     type: dir
