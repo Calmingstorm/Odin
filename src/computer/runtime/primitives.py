@@ -145,12 +145,6 @@ class NativeDesktop:
         if (self._profile not in PROFILES or not nodes
                 or not self._same_app_transient(window)):
             return "unknown"
-        labels = " ".join(str(n.get("name", "")) + " " + str(n.get("role", ""))
-                          + " " + str(n.get("text", ""))
-                          for n in nodes).casefold()
-        if any(word in labels for word in ("password", "authentication", "permission",
-                                            "terminal", "administrator", "odin", "security")):
-            return "denied"
         buttons = {n.get("name") for n in nodes if n.get("role") == "push button"}
         startup = (self._profile == "drawing" and nodes[0].get("role") == "alert"
                    and nodes[0].get("name") == "Information" and buttons == {"No", "Yes"})
