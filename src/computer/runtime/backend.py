@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import sys
 import time
@@ -198,47 +199,89 @@ class LinuxDesktopBackend:
             self._frame = BackendObservation(
                 source, scope, metadata.width, metadata.height, metadata.delivered_to_source,
                 rendered.png, focused=result.get("focused") is True,
-                modal=result.get("modal_id"), resize_scale=metadata.resize_scale)
+                modal=result.get("modal_id"), resize_scale=metadata.resize_scale,
+                modal_kind=("safe_application" if result.get("modal_kind") == "safe_application"
+                            else "unrecognized") if result.get("modal_id") is not None else None,
+                accessibility=tuple(result.get("accessibility", ())))
             self._captured_at = captured
             return self._frame
 
     async def act(self, action: dict) -> dict:
-        """Private click-only increment; pointer evidence is not click-effect proof."""
+        """Strict private GUI actions; evidence never implies application semantics."""
+        action = copy.deepcopy(action)
         async with self._ordinary:
             frame = self._frame
             if (self._closed or self._paused or frame is None or not frame.focused
-                    or frame.modal is not None
                     or not 0 <= time.monotonic() - self._captured_at <= 5):
                 raise RuntimeFailure("capture only; fresh focused nonmodal observation required")
-            required = {"type", "source_id", "source_revision", "consent_generation",
-                        "x", "y", "expected"}
-            if (type(action) is not dict or set(action) != required
-                    or action["type"] != "click"):
+            fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
+                      "polyline": {"points", "duration"}}
+            required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
+            if (type(action) is not dict or not isinstance(action.get("type"), str)
+                    or action["type"] not in fields
+                    or set(action) - {"expected_modal"} != required | fields[action["type"]]):
                 raise RuntimeFailure("unsupported grounded action")
+            if frame.modal is not None:
+                if (frame.modal_kind != "safe_application"
+                        or action.get("expected_modal") != frame.modal):
+                    raise RuntimeFailure("unexpected or denied application modal")
+            elif "expected_modal" in action:
+                raise RuntimeFailure("expected modal is not present")
             source = frame.source
             for key in ("source_id", "source_revision", "consent_generation"):
                 if (type(action[key]) is not type(getattr(source, key))
                         or action[key] != getattr(source, key)):
                     raise RuntimeFailure("stale source binding")
             expected = action["expected"]
-            if (type(expected) is not dict or set(expected) != {"type", "x", "y"}
-                    or expected["type"] != "pointer_at"
-                    or any(type(expected[k]) is not int or expected[k] != action[k]
-                           for k in ("x", "y"))):
+            visual = type(expected) is dict and expected == {"type": "visual_change"}
+            pointer = (action["type"] == "click" and type(expected) is dict
+                       and set(expected) == {"type", "x", "y"}
+                       and expected["type"] == "pointer_at"
+                       and all(type(expected[k]) is int and expected[k] == action[k]
+                               for k in ("x", "y")))
+            if not pointer and not visual:
                 raise RuntimeFailure("unsupported postcondition")
-            x, y = source.input_point(frame.delivered_to_source, action["x"], action["y"],
-                                      frame.width, frame.height)
-            payload = {"type": "click", "x": int(x), "y": int(y),
-                       "source_revision": source.source_revision,
+            payload = {"type": action["type"], "source_revision": source.source_revision,
                        "expected_window": self._last_window,
                        "observation_id": self._last_observation,
-                       "expected": {"type": "pointer_at", "x": int(x), "y": int(y)}}
+                       "expected": expected}
+            if "expected_modal" in action:
+                payload["expected_modal"] = action["expected_modal"]
+            from .accessibility import PrimitiveError, bounded_text, finite
+            from .primitives import KEYS
+            try:
+                if action["type"] == "click":
+                    if any(type(action[k]) is not int for k in ("x", "y")):
+                        raise RuntimeFailure("click coordinates must be integers")
+                    x, y = source.input_point(frame.delivered_to_source, action["x"], action["y"],
+                                              frame.width, frame.height)
+                    payload.update(x=int(x), y=int(y))
+                    if pointer:
+                        payload["expected"] = {"type": "pointer_at", "x": int(x), "y": int(y)}
+                elif action["type"] == "polyline":
+                    points = action["points"]
+                    if (type(points) is not list or not 2 <= len(points) <= 256
+                            or any(type(p) is not list or len(p) != 2
+                                   or any(type(v) is not int for v in p) for p in points)):
+                        raise RuntimeFailure("invalid bounded polyline")
+                    finite(action["duration"], 0, 1.0)
+                    payload["points"] = [[int(v) for v in source.input_point(
+                        frame.delivered_to_source, *p, frame.width, frame.height)] for p in points]
+                    payload["duration"] = action["duration"]
+                elif action["type"] == "type":
+                    payload["text"] = bounded_text(action["text"])
+                else:
+                    if not isinstance(action["chord"], str) or action["chord"] not in KEYS:
+                        raise RuntimeFailure("unsupported key chord")
+                    payload["chord"] = action["chord"]
+            except PrimitiveError as exc:
+                raise RuntimeFailure(str(exc)) from exc
             self._frame = None  # Consume before sending, including lost/failed replies.
             self._last_window = None
             receipt = (await self._rpc("act", action=payload, timeout=5.0))["receipt"]
             if receipt.get("released") is not True:
                 self._paused = True  # Failed owned-input cleanup requires teardown.
-            post = receipt.get("postcondition", {"type": "pointer_at", "status": "unavailable"})
+            post = receipt.get("postcondition", {"type": expected["type"], "status": "unavailable"})
             receipt["postcondition"] = {**post, "source_id": source.source_id,
                                         "source_revision": source.source_revision,
                                         "consent_generation": source.consent_generation}

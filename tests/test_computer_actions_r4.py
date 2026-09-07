@@ -269,7 +269,7 @@ async def test_expired_grounding_denies_input(tmp_path, where):
     now = [100.0]
     async with setup(tmp_path, monotonic=lambda: now[0]) as (controller, backend, ctx, inp):
         if where == "original":
-            now[0] += 5.01
+            now[0] += 120.01
         elif where == "capture":
             backend.capture_hook = lambda _: now.__setitem__(0, now[0] + 5.01)
         else:

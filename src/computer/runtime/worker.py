@@ -74,6 +74,12 @@ class Worker:
         for folder in ("home/.config", "home/.cache", "home/.local/share", "run", "exports",
                        "tmp/.X11-unix"):
             Path("/workspace", folder).mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Private ephemeral GTK settings only, never operator-session settings.
+        # Blinking carets otherwise invalidate exact-raster grounding during render.
+        gtk_settings = Path("/workspace/home/.config/gtk-3.0")
+        gtk_settings.mkdir(mode=0o700)
+        (gtk_settings / "settings.ini").write_text(
+            "[Settings]\ngtk-cursor-blink=false\ngtk-enable-animations=false\n")
         self.spawn([
             "/usr/bin/dbus-daemon", "--nofork", "--nopidfile",
             "--config-file=/runtime/assets/session.conf",
@@ -147,9 +153,16 @@ class Worker:
     def serve_operation(self, message, directory_fd):
         try:
             self.emit(self.operation(message, directory_fd))
-        except Exception:
+        except Exception as exc:
+            # Only our fixed-message primitive errors are safe diagnostic output.
+            if TYPE_CHECKING or __package__:
+                from .accessibility import PrimitiveError
+            else:
+                from runtime.accessibility import PrimitiveError
+            reason = (str(exc)[:160] if isinstance(exc, PrimitiveError)
+                      else "desktop operation unavailable")
             self.emit({
-                "ok": False, "id": message.get("id"), "error": "desktop operation unavailable"
+                "ok": False, "id": message.get("id"), "error": reason
             })
         finally:
             self.operation_lock.release()

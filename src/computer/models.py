@@ -136,6 +136,8 @@ class BackendObservation:
     rotation: Literal[0, 90, 180, 270] = 0
     resize_scale: tuple[int, int] = (1, 1)
     resize_rounding: Literal["nearest", "floor"] = "nearest"
+    modal_kind: str | None = None
+    accessibility: tuple[dict, ...] = ()
 
     def __post_init__(self):
         dimension(self.width)
@@ -146,6 +148,12 @@ class BackendObservation:
             raise ComputerError("invalid_backend_observation")
         if self.modal is not None:
             opaque_id(self.modal)
+        if self.modal_kind not in {None, "safe_application", "unrecognized"}:
+            raise ComputerError("invalid_modal_classification")
+        if self.modal is None and self.modal_kind is not None:
+            raise ComputerError("invalid_modal_classification")
+        if type(self.accessibility) is not tuple or len(self.accessibility) > 128:
+            raise ComputerError("invalid_accessibility_metadata")
         if (self.source.source_id not in self.scope.capture_sources
                 or self.source.consent_generation != self.scope.consent_generation):
             raise ComputerError("capture_not_granted")
@@ -171,11 +179,13 @@ class Observation:
     evidence_id: str
     image_sha256: str
     frame_metadata: FrameMetadata | None = None
+    modal_kind: str | None = None
+    accessibility: tuple[dict, ...] = ()
 
     @property
     def geometry(self) -> tuple:
         return (self.source, self.scope, self.width, self.height, self.delivered_to_source,
-                self.focused, self.modal)
+                self.focused, self.modal, self.modal_kind)
 
     def public(self) -> dict[str, Any]:
         return {"observation_id": self.observation_id, "session_id": self.session_id,
@@ -185,6 +195,7 @@ class Observation:
                                    else self.frame_metadata.public()),
                 "capture_time_basis": "request_start_lower_bound",
                 "source": self.source.public(), "modal": self.modal, "focused": self.focused,
+                "modal_kind": self.modal_kind,
                 "consent_generation": self.scope.consent_generation,
                 "capture_sources": sorted(self.scope.capture_sources),
                 "input_sources": sorted(self.scope.input_sources),

@@ -224,7 +224,12 @@ def test_physical_receipts_argv_and_release(kind, arguments, count):
         assert 0 < kwargs["timeout"] <= 2.0
         assert kwargs["env"]["DISPLAY"] == ":77" and kwargs["cwd"] == "/workspace"
     if kind == "type":
-        assert inputs(desktop)[0][-2:] == ["--", arguments["text"]]
+        first, second = arguments["text"].split("\n")
+        assert inputs(desktop)[0] == [
+            "type", "--delay", "0", "--args", "1", "--", first,
+            "key", "Return",
+            "type", "--delay", "0", "--args", "1", "--", second,
+        ]
         assert desktop.typed_releases == 1
     if kind == "key":
         assert inputs(desktop)[-2:] == [["keyup", "a"], ["keyup", "ctrl"]]

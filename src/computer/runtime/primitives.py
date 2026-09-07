@@ -7,6 +7,7 @@ Receipts confirm injection only: the worker owns deadlines and postconditions.
 import ctypes
 import hashlib
 import os
+import re
 import secrets
 import struct
 import subprocess
@@ -93,7 +94,9 @@ class NativeDesktop:
         self._a11y = accessibility_backend or Accessibility()
         self._env = {"DISPLAY": display, "HOME": workspace, "PATH": "/usr/bin:/bin",
                      "LANG": "C.UTF-8", "NO_AT_BRIDGE": "0"}
-        for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_DATA_DIRS"):
+        for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_DATA_DIRS",
+                     "XDG_CONFIG_HOME", "GTK_MODULES", "GTK_A11Y", "GSETTINGS_BACKEND",
+                     "GDK_BACKEND", "LIBGL_ALWAYS_SOFTWARE"):
             if name in os.environ:
                 self._env[name] = os.environ[name]
         self._apps, self._processes = {}, set()
@@ -110,6 +113,93 @@ class NativeDesktop:
         self._modal_id = None
         self._input_quarantined = False
         self._raster_digest = None
+        self._profile = None
+        self._modal_kind = None
+        self._startup_modal = None
+
+    def _same_app_transient(self, window):
+        from Xlib import display as xdisplay  # type: ignore[import-untyped]
+        display = xdisplay.Display(":77")
+        try:
+            node = display.create_resource_object("window", window["id"])
+            parent = node.get_wm_transient_for()
+            return bool(parent and parent.id != window["id"]
+                        and int(self._run("getwindowpid", parent.id)) == window["pid"])
+        finally:
+            display.close()
+
+    def _classify_modal(self, window, nodes):
+        if not window["modal"]:
+            return None
+        if (self._profile not in PROFILES or not nodes
+                or not self._same_app_transient(window)):
+            return "unknown"
+        labels = " ".join(str(n.get("name", "")) + " " + str(n.get("role", ""))
+                          for n in nodes).casefold()
+        if any(word in labels for word in ("password", "authentication", "permission",
+                                            "terminal", "administrator", "odin", "security")):
+            return "denied"
+        buttons = {n.get("name") for n in nodes if n.get("role") == "push button"}
+        startup = (self._profile == "drawing" and nodes[0].get("role") == "alert"
+                   and nodes[0].get("name") == "Information" and buttons == {"No", "Yes"})
+        identity = (window["id"], window["pid"], self._identity(window["pid"]))
+        if startup and self._source_fingerprint is None:
+            self._startup_modal = identity
+        startup = startup and self._startup_modal == identity
+        file_dialog = (nodes[0].get("role") in ("dialog", "file chooser")
+                       and window["title"] in {
+                           "Save As", "Save As…", "Save Image", "Save", "Open", "Open Image",
+                           "Save picture as…", "Open a picture"})
+        return "safe_application" if startup or file_dialog else "unknown"
+
+    def _window_descendant(self, candidate, expected):
+        """Prove a bounded X tree ancestry, not merely same PID or coordinates."""
+        if candidate == expected:
+            return True
+        if self._runner is not None:
+            return False  # Synthetic transport has no native X resource authority.
+        from Xlib import display as xdisplay  # type: ignore[import-untyped]
+        display = xdisplay.Display(":77")
+        try:
+            visited = set()
+            for _ in range(64):
+                self._guard()
+                if candidate <= 0 or candidate in visited:
+                    return False
+                visited.add(candidate)
+                tree = display.create_resource_object("window", candidate).query_tree()
+                candidate = tree.parent.id
+                if candidate == expected:
+                    return True
+                if candidate == tree.root.id:
+                    return False
+            return False
+        finally:
+            display.close()
+
+    def _pointer_target(self, expected):
+        """Query the real pointer tree. xdotool may return the WM frame ancestor."""
+        if self._runner is not None:
+            return False
+        from Xlib import display as xdisplay  # type: ignore[import-untyped]
+        display = xdisplay.Display(":77")
+        try:
+            current = display.screen().root
+            visited = set()
+            for _ in range(64):
+                self._guard()
+                if current.id in visited:
+                    return False
+                visited.add(current.id)
+                if current.id == expected:
+                    return True
+                child = current.query_pointer().child
+                if not child:
+                    return False
+                current = child
+            return False
+        finally:
+            display.close()
 
     def _guard(self):
         if self._cancelled is not None and self._cancelled.is_set():
@@ -300,7 +390,11 @@ class NativeDesktop:
                 image, width, height = sanitize_png(capture)
                 mode = "PNG"
             observation = secrets.token_urlsafe(18)
+            if (self._source_fingerprint is None and self._profile == "drawing"
+                    and window["modal"] and self._same_app_transient(window)):
+                self._startup_modal = (window["id"], window["pid"], identity)
             nodes, status = self._a11y.snapshot(window, observation, self._guard)
+            modal_kind = self._classify_modal(window, nodes)
             if self._root_extent is not None:
                 extent = tuple(int(v) for v in self._run("getdisplaygeometry").split())
                 if extent != (width, height):
@@ -316,35 +410,63 @@ class NativeDesktop:
                 self._source_fingerprint = fingerprint
                 self._modal_id = secrets.token_urlsafe(18) if window["modal"] else None
             self._captured_at = captured_at
+            self._modal_kind = modal_kind
             self._raster_digest = hashlib.sha256(image).digest() if packed else None
             return {"image_bytes": image, "width": width, "height": height, "window": window,
                     "accessibility": nodes, "accessibility_status": status,
+                    "accessibility_detail": getattr(self._a11y, "status_detail", status),
+                    "accessibility_roots": getattr(self._a11y, "root_diagnostics", []),
                     "observation_id": observation, "modal": window["modal"],
                     "source_revision": self._source_revision, "raster_mode": mode,
-                    "modal_id": self._modal_id, "focused": True}
+                    "modal_id": self._modal_id, "modal_kind": modal_kind, "focused": True}
 
     def grounded_execute(self, action, cancelled):
         """Worker entry point. Pointer proof does not establish widget activation."""
         with self._lock:
-            required = {"type", "x", "y", "source_revision", "expected_window",
-                        "observation_id", "expected"}
-            if (type(action) is not dict or set(action) != required
+            fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
+                      "polyline": {"points", "duration"}}
+            required = {"type", "source_revision", "expected_window", "observation_id", "expected"}
+            if (type(action) is not dict or not isinstance(action.get("type"), str)
+                    or action["type"] not in fields
+                    or set(action) - {"expected_modal"} != required | fields[action["type"]]
                     or self._input_quarantined
-                    or action["type"] != "click"
                     or self._observation is None
                     or action["observation_id"] != self._observation
                     or type(action["source_revision"]) is not int
                     or action["source_revision"] != self._source_revision
                     or not 0 <= self._clock() - self._captured_at <= 5
                     or self._window_at_observation is None
-                    or self._window_at_observation["modal"]):
+                    or action["expected_window"] != self._window_at_observation):
                 raise PrimitiveError("rejected", "Stale or unsupported grounded action")
+            if self._window_at_observation["modal"]:
+                if (self._modal_kind != "safe_application" or self._modal_id is None
+                        or action.get("expected_modal") != self._modal_id):
+                    raise PrimitiveError("rejected", "Unexpected or denied application modal")
+            elif "expected_modal" in action:
+                raise PrimitiveError("rejected", "Expected modal is not present")
             expected = action["expected"]
-            if (type(expected) is not dict or set(expected) != {"type", "x", "y"}
-                    or expected["type"] != "pointer_at"
-                    or any(type(action[k]) is not int or type(expected[k]) is not int
-                           or action[k] != expected[k] for k in ("x", "y"))):
-                raise PrimitiveError("rejected", "Unsupported pointer postcondition")
+            visual = type(expected) is dict and expected == {"type": "visual_change"}
+            pointer = (action["type"] == "click" and type(expected) is dict
+                       and set(expected) == {"type", "x", "y"}
+                       and expected["type"] == "pointer_at"
+                       and all(type(action[k]) is int and type(expected[k]) is int
+                               and action[k] == expected[k] for k in ("x", "y")))
+            if not visual and not pointer:
+                raise PrimitiveError("rejected", "Unsupported independently measured postcondition")
+            if action["type"] == "type":
+                bounded_text(action["text"])
+            elif action["type"] == "key":
+                if not isinstance(action["chord"], str) or action["chord"] not in KEYS:
+                    raise PrimitiveError("rejected", "Key chord is not in the allowlist")
+            elif action["type"] == "polyline":
+                points = action["points"]
+                if (type(points) is not list or not 2 <= len(points) <= 256
+                        or any(type(p) is not list or len(p) != 2
+                               or any(type(v) is not int for v in p) for p in points)):
+                    raise PrimitiveError("rejected", "Invalid grounded polyline")
+                finite(action["duration"], 0, 1.0)
+            elif any(type(action[k]) is not int for k in ("x", "y")):
+                raise PrimitiveError("rejected", "Pixel coordinates must be integers")
             # Recheck pixels after controller authorization awaits, before input.
             self._deadline, self._cancelled = self._clock() + 1.75, cancelled
             observed_extent = self._root_extent
@@ -355,9 +477,10 @@ class NativeDesktop:
                 self._observation = None
                 raise PrimitiveError("rejected", "Private pixels changed before input")
             self._guard()
+            before_digest = self._raster_digest.hex()
             receipt = self.execute(action, cancelled)
             self._observation = None
-            receipt["postcondition"] = {"type": "pointer_at", "status": "unavailable"}
+            receipt["postcondition"] = {"type": expected["type"], "status": "unavailable"}
             if not receipt["ok"] or not receipt["released"]:
                 receipt["status"] = "unknown" if receipt["effect_uncertain"] else "unavailable"
                 return receipt
@@ -365,16 +488,39 @@ class NativeDesktop:
             self._cancelled = cancelled
             self._expected = dict(self._window_at_observation)
             try:
+                if visual:
+                    # Allow a dialog/title transition only in the same process,
+                    # independently remeasured after release. Never echo a verdict.
+                    self._guard()
+                    cancelled.wait(0.08)
+                    window = self._window()
+                    same_app = (window["pid"] == self._expected["pid"]
+                                and self._identity(window["pid"]) == self._observed_identity)
+                    after = self._capture()
+                    same_app = (same_app and self._window() == window
+                                and after[1:3] == observed_extent)
+                    self._guard()
+                    after_digest = hashlib.sha256(after[0]).hexdigest()
+                    satisfied = same_app and before_digest != after_digest
+                    receipt["postcondition"] = {
+                        "type": "visual_change", "method": "raster_digest_after_release",
+                        "status": "satisfied" if satisfied else "not_satisfied",
+                        "target_application_matches": same_app,
+                        "actual": {"before_sha256": before_digest, "after_sha256": after_digest}}
+                    receipt["status"] = "verified" if satisfied else "not_satisfied"
+                    return receipt
                 self._assert_window()
                 values = dict(line.split("=", 1) for line in self._run(
                     "getmouselocation", "--shell").splitlines() if "=" in line)
                 actual = {"x": int(values["X"]), "y": int(values["Y"])}
                 self._assert_window()
-                satisfied = (actual == {"x": action["x"], "y": action["y"]}
-                             and int(values["WINDOW"]) == self._expected["id"])
+                target_matches = (self._window_descendant(
+                    int(values["WINDOW"]), self._expected["id"])
+                                  or self._pointer_target(self._expected["id"]))
+                satisfied = actual == {"x": action["x"], "y": action["y"]} and target_matches
                 receipt["postcondition"] = {
                     "type": "pointer_at", "status": "satisfied" if satisfied else "not_satisfied",
-                    "target_window_matches": int(values["WINDOW"]) == self._expected["id"],
+                    "target_window_matches": target_matches,
                     "method": "pointer_query_after_release", "actual": actual}
                 receipt["status"] = "verified" if satisfied else "not_satisfied"
             except Exception:
@@ -407,7 +553,8 @@ class NativeDesktop:
             "getmouselocation", "--shell").splitlines() if "=" in line)
         if (int(values.get("X", -1)), int(values.get("Y", -1))) != (x, y):
             raise PrimitiveError("rejected", "Pointer did not reach the observed target")
-        if int(values.get("WINDOW", 0)) != self._expected["id"]:
+        if not (self._window_descendant(int(values.get("WINDOW", 0)), self._expected["id"])
+                or self._pointer_target(self._expected["id"])):
             raise PrimitiveError("unsupported", "Pointer window is not the exact observed target")
 
     def _physical(self, action):
@@ -423,7 +570,16 @@ class NativeDesktop:
         elif kind == "type":
             text = bounded_text(action.get("text"))
             self._type_dirty = True
-            self._input("type", "--delay", "0", "--", text)
+            # xdotool type does not reliably synthesize LF/Tab in GTK editors.
+            # One bounded native command chain retains ordered text/control events.
+            arguments = []
+            for part in re.split(r"([\n\t])", text):
+                if part in ("\n", "\t"):
+                    arguments.extend(("key", "Return" if part == "\n" else "Tab"))
+                elif part:
+                    arguments.extend(("type", "--delay", "0", "--args", "1", "--", part))
+            if arguments:
+                self._input(*arguments)
         elif kind == "polyline":
             assert self._cancelled is not None  # execute supplies the cancellation event.
             points = action.get("points")
@@ -574,6 +730,7 @@ class NativeDesktop:
                     child.wait(timeout=0.1)
                     return {"ok": False, "status": "failed", "error": "App launch not established"}
                 self._apps[child.pid] = (child, identity[1])
+                self._profile = profile
                 return {"ok": True, "status": "launched", "profile": profile, "pid": child.pid}
             except (OSError, ValueError, subprocess.TimeoutExpired):
                 return {"ok": False, "status": "unsupported", "error": "Approved app unavailable"}

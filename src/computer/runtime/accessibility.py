@@ -51,6 +51,8 @@ class Accessibility:
         self.api: Any | None = None
         self.references = {}
         self.observation_id = None
+        self.status_detail = "not_observed"
+        self.root_diagnostics = []
 
     def _load(self):
         if self.api is None:
@@ -95,7 +97,10 @@ class Accessibility:
                     capabilities.append(action)
         text = ""
         if "Text" in interfaces and "password" not in role.lower():
-            text = (node.get_text_iface().get_text(0, 512) or "")[:512]
+            interface = node.get_text_iface()
+            count = (interface.get_character_count()
+                     if hasattr(interface, "get_character_count") else 512)
+            text = (interface.get_text(0, min(512, max(0, count))) or "")[:512]
         public = {"role": str(role)[:64], "name": name[:128], "text": text,
                   "bounds": dict(zip(("x", "y", "width", "height"), bounds, strict=True)),
                   "states": list(states), "capabilities": capabilities}
@@ -104,6 +109,7 @@ class Accessibility:
     def _window_root(self, window, guard):
         assert self.api is not None  # Called only after _load().
         desktop = self.api.get_desktop(0)
+        self.root_diagnostics = []
         budget = 128
         candidates = []
         for i in range(min(desktop.get_child_count(), 128)):
@@ -120,8 +126,22 @@ class Accessibility:
                     continue
                 fingerprint, _ = self._data(root)
                 bounds = tuple(window[key] for key in ("x", "y", "width", "height"))
-                if (root.get_name() == window["title"] and fingerprint[2] == bounds
-                        and root.get_role_name() in ("frame", "dialog", "window")):
+                self.root_diagnostics.append({"name": (root.get_name() or "")[:128],
+                                              "role": root.get_role_name(),
+                                              "bounds": fingerprint[2]})
+                exact = (root.get_name() == window["title"] and fingerprint[2] == bounds
+                         and root.get_role_name() in ("frame", "dialog", "window"))
+                # GTK describes the WM frame, not xdotool's client geometry.
+                # Require native ancestry geometry and active/modal state.
+                framed = False
+                if not exact:
+                    state = root.get_state_set()
+                    framed = (state.contains(self.api.StateType.ACTIVE)
+                              and state.contains(self.api.StateType.MODAL) == window["modal"]
+                              and root.get_role_name() in (
+                                  "frame", "dialog", "window", "alert", "file chooser")
+                              and fingerprint[2] == self._native_frame_bounds(window, guard))
+                if exact or framed:
                     candidates.append((root, fingerprint))
             if budget <= 0:
                 break
@@ -129,11 +149,30 @@ class Accessibility:
             return candidates[0]
         raise PrimitiveError("unsupported", "No unambiguous active-window AT-SPI root")
 
+    @staticmethod
+    def _native_frame_bounds(window, guard):
+        from Xlib import display as xdisplay  # type: ignore[import-untyped]
+        display = xdisplay.Display(":77")
+        try:
+            node = display.create_resource_object("window", window["id"])
+            for _ in range(64):
+                guard()
+                tree = node.query_tree()
+                if tree.parent.id == tree.root.id:
+                    geometry = node.get_geometry()
+                    return (geometry.x, geometry.y, geometry.width, geometry.height)
+                node = tree.parent
+            return None
+        finally:
+            display.close()
+
     def snapshot(self, window, observation_id, guard):
         self.references.clear()
         self.observation_id = observation_id
+        self.status_detail = "loading"
         try:
             self._load()
+            self.status_detail = "window_root_unavailable"
             root, root_fingerprint = self._window_root(window, guard)
             stack: list[tuple[Any, int, str | None, int | None]] = [(root, 0, None, None)]
             nodes = []
@@ -168,6 +207,7 @@ class Accessibility:
                     raise
                 except Exception:
                     continue
+            self.status_detail = "available"
             return nodes, "available"
         except PrimitiveError as exc:
             if exc.status != "unsupported":

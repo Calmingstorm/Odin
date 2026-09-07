@@ -48,6 +48,7 @@ async def test_capture_uses_request_lower_bound_and_refuses_old_verification(tmp
         observation["frame_metadata"]["source_id"] = "tampered"
         saved = controller._live[grant["session_id"]].observations[observation["observation_id"]]
         assert saved.public()["frame_metadata"]["source_id"] == "opaque"
+        backend.delay = 5.01  # Fresh revalidation deadline, not model-turnaround TTL.
         with pytest.raises(ComputerError, match="stale_observation"):
             await controller.validate_action_binding(
                 controller.store.get_session(grant["session_id"]), observation["observation_id"])

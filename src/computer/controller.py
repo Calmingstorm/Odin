@@ -7,7 +7,8 @@ import time
 import uuid
 from copy import deepcopy
 
-from .actions import click_arguments, click_payload, click_receipt
+from .actions import click_receipt
+from .gui_actions import action_arguments, action_payload, visual_receipt
 from .models import (
     BackendCapabilities,
     BackendObservation,
@@ -17,6 +18,7 @@ from .models import (
     RequestContext,
 )
 from .policy import (
+    DELIVERED_GROUNDING_SECONDS,
     FRAME_FRESH_SECONDS,
     MAX_ACTIONS,
     MAX_INPUT_SECONDS,
@@ -77,6 +79,7 @@ class ComputerController:
         self._actions = asyncio.Lock()
         self._watchdogs: dict[str, asyncio.Task] = {}
         self._delivered_observations: dict[str, str] = {}
+        self._stop_locks: dict[str, asyncio.Lock] = {}
         self.store.recover()
 
     async def _auth(self, context, *, emergency=False):
@@ -116,6 +119,13 @@ class ComputerController:
         await self._stop(sid, "cancelled")
 
     async def _stop(self, sid, state):
+        async with self._stop_locks.setdefault(sid, asyncio.Lock()):
+            current = self.store.get_session(sid)
+            if current.state in {"closed", "cancelled"} and sid not in self._live:
+                return self._public_session(current)
+            return await self._stop_owned(sid, state)
+
+    async def _stop_owned(self, sid, state):
         grant = self.store.set_state(sid, "quarantined", revoke=True)
         self._delivered_observations.pop(sid, None)
         live = self._live.get(sid)
@@ -160,7 +170,9 @@ class ComputerController:
 
     async def finish_turn(self, context: RequestContext):
         """Release this turn's owned desktop, never a later turn's session."""
-        await self._auth(context, emergency=True)
+        # Revoked input permission cannot prevent trusted transport-owned cleanup.
+        # This method never creates authority and is not a model tool operation.
+        foreground(context)
         grant = self.store.find_session(context)
         if (grant is not None and grant.turn_id == context.turn_id
                 and grant.state in {"starting", "active", "paused", "quarantined"}):
@@ -326,7 +338,8 @@ class ComputerController:
         obs = Observation(oid, grant.session_id, grant.generation,
                           captured, raw.width, raw.height, raw.source, raw.scope,
                           raw.delivered_to_source, raw.focused, raw.modal, evidence,
-                          hashlib.sha256(raw.image_bytes).hexdigest(), metadata)
+                          hashlib.sha256(raw.image_bytes).hexdigest(), metadata,
+                          raw.modal_kind, raw.accessibility)
         live.observations.clear()
         live.observations[obs.observation_id] = obs
         if acknowledge_modal:
@@ -362,15 +375,83 @@ class ComputerController:
         self._delivered_observations[grant.session_id] = obs.observation_id
 
     async def validate_action_binding(self, grant, observation_id):
+        return await self._validate_action_binding(grant, observation_id)
+
+    def _operator_grant(self, context):
+        if context.surface != "webui":
+            raise ComputerError("operator_surface_required")
+        with self.store.lock:
+            row = self.store.db.execute(
+                "SELECT session_id FROM sessions WHERE owner_id=? AND host_id=? "
+                "ORDER BY created_at DESC LIMIT 1", (context.owner_id, context.host_id)).fetchone()
+        if row is None:
+            raise ComputerError("not_found")
+        return self.store.get_session(row[0])
+
+    async def operator_session(self, context, operation):
+        if operation not in {"status", "pause", "stop", "cancel", "close"}:
+            raise ComputerError("unsupported_operation")
+        await self._auth(context, emergency=operation != "pause")
+        grant = self._operator_grant(context)
+        if operation == "status":
+            return self._public_session(grant)
+        if operation == "pause":
+            return await self._pause(grant.session_id)
+        return await self._stop(grant.session_id, "closed" if operation == "close" else "cancelled")
+
+    async def operator_observe(self, context):
+        await self._auth(context)
+        grant = self._operator_grant(context)
+        async with self._actions:
+            obs, image = await self._capture(grant)
+            await self._auth(context)
+            self._active(grant)
+            if not 0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS:
+                raise ComputerError("stale_observation")
+        return {**obs.public(), "image_bytes": image}
+
+    async def read_evidence(self, context, evidence_id):
+        await self._auth(context)
+        if context.surface != "webui":
+            raise ComputerError("operator_surface_required")
+        with self.store.lock:
+            row = self.store.db.execute(
+                "SELECT s.* FROM sessions s JOIN evidence e USING(session_id) "
+                "WHERE evidence_id=? AND owner_id=? AND host_id=?",
+                (evidence_id, context.owner_id, context.host_id)).fetchone()
+        if row is None:
+            raise ComputerError("evidence_unavailable")
+        storage_context = RequestContext(context.owner_id, row["channel_id"], context.turn_id,
+                                         context.host_id, surface="webui")
+        content, metadata = self.store.read_evidence(storage_context, evidence_id)
+        await self._auth(context)
+        return content, metadata
+
+    async def operator_export(self, context, name):
+        await self._auth(context)
+        grant = self._operator_grant(context)
+        name = self.store.validate_name(name)
+        async with self._actions:
+            live = self._active(grant)
+            content = await _bounded(live.backend.export(name), 5)
+            self._active(grant)
+            await self._auth(context)
+            artifact = self.store.put_evidence(grant.session_id, content, kind="export", name=name)
+        _, metadata = await self.read_evidence(context, artifact)
+        return {"artifact_id": artifact, "name": name, "expires_at": metadata["expires_at"]}
+
+    async def _validate_action_binding(self, grant, observation_id):
         """No input: compare full source geometry/consent/focus against fresh capture."""
         live = self._active(grant)
         obs = live.observations.get(observation_id)
-        if obs is None or not 0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS:
+        if (obs is None or not 0 <= self.monotonic() - obs.captured_at
+                <= DELIVERED_GROUNDING_SECONDS):
             raise ComputerError("stale_observation")
         observation_input(grant, live, obs)
         current, _ = await self._capture(grant)
         now = self.monotonic()
-        if not all(0 <= now - frame.captured_at <= FRAME_FRESH_SECONDS for frame in (obs, current)):
+        if (not 0 <= now - obs.captured_at <= DELIVERED_GROUNDING_SECONDS
+                or not 0 <= now - current.captured_at <= FRAME_FRESH_SECONDS):
             raise ComputerError("stale_observation")
         if current.geometry != obs.geometry:
             raise ComputerError("stale_source_binding")
@@ -382,7 +463,7 @@ class ComputerController:
         # Retain the historical empty probe's refusal, not an unconditional gate.
         if type(inp) is dict and not inp:
             raise ComputerError("grounded_actions_unavailable")
-        click_arguments(inp)
+        action_arguments(inp)
         inp = deepcopy(inp)
         payload_hash = canonical_hash(inp)
         async with self._actions:
@@ -403,10 +484,12 @@ class ComputerController:
             if original is None:
                 raise ComputerError("stale_observation")
             # Unexpected modals pause, never become an implicit consent grant.
-            if original.modal is not None:
-                await self._pause(grant.session_id)
-                raise ComputerError("unexpected_modal")
-            click_payload(inp, original)
+            try:
+                action_payload(inp, original)
+            except ComputerError as exc:
+                if exc.code == "unexpected_modal":
+                    await self._pause(grant.session_id)
+                raise
             try:
                 current = await self.validate_action_binding(grant, inp["observation_id"])
             except ComputerError:
@@ -415,11 +498,11 @@ class ComputerController:
                 raise
             if current.image_sha256 != original.image_sha256:
                 raise ComputerError("visual_target_changed")
-            payload, target = click_payload(inp, current)
+            payload, target = action_payload(inp, current)
             await self._auth(context)
             self._active(grant)
-            if not all(0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS
-                       for obs in (original, current)):
+            if (not 0 <= self.monotonic() - original.captured_at <= DELIVERED_GROUNDING_SECONDS
+                    or not 0 <= self.monotonic() - current.captured_at <= FRAME_FRESH_SECONDS):
                 raise ComputerError("stale_observation")
             if not callable(getattr(live.backend, "act", None)):
                 raise ComputerError("grounded_actions_unavailable")
@@ -436,14 +519,27 @@ class ComputerController:
                 self._active(grant)
                 await self._auth(context)
                 self._active(grant)
-                result = click_receipt(raw, current, target)
+                visual = inp["expect"]["type"] == "visual_change"
+                result = (visual_receipt(raw, current) if visual
+                          else click_receipt(raw, current, target))
                 if result["status"] not in {"unknown", "unavailable"}:
                     after, _ = await self._capture(grant)
                     await self._auth(context)
                     self._active(grant)
                     age = self.monotonic() - after.captured_at
-                    if (after.geometry != current.geometry
-                            or not 0 <= age <= FRAME_FRESH_SECONDS):
+                    binding_matches = after.geometry == current.geometry
+                    if visual and result["verification"].get("target_application_matches") is True:
+                        # A confirmed same-app title/modal transition still invalidates
+                        # the old observation. It never permits retargeting another source.
+                        binding_matches = (
+                            after.source.source_id == current.source.source_id
+                            and after.scope == current.scope
+                            and after.width == current.width and after.height == current.height
+                            and after.delivered_to_source == current.delivered_to_source
+                            and after.source.pixel_to_input == current.source.pixel_to_input
+                            and after.source.input_region_id == current.source.input_region_id
+                            and after.focused)
+                    if not binding_matches or not 0 <= age <= FRAME_FRESH_SECONDS:
                         raise ComputerError("postcondition_binding_changed")
                     result["observation_id"] = after.observation_id
                     result["verification"]["evidence_id"] = after.evidence_id

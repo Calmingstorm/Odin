@@ -12,7 +12,7 @@ _REQUIRED = {"session_id", "generation", "consent_generation", "source_id",
 
 def click_arguments(inp):
     """A strict supported subset of the declared computer_act JSON schema."""
-    exact_keys(inp, _REQUIRED | {"x", "y"}, _REQUIRED)
+    exact_keys(inp, _REQUIRED | {"x", "y", "expected_modal"}, _REQUIRED)
     for key in ("session_id", "source_id", "action_id", "observation_id"):
         try:
             opaque_id(inp[key])
@@ -22,7 +22,7 @@ def click_arguments(inp):
         integer(inp[key], 1, 2**63 - 1)
     if inp["operation"] != "click":
         raise ComputerError("unsupported_operation")
-    exact_keys(inp, _REQUIRED | {"x", "y"}, _REQUIRED | {"x", "y"})
+    exact_keys(inp, _REQUIRED | {"x", "y", "expected_modal"}, _REQUIRED | {"x", "y"})
     for key in ("x", "y"):
         integer(inp[key], 0, 1_000_000 - 1)
     expected = inp["expect"]
