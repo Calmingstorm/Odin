@@ -326,7 +326,7 @@ export default {
                 </button>
 
                 <div v-if="isSectionExpanded(section)" :id="'cfgc-section-' + section" class="cfgc-section-body">
-                  <div v-if="!['mcp', 'computer'].includes(section) && searchQuery && sectionSearchHits(section).length" class="cfgc-search-hits">
+                  <div v-if="section !== 'mcp' && searchQuery && sectionSearchHits(section).length" class="cfgc-search-hits">
                     <span>Matched</span>
                     <button v-for="hit in sectionSearchHits(section).slice(0, 5)" :key="hit.path" type="button" @click="focusField(hit.path)">
                       {{ hit.label }} <code>{{ hit.path }}</code>
@@ -348,17 +348,16 @@ export default {
                     </router-link>
                   </div>
 
-                  <div v-else-if="section === 'computer'" class="cfgc-mcp-owner">
-                    <div>
-                      <strong>Computer use has a dedicated control plane</strong>
-                      <p>Enable or disable provisioned computer use, inspect backend capabilities, and stop a desktop task from the Computer page. Target and storage settings are operator-provisioned and require a restart. Input is available only where the backend has passed its safety checks.</p>
-                    </div>
-                    <router-link class="btn btn-ghost text-xs" :to="{ path: '/system', query: { tab: 'computer' } }">
-                      Open Computer <odin-icon name="chevronRight" :size="14" />
-                    </router-link>
-                  </div>
-
                   <div v-else class="cfgc-field-groups">
+                    <div v-if="section === 'computer'" class="cfgc-mcp-owner">
+                      <div>
+                        <strong>Computer provisioning · restart required</strong>
+                        <p>Edit the desired target, storage and launcher policy below, then review and save. Odin keeps its startup settings until a restart, including across disable/enable cycles. Saving does not install dependencies, create storage, grant OS permissions, or start a desktop session. Enable/disable and session controls remain on the Computer page.</p>
+                      </div>
+                      <router-link class="btn btn-ghost text-xs" :to="{ path: '/system', query: { tab: 'computer' } }">
+                        Open Computer <odin-icon name="chevronRight" :size="14" />
+                      </router-link>
+                    </div>
                     <div v-if="section === 'tools' && hasHostsCollection()" class="cfgc-mcp-owner">
                       <span class="cfgc-mcp-owner-icon" aria-hidden="true"><odin-icon name="server" :size="18" /></span>
                       <div>
@@ -394,7 +393,15 @@ export default {
                           </div>
 
                           <div class="cfgc-field-control">
-                            <template v-if="field.structured_container || field.structured_container_child">
+                            <template v-if="field.path === 'computer.enabled'">
+                              <div class="cfgc-structured-summary">
+                                <span>{{ field.value ? 'Enabled' : 'Disabled' }}</span>
+                                <small>Read-only here. Use the Computer page to enable or revoke sessions safely.</small>
+                                <router-link class="btn btn-ghost text-xs" :to="{ path: '/system', query: { tab: 'computer' } }">Open Computer</router-link>
+                              </div>
+                            </template>
+
+                            <template v-else-if="field.structured_container || field.structured_container_child">
                               <div class="cfgc-structured-summary">
                                 <span v-if="field.sensitivity !== 'public'"><odin-icon name="shield" :size="15" /> {{ field.configured ? 'Configured value' : 'Not configured' }}</span>
                                 <span v-else>{{ compactValue(field.value) }}</span>
@@ -1027,6 +1034,7 @@ export default {
     }
 
     function setFieldValue(field, value, options = {}) {
+      if (field.path === 'computer.enabled') return;
       const [section, ...segments] = field.path.split('.');
       recordUndoForField(field.path, Boolean(options.coalesce));
       const current = ensureSectionDraft(section);
@@ -1059,6 +1067,11 @@ export default {
       const raw = inputDrafts.value[field.path];
       lastUndoEdit = { path: null, at: 0 };
       if (raw === '') {
+        if (field.nullable) {
+          endTextInputEdit(field.path);
+          setFieldValue(field, null, { coalesce: true });
+          return;
+        }
         jsonErrors.value = { ...jsonErrors.value, [field.path]: 'Enter a number.' };
         return;
       }
@@ -1080,6 +1093,10 @@ export default {
     function setNumberFieldValue(field, raw) {
       inputDrafts.value = { ...inputDrafts.value, [field.path]: raw };
       if (raw === '') {
+        if (field.nullable) {
+          setFieldValue(field, null, { coalesce: true });
+          return;
+        }
         jsonErrors.value = { ...jsonErrors.value, [field.path]: 'Enter a number.' };
         return;
       }

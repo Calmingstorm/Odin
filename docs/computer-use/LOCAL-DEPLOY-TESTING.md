@@ -151,9 +151,19 @@ install or launch an isolated desktop just to help in an existing application.
 These are alternative `computer` blocks, not two selectable live profiles.
 Environment, platform, display, Xauthority, monitor grant, storage and sudo policy
 are snapshotted at process construction, even when disabled. Switching targets
-requires offline configuration and another explicitly authorized manual restart.
-Generic Config PUT cannot change computer settings. Only enabled/disabled toggles
-are live in **System > Computer**.
+requires another explicitly authorized restart. Administrators can edit these
+desired settings in **Configuration center > Services > Computer**, then use the
+standard review/save and pending-restart flow. `PUT /api/config` accepts partial
+`computer` provisioning objects but rejects `computer.enabled`, even when supplied
+alongside provisioning fields. Enable/disable and session controls remain live in
+**System > Computer** through their dedicated lifecycle endpoints.
+
+Saving provisioning does not attach to a desktop, install dependencies, create or
+migrate storage, or grant OS/sudo permissions. Complete the OS prerequisites above
+separately. Disabling and re-enabling before restart still uses the old target.
+The optional Wayland UID accepts an empty field to unset; zero is a real UID, not
+an unset marker. Platform-specific fields may be prepared before switching targets;
+enable/session admission still validates the selected target's prerequisites.
 
 ### A. Isolated first test
 
