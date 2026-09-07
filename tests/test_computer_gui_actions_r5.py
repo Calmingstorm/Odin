@@ -20,7 +20,11 @@ def changed(payload, *, binding=True, change=True):
 
 
 @pytest.mark.parametrize("operation,fields", [
-    ("type", {"text": "harmless GUI note"}), ("key", {"key": "ctrl+s"}),
+    ("type", {"text": "harmless GUI note é 日本語"}), ("key", {"key": "super+F12"}),
+    ("double_click", {"x": 1, "y": 1}), ("right_click", {"x": 1, "y": 1}),
+    ("middle_click", {"x": 1, "y": 1}),
+    ("scroll", {"x": 1, "y": 1, "direction": "left", "count": 20}),
+    ("polyline", {"points": [[0, 0], [1, 1]], "duration": .1}),
     ("drag", {"points": [[0, 0], [1, 1]], "duration": .1}), ("click", {"x": 1, "y": 1}),
 ])
 async def test_new_actions_pending_before_input_no_replay(tmp_path, operation, fields):
@@ -41,8 +45,8 @@ async def test_new_actions_pending_before_input_no_replay(tmp_path, operation, f
 
 @pytest.mark.parametrize("operation,fields", [
     ("type", {"text": "x" * 513}), ("type", {"text": "\x00"}),
-    ("type", {"text": "\ud800"}), ("key", {"key": "ctrl+alt+t"}),
-    ("key", {"key": "Super_L"}), ("drag", {"points": [[0, 0], [1, 1]], "duration": 1.1}),
+    ("type", {"text": "\ud800"}), ("key", {"key": "ctrl+ctrl+t"}),
+    ("key", {"key": "--window"}), ("drag", {"points": [[0, 0], [1, 1]], "duration": 1.1}),
     ("drag", {"points": [[0, 0], [True, 1]], "duration": 0}),
     ("drag", {"points": [[0, 0]], "duration": 0}),
 ])

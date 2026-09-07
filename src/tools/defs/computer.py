@@ -26,31 +26,19 @@ _DEFINITIONS = [
         "Manage an on-demand desktop task alongside ordinary authorized tools. "
         "Starting or closing a desktop session does not change other tools' availability. "
         "The operator configures the target and backend; unavailable input is never bypassed. "
-        "Isolated tasks use approved offline Drawing/Xed apps. Existing-session access requires "
-        "an explicit current user request. Pause/cancel stops input, not applied effects. "
-        "Attached X11 input supports focused native Xed, Inkscape or LibreOffice Writer only "
-        "(app=writer). Generic LibreOffice, Calc and Draw are not offered and must be refused. "
-        "Writer supports only keyboard note/paragraph/bold and GUI ODT save, not document "
-        "close/reopen, open/new or pointer/menu input. Never attempt those Writer tasks. "
-        "Wayland input offers only focused native Inkscape after a real per-session compositor "
-        "release probe and portal consent. The operator must open the document. "
-        "Wayland dialogs and document open/new/close/reopen are refused; use an already-open "
-        "explicitly authorized scratch file for Save. Other Wayland applications are not offered. "
-        "Writer remains attached-X11 only. Attached applications are never "
-        "launched by this tool; the operator must open the application. Only recognized "
-        "same-process file dialogs are input-eligible (Writer save dialogs only), "
-        "not macros/settings/security prompts. "
-        "Session close detaches; it does not close documents. "
-        "Drawing is capture-only there because interpreter provenance cannot be proved. "
-        "Check returned input_limits: attached typing is printable ASCII, with explicit "
-        "Return/Tab key calls for line breaks. The pointer is shared, not independent. "
-        "Foreground only. Never operate terminals, security prompts or Odin's control plane.",
+        "Use the user's existing desktop applications, menus and documents with an explicit "
+        "current request and supervised consent. Omit app for an existing session; isolated "
+        "tasks launch fixed Drawing/Xed profiles. Check returned input limits and sharing "
+        "capabilities. Pause/cancel releases input, not applied effects; close detaches without "
+        "closing documents. Never operate terminals, credential/security prompts or Odin's "
+        "control plane.",
         {
             "operation": {"type": "string", "enum": [
                 "start", "status", "stop", "pause", "resume", "cancel", "close", "export",
             ]},
             "session_id": _SESSION,
-            "app": {"type": "string", "enum": ["drawing", "xed", "writer", "inkscape"]},
+            "app": {"type": "string", "enum": ["drawing", "xed"],
+                    "description": "Isolated launch profile only; omit for existing sessions."},
             "generation": {"type": "integer", "minimum": 1},
             "name": {"type": "string", "maxLength": 128,
                      "description": "Explicit saved output basename, never a host path."},
@@ -66,7 +54,16 @@ _DEFINITIONS = [
         {"session_id": _SESSION, "generation": {"type": "integer", "minimum": 1},
          "source_id": {"type": "string", "maxLength": 128,
                        "description": "Optional opaque granted source from session sources. "
-                       "Selects one monitor; never a global desktop coordinate plane."}},
+                       "Selects one monitor; never a global desktop coordinate plane."},
+         "crop": {"type": "object", "additionalProperties": False,
+                  "description": "Region in selected SOURCE pixels before downsampling; must "
+                  "fit the source. Action coordinates remain delivered-image pixels.",
+                  "properties": {
+                      "x": {"type": "integer", "minimum": 0, "maximum": 999999},
+                      "y": {"type": "integer", "minimum": 0, "maximum": 999999},
+                      "width": {"type": "integer", "minimum": 1, "maximum": 1000000},
+                      "height": {"type": "integer", "minimum": 1, "maximum": 1000000}},
+                  "required": ["x", "y", "width", "height"]}},
         ["session_id", "generation"],
     ),
     _tool(
@@ -76,17 +73,18 @@ _DEFINITIONS = [
         "the receipt, NEVER repeats input. Unknown outcomes require observation/reconciliation, "
         "not a retry. A visual change or pointer position does not prove task success: observe "
         "again and verify the application result. At most two seconds of input; no held keys "
-        "across calls. Follow application_profile task limits from session status. Writer only "
-        "offers type and these keys: Return, Escape, BackSpace, Delete, space, ctrl+a, ctrl+b, "
-        "ctrl+s, ctrl+shift+s. Refuse Writer close/reopen, open/new, clicks, drags or menu "
-        "navigation; the generic key enum does not override profile limits. "
+        "across calls. Click variants require x,y; scroll requires x,y,direction,count; "
+        "type requires text; key requires key; drag/polyline require points,duration. "
+        "Supply only fields for that operation. Unicode typing and generic keysym chords "
+        "depend on the active keyboard mapping; unsupported input is reported. "
         "No terminal, security-prompt or control-plane actions.",
         {
             "session_id": _SESSION,
             "action_id": {"type": "string", "minLength": 1, "maxLength": 96},
             "observation_id": {"type": "string"},
             "operation": {"type": "string", "enum": [
-                "click", "type", "key", "drag",
+                "click", "double_click", "right_click", "middle_click", "scroll",
+                "type", "key", "drag", "polyline",
             ]},
             "generation": {"type": "integer", "minimum": 1},
             "consent_generation": {"type": "integer", "minimum": 1},
@@ -98,19 +96,17 @@ _DEFINITIONS = [
                   "description": "Delivered pixel index; mapped at center."},
             "text": {"type": "string", "minLength": 1, "maxLength": 512,
                      "description": "Text for the grounded application field, never commands."},
-            "key": {"type": "string", "enum": [
-                "Return", "Escape", "Tab", "BackSpace", "Delete", "space", "Left",
-                "Right", "Up", "Down", "Home", "End", "Page_Up", "Page_Down",
-                "ctrl+a", "ctrl+z", "ctrl+y", "ctrl+s", "ctrl+shift+s", "ctrl+o",
-                "ctrl+n", "ctrl+f", "ctrl+b", "ctrl+i", "ctrl+u",
-                "ctrl+Home", "ctrl+End", "shift+Tab",
-                "shift+Left", "shift+Right", "shift+Up", "shift+Down",
-            ]},
+            "key": {"type": "string", "minLength": 1, "maxLength": 128,
+                    "pattern": "^(?:(?:ctrl|alt|shift|super)\\+){0,4}[A-Za-z0-9_]+$(?![\\s\\S])",
+                    "description": "Keysym with optional ctrl/alt/shift/super prefixes, each "
+                    "at most once; e.g. ctrl+shift+s, F12, XF86AudioMute."},
+            "direction": {"type": "string", "enum": ["up", "down", "left", "right"]},
+            "count": {"type": "integer", "minimum": 1, "maximum": 20},
             "expected_modal": {"type": "string", "maxLength": 128,
                                "description": "Exact observed safe-application modal ID. "
                                "Never authorizes a security prompt or an unknown dialog."},
             "duration": {"type": "number", "minimum": 0, "maximum": 1,
-                         "description": "Drag duration in seconds; required for drag."},
+                         "description": "Duration in seconds; required for drag/polyline."},
             "points": {"type": "array", "minItems": 2, "maxItems": 256, "items": {
                 "type": "array", "minItems": 2, "maxItems": 2,
                 "items": {"type": "integer", "minimum": 0},
@@ -130,6 +126,24 @@ _DEFINITIONS = [
         ["session_id", "generation", "consent_generation", "source_id", "source_revision",
          "action_id", "observation_id", "operation", "expect"],
     ),
+]
+
+_ACTION_FIELDS = {
+    "click": {"x", "y"}, "double_click": {"x", "y"}, "right_click": {"x", "y"},
+    "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
+    "type": {"text"}, "key": {"key"}, "drag": {"points", "duration"},
+    "polyline": {"points", "duration"},
+}
+_ACTION_SCHEMA = _DEFINITIONS[2]["input_schema"]
+_ACTION_SCHEMA["oneOf"] = [
+    {"properties": {"operation": {"const": operation},
+                    **{field: False for field in set().union(*_ACTION_FIELDS.values()) - fields}},
+     "required": sorted(fields)}
+    for operation, fields in _ACTION_FIELDS.items()
+]
+_ACTION_SCHEMA["properties"]["key"]["allOf"] = [
+    {"not": {"pattern": rf"(?:^|\+){modifier}\+(?:.*\+)?{modifier}\+"}}
+    for modifier in ("ctrl", "alt", "shift", "super")
 ]
 
 

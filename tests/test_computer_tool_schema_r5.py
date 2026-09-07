@@ -23,10 +23,10 @@ def test_ordinary_tool_conversion_shape_unchanged_without_explicit_strict_field(
 
 
 def test_public_key_vocabulary_is_executable_by_controller_and_private_backend():
-    from src.computer.gui_actions import KEYS as CONTROLLER_KEYS
-    from src.computer.runtime.primitives import KEYS as NATIVE_KEYS
+    from src.computer.gui_actions import parse_key_chord as controller_parse
+    from src.computer.runtime.primitives import parse_key_chord as native_parse
 
     action = next(tool for tool in computer_definitions() if tool["name"] == "computer_act")
-    declared = set(action["input_schema"]["properties"]["key"]["enum"])
-    assert declared == CONTROLLER_KEYS
-    assert declared <= NATIVE_KEYS
+    assert "enum" not in action["input_schema"]["properties"]["key"]
+    assert controller_parse is native_parse
+    assert native_parse("super+alt+F12") == (("super", "alt"), "F12")

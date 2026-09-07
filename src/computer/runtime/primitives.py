@@ -20,15 +20,21 @@ from .accessibility import Accessibility, PrimitiveError, bounded_text, finite
 XDOTOOL = "/usr/bin/xdotool"
 PROFILES = {"drawing": ("/usr/bin/drawing", "--new-window"),
             "xed": ("/usr/bin/xed", "--standalone", "--new-window")}
-KEYS = frozenset({"Return", "Escape", "Tab", "BackSpace", "Delete", "space", "Left",
-                  "Right", "Up", "Down", "Home", "End", "Page_Up", "Page_Down",
-                  "ctrl+a", "ctrl+c", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+s",
-                  "ctrl+o", "ctrl+n", "ctrl+f", "ctrl+b", "ctrl+i", "ctrl+u",
-                  "ctrl+shift+s", "ctrl+Home", "ctrl+End",
-                  "shift+Tab",
-                  "shift+Left", "shift+Right", "shift+Up", "shift+Down"})
-PHYSICAL = frozenset({"move", "click", "double_click", "scroll", "key", "type", "polyline"})
+KEY_PATTERN = r"(?:(?:ctrl|alt|shift|super)\+){0,4}[A-Za-z0-9_]+"
+PHYSICAL = frozenset({"move", "click", "double_click", "right_click", "middle_click",
+                      "scroll", "key", "type", "polyline"})
 SEMANTIC = frozenset({"invoke", "focus", "set_text", "select", "value"})
+
+
+def parse_key_chord(value):
+    """Parse a bounded keysym chord; native resolution decides availability."""
+    if (type(value) is not str or not 1 <= len(value) <= 128
+            or re.fullmatch(KEY_PATTERN, value) is None):
+        raise ValueError("unsupported_key")
+    *modifiers, keysym = value.split("+")
+    if len(modifiers) != len(set(modifiers)):
+        raise ValueError("unsupported_key")
+    return tuple(modifiers), keysym
 
 
 def sanitize_png(data):
@@ -442,6 +448,9 @@ class NativeDesktop:
         """Worker entry point. Pointer proof does not establish widget activation."""
         with self._lock:
             fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
+                      "double_click": {"x", "y"}, "right_click": {"x", "y"},
+                      "middle_click": {"x", "y"},
+                      "scroll": {"x", "y", "direction", "count"},
                       "polyline": {"points", "duration"}}
             required = {"type", "source_revision", "expected_window", "observation_id", "expected"}
             if (type(action) is not dict or not isinstance(action.get("type"), str)
@@ -474,8 +483,10 @@ class NativeDesktop:
             if action["type"] == "type":
                 bounded_text(action["text"])
             elif action["type"] == "key":
-                if not isinstance(action["chord"], str) or action["chord"] not in KEYS:
-                    raise PrimitiveError("rejected", "Key chord is not in the allowlist")
+                try:
+                    parse_key_chord(action["chord"])
+                except ValueError:
+                    raise PrimitiveError("rejected", "unsupported_key") from None
             elif action["type"] == "polyline":
                 points = action["points"]
                 if (type(points) is not list or not 2 <= len(points) <= 256
@@ -485,6 +496,8 @@ class NativeDesktop:
                 finite(action["duration"], 0, 1.0)
             elif any(type(action[k]) is not int for k in ("x", "y")):
                 raise PrimitiveError("rejected", "Pixel coordinates must be integers")
+            if action["type"] == "scroll":
+                self._scroll(action)
             # Recheck pixels after controller authorization awaits, before input.
             self._deadline, self._cancelled = self._clock() + 1.75, cancelled
             observed_extent = self._root_extent
@@ -579,9 +592,11 @@ class NativeDesktop:
         kind = action["type"]
         if kind == "key":
             chord = action.get("chord")
-            if chord not in KEYS:
-                raise PrimitiveError("rejected", "Key chord is not in the allowlist")
-            keys = chord.split("+")
+            try:
+                modifiers, keysym = parse_key_chord(chord)
+            except ValueError:
+                raise PrimitiveError("rejected", "unsupported_key") from None
+            keys = [*modifiers, keysym]
             for key in keys:
                 self._keys.add(key)
                 self._input("keydown", key)
@@ -621,25 +636,34 @@ class NativeDesktop:
                 self._pointer(*point)
         else:
             point = self._point(action.get("x"), action.get("y"))
-            button = {"left": 1, "middle": 2, "right": 3}.get(action.get("button", "left"))
+            button = {"right_click": 3, "middle_click": 2}.get(kind, 1)
             if button is None:
                 raise PrimitiveError("rejected", "Unsupported mouse button")
-            delta = action.get("delta", 0)
-            if kind == "scroll" and (type(delta) is not int or not 1 <= abs(delta) <= 20):
-                raise PrimitiveError("rejected", "Scroll delta must be a nonzero integer <=20")
+            count = 2 if kind == "double_click" else 1
+            if kind == "scroll":
+                button, count = self._scroll(action)
             self._input("mousemove", *point)
             self._pointer(*point)
             if kind == "move":
                 return
-            count = 2 if kind == "double_click" else abs(delta) if kind == "scroll" else 1
-            if kind == "scroll":
-                button = 4 if delta > 0 else 5
-            for _ in range(count):
+            for index in range(count):
+                if index:
+                    self._guard()
+                    assert self._cancelled is not None
+                    self._cancelled.wait(0.08 if kind == "double_click" else 0.03)
                 self._pointer(*point)
                 self._buttons.add(button)
                 self._input("mousedown", button)
                 self._run("mouseup", button)
                 self._buttons.discard(button)
+
+    @staticmethod
+    def _scroll(action):
+        direction, count = action.get("direction"), action.get("count")
+        if (type(direction) is not str or direction not in {"up", "down", "left", "right"}
+                or type(count) is not int or not 1 <= count <= 20):
+            raise PrimitiveError("rejected", "Invalid scroll direction/count")
+        return {"up": 4, "down": 5, "left": 6, "right": 7}[direction], count
 
     def execute(self, action, cancelled):
         with self._lock:

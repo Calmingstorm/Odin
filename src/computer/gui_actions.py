@@ -7,18 +7,28 @@ from .actions import _REQUIRED, click_arguments, click_payload
 from .geometry import GeometryError, opaque_id
 from .models import ComputerError
 from .policy import exact_keys, integer
+from .runtime.primitives import parse_key_chord
 
-KEYS = frozenset({"Return", "Escape", "Tab", "BackSpace", "Delete", "space", "Left",
-                  "Right", "Up", "Down", "Home", "End", "Page_Up", "Page_Down",
-                  "ctrl+a", "ctrl+z", "ctrl+y", "ctrl+s", "ctrl+shift+s", "ctrl+o",
-                  "ctrl+n", "ctrl+f", "ctrl+b", "ctrl+i", "ctrl+u",
-                  "ctrl+Home", "ctrl+End", "shift+Tab",
-                  "shift+Left", "shift+Right", "shift+Up", "shift+Down"})
+
+def crop_arguments(crop, width=None, height=None):
+    """Validate source-pixel crop shape, then optional selected-source extent."""
+    exact_keys(crop, {"x", "y", "width", "height"}, {"x", "y", "width", "height"})
+    for key in ("x", "y"):
+        integer(crop[key], 0, 999_999)
+    for key in ("width", "height"):
+        integer(crop[key], 1, 1_000_000)
+    if ((width is not None and crop["x"] + crop["width"] > width)
+            or (height is not None and crop["y"] + crop["height"] > height)):
+        raise ComputerError("invalid_bounds")
+    return dict(crop)
 
 
 def action_arguments(inp):
-    fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"key"},
-              "drag": {"points", "duration"}}
+    fields = {"click": {"x", "y"}, "double_click": {"x", "y"},
+              "right_click": {"x", "y"}, "middle_click": {"x", "y"},
+              "scroll": {"x", "y", "direction", "count"},
+              "type": {"text"}, "key": {"key"},
+              "drag": {"points", "duration"}, "polyline": {"points", "duration"}}
     exact_keys(inp, _REQUIRED | set().union(*fields.values()) | {"expected_modal"}, _REQUIRED)
     operation = inp["operation"]
     if type(operation) is not str or operation not in fields:
@@ -39,9 +49,14 @@ def action_arguments(inp):
         return click_arguments(inp)
     if expected != {"type": "visual_change"}:
         raise ComputerError("unsupported_postcondition")
-    if operation == "click":
+    if operation in {"click", "double_click", "right_click", "middle_click", "scroll"}:
         for key in ("x", "y"):
             integer(inp[key], 0, 999_999)
+        if operation == "scroll":
+            if type(inp["direction"]) is not str or inp["direction"] not in {
+                    "up", "down", "left", "right"}:
+                raise ComputerError("invalid_arguments")
+            integer(inp["count"], 1, 20)
     elif operation == "type":
         text = inp["text"]
         if (type(text) is not str or not 1 <= len(text) <= 512
@@ -52,8 +67,10 @@ def action_arguments(inp):
         except UnicodeError:
             raise ComputerError("invalid_text") from None
     elif operation == "key":
-        if type(inp["key"]) is not str or inp["key"] not in KEYS:
-            raise ComputerError("unsupported_key")
+        try:
+            parse_key_chord(inp["key"])
+        except ValueError:
+            raise ComputerError("unsupported_key") from None
     else:
         points, duration = inp["points"], inp["duration"]
         if type(points) is not list or not 2 <= len(points) <= 256:
@@ -86,12 +103,15 @@ def action_payload(inp, observation):
                    ("source_id", "source_revision", "consent_generation")}
         payload.update(type={"drag": "polyline"}.get(inp["operation"], inp["operation"]),
                        expected=dict(inp["expect"]))
-        for key in ("text", "points", "duration"):
+        for key in ("text", "points", "duration", "x", "y", "direction", "count"):
             if key in inp:
                 payload[key] = inp[key]
         if inp["operation"] == "key":
             payload["chord"] = inp["key"]
         try:
+            if "x" in inp:
+                source.input_point(observation.delivered_to_source, inp["x"], inp["y"],
+                                   observation.width, observation.height)
             for point in inp.get("points", []):
                 source.input_point(observation.delivered_to_source, *point,
                                    observation.width, observation.height)
