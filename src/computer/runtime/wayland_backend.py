@@ -510,7 +510,15 @@ class WaylandRuntimeBackend:
             _, metadata, rendered = await self._capture(self._crop)
             image, width, height = rendered.png, rendered.metadata.width, rendered.metadata.height
             fresh_scope = await self._scope_provider.snapshot(metadata)
-            if (width != frame.width or height != frame.height or image != frame.image_bytes
+            stable_pixels = image == frame.image_bytes
+            if not stable_pixels and action["type"] in {
+                    "click", "double_click", "right_click", "middle_click", "scroll", "polyline"}:
+                from ..grounding import pointer_target_stable
+
+                anchor = action["points"][0] if action["type"] == "polyline" else (
+                    action["x"], action["y"])
+                stable_pixels = pointer_target_stable(frame.image_bytes, image, *anchor)
+            if (width != frame.width or height != frame.height or not stable_pixels
                     or _scope_binding(scope) != _scope_binding(fresh_scope)):
                 self._frame = None
                 raise ComputerError("wayland_observation_changed")
