@@ -114,11 +114,16 @@ The build evidence document will separate unit/contract proof, actual runtime
 measurements, and uncompleted release gates. A service returning exit 0 is not
 evidence that drawing, postcondition verification, or containment succeeded.
 
-R6 distinguishes fixed profile eligibility from GUI qualification. Isolated
+R7 narrows fixed profile eligibility to the offered tasks. Isolated
 launch remains Drawing/Xed. Attached X11 profiles may target installed native
-Xed, Inkscape and LibreOffice Writer/Calc/Draw with verified process identity;
+Xed, Inkscape and LibreOffice Writer only (`app=writer`) with verified process identity;
 the tools never launch or close the operator's applications. The handoff names
 the tasks actually measured for each application. Macro IDEs, extensions,
 security prompts and unknown dialogs do not inherit document-window permission.
+Calc/Draw and generic `libreoffice` are refused. Writer's keyboard-only note,
+paragraph, bold and GUI ODT save task remains offered; document close/reopen,
+open/new and pointer/menu input are not offered and are refused by task policy.
+Writer file-dialog scope permits only save dialogs rooted in a Writer document.
+See APPLICATION-QUALIFICATION-R7.md for the retained failure and evidence limits.
 No UI declaration of an eligible profile establishes that an application is
 installed, focused, authorized, input-ready or qualified for an arbitrary task.

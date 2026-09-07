@@ -42,11 +42,13 @@ export default {
           <li v-for="profile in applicationProfiles" :key="profile.id">
             <strong>{{ profile.label }}</strong>: {{ profile.input === 'supported' ? 'Input eligible' : 'Capture only' }}
             <span v-if="profile.input === 'capture_only'"> (application provenance unavailable)</span>
+            <p v-if="profile.task_scope" class="page-lede">{{ profile.task_scope }}</p>
           </li>
         </ul>
         <p v-else class="page-lede">No application profiles reported for this backend.</p>
         <p class="page-lede">Profiles describe supported scope, not installation, focus, permission or task success. Input readiness is checked against a fresh observation.</p>
         <p v-if="status.backend?.environment === 'existing_session'" class="page-lede">Open and focus the application, then ask for help in ordinary chat. Apps stay open when the turn ends. Pointer and keyboard focus are shared. Unknown apps, terminals, security prompts and control-plane actions remain unavailable.</p>
+        <p v-if="status.backend?.environment === 'existing_session'" class="page-lede">LibreOffice Calc/Draw and the generic LibreOffice profile are not offered. Writer is keyboard-only note/bold/save; document close/reopen, open/new and pointer/menu input are refused. Session Stop/Close only detaches, never closes a Writer document.</p>
       </section>
       <p v-if="status.state === 'unavailable'" class="page-lede mb-4">Disabled or unavailable. Check configured state, lifecycle state and backend prerequisites separately.</p>
       <p v-if="status.state === 'paused'" class="page-lede mb-4">Agent input is revoked. This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</p>

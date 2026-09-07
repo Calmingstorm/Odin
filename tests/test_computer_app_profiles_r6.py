@@ -13,7 +13,7 @@ from src.computer.store import ComputerStore
 from tests.test_computer_x11_app_scope_r5 import Display, Window, fake_proc  # noqa: F401
 
 
-@pytest.mark.parametrize("app", ["libreoffice", "inkscape"])
+@pytest.mark.parametrize("app", ["writer", "inkscape"])
 def test_attached_only_profiles_are_not_isolated_launch_commands(app, tmp_path):
     validate_profile(app, platform="x11", environment="existing_session")
     assert app not in APP_PROFILES
@@ -33,13 +33,14 @@ def test_attached_only_profiles_are_not_isolated_launch_commands(app, tmp_path):
         store.close()
 
 
-@pytest.mark.parametrize("app", ["/usr/bin/inkscape", "soffice", "writer", "terminal", "python"])
+@pytest.mark.parametrize("app", ["/usr/bin/inkscape", "soffice", "libreoffice", "calc", "draw",
+                                  "terminal", "python"])
 def test_production_profile_names_are_not_arbitrary(app):
     with pytest.raises(ComputerError, match="unsupported_app"):
         validate_profile(app, platform="x11", environment="existing_session")
 
 
-@pytest.mark.parametrize("app", ["libreoffice", "inkscape", "xed"])
+@pytest.mark.parametrize("app", ["writer", "inkscape", "xed"])
 def test_attached_configuration_enables_native_profiles_only(app):
     backend = X11AttachedBackend(display_name=":177", monitor_names=["screen"],
                                  app_profile=app, input_enabled=True)
@@ -50,14 +51,14 @@ def test_attached_configuration_enables_native_profiles_only(app):
     assert capture.input_blocker == "attached_application_provenance_unavailable"
 
 
-@pytest.mark.parametrize("app", ["libreoffice", "inkscape"])
+@pytest.mark.parametrize("app", ["writer", "inkscape"])
 def test_actual_interpreter_never_proves_native_identity(app):
     with pytest.raises(scope.ScopeFailure):
         scope._process_identity(os.getpid(), app)
 
 
 @pytest.mark.parametrize("app,path", [
-    ("libreoffice", "/usr/lib/libreoffice/program/soffice.bin"),
+    ("writer", "/usr/lib/libreoffice/program/soffice.bin"),
     ("inkscape", "/usr/bin/inkscape"),
 ])
 def test_native_identity_requires_trusted_executable(fake_proc, monkeypatch, app, path):  # noqa: F811
@@ -82,6 +83,7 @@ def test_native_identity_requires_trusted_executable(fake_proc, monkeypatch, app
 
 def app_scope(monkeypatch, profile, wm_class):
     display = Display()
+    wm_class = "soffice" if wm_class == "writer" else wm_class
     display.target.props["WM_CLASS"] = wm_class.encode()
     monkeypatch.setattr(scope, "_process_identity", lambda pid, profile: {
         "pid": pid, "uid": 65534, "start_ticks": 101, "exe": "native"})
@@ -92,8 +94,11 @@ def app_scope(monkeypatch, profile, wm_class):
 @pytest.mark.parametrize("kind", ["writer", "calc", "draw"])
 def test_office_document_surfaces(monkeypatch, kind):
     _, checker, monitor = app_scope(
-        monkeypatch, "libreoffice", f"libreoffice\0libreoffice-{kind}\0")
-    assert checker.snapshot(monitor)["modal_kind"] is None
+        monkeypatch, "writer", f"libreoffice\0libreoffice-{kind}\0")
+    if kind == "writer":
+        assert checker.snapshot(monitor)["modal_kind"] is None
+    else:
+        assert checker.snapshot(monitor) is None
 
 
 @pytest.mark.parametrize("wm_class,title", [
@@ -103,13 +108,13 @@ def test_office_document_surfaces(monkeypatch, kind):
     ("libreoffice-writer", "Terminal"), ("libreoffice-writer", "Odin"),
 ])
 def test_office_non_document_and_sensitive_windows_denied(monkeypatch, wm_class, title):
-    display, checker, monitor = app_scope(monkeypatch, "libreoffice", wm_class)
+    display, checker, monitor = app_scope(monkeypatch, "writer", wm_class)
     display.target.props["WM_NAME"] = title.encode()
     assert checker.snapshot(monitor) is None
 
 
 @pytest.mark.parametrize("profile,wm_class", [
-    ("libreoffice", "libreoffice-writer"), ("inkscape", "inkscape"),
+    ("writer", "libreoffice-writer"), ("inkscape", "inkscape"),
 ])
 @pytest.mark.parametrize("title,expected", [("Save As", "safe_application"),
                                            ("Unknown", "unrecognized"),
@@ -134,12 +139,12 @@ def test_tool_catalogue_contains_new_profiles_without_launch_claim():
     from src.tools.defs.computer import _DEFINITIONS
     definition = _DEFINITIONS[0]
     assert set(definition["input_schema"]["properties"]["app"]["enum"]) == {
-        "drawing", "xed", "libreoffice", "inkscape"}
+        "drawing", "xed", "writer", "inkscape"}
     assert "attached-X11 only" in definition["description"]
     assert "operator must open the application" in definition["description"]
 
 
-@pytest.mark.parametrize("app", ["libreoffice", "inkscape"])
+@pytest.mark.parametrize("app", ["writer", "inkscape"])
 def test_production_integration_validates_environment_before_building_backend(app):
     from src.computer.integration import ComputerIntegration
 
@@ -157,7 +162,7 @@ def test_production_integration_validates_environment_before_building_backend(ap
         integration._backend("/usr/bin/inkscape")
 
 
-@pytest.mark.parametrize("app", ["libreoffice", "inkscape"])
+@pytest.mark.parametrize("app", ["writer", "inkscape"])
 async def test_controller_accepts_attached_profile_but_not_isolated_adapter(tmp_path, app):
     from src.computer.controller import ComputerController
     from tests.test_computer_attached_controller_r5 import Attached
@@ -180,7 +185,7 @@ async def test_controller_accepts_attached_profile_but_not_isolated_adapter(tmp_
 
 
 @pytest.mark.parametrize("profile,wm_class", [
-    ("libreoffice", "libreoffice-writer"), ("inkscape", "inkscape"),
+    ("writer", "libreoffice-writer"), ("inkscape", "inkscape"),
 ])
 def test_unparented_dialog_never_becomes_safe(monkeypatch, profile, wm_class):
     display, checker, monitor = app_scope(monkeypatch, profile, wm_class)
@@ -198,7 +203,7 @@ def test_inkscape_sensitive_nonmodal_windows_denied(monkeypatch, title):
 
 
 @pytest.mark.parametrize("profile,wm_class", [
-    ("libreoffice", "libreoffice-writer"), ("inkscape", "inkscape"),
+    ("writer", "libreoffice-writer"), ("inkscape", "inkscape"),
 ])
 def test_spoofed_class_wm_pid_or_missing_xres_cannot_authorize(monkeypatch, profile, wm_class):
     display, checker, monitor = app_scope(monkeypatch, profile, wm_class)
@@ -214,7 +219,7 @@ def test_spoofed_class_wm_pid_or_missing_xres_cannot_authorize(monkeypatch, prof
 
 
 def test_office_file_dialog_from_start_center_not_eligible(monkeypatch):
-    display, checker, monitor = app_scope(monkeypatch, "libreoffice", "libreoffice")
+    display, checker, monitor = app_scope(monkeypatch, "writer", "libreoffice")
     main = Window(display, 30, display.root)
     main.props = {"WM_STATE": [1, 0], "WM_CLASS": b"libreoffice-startcenter"}
     display.windows[30], display.owners[30] = main, 1234
@@ -222,7 +227,7 @@ def test_office_file_dialog_from_start_center_not_eligible(monkeypatch):
     checker._atom = lambda name: 700 if name == "_NET_WM_WINDOW_TYPE_DIALOG" else atom(name)
     display.target.props.update({"WM_NAME": b"Open", "WM_TRANSIENT_FOR": [30],
                                 "_NET_WM_WINDOW_TYPE": [700]})
-    assert checker.snapshot(monitor)["modal_kind"] == "unrecognized"
+    assert checker.snapshot(monitor) is None
 
 
 def test_formatting_key_contract_is_identical_in_schema_and_guardian():
@@ -243,7 +248,7 @@ def test_formatting_key_contract_is_identical_in_schema_and_guardian():
 
 
 @pytest.mark.parametrize("profile,document_class", [
-    ("libreoffice", "libreoffice-writer"), ("inkscape", "inkscape"),
+    ("writer", "libreoffice-writer"), ("inkscape", "inkscape"),
 ])
 @pytest.mark.parametrize("intermediate_title,expected", [
     ("Unknown action dialog", "unrecognized"), ("Save As", "safe_application"),
@@ -254,14 +259,15 @@ def test_unknown_transient_cannot_launder_safe_file_child(
     main = Window(display, 30, display.root)
     main.props = {"WM_STATE": [1, 0], "WM_CLASS": document_class.encode()}
     intermediate = Window(display, 40, display.root)
-    intermediate.props = {"WM_STATE": [1, 0], "WM_CLASS": profile.encode(),
+    intermediate.props = {"WM_STATE": [1, 0],
+                          "WM_CLASS": ("soffice" if profile == "writer" else profile).encode(),
                           "WM_NAME": intermediate_title.encode(), "WM_TRANSIENT_FOR": [30],
                           "_NET_WM_WINDOW_TYPE": [700]}
     for window in [main, intermediate]:
         display.windows[window.id], display.owners[window.id] = window, 1234
     atom = checker._atom
     checker._atom = lambda name: 700 if name == "_NET_WM_WINDOW_TYPE_DIALOG" else atom(name)
-    display.target.props.update({"WM_NAME": b"Open", "WM_TRANSIENT_FOR": [40],
+    display.target.props.update({"WM_NAME": b"Save", "WM_TRANSIENT_FOR": [40],
                                 "_NET_WM_WINDOW_TYPE": [700]})
     snapshot = checker.snapshot(monitor)
     assert snapshot["modal_kind"] == expected
@@ -270,13 +276,13 @@ def test_unknown_transient_cannot_launder_safe_file_child(
             checker.assert_snapshot(snapshot, monitor)
     else:
         assert checker.assert_snapshot(snapshot, monitor) == snapshot
-        intermediate.props["WM_NAME"] = b"Open"
+        intermediate.props["WM_NAME"] = b"Save"
         with pytest.raises(scope.ScopeFailure):
             checker.assert_snapshot(snapshot, monitor)
 
 
 @pytest.mark.parametrize("profile,document_class", [
-    ("libreoffice", "libreoffice-writer"), ("inkscape", "inkscape"),
+    ("writer", "libreoffice-writer"), ("inkscape", "inkscape"),
 ])
 def test_final_transient_ancestor_must_be_nonmodal_document(monkeypatch, profile, document_class):
     display, checker, monitor = app_scope(monkeypatch, profile, profile)
@@ -295,7 +301,7 @@ def test_final_transient_ancestor_must_be_nonmodal_document(monkeypatch, profile
 
 @pytest.mark.parametrize("profile,wm_class,expected", [
     ("inkscape", "org.inkscape.Inkscape\0Inkscape\0", "safe_application"),
-    ("libreoffice", "libreoffice-writer", "unrecognized"),
+    ("writer", "libreoffice-writer", "unrecognized"),
 ])
 def test_measured_inkscape_save_title_is_profile_specific(monkeypatch, profile, wm_class, expected):
     display, checker, monitor = app_scope(monkeypatch, profile, wm_class)

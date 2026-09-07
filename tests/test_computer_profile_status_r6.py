@@ -10,7 +10,7 @@ from src.config.schema import Config
 @pytest.mark.parametrize("environment,platform,expected", [
     ("isolated", "x11", {"drawing": "supported", "xed": "supported"}),
     ("existing_session", "x11", {"drawing": "capture_only", "xed": "supported",
-                                 "inkscape": "supported", "libreoffice": "supported"}),
+                                 "inkscape": "supported", "writer": "supported"}),
     ("existing_session", "wayland", {}),
 ])
 def test_profile_status_is_pure_declaration(environment, platform, expected):

@@ -28,10 +28,15 @@ _DEFINITIONS = [
         "The operator configures the target and backend; unavailable input is never bypassed. "
         "Isolated tasks use approved offline Drawing/Xed apps. Existing-session access requires "
         "an explicit current user request. Pause/cancel stops input, not applied effects. "
-        "Attached X11 input supports focused native Xed, Inkscape or LibreOffice Writer/Calc/Draw "
-        "document windows (app=libreoffice). LibreOffice/Inkscape are attached-X11 only, never "
+        "Attached X11 input supports focused native Xed, Inkscape or LibreOffice Writer only "
+        "(app=writer). Generic LibreOffice, Calc and Draw are not offered and must be refused. "
+        "Writer supports only keyboard note/paragraph/bold and GUI ODT save, not document "
+        "close/reopen, open/new or pointer/menu input. Never attempt those Writer tasks. "
+        "Writer/Inkscape are attached-X11 only, never "
         "launched by this tool; the operator must open the application. Only recognized "
-        "same-process file dialogs are input-eligible, not macros/settings/security prompts. "
+        "same-process file dialogs are input-eligible (Writer save dialogs only), "
+        "not macros/settings/security prompts. "
+        "Session close detaches; it does not close documents. "
         "Drawing is capture-only there because interpreter provenance cannot be proved. "
         "Check returned input_limits: attached typing is printable ASCII, with explicit "
         "Return/Tab key calls for line breaks. The pointer is shared, not independent. "
@@ -41,7 +46,7 @@ _DEFINITIONS = [
                 "start", "status", "stop", "pause", "resume", "cancel", "close", "export",
             ]},
             "session_id": _SESSION,
-            "app": {"type": "string", "enum": ["drawing", "xed", "libreoffice", "inkscape"]},
+            "app": {"type": "string", "enum": ["drawing", "xed", "writer", "inkscape"]},
             "generation": {"type": "integer", "minimum": 1},
             "name": {"type": "string", "maxLength": 128,
                      "description": "Explicit saved output basename, never a host path."},
@@ -67,7 +72,11 @@ _DEFINITIONS = [
         "the receipt, NEVER repeats input. Unknown outcomes require observation/reconciliation, "
         "not a retry. A visual change or pointer position does not prove task success: observe "
         "again and verify the application result. At most two seconds of input; no held keys "
-        "across calls. No terminal, security-prompt or control-plane actions.",
+        "across calls. Follow application_profile task limits from session status. Writer only "
+        "offers type and these keys: Return, Escape, BackSpace, Delete, space, ctrl+a, ctrl+b, "
+        "ctrl+s, ctrl+shift+s. Refuse Writer close/reopen, open/new, clicks, drags or menu "
+        "navigation; the generic key enum does not override profile limits. "
+        "No terminal, security-prompt or control-plane actions.",
         {
             "session_id": _SESSION,
             "action_id": {"type": "string", "minLength": 1, "maxLength": 96},

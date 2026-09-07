@@ -24,15 +24,18 @@ _DENIED = re.compile(
     r"credential|pinentry|keyring|sudo|odin|command prompt|\bshell\b", re.I)
 _FILE_DIALOGS = frozenset({"open", "open file", "open image", "save", "save as", "save as…",
                            "save image"})
-_PROFILE_FILE_DIALOGS = {"inkscape": _FILE_DIALOGS | {"select file to save to"}}
+_PROFILE_FILE_DIALOGS = {
+    "inkscape": _FILE_DIALOGS | {"select file to save to"},
+    "writer": frozenset({"save", "save as", "save as…"}),
+}
 _NATIVE_EXECUTABLES = {
     "xed": ("/usr/bin/xed", "/usr/libexec/xed"),
-    "libreoffice": ("/usr/lib/libreoffice/program/soffice.bin",),
+    "writer": ("/usr/lib/libreoffice/program/soffice.bin",),
     "inkscape": ("/usr/bin/inkscape",),
 }
-_LIBREOFFICE_DOCUMENT_CLASSES = frozenset({
-    "libreoffice-writer", "libreoffice-calc", "libreoffice-draw",
-})
+_WRITER_DOCUMENT_CLASSES = frozenset({"libreoffice-writer"})
+_OFFICE_COMPONENT_DENIED = re.compile(
+    r"\blibreoffice-(?!writer\b)[a-z]+\b", re.I)
 _NATIVE_DOCUMENT_DENIED = re.compile(
     r"macro|\bbasic\b|script|certificate|digital signature|extension|options|"
     r"preferences|settings|customiz|database|recovery|repair|overwrite|replace|"
@@ -176,9 +179,11 @@ class AppScope:
         wm_class = self._text(window, "WM_CLASS")
         if any(_DENIED.search(text) for text in (modern_title, legacy_title, wm_class)):
             raise ScopeFailure("application_scope_unavailable")
-        if self.profile in {"libreoffice", "inkscape"} and any(
+        if self.profile in {"writer", "inkscape"} and any(
                 _NATIVE_DOCUMENT_DENIED.search(text)
                 for text in (modern_title, legacy_title, wm_class)):
+            raise ScopeFailure("application_scope_unavailable")
+        if self.profile == "writer" and _OFFICE_COMPONENT_DENIED.search(wm_class):
             raise ScopeFailure("application_scope_unavailable")
         # Metadata is used only for rejection/classification, never PID approval.
         # Harmless document title changes (dirty asterisk) are not source changes.
@@ -295,8 +300,8 @@ class AppScope:
         file_dialogs = _PROFILE_FILE_DIALOGS.get(self.profile, _FILE_DIALOGS)
         modal = bool(transient or self._atom("_NET_WM_STATE_MODAL") in states
                      or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
-        if (self.profile == "libreoffice" and not modal
-                and not _LIBREOFFICE_DOCUMENT_CLASSES.intersection(wm_class.casefold().split())):
+        if (self.profile == "writer" and not modal
+                and not _WRITER_DOCUMENT_CLASSES.intersection(wm_class.casefold().split())):
             # Native soffice also owns the start center, macro IDE and settings.
             # Metadata only narrows scope; it never establishes process identity.
             raise ScopeFailure("application_scope_unavailable")
@@ -318,7 +323,7 @@ class AppScope:
             if _xid(actual) != _xid(cursor) or self._pid(cursor) != pid:
                 raise ScopeFailure("application_scope_unavailable")
             parent_title, parent_class, parent_digest = self._metadata(cursor)
-            if self.profile in {"libreoffice", "inkscape"}:
+            if self.profile in {"writer", "inkscape"}:
                 parent_types = self._values(cursor, "_NET_WM_WINDOW_TYPE")
                 parent_states = self._values(cursor, "_NET_WM_STATE")
                 parent_modal = bool(
@@ -327,7 +332,7 @@ class AppScope:
                     or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in parent_types)
                 classes = set(parent_class.casefold().split())
                 permitted_classes = ({"inkscape"} if self.profile == "inkscape" else
-                                     {"libreoffice", "soffice", *_LIBREOFFICE_DOCUMENT_CLASSES})
+                                     {"libreoffice", "soffice", *_WRITER_DOCUMENT_CLASSES})
                 if parent_modal:
                     chain_dialogs_safe &= (
                         bool(self._values(cursor, "WM_TRANSIENT_FOR"))
@@ -337,7 +342,7 @@ class AppScope:
                         and all(value in allowed_types for value in parent_types))
                 else:
                     document_classes = ({"inkscape"} if self.profile == "inkscape" else
-                                        _LIBREOFFICE_DOCUMENT_CLASSES)
+                                        _WRITER_DOCUMENT_CLASSES)
                     chain_dialogs_safe &= bool(classes & document_classes)
                 parent_attrs = cursor.get_attributes()
                 chain_dialogs_safe &= (parent_attrs.map_state == X.IsViewable
@@ -352,14 +357,14 @@ class AppScope:
             chain.append(_xid(cursor))
         else:
             raise ScopeFailure("application_scope_unavailable")
-        dialog_classes = ({self.profile} if self.profile != "libreoffice" else
-                          {"libreoffice", "soffice", *_LIBREOFFICE_DOCUMENT_CLASSES})
+        dialog_classes = ({self.profile} if self.profile != "writer" else
+                          {"libreoffice", "soffice", *_WRITER_DOCUMENT_CLASSES})
         safe_dialog = (bool(chain) and chain_dialogs_safe and title.casefold() in file_dialogs
                        and bool(dialog_classes.intersection(wm_class.casefold().split()))
                        and self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
-        if self.profile == "libreoffice" and chain:
+        if self.profile == "writer" and chain:
             safe_dialog = safe_dialog and bool(
-                _LIBREOFFICE_DOCUMENT_CLASSES.intersection(parent_class.casefold().split()))
+                _WRITER_DOCUMENT_CLASSES.intersection(parent_class.casefold().split()))
         evidence = {"topology": topology, "source_rect": source,
                     "source_origin": source[:2],
                     "window": _xid(target), "focus_window": _xid(focused),

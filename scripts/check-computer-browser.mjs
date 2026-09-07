@@ -103,14 +103,18 @@ try {
   applicationProfiles = [
     { id: 'drawing', label: 'Drawing', input: 'capture_only' },
     { id: 'inkscape', label: 'Inkscape', input: 'supported' },
-    { id: 'libreoffice', label: 'LibreOffice Writer / Calc / Draw', input: 'supported' },
+    { id: 'writer', label: 'LibreOffice Writer only', input: 'supported',
+      task_scope: 'Keyboard-only Writer note and save. Close/reopen is not offered; save evidence is not reopen evidence.' },
     { id: 'xed', label: 'Xed', input: 'supported' },
   ];
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading && view.status.backend.environment === 'existing_session');
   assert.match(await applications.innerText(), /Drawing: Capture only/);
   assert.match(await applications.innerText(), /Inkscape: Input eligible/);
-  assert.match(await applications.innerText(), /LibreOffice Writer \/ Calc \/ Draw: Input eligible/);
+  assert.match(await applications.innerText(), /LibreOffice Writer only: Input eligible/);
+  assert.match(await applications.innerText(), /Close\/reopen is not offered/);
+  assert.match(await applications.innerText(), /Calc\/Draw and the generic LibreOffice profile are not offered/);
+  assert.match(await applications.innerText(), /pointer\/menu input are refused/);
   assert.match(await applications.innerText(), /Pointer and keyboard focus are shared/);
   assert.match(await lifecycle.innerText(), /Input unavailable/);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, 0, 'profile listing never captures');
