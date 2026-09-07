@@ -5,7 +5,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 from types import SimpleNamespace as NS  # noqa: N814
-from unittest.mock import MagicMock, Mock
+from unittest.mock import MagicMock, Mock, call
 
 import pytest
 
@@ -83,6 +83,35 @@ def test_sender_lifecycle(modules):
     sender.close()
     lib.ei_device_stop_emulating.assert_called_once_with(20)
     assert sender.ctx is None
+    # Keep the real hold/release/fresh/escape/frame paths; only libei is fake.
+    emission_names = {"ei_device_pointer_motion_absolute", "ei_device_button_button",
+                      "ei_device_keyboard_key", "ei_device_frame"}
+    assert [entry for entry in lib.mock_calls if entry[0] in emission_names] == [
+        call.ei_device_pointer_motion_absolute(20, 250.0, 250.0),
+        call.ei_device_frame(20, 123),
+        call.ei_device_button_button(20, 272, True),
+        call.ei_device_frame(20, 123),
+        call.ei_device_keyboard_key(20, 42, True),
+        call.ei_device_frame(20, 123),
+        call.ei_device_button_button(20, 272, False),
+        call.ei_device_frame(20, 123),
+        call.ei_device_keyboard_key(20, 42, False),
+        call.ei_device_frame(20, 123),
+        call.ei_device_pointer_motion_absolute(20, 250.0, 250.0),
+        call.ei_device_frame(20, 123),
+        call.ei_device_button_button(20, 272, True),
+        call.ei_device_frame(20, 123),
+        call.ei_device_button_button(20, 272, False),
+        call.ei_device_frame(20, 123),
+        call.ei_device_keyboard_key(20, 30, True),
+        call.ei_device_frame(20, 123),
+        call.ei_device_keyboard_key(20, 30, False),
+        call.ei_device_frame(20, 123),
+        call.ei_device_keyboard_key(20, 1, True),
+        call.ei_device_frame(20, 123),
+        call.ei_device_keyboard_key(20, 1, False),
+        call.ei_device_frame(20, 123),
+    ]
 
 
 @pytest.mark.parametrize('failure', ['new', 'setup', 'fd'])

@@ -130,10 +130,61 @@ def test_behavior_refusal(harness, code, expected):
     assert result.probe_scope == "same_stack_disposable"
 
 
-def test_cancel_propagates_and_cleans(harness):
+def test_cancel_during_spawn_propagates(harness):
     harness.spawn.side_effect = asyncio.CancelledError()
     with pytest.raises(asyncio.CancelledError):
         asyncio.run(p.qualify(harness.ident))
+    harness.cleanup.assert_not_awaited()
+    harness.close.assert_not_called()
+
+
+@pytest.mark.parametrize("phase", ["readiness", "output"])
+def test_cancel_propagates_and_cleans(harness, phase):
+    h = harness
+
+    async def scenario():
+        entered = asyncio.Event()
+        original_spawn = h.spawn.side_effect
+        record = AsyncMock()
+
+        async def blocked_read(*args):
+            entered.set()
+            await asyncio.Future()
+
+        async def spawn(*args, **kwargs):
+            proc = await original_spawn(*args, **kwargs)
+            proc.returncode = None
+            target = "readline" if phase == "readiness" else "read"
+            setattr(proc.stdout, target, AsyncMock(side_effect=blocked_read))
+            return proc
+
+        h.spawn.side_effect = spawn
+        task = asyncio.create_task(p.GnomeSameStackQualifier(record_spawn=record)(h.ident))
+        try:
+            await asyncio.wait_for(entered.wait(), 3)
+            assert not task.done()
+            h.cleanup.assert_not_awaited()
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 3)
+            assert task.cancelled()
+            h.cleanup.assert_awaited_once_with(h.proc, None if phase == "readiness" else 9876)
+            assert h.cleanup.await_args.args[0] is h.proc
+            if phase == "output":
+                record.assert_awaited_once_with(4321)
+                h.close.assert_called_once_with(9876)
+                h.proc.stdin.drain.assert_awaited_once()
+            else:
+                record.assert_not_awaited()
+                h.close.assert_not_called()
+                h.proc.stdin.write.assert_not_called()
+        finally:
+            if not task.done():
+                task.cancel()
+                with pytest.raises(asyncio.CancelledError):
+                    await asyncio.wait_for(task, 3)
+
+    asyncio.run(scenario())
 
 
 @pytest.mark.parametrize("changes,code", [({"binding_digest": "bad"}, "binding_invalid"),

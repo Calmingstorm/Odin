@@ -242,9 +242,21 @@ def test_r10_helper_dispatch_on_private_socket(monkeypatch):
             return self._close_receipt
 
     monkeypatch.setattr(m, "_PortalWorker", Worker)
+    readers = []
+
+    def tracked_thread(*args, **kwargs):
+        # Local module proxy, not a global threading patch. A shutdown regression
+        # must fail this test without keeping the pytest interpreter alive.
+        kwargs["daemon"] = True
+        reader = threading.Thread(*args, **kwargs)
+        readers.append(reader)
+        return reader
+
+    monkeypatch.setattr(m, "threading", NS(**(vars(threading) | {"Thread": tracked_thread})))
     parent, child = socket.socketpair()
     parent.settimeout(3)
-    thread = threading.Thread(target=m._helper, args=(child.detach(), "unix:path=/fake", 1000))
+    thread = threading.Thread(target=m._helper, args=(child.detach(), "unix:path=/fake", 1000),
+                              daemon=True)
     thread.start()
     try:
 
@@ -257,9 +269,22 @@ def test_r10_helper_dispatch_on_private_socket(monkeypatch):
         assert request("capture", node_id=7)[1] == b"PNG"
         assert "unknown" in request("invalid")[0]["error"]
         assert request("close")[0]["result"]["closed"]
+        # Assert native shutdown before test fallback can conceal a regression.
+        thread.join(3)
+        assert not thread.is_alive()
+        assert len(readers) == 1 and readers[0].name == "wayland-portal-commands"
+        readers[0].join(3)
+        assert not readers[0].is_alive()
     finally:
+        # Cooperative EOF wakes the command reader on any earlier assertion failure.
+        try:
+            parent.shutdown(socket.SHUT_RDWR)
+        except OSError:
+            pass
         parent.close()
         thread.join(3)
+        for reader in readers:
+            reader.join(3)
     assert not thread.is_alive() and workers[0].closed >= 1
 
 
