@@ -192,6 +192,29 @@ def test_reply_extra_private_fields_are_discarded(provider):
     assert "global_x" not in result
 
 
+@pytest.mark.parametrize("field", ["title", "wm_class"])
+@pytest.mark.parametrize("text", ["Terminal", "Password", "Polkit", "Keyring", "Pinentry",
+                                  "Authentication", "sudo", "Odin", "Security"])
+def test_shared_denied_class_boundary(provider, field, text):
+    provider.mutate = lambda result: result | {field: text}
+    with pytest.raises(scope.WaylandScopeFailure, match="focus_unavailable"):
+        asyncio.run(provider.snapshot(SOURCE))
+
+
+def test_ordinary_portal_dialog_records_modal_provenance(provider):
+    from src.computer.provenance import canonical_application_provenance
+
+    provider.mutate = lambda result: result | {
+        "title": "Choose Folder", "wm_class": "xdg-desktop-portal-gtk", "modal": True}
+    result = asyncio.run(provider.snapshot(SOURCE))
+    assert result["modal"] and result["modal_kind"] == "safe_application"
+    assert len(result["modal_title_digest"]) == 64
+    assert "Choose Folder" not in str(result)
+    evidence = canonical_application_provenance(result)
+    assert evidence["trusted_executable"] is False
+    assert evidence["wm_class"] == "xdg-desktop-portal-gtk"
+
+
 @pytest.mark.parametrize("address", ["", "unix:abstract=/tmp/bus", "tcp:host=localhost",
                                      "unix:path=/tmp/a;unix:path=/tmp/b"])
 def test_no_ambient_or_remote_bus(address):

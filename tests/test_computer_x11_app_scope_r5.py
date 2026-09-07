@@ -316,6 +316,33 @@ def test_proc_arbitrary_executable_accepted(fake_proc):
     assert scope._process_identity(1234)["exe"] == "/usr/bin/true"
 
 
+def test_proc_read_twice_detects_argv_change(fake_proc, monkeypatch):
+    original = scope._trusted_file
+    reads = 0
+
+    def change_after_first_read(path):
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            (fake_proc / "cmdline").write_bytes(b"changed argv\0")
+        return original(path)
+
+    monkeypatch.setattr(scope, "_trusted_file", change_after_first_read)
+    with pytest.raises(scope.ScopeFailure, match="application_identity_changed"):
+        scope._process_identity(1234)
+
+
+def test_user_installed_executable_is_evidence_not_refusal(fake_proc):
+    executable = fake_proc.parent / "user-app"
+    executable.write_bytes(b"fixture")
+    executable.chmod(0o777)
+    (fake_proc / "exe").unlink()
+    (fake_proc / "exe").symlink_to(executable)
+    result = scope._process_identity(1234)
+    assert result["exe"] == str(executable)
+    assert result["trusted_executable"] is False
+
+
 @pytest.mark.parametrize("cmdline", [
     b"/usr/bin/python3\0/usr/bin/drawing\0",
     b"/usr/bin/python3\0-c\0/usr/bin/drawing\0",
