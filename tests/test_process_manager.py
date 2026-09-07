@@ -2069,22 +2069,31 @@ class TestSelectiveProvenanceErasure:
             # the shell is how earlier attempts silently produced a dead
             # escapee (repr picks double quotes when the body contains
             # single ones, and the shell then breaks on the parens).
+            # Publish readiness only AFTER exec has installed the forged
+            # environment in /proc and the TERM handler is active. A pre-exec
+            # pidfile races both transitions, especially under coverage.
+            ready_code = (
+                'import os,signal,time\n'
+                'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+                f'with open({pidfile!r}, "w") as fh: fh.write(str(os.getpid()))\n'
+                'time.sleep(45)\n'
+            )
             script = f"""
 import os, signal, sys, time
 if os.fork() == 0:
     os.setsid()
+    if os.fork() != 0:
+        os._exit(0)
     os.environ['ODIN_BG_JOB'] = 'forged-not-a-real-job'
-    with open({pidfile!r}, 'w') as fh:
-        fh.write(str(os.getpid()))
     os.execve(
         sys.executable,
-        [sys.executable, '-c',
-         'import signal,time\\n'
-         'signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n'
-         'time.sleep(45)\\n'],
+        [sys.executable, '-c', {ready_code!r}],
         os.environ,
     )
-sys.exit(0)
+# Keep the command leader alive until explicit teardown. Otherwise the exit
+# watcher correctly cleans descendants before the test can inspect readiness.
+# The intermediate child exits, so the grandchild is still an adopted orphan.
+time.sleep(45)
 """
             script_path = pidfile + ".py"
             with open(script_path, "w") as fh:
