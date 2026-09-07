@@ -390,6 +390,9 @@ def test_controller_eof_does_not_skip_session_close():
     worker = object.__new__(portal._PortalWorker)
     worker.alive, worker.generation = True, 1
     worker.cancel = threading.Event()
+    worker._close_receipt, worker.bus = None, None
+    worker._cancellation = SimpleNamespace(close=lambda: None)
+    worker.context = SimpleNamespace(pop_thread_default=lambda: None)
     worker.session, worker.subscriptions = "/session/owned", []
     def disconnected(message):
         raise BrokenPipeError("controller gone")
@@ -398,6 +401,7 @@ def test_controller_eof_does_not_skip_session_close():
     worker.call = lambda *args, **kwargs: calls.append((args, kwargs))
     result = worker.close()
     assert result["closed"]
+    assert result["session_close_acknowledged"]
     assert calls[0][0][:2] == (portal.SESSION, "Close")
     assert worker.session is None
 
