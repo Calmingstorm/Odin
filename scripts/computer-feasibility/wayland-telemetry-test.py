@@ -3,10 +3,55 @@ import importlib.util
 import json
 from pathlib import Path
 import unittest
+from unittest.mock import patch
 
 spec = importlib.util.spec_from_file_location('receiver', Path(__file__).with_name('wayland-receiver.py'))
 receiver = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(receiver)
+
+def load(name):
+    spec = importlib.util.spec_from_file_location(name, Path(__file__).with_name(name + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+portal = load('wayland-portal')
+lifecycle = load('wayland-lifecycle')
+
+
+class OwnershipTest(unittest.TestCase):
+    def test_fd_list_is_emptied_not_duplicated(self):
+        class Fds:
+            fds = [101, 102]
+            def get_length(self): return len(self.fds)
+            def steal_fds(self):
+                value, self.fds = self.fds, []
+                return value
+            def get(self, index): raise AssertionError('get leaves original socket open')
+        fds = Fds()
+        with patch.object(portal.os, 'close') as close:
+            self.assertEqual(portal.take_fd(fds, 1), 102)
+            close.assert_called_once_with(101)
+        self.assertEqual(fds.get_length(), 0)
+
+    def test_bad_fd_index_does_not_transfer(self):
+        class Fds:
+            def get_length(self): return 1
+            def steal_fds(self): raise AssertionError('must validate before transfer')
+        for index in (-1, 1):
+            with self.assertRaises(ValueError): portal.take_fd(Fds(), index)
+
+    def test_alt_candidate_is_not_cleared_or_broadened(self):
+        sample = dict(active=True, toplevel_focus=True, focused=True,
+                      keys=[65513], buttons=[], state=0)
+        original = json.dumps(sample, sort_keys=True)
+        self.assertTrue(lifecycle.needs_operator_alt_cycle(sample))
+        self.assertEqual(json.dumps(sample, sort_keys=True), original)
+        for field, value in [('active', False), ('focused', False), ('toplevel_focus', False),
+                             ('keys', [65513, 65508]), ('keys', [65505]),
+                             ('buttons', [1]), ('state', 8), ('state', 4)]:
+            self.assertFalse(lifecycle.needs_operator_alt_cycle({**sample, field: value}))
+        self.assertFalse(lifecycle.needs_operator_alt_cycle(None))
 
 
 class FakeUnion:

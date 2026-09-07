@@ -8,11 +8,6 @@ import time
 import uuid
 from pathlib import Path
 
-import gi
-
-gi.require_version("Gio", "2.0")
-from gi.repository import Gio, GLib
-
 DEST = "org.freedesktop.portal.Desktop"
 PATH = "/org/freedesktop/portal/desktop"
 RD = "org.freedesktop.portal.RemoteDesktop"
@@ -24,7 +19,22 @@ def report(event, **fields):
     print(json.dumps({"event": event, "monotonic": time.monotonic(), **fields}), flush=True)
 
 
+def take_fd(fd_list, index):
+    """Transfer ownership, not get()'s duplicate while the list retains a socket."""
+    if not 0 <= index < fd_list.get_length():
+        raise ValueError('portal FD index outside returned list')
+    fds = fd_list.steal_fds()
+    chosen = fds[index]
+    for i, fd in enumerate(fds):
+        if i != index:
+            os.close(fd)
+    return chosen
+
+
 def main():
+    import gi
+    gi.require_version("Gio", "2.0")
+    from gi.repository import Gio, GLib
     if not (os.path.exists("/run/.containerenv") or os.path.exists("/.dockerenv")) or os.environ.get("HOME") != "/tmp/home":
         raise RuntimeError("private gated container required")
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
@@ -108,9 +118,10 @@ def main():
             value, fd_list = bus.call_with_unix_fd_list_sync(
                 DEST, PATH, interface, method, GLib.Variant("(oa{sv})", (session, {})),
                 GLib.VariantType.new("(h)"), Gio.DBusCallFlags.NONE, 5000, None, None)
-            fd = fd_list.get(value.unpack()[0])
+            fd = take_fd(fd_list, value.unpack()[0])
             retained_fds.append(fd)
-            report("mediated_fd_received", method=method)
+            report("mediated_fd_received", method=method,
+                   fd_list_remaining=fd_list.get_length(), ownership='stolen_not_duplicated')
             if os.environ.get("WAYLAND_OPERATOR_LAB") == "1":
                 if method == "ConnectToEIS":
                     mode = os.environ.get("WAYLAND_LIFECYCLE_MODE")
@@ -127,6 +138,8 @@ def main():
                     # A parent-held duplicate would invalidate the EOF experiment.
                     os.close(fd)
                     retained_fds.remove(fd)
+                    report('sender_fd_transferred', sender_pid=child.pid,
+                           parent_returned_fd_closed=True, fd_list_remaining=fd_list.get_length())
                     try:
                         stdout, stderr = child.communicate(timeout=12)
                     finally:
