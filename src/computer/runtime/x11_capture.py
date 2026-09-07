@@ -13,6 +13,8 @@ from dataclasses import dataclass, field
 from ..geometry import SourceGeometry
 from ..models import BackendObservation, CaptureScope
 from ..render import MAX_SOURCE_BYTES, render_frame, source_allocation_bytes
+from ..vision import FrameCrop
+from .x11_topology import RandRRevision, display_power
 
 MAX_MONITORS = 16
 MAX_CAPTURE_WORKING_BYTES = 128 * 1024 * 1024
@@ -41,9 +43,11 @@ class Topology:
     monitors: tuple[Monitor, ...]
     configuration_time: int = 0
     monitor_time: int = 0
+    event_revision: int = 1
 
     def __post_init__(self):
-        if (any(type(v) is not int or not 0 <= v < 2**32
+        if (type(self.event_revision) is not int or self.event_revision < 1
+                or any(type(v) is not int or not 0 <= v < 2**32
                 for v in (self.epoch, self.configuration_time, self.monitor_time))
                 or type(self.width) is not int or type(self.height) is not int
                 or not 1 <= self.width <= 32767 or not 1 <= self.height <= 32767
@@ -122,23 +126,30 @@ class _XlibConnection:
                     or self.byte_order not in (0, 1)):
                 raise CaptureError("unsupported_pixel_format")
             capture_budget(1, 1, self.bits, self.pad)
+            self._topology_events = RandRRevision(self._display, self._root)
         except BaseException:
             self._display.close()
             raise
 
     def topology(self) -> Topology:
+        revision = self._topology_events.drain()
         resources = self._root.xrandr_get_screen_resources_current()
         geometry = self._root.get_geometry()
         reply = self._root.xrandr_get_monitors(True)
         after = self._root.xrandr_get_screen_resources_current()
-        if ((resources.config_timestamp, resources.timestamp)
+        if (revision != self._topology_events.drain()
+                or (resources.config_timestamp, resources.timestamp)
                 != (after.config_timestamp, after.timestamp)):
             raise CaptureError("topology_changed_during_snapshot")
         return Topology(int(resources.config_timestamp), int(geometry.width),
                         int(geometry.height), tuple(Monitor(
                             (int(m.name), tuple(int(v) for v in m.crtcs)),
                             int(m.x), int(m.y), int(m.width_in_pixels), int(m.height_in_pixels)
-                        ) for m in reply.monitors), int(resources.timestamp), int(reply.timestamp))
+                        ) for m in reply.monitors), int(resources.timestamp), int(reply.timestamp),
+                        revision)
+
+    def power_status(self):
+        return display_power(self._display)
 
     def image(self, monitor: Monitor) -> bytes:
         _, expected = capture_budget(monitor.width, monitor.height, self.bits, self.pad)
@@ -190,12 +201,20 @@ class X11MonitorCapture:
         except Exception:
             raise CaptureError("capture_topology_unavailable") from None
 
-    def capture(self, topology: Topology, index: int) -> BackendObservation:
+    def power_status(self):
+        if self._closed:
+            raise CaptureError("capture_revoked")
+        return self._connection.power_status()
+
+    def capture(self, topology: Topology, index: int, *,
+                crop: FrameCrop | None = None) -> BackendObservation:
         if (type(topology) is not Topology or type(index) is not int
                 or not 0 <= index < len(topology.monitors)):
             raise CaptureError("invalid_monitor_selection")
         if self.topology() != topology:
             raise CaptureError("stale_capture_topology")
+        if self.power_status() == "display_asleep":
+            raise CaptureError("display_asleep")
         monitor = topology.monitors[index]
         # The full desktop may exceed budget. Never allocate it and crop afterward.
         capture_budget(monitor.width, monitor.height,
@@ -207,18 +226,23 @@ class X11MonitorCapture:
             raise CaptureError("capture_failed") from None
         if self.topology() != topology:
             raise CaptureError("topology_changed_during_capture")
-        source = SourceGeometry(uuid.uuid4().hex, 1, self._generation,
+        if self.power_status() == "display_asleep":
+            raise CaptureError("display_asleep")
+        source = SourceGeometry(uuid.uuid4().hex, topology.event_revision, self._generation,
                                 monitor.width, monitor.height)
         rendered = render_frame(pixels, source, mode="RGB", observation_id=uuid.uuid4().hex,
                                 session_id=uuid.uuid4().hex, generation=1,
-                                captured_monotonic_ns=started)
+                                captured_monotonic_ns=started, crop=crop)
         if self.topology() != topology:
             raise CaptureError("topology_changed_during_render")
+        if self.power_status() == "display_asleep":
+            raise CaptureError("display_asleep")
         meta = rendered.metadata
         return BackendObservation(source, CaptureScope(self._generation,
                                   frozenset({source.source_id})), meta.width, meta.height,
                                   meta.delivered_to_source, rendered.png,
-                                  resize_scale=meta.resize_scale)
+                                  resize_scale=meta.resize_scale,
+                                  crop=(crop.x, crop.y, crop.width, crop.height) if crop else None)
 
     def close(self):
         if not self._closed:
