@@ -98,8 +98,9 @@ async def test_session_revocation_stops_owned_foreground_while_model_waits(tmp_p
     valid[0] = False
     assert not manager.authorize_context(context)
     async with asyncio.timeout(1):
-        while not backend.stopped:
+        while manager._service.controller.store.find_session(context).state != "cancelled":
             await asyncio.sleep(0.01)
+    assert backend.stopped
     assert manager._service.controller.store.find_session(context).state == "cancelled"
     await manager.close()
 
