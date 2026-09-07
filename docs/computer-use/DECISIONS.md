@@ -34,6 +34,15 @@ deployment, restart, live-install edit, main-session input experiment, master me
 tag or pipeline. Record actual qualified/refused versions, cleanup evidence,
 remaining limitations and local test results before claiming completion.
 
+R8 implementation choice after read-only source review: native-headless Mutter and
+the native hardware compositor share `META_TYPE_BACKEND_NATIVE`,
+`META_TYPE_VIRTUAL_INPUT_DEVICE_NATIVE` and its per-device disposal release path.
+The headless backend disables physical libinput. Use this same-stack disposable
+test, with active-code identity checks before/after, instead of deliberately
+stranding a button on the operator's seat. This is a same-implementation inference,
+explicitly not direct measurement of the active instance. A stock compositor must
+still pass graphical execution; source review alone never marks it qualified.
+
 ## Revision R7: autonomous cleanup and qualified offerings (2026-09-07)
 
 The reported Cinnamon wake issue is a pre-existing operator/compositor issue,

@@ -1,4 +1,4 @@
-# Computer contract and acceptance matrix (R6)
+# Computer contract and acceptance matrix (R8)
 
 Three configured-only tools: `computer_session`, `computer_observe`,
 `computer_act`. No desktop dependency imports, prompt text, processes, listeners,
@@ -45,8 +45,15 @@ honestly exposed to the operator/model; it does not accept unknown cleanup safet
 Existing-session input requires verified owned-input release and application-safe
 detach regardless of separation. R5's bounded X11 guardian supplies these measured
 capabilities with shared-input and crash-recovery limitations documented in the
-handoff. Wayland remains unavailable; a laboratory compositor fix is not a
-production backend qualification.
+handoff. R8 replaces blanket Wayland refusal with per-session compositor-specific
+admission. A laboratory patch or a version string is not production qualification.
+Run a real bounded release test in an isolated compositor using the same identified
+native virtual-input implementation, then revalidate the active stack/session
+binding. Report this as `same_stack_disposable`, never an active-instance test.
+The test must observe actual button/key release and application survival, not only
+successful input dispatch. No intentional held-input EOF fault is permitted in the
+operator's compositor. Unknown/mismatched code, failed behavior or cleanup denies
+input with an identified reason and remedy, not a platform-wide allegation.
 Capabilities are server-owned evidence assertions, not model-supplied consent.
 Moving/restoring the human pointer must never be described as independence.
 Shared widget focus is observable as a limitation; detected focus changes require
@@ -127,3 +134,21 @@ Writer file-dialog scope permits only save dialogs rooted in a Writer document.
 See APPLICATION-QUALIFICATION-R7.md for the retained failure and evidence limits.
 No UI declaration of an eligible profile establishes that an application is
 installed, focused, authorized, input-ready or qualified for an arbitrary task.
+
+### R8 Wayland qualification boundary
+
+Mutter's native and native-headless modes instantiate the same native backend and
+virtual-input device implementation. Headless mode disables physical libinput;
+the qualification must also isolate display/session buses and physical devices.
+This permits exercising the actual held-input EOF cleanup implementation safely
+before offering input to the user's native compositor. It does not measure that
+active instance's hidden state, physical-device concurrency or every hardware path.
+Nested X11 behavior is a different implementation and cannot qualify native input.
+
+The public portal/libei APIs offer no transactional live fault test guaranteeing
+rollback if the compositor itself fails release. A duplicated EI FD invalidates
+last-owner EOF; a scratch window or another virtual monitor still shares the seat.
+Do not rename those mechanisms as equivalent evidence. Separate qualification,
+portal consent, trusted source/focus evidence and finite runtime leases remain
+independent checks. Exact supported compositor builds and completed GUI operations
+belong in the final R8 qualification/handoff record, not this acceptance contract.
