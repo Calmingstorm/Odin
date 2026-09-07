@@ -56,5 +56,45 @@ No live qualification has occurred for these increments. One UI commit omitted
 the phase's CI-skip marker, triggering three workflows automatically. All three
 were cancelled; this is not a CI pass and not a completed end-of-phase gate.
 
-Transition-aware effect verification and failure diagnostics, bounded sequences,
-disconnected strokes, richer targets and field operations remain in progress.
+## Integrated source checkpoint
+
+The remaining charter areas now have source implementations, not live passes:
+
+- Bounded sequences/disconnected strokes reserve step IDs atomically, retain
+  individual receipts and interrupt on sampled target changes. Captures between
+  steps only veto targets from the original delivered view. They never become
+  synthetic delivery grants. Native focused editable identity permits text or
+  selection changes within the same initially focused field; without that proof,
+  keyboard batches remain conservatively raster-bound.
+- Effects distinguish region change, native window disappearance, newly mapped
+  dialog/menu appearance, pointer location and complete field-text equality.
+  Appearance now requires before/after map inventory, not just activating an
+  already-open dialog. Unknown release stops; confirmed release with uncertain
+  effects yields an interrupted result and no automatic replay.
+- AT-SPI field replacement is implemented for isolated and attached X11 with
+  native identity across captures and original-node readback. Attached discovery
+  requires an existing accessibility bus and usable optional GI support; it does
+  not enable desktop accessibility or install anything. Unsupported environments
+  report unavailable rather than silently substituting keyboard/clipboard input.
+- Click count/modifiers, modified scroll and drag/polyline are wired through
+  backend validation. X11 checks modifier semantics and rejects unsupported
+  implicit keysym levels instead of sending the wrong symbol. Wayland extensions
+  require the newly provisioned guardian capability; old binaries refuse them.
+- Prepress dispatch admission estimates and bounded native progress diagnostics
+  are implemented. These estimates are not performance measurements.
+
+All source integrations received lint, syntax/import and targeted type checks;
+the Wayland guardian received a strict C syntax check. No new tests or pytest
+were run. Three existing broad tool-loop mypy audit-call errors were reproduced
+on the starting head, rather than attributed to this work.
+
+The running installation was still on the previous deployment at the final
+read-only check. No GUI inputs, shell GUI batches, captures or live recovery calls
+were performed in this build turn. Consequently there is no measured GUI task
+elapsed time, batching improvement or runtime cleanup claim for this checkpoint.
+
+Next: operator deployment, then supervised scratch qualification of post-action
+views, drawing sequences, expected dialogs, native field replacement and modifier
+actions. Report total GUI inputs including shell, explicit/redundant captures,
+recovery, elapsed time and verified task completion. Run the full end-of-phase
+regression and coverage gate only after the testing phase ends.
