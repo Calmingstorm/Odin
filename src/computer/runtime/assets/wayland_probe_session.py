@@ -233,6 +233,8 @@ class Trial:
         self.measure(identity)
 
     def setup_gnome(self, identity, dbus, bus, gio, glib):
+        if self.compositor is None:
+            raise TrialError("probe_private_compositor_missing")
         self.wait(lambda: dbus("NameHasOwner", "org.gnome.Mutter.RemoteDesktop"),
                   "probe_private_remote_desktop_unavailable", 15)
         self.owner = dbus("GetNameOwner", "org.gnome.Mutter.RemoteDesktop")
@@ -262,6 +264,8 @@ class Trial:
         self.call(self.session, "org.gnome.Mutter.RemoteDesktop.Session", "Start")
 
     def measure(self, identity):
+        if self.compositor is None:
+            raise TrialError("probe_private_compositor_missing")
         self.stage = "sender_connect"
         self.connect_sender()
         self.command("escape", "escape_sent")

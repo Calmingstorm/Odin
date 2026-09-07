@@ -4,6 +4,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable
 from datetime import UTC, datetime
+from typing import Any
 
 from aiohttp import web
 
@@ -125,7 +126,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             "starting", "active", "paused", "cancelled", "closed",
             "quarantined", "unknown", "unavailable",
         }
-        result = {
+        result: dict[str, Any] = {
             "available": bool(value.get("available", True)),
             "state": state if state in known else "unknown",
         }
@@ -211,7 +212,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             public_limits = {}
             for key in ("max_text_chars", "max_scroll_count", "max_points", "lease_seconds"):
                 item = limits.get(key)
-                if type(item) in (int, float) and 0 < item <= 10000:
+                if (isinstance(item, (int, float)) and not isinstance(item, bool)
+                        and 0 < item <= 10000):
                     public_limits[key] = item
             result["input_limits"] = public_limits
         if isinstance(value.get("error"), str):
