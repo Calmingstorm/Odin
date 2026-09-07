@@ -217,7 +217,7 @@ class AppScope:
         return values, {"root": _xid(root), "size": [geometry.width, geometry.height],
                         "monitors": sorted(monitors)}
 
-    def _snapshot(self, monitor):
+    def _snapshot(self, monitor, *, candidate=None):
         from Xlib import X  # type: ignore[import-untyped]
 
         version = self.connection.res_query_version(1, 2)
@@ -228,6 +228,10 @@ class AppScope:
         focused = self.connection.get_input_focus().focus
         if _xid(focused) <= 1 or _xid(focused) == _xid(root):
             raise ScopeFailure("application_scope_unavailable")
+        actual_focus = _xid(focused)
+        # Private pointer-hit evidence only, never public window authority.
+        if candidate is not None:
+            focused = candidate
         focused = self._window(focused)
         target, ancestors = self._target(focused, root)
         pid = self._pid(target)
@@ -306,7 +310,7 @@ class AppScope:
                     "transient_processes": chain_processes, "wm_class": wm_class,
                     "metadata_digest": metadata_digest, "states": states, "types": types}
         # Bound TOCTOU detection; there is no claim of an atomic X11 transaction.
-        if (_xid(self.connection.get_input_focus().focus) != _xid(focused)
+        if (_xid(self.connection.get_input_focus().focus) != actual_focus
                 or self._pid(target) != pid or _process_identity(pid) != process
                 or any(_process_identity(self._pid(self._window(wid))) != identity
                        for wid, identity in zip(chain, chain_processes, strict=True))
@@ -332,30 +336,40 @@ class AppScope:
                 x, y = point
                 if type(x) is not int or type(y) is not int:
                     raise ValueError
-                left, top, width, height = current["rect"]
+                left, top, width, height = current["source_rect"]
                 if not (left <= x < left + width and top <= y < top + height):
                     raise ValueError
                 window = self.connection.screen().root
-                seen, target_seen = set(), False
+                seen = set()
                 for _ in range(MAX_DEPTH):
                     identity = _xid(window)
                     if identity in seen:
                         raise ValueError
                     seen.add(identity)
-                    target_seen |= identity == current["window"]
-                    if target_seen and self._pid(window) != current["process"]["pid"]:
-                        raise ValueError
                     # Native injection's client is bound to the owned master.
                     query = (window.query_pointer() if pointer_query is None
                              else pointer_query(identity))
                     if not query.same_screen or (query.root_x, query.root_y) != (x, y):
                         raise ValueError
                     if not _xid(query.child):
-                        if not target_seen:
-                            raise ValueError
                         break
                     window = self._window(query.child)
                 else:
+                    raise ValueError
+                target = self._snapshot(monitor, candidate=window)
+                family = {current["window"], *current["transient_chain"]}
+                related = (target["window"] in family
+                           or bool(family.intersection(target["transient_chain"]))
+                           or target["process"] == current["process"])
+                if not related:
+                    raise ValueError
+                # Bounds and denial/provenance checks apply to the actual hit,
+                # including every descendant and its transient family, not just
+                # the focused top-level. Popup extent may exceed that top-level.
+                left, top, width, height = target["rect"]
+                if not (left <= x < left + width and top <= y < top + height):
+                    raise ValueError
+                if self._snapshot(monitor, candidate=window) != target:
                     raise ValueError
                 if self.snapshot(monitor) != current:
                     raise ValueError

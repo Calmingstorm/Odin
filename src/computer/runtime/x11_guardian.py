@@ -370,11 +370,18 @@ def execute(request, *, controller_fd=0, authorize=None):
                 x, y = step[1:]
                 if any(type(v) is not int for v in (x, y)):
                     raise GuardianFailure("invalid_point")
-                rx, ry, rw, rh = expected["rect"]
                 if not (monitor.x <= x < monitor.x + monitor.width
-                        and monitor.y <= y < monitor.y + monitor.height
-                        and rx <= x < rx + rw and ry <= y < ry + rh):
-                    raise GuardianFailure("point_outside_application")
+                        and monitor.y <= y < monitor.y + monitor.height):
+                    raise GuardianFailure("point_outside_source")
+                # Move within exact source bounds, then resolve the actual owned
+                # pointer hit before any press. Eligible popups can lie outside
+                # the focused application's rectangle; this is not a hit bypass.
+                # A held polyline move can itself affect a window before the
+                # next press gate. Do not widen existing drag geometry here.
+                if request["action"]["type"] == "polyline":
+                    rx, ry, rw, rh = expected["rect"]
+                    if not (rx <= x < rx + rw and ry <= y < ry + rh):
+                        raise GuardianFailure("point_outside_application")
                 scope.assert_snapshot(expected, monitor)
                 pointer[0] = (x, y)
             else:

@@ -14,6 +14,51 @@ through the existing native keymap, with unit tests for mixed Unicode/multiline
 text. The actual task still used an explicit Return call. Legacy fake-pointer
 and admission fixtures were repaired separately; no test exclusion was added.
 
+## Popup item selection correction
+
+The audit correctly distinguished run8's open/Escape dismissal from choosing an
+item. `/tmp/r11-popup-live3/result.json` now proves actual **Select All** activation
+through the unchanged controller/native input path, in disposable Xvfb `:1`.
+The separate root-child override-redirect Xed menu is at `[751,148,167,254]`, has
+the application's authoritative XRes PID and `WM_TRANSIENT_FOR`. Click `[906,329]`
+lies outside the original app extent ending at x860. Subsequent typing replaces
+the entire document; saved/reopened UTF-8 content is exactly `Menu-selected café`
+plus one newline. Thus this is selection, not merely dismissal or changed pixels.
+
+Sixteen actions acknowledged injection/release with Xed provenance; fifteen
+visual-change receipts verified, and short-document scroll correctly reported
+not_satisfied. Core pointer remained `[950,650]`, held keys/buttons were empty
+after Stop, application stayed alive until fixture teardown. Stop fully revoked
+capture/input. `/tmp/r11-popup-live3-supervisor.json` records exit0,
+cleanup_ok=true and no residuals; direct fixture children were also reaped.
+
+The small scope correction reuses existing snapshot validation for the actual
+owned-pointer hit, allowing focused/transient-family or authoritative same-process
+targets. Denied metadata, allowed surface types, descendant PID checks, transient
+family provenance, actual target bounds, source bounds and final target/focus
+snapshots still apply. No native target IDs are accepted from public input.
+The guardian allows source-bounded pointer movement beyond the focused rect but
+resolves/gates the actual hit before button-down. Existing focused-rect drag bounds
+remain unchanged: a held move must not gain broader authority from this fix.
+Lease and release code is unchanged.
+Attached source-local/crop transforms needed no change.
+
+Final targeted checks: **146 passed**, including 14 new popup cases and guardian
+outside-focused-rect/callback and unchanged drag-bounds regressions; changed-file
+Ruff and diff-check passed. Unit supervisor `/tmp/r11-popup-unit4-supervisor.json`
+records exit0/cleanup_ok=true.
+Runs1/2 failed before popup input at the controller's raster-exact gate, with
+visual_target_changed; neither is counted as passing. Run3 uses explicit small
+delivered crops for pointer targets to exclude unrelated changing pixels, without
+relaxing raster validation. OCR reads the delivered menu image to identify Select
+All's row. No post-setup direct injection, gate bypass, :0 operation or deployment.
+This is ordinary Xed menu qualification, not exhaustive popup or cross-process
+portal qualification; the parent suite/release gates remain independent.
+
+Final-code rerun `/tmp/r11-popup-live4/result.json` also passed all sixteen actions;
+`/tmp/r11-popup-live4-supervisor.json` records exit0, cleanup_ok=true. This rerun
+includes the explicit preservation of existing polyline bounds.
+
 ## Final full-action result
 
 Run8 passed the COMPLETE controller/native/Xed task, including independent

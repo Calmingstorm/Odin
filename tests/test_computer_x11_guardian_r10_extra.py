@@ -161,8 +161,9 @@ def test_action_translation_releases_chords_in_reverse():
 
 
 @pytest.mark.parametrize("case,reason", [
-    ("ok", None), ("stale", "stale_source"), ("topology", "stale_source"),
-    ("invalid", "invalid_point"), ("outside", "point_outside_application"),
+    ("ok", None), ("popup", None), ("stale", "stale_source"), ("topology", "stale_source"),
+    ("invalid", "invalid_point"), ("outside", "point_outside_source"),
+    ("drag_outside", "point_outside_application"),
     ("pointer_move", "shared_pointer_changed"),
     ("pointer_button", "shared_pointer_changed"), ("key", None),
 ])
@@ -187,6 +188,9 @@ def test_execute_revalidates_application_and_always_closes(monkeypatch, case, re
         monkeypatch.setitem(sys.modules, "src.computer.runtime." + name, module)
     monkeypatch.setattr(g, "InjectionHelper", lambda *a, **k: helper)
     steps = [("key", 38, True)] if case == "key" else [("move", 10, 20), ("button", 1, True)]
+    if case in {"popup", "drag_outside"}:
+        steps = [("move", 70, 80), ("button", 1, True)]
+        n.pointer.return_value = (70, 80)
     if case == "invalid":
         steps = [("move", 1.5, 2)]
     if case == "outside":
@@ -207,6 +211,8 @@ def test_execute_revalidates_application_and_always_closes(monkeypatch, case, re
     monkeypatch.setattr(g, "Guardian", Exerciser)
     request = dict(config, selected=selected, scope={"rect": [0, 0, 50, 50]},
                    action={"type": "click"}, input_mode="shared", expected_device_identity=[11, 12])
+    if case == "drag_outside":
+        request["action"]["type"] = "polyline"
     authorize = Mock()
     if reason:
         with pytest.raises(g.GuardianFailure, match=reason):
@@ -215,6 +221,10 @@ def test_execute_revalidates_application_and_always_closes(monkeypatch, case, re
         assert g.execute(request, authorize=authorize) == {"status": "executed"}
         authorize.assert_called_once_with(helper)
         assert scope.assert_snapshot.call_count >= 2
+        if case == "popup":
+            scope.assert_snapshot.assert_called_with(
+                request["scope"], topology.monitors[0], point=(70, 80),
+                pointer_query=n.query_pointer)
     connection.close.assert_called_once()
     if case != "stale":
         n.close.assert_called_once()

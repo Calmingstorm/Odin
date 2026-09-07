@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import csv
+import io
 import json
 import os
 import subprocess
@@ -112,7 +114,7 @@ async def qualify(out, keyboard_only=False):
         args = {"session_id": grant["session_id"], "generation": grant["generation"]}
 
         async def observe(label, crop=None):
-            await asyncio.sleep(.15)
+            await asyncio.sleep(.5)
             observed = await controller.observe(
                 context, {**args, **({"crop": crop} if crop else {})})
             (out / f"{label}.png").write_bytes(observed.pop("image_bytes"))
@@ -146,17 +148,61 @@ async def qualify(out, keyboard_only=False):
         await act("second-line", "type", text="Second line")
         result["keyboard_only"] = keyboard_only
         if not keyboard_only:
-            await act("select-word", "double_click", x=190, y=147)
-            await act("context-menu", "right_click", x=190, y=147)
-            await act("dismiss-menu", "key", key="Escape")
-            await act("scroll", "scroll", x=700, y=400, direction="down", count=3)
+            await act("select-word", "double_click",
+                      crop={"x": 180, "y": 137, "width": 30, "height": 30}, x=10, y=10)
+            await act("context-menu", "right_click",
+                      crop={"x": 740, "y": 137, "width": 30, "height": 30}, x=10, y=10)
+            await observe("open-context-menu")
+            from Xlib.display import Display
+
+            from src.computer.runtime.x11_app_scope import AppScope
+
+            connection = Display(display)
+            try:
+                root = connection.screen().root
+                scope = AppScope(connection)
+                menus = [w for w in root.query_tree().children
+                         if w.get_attributes().map_state == 2
+                         and w.get_attributes().override_redirect
+                         and scope._atom("_NET_WM_WINDOW_TYPE_POPUP_MENU")
+                         in scope._values(w, "_NET_WM_WINDOW_TYPE")]
+                assert len(menus) == 1
+                menu = menus[0]
+                geo = menu.get_geometry()
+                origin = root.translate_coords(menu, 0, 0)
+                assert scope._pid(menu) == app.pid
+                result["popup"] = {"root_child": True, "override_redirect": True,
+                                   "rect": [origin.x, origin.y, geo.width, geo.height],
+                                   "xres_pid": scope._pid(menu),
+                                   "transient_for": scope._values(menu, "WM_TRANSIENT_FOR")}
+                click_x = origin.x + geo.width - 12
+                assert click_x > 860  # outside the original application's extent
+            finally:
+                connection.close()
+            text = setup(["tesseract", str(out / "open-context-menu.png"), "stdout", "tsv"])
+            rows = list(csv.DictReader(io.StringIO(text), delimiter="\t"))
+            select = [row for row in rows if row["text"] == "Select"]
+            assert len(select) == 1
+            click_y = int(select[0]["top"]) + int(select[0]["height"]) // 2
+            result["popup"]["selection_point"] = [click_x, click_y]
+            await act("select-all-menu-item", "click",
+                      crop={"x": origin.x, "y": origin.y, "width": geo.width,
+                            "height": geo.height}, x=click_x-origin.x, y=click_y-origin.y)
+            # Replacing all text independently proves item activation, not a
+            # menu dismissal, pointer move or a visual-change receipt alone.
+            await act("replace-menu-selection", "type", text="Menu-selected café")
+            await act("scroll", "scroll",
+                      crop={"x": 680, "y": 380, "width": 40, "height": 40},
+                      x=20, y=20, direction="down", count=3)
         await act("save-dialog", "key", key="ctrl+s")
         destination = out / "controller-note.txt"
         await act("save-path", "type", text=str(destination))
         await act("save-confirm", "key", key="Return")
         await asyncio.sleep(.5)
         result["saved_text"] = destination.read_text()
-        assert result["saved_text"] == "Controller evidence café\nSecond line\n", (
+        expected_text = ("Controller evidence café\nSecond line\n" if keyboard_only
+                         else "Menu-selected café\n")
+        assert result["saved_text"] == expected_text, (
             result["saved_text"])
         await act("close-document", "key", key="ctrl+w")
         await act("open-dialog", "key", key="ctrl+o")
