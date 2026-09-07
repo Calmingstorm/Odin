@@ -122,6 +122,7 @@ class X11AttachedBackend:
         self._topology_error = None
         self._power_status = "unknown"
         self._frame = self._scope = self._fingerprint = None
+        self._window_inventory = None
         self._modal_id = None
         self._captured_at = 0.0
         self._runtime_descriptor = None
@@ -810,6 +811,7 @@ class X11AttachedBackend:
                                            resize_scale=tuple(reply["resize_scale"]),
                                            crop=tuple(expected_crop) if expected_crop else None)
                 self._frame, self._scope, self._captured_at = frame, binding, captured_at
+                self._window_inventory = reply.get("window_inventory")
                 return frame
             except Exception:
                 raise AttachedFailure("invalid_capture_reply") from None
@@ -965,12 +967,12 @@ class X11AttachedBackend:
                     after_scope = after.get("input_scope")
                     if (type(after_scope) is dict
                             and same_application_scope(self._scope, after_scope)):
-                        evidence["transition"] = {
-                            "method": "native_window_transition",
-                            "kind": after_scope.get("window_kind", "normal"),
-                            "appeared": (after_scope.get("window") != self._scope.get("window")
-                                         or after_scope.get("window_kind")
-                                         != self._scope.get("window_kind"))}
+                        from .x11_appearance import appearance_transition
+                        transition = appearance_transition(
+                            self._window_inventory, after.get("window_inventory"),
+                            self._scope, after_scope)
+                        if transition is not None:
+                            evidence["transition"] = transition
                     if after.get("prior_target_state") in {"destroyed", "unmapped", "viewable"}:
                         evidence.update(target_state=after["prior_target_state"],
                                         target_state_method="native_window_state_after_release")

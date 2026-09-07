@@ -11,11 +11,14 @@ import json
 import os
 import re
 import stat
+import time
 from pathlib import Path
 from typing import Any
 
 MAX_DEPTH = 32
 MAX_PROPERTY = 4096
+MAX_INVENTORY_WINDOWS = 2048
+INVENTORY_SECONDS = 0.25
 # Only these pixel-free reasons may leave the private scope adapter.
 SCOPE_REASONS = frozenset({
     "application_identity_unavailable", "application_identity_changed",
@@ -331,6 +334,54 @@ class AppScope:
 
     def snapshot(self, monitor):
         return self.inspect(monitor)[0]
+
+    def window_inventory(self, expected):
+        """Complete bounded native map-state sample, separate from input scope.
+
+        Walk the actual tree, not _NET_CLIENT_LIST (which omits override-redirect
+        menus). No truncation or skipped BadWindow is acceptable evidence of
+        absence. Unrelated windows need no process admission; the sampled target
+        does, using XRes plus the existing stable /proc identity guard.
+        """
+        from Xlib import X  # type: ignore[import-untyped]
+
+        root = self.connection.screen().root
+        if _xid(root) != expected["topology"]["root"]:
+            raise ScopeFailure("source_scope_unavailable")
+        target = self._window(expected["window"])
+        deadline = time.monotonic() + INVENTORY_SECONDS
+
+        def guard():
+            if (_process_identity(self._pid(target)) != expected["process"]
+                    or target.get_attributes().map_state != X.IsViewable):
+                raise ScopeFailure("application_identity_changed")
+
+        guard()
+        pending = [(root, 0)]
+        states = {}
+        while pending:
+            if time.monotonic() >= deadline:
+                raise ScopeFailure("application_scope_unavailable")
+            window, depth = pending.pop()
+            identity = _xid(window)
+            if identity in states or len(states) >= MAX_INVENTORY_WINDOWS:
+                raise ScopeFailure("application_scope_unavailable")
+            state = window.get_attributes().map_state
+            if state not in {X.IsUnmapped, X.IsUnviewable, X.IsViewable}:
+                raise ScopeFailure("application_scope_unavailable")
+            states[identity] = state
+            children = window.query_tree().children
+            if (len(states) + len(pending) + len(children) > MAX_INVENTORY_WINDOWS
+                    or (children and depth >= MAX_DEPTH)):
+                raise ScopeFailure("application_scope_unavailable")
+            pending.extend((child, depth + 1) for child in children)
+        guard()
+        if (time.monotonic() >= deadline
+                or states.get(expected["window"]) != X.IsViewable):
+            raise ScopeFailure("application_scope_changed")
+        return {"complete": True, "root": _xid(root),
+                "process": expected["process"], "target": expected["window"],
+                "windows": sorted(states.items())}
 
     def target_state(self, expected, monitor):
         """Measure the prior native target, not absence from the CURRENT focus.

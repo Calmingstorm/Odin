@@ -107,9 +107,21 @@ def run(request, capture=None):
         # GUI save/close can settle focus and title in separate events. Discard
         # every raced raster and take a wholly new bounded observation, never
         # relax equality or replay the preceding input to obtain a stable frame.
+        def inventory(binding):
+            if not app_scope or not binding:
+                return None
+            try:
+                return app_scope.window_inventory(binding)
+            except Exception:
+                # Inventory failure limits appearance verification only. It must
+                # not alter the input binding or invalidate unrelated app work.
+                return None
+
         for attempt in range(3):
             binding = app_scope.snapshot(monitor) if app_scope else None
+            before_inventory = inventory(binding)
             observation = capture.capture(topology, selected["index"], crop=crop)
+            after_inventory = inventory(binding)
             if not app_scope or binding == app_scope.snapshot(monitor):
                 break
             if attempt < 2:
@@ -134,6 +146,8 @@ def run(request, capture=None):
                 "crop": observation.crop,
                 **status,
                 "input_scope": binding,
+                "window_inventory": (after_inventory if before_inventory == after_inventory
+                                     else None),
                 "input_scope_reason": reason,
                 "prior_target_state": target_state,
                 "image": base64.b64encode(observation.image_bytes).decode("ascii")}

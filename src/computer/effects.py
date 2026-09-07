@@ -104,12 +104,13 @@ def effect_receipt(raw, observation, expected, target=None):
             result["verification"]["target_disappeared"] = satisfied
     elif kind in {"dialog_appeared", "menu_appeared"} and native_binding and same_app:
         transition = evidence.get("transition")
-        if (type(transition) is dict and transition.get("method") == "native_window_transition"
+        if (type(transition) is dict and transition.get("method")
+                == "native_complete_map_inventory_transition"
                 and type(transition.get("appeared")) is bool
                 and transition.get("kind") in {"dialog", "menu", "normal"}):
             satisfied = (transition["appeared"]
                          and transition["kind"] == kind.removesuffix("_appeared"))
-            method = "native_window_transition"
+            method = "native_complete_map_inventory_transition"
     elif kind == "field_text_equals" and native_binding:
         actual = evidence.get("actual")
         if (evidence.get("type") == kind and evidence.get("target") == expected["target"]
