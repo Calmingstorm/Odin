@@ -239,12 +239,20 @@ def test_ascii_layout_and_named_keys(native):
         dev.text_keys("a")
 
 
-@pytest.mark.parametrize("text", ["é", "\n", "\t", "\x00", "a" * 4097])
+@pytest.mark.parametrize("text", ["é", "\x00", "a" * 4097])
 def test_text_rejected_without_native_call(native, text):
     before = list(native[0].calls)
     with pytest.raises(m.X11DeviceError, match="invalid_text|unsupported_character"):
         native[1].text_keys(text)
     assert native[0].calls == before
+
+
+def test_multiline_text_resolves_return_and_tab_without_input(native):
+    fake, dev = native
+    before = list(fake.calls)
+    assert dev.text_keys("a\n\tA") == [[38], [dev.keycode("Return")],
+                                      [dev.keycode("Tab")], [50, 38]]
+    assert fake.calls == before
 
 
 def test_raw_physical_short_tap_preserved_and_own_source_ignored(native):

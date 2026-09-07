@@ -642,6 +642,9 @@ class ExistingXTest:
                         if char is not None:
                             chord = prefix + [code]
                             chords.setdefault(char, chord)
+            for char, symbol in (("\n", "Return"), ("\t", "Tab")):
+                if char in text:
+                    chords[char] = [self.keycode(symbol)]
             if any(c not in chords for c in text):
                 raise UnsupportedCharacters([
                     {"index": i, "codepoint": f"U+{ord(c):04X}",

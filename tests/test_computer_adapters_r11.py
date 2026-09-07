@@ -66,7 +66,7 @@ async def test_crop_stable_revision_mapping_and_postcondition(monkeypatch):
 @pytest.mark.parametrize("operation,extra", [
     ("double_click", {"x": 2, "y": 3}), ("middle_click", {"x": 2, "y": 3}),
     ("scroll", {"x": 2, "y": 3, "direction": "left", "count": 20}),
-    ("type", {"text": "é日本語"}), ("key", {"chord": "super+Page_Down"}),
+    ("type", {"text": "é日本語\n\t"}), ("key", {"chord": "super+Page_Down"}),
     ("polyline", {"points": [[1, 2], [3, 4]], "duration": .2}),
 ])
 async def test_generic_actions(monkeypatch, operation, extra):

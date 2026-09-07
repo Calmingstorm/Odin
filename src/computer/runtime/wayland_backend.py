@@ -99,7 +99,8 @@ class WaylandRuntimeBackend:
     startup_timeout_seconds = 180
     input_supported = False
     input_blocker: str | None = "wayland_session_not_qualified"
-    input_limits = {"lease_seconds": 2, "text": "unicode_current_keymap",
+    input_limits = {"lease_seconds": 2, "text": "unicode_current_keymap", "max_text_chars": 256,
+                    "max_scroll_count": 20, "max_points": 256,
                     "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app"}
 
     def __init__(self, *, enabled=False, app_profile=None, environment="existing_session",

@@ -617,9 +617,9 @@ class X11AttachedBackend:
             if action["type"] == "type":
                 text = action["text"]
                 if (type(text) is not str or not 1 <= len(text) <= 512
-                        or any(ord(c) < 32 or 127 <= ord(c) <= 159
+                        or any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) <= 159
                                or 0xD800 <= ord(c) <= 0xDFFF for c in text)):
-                    raise AttachedFailure("invalid_text")
+                    raise ComputerError("invalid_text")
             elif action["type"] == "key":
                 from .primitives import parse_key_chord
                 try:
