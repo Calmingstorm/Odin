@@ -53,9 +53,12 @@ HTTP serialization, is decoded and checked for:
 * Untagged legacy image preserved separately, not consumed by computer pruning.
 * Decoded PNG byte/pixel bounds and independently decoded red/green contents.
 * A native-size crop mapping `(0, 0)` to source `(40, 4)` without global origins.
-* No pixel string in text, metadata or the checkpoint JSON payload. Checkpoint
-  image blobs deliberately retain pixels separately; this is not a claim that
-  evidence storage is pixel-free. Delivery authority defaults to denied on resume.
+* No pixel string in text, metadata or checkpoint storage. R5 independent review
+  found generic blob externalization escaped computer evidence expiry. The parent
+  corrected this: tagged desktop frames are retired before blob writes, and old
+  tagged blob references are retired without loading on resume. Untagged legacy
+  images still externalize and restore normally. Tool/result pairs are unchanged;
+  delivery authority defaults to denied and fresh observation is required on resume.
 
 The existing renderer suite additionally covers 1080p/1440p/4K/wide source
 allocation, exact rotated/cropped pixel sampling, byte-cap retries and rejection.
@@ -85,3 +88,9 @@ Parent integration now uses this canary instead of the stale name list, with a
 regression proving a valid current-model converter passes and a dropped native
 image fails. The current-model case was also added to the serialized HTTP proof.
 This changes transport admission, not the unverified upstream-acceptance claim.
+
+Privacy regression coverage additionally uses real checkpoint entry points and
+asserts no blob writer calls for computer-only pixels, no blob reader calls for
+old tagged references, unchanged legacy-image round trips and unchanged input
+objects. This fixes new copies and use of old references, not deletion of any
+historical deployment blobs; no live data or configuration was touched.

@@ -190,7 +190,7 @@ async def test_real_aiohttp_serialized_request_preserves_pixels_and_correlation(
     assert "data:image/" not in without_pixels
 
 
-def test_native_pixels_externalized_from_checkpoint_not_rearmed_on_resume():
+def test_native_pixels_retired_from_checkpoint_not_rearmed_on_resume():
     from src.discord.tool_loop import _ChatTurn
     from src.turn_state.codec import snapshot_chat_turn
     from tests.test_turn_checkpoint_codec import _blob_dict, _full_turn
@@ -207,6 +207,6 @@ def test_native_pixels_externalized_from_checkpoint_not_rearmed_on_resume():
     assert encoded not in json.dumps(payload)
     assert "_computer_frame_error" not in payload["fields"]
     assert _ChatTurn.__dataclass_fields__["_computer_frame_error"].default is True
-    # Existing image blob externalization is evidence storage, NOT a pixel-free
-    # claim for the separate blob store. It intentionally retains image bytes.
-    assert blobs
+    # No uncontrolled screenshot copy can escape the private evidence TTL.
+    assert not blobs
+    assert "Private desktop pixels not retained" in json.dumps(payload)
