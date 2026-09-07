@@ -10,6 +10,17 @@ from tests.test_computer_dispatch_r3 import dispatch_state, facade
 from tests.test_computer_review_r3 import call
 
 
+def test_facade_uses_actual_converter_not_stale_model_allowlist():
+    from src.computer.integration import require_vision
+    from tests.test_computer_native_vision_r5 import client, serving
+
+    current = serving(client("gpt-6-astra"))
+    require_vision(current)
+    current.client._convert_messages_with_tools = lambda _: []
+    with pytest.raises(PermissionError, match="vision transport"):
+        require_vision(current)
+
+
 @pytest.mark.parametrize("status", ["unavailable", "not_satisfied", "rejected", "failed"])
 async def test_known_failure_is_not_reported_as_success_or_uncertain(status, monkeypatch):
     service, state = facade(), dispatch_state()

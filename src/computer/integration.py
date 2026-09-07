@@ -16,8 +16,6 @@ from .models import RequestContext
 
 COMPUTER_TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 NONVISUAL_OPERATIONS = frozenset({"stop", "cancel", "close", "status", "pause"})
-VISION_MODELS = frozenset({"gpt-5.4", "gpt-5.4-mini", "gpt-5.5",
-                          "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"})
 
 
 @dataclass(frozen=True)
@@ -36,12 +34,12 @@ _grant: contextvars.ContextVar[ForegroundGrant | None] = contextvars.ContextVar(
 
 
 def require_vision(serving) -> None:
-    from ..llm.openai_codex import CodexChatClient
+    from .capabilities import native_transport_evidence
 
-    if (getattr(serving, "provider", None) != "codex"
-            or getattr(serving, "model", None) not in VISION_MODELS
-            or not isinstance(getattr(serving, "client", None), CodexChatClient)):
-        raise PermissionError("Computer use requires supported native vision transport and model.")
+    try:
+        native_transport_evidence(serving)
+    except PermissionError:
+        raise PermissionError("Computer use requires verified native vision transport.") from None
 
 
 class ComputerIntegration:
