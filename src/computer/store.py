@@ -76,6 +76,10 @@ class ComputerStore:
                 PRIMARY KEY(session_id,action_id));
             CREATE TABLE IF NOT EXISTS session_cleanup (
                 session_id TEXT PRIMARY KEY, result TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS session_runtime (
+                session_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL);
+            CREATE TABLE IF NOT EXISTS session_recovery (
+                session_id TEXT PRIMARY KEY, result TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS evidence (
                 evidence_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
                 kind TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL,
@@ -129,6 +133,70 @@ class ComputerStore:
             raise ComputerError("session_busy") from exc
         return SessionGrant(*values)
 
+    def record_runtime(self, grant: SessionGrant, descriptor: dict) -> None:
+        """Durable launch fence. Native IDs remain private and cannot be replaced."""
+        from .runtime.recovery import validate_descriptor
+        try:
+            validate_descriptor(descriptor, grant.session_id)
+            encoded = json.dumps(descriptor, sort_keys=True)
+        except (TypeError, ValueError) as exc:
+            raise ComputerError('invalid_runtime_identity') from exc
+        with self.lock:
+            current = self.get_session(grant.session_id)
+            if (current.generation != grant.generation
+                    or current.state not in {'starting', 'active'}):
+                raise ComputerError('grant_revoked')
+            previous = self.runtime_descriptor(grant.session_id)
+            if previous is not None:
+                fixed = set(previous) - {'launch_pending', 'processes'}
+                if (any(previous[k] != descriptor.get(k) for k in fixed)
+                        or descriptor['processes'][:len(previous['processes'])]
+                        != previous['processes']):
+                    raise ComputerError('runtime_identity_changed')
+            self.db.execute('INSERT OR REPLACE INTO session_runtime VALUES (?,?)',
+                            (grant.session_id, encoded))
+
+    def runtime_descriptor(self, session_id: str) -> dict | None:
+        with self.lock:
+            row = self.db.execute('SELECT descriptor FROM session_runtime WHERE session_id=?',
+                                  (session_id,)).fetchone()
+        return json.loads(row[0]) if row else None
+
+    def recovery_status(self, session_id: str) -> dict | None:
+        with self.lock:
+            row = self.db.execute('SELECT result FROM session_recovery WHERE session_id=?',
+                                  (session_id,)).fetchone()
+            if row:
+                return json.loads(row[0])
+            grant = self.get_session(session_id)
+            if grant.state != 'quarantined':
+                return None
+            identity = self.runtime_descriptor(session_id)
+        return {'status': 'operator_reconciliation_required' if identity else
+                'operator_cleanup_required', 'reason': 'controller_lost' if identity else
+                'legacy_runtime_identity_missing', 'complete': False}
+
+    def finish_recovery(self, grant: SessionGrant, result: dict, *, acknowledged=False):
+        """CAS prevents delayed inspection from clearing another runtime generation."""
+        clean = result.get('status') == 'absence_verified' and not acknowledged
+        receipt = {**result, 'complete': clean}
+        with self.lock:
+            self.db.execute('BEGIN IMMEDIATE')
+            try:
+                current = self.get_session(grant.session_id)
+                if current.generation != grant.generation or current.state != 'quarantined':
+                    raise ComputerError('stale_generation')
+                self.db.execute('INSERT OR REPLACE INTO session_recovery VALUES (?,?)',
+                                (grant.session_id, json.dumps(receipt, sort_keys=True)))
+                if clean or acknowledged:
+                    self.record_cleanup(grant.session_id, {'stopped': clean}, clean=clean)
+                    self.set_state(grant.session_id, 'closed', revoke=True)
+                self.db.execute('COMMIT')
+            except BaseException:
+                self.db.execute('ROLLBACK')
+                raise
+        return self.get_session(grant.session_id)
+
     def get_session(self, session_id: str) -> SessionGrant:
         with self.lock:
             row = self.db.execute(
@@ -162,10 +230,10 @@ class ComputerStore:
         values = result if type(result) is dict else {}
         receipt = {key: (values.get(key) if type(values.get(key)) is bool else None)
                    for key in ("stopped", "released", "applications_preserved",
-                               "input_revoked", "capture_revoked")}
+                               "input_revoked", "capture_revoked", "input_was_enabled")}
         devices = values.get("owned_devices")
         receipt["owned_devices"] = (devices if type(devices) is str and devices in
-                                    {"removed", "retained_inactive"} else "unknown")
+                                    {"removed", "retained_inactive", "not_created"} else "unknown")
         receipt["complete"] = clean is True
         with self.lock:
             self.db.execute("INSERT OR REPLACE INTO session_cleanup VALUES (?,?)",

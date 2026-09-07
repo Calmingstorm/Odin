@@ -141,6 +141,11 @@ class Supervisor:
         await asyncio.get_running_loop().connect_read_pipe(
             lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer,
         )
+        # No systemd launch until the controller durably records this process.
+        # A crash before that write closes stdin; never launch from EOF/timeout.
+        line = await asyncio.wait_for(reader.readline(), 2.0)
+        if not line or decode(line, cap=65536) != {'op': 'launch'}:
+            return
         self.worker = await asyncio.create_subprocess_exec(
             *self.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL, env=clean_environment(), limit=MAX_WIRE_BYTES,

@@ -7,6 +7,46 @@ Authority: Aaron's build authorization recorded in the review document of
 
 ## Revision R5: complete the deploy-testable capability (2026-09-07)
 
+### R5 crash workload recovery (2026-09-07)
+
+Recovery is operator-owned read-only reconciliation, never automatic replay or
+blind database clearing. Constructor recovery only fences generations and marks
+pending receipts unknown. A separate bounded asynchronous operator call verifies
+the exact persisted runtime; success closes the quarantine, preserving receipts
+and evidence. Current owner/host authority is checked before and after inspection,
+and the result uses a generation compare-and-swap. Model observation reconcile
+does not grant this recovery capability. No historical workloads are terminated.
+
+Production adapters generate an immutable startup descriptor before launch and
+persist every native process identity before sending its launch/request gate.
+An isolated descriptor contains the unpredictable exact systemd unit, boot ID,
+supervisor PID/start ticks and launch-pending state. Attached descriptors record
+all finite capture/guardian process identities, no-device-creation evidence and
+whether input was enabled. Runtime IDs stay private, absent from model/API status.
+The existing isolated two-second lease and 1200-second unit maximum remain;
+elapsed time alone never proves cleanup. Inspection first proves launch-capable
+processes/groups gone, then verifies unit inactive/no job/no PID and its fixed
+cgroup absent or unpopulated. PID reuse never authorizes signalling; zombies and
+unknown inspection results remain incomplete. The recovery code never calls unit
+stop, kill, reset-failed, restart or display APIs.
+
+A crash in the spawn-to-PID persistence gap remains `launch_identity_incomplete`.
+Attached XTEST input can remain held after a guardian crash; process absence alone
+does not prove owned-input release. Such input-enabled sessions remain quarantined
+with `owned_input_release_unproven`, not a fabricated release or app-survival claim.
+Capture-only sessions can be reconciled by exact process absence. Host restart
+invalidates prior-boot processes and input state. Failed/unknown reads do not close
+quarantine and can be retried by the operator after independent cleanup.
+
+Pre-descriptor development stores report actionable `operator_cleanup_required`.
+The separate, non-model legacy acknowledgment requires exact session identity,
+generation and `ACKNOWLEDGE UNVERIFIED CLEANUP <session_id>` from the operator after
+independent workload checks. It archives the quarantine to unblock admission but
+persists `operator_acknowledged_unverified` and cleanup complete=false, never a
+claim that the bot verified old workload or device removal. Ordinary stop/status
+cannot silently perform this acknowledgment. No existing session is tested or
+cleaned during development; deterministic fixtures exercise recovery.
+
 Aaron's current instruction requires a working end-to-end GUI task and active,
 configured-only production wiring, not another preparatory checkpoint. Continue
 on this branch; no deployment, live-install edits, restart, master merge, tag or

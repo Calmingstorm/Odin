@@ -83,6 +83,74 @@ class ComputerController:
         self._stop_locks: dict[str, asyncio.Lock] = {}
         self.store.recover()
 
+    def _prepare_runtime(self, grant, backend):
+        prepare = getattr(backend, 'startup_descriptor', None)
+        if prepare is None:
+            return  # Legacy test adapters remain explicitly unrecoverable.
+        self.store.record_runtime(grant, prepare(grant.session_id))
+        launch_grant = grant
+
+        def persist(descriptor):
+            nonlocal launch_grant
+            live = self._live.get(grant.session_id)
+            if live is None or live.backend is not backend:
+                raise ComputerError('grant_revoked')
+            if descriptor.get('launch_pending') is True:
+                # A new spawn after an authorized resume may use its new grant;
+                # completion of an old spawn may never inherit that generation.
+                launch_grant = self.store.get_session(grant.session_id)
+            self.store.record_runtime(launch_grant, descriptor)
+        backend.runtime_identity_callback = persist
+
+    async def reconcile_recovery(self, context, session_id, generation):
+        """Operator-only absence verification, never an input or cleanup actuator."""
+        await self._auth(context, emergency=True)
+        if context.surface != 'webui':
+            raise ComputerError('operator_surface_required')
+        grant = self.store.get_session(session_id)
+        if grant.owner_id != context.owner_id or grant.host_id != context.host_id:
+            raise ComputerError('not_found')
+        if type(generation) is not int or grant.generation != generation:
+            raise ComputerError('stale_generation')
+        async with self._stop_locks.setdefault(session_id, asyncio.Lock()):
+            if session_id in self._live or grant.state != 'quarantined':
+                raise ComputerError('recovery_unavailable')
+            descriptor = self.store.runtime_descriptor(session_id)
+            if descriptor is None:
+                result = {'status': 'operator_cleanup_required',
+                          'reason': 'legacy_runtime_identity_missing'}
+            else:
+                from .runtime.recovery import verify_absence
+                try:
+                    result = await _bounded(verify_absence(descriptor), 3.0)
+                except TimeoutError:
+                    result = {'status': 'unknown', 'reason': 'inspection_timeout'}
+            await self._auth(context, emergency=True)
+            grant = self.store.finish_recovery(grant, result)
+            return self._public_session(grant)
+
+    async def acknowledge_legacy_recovery(self, context, session_id, generation, acknowledgment):
+        """Explicit human attestation archives legacy uncertainty, not a clean claim."""
+        await self._auth(context, emergency=True)
+        if context.surface != 'webui':
+            raise ComputerError('operator_surface_required')
+        grant = self.store.get_session(session_id)
+        if grant.owner_id != context.owner_id or grant.host_id != context.host_id:
+            raise ComputerError('not_found')
+        if type(generation) is not int or grant.generation != generation:
+            raise ComputerError('stale_generation')
+        if acknowledgment != f'ACKNOWLEDGE UNVERIFIED CLEANUP {session_id}':
+            raise ComputerError('explicit_acknowledgment_required')
+        async with self._stop_locks.setdefault(session_id, asyncio.Lock()):
+            if (session_id in self._live or self.store.runtime_descriptor(session_id) is not None
+                    or grant.state != 'quarantined'):
+                raise ComputerError('legacy_acknowledgment_unavailable')
+            await self._auth(context, emergency=True)
+            grant = self.store.finish_recovery(grant, {
+                'status': 'operator_acknowledged_unverified',
+                'reason': 'legacy_runtime_identity_missing'}, acknowledged=True)
+            return self._public_session(grant)
+
     async def _auth(self, context, *, emergency=False):
         foreground(context)
         result = self.authorize(context)
@@ -189,7 +257,8 @@ class ComputerController:
         capabilities = live.capabilities if live is not None else None
         result = {**grant.public(), "backend_capabilities": (
             capabilities.public() if capabilities is not None else None),
-                "cleanup": self.store.cleanup(grant.session_id)}
+                "cleanup": self.store.cleanup(grant.session_id),
+                "recovery": self.store.recovery_status(grant.session_id)}
         if live is not None:
             sources = getattr(live.backend, "sources", None)
             if callable(sources):
@@ -225,6 +294,7 @@ class ComputerController:
             try:
                 self._live[grant.session_id] = LiveSession(
                     backend, self.monotonic() + MAX_TASK_SECONDS, capabilities=capabilities)
+                self._prepare_runtime(grant, backend)
                 await _bounded(backend.start(grant.session_id), 20)
                 current = self.store.get_session(grant.session_id)
                 if current.generation != grant.generation or current.state != "starting":

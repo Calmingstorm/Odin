@@ -57,6 +57,23 @@ class LinuxDesktopBackend:
         self._consent_generation = 1
         self._frame: BackendObservation | None = None
         self._captured_at = 0.0
+        self._descriptor = None
+        self.runtime_identity_callback = None
+
+    def startup_descriptor(self, session_id: str) -> dict:
+        from .recovery import boot_id
+        validate_session(session_id)
+        if self._descriptor is None:
+            owned = hashlib.sha256(session_id.encode()).hexdigest()[:32] + '-' + uuid.uuid4().hex
+            self._unit = unit_for(owned)
+            self._descriptor = {
+                'version': 1, 'kind': 'isolated', 'session_id': session_id,
+                'boot_id': boot_id(), 'token': owned, 'unit': self._unit,
+                'processes': [], 'launch_pending': True,
+            }
+        if self._descriptor['session_id'] != session_id:
+            raise RuntimeFailure('runtime identity changed')
+        return copy.deepcopy(self._descriptor)
 
     async def start(self, session_id: str) -> dict:
         if not self.enabled:
@@ -65,8 +82,8 @@ class LinuxDesktopBackend:
             raise RuntimeFailure("backend instances are single-use")
         validate_session(session_id)
         preflight()
-        owned = hashlib.sha256(session_id.encode()).hexdigest()[:32] + "-" + uuid.uuid4().hex
-        self._unit = unit_for(owned)
+        descriptor = self.startup_descriptor(session_id)
+        owned = descriptor['token']
         self._ready = asyncio.get_running_loop().create_future()
         try:
             self._process = await asyncio.create_subprocess_exec(
@@ -77,6 +94,13 @@ class LinuxDesktopBackend:
                 stderr=asyncio.subprocess.DEVNULL, env=clean_environment(),
                 start_new_session=True, limit=MAX_WIRE_BYTES,
             )
+            from .recovery import process_identity
+            self._descriptor['processes'].append(process_identity(self._process.pid))
+            self._descriptor['launch_pending'] = False
+            if self.runtime_identity_callback is not None:
+                self.runtime_identity_callback(copy.deepcopy(self._descriptor))
+            # Supervisor cannot launch the unit before its exact PID and unit are durable.
+            await self._send({'op': 'launch'})
             self._reader_task = asyncio.create_task(self._read())
             self._heartbeat_task = asyncio.create_task(self._heartbeats())
             result = await asyncio.wait_for(asyncio.shield(self._ready), 20.0)
