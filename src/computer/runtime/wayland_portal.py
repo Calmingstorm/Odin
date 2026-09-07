@@ -715,7 +715,8 @@ class _PortalWorker:
                 break
         if compositor is None:
             raise PortalError("portal_remotedesktop_eis_unavailable")
-        self.identity = {"portal": self.owner(DEST), "shell": compositor}
+        self.identity = {"portal": self.owner(DEST), "shell": compositor,
+                         "compositor_bus": compositor_bus}
         for name, key in ((DEST, "portal"), (compositor_bus, "shell")):
             expected = self.identity[key]["owner"]
             def changed(_b, _s, _p, _i, _n, params, expected=expected):
@@ -790,7 +791,10 @@ class _PortalWorker:
         try:
             pid, uid, gid = struct.unpack(
                 "3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-            shell = self.owner("org.gnome.Shell")
+            compositor_bus = self.identity.get("compositor_bus", "org.gnome.Shell")
+            if compositor_bus not in {"org.gnome.Shell", "org.kde.KWin"}:
+                raise PortalError("unrecognized measured compositor bus")
+            shell = self.owner(compositor_bus)
             if shell != self.identity["shell"] or (pid, uid) != (shell["pid"], self.expected_uid):
                 raise PortalError("EIS creator differs from measured compositor")
             return {"eis_peer": {**shell, "gid": gid}, "generation": self.generation}, sock.detach()
