@@ -401,7 +401,9 @@ class AsyncGuardian:
         if self.malformed:
             return b"invalid receipt\n"
         if self.reads == 1:
-            await asyncio.Event().wait()
+            # A real guardian emits its one receipt on controller EOF. The
+            # lifetime owner keeps reading it across caller cancellation.
+            await self.closed.wait()
         return b'{"status":"unknown","released":true}\n'
 
     async def wait(self):

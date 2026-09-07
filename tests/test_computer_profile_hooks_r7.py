@@ -11,7 +11,8 @@ from tests.test_computer_x11_guardian_r5 import click, observed
     ("drag", {"points": [[2, 2], [3, 3]], "duration": .1}),
     ("key", {"key": "ctrl+o"}), ("key", {"key": "ctrl+n"}),
 ])
-async def test_controller_offering_before_capture_or_pending(tmp_path, monkeypatch, operation, fields):
+async def test_controller_offering_before_capture_or_pending(
+        tmp_path, monkeypatch, operation, fields):
     async with fixture(tmp_path, monkeypatch) as (c, ctx, action, _state, calls):
         c.store.db.execute("UPDATE sessions SET app='writer'")
         action.update(operation=operation, **fields)

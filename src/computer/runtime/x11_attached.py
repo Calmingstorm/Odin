@@ -24,6 +24,7 @@ from .profile import validate_session
 
 MAX_REPLY = 3 * 1024 * 1024
 CAPTURE_TIMEOUT = 5.0
+CLEANUP_TIMEOUT = 9.0
 INPUT_BLOCKER = "existing_x11_input_not_enabled"
 
 
@@ -111,6 +112,9 @@ class X11AttachedBackend:
         self._children = set()
         self._guardians = set()
         self._worker_identities = {}
+        self._jobs = {}
+        self._workers = {}
+        self._reapers = {}
         self._release_failed = False
         self._frame = self._scope = self._fingerprint = None
         self._modal_id = None
@@ -213,6 +217,15 @@ class X11AttachedBackend:
             await asyncio.sleep(.02)
 
     async def _reap(self, child):
+        # A cancelled observer and Stop can arrive together. Exactly one owner
+        # settles this child; cancelling a waiter never cancels its reaper.
+        task = self._reapers.get(child)
+        if task is None:
+            task = asyncio.create_task(self._reap_owned(child))
+            self._reapers[child] = task
+        await asyncio.shield(task)
+
+    async def _reap_owned(self, child):
         assert child.stdin is not None
         if self._runtime_sudo:
             child.stdin.close()
@@ -237,17 +250,62 @@ class X11AttachedBackend:
                     child.kill()
                 except ProcessLookupError:
                     pass
-                await child.wait()
+                try:
+                    await asyncio.wait_for(child.wait(), .3)
+                except TimeoutError:
+                    self._release_failed = True
+                    return
         self._children.discard(child)
 
     async def _read_worker(self, operation, *, selected=None):
+        return await self._work("capture", self._read_worker_owned, operation, selected=selected)
+
+    async def _work(self, kind, operation, *args, **kwargs):
+        """Own the complete worker lifetime, not the caller's observation wait.
+
+        Cancellation revokes a pipe/event, never the owner task. In particular a
+        cancellation during spawn cannot lose the returned process, and repeated
+        caller cancellation cannot orphan receipt consumption or reaping.
+        """
+        if self._closed or self._paused:
+            raise AttachedFailure("worker_revoked")
+        revoked = asyncio.Event()
+        task = asyncio.create_task(operation(revoked, *args, **kwargs))
+        self._jobs[task] = (kind, revoked)
+
+        def finished(task):
+            self._jobs.pop(task, None)
+            self._workers.pop(revoked, None)
+            if not task.cancelled():
+                task.exception()
+
+        task.add_done_callback(finished)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            self._revoke_job(kind, revoked)
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                pass
+            raise
+
+    def _revoke_job(self, kind, revoked):
+        revoked.set()
+        child = self._workers.get(revoked)
+        if child is not None:
+            child.stdin.close()
+            if kind == "capture" and child not in self._reapers:
+                self._reapers[child] = asyncio.create_task(self._reap_owned(child))
+
+    async def _read_worker_owned(self, revoked, operation, *, selected=None):
         if self._closed or self._paused:
             raise AttachedFailure("capture_revoked")
         request = {**self._config, "operation": operation, "input_enabled": self._input_enabled}
         if selected is not None:
             request["selected"] = selected
         async with self._spawn_lock:
-            if self._closed or self._paused:
+            if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("capture_revoked")
             self._record_spawn()
             child = await asyncio.create_subprocess_exec(
@@ -257,12 +315,13 @@ class X11AttachedBackend:
                 env=worker_environment(self._config["xauthority"]), start_new_session=True,
                 limit=MAX_REPLY + 1)
             self._children.add(child)
+            self._workers[revoked] = child
         assert child.stdin is not None and child.stdout is not None
         try:
             self._record_spawn(child, pending=self._runtime_sudo)
             if self._runtime_sudo:
                 await self._worker_ready(child, "capture")
-            if self._closed or self._paused:
+            if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("capture_revoked")
 
             async def communicate_bounded():
@@ -277,7 +336,7 @@ class X11AttachedBackend:
                 return output
 
             output = await asyncio.wait_for(communicate_bounded(), CAPTURE_TIMEOUT)
-            if child.returncode != 0 or self._closed:
+            if child.returncode != 0 or self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("capture_worker_failed_or_revoked")
             reply = json.loads(output)
             if type(reply) is not dict or reply.get("ok") is not True:
@@ -290,7 +349,7 @@ class X11AttachedBackend:
         except Exception:
             raise AttachedFailure("capture_unavailable") from None
         finally:
-            await asyncio.shield(self._reap(child))
+            await self._reap(child)
 
     async def start(self, session_id):
         if not self.enabled:
@@ -467,8 +526,11 @@ class X11AttachedBackend:
             return receipt
 
     async def _input_worker(self, request):
+        return await self._work("input", self._input_worker_owned, request)
+
+    async def _input_worker_owned(self, revoked, request):
         async with self._spawn_lock:
-            if self._closed or self._paused:
+            if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("input_revoked")
             self._record_spawn()
             child = await asyncio.create_subprocess_exec(
@@ -478,22 +540,26 @@ class X11AttachedBackend:
                 env=worker_environment(self._config["xauthority"]),
                 start_new_session=True, limit=65536)
             self._guardians.add(child)
+            self._workers[revoked] = child
         assert child.stdin is not None and child.stdout is not None
         received = False
+        sent = False
+        line = None
         try:
             self._record_spawn(child, pending=self._runtime_sudo)
             guardian_identity = None
             if self._runtime_sudo:
                 guardian_identity = await self._worker_ready(child, "guardian", pending=True)
-            if self._closed or self._paused:
+            if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("input_revoked")
+            sent = True  # Any partial write may authorize work; never infer a retry.
             child.stdin.write(json.dumps(request).encode() + b"\n")
             await child.stdin.drain()
             if self._runtime_sudo:
                 assert guardian_identity is not None
                 identity = await self._worker_ready(child, "injector",
                     parent=guardian_identity["pid"])
-                if self._closed or self._paused:
+                if self._closed or self._paused or revoked.is_set():
                     raise AttachedFailure("input_revoked")
                 child.stdin.write(json.dumps({"ack": identity}).encode() + b"\n")
                 await child.stdin.drain()
@@ -519,10 +585,14 @@ class X11AttachedBackend:
                 assert child.stdout is not None
                 try:
                     await asyncio.wait_for(child.wait(), 3)
-                    if not received:
-                        line = await asyncio.wait_for(child.stdout.readline(), 1)
-                        receipt = json.loads(line)
-                        if receipt.get("released") is not True:
+                    if not received and sent:
+                        # A receipt read before a wait/identity failure is still
+                        # the only receipt. Never replace it by an EOF re-read.
+                        reply = line if line is not None else await asyncio.wait_for(
+                            child.stdout.readline(), 1)
+                        receipt = json.loads(reply)
+                        if (child.returncode != 0 or type(receipt) is not dict
+                                or receipt.get("released") is not True):
                             self._release_failed = True
                     if self._runtime_sudo and not await self._identities_gone(child):
                         self._release_failed = True
@@ -531,7 +601,9 @@ class X11AttachedBackend:
                 # Never kill the release supervisor to manufacture a clean stop.
                 if child.returncode is not None:
                     self._guardians.discard(child)
-            await asyncio.shield(revoke())
+            # This lifetime task is already shielded by _work. Keep receipt
+            # settlement in that owner, not an untracked nested shield task.
+            await revoke()
 
     async def export(self, name):
         raise AttachedFailure("existing_session_export_not_granted")
@@ -539,51 +611,56 @@ class X11AttachedBackend:
     async def pause(self):
         self._paused = True
         self._frame = None
-        async with self._spawn_lock:
-            for child in tuple(self._guardians):
-                child.stdin.close()
-            for child in tuple(self._children):
-                await asyncio.shield(self._reap(child))
-        await self._wait_guardians()
+        async with self._stop_lock:
+            settled = await self._cleanup_workers()
         return {"paused": True, "input_revoked": True, "capture_revoked": True,
-                "released": not self._release_failed}
+                "released": settled and not self._release_failed}
 
     async def resume(self, *, consent_generation):
         if self._closed or not self._paused:
             raise AttachedFailure("capture_not_paused")
         if type(consent_generation) is not int or consent_generation <= self._generation:
             raise AttachedFailure("renewed_capture_consent_required")
-        self._generation = consent_generation
-        if self._release_failed:
+        if (self._release_failed or self._jobs or self._children or self._guardians
+                or any(not task.done() for task in self._reapers.values())):
             raise AttachedFailure("owned_release_unverified")
+        self._generation = consent_generation
         self._paused = False
         return {"resumed": True, "capture_only": not self._input_enabled}
 
-    async def _wait_guardians(self):
+    async def _cleanup_workers(self):
+        # No raster, RandR, focus, action lock or application operation belongs
+        # here. Fence authority first, settle the exact owned worker jobs only.
+        for kind, revoked in tuple(self._jobs.values()):
+            self._revoke_job(kind, revoked)
         for child in tuple(self._guardians):
-            try:
-                await asyncio.wait_for(asyncio.shield(child.wait()), 3)
-            except TimeoutError:
-                self._release_failed = True
-        # Each action owner consumes its receipt and records cleanup failure.
-        async with self._lock:
-            pass
+            child.stdin.close()
+        for child in tuple(self._children):
+            if child not in self._reapers:
+                self._reapers[child] = asyncio.create_task(self._reap_owned(child))
+        tasks = set(self._jobs) | {t for t in self._reapers.values() if not t.done()}
+        if tasks:
+            _done, pending = await asyncio.wait(tasks, timeout=CLEANUP_TIMEOUT)
+            if pending:
+                # A wait deadline is not a negative release receipt. Keep the
+                # owner alive and distinguish unsettled from proven failure;
+                # a later Stop can accept its independently verified result.
+                return False
+        return not self._children and not self._guardians
 
     async def detach(self):
         self._closed = True
         self._paused = True
+        self._frame = None
         async with self._stop_lock:
-            async with self._spawn_lock:
-                for child in tuple(self._guardians):
-                    child.stdin.close()
-                for child in tuple(self._children):
-                    await asyncio.shield(self._reap(child))
-            await self._wait_guardians()
-            return {"stopped": not self._release_failed, "released": not self._release_failed,
+            settled = await self._cleanup_workers()
+            clean = settled and not self._release_failed
+            return {"stopped": clean, "released": clean,
                     "applications_preserved": True,
                     "input_revoked": True, "capture_revoked": True,
                     "owned_devices": "not_created", "input_was_enabled": self._input_enabled,
-                    "state": "quarantined" if self._release_failed else "closed"}
+                    "state": "closed" if clean else "quarantined",
+                    "recovery": None if clean else "owned_x11_cleanup_unverified"}
 
     stop = detach
     close = detach

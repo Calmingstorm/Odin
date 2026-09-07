@@ -13,6 +13,9 @@ MAX_BATCH = 8
 FRAME_FRESH_SECONDS = 5.0
 DELIVERED_GROUNDING_SECONDS = 120.0
 STOP_TIMEOUT_SECONDS = 3.0
+# Existing-session teardown must allow the privileged capture alarm (5s),
+# wrapper exit and exact-identity census. Isolated stop keeps its original bound.
+ATTACHED_STOP_TIMEOUT_SECONDS = 10.0
 
 
 def foreground(context: RequestContext) -> None:

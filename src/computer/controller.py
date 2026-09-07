@@ -8,7 +8,11 @@ import uuid
 from copy import deepcopy
 
 from .actions import click_receipt
-from .app_profiles import application_profile, validate_attached_only_profile, validate_profile_action
+from .app_profiles import (
+    application_profile,
+    validate_attached_only_profile,
+    validate_profile_action,
+)
 from .gui_actions import action_arguments, action_payload, visual_receipt
 from .models import (
     BackendCapabilities,
@@ -19,6 +23,7 @@ from .models import (
     RequestContext,
 )
 from .policy import (
+    ATTACHED_STOP_TIMEOUT_SECONDS,
     DELIVERED_GROUNDING_SECONDS,
     FRAME_FRESH_SECONDS,
     MAX_ACTION_RPC_SECONDS,
@@ -82,6 +87,7 @@ class ComputerController:
         self._watchdogs: dict[str, asyncio.Task] = {}
         self._delivered_observations: dict[str, str] = {}
         self._stop_locks: dict[str, asyncio.Lock] = {}
+        self._stops: dict[str, asyncio.Task] = {}
         self.store.recover()
 
     def _prepare_runtime(self, grant, backend):
@@ -189,6 +195,20 @@ class ComputerController:
         await self._stop(sid, "cancelled")
 
     async def _stop(self, sid, state):
+        # Transport/turn cancellation must not cancel cleanup or its durable
+        # receipt. Later close/disable joins the same owner rather than racing it.
+        task = self._stops.get(sid)
+        if task is None or task.done():
+            task = asyncio.create_task(self._stop_serialized(sid, state))
+            self._stops[sid] = task
+            task.add_done_callback(_consume)
+        try:
+            return await asyncio.shield(task)
+        except asyncio.CancelledError:
+            await asyncio.shield(task)
+            raise
+
+    async def _stop_serialized(self, sid, state):
         async with self._stop_locks.setdefault(sid, asyncio.Lock()):
             current = self.store.get_session(sid)
             if current.state in {"closed", "cancelled"} and sid not in self._live:
@@ -212,7 +232,10 @@ class ComputerController:
                 raise ComputerError("backend_capabilities_unknown")
             operation = (live.backend.detach if live.capabilities.environment == "existing_session"
                          else live.backend.stop)
-            result = await _bounded(operation(), STOP_TIMEOUT_SECONDS)
+            timeout = (ATTACHED_STOP_TIMEOUT_SECONDS
+                       if live.capabilities.environment == "existing_session"
+                       else STOP_TIMEOUT_SECONDS)
+            result = await _bounded(operation(), timeout)
             clean = isinstance(result, dict) and result.get("stopped") is True
             if clean and live.capabilities.environment == "existing_session":
                 device_state = result.get("owned_devices")
@@ -260,7 +283,8 @@ class ComputerController:
             capabilities.public() if capabilities is not None else None),
                 "cleanup": self.store.cleanup(grant.session_id),
                 "recovery": self.store.recovery_status(grant.session_id)}
-        profile = application_profile(grant.app, platform=grant.platform, environment=grant.environment)
+        profile = application_profile(grant.app, platform=grant.platform,
+                                      environment=grant.environment)
         if profile is not None:
             result["application_profile"] = profile
         if live is not None:
@@ -392,7 +416,10 @@ class ComputerController:
         if pause is None:
             return await self._stop(sid, "cancelled")
         try:
-            result = await _bounded(pause(), STOP_TIMEOUT_SECONDS)
+            timeout = (ATTACHED_STOP_TIMEOUT_SECONDS if live.capabilities is not None
+                       and live.capabilities.environment == "existing_session"
+                       else STOP_TIMEOUT_SECONDS)
+            result = await _bounded(pause(), timeout)
             if not isinstance(result, dict) or result.get("released") is not True:
                 return await self._stop(sid, "cancelled")
         except (Exception, asyncio.CancelledError):

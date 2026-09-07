@@ -52,6 +52,11 @@ class OwnedLedger:
                 (self.keys if kind == "key" else self.buttons).discard(code)
 
     def release(self):
+        # No potentially-held code means no native release work. Capture, RandR,
+        # focus and even a lost server must not turn a proven empty ledger into
+        # spurious release failure. A fenced helper is still required by caller.
+        if not self.keys and not self.buttons:
+            return True
         errors = []
         try:
             physical = self.native.physical_held()
