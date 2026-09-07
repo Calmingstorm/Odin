@@ -35,10 +35,12 @@ Review APT's proposed transaction before accepting it.
 * **Depends:** Python 3.11+, python3-venv, openssh-client, systemd and sudo.
 * **Recommends:** Python pip, the optional computer OS tools/libraries and native
   applications, including bubblewrap, Xvfb, D-Bus, xdotool, Openbox, system
-  Xlib/GI/AT-SPI/GTK, fonts, X11 libraries, Drawing, Xed, Inkscape, Writer,
+  Xlib/GI/AT-SPI/GTK, fonts, X11 libraries including X11-XCB and xkbcommon-X11
+  for exact injected-keyboard mapping checks, Drawing, Xed, Inkscape, Writer,
   libei and GStreamer/PipeWire support. APT normally installs available
   recommendations; not every distribution supplies every recommended package.
-* **Suggests only:** GNOME Shell and the desktop/ GNOME portal packages. An Odin
+* **Suggests only:** GNOME Shell, KWin, the appropriate desktop portal packages,
+  and the version-matched `odin-kwin-scope` companion. An Odin
   install or upgrade must not implicitly install or replace a desktop compositor
   or select a portal backend. Choose and provision the target desktop separately.
 
@@ -80,7 +82,7 @@ not authorize silently bypassing a computer refusal.
 The operator must select the target, provision authorized display/monitor access
 for X11 or the exact target UID/local Unix session bus for Wayland, review service
 privileges, and enable computer use. For Wayland, the operator must activate the
-trusted scope extension in the chosen GNOME session and approve the real portal
+trusted GNOME extension or matching KWin companion and approve the real portal
 monitor-sharing/remote-interaction prompt for each task. The package never enables
 the extension, edits desktop security/accessibility settings, or restarts a login
 session. If discovery of new extension files needs a new login on that desktop,
@@ -101,6 +103,19 @@ availability varies with the base release and repositories. Missing or too-old
 libei is a specific missing dependency, **not evidence of a compositor defect**.
 Do not replace a desktop or add unreviewed repositories to force acceptance.
 Existing-session X11 remains a separate option on a suitably provisioned stack.
+
+KWin 6.1+ is recognized through its own portal/EIS and authenticated in-process
+scope adapter. Tested stock Fedora 43 `kwin-6.7.4-1.fc43` and Rawhide
+`kwin-6.7.4-2.fc46` both fail the mandatory held-input EOF release probe. They
+remain refused; the error identifies the compositor/version and required remedy.
+wlroots/Sway and the unqualified Hyprland remote-portal path remain named refusals.
+
+The main package ships KWin companion sources under `/usr/share/odin/kwin-scope`.
+`packaging/nfpm-kwin-scope.yml` packages a separately built, exact-ABI native
+companion. No universal KWin binary is included and no distro companion was
+published by this development round. A matching companion must be supplied by
+the package distributor or built explicitly; the main install alone does not
+make KWin input ready. Installation never loads the plugin automatically.
 
 Xed is unavailable in some distribution repositories. Isolated Enable preflight
 checks common executables, and task start checks the selected Drawing or Xed

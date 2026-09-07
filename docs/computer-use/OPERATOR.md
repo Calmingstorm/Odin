@@ -17,16 +17,16 @@ Computer use is default-off and available to authorized foreground conversations
 not autonomous agents, loops or schedules. Ordinary tools retain their normal
 permissions; this is not a separate chat mode.
 
-The R11 implementation contract is capability-first attached use: target the
+Attached use targets the
 user's chosen window without an application launch profile. Ordinary applications,
 menus, file pickers and document open/new/save/close/reopen are ordinary tasks.
 Terminals, shells, security/authentication/password prompts, keyrings, polkit and
 Odin's own control surface remain denied. Process/window provenance and fresh
 source/focus checks remain safety boundaries. Eligibility is not task success.
 
-The contract includes click, double/right click, drag, scroll, generic keys,
-Unicode typing and bounded observation crops. It calls for persistent independent
-X11 master devices where available, with a reported shared-pointer fallback.
+The tools provide click, double/right/middle click, drag/polyline, scroll, generic
+keys, Unicode typing and bounded observation crops. X11 uses persistent independent
+master devices where available, with a reported shared-pointer fallback.
 Independent per-window keyboard focus does not isolate widget focus inside a
 window. Concurrent user input can overlap. Inspect actual session capabilities.
 Unicode does not imply every character exists in the active keyboard layout;
@@ -41,9 +41,20 @@ R8 results covered specific GNOME/Mutter 48.7 fixtures; R6/R7 application result
 covered specific Xed, Drawing, Inkscape and Writer tasks. Those samples are neither
 a current attached-app allowlist nor general qualification.
 
-**R11 validation pending:** this guide records the implementation contract while
-parallel changes are integrated. It does not claim new GUI, compositor, Unicode,
-pointer or crop qualification. Consult the release checkpoint and runtime status.
+**Measured examples, not an application allowlist:** a real X11 Xed task completed
+through the controller with crop delivery, Unicode, click variants, a context menu,
+save, exact UTF-8 verification, document close/reopen and automatic detach. The
+human/core pointer stayed unchanged and the application survived. A real topology
+change invalidated old coordinates. Hardware DPMS sleep/wake is unit-tested but
+not hardware-qualified. Unsupported keyboard characters are reported by index;
+clipboard/IME fallback is not implemented.
+
+**KDE limits:** the opt-in KWin scope companion loaded and returned authenticated
+native-window metadata on stock Fedora 43 KWin 6.7.4. The tested Fedora 43 and
+Rawhide KWin 6.7.4 stacks both failed held-button/Shift release after EI sender EOF.
+They are refused with `compositor_held_button_eof_release_failed`; successful
+ordinary input or scope loading does not override that failure. Install a vendor
+fix and run qualification again. A full KDE controller input task is not qualified.
 Remote desktop-worker transport is not implemented; remote WebUI access is not
 remote computer control.
 
@@ -80,6 +91,14 @@ restart a user's graphical session to test setup.
   do not replace a running compositor. The human selects a monitor and approves
   interaction in the portal for each task. A registered adapter does not replace
   the mandatory behavioral release probe.
+
+KWin's provider uses a private, version-specific compositor ABI. It needs a
+matching `odin-kwin-scope` companion package and explicit operator loading.
+The main package contains the companion sources, not a universal binary. This
+branch provides the companion build/package recipe but does not publish distro
+binaries. Without a matching companion, KDE is not a zero-manual-step setup;
+source builders must follow the shipped companion README. Do not install a
+binary built for a different KWin ABI or load it into an untested real session.
 
 Least-privilege service policy is independent. `runtime_sudo` is an explicitly
 provisioned choice, not automatic escalation. Never bypass refusal with shell input.

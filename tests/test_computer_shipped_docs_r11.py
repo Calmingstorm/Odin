@@ -37,7 +37,9 @@ def test_new_operators_see_auth_and_consent_warnings():
         assert "general API authentication gate is disabled" in text[:1400]
     operator = (DOCS / "OPERATOR.md").read_text()
     assert "Installing dependencies is not consent" in operator
-    assert "R11 validation pending" in operator
+    assert "Measured examples, not an application allowlist" in operator
+    assert "full KDE controller input task is not qualified" in operator
+    assert "not a zero-manual-step setup" in operator
     assert "shared-pointer fallback" in operator
     assert "Remote desktop-worker transport is not implemented" in operator
 
