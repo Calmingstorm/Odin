@@ -811,6 +811,7 @@ class ComputerController:
             # Pending is now durable, before even constructing the input coroutine.
             self._delivered_observations.pop(grant.session_id, None)
             live.observations.clear()
+            next_observation = None
             try:
                 self._active(grant)
                 raw = await _bounded(live.backend.act(payload),
@@ -826,7 +827,7 @@ class ComputerController:
                             if current.frame_metadata is not None
                             and current.frame_metadata.crop is not None else None)
                     try:
-                        after, _ = await self._capture(grant, crop=crop)
+                        after, after_image = await self._capture(grant, crop=crop)
                     except ComputerError as exc:
                         if (grant.environment != "existing_session"
                                 or exc.code not in {
@@ -890,6 +891,19 @@ class ComputerController:
                             reason="target_changed_observe_again")
                     result["observation_id"] = after.observation_id
                     result["verification"]["evidence_id"] = after.evidence_id
+                    # Reuse the verification capture, not a second screenshot.
+                    # This is transport-only: persisted/replayed receipts contain
+                    # neither pixels nor new delivery authority. The ordinary
+                    # foreground native-image delivery gate must admit this frame
+                    # before its observation can authorize another action.
+                    next_observation = {
+                        **after.public(), "image_bytes": after_image,
+                        **self._input_status(live, grant),
+                        "sources": (live.backend.sources()
+                                    if callable(getattr(live.backend, "sources", None)) else []),
+                        "backend_capabilities": (live.capabilities.public()
+                                                 if live.capabilities is not None else None),
+                    }
                 receipt = self.store.finish_action(grant.session_id, inp["action_id"], result)
             except (Exception, asyncio.CancelledError) as exc:
                 self.store.finish_action(grant.session_id, inp["action_id"],
@@ -900,4 +914,6 @@ class ComputerController:
                 return self.store.receipt(grant.session_id, inp["action_id"], payload_hash)
             if receipt["status"] == "unknown":
                 await self._stop(grant.session_id, "cancelled")
+            elif next_observation is not None:
+                return {**receipt, "next_observation": next_observation}
             return receipt

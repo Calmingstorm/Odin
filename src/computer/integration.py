@@ -183,6 +183,30 @@ class ComputerIntegration:
                   "computer_act": self.controller.act}[name]
         try:
             result = await method(grant.context, values)
+            if (name == "computer_act" and isinstance(result, dict)
+                    and isinstance(result.get("next_observation"), dict)):
+                # Only the controller's newly captured frame enters this path.
+                # A stored receipt replay has no next_observation and cannot
+                # reissue pixels or authorize a subsequent action.
+                observation = result["next_observation"]
+                receipt = {k: v for k, v in result.items() if k != "next_observation"}
+                try:
+                    image = self.output_image(observation)
+                except (ValueError, TypeError, KeyError):
+                    # Injection already settled. A transport formatting failure
+                    # must not rewrite it as unknown or invite an action replay.
+                    result = receipt
+                else:
+                    image["__computer_action_receipt__"] = receipt
+                    image["__prompt__"] += (
+                        "\nAction receipt (effect status is independent of image delivery): "
+                        + json.dumps(receipt, ensure_ascii=True)
+                        + "\nThis is the post-action view. Use its observation_id and binding "
+                        "for the next action only after inspecting these pixels. Do not replay "
+                        "the previous action. Obtain a fresh observation if this view is stale."
+                    )
+                    grant.images.append(image)
+                    return image
             if isinstance(result, dict) and "image_bytes" in result:
                 from .models import ComputerError
 
