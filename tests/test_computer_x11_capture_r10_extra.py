@@ -27,8 +27,11 @@ def native(monkeypatch):
     module.X = NS(TrueColor=4, ZPixmap=2)
     module.display = NS(Display=Mock(return_value=display))
     monkeypatch.setitem(sys.modules, "Xlib", module)
+    revision = Mock()
+    revision.drain.return_value = 1
+    monkeypatch.setattr(capture, "RandRRevision", Mock(return_value=revision))
     return NS(module=module, display=display, root=root, screen=screen,
-              visual=visual, fmt=fmt, info=info)
+              visual=visual, fmt=fmt, info=info, revision=revision)
 
 
 def test_native_initialization_topology_image_and_close(native):
@@ -41,9 +44,10 @@ def test_native_initialization_topology_image_and_close(native):
         name=42, crtcs=[13, 14], x=2, y=1, width_in_pixels=2, height_in_pixels=1)])
     topology = connection.topology()
     assert topology == capture.Topology(9, 8, 4, (
-        capture.Monitor((42, (13, 14)), 2, 1, 2, 1),), 10, 11)
+        capture.Monitor((42, (13, 14)), 2, 1, 2, 1),), 10, 11, 1)
     assert native.root.xrandr_get_screen_resources_current.call_count == 2
     native.root.xrandr_get_monitors.assert_called_once_with(True)
+    assert native.revision.drain.call_count == 2
     native.root.get_image.return_value = NS(depth=24, data=bytes([3, 2, 1, 0]) * 2)
     assert connection.image(topology.monitors[0]) == bytes([1, 2, 3]) * 2
     native.root.get_image.assert_called_once_with(2, 1, 2, 1, 2, 0xFFFFFFFF)

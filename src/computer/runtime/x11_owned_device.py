@@ -1,4 +1,4 @@
-"""Explicit existing XTEST slave access. No creation/deletion, keymap edits or cleanup.
+"""Explicit XTEST access, with optional server-lifetime independent master reuse.
 
 Construct only in a dedicated single-threaded helper with an external deadline:
 Xlib can block on a dead server and its error handler is process-global. Queries
@@ -10,6 +10,7 @@ Native libraries and display access are deferred until construction.
 from __future__ import annotations
 
 import ctypes as C  # noqa: N812 - conventional short ctypes ABI declarations
+import os
 import re
 import threading
 from contextlib import contextmanager
@@ -17,6 +18,17 @@ from contextlib import contextmanager
 
 class X11DeviceError(RuntimeError):
     """Bounded native failure."""
+
+
+class UnsupportedCharacters(X11DeviceError):  # noqa: N818 - structured native result
+    def __init__(self, characters):
+        super().__init__("unsupported_character")
+        self.characters = characters
+
+
+class _AddMaster(C.Structure):
+    _fields_ = [("type", C.c_int), ("name", C.c_char_p),
+                ("send_core", C.c_int), ("enable", C.c_int)]
 
 
 class _Info(C.Structure):
@@ -73,9 +85,6 @@ class _RawPrefix(C.Structure):
 
 _ERROR_HANDLER = C.CFUNCTYPE(C.c_int, C.c_void_p, C.c_void_p)
 _LOCK = threading.RLock()
-_NAMES = frozenset(("Return", "Escape", "Tab", "BackSpace", "Delete", "space",
-                    "Left", "Right", "Up", "Down", "Home", "End", "Page_Up",
-                    "Page_Down", "Control_L", "Shift_L"))
 
 
 def _load_native():
@@ -85,6 +94,7 @@ def _load_native():
         ip, dp = C.POINTER(i), C.POINTER(_Device)
         specs = [
             (x, "XOpenDisplay", [C.c_char_p], p), (x, "XCloseDisplay", [p], i),
+            (x, "XGrabServer", [p], i), (x, "XUngrabServer", [p], i),
             (x, "XSync", [p, i], i), (x, "XSetErrorHandler", [p], p),
             (x, "XQueryExtension", [p, C.c_char_p, ip, ip, ip], i),
             (x, "XPending", [p], i), (x, "XNextEvent", [p, C.POINTER(_Event)], i),
@@ -104,6 +114,9 @@ def _load_native():
             (x, "XGetModifierMapping", [p], C.POINTER(_ModifierMap)),
             (x, "XFreeModifiermap", [C.POINTER(_ModifierMap)], i),
             (xi, "XIQueryVersion", [p, ip, ip], i),
+            (xi, "XIChangeHierarchy", [p, p, i], i),
+            (xi, "XISetClientPointer", [p, ul, i], i),
+            (xi, "XISetFocus", [p, i, ul, ul], i),
             (xi, "XISelectEvents", [p, ul, C.POINTER(_EventMask), i], i),
             (xi, "XIQueryDevice", [p, i, ip], C.POINTER(_Info)),
             (xi, "XIFreeDeviceInfo", [C.POINTER(_Info)], None),
@@ -124,6 +137,15 @@ def _load_native():
 
 
 class ExistingXTest:
+    prefix = "Virtual core"
+    independent_pointer = False
+
+    def _keyboard_id(self):
+        return 0x100
+
+    def _prepare_master(self):
+        pass
+
     def __init__(self, display_name: str):
         if (not isinstance(display_name, str)
                 or not re.fullmatch(r":[0-9]{1,5}(?:\.[0-9]{1,2})?", display_name)):
@@ -134,6 +156,7 @@ class ExistingXTest:
         self.physical_seen = False
         self._invalidated = False
         self._mapping_changed = False
+        self._text_state = None
         if not self._display:
             raise X11DeviceError("display_unavailable")
         try:
@@ -151,6 +174,7 @@ class ExistingXTest:
                                               C.byref(opcode), C.byref(event), C.byref(error)):
                     raise X11DeviceError("xi2_unavailable")
                 self._opcode = opcode.value
+                self._prepare_master()
                 # Subscribe BEFORE the initial census. Hierarchy changes poison
                 # this connection even if an ID/name is later reused identically.
                 raw = (C.c_ubyte * 3)(0, 0xE0, 1)
@@ -161,7 +185,7 @@ class ExistingXTest:
                     raise X11DeviceError("physical_event_subscription_failed")
             self._initial = self.identity()
             for row in self._initial:
-                if row[1] in ("Virtual core XTEST keyboard", "Virtual core XTEST pointer"):
+                if row[1] in (self.prefix + " XTEST keyboard", self.prefix + " XTEST pointer"):
                     kind = "keys" if row[2] == 4 else "buttons"
                     with self._checked():
                         device = self._xi.XOpenDevice(self._display, row[0])
@@ -223,8 +247,9 @@ class ExistingXTest:
         if self._invalidated:
             raise X11DeviceError("device_topology_changed")
         rows, selected = self._topology(), {}
-        for name, use in (("Virtual core pointer", 1), ("Virtual core keyboard", 2),
-                          ("Virtual core XTEST pointer", 3), ("Virtual core XTEST keyboard", 4)):
+        for name, use in ((self.prefix + " pointer", 1), (self.prefix + " keyboard", 2),
+                          (self.prefix + " XTEST pointer", 3),
+                          (self.prefix + " XTEST keyboard", 4)):
             matches = [r for r in rows if r[1] == name]
             if len(matches) != 1 or matches[0][2] != use or not matches[0][4]:
                 raise X11DeviceError("core_xtest_topology_invalid")
@@ -312,6 +337,13 @@ class ExistingXTest:
         self._assert_identity()
         if self._mapping_changed:
             result.append(("mapping", 0, True))
+        if self._text_state is not None:
+            with self._checked():
+                state = _XkbState()
+                if self._x.XkbGetState(self._display, self._keyboard_id(), C.byref(state)) != 0:
+                    raise X11DeviceError("keyboard_state_unavailable")
+                if (state.group, state.locked_mods, state.latched_group) != self._text_state:
+                    raise X11DeviceError("keyboard_state_changed")
         return result
 
     def _state(self, device, required):
@@ -358,8 +390,8 @@ class ExistingXTest:
         Never follow replaced/reattached synthetic endpoints. Physical handles
         are never injection targets. Caller must own a potential-down ledger.
         """
-        names = {"Virtual core pointer", "Virtual core keyboard",
-                 "Virtual core XTEST pointer", "Virtual core XTEST keyboard"}
+        names = {self.prefix + suffix for suffix in
+                 (" pointer", " keyboard", " XTEST pointer", " XTEST keyboard")}
         expected = tuple(r for r in self._initial if r[1] in names)
         actual = tuple(sorted(r for r in self._topology() if r[1] in names))
         if actual != expected:
@@ -443,9 +475,7 @@ class ExistingXTest:
             return rx.value, ry.value
 
     def keycode(self, name: str) -> int:
-        if not isinstance(name, str) or (name not in _NAMES
-                                        and not (len(name) == 1 and name.isascii()
-                                                 and name.isalnum())):
+        if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,128}", name):
             raise X11DeviceError("unsupported_key_name")
         with self._checked():
             symbol = self._x.XStringToKeysym(name.encode("ascii"))
@@ -457,19 +487,19 @@ class ExistingXTest:
     def text_keys(self, text: str) -> list[list[int]]:
         """Press-order chords; release each in reverse. Active XKB group/locks.
 
-        Fail closed on active/latched modifiers or non-ASCII; no keymap changes.
+        Fail closed on active/latched modifiers; never change the global keymap.
         Dispatch must recheck layout/state because the returned list is no lease.
         """
-        if (not isinstance(text, str) or len(text) > 4096
-                or any(not 32 <= ord(c) <= 126 for c in text)):
-            raise X11DeviceError("printable_ascii_required")
+        if not isinstance(text, str) or len(text) > 4096:
+            raise X11DeviceError("invalid_text")
         with self._checked():
             state = _XkbState()
-            if self._x.XkbGetState(self._display, 0x100, C.byref(state)) != 0:
+            if self._x.XkbGetState(self._display, self._keyboard_id(), C.byref(state)) != 0:
                 raise X11DeviceError("keyboard_state_unavailable")
             if (state.base_mods or state.latched_mods or state.latched_group
                     or state.group > 3 or state.locked_mods & ~18):
                 raise X11DeviceError("keyboard_modifiers_busy")
+            self._text_state = (state.group, state.locked_mods, state.latched_group)
             shift = self.keycode("Shift_L")
             mapping = self._x.XGetModifierMapping(self._display)
             if not mapping:
@@ -483,6 +513,14 @@ class ExistingXTest:
                 if shift in all_modifiers[m.max_keypermod:]:
                     raise X11DeviceError("shift_mapping_ambiguous")
                 modifier_codes = set(all_modifiers)
+                level3 = []
+                for name in ("ISO_Level3_Shift", "Mode_switch"):
+                    symbol = self._x.XStringToKeysym(name.encode("ascii"))
+                    code = self._x.XKeysymToKeycode(self._display, symbol)
+                    slots = [i // m.max_keypermod for i, c in enumerate(all_modifiers)
+                             if code and c == code]
+                    if len(set(slots)) == 1 and slots[0] in (3, 5, 6, 7):
+                        level3.append((code, 1 << slots[0]))
             finally:
                 self._x.XFreeModifiermap(mapping)
             low, high = C.c_int(), C.c_int()
@@ -490,19 +528,26 @@ class ExistingXTest:
             if not 8 <= low.value <= high.value <= 255:
                 raise X11DeviceError("keycode_range_invalid")
             chords: dict[str, list[int]] = {}
-            for shifted in (False, True):
-                mask = (state.group << 13) | state.locked_mods | int(shifted)
+            variants = [(0, []), (1, [shift])]
+            for code, mask in level3:
+                variants.extend([(mask, [code]), (mask | 1, [code, shift])])
+            for modifiers, prefix in variants:
+                mask = (state.group << 13) | state.locked_mods | modifiers
                 for code in range(low.value, high.value + 1):
                     if code in modifier_codes:
                         continue
                     consumed, symbol = C.c_uint(), C.c_ulong()
                     if self._x.XkbLookupKeySym(self._display, code, mask,
                                                C.byref(consumed), C.byref(symbol)):
-                        if 32 <= symbol.value <= 126:
-                            chord = [shift, code] if shifted else [code]
-                            chords.setdefault(chr(symbol.value), chord)
+                        char = _keysym_character(symbol.value)
+                        if char is not None:
+                            chord = prefix + [code]
+                            chords.setdefault(char, chord)
             if any(c not in chords for c in text):
-                raise X11DeviceError("text_not_in_active_layout")
+                raise UnsupportedCharacters([
+                    {"index": i, "codepoint": f"U+{ord(c):04X}",
+                     "reason": "unsupported_character"}
+                    for i, c in enumerate(text) if c not in chords])
             return [list(chords[c]) for c in text]
 
     def sync(self):
@@ -521,3 +566,87 @@ class ExistingXTest:
         finally:
             self._x.XCloseDisplay(self._display)
             self._display = None
+
+
+def _keysym_character(symbol):
+    if 32 <= symbol <= 126 or 160 <= symbol <= 255:
+        return chr(symbol)
+    if 0x01000100 <= symbol <= 0x0110FFFF:
+        return chr(symbol - 0x01000000)
+    try:
+        lib = C.CDLL("libxkbcommon.so.0")
+        lib.xkb_keysym_to_utf32.argtypes = [C.c_uint32]
+        lib.xkb_keysym_to_utf32.restype = C.c_uint32
+        value = lib.xkb_keysym_to_utf32(symbol)
+        return chr(value) if 32 <= value <= 0x10FFFF else None
+    except OSError:
+        return None
+
+
+class PersistentXTest(ExistingXTest):
+    """Server-lifetime master pair. Never remove, disable or reattach devices.
+
+    Closing connections leaves masters and applications intact. The guardian
+    must fence injection and release its ledger. Widget focus remains shared.
+    """
+    prefix = f"Odin persistent {os.getuid()}"
+    independent_pointer = True
+
+    def _keyboard_id(self):
+        return next(r[0] for r in self._initial if r[2] == 2)
+
+    def focus(self, window):
+        """Change only this master keyboard's top-level focus."""
+        self._assert_identity()
+        keyboard = next(r[0] for r in self._initial if r[2] == 2)
+        with self._checked():
+            if self._xi.XISetFocus(self._display, keyboard, window, 0):
+                raise X11DeviceError("owned_focus_failed")
+
+    def _prepare_master(self):
+        # Serialize query+create across helpers; the server automatically drops
+        # this very short grab if the connection dies. No resource is removed.
+        self._x.XGrabServer(self._display)
+        try:
+            rows = self._topology()
+            if not any(r[1].startswith(self.prefix + " ") for r in rows):
+                add = _AddMaster(1, self.prefix.encode("ascii"), 1, 1)
+                with self._checked():
+                    if self._xi.XIChangeHierarchy(self._display, C.byref(add), 1):
+                        raise X11DeviceError("independent_pointer_unavailable")
+            masters = [r for r in self._topology() if r[1] == self.prefix + " pointer"]
+            if len(masters) != 1 or masters[0][2] != 1 or not masters[0][4]:
+                raise X11DeviceError("persistent_master_invalid")
+            if self._xi.XISetClientPointer(self._display, 0, masters[0][0]):
+                raise X11DeviceError("independent_pointer_unavailable")
+        finally:
+            self._x.XUngrabServer(self._display)
+
+
+def open_input(display_name, *, mode="auto"):
+    if mode == "shared":
+        return ExistingXTest(display_name)
+    try:
+        return PersistentXTest(display_name)
+    except X11DeviceError:
+        if mode != "auto":
+            raise
+        return ExistingXTest(display_name)
+
+
+def input_capabilities(display_name):
+    """Probe actual endpoints, creating at most one persistent pair; no input."""
+    native = open_input(display_name)
+    try:
+        independent = native.independent_pointer
+        idle = not any(native.owned_release_state().values())
+        return {"pointer": "independent" if independent else "shared",
+                "keyboard_focus": "independent_per_window" if independent else "shared",
+                "widget_focus": "shared_within_window",
+                "shared_pointer": not independent, "shared_keyboard": not independent,
+                "persistent_input_devices": independent, "device_identity": native.identity(),
+                "owned_devices": ("persistent_idle" if idle else "persistent_release_unverified")
+                if independent else "not_created", "released": idle,
+                "clipboard_fallback": False}
+    finally:
+        native.close()

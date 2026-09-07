@@ -66,6 +66,9 @@ class FakeConnection:
     def topology(self):
         return self.current
 
+    def power_status(self):
+        return "on"
+
     def image(self, monitor):
         self.images.append(monitor)
         if self.change_during_capture:
@@ -144,6 +147,7 @@ def test_native_getimage_trailing_protocol_padding():
 
 def test_native_topology_snapshot_is_bracketed():
     connection = _XlibConnection.__new__(_XlibConnection)
+    connection._topology_events = SimpleNamespace(drain=lambda: 1)
     times = iter([SimpleNamespace(config_timestamp=2, timestamp=1),
                   SimpleNamespace(config_timestamp=2, timestamp=3)])
     connection._root = SimpleNamespace(
@@ -201,4 +205,4 @@ def test_import_does_not_import_optional_dependencies():
 
 def test_capture_class_has_no_input_or_desktop_mutation_api():
     public = {name for name in vars(X11MonitorCapture) if not name.startswith("_")}
-    assert public == {"topology", "capture", "close"}
+    assert public == {"topology", "power_status", "capture", "close"}

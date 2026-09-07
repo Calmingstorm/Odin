@@ -10,6 +10,7 @@ from unittest.mock import Mock
 import pytest
 
 from src.computer.runtime import x11_app_scope as scope
+from src.computer.runtime import x11_attached as attached
 from src.computer.runtime import x11_attached_worker as worker
 from src.computer.runtime import x11_worker_lifecycle as lifecycle
 from src.computer.runtime.x11_capture import Monitor, Topology, _XlibConnection
@@ -38,6 +39,9 @@ def native(monkeypatch):
         connection._display = display
         connection.bits, connection.pad = 24, 8
 
+    def power_status(connection):
+        return "on"
+
     def image(connection, monitor):
         state.images += 1
         if state.fail:
@@ -51,8 +55,16 @@ def native(monkeypatch):
 
     monkeypatch.setattr(_XlibConnection, "__init__", init)
     monkeypatch.setattr(_XlibConnection, "topology", lambda self: state.topology)
+    monkeypatch.setattr(_XlibConnection, "power_status", power_status)
     monkeypatch.setattr(_XlibConnection, "image", image)
     monkeypatch.setattr(_XlibConnection, "close", close)
+    def configuration(display_name, xauthority, monitor_names):
+        return {"display_name": display_name, "xauthority": xauthority,
+                "monitor_names": monitor_names}
+    monkeypatch.setattr(worker, "attachment_configuration", configuration)
+    monkeypatch.setattr(attached, "attachment_configuration", configuration)
+    real_scope = scope.AppScope
+    monkeypatch.setattr(scope, "AppScope", lambda connection: real_scope(connection, "xed"))
     monkeypatch.setattr(scope, "_process_identity", lambda pid, profile: {
         "pid": pid, "uid": 65534, "start_ticks": 101, "exe": "/usr/bin/xed"})
     return state

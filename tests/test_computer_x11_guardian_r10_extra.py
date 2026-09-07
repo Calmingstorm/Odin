@@ -9,11 +9,13 @@ from unittest.mock import Mock
 import pytest
 
 from src.computer.runtime import x11_guardian as g
+from src.computer.runtime import x11_owned_device as devices
 from src.computer.runtime import x11_worker_lifecycle as lifecycle
 
 
 def native():
     n = Mock()
+    n.independent_pointer = False
     n.identity.return_value = (11, 12)
     n.held.return_value = {"keys": set(), "buttons": set()}
     n.physical_held.return_value = {"keys": set(), "buttons": set()}
@@ -57,7 +59,8 @@ def test_helper_initialization_closes_child_socket(monkeypatch, fail):
         helper = g.InjectionHelper(":fake", {"A": "B"})
         assert helper.sock is parent
         assert popen.call_args.kwargs["pass_fds"] == (19,)
-        assert json.loads(parent.sendall.call_args.args[0]) == {"display_name": ":fake"}
+        assert json.loads(parent.sendall.call_args.args[0]) == {
+            "display_name": ":fake", "mode": "shared"}
     child.close.assert_called_once()
 
 
@@ -175,11 +178,13 @@ def test_execute_revalidates_application_and_always_closes(monkeypatch, case, re
         "x11_attached": SimpleNamespace(attachment_configuration=lambda *a: config,
                                         worker_environment=lambda *a: {}),
         "x11_attached_worker": SimpleNamespace(AttachedConnection=lambda *a: connection),
-        "x11_owned_device": SimpleNamespace(ExistingXTest=lambda *a: n),
+        "x11_owned_device": SimpleNamespace(open_input=lambda *a, **k: n,
+                                            UnsupportedCharacters=devices.UnsupportedCharacters,
+                                            X11DeviceError=devices.X11DeviceError),
         "x11_app_scope": SimpleNamespace(AppScope=lambda *a: scope),
     }.items():
         monkeypatch.setitem(sys.modules, "src.computer.runtime." + name, module)
-    monkeypatch.setattr(g, "InjectionHelper", lambda *a: helper)
+    monkeypatch.setattr(g, "InjectionHelper", lambda *a, **k: helper)
     steps = [("key", 38, True)] if case == "key" else [("move", 10, 20), ("button", 1, True)]
     if case == "invalid":
         steps = [("move", 1.5, 2)]
@@ -228,7 +233,7 @@ def test_injector_protocol_and_resource_closure(monkeypatch, op):
     monkeypatch.setattr(g.socket, "socket", lambda **kwargs: sock)
     monkeypatch.setattr(lifecycle, "parent_watch", Mock())
     monkeypatch.setitem(sys.modules, "src.computer.runtime.x11_owned_device",
-                        SimpleNamespace(ExistingXTest=lambda *a: n))
+                        SimpleNamespace(open_input=lambda *a, **k: n))
     monkeypatch.setattr(g.os, "_exit", Mock(side_effect=SystemExit(0)))
     if op == "invalid":
         with pytest.raises(g.GuardianFailure, match="unsupported_helper_operation"):

@@ -1,7 +1,7 @@
 """One action, two XTEST connections, a finite nonrenewable owned-input lease.
 
-The core XTEST slaves are SHARED with other synthetic clients. No native devices
-are created/removed, no physical slave is injected, and no global key-up exists.
+Persistent XI2 masters are reused without removal. When unavailable the original
+shared core XTEST path remains. No physical slave or global key-up is injected.
 The controller pipe stays open while input is permitted. Its loss, cancellation,
 helper exit and the fixed lease all fence the helper before ledger-only release.
 """
@@ -85,7 +85,7 @@ class OwnedLedger:
 
 
 class InjectionHelper:
-    def __init__(self, display_name, environment):
+    def __init__(self, display_name, environment, *, mode="shared"):
         self.sock, child_sock = socket.socketpair()
         try:
             self.process = subprocess.Popen(
@@ -98,7 +98,7 @@ class InjectionHelper:
         finally:
             child_sock.close()
         self.buffer = b""
-        self.sock.sendall(json.dumps({"display_name": display_name}).encode() + b"\n")
+        self.sock.sendall(json.dumps({"display_name": display_name, "mode": mode}).encode() + b"\n")
 
     def exchange(self, command, guard):
         guard()
@@ -229,20 +229,47 @@ class Guardian:
                 released = False
             latency = (self.clock() - triggered) * 1000
         success = self.reason == "complete" and released and not self.ledger.uncertain
+        persistent_idle = False
+        if getattr(self.native, "independent_pointer", False) and released:
+            try:
+                persistent_idle = not any(self.native.owned_release_state().values())
+            except Exception:
+                persistent_idle = False
         status = "executed" if success else ("unknown" if self.injected else "unavailable")
+        independent = getattr(self.native, "independent_pointer", False)
+        devices = "persistent_idle" if persistent_idle else "persistent_release_unverified"
         return {"status": status,
                 "injected": self.injected, "released": released, "reason": self.reason,
                 "overlap_uncertain": self.ledger.uncertain, "release_ms": round(latency, 3),
-                "shared_pointer": True, "shared_keyboard": True,
-                "owned_devices": "not_created", "applications_preserved": True}
+                "shared_pointer": not independent, "shared_keyboard": not independent,
+                "pointer": "independent" if independent else "shared",
+                "keyboard_focus": "independent_per_window" if independent else "shared",
+                "widget_focus": "shared_within_window",
+                "persistent_input_devices": independent,
+                "device_identity": self.identity,
+                "owned_devices": devices if independent else "not_created",
+                "applications_preserved": True}
 
 
 def input_steps(action, native):
     """Fixed action vocabulary. No model-supplied native code or arbitrary chord."""
-    from src.computer.gui_actions import KEYS
     kind = action["type"]
-    if kind == "click":
-        return [("move", action["x"], action["y"]), ("button", 1, True), ("button", 1, False)]
+    if kind in {"click", "double_click", "right_click", "middle_click", "scroll"}:
+        button = {"right_click": 3, "middle_click": 2}.get(kind, 1)
+        count, delay = (2, .08) if kind == "double_click" else (1, .03)
+        if kind == "scroll":
+            count = action.get("count", 1)
+            if type(count) is not int or not 1 <= count <= 20:
+                raise GuardianFailure("invalid_scroll_count")
+            button = {"up": 4, "down": 5, "left": 6, "right": 7}.get(action.get("direction"))
+            if button is None:
+                raise GuardianFailure("invalid_scroll_direction")
+        steps = [("move", action["x"], action["y"])]
+        for i in range(count):
+            if i:
+                steps.append(("wait", delay))
+            steps.extend([("button", button, True), ("button", button, False)])
+        return steps
     if kind == "polyline":
         points, duration = action["points"], action["duration"]
         if (not 2 <= len(points) <= 256 or type(duration) not in (float, int)
@@ -257,9 +284,11 @@ def input_steps(action, native):
         if type(text) is not str or not 1 <= len(text) <= 512:
             raise GuardianFailure("invalid_text")
         chords = native.text_keys(text)
-    elif kind == "key" and action["chord"] in KEYS:
-        mapping = {"ctrl": "Control_L", "shift": "Shift_L"}
-        chords = [[native.keycode(mapping.get(k, k)) for k in action["chord"].split("+")]]
+    elif kind == "key":
+        from src.computer.runtime.primitives import parse_key_chord
+        modifiers, symbol = parse_key_chord(action["chord"])
+        mapping = {"ctrl": "Control_L", "shift": "Shift_L", "alt": "Alt_L", "super": "Super_L"}
+        chords = [[native.keycode(mapping[k]) for k in modifiers] + [native.keycode(symbol)]]
     else:
         raise GuardianFailure("unsupported_action")
     return [event for chord in chords for event in
@@ -271,25 +300,46 @@ def execute(request, *, controller_fd=0, authorize=None):
     from src.computer.runtime.x11_app_scope import AppScope
     from src.computer.runtime.x11_attached import attachment_configuration, worker_environment
     from src.computer.runtime.x11_attached_worker import AttachedConnection
-    from src.computer.runtime.x11_owned_device import ExistingXTest
+    from src.computer.runtime.x11_owned_device import (
+        UnsupportedCharacters,
+        X11DeviceError,
+        open_input,
+    )
     config = attachment_configuration(request["display_name"], request["xauthority"],
-                                      request["monitor_names"], request["app_profile"])
+                                      request["monitor_names"])
     connection = AttachedConnection(config["display_name"])
     native = helper = None
     try:
+        if connection.power_status() == "display_asleep":
+            raise GuardianFailure("display_asleep")
         topology = connection.topology()
         sources = connection.named_sources(topology, config["monitor_names"])
         selected = request["selected"]
         if selected not in sources:
             raise GuardianFailure("stale_source")
         monitor = topology.monitors[selected["index"]]
-        scope = AppScope(connection._display, config["app_profile"])
+        scope = AppScope(connection._display)
         expected = request["scope"]
         scope.assert_snapshot(expected, monitor)
-        native = ExistingXTest(config["display_name"])
-        steps = input_steps(request["action"], native)
+        native = open_input(config["display_name"])
+        if native.independent_pointer:
+            native.focus(expected["focus_window"])
+        try:
+            steps = input_steps(request["action"], native)
+        except (X11DeviceError, ValueError) as exc:
+            idle = not any(native.owned_release_state().values())
+            return {"status": "unavailable", "injected": False, "released": True,
+                    "reason": str(exc), "unsupported_characters":
+                    exc.characters if isinstance(exc, UnsupportedCharacters) else [],
+                    "clipboard_fallback": False, "device_identity": native.identity(),
+                    "persistent_input_devices": native.independent_pointer,
+                    "owned_devices": ("persistent_idle" if idle
+                                      else "persistent_release_unverified")
+                    if native.independent_pointer else "not_created"}
         pointer: list[tuple[int, int] | None] = [None]
         def validate(step):
+            if connection.power_status() == "display_asleep":
+                raise GuardianFailure("display_asleep")
             if connection.topology() != topology:
                 raise GuardianFailure("stale_source")
             if step[0] == "move":
@@ -312,7 +362,8 @@ def execute(request, *, controller_fd=0, authorize=None):
                     scope.assert_snapshot(expected, monitor, point=pointer[0])
                 else:
                     scope.assert_snapshot(expected, monitor)
-        helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]))
+        helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]),
+                                 mode="independent" if native.independent_pointer else "shared")
         if authorize is not None:
             authorize(helper)
         return Guardian(native, helper, validate, controller_fd=controller_fd).run(steps)
@@ -327,22 +378,59 @@ def execute(request, *, controller_fd=0, authorize=None):
 def injector(fd):
     from src.computer.runtime.x11_worker_lifecycle import parent_watch
     parent_watch(injector=True)
-    from src.computer.runtime.x11_owned_device import ExistingXTest
+    from src.computer.runtime.x11_owned_device import open_input
     stream = socket.socket(fileno=fd).makefile("rwb", buffering=0)
     first = json.loads(stream.readline(MAX_MESSAGE))
-    native = ExistingXTest(first["display_name"])
+    native = open_input(first["display_name"], mode=first.get("mode", "shared"))
+    if native.independent_pointer:
+        # Dedicated endpoints survive their clients. Keep a second potential-down
+        # ledger in the injector so a killed guardian cannot strand held input.
+        # Shared fallback preserves its original external-ledger behavior.
+        parent_watch(injector=False)
+        ledger = OwnedLedger(native)
+        deadline = time.monotonic() + LEASE_SECONDS
+    else:
+        ledger = None
+    pending = bytearray()
     try:
-        while line := stream.readline(MAX_MESSAGE):
+        while True:
+            if ledger is not None:
+                from src.computer.runtime import x11_worker_lifecycle
+                if x11_worker_lifecycle.REVOKED or time.monotonic() >= deadline:
+                    break
+                if not select.select([stream], [], [], .02)[0]:
+                    continue
+                byte = stream.read(1)
+                if not byte:
+                    break
+                pending.extend(byte)
+                if len(pending) > MAX_MESSAGE:
+                    raise GuardianFailure("input_helper_protocol")
+                if byte != b"\n":
+                    continue
+                line, pending = bytes(pending), bytearray()
+            else:
+                line = stream.readline(MAX_MESSAGE)
+            if not line:
+                break
             command = json.loads(line)
             op, args = command["op"], command.get("args", [])
             if op == "quit":
+                if ledger is not None:
+                    break
                 os._exit(0)  # Deliberate abrupt normal EOF; supervisor still owns ledger.
             if op not in {"key", "button", "move"}:
                 raise GuardianFailure("unsupported_helper_operation")
+            if ledger is not None and op in {"key", "button"}:
+                ledger.prepare(op, *args)
             getattr(native, op)(*args)
             native.sync()
+            if ledger is not None and op in {"key", "button"}:
+                ledger.acknowledged(op, *args)
             stream.write(b'{"ok":true}\n')
     finally:
+        if ledger is not None:
+            ledger.release()
         native.close()
         stream.close()
 

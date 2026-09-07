@@ -225,7 +225,7 @@ def test_ascii_layout_and_named_keys(native):
     assert dev.keycode("Return") == 36
     assert dev.text_keys("aA1! ") == [[38], [50, 38], [10], [50, 10], [65]]
     assert dev.text_keys("") == []
-    with pytest.raises(m.X11DeviceError, match="active_layout"):
+    with pytest.raises(m.X11DeviceError, match="unsupported_character"):
         dev.text_keys("z")
     fake.mods = 4
     with pytest.raises(m.X11DeviceError, match="modifiers_busy"):
@@ -234,8 +234,10 @@ def test_ascii_layout_and_named_keys(native):
 
 @pytest.mark.parametrize("text", ["é", "\n", "\t", "\x00", "a" * 4097])
 def test_text_rejected_without_native_call(native, text):
-    with pytest.raises(m.X11DeviceError, match="ascii"):
+    before = list(native[0].calls)
+    with pytest.raises(m.X11DeviceError, match="invalid_text|unsupported_character"):
         native[1].text_keys(text)
+    assert native[0].calls == before
 
 
 def test_raw_physical_short_tap_preserved_and_own_source_ignored(native):

@@ -43,6 +43,9 @@ def run(request, capture=None):
     config = attachment_configuration(request["display_name"], request["xauthority"],
                                       request["monitor_names"])
     owned = capture is None
+    if request["operation"] == "input_capabilities":
+        from src.computer.runtime.x11_owned_device import input_capabilities
+        return {"ok": True, **input_capabilities(config["display_name"])}
     if owned:
         capture = X11MonitorCapture(config["display_name"], enabled=True,
                                     connection_factory=AttachedConnection)
