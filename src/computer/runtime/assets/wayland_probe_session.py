@@ -131,8 +131,11 @@ class Trial:
         compositor = self.compositor
         if compositor is None:
             raise TrialError("probe_private_compositor_missing")
-        result, fd_list = self.call(self.session, "org.gnome.Mutter.RemoteDesktop.Session",
-                                   "ConnectToEIS", glib.Variant("(a{sv})", ({},)), fd=True)
+        if self.marker["identity"].get("compositor_name") == "kwin_wayland":
+            result, fd_list = importlib.import_module("wayland_probe_kwin").connect(self, glib)
+        else:
+            result, fd_list = self.call(self.session, "org.gnome.Mutter.RemoteDesktop.Session",
+                                       "ConnectToEIS", glib.Variant("(a{sv})", ({},)), fd=True)
         fds = fd_list.steal_fds()
         try:
             index = result.unpack()[0]
@@ -194,6 +197,9 @@ class Trial:
             argv += ["--nested"]
         else:
             raise TrialError("probe_backend_unsupported")
+        if identity.get("compositor_name") == "kwin_wayland":
+            adapter = importlib.import_module("wayland_probe_kwin")
+            argv = adapter.compositor_argv(identity["backend"])
         assert_private_environment()
         self.compositor = self.spawn(argv)
         self.stage = "compositor_start"
@@ -220,6 +226,13 @@ class Trial:
                 method, glib.Variant("(s)", (value,)), None,
                 gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
         self.stage = "dbus_owner"
+        if identity.get("compositor_name") == "kwin_wayland":
+            importlib.import_module("wayland_probe_kwin").setup(self, identity, dbus)
+        else:
+            self.setup_gnome(identity, dbus, bus, gio, glib)
+        self.measure(identity)
+
+    def setup_gnome(self, identity, dbus, bus, gio, glib):
         self.wait(lambda: dbus("NameHasOwner", "org.gnome.Mutter.RemoteDesktop"),
                   "probe_private_remote_desktop_unavailable", 15)
         self.owner = dbus("GetNameOwner", "org.gnome.Mutter.RemoteDesktop")
@@ -247,6 +260,8 @@ class Trial:
             "/org/gnome/Mutter/RemoteDesktop", "org.gnome.Mutter.RemoteDesktop",
             "CreateSession").unpack()[0]
         self.call(self.session, "org.gnome.Mutter.RemoteDesktop.Session", "Start")
+
+    def measure(self, identity):
         self.stage = "sender_connect"
         self.connect_sender()
         self.command("escape", "escape_sent")

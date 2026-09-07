@@ -125,6 +125,7 @@ def relevant_library(path):
     # MUST match wayland_identity._capture exactly. Case-insensitive libGL would
     # accidentally select libglib, which is not the OpenGL vendor implementation.
     name = Path(path).name
-    return (name.startswith(("libmutter", "libei", "libeis", "libxkbcommon",
+    return (name.startswith(("libmutter", "libkwin", "libei", "libeis", "libxkbcommon",
                              "libinput", "libEGL", "libGL", "libgbm", "libdrm"))
+            or path.endswith("/kwin/plugins/eis.so")
             or "_dri.so" in name or "nvidia" in name)

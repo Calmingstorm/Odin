@@ -17,15 +17,16 @@ from pathlib import Path
 
 from ..admission import CompositorIdentity, InputAdmission
 from .assets.wayland_probe_private import device_equal, measured_object, object_equal
+from .wayland_identity import COMPOSITOR_REGISTRY, compositor_adapter
 
 _ASSETS = Path(__file__).with_name("assets")
-_REMEDY = ("Keep this session capture-only. Install matching GNOME/Mutter and probe "
+_REMEDY = ("Keep this session capture-only. Install matching compositor and probe "
            "dependencies, or use a compositor/backend whose disposable same-stack "
            "button-release probe passes; then begin a new consented session.")
 
 
 def _behavior_refusal(public, code):
-    if code == "compositor_held_button_eof_release_failed":
+    if code == "compositor_held_button_eof_release_failed" and public.name == "gnome-shell":
         return InputAdmission(
             "refused", code,
             f"{public.name} {public.version} ({public.backend}): the receiver received a held "
@@ -50,19 +51,24 @@ def _manifest(identity) -> dict:
     digest = identity.binding_digest
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("identity_binding_invalid")
-    if (identity.compositor_name != "gnome-shell"
+    if identity.executable.path not in {item.executable for item in COMPOSITOR_REGISTRY}:
+        raise ValueError("probe_nonstandard_compositor_installation")
+    adapter = compositor_adapter(identity.executable.path, identity.version)
+    if (identity.compositor_name != adapter.name
             or identity.backend not in {"native", "x11-nested"}
             or identity.pid <= 1 or identity.uid < 0 or identity.start_ticks <= 0
             or identity.eis_peer_pid != identity.pid or identity.eis_peer_uid != identity.uid
             or not re.fullmatch(r":[0-9]+[.][0-9]+", identity.shell_owner)):
         raise ValueError("identity_backend_or_peer_not_authenticated")
     libraries = [obj(item) for item in identity.libraries]
-    if not libraries or not any("libmutter" in item["path"] for item in libraries):
-        raise ValueError("identity_mutter_mapping_missing")
+    if not libraries or not any(Path(item["path"]).name.startswith(adapter.library_prefix)
+                                for item in libraries):
+        raise ValueError("identity_compositor_mapping_missing")
     return {"binding_digest": digest, "pid": identity.pid, "uid": identity.uid,
             "start_ticks": identity.start_ticks, "boot_id": identity.boot_id,
             "session_id": identity.session_id, "backend": identity.backend,
-            "version": identity.version, "executable": obj(identity.executable),
+            "version": identity.version, "compositor_name": adapter.name,
+            "executable": obj(identity.executable),
             "libraries": libraries}
 
 
@@ -117,11 +123,13 @@ def _sandbox_argv(marker: Path) -> list[str]:
                  "/etc/passwd", "/etc/group", "/etc/localtime"):
         if Path(path).exists():
             argv += ["--ro-bind", path, path]
+    manifest = json.loads(marker.read_text()).get("identity", {})
+    desktop = "KDE" if manifest.get("compositor_name") == "kwin_wayland" else "GNOME"
     env = {"PATH": "/usr/bin:/bin", "HOME": "/home/probe", "XDG_RUNTIME_DIR": "/run/probe",
            "WAYLAND_DISPLAY": "wayland-probe", "GDK_BACKEND": "wayland", "LC_ALL": "C.UTF-8",
            "ODIN_WAYLAND_PROBE_NONCE": json.loads(marker.read_text())["nonce"],
            "XDG_CONFIG_HOME": "/home/probe/.config", "XDG_DATA_HOME": "/home/probe/.local/share",
-           "XDG_CACHE_HOME": "/home/probe/.cache", "XDG_CURRENT_DESKTOP": "GNOME",
+           "XDG_CACHE_HOME": "/home/probe/.cache", "XDG_CURRENT_DESKTOP": desktop,
            "XDG_SESSION_TYPE": "wayland", "GSETTINGS_BACKEND": "memory", "NO_AT_BRIDGE": "1",
            "LIBGL_ALWAYS_SOFTWARE": "1", "GALLIUM_DRIVER": "llvmpipe", "LP_NUM_THREADS": "2",
            "OMP_NUM_THREADS": "1", "GSK_RENDERER": "cairo", "PYTHONDONTWRITEBYTECODE": "1"}
@@ -176,13 +184,11 @@ class GnomeSameStackQualifier:
                     manifest = _manifest(identity)
                     await asyncio.to_thread(_validate_active, manifest)
                     for path in ("/usr/bin/bwrap", "/usr/bin/python3", "/usr/bin/dbus-daemon",
-                                 "/usr/bin/gnome-shell"):
+                                 manifest["executable"]["path"]):
                         _trusted_program(path)
                     if manifest["backend"] == "x11-nested":
                         _trusted_program("/usr/bin/Xvfb")
                         _trusted_program("/usr/bin/xdotool")
-                    if manifest["executable"]["path"] != "/usr/bin/gnome-shell":
-                        raise RuntimeError("probe_nonstandard_compositor_installation")
                     with tempfile.TemporaryDirectory(prefix="odin-wayland-probe-") as directory:
                         marker = Path(directory) / "private.json"
                         data = {"nonce": secrets.token_hex(32), "identity": manifest}
@@ -271,3 +277,7 @@ class GnomeSameStackQualifier:
 async def qualify(identity) -> InputAdmission:
     """Runtime integration convenience; no cached decisions."""
     return await GnomeSameStackQualifier()(identity)
+
+
+# Compatibility for existing integrations; this runner now dispatches adapters.
+SameStackQualifier = GnomeSameStackQualifier

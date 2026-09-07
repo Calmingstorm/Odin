@@ -5,6 +5,7 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,6 +16,37 @@ from ..models import ComputerError
 
 class WaylandIdentityError(ComputerError):
     """Safe static identity failure."""
+
+
+@dataclass(frozen=True)
+class CompositorAdapter:
+    name: str
+    executable: str
+    bus_name: str
+    library_prefix: str
+    minimum_version: tuple[int, int] = (0, 0)
+
+
+# Recognition is not admission: fresh authenticated scope and trial are required.
+COMPOSITOR_REGISTRY = (
+    CompositorAdapter("gnome-shell", "/usr/bin/gnome-shell", "org.gnome.Shell", "libmutter-"),
+    CompositorAdapter("kwin_wayland", "/usr/bin/kwin_wayland", "org.kde.KWin", "libkwin", (6, 1)),
+)
+
+
+def compositor_adapter(executable: str, version: str) -> CompositorAdapter:
+    if executable in {"/usr/bin/sway", "/usr/bin/wayfire", "/usr/bin/labwc"}:
+        raise WaylandIdentityError("portal_remotedesktop_eis_unavailable")
+    if executable in {"/usr/bin/Hyprland", "/usr/bin/hyprland"}:
+        raise WaylandIdentityError("hyprland_remote_portal_unqualified")
+    adapter = next((item for item in COMPOSITOR_REGISTRY if item.executable == executable), None)
+    if adapter is None:
+        raise WaylandIdentityError("wayland_compositor_executable_unqualified")
+    if adapter.minimum_version != (0, 0):
+        match = re.fullmatch(r"(\d+)\.(\d+)(?:\.\d+)?(?:[-+~][A-Za-z0-9.+~_-]+)?", version)
+        if not match or tuple(map(int, match.group(1, 2))) < adapter.minimum_version:
+            raise WaylandIdentityError("kwin_connect_to_eis_requires_6_1")
+    return adapter
 
 
 @dataclass(frozen=True)
@@ -105,8 +137,9 @@ def _capture(scope: dict, eis_peer: dict) -> CompositorRuntimeIdentity:
                 or any(ord(c) < 32 for c in version)):
             raise WaylandIdentityError("wayland_compositor_backend_unidentified")
         executable_path = os.readlink(f"/proc/{pid}/exe")
-        if executable_path != "/usr/bin/gnome-shell":
-            raise WaylandIdentityError("wayland_compositor_executable_unqualified")
+        adapter = compositor_adapter(executable_path, version)
+        if scope.get("compositor_name", adapter.name) != adapter.name:
+            raise WaylandIdentityError("wayland_compositor_name_mismatch")
         executable_stat = os.stat(f"/proc/{pid}/exe")
         executable = _hash_object(executable_path, _device(executable_stat.st_dev),
                                   executable_stat.st_ino, proc_path=f"/proc/{pid}/exe")
@@ -117,8 +150,9 @@ def _capture(scope: dict, eis_peer: dict) -> CompositorRuntimeIdentity:
                 continue
             _address, _perms, _offset, device, inode_text, path = fields
             name = path.rsplit("/", 1)[-1]
-            if not (name.startswith(("libmutter", "libei", "libeis", "libxkbcommon",
+            if not (name.startswith(("libmutter", "libkwin", "libei", "libeis", "libxkbcommon",
                                      "libinput", "libEGL", "libGL", "libgbm", "libdrm"))
+                    or path.endswith("/kwin/plugins/eis.so")
                     or "_dri.so" in name or "nvidia" in name):
                 continue
             if path.endswith(" (deleted)") or int(inode_text) <= 0:
@@ -129,13 +163,15 @@ def _capture(scope: dict, eis_peer: dict) -> CompositorRuntimeIdentity:
             if key not in mapped:
                 mapped[key] = _hash_object(path, device, int(inode_text),
                                            proc_path=f"/proc/{pid}/root{path}")
-        if not any(Path(x.path).name.startswith("libmutter-") for x in mapped.values()):
-            raise WaylandIdentityError("wayland_mutter_mapping_unavailable")
+        if not any(Path(x.path).name.startswith(adapter.library_prefix) for x in mapped.values()):
+            code = ("wayland_mutter_mapping_unavailable" if adapter.name == "gnome-shell"
+                    else "wayland_kwin_mapping_unavailable")
+            raise WaylandIdentityError(code)
         if _process(pid) != before:
             raise WaylandIdentityError("wayland_compositor_identity_changed")
         from .recovery import boot_id
         return CompositorRuntimeIdentity(pid, before[0], uid, boot_id(), before[1],
-                                          "gnome-shell", version, backend, executable,
+                                          adapter.name, version, backend, executable,
                                           tuple(sorted(mapped.values(), key=lambda x: x.path)),
                                           scope["owner"], pid, uid)
     except WaylandIdentityError:
