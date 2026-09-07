@@ -51,6 +51,16 @@ EXPECTED_ROUTES = [
     ("POST", "/api/loops/stop-all", "stop_all_loops"),
     ("POST", "/api/chat", "chat"),
     ("POST", "/api/execute", "execute"),
+    ("GET", "/api/computer", "wrapped"),
+    ("POST", "/api/computer/stop", "wrapped"),
+    ("POST", "/api/computer/pause", "wrapped"),
+    ("POST", "/api/computer/observe", "wrapped"),
+    ("GET", "/api/computer/evidence/{id}", "wrapped"),
+    ("POST", "/api/computer/export", "wrapped"),
+    ("GET", "/api/computer/download/{id}", "wrapped"),
+    ("POST", "/api/computer/enabled", "wrapped"),
+    ("POST", "/api/computer/recover", "wrapped"),
+    ("POST", "/api/computer/acknowledge_legacy", "wrapped"),
     ("GET", "/api/sessions", "list_sessions"),
     ("GET", "/api/sessions/token-usage", "session_token_usage"),
     ("GET", "/api/sessions/activity", "session_activity"),
@@ -259,7 +269,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 211
+        assert len(actual) == len(expected) == 221
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

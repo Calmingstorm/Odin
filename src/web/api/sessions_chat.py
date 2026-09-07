@@ -41,7 +41,7 @@ async def _pkg_process_web_chat(*args, **kwargs):
     from ...tools.output_authorization import web_output_scope
 
     with web_output_scope(args[0], request):
-        if request.path == "/api/chat":
+        if getattr(request, "path", None) == "/api/chat":
             from ..computer_binding import browser_binding
 
             binding = browser_binding(args[0], request)

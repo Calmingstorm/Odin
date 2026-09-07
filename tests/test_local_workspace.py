@@ -1960,7 +1960,19 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     "src/computer/runtime/backend.py": (
         "enabled-only launch of an absolute supervisor.py via isolated Python (-I), "
         "validated session/profile and clean env; inherits cwd but accepts no shell "
-        "or relative user path; public act currently rejects input (capture only)"
+        "or relative user path; input is confined by the owned private sandbox"
+    ),
+    "src/computer/runtime/recovery.py": (
+        "read-only systemctl show with exact durable owned unit identity and fixed argv; "
+        "no model command, no relative path, no input or termination"
+    ),
+    "src/computer/runtime/x11_attached.py": (
+        "fixed absolute -I capture/guardian helper paths, operator-configured explicit "
+        "display/auth with clean env and optional explicit sudo; no shell or model cwd"
+    ),
+    "src/computer/runtime/x11_guardian.py": (
+        "fixed absolute -I injector helper with private socket, finite lease and "
+        "owned input ledger; no model command, arbitrary executable or relative path"
     ),
     "src/computer/runtime/supervisor.py": (
         "fixed systemd-run/bwrap profile and systemctl control argv (optional sudo -n); "
