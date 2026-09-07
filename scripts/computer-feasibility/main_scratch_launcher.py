@@ -20,7 +20,7 @@ def identity(pid):
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('role', choices=['xed', 'bus', 'terminate'])
+    parser.add_argument('role', choices=['xed', 'inkscape', 'bus', 'terminate'])
     parser.add_argument('--config')
     parser.add_argument('--pid', type=int)
     parser.add_argument('--start', type=int)
@@ -51,6 +51,10 @@ def main():
             os.dup2(null.fileno(), fd)
     if args.role == 'xed':
         os.execve('/usr/bin/xed', ['xed', '--standalone', '--new-window'], os.environ)
+    if args.role == 'inkscape':
+        # Installed 1.2.2 has no --new-instance flag. Isolated private HOME and
+        # private non-activating bus prevent forwarding to existing instances.
+        os.execve('/usr/bin/inkscape', ['inkscape'], os.environ)
     if not args.config or not Path(args.config).is_absolute():
         raise RuntimeError('private_config_required')
     os.execve('/usr/bin/dbus-daemon', ['dbus-daemon', '--nofork', '--nopidfile',

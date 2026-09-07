@@ -6,6 +6,9 @@ automatically deploys, edits live configuration, enables input, or runs a pipeli
 The development driver has passed a scratch Xed save on the actual main session
 with exact before/after restoration; see R5-MAIN-SESSION.md. This does not establish
 that the externally deployed service works. Deployment QA remains operator-owned.
+R6 additionally completed main-session Inkscape drawing/save, but both scratch
+CLI runs needed honest failure reporting for restoration issues; parent restored
+the complete baseline afterward. Read MAIN-SESSION-R6.md before repeating a test.
 
 ## First increment and evidence boundary
 
@@ -18,7 +21,9 @@ during, after, or following failure of a computer task. This is not a chat mode.
 | --- | --- |
 | Isolated X11 | Fixed Drawing and Xed profiles in an owned disposable desktop. Native-model Xed save/close/reopen was demonstrated; Drawing save/reopen and the 30-task corpus use deterministic native GUI drivers. |
 | Corpus | **27/30 distinct isolated tasks**: Xed 14/15, Drawing 13/15. Unicode/tab fidelity, text annotation and selection move failed. This is not a 90% general model success rate. |
-| Existing X11 | Explicitly granted monitor capture; input only to a focused, identity-verified installed native Xed and recognized same-process dialogs. The operator opens/focuses it; Odin does not launch or close attached applications. |
+| Existing X11 | Explicitly granted monitor capture; input to focused, identity-verified installed native Xed, Inkscape, and LibreOffice Writer/Calc/Draw document windows. The operator opens/focuses the app; Odin does not launch or close attached applications. Profile eligibility is not task qualification. |
+| R6 qualified work | Inkscape: actual model drew and GUI-saved a recognizable three-part house as vector SVG; independent shape, raster and visual review passed. Writer: deterministic GUI typing, paragraph break, bold formatting and ODT save passed. See R6 reports for fixture conditions, remaining checks and failures. |
+| Not qualified | LibreOffice Calc/Draw are native-profile eligible but have no completed task qualification. Browsers, terminals, games, arbitrary apps, macros and application extensions are not qualified input targets. A listed profile does not promise that every operation works. |
 | Attached Drawing | Capture-only. Interpreter/script argv cannot establish trusted executed-script identity, so Drawing input is refused. Isolated Drawing is unaffected. |
 | Shared input | Pointer and focus are shared, not independent. The pointer stays where input moved it. Busy input is refused; same-key overlap and racing synthetic clients are not safely separable. Stop is not a hard real-time server-hang guarantee. |
 | Attached text | Printable ASCII using the existing keymap only. Send Return and Tab as separate key actions, not embedded text. No clipboard/keymap changes; do not promise Unicode fidelity. |
@@ -31,8 +36,12 @@ prove a particular unprivileged service's sudo/PAM policy or physical-input safe
 Capture permission is monitor-wide, not an application-only privacy boundary.
 Use short typing chunks and short explicit file paths: the independently enforced
 native input lease is two seconds, not permission to finish arbitrarily long text.
-Busy or animated screens can invalidate exact raster grounding before dispatch;
-refresh the observation and decide anew, never replay an unknown action. These
+Pointer actions still require identical raster grounding before dispatch. Attached
+X11 typing/key actions instead require the same freshly verified native
+process/window/focus/modal/source binding, so a blinking caret alone does not
+prevent typing. This intentionally cannot guarantee that an internal widget,
+selection or document content remained unchanged; shared focus is an accepted
+limitation. Refresh observations and decide anew, never replay an unknown action. These
 limits are operationally significant, not just theoretical caveats.
 
 ## 1. Provision offline, before the manual restart
@@ -116,6 +125,9 @@ computer:
   monitor_names: [DP-1]  # Illustrative only: replace with exact granted RandR names.
 ```
 
+Use an awake, stable desktop with the operator present for initial deploy testing.
+The R6 overnight test observed a sleep/topology transition that required manual
+baseline restoration; automated unattended testing is not qualified for that case.
 Do not change monitor topology during a task. Hotplug, replacement or mapping
 changes require new consent/start; the runtime must not guess a new input transform.
 
@@ -133,7 +145,7 @@ changes require new consent/start; the runtime must not guess a new input transf
    or capture the desktop. Opening/refreshing the inspector fetches no screenshot.
 4. Start a new foreground scratch task through authorized chat. For isolated mode,
    request a new Xed profile. For attached mode, first explicitly authorize this
-   bounded task, manually open a **new blank native Xed window**, place it wholly
+   bounded task, manually open a **new blank native Xed, Inkscape or Writer window**, place it wholly
    inside a granted monitor and focus its editor. Keep unrelated/private windows
    off the captured monitor. Do not use an existing unsaved document.
 5. Example request: “Use only this new scratch Xed document. Type `Local QA note`,
@@ -204,3 +216,28 @@ Relevant regression files include `tests/test_computer_lifecycle_r5.py`,
 `tests/test_computer_recovery_r5.py`, `tests/test_computer_x11_app_scope_r5.py`,
 `tests/test_computer_model_gui_smoke_r5.py` and `tests/test_computer_corpus30_r5.py`.
 These are pointers to recorded evidence, not new test or full-suite pass claims.
+
+## R6 additions
+
+The operator page lists application profiles separately from actual input
+readiness, without probing processes or capturing a screen. For drawing, a useful
+scratch request is: “In this new blank Inkscape document, draw a simple blue house
+with an orange roof and white door. Save only to this new scratch filename. Do not
+modify another window or overwrite a file.” For Writer, request a short note and
+specific formatting, and inspect the document before saving. Keep commands within
+the disclosed key vocabulary and short ASCII chunks.
+
+Read [APPLICATION-QUALIFICATION-R6.md](APPLICATION-QUALIFICATION-R6.md),
+[MODEL-APPLICATION-R6.md](MODEL-APPLICATION-R6.md),
+[KEYBOARD-GROUNDING-R6.md](KEYBOARD-GROUNDING-R6.md), and
+[DEPENDENCIES-R6.md](DEPENDENCIES-R6.md). Native Inkscape and LibreOffice must be
+installed through the operator's package manager. Alternate package locations,
+Flatpak/Snap wrappers and interpreter launchers are not silently trusted.
+
+The branch also fixes the diagnosed local shell-command reaping path. Read
+[ZOMBIE-REAP-R6.md](ZOMBIE-REAP-R6.md): a dedicated subreaper owns each local
+command subtree, preserving shell status separately from descendant cleanup.
+Existing live zombies are not cleared by this source change. Direct browser/native
+launches outside that command path remain a distinct ownership boundary. No
+historical zombie should be manually reaped or the live service restarted merely
+to make a count look better.

@@ -95,7 +95,7 @@ def exact_process(expected):
 
 
 async def launch(role, args, home, base, processes):
-    if role not in {'bus', 'xed'}:
+    if role not in {'bus', 'xed', 'inkscape'}:
         raise RuntimeError('invalid_role')
     env = ['env', '-i', 'PATH=/usr/bin:/bin', f'HOME={home}',
         f'USER={args.session_user}', f'LOGNAME={args.session_user}',

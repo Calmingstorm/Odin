@@ -1,6 +1,6 @@
 # R6 command zombie ownership
 
-Implemented on existing PR350 branch, uncommitted. No live change or cure claimed.
+Implemented on existing PR350 branch at `0ec10ff`. No live change or cure claimed.
 
 ## Observed diagnosis
 
@@ -83,6 +83,16 @@ Independent reviewer additionally reported real CLONE_PARENT behavior preserving
 Popen41, helper SIGKILL failure/veto and non-ASCII comm cleanup. A discovered
 pre-protocol SIGKILL cleanup gap was fixed and independently rerun successfully.
 Those reviewer observations are separate from directly recorded suites above.
+
+Parent ran 24 interleaved pairs of harmless `printf ok` commands, comparing the
+previous asyncio shell spawn with the new supervisor, verifying identical output
+and status, and awaiting every supervisor settlement. Previous median 0.717 ms,
+p95 0.840 ms; supervised median 36.690 ms, p95 56.231 ms. This is roughly 36 ms
+additional median per minimal command, not zero overhead. The wider task impact
+depends on command duration and concurrency; this run occurred alongside private
+validation workload. `/tmp/odin-r6-command-overhead-owned.json` reports verified
+cleanup with no residual descendants. Functional status correctness and resource
+ownership are separate from performance.
 
 ## Remaining limitations
 
