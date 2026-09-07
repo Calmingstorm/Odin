@@ -1201,6 +1201,25 @@ class ComputerUseConfig(BaseModel):
     display: str = ""
     xauthority: str = ""
     monitor_names: list[str] = Field(default_factory=list)
+    # Explicit operator binding, not ambient desktop discovery or a tool argument.
+    wayland_bus_address: str = ""
+    wayland_uid: int | None = Field(default=None, strict=True, ge=0, le=4294967294)
+    wayland_guardian_binary: str = "/usr/libexec/odin-computer-wayland-input"
+
+    @field_validator("wayland_bus_address")
+    @classmethod
+    def validate_wayland_bus_address(cls, value: str) -> str:
+        if value and (len(value) > 512 or not re.fullmatch(r"unix:path=/[^,;\s\x00]+", value)):
+            raise ValueError("computer.wayland_bus_address must name one explicit local session bus")
+        return value
+
+    @field_validator("wayland_guardian_binary")
+    @classmethod
+    def validate_wayland_guardian_binary(cls, value: str) -> str:
+        if (not value or len(value) > 4096 or not Path(value).is_absolute()
+                or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("computer.wayland_guardian_binary must be an absolute executable path")
+        return value
 
     @field_validator("display")
     @classmethod
