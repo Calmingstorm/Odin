@@ -7,6 +7,8 @@ import pytest
 from src.computer.geometry import AffineTransform
 from src.computer.models import ComputerError
 from src.computer.runtime import recovery
+from src.computer.runtime.backend import LinuxDesktopBackend, RuntimeFailure
+from src.computer.runtime.protocol import pack_blob
 from src.computer.runtime.x11_attached import X11AttachedBackend
 
 
@@ -106,3 +108,47 @@ async def test_persistent_cleanup_crash_unknown(monkeypatch):
     monkeypatch.setattr(recovery, "_processes_gone", lambda descriptor: None)
     assert await recovery.verify_absence(descriptor) == {
         "status": "unknown", "reason": "persistent_input_state_unproven"}
+
+
+@pytest.mark.asyncio
+async def test_isolated_crop_scroll_and_invalid_key(monkeypatch):
+    b = LinuxDesktopBackend()
+    observation = {"width": 100, "height": 80, "source_revision": 1, "raster_mode": "RGB",
+                   "window": 5, "observation_id": "observation", "focused": True,
+                   "image": pack_blob(bytes(100 * 80 * 3))}
+    rpc = AsyncMock(return_value={"observation": observation})
+    monkeypatch.setattr(b, "_rpc", rpc)
+    crop = {"x": 10, "y": 20, "width": 30, "height": 40}
+    frame = await b.observe(crop=crop)
+    assert frame.crop == (10, 20, 30, 40)
+    assert (frame.width, frame.height) == (30, 40)
+    binding = {"source_id": b._source_id, "source_revision": 1, "consent_generation": 1,
+               "expected": {"type": "visual_change"}}
+    with pytest.raises(RuntimeFailure, match="unsupported_key"):
+        await b.act({**binding, "type": "key", "chord": "not-allowed"})
+    rpc.return_value = {"receipt": {"released": True}}
+    await b.act({**binding, "type": "scroll", "x": 2, "y": 3, "direction": "down", "count": 2})
+    payload = rpc.call_args.kwargs["action"]
+    assert (payload["x"], payload["y"], payload["count"]) == (12, 23, 2)
+
+
+def test_receipt_identity_cannot_change_or_erase_retained_devices():
+    b = backend()
+    b._accept_device_receipt({"device_identity": [[8, "master"]], "released": True,
+                             "persistent_input_devices": True, "owned_devices": "persistent_idle"})
+    with pytest.raises(RuntimeError, match="input_device_identity_changed"):
+        b._accept_device_receipt({"device_identity": [[2, "core"]], "released": True,
+                                 "persistent_input_devices": False, "owned_devices": "not_created"})
+    assert b.creates_devices and b._persistent_devices and b._release_failed
+
+
+@pytest.mark.asyncio
+async def test_topology_change_during_capture_refuses(monkeypatch):
+    b = backend()
+    async def changed(*args, **kwargs):
+        b._topology_epoch += 1
+        return capture()
+    monkeypatch.setattr(b, "_read_worker", changed)
+    with pytest.raises(ComputerError, match="topology_changed"):
+        await b.observe()
+    assert b._frame is None
