@@ -60,7 +60,15 @@ click/key/type actions but do not advertise an implemented compound operation.
 ## Qualification boundary
 
 UI distribution rebuilt. Python lint, targeted types, tool-reference generation,
-and whitespace checks performed. No new tests or pytest, per phase instruction.
+and whitespace checks performed. End-phase testing added explicit Num Lock,
+preflight handshake, unknown-release and pixel-plan regression coverage; the
+focused set passes 71 tests. Broad computer-suite runs were red: original
+83eeca99 baseline 164 failed/2444 passed, initial patched run 172 failed/2443
+passed. The eight additional failures exposed a missing durable targeting
+receipt field and an unnecessarily changed mock call shape; both were corrected.
+The baseline failures remain open, not waived or presented as green coverage.
+Both broad runs used standalone subreapers and certified no residual processes.
 No live input, settings changes, deployment, service restart or quarantine reset.
+Live status still shows the previous deployment quarantined with input disabled.
 The next deployed live test must prove first-chord dispatch, clean detach,
 native editable handles where exported, and explicit pixel replacement.

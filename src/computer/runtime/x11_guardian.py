@@ -551,8 +551,9 @@ def _execute(request, *, controller_fd=0, authorize=None):
                         raise GuardianFailure("shared_pointer_changed")
                     scope.assert_snapshot(expected, monitor, point=pointer[0],
                                           pointer_query=native.query_pointer,
-                                          require_focused_window=(
-                                              request["action"]["type"] == "replace_field_pixels"))
+                                          **({"require_focused_window": True} if
+                                             request["action"]["type"] == "replace_field_pixels"
+                                             else {}))
                 else:
                     scope.assert_snapshot(expected, monitor)
         helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]),
