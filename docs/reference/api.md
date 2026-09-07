@@ -44,16 +44,16 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | POST | /api/loops/stop-all | [src.web.api.self&#95;update](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/self_update.py#L254) | Yes | — |
 | POST | /api/chat | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/sessions_chat.py#L58) | No | — |
 | POST | /api/execute | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/sessions_chat.py#L127) | No | Stateless prompt execution — no session history, no persistence. |
-| GET | /api/computer | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| POST | /api/computer/stop | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| POST | /api/computer/pause | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| POST | /api/computer/observe | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| GET | /api/computer/evidence/&#123;id&#125; | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| POST | /api/computer/export | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| GET | /api/computer/download/&#123;id&#125; | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| POST | /api/computer/enabled | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| POST | /api/computer/recover | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
-| POST | /api/computer/acknowledge&#95;legacy | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L326) | Yes | — |
+| GET | /api/computer | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| POST | /api/computer/stop | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| POST | /api/computer/pause | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| POST | /api/computer/observe | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| GET | /api/computer/evidence/&#123;id&#125; | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| POST | /api/computer/export | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| GET | /api/computer/download/&#123;id&#125; | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| POST | /api/computer/enabled | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| POST | /api/computer/recover | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
+| POST | /api/computer/acknowledge&#95;legacy | [src.web.api.computer](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/computer.py#L389) | Yes | — |
 | GET | /api/sessions | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/sessions_chat.py#L205) | No | — |
 | GET | /api/sessions/token-usage | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/sessions_chat.py#L237) | Yes + local | — |
 | GET | /api/sessions/activity | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/sessions_chat.py#L245) | Yes + local | — |
