@@ -129,7 +129,7 @@ class BackendObservation:
     width: int
     height: int
     delivered_to_source: AffineTransform
-    image_bytes: bytes
+    image_bytes: bytes = field(repr=False)
     focused: bool = False
     modal: str | None = None
     crop: tuple[int, int, int, int] | None = None

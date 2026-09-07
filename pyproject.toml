@@ -26,8 +26,8 @@ dependencies = [
 pdf = ["PyMuPDF>=1.24.0"]
 # Browser automation (browser_screenshot, browser_click, etc.)
 browser = ["playwright>=1.40.0"]
-# Computer observation raster processing, imported only on explicit render calls.
-computer = ["Pillow>=12.3,<13"]
+# Lazy observation rendering and explicit Linux X11 capture. Neither enables input.
+computer = ["Pillow>=12.3,<13", "python-xlib>=0.33,<1; sys_platform == 'linux'"]
 # All optional executor features
 all = ["odin-bot[pdf,browser,computer]"]
 dev = [
