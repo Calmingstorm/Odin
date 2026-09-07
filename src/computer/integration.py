@@ -6,6 +6,7 @@ import contextvars
 import hashlib
 import json
 from contextlib import contextmanager
+from copy import deepcopy
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -14,7 +15,7 @@ from ..tools.result_validator import ToolResult
 from .models import RequestContext
 
 COMPUTER_TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
-NONVISUAL_OPERATIONS = frozenset({"stop", "cancel", "close", "status"})
+NONVISUAL_OPERATIONS = frozenset({"stop", "cancel", "close", "status", "pause"})
 VISION_MODELS = frozenset({"gpt-5.4", "gpt-5.4-mini", "gpt-5.5",
                           "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"})
 
@@ -44,20 +45,29 @@ def require_vision(serving) -> None:
 
 
 class ComputerIntegration:
-    def __init__(self, bot, *, controller=None):
+    def __init__(self, bot, *, controller=None, settings=None):
         self.bot = bot
+        # Config reload replaces the live object. Persistent paths and backend
+        # attachment settings belong to this runtime generation, not the next one.
+        self.settings = deepcopy(settings if settings is not None else bot.config.computer)
+        self._owns_store = controller is None
+        self._closed = False
         if controller is None:
             from .controller import ComputerController
             from .store import ComputerStore
 
-            root = Path(bot.config.computer.storage_dir).expanduser().absolute()
+            root = Path(self.settings.storage_dir).expanduser().absolute()
             store = ComputerStore(root / "state.sqlite3", root / "evidence")
-            controller = ComputerController(store, self._backend, self._authorize, enabled=True)
+            try:
+                controller = ComputerController(store, self._backend, self._authorize, enabled=True)
+            except BaseException:
+                store.close()
+                raise
         self.controller = controller
 
     @property
     def enabled(self):
-        return bool(self.bot.config.computer.enabled)
+        return not self._closed and bool(self.bot.config.computer.enabled)
 
     def reserves_tool(self, name):
         return self.enabled and name in COMPUTER_TOOLS
@@ -66,7 +76,7 @@ class ComputerIntegration:
         from .runtime.backend import LinuxDesktopBackend
 
         return LinuxDesktopBackend(enabled=self.enabled, app_profile=app,
-                                   runtime_sudo=bool(self.bot.config.computer.runtime_sudo))
+                                   runtime_sudo=bool(self.settings.runtime_sudo))
 
     def _authorize(self, context):
         manager = getattr(self.bot, "host_access_manager", None)
@@ -118,7 +128,7 @@ class ComputerIntegration:
         return bool(grant is not None and grant.task is asyncio.current_task()
                     and grant.tool_name == name and grant.context.owner_id == str(owner)
                     and grant.conversation == str(channel) and tool_scope_allows(name)
-                    and self.bot.config.computer.enabled and self._authorize(grant.context))
+                    and self.enabled and self._authorize(grant.context))
 
     async def _tool(self, name, values):
         grant = _grant.get()
@@ -150,8 +160,12 @@ class ComputerIntegration:
                 or (isinstance(result.get("cleanup"), dict)
                     and result["cleanup"].get("complete") is not True)
                 or result.get("uncertain_outcome") is True)
-            return ToolResult(json.dumps(result, ensure_ascii=True), ok=not unknown,
-                              error="outcome_unknown" if unknown else None,
+            rejected = isinstance(result, dict) and result.get("status") in {
+                "unavailable", "not_satisfied", "rejected", "failed",
+            }
+            return ToolResult(json.dumps(result, ensure_ascii=True), ok=not (unknown or rejected),
+                              error=("outcome_unknown" if unknown else
+                                     "computer_not_satisfied" if rejected else None),
                               uncertain_outcome=unknown, tool_name=name,
                               audit_metadata={"computer_call_id": grant.call_id,
                                               "computer_turn_id": grant.context.turn_id})
@@ -245,7 +259,16 @@ class ComputerIntegration:
         await self.controller.set_enabled(bool(enabled))
 
     async def close(self):
+        if self._closed:
+            return
         await self.controller.close()
+        # Keep a failed cleanup's controller/evidence usable for emergency retry.
+        # A manager must not replace it and lose the only owner of a live backend.
+        if getattr(self.controller, "_live", None):
+            raise RuntimeError("Computer cleanup incomplete; runtime retained")
+        if self._owns_store:
+            self.controller.store.close()
+        self._closed = True
 
     def _operator_context(self, owner_id, web_session_id, *, emergency=False):
         from .models import RequestContext

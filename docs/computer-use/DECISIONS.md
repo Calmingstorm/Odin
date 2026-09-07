@@ -5,6 +5,39 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 Authority: Aaron's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
+## Revision R5: complete the deploy-testable capability (2026-09-07)
+
+Aaron's current instruction requires a working end-to-end GUI task and active,
+configured-only production wiring, not another preparatory checkpoint. Continue
+on this branch; no deployment, live-install edits, restart, master merge, tag or
+pipeline. Local validation and reviewable skip-CI commits remain the delivery path.
+
+Priority is owned-input safety first: resolve the measured Wayland sender-EOF
+button-release failure or establish a precise unsupported boundary. A compositor
+disconnect or successful portal Close is not release evidence. Unsafe input
+backends must stay unavailable, even when capture succeeds. X11 shared focus is
+accepted, but application-preserving detach and no stuck owned input remain gates.
+Use disposable application event telemetry to establish these before real input.
+
+Next complete real GUI work, including safe recovery from observed application
+startup dialogs. A modal is not automatically permission and not automatically a
+permanent dead end: observe afresh, identify the approved application's harmless
+dialog, ground the exact action and verify its effect. Terminal, security-prompt,
+control-plane and existing-work protections stay unchanged. No generated file may
+be presented as a GUI-created artifact. Preserve durable no-replay receipts.
+
+Finally wire lazy lifecycle, native transport, authenticated APIs and operator
+controls into normal production startup. Disabled startup remains inert. Backend
+selection, display/session binding and persistent settings are operator-owned,
+never model-provided. Runtime status must distinguish configured availability,
+capture capability, input eligibility and measured unsupported conditions.
+
+The actual main-session topology is FOUR monitors, including the 3440x1440 DP-4
+primary. R4's full measurements supersede the truncated earlier three-monitor list;
+fresh source-local topology is authoritative, not a hardcoded fixture. R4's bounded
+overnight grant and leave-as-found constraints remain; workers have no implicit
+permission to access the main session. Historical service-owned zombies stay alone.
+
 ## Revision R4 — bounded overnight main-session testing (2026-09-07)
 
 Authority: Claudia relayed Aaron's current explicit authorization to test his main

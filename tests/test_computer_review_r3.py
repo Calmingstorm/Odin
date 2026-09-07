@@ -23,7 +23,7 @@ def call(name="computer_observe", **values):
     return SimpleNamespace(id="call", name=name, input=values)
 
 
-@pytest.mark.parametrize("operation", ["stop", "cancel", "close", "status"])
+@pytest.mark.parametrize("operation", ["stop", "cancel", "close", "status", "pause"])
 async def test_nonvisual_model_change_allows_only_bound_operation(operation):
     service, state = facade(), dispatch_state()
     state._computer_serving = None
@@ -42,7 +42,7 @@ async def test_nonvisual_model_change_allows_only_bound_operation(operation):
         assert service.controller.session.await_count == 1
 
 
-@pytest.mark.parametrize("operation", ["start", "resume", "reconcile", "export", "pause",
+@pytest.mark.parametrize("operation", ["start", "resume", "reconcile", "export",
                                        "unknown", None, []])
 async def test_visual_operations_still_require_vision(operation):
     service, state = facade(), dispatch_state()

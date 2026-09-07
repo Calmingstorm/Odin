@@ -1,0 +1,85 @@
+"""Production facade contracts with no desktop or optional dependency needed."""
+
+from types import SimpleNamespace
+from unittest.mock import AsyncMock, Mock
+
+import pytest
+
+from src.computer.integration import ComputerIntegration
+from tests.test_computer_dispatch_r3 import dispatch_state, facade
+from tests.test_computer_review_r3 import call
+
+
+@pytest.mark.parametrize("status", ["unavailable", "not_satisfied", "rejected", "failed"])
+async def test_known_failure_is_not_reported_as_success_or_uncertain(status, monkeypatch):
+    service, state = facade(), dispatch_state()
+    monkeypatch.setattr("src.computer.integration.require_vision", lambda _: None)
+    service.controller.act.return_value = {"status": status, "reason": "fixture_refusal"}
+    block = call("computer_act")
+    with service.foreground(state, block):
+        result = await service._tool(block.name, block.input)
+    assert result.ok is False
+    assert result.error == "computer_not_satisfied"
+    assert not result.uncertain_outcome
+
+
+async def test_pause_remains_available_without_native_vision():
+    service, state = facade(), dispatch_state()
+    state._computer_serving = None
+    block = call("computer_session", operation="pause")
+    with service.foreground(state, block):
+        result = await service._tool(block.name, block.input)
+    assert result.ok
+    assert service.controller.session.call_args.args[1] == {"operation": "pause"}
+
+
+def fixture(controller):
+    settings = SimpleNamespace(enabled=True, runtime_sudo=False, storage_dir="/unused")
+    bot = SimpleNamespace(config=SimpleNamespace(computer=settings))
+    return ComputerIntegration(bot, controller=controller), settings
+
+
+def test_generation_pins_backend_settings_not_enable_switch():
+    service, settings = fixture(SimpleNamespace())
+    settings.runtime_sudo = True
+    settings.storage_dir = "/different"
+    assert service.settings.runtime_sudo is False
+    assert service.settings.storage_dir == "/unused"
+    assert service.enabled
+    settings.enabled = False
+    assert not service.enabled
+
+
+async def test_close_idempotent_never_closes_an_injected_store():
+    store = SimpleNamespace(close=Mock())
+    controller = SimpleNamespace(close=AsyncMock(), store=store, _live={})
+    service, _ = fixture(controller)
+    await service.close()
+    await service.close()
+    controller.close.assert_awaited_once()
+    store.close.assert_not_called()
+    assert not service.enabled
+
+
+async def test_close_owned_store_once_after_successful_cleanup():
+    controller = SimpleNamespace(close=AsyncMock(), store=SimpleNamespace(close=Mock()), _live={})
+    service, _ = fixture(controller)
+    service._owns_store = True
+    await service.close()
+    await service.close()
+    controller.store.close.assert_called_once()
+
+
+async def test_failed_cleanup_keeps_owned_store_and_allows_retry():
+    controller = SimpleNamespace(close=AsyncMock(), store=SimpleNamespace(close=Mock()),
+                                 _live={"fixture": object()})
+    service, _ = fixture(controller)
+    service._owns_store = True
+    with pytest.raises(RuntimeError, match="cleanup incomplete"):
+        await service.close()
+    controller.store.close.assert_not_called()
+    assert not service._closed
+    controller._live.clear()
+    await service.close()
+    assert service._closed
+    controller.store.close.assert_called_once()
