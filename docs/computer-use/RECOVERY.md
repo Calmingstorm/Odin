@@ -40,8 +40,9 @@ the same fields plus the exact acknowledgment below, but only for records with
 no runtime identity; it cannot reconcile a modern descriptor.
 
 An authenticated administrator authorized for the target host can explicitly
-reconcile a stranded **existing-session** record using **Reconcile inspected
-desktop** or `POST /api/computer/reconcile`. First independently confirm no held
+reconcile a stranded **existing-session** record using the
+**Acknowledge unverified cleanup** control or
+`POST /api/computer/reconcile`. First independently confirm no held
 keys/buttons, no stranded owned masters, physical devices on their normal core
 masters, and no remaining computer workers/guardians. Protect unsaved documents.
 The request fields are `session_id`, integer `generation`, and `acknowledgment`

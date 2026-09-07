@@ -321,16 +321,15 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         # Existing operator/host authorization runs before and after this await;
         # the route's delivery fence still applies to the final response.
         service, _ = context(request, emergency=True)
-        # Recovery inspection must not depend on reaching a lost desktop. This
-        # optional diagnostic must never hide the persisted session/generation.
-        accessibility = {"enabled": None, "state": "unknown", "reason": "session_quarantined"}
-        if value.get("state") != "quarantined":
-            try:
-                accessibility = await read_accessibility_status(getattr(service, "settings", None))
-            except PermissionError:
-                raise
-            except Exception:
-                accessibility = {"enabled": None, "state": "unknown", "reason": "read_unavailable"}
+        # This bounded property read does not open a display or enumerate apps.
+        # Preserve the live indicator during quarantine, but never let an optional
+        # diagnostic hide the persisted recovery identifiers or lifecycle controls.
+        try:
+            accessibility = await read_accessibility_status(getattr(service, "settings", None))
+        except PermissionError:
+            raise
+        except Exception:
+            accessibility = {"enabled": None, "state": "unknown", "reason": "read_unavailable"}
         authenticate(request)
         return status_json(value, actor, accessibility=accessibility)
 

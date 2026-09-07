@@ -154,7 +154,8 @@ async def test_post_await_authority_and_generation_cas(rig, monkeypatch, change)
 
     controller.authorize = auth
     monkeypatch.setattr(recovery, 'verify_reconciliation_prerequisites', inspect)
-    with pytest.raises(ComputerError, match='not_found' if change == 'auth' else 'stale_generation'):
+    expected = 'not_found' if change == 'auth' else 'stale_generation'
+    with pytest.raises(ComputerError, match=expected):
         await reconcile(rig)
     assert len(auth_calls) == 2
     assert store.get_session(grant.session_id).state != 'closed'
@@ -178,9 +179,22 @@ async def test_unknown_machine_result_keeps_quarantine(rig, monkeypatch, reason)
 
 
 @pytest.mark.asyncio
-async def test_foreign_status_is_lifecycle_only_and_legacy_routes_remain_owner_bound(rig, monkeypatch):
+async def test_reconcile_cannot_accept_automatic_clean_result(rig, monkeypatch):
+    store, _, grant = rig
+    monkeypatch.setattr(recovery, 'verify_reconciliation_prerequisites',
+                        AsyncMock(return_value={'status': 'absence_verified'}))
+    result = await reconcile(rig)
+    assert result['state'] == 'quarantined'
+    assert result['recovery']['status'] == 'unknown'
+    assert result['recovery']['complete'] is False
+    assert store.cleanup(grant.session_id)['complete'] is False
+
+
+@pytest.mark.asyncio
+async def test_foreign_status_is_lifecycle_only_and_legacy_owner_bound(rig, monkeypatch):
     store, controller, grant = rig
-    monkeypatch.setattr(controller, '_public_session', lambda _: pytest.fail('foreign evidence access'))
+    monkeypatch.setattr(controller, '_public_session',
+                        lambda _: pytest.fail('foreign evidence access'))
     result = await controller.operator_session(context(), 'status')
     assert result['session_id'] == grant.session_id
     assert result['generation'] == grant.generation
@@ -207,7 +221,8 @@ async def test_integration_authenticated_operator_and_host_fences(rig, monkeypat
     _, controller, grant = rig
     settings = SimpleNamespace(enabled=False)
     bot = SimpleNamespace(config=SimpleNamespace(computer=settings),
-                          host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: host_allowed),
+                          host_access_manager=SimpleNamespace(
+                              is_host_allowed=lambda *_: host_allowed),
                           tool_executor=SimpleNamespace(check_permission=lambda *_: None))
     integration = ComputerIntegration(bot, controller=controller, settings=settings)
     controller.authorize = integration._authorize

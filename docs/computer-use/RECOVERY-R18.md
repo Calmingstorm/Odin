@@ -39,3 +39,25 @@ returned launch_identity_incomplete; reconciliation prerequisites returned
 recorded_processes_gone. No live store edit, recovery override, restart, deployment
 or desktop input was performed during diagnosis. End-to-end route recovery and
 native-input qualification require the externally gated deployment of this fix.
+
+## Validation and next live step
+
+Focused coverage includes a real HTTP route through the real manager, integration,
+controller and persisted temporary store: a foreign attached-session quarantine
+survives simulated restart, appears to the authorized host administrator, and
+closes only after explicit attestation and process inspection. Tests fence stale
+generation, auth revocation, live adapters, held uncertainty, unexpected clean
+results, missing identity and owner-scoped evidence. They also retain failed
+cleanup and unknown action receipts byte-for-byte at the semantic JSON level.
+
+The focused recovery/API/auth/Num-Lock/shipped-doc set, lint, operator browser
+harness, Vue template/binding checks and production UI rebuild are rerun for this
+increment. This is not a full-suite or coverage-gate claim.
+
+After gated deployment, GET `/api/computer` must return 200 with the quarantine ID,
+session generation, input disabled and the bounded live accessibility indicator.
+Use the explicit reconciliation control only after independent desktop inspection.
+It must return closed with unverified acknowledgment, not a synthetic clean pass.
+Then start a new supervised session to qualify first native action, AT-SPI identity
+replacement and explicit pixel replacement. Never open a second controller on the
+live store or edit its rows to make that qualification possible.

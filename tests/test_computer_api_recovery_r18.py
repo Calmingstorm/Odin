@@ -71,11 +71,11 @@ async def test_correct_body_preserves_safe_controller_failure(route, error, stat
 
 
 @pytest.mark.asyncio
-async def test_quarantined_status_exposes_generations_without_desktop_probe(monkeypatch):
-    async def forbidden(*_):
-        pytest.fail("quarantine status must not probe the desktop")
+async def test_quarantined_status_exposes_generations_despite_optional_probe_failure(monkeypatch):
+    async def unavailable(*_):
+        raise AttributeError("diagnostic unavailable")
 
-    monkeypatch.setattr("src.computer.accessibility_status.read_accessibility_status", forbidden)
+    monkeypatch.setattr("src.computer.accessibility_status.read_accessibility_status", unavailable)
     async with client(RecoveryController(), enabled=False) as c:
         response = await c.get("/api/computer")
         result = await response.json()
@@ -83,7 +83,20 @@ async def test_quarantined_status_exposes_generations_without_desktop_probe(monk
         assert result["generation"] == 2 and result["session_generation"] == 8
         assert result["recovery"]["complete"] is False
         assert result["accessibility"]["enabled"] is None
-        assert result["accessibility"]["reason"] == "session_quarantined"
+        assert result["accessibility"]["reason"] == "read_unavailable"
+
+
+@pytest.mark.asyncio
+async def test_quarantined_status_keeps_live_accessibility_indicator(monkeypatch):
+    async def enabled(*_):
+        return {"enabled": True, "state": "enabled", "reason": "property_read"}
+    monkeypatch.setattr("src.computer.accessibility_status.read_accessibility_status", enabled)
+    async with client(RecoveryController()) as c:
+        response = await c.get("/api/computer")
+        result = await response.json()
+        assert response.status == 200
+        assert result["state"] == "quarantined"
+        assert result["accessibility"]["enabled"] is True
 
 
 @pytest.mark.asyncio

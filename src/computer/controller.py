@@ -202,7 +202,10 @@ class ComputerController:
                           'acknowledged_at': self.store.clock()}
                 grant = self.store.finish_recovery(grant, result, acknowledged=True)
             else:
-                grant = self.store.finish_recovery(grant, result)
+                # Unexpected machine results cannot manufacture verified cleanup.
+                grant = self.store.finish_recovery(grant, {
+                    'status': 'unknown',
+                    'reason': result.get('reason', 'inspection_unavailable')})
             return self._reconciliation_status(grant)
 
     async def _auth(self, context, *, emergency=False):
