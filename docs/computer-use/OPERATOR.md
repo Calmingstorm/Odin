@@ -73,7 +73,12 @@ service-owned private evidence directory (default `/var/lib/odin/computer`, 0700
 no symlink components). Verify both service and worker interpreters. Isolated
 workers use system Python; installing extras only in a venv is insufficient.
 
-Configure the target offline before an operator-authorized service restart.
+Configure the target in **System > Computer > Computer provisioning** before an
+operator-authorized service restart. Review the changed fields and save the draft;
+the panel reports pending restart settings. Computer provisioning is no longer in
+Config Center. Saving does not install dependencies, change enablement, attach to
+a desktop, or restart anything. A failed/uncertain save requires reloading saved
+values before another attempt, not automatically replaying the save.
 Display, environment, platform, storage and privilege settings are restart-pinned.
 Only computer enablement toggles are live. Retain rollback configuration. Do not
 restart a user's graphical session to test setup.
@@ -114,7 +119,9 @@ source builders must follow the shipped companion README. Do not install a
 binary built for a different KWin ABI or load it into an untested real session.
 
 Least-privilege service policy is independent. `runtime_sudo` is an explicitly
-provisioned choice, not automatic escalation. Never bypass refusal with shell input.
+provisioned choice, not automatic escalation. Mixed shell and computer tools are
+legitimate within the authorized task. They must not bypass unavailable desktop
+permissions, uncertain input release or the user's task boundaries.
 
 ## First supervised task
 
@@ -137,10 +144,17 @@ provisioned choice, not automatic escalation. Never bypass refusal with shell in
 5. Observe before acting; use fresh session/generation/source/observation bindings.
    Startup selects a granted monitor containing an eligible focused application
    when possible. Check `input_readiness` and `input_blocker`; device availability
-   is not an actionable target. Wrong-monitor, denied-application, privilege and
+   is not an actionable target. Wrong-monitor, privilege and
    missing-focus failures have separate static reasons. Status without a current
    observation does not claim input readiness.
    Inspect actual text/drawing and saved files. Pixel changes alone are not success.
+   When an action returns verification pixels, inspect that new view and use its
+   observation ID for the next action instead of taking a duplicate screenshot.
+   A receipt without pixels grants no new input authority. If the view is stale,
+   absent or no longer matches the intended target, obtain a fresh observation.
+   Optional `task_context` notes on observe retain short goal/tool/color/brush
+   descriptions across interruptions. They are caller hints, never verified
+   application state or authority; actions and target changes mark them stale.
 6. Exercise Pause/revoke and explicitly authorized resume only while the originating
    foreground task remains alive. Stop ends it. Inspect cleanup and verify the
    user's applications remain alive. Closing a document is an ordinary separately

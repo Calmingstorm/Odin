@@ -40,7 +40,21 @@ Report all GUI inputs including shell, explicit observe calls, redundant
 captures, recovery calls, elapsed time and task completion. Do not count saved
 round trips until measured. No desktop actions were needed to build this change.
 
-The remaining accepted charter is still pending: transition-aware effect
-verification and failure diagnostics, bounded sequences/disconnected strokes,
-richer targets and field operations, stale-able task context, and moving
-provisioning into System > Computer while removing the Config Center section.
+## Additional pushed increments
+
+- Descriptive task context retains bounded goal/tool/color/brush hints and the
+  latest target/view identity. Hints are explicitly unverified and become stale
+  on input, pause and target changes. They are never consulted for authorization.
+- Action settlement is extracted before image-delivery validation. A rejected
+  image no longer changes an already settled action into a failed turn-ledger
+  operation; the receipt is still returned for reconciliation without replay.
+- Provisioning moved to System > Computer, with changed-field review, independent
+  lifecycle controls, restart metadata and reload after uncertain save. The
+  Config Center section was removed and production UI assets rebuilt.
+
+No live qualification has occurred for these increments. One UI commit omitted
+the phase's CI-skip marker, triggering three workflows automatically. All three
+were cancelled; this is not a CI pass and not a completed end-of-phase gate.
+
+Transition-aware effect verification and failure diagnostics, bounded sequences,
+disconnected strokes, richer targets and field operations remain in progress.
