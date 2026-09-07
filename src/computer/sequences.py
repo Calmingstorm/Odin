@@ -257,7 +257,16 @@ async def execute_sequence(controller, context, inp):
                 result = {"status": "verified" if reason is None else
                           "unknown" if stop_required else
                           "interrupted" if effect_uncertain else "not_satisfied",
-                          "verification": verification}
+                          "verification": verification,
+                          "execution": {
+                              "injected": any(s.get("execution", {}).get("injected") is True
+                                              or s.get("status") == "unknown" for s in settled),
+                              "released": not stop_required and all(
+                                  s.get("execution", {}).get("released") is True for s in settled),
+                              "completed_steps": sum(s.get("status") == "verified"
+                                                     for s in settled),
+                              "planned_steps": len(steps),
+                          }}
                 if reason is not None:
                     result["reason"] = reason
                 controller.store.finish_action(grant.session_id, inp["action_id"], result)
