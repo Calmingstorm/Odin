@@ -1,0 +1,10 @@
+{
+    "KPlugin": {
+        "Id": "odin-scope",
+        "Name": "Odin authenticated focus scope",
+        "Description": "Opt-in in-process KWin focus evidence provider",
+        "EnabledByDefault": false,
+        "License": "GPL-2.0-or-later",
+        "Version": "1.0.0"
+    }
+}
