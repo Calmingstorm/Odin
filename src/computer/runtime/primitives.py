@@ -590,6 +590,14 @@ class NativeDesktop:
 
     def _physical(self, action):
         kind = action["type"]
+        fields = {"move": {"x", "y"}, "click": {"x", "y"},
+                  "double_click": {"x", "y"}, "right_click": {"x", "y"},
+                  "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
+                  "key": {"chord"}, "type": {"text"}, "polyline": {"points", "duration"}}
+        binding = {"type", "expected_window", "observation_id", "source_revision",
+                   "expected", "expected_modal"}
+        if set(action) - (binding | fields[kind]):
+            raise PrimitiveError("rejected", "Unsupported native action fields")
         if kind == "key":
             chord = action.get("chord")
             try:

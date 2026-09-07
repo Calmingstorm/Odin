@@ -491,6 +491,9 @@ async def observed():
     ("polyline", {"points": [[1, 2], [3, 4]], "duration": 99}, False),
     ("type", {"text": "hello"}, True), ("type", {"text": "\x00"}, False),
     ("key", {"chord": "Return"}, True), ("key", {"chord": "not-allowed"}, False),
+    ("key", {"chord": "alt+F4"}, True), ("key", {"chord": "super+alt+F12"}, True),
+    ("key", {"chord": "Return", "unknown": True}, False),
+    ("click", {"x": 1, "y": 2, "button": "extra"}, False),
     ("click", {"x": True, "y": 2}, False),
 ])
 async def test_backend_action_payload_validation(kind, value, valid):
