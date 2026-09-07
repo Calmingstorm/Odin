@@ -717,7 +717,11 @@ class X11AttachedBackend:
             self._select_source(source_id)
             return {"selected_source": source_id, "capture_only": not self._input_enabled}
 
-    async def observe(self, crop=None):
+    async def observe_sequence(self, crop=None):
+        """Sequence checkpoints never hide a sampled human focus excursion."""
+        return await self.observe(crop=crop, _settle_focus=False)
+
+    async def observe(self, crop=None, *, _settle_focus=True):
         async with self._lock:
             if not self._started or self._closed or self._paused or self._selected is None:
                 raise AttachedFailure("capture_not_active")
@@ -744,7 +748,7 @@ class X11AttachedBackend:
             # qualify, including its window/process provenance and geometry.
             # No activation, input, revision rollback or coordinate remapping.
             previous_scope = self._scope
-            if (self._input_enabled and previous_scope
+            if (_settle_focus and self._input_enabled and previous_scope
                     and previous_scope.get("focused") is True
                     and previous_scope.get("modal") is None):
                 for _ in range(3):

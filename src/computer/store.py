@@ -279,7 +279,57 @@ class ComputerStore:
         result = json.loads(row["result"])
         if row["status"] == "pending":
             result.update(status="unknown", reason="pending_no_replay")
+        verification = result.get("verification", {})
+        if verification.get("type") == "sequence":
+            # Recover individual committed facts after a crash. Reading never
+            # resumes a plan, even if some reserved steps were never dispatched.
+            with self.lock:
+                steps = []
+                for step_id in verification.get("step_action_ids", []):
+                    step = self.db.execute(
+                        "SELECT payload_hash FROM receipts WHERE session_id=? AND action_id=?",
+                        (session_id, step_id)).fetchone()
+                    if step is not None:
+                        steps.append(self.receipt(session_id, step_id, step[0]))
+            verification["steps"] = steps
         return {**result, "action_id": action_id, "session_id": session_id}
+
+    def begin_sequence(self, grant, action_id, payload_hash, steps, max_actions):
+        """Atomically reserve all step IDs and their budget before any input."""
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                existing = self.receipt(grant.session_id, action_id, payload_hash)
+                if existing is not None:
+                    self.db.execute("COMMIT")
+                    return existing
+                ids = [action_id, *(step_id for step_id, _ in steps)]
+                if len(ids) != len(set(ids)) or not 1 <= len(steps) <= 8:
+                    raise ComputerError("invalid_sequence")
+                for step_id in ids:
+                    if self.db.execute(
+                            "SELECT 1 FROM receipts WHERE session_id=? AND action_id=?",
+                            (grant.session_id, step_id)).fetchone() is not None:
+                        raise ComputerError("action_id_conflict")
+                changed = self.db.execute(
+                    "UPDATE sessions SET actions=actions+? WHERE session_id=? AND generation=? "
+                    "AND state='active' AND actions<=? AND expires_at>?",
+                    (len(steps), grant.session_id, grant.generation,
+                     max_actions - len(steps), self.clock())).rowcount
+                if not changed:
+                    raise ComputerError("grant_revoked_or_limit")
+                initial = {"verification": {"type": "sequence", "step_action_ids": ids[1:]}}
+                self.db.execute("INSERT INTO receipts VALUES (?,?,?,?,?)",
+                                (grant.session_id, action_id, payload_hash, "pending",
+                                 json.dumps(initial)))
+                for step_id, step_hash in steps:
+                    self.db.execute("INSERT INTO receipts VALUES (?,?,?,?,?)",
+                                    (grant.session_id, step_id, step_hash, "pending", "{}"))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return None
 
     def begin_action(self, grant: SessionGrant, action_id: str, payload_hash: str,
                      max_actions: int, *, provenance: dict | None = None) -> dict | None:

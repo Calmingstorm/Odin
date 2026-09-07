@@ -495,7 +495,7 @@ class ComputerController:
             return await self._stop(sid, "cancelled")
         return self._public_session(grant)
 
-    async def _capture(self, grant, *, acknowledge_modal=False, crop=None):
+    async def _capture(self, grant, *, acknowledge_modal=False, crop=None, strict_binding=False):
         from .vision import FrameCrop, FrameMetadata, _validate_png
         live = self._active(grant)
         # The private adapter captures synchronously for each request. This is
@@ -503,7 +503,9 @@ class ComputerController:
         captured = self.monotonic()
         request = {"crop": crop} if crop is not None else {}
         try:
-            raw = await _bounded(live.backend.observe(**request), 5)
+            capture = (getattr(live.backend, "observe_sequence", live.backend.observe)
+                       if strict_binding else live.backend.observe)
+            raw = await _bounded(capture(**request), 5)
         except ComputerError as exc:
             if exc.code in {"display_asleep", "topology_changed", "stale_source_binding",
                             "capture_revoked", "portal_closed"}:
@@ -725,6 +727,11 @@ class ComputerController:
 
     async def act(self, context, inp):
         await self._auth(context)
+        if (type(inp) is dict and type(inp.get("operation")) is str
+                and inp["operation"] in {"sequence", "strokes"}):
+            from .sequences import execute_sequence
+
+            return await execute_sequence(self, context, inp)
         # Retain the historical empty probe's refusal, not an unconditional gate.
         if type(inp) is dict and not inp:
             raise ComputerError("grounded_actions_unavailable")

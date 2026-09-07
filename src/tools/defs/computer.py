@@ -90,7 +90,14 @@ _DEFINITIONS = [
         "not a retry. Plan the action sequence first. For drawing, batch each connected shape "
         "(mountain outline, moon arc, star or ripple) into ONE multi-point polyline, up to 256 "
         "points, instead of separate acts/observations for every segment. Points are joined "
-        "with the button held: disconnected strokes need separate calls. Choose a duration "
+        "with the button held: use operation=strokes with strokes[] for disconnected shapes, "
+        "or operation=sequence with steps[] for a finite plan against ONE delivered view. "
+        "Each step has its own unique action_id and releases input before the next step. "
+        "Maximum 8 steps, 256 total points, 512 total text characters, 4 seconds of requested "
+        "stroke duration and 30 seconds wall time. No nested sequences or rebinding. "
+        "Unexpected target/dialog changes or failed expectations interrupt immediately; "
+        "inspect the final/interruption view. Never replay partial work. A sequence cannot "
+        "open a new dialog then operate it without a new model-visible view. Choose a duration "
         "within the one-second stroke limit. Ground the start anchor before pressing; canvas "
         "changes caused by the stroke are expected. Never reuse expired or changed bindings. "
         "A visual change or pointer position alone does not prove task success: verify the "
@@ -172,6 +179,44 @@ _ACTION_SCHEMA["properties"]["key"]["allOf"] = [
     {"not": {"pattern": rf"(?:^|\+){modifier}\+(?:.*\+)?{modifier}\+"}}
     for modifier in ("ctrl", "alt", "shift", "super")
 ]
+
+
+# Reuse the ordinary single-action contract without allowing binding overrides
+# inside a plan. Single actions retain their existing controller dispatch path.
+_STEP_FIELDS = {"action_id", "operation", "expect"} | set().union(*_ACTION_FIELDS.values())
+_STEP_SCHEMA = {
+    "type": "object", "additionalProperties": False,
+    "properties": {key: deepcopy(value) for key, value in _ACTION_SCHEMA["properties"].items()
+                   if key in _STEP_FIELDS},
+    "required": ["action_id", "operation", "expect"],
+    "oneOf": deepcopy(_ACTION_SCHEMA["oneOf"]),
+}
+_ACTION_SCHEMA["properties"].update({
+    "steps": {"type": "array", "minItems": 1, "maxItems": 8, "items": _STEP_SCHEMA,
+              "description": "Ordered non-nested single actions, all planned against the "
+              "envelope's original delivered view. Each requires a distinct action_id. "
+              "No source, observation, generation or modal overrides."},
+    "strokes": {"type": "array", "minItems": 1, "maxItems": 8,
+                "description": "Disconnected held-button polylines. Input is released between "
+                "strokes; 256 points and 4 seconds requested duration total. Each start anchor "
+                "must remain grounded in the ORIGINAL view; overlapping changed anchors yield.",
+                "items": {"type": "object", "additionalProperties": False,
+                          "required": ["action_id", "points", "duration"],
+                          "properties": {key: deepcopy(_ACTION_SCHEMA["properties"][key])
+                                         for key in ("action_id", "points", "duration")}}},
+})
+_ACTION_SCHEMA["properties"]["operation"]["enum"].extend(["sequence", "strokes"])
+_ACTION_SCHEMA["required"].remove("expect")
+for _branch in _ACTION_SCHEMA["oneOf"]:
+    _branch["properties"].update(steps=False, strokes=False)
+    _branch["required"].append("expect")
+for _operation, _collection in (("sequence", "steps"), ("strokes", "strokes")):
+    _ACTION_SCHEMA["oneOf"].append({
+        "properties": {"operation": {"const": _operation},
+                       **{key: False for key in _STEP_FIELDS - {"operation", "action_id"}},
+                       ("strokes" if _collection == "steps" else "steps"): False},
+        "required": [_collection],
+    })
 
 
 def computer_definitions():
