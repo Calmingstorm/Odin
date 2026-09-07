@@ -21,6 +21,7 @@ from ..models import BackendCapabilities, BackendObservation, CaptureScope, Comp
 from ..provenance import canonical_application_provenance
 from ..render import render_frame, source_allocation_bytes
 from ..vision import FrameCrop
+from .kwin_scope import KWinWaylandScopeProvider
 from .profile import validate_session
 from .wayland_guardian import WaylandGuardian, WaylandGuardianError
 from .wayland_identity import CompositorRuntimeIdentity, capture_identity, revalidate_identity
@@ -201,14 +202,16 @@ class WaylandRuntimeBackend:
         if not 1 <= len(self._sources) <= 16:
             raise ComputerError("wayland_capture_sources_unavailable")
         self._selected = next(iter(self._sources))
-        self._scope_provider = GNOMEWaylandScopeProvider(bus_address=self.config.bus_address,
-                                                        expected_uid=self.config.expected_uid)
         fd = None
         try:
             portal_identity = getattr(self._portal, "identity", {})
-            if portal_identity.get("shell", {}).get("executable") == "/usr/bin/kwin_wayland":
-                # Recognition of EIS is not proof of authenticated app scope.
-                raise ComputerError("kwin_application_scope_adapter_unavailable")
+            shell = portal_identity.get("shell", {})
+            provider = (KWinWaylandScopeProvider
+                        if shell.get("executable") == "/usr/bin/kwin_wayland"
+                        else GNOMEWaylandScopeProvider)
+            self._scope_provider = provider(bus_address=self.config.bus_address,
+                                            expected_uid=self.config.expected_uid,
+                                            expected_compositor_pid=shell.get("pid"))
             scope_identity = await self._scope_provider.identity()
             fd = await self._portal.connect_eis()
             self._identity = await capture_identity(scope_identity, self._portal.eis_peer)
