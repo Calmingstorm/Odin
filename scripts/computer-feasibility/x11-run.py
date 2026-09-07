@@ -14,12 +14,17 @@ p = argparse.ArgumentParser()
 p.add_argument('--execute-isolated', action='store_true', help='requires parent go-ahead')
 p.add_argument('--same-process', action='store_true', help='opt-in GTK shared-focus and disconnect probe')
 p.add_argument('--safe-lifecycle', action='store_true', help='R2 watchdog, release and retained-device lifecycle only')
+p.add_argument('--send-event-probe', action='store_true', help='R5 disposable no-device compatibility probe')
+p.add_argument('--attached-corpus', action='store_true', help='R5 disposable SendEvent toolkit coexistence corpus')
+p.add_argument('--capture-adapter', action='store_true', help='R5 actual capture adapter in private display')
+p.add_argument('--owned-guardian', action='store_true', help='R5 existing XTEST input and release')
 args = p.parse_args()
 if not args.execute_isolated:
     raise SystemExit('PREPARED ONLY. Parent authorization required before --execute-isolated.')
 if args.same_process:
     raise SystemExit('Historical removal probe is unsafe and disabled; use --safe-lifecycle.')
-if not args.safe_lifecycle:
+if not any((args.safe_lifecycle, args.send_event_probe, args.attached_corpus,
+            args.capture_adapter, args.owned_guardian)):
     raise SystemExit('Historical hierarchy-removal fixtures are disabled; require --safe-lifecycle.')
 root = Path(__file__).resolve().parent
 if any(c in str(root) for c in ': \n\r'):
@@ -58,12 +63,45 @@ env = {'PATH': '/usr/bin', 'HOME': '/workspace/home', 'LANG': 'C.UTF-8', 'LC_ALL
        'XI2_PRIVATE_SANDBOX': '1'}
 if args.same_process:
     env['XI2_SAME_PROCESS'] = '1'
-if args.safe_lifecycle:
+if args.safe_lifecycle or args.send_event_probe or args.attached_corpus or args.capture_adapter:
     env['XI2_SAFE_LIFECYCLE'] = '1'
 for k, v in env.items():
     sandbox += ['--setenv', k, v]
 sandbox += ['/usr/bin/dbus-run-session', '--', '/usr/bin/bash',
+            '/harness/x11-send-event-session.sh' if args.send_event_probe else
             '/harness/x11-lifecycle-session.sh' if args.safe_lifecycle else '/harness/x11-session.sh']
+if args.attached_corpus:
+    sandbox[-2:] = ['/usr/bin/python3', '/harness/x11-attached-corpus.py']
+if args.capture_adapter or args.owned_guardian:
+    props.append(f'BindReadOnlyPaths={root.parents[1] / "src"}:/capture-source')
+    at = sandbox.index('--ro-bind')
+    sandbox[at:at] = ['--dir', '/code', '--ro-bind', '/capture-source', '/code/src']
+    sandbox[-2:] = ['/usr/bin/python3', '/harness/x11-attached-capture-check.py']
+if args.owned_guardian:
+    # The app identity query needs ONLY the fixture's private PID namespace.
+    # Replace outer masked proc mounts with private readonly proc (R4 bootstrap).
+    props = [p for p in props if not p.startswith((
+        'ProtectKernelTunables=', 'ProtectKernelLogs=', 'DynamicUser=',
+        'CapabilityBoundingSet='))]
+    # Root-only namespace bootstrap preserves real immutable /usr ownership for
+    # the PRODUCT executable identity check. Drop uid before server/apps start.
+    props += ['CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_CHOWN CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_SYS_CHROOT']
+    sandbox.remove('--unshare-all')
+    sandbox.remove('--unshare-user')
+    sandbox[1:1] = ['--unshare-pid', '--unshare-net', '--unshare-ipc', '--unshare-uts']
+    for flag in ('--uid', '--gid'):
+        at = sandbox.index(flag)
+        del sandbox[at:at+2]
+    at = sandbox.index('--cap-drop') + 2
+    sandbox[at:at] = ['--cap-add', 'CAP_SETUID', '--cap-add', 'CAP_SETGID',
+                     '--cap-add', 'CAP_SETPCAP', '--cap-add', 'CAP_CHOWN']
+    at = sandbox.index('/proc')
+    sandbox[at-1:at+1] = ['--proc', '/proc']
+    at = sandbox.index('--remount-ro')
+    sandbox[at:at] = ['--remount-ro', '/proc']
+    sandbox[-2:] = ['/usr/bin/python3', '/harness/x11-owned-guardian-corpus.py']
+    at = sandbox.index('/usr/bin/dbus-run-session')
+    sandbox[at:] = ['/usr/bin/bash', '/harness/x11-owned-bootstrap.sh']
 cmd = ['/usr/bin/systemd-run', '--quiet', '--pipe', '--wait', '--collect', '--service-type=exec',
        '--unit=' + unit] + ['--property=' + x for x in props] + sandbox
 if os.geteuid() != 0:

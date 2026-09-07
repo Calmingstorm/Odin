@@ -1,0 +1,363 @@
+"""Private, read-only X11 application scope. No connection creation or input.
+
+Snapshots are native-private evidence, never API/public diagnostics. Queries are
+bounded revalidation, NOT an atomic focus/input security boundary. X11 clients
+in one server remain mutually untrusted; this does not isolate hostile peers.
+"""
+from __future__ import annotations
+
+import hashlib
+import json
+import os
+import re
+import stat
+from pathlib import Path
+
+MAX_DEPTH = 32
+MAX_PROPERTY = 4096
+_DENIED = re.compile(
+    r"terminal|xterm|konsole|gnome-terminal|xfce4-terminal|alacritty|kitty|"
+    r"password|passphrase|authentication|authenticate|polkit|security|"
+    r"credential|pinentry|keyring|sudo|odin|command prompt|\bshell\b", re.I)
+_FILE_DIALOGS = frozenset({"open", "open file", "open image", "save", "save as", "save image"})
+
+
+class ScopeFailure(RuntimeError):  # noqa: N818 - Scope adapter failure API.
+    """Static failure: no titles, native IDs, process arguments or paths."""
+
+
+def _xid(window):
+    return int(getattr(window, "id", window))
+
+
+def _field(value, name):
+    return value[name] if isinstance(value, dict) else getattr(value, name)
+
+
+def _trusted_file(path):
+    """Resolve a fixed installed path and reject writable file/ancestor chains."""
+    resolved = path.resolve(strict=True)
+    for item in (path, *path.parents, resolved, *resolved.parents):
+        info = item.stat()
+        if info.st_uid != 0 or info.st_mode & 0o022:
+            raise ScopeFailure("application_identity_unavailable")
+    info = resolved.stat()
+    if not stat.S_ISREG(info.st_mode):
+        raise ScopeFailure("application_identity_unavailable")
+    return resolved, (info.st_dev, info.st_ino)
+
+
+def _process_identity(pid, profile):
+    """Authoritative XRes PID, then stable local /proc identity, not WM_PID."""
+    if profile != "xed":
+        # Interpreter argv is writable by the process. A trusted Python binary
+        # plus /usr/bin/drawing in cmdline cannot prove which script is running.
+        # Drawing remains supported only in the owned isolated launch tier.
+        raise ScopeFailure("attached_application_provenance_unavailable")
+    if type(pid) is not int or pid <= 1:
+        raise ScopeFailure("application_identity_unavailable")
+    proc = Path("/proc") / str(pid)
+
+    def read_identity():
+        data = (proc / "stat").read_text()
+        fields = data[data.rfind(")") + 2:].split()
+        if len(fields) < 20 or fields[0] in {"Z", "X", "x"}:
+            raise ScopeFailure("application_identity_unavailable")
+        start = int(fields[19])  # field 22; comm can contain spaces and ')'.
+        status = (proc / "status").read_text()
+        uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
+        uids = tuple(map(int, uid_line.split()[1:]))
+        if (len(uids) != 4 or len(set(uids)) != 1 or proc.stat().st_uid != uids[0]
+                or os.geteuid() not in {0, uids[0]}):
+            raise ScopeFailure("application_identity_unavailable")
+        executable = (proc / "exe").resolve(strict=True)
+        info = (proc / "exe").stat()
+        with (proc / "cmdline").open("rb") as stream:
+            cmdline = stream.read(16385)
+        if not cmdline or len(cmdline) > 16384 or not cmdline.endswith(b"\0"):
+            raise ScopeFailure("application_identity_unavailable")
+        return start, uids, executable, (info.st_dev, info.st_ino), cmdline
+
+    first = read_identity()
+    start, uids, executable, inode, cmdline = first
+    script_identity = None
+    if profile == "xed":
+        candidates = (Path("/usr/bin/xed"), Path("/usr/libexec/xed"))
+        approved = False
+        for candidate in candidates:
+            if candidate.exists():
+                real, expected_inode = _trusted_file(candidate)
+                if executable == real and inode == expected_inode:
+                    approved = True
+        if not approved:
+            raise ScopeFailure("application_identity_unavailable")
+    else:
+        raise ScopeFailure("unapproved_application_profile")
+    if first != read_identity():
+        raise ScopeFailure("application_identity_changed")
+    return {"pid": pid, "uid": uids[0], "start_ticks": start,
+            "exe": str(executable), "exe_identity": list(inode),
+            "script_identity": script_identity,
+            "cmdline_digest": hashlib.sha256(cmdline).hexdigest()}
+
+
+class AppScope:
+    """Use an owner-provided python-xlib Display; never closes it.
+
+    The worker must run with the approved application's UID. Denied/unknown
+    snapshot returns None. assert_snapshot returns fresh evidence or raises a
+    static ScopeFailure. rect is root-absolute and clipped to the source monitor.
+    """
+
+    def __init__(self, connection, profile):
+        if profile not in {"xed", "drawing"}:
+            raise ScopeFailure("unapproved_application_profile")
+        # Operator-configured explicit display only. Tests must never access :0.
+        name = connection.get_display_name()
+        if not isinstance(name, str) or not re.fullmatch(r":[0-9]{1,5}(?:\.[0-9]+)?", name):
+            raise ScopeFailure("explicit_local_display_required")
+        self.connection = connection
+        self.profile = profile
+        self._atoms = {}
+
+    def _atom(self, name):
+        if name not in self._atoms:
+            atom = self.connection.intern_atom(name, only_if_exists=True)
+            # A dialog can create an atom after our first read. Never cache None.
+            if atom:
+                self._atoms[name] = atom
+            return atom
+        return self._atoms[name]
+
+    def _property(self, window, name):
+        atom = self._atom(name)
+        if not atom:
+            return None
+        # GetProperty's length is four-byte units. Never unbounded full_property.
+        prop = window.get_property(atom, 0, 0, MAX_PROPERTY // 4)
+        if prop is not None and prop.bytes_after:
+            raise ScopeFailure("application_scope_unavailable")
+        return prop
+
+    def _values(self, window, name):
+        prop = self._property(window, name)
+        if prop is None:
+            return []
+        if prop.format != 32:
+            raise ScopeFailure("application_scope_unavailable")
+        return [int(value) for value in prop.value]
+
+    def _text(self, window, name):
+        prop = self._property(window, name)
+        if prop is None:
+            return ""
+        if prop.format != 8:
+            raise ScopeFailure("application_scope_unavailable")
+        return bytes(prop.value).decode("utf-8", errors="strict").replace("\x00", " ").strip()
+
+    def _metadata(self, window):
+        modern_title = self._text(window, "_NET_WM_NAME")
+        legacy_title = self._text(window, "WM_NAME")
+        title = modern_title or legacy_title
+        wm_class = self._text(window, "WM_CLASS")
+        if any(_DENIED.search(text) for text in (modern_title, legacy_title, wm_class)):
+            raise ScopeFailure("application_scope_unavailable")
+        # Metadata is used only for rejection/classification, never PID approval.
+        # Harmless document title changes (dirty asterisk) are not source changes.
+        # Title rejection stays live above; modal titles are bound separately.
+        digest = hashlib.sha256(wm_class.encode()).hexdigest()
+        return title, wm_class, digest
+
+    def _window(self, value):
+        return self.connection.create_resource_object("window", _xid(value))
+
+    def _ancestors(self, window, root):
+        result, seen = [], set()
+        for _ in range(MAX_DEPTH):
+            identity = _xid(window)
+            if identity == _xid(root):
+                return result
+            if identity <= 1 or identity in seen:
+                break
+            seen.add(identity)
+            result.append(window)
+            window = window.query_tree().parent
+        raise ScopeFailure("application_scope_unavailable")
+
+    def _target(self, focused, root):
+        ancestors = self._ancestors(focused, root)
+        # Hints locate client top-level beneath possible WM reparenting frames.
+        candidates = [w for w in ancestors if self._values(w, "WM_STATE")
+                      or self._values(w, "_NET_WM_PID")]
+        if not candidates:
+            raise ScopeFailure("application_scope_unavailable")
+        return candidates[-1], ancestors
+
+    def _pid(self, window):
+        # Imports are lazy: importing this module needs no X11 dependency.
+        from Xlib.ext import res
+
+        reply = self.connection.res_query_client_ids([
+            {"client": _xid(window), "mask": res.LocalClientPIDMask}])
+        ids = reply.ids
+        if len(ids) != 1:
+            raise ScopeFailure("application_identity_unavailable")
+        value = ids[0]
+        if (_field(_field(value, "spec"), "mask") != res.LocalClientPIDMask
+                or len(_field(value, "value")) != 1):
+            raise ScopeFailure("application_identity_unavailable")
+        pid = int(_field(value, "value")[0])
+        if pid <= 1:
+            raise ScopeFailure("application_identity_unavailable")
+        return pid
+
+    def _topology(self, root, monitor):
+        values = [int(_field(monitor, k)) for k in ("x", "y", "width", "height")]
+        if values[2] <= 0 or values[3] <= 0:
+            raise ScopeFailure("source_scope_unavailable")
+        reply = root.xrandr_get_monitors(True)
+        monitors = []
+        if not 1 <= len(reply.monitors) <= 32:
+            raise ScopeFailure("source_scope_unavailable")
+        for entry in reply.monitors:
+            monitors.append([int(_field(entry, k)) for k in (
+                "name", "x", "y", "width_in_pixels", "height_in_pixels")]
+                + [list(map(int, _field(entry, "crtcs")))])
+        if not any(m[1:5] == values for m in monitors):
+            raise ScopeFailure("source_scope_unavailable")
+        geometry = root.get_geometry()
+        return values, {"root": _xid(root), "size": [geometry.width, geometry.height],
+                        "monitors": sorted(monitors)}
+
+    def _snapshot(self, monitor):
+        from Xlib import X
+
+        version = self.connection.res_query_version(1, 2)
+        if (version.server_major, version.server_minor) < (1, 2):
+            raise ScopeFailure("application_identity_unavailable")
+        root = self.connection.screen().root
+        source, topology = self._topology(root, monitor)
+        focused = self.connection.get_input_focus().focus
+        if _xid(focused) <= 1 or _xid(focused) == _xid(root):
+            raise ScopeFailure("application_scope_unavailable")
+        focused = self._window(focused)
+        target, ancestors = self._target(focused, root)
+        pid = self._pid(target)
+        process = _process_identity(pid, self.profile)
+        path, focus_metadata = [], []
+        for window in ancestors:
+            path.append(_xid(window))
+            focus_metadata.append(self._metadata(window)[2])
+            if self._pid(window) != pid:
+                raise ScopeFailure("application_scope_unavailable")
+            if _xid(window) == _xid(target):
+                break
+        title, wm_class, metadata_digest = self._metadata(target)
+        attrs = target.get_attributes()
+        if attrs.map_state != X.IsViewable or attrs.override_redirect:
+            raise ScopeFailure("application_scope_unavailable")
+        geo = target.get_geometry()
+        origin = root.translate_coords(target, 0, 0)
+        if not origin.same_screen:
+            raise ScopeFailure("source_scope_unavailable")
+        rect = [int(origin.x), int(origin.y), int(geo.width), int(geo.height)]
+        left, top = max(rect[0], source[0]), max(rect[1], source[1])
+        right = min(rect[0] + rect[2], source[0] + source[2])
+        bottom = min(rect[1] + rect[3], source[1] + source[3])
+        if right <= left or bottom <= top:
+            raise ScopeFailure("source_scope_unavailable")
+        states = self._values(target, "_NET_WM_STATE")
+        types = self._values(target, "_NET_WM_WINDOW_TYPE")
+        allowed_types = {self._atom("_NET_WM_WINDOW_TYPE_NORMAL"),
+                         self._atom("_NET_WM_WINDOW_TYPE_DIALOG")}
+        if any(value not in allowed_types for value in types):
+            raise ScopeFailure("application_scope_unavailable")
+        transient = self._values(target, "WM_TRANSIENT_FOR")
+        modal = bool(transient or self._atom("_NET_WM_STATE_MODAL") in states
+                     or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
+        chain, chain_metadata, seen = [], [], {_xid(target)}
+        cursor = target
+        for _ in range(MAX_DEPTH):
+            parent_ids = self._values(cursor, "WM_TRANSIENT_FOR")
+            if not parent_ids:
+                break
+            if len(parent_ids) != 1 or parent_ids[0] in seen or parent_ids[0] == _xid(root):
+                raise ScopeFailure("application_scope_unavailable")
+            seen.add(parent_ids[0])
+            cursor = self._window(parent_ids[0])
+            actual, _ = self._target(cursor, root)
+            if _xid(actual) != _xid(cursor) or self._pid(cursor) != pid:
+                raise ScopeFailure("application_scope_unavailable")
+            chain_metadata.append(self._metadata(cursor)[2])
+            chain.append(_xid(cursor))
+        else:
+            raise ScopeFailure("application_scope_unavailable")
+        safe_dialog = (bool(chain) and title.casefold() in _FILE_DIALOGS
+                       and self.profile in wm_class.casefold().split()
+                       and self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
+        evidence = {"topology": topology, "source_rect": source,
+                    "source_origin": source[:2],
+                    "window": _xid(target), "focus_window": _xid(focused),
+                    "focus_path": path, "ancestor_path": [_xid(w) for w in ancestors],
+                    "focus_metadata": focus_metadata, "transient_metadata": chain_metadata,
+                    "window_rect": rect, "rect": [left, top, right-left, bottom-top],
+                    "focused": True, "modal": modal,
+                    "modal_kind": (None if not modal else
+                                   "safe_application" if safe_dialog else "unrecognized"),
+                    "modal_title_digest": (hashlib.sha256(title.encode()).hexdigest()
+                                           if modal else None),
+                    "transient_chain": chain, "process": process,
+                    "metadata_digest": metadata_digest, "states": states, "types": types}
+        # Bound TOCTOU detection; there is no claim of an atomic X11 transaction.
+        if (_xid(self.connection.get_input_focus().focus) != _xid(focused)
+                or self._pid(target) != pid or _process_identity(pid, self.profile) != process
+                or self._topology(root, monitor)[1] != topology):
+            raise ScopeFailure("application_scope_changed")
+        evidence["fingerprint"] = hashlib.sha256(
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+        return evidence
+
+    def snapshot(self, monitor):
+        try:
+            return self._snapshot(monitor)
+        except Exception:
+            return None
+
+    def assert_snapshot(self, expected, monitor, point=None):
+        current = self.snapshot(monitor)
+        if (current is None or current != expected or not current["focused"]
+                or current["modal_kind"] == "unrecognized"):
+            raise ScopeFailure("application_scope_changed")
+        if point is not None:
+            try:
+                x, y = point
+                if type(x) is not int or type(y) is not int:
+                    raise ValueError
+                left, top, width, height = current["rect"]
+                if not (left <= x < left + width and top <= y < top + height):
+                    raise ValueError
+                window = self.connection.screen().root
+                seen, target_seen = set(), False
+                for _ in range(MAX_DEPTH):
+                    identity = _xid(window)
+                    if identity in seen:
+                        raise ValueError
+                    seen.add(identity)
+                    target_seen |= identity == current["window"]
+                    if target_seen and self._pid(window) != current["process"]["pid"]:
+                        raise ValueError
+                    query = window.query_pointer()
+                    if not query.same_screen or (query.root_x, query.root_y) != (x, y):
+                        raise ValueError
+                    if not _xid(query.child):
+                        if not target_seen:
+                            raise ValueError
+                        break
+                    window = self._window(query.child)
+                else:
+                    raise ValueError
+                if self.snapshot(monitor) != current:
+                    raise ValueError
+            except Exception:
+                raise ScopeFailure("pointer_scope_changed") from None
+        return current
