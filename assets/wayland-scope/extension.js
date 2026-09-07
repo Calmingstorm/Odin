@@ -95,7 +95,7 @@ export default class OdinScope extends Extension {
             Main.sessionMode.isGreeter || Main.screenShield?.locked ||
             Main.overview.visible || Main.overview.animationInProgress ||
             Main.modalCount !== 0 || global.stage.get_key_focus() !== null ||
-            Main.messageTray?._bannerBin?.visible)
+            (Main.messageTray?._banner?.visible && Main.messageTray?._bannerBin?.visible))
             refuse();
         const source = request.source;
         if (!source || source.source_type !== 1 || !Number.isInteger(source.node_id) ||
