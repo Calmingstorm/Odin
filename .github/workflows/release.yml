@@ -27,6 +27,12 @@ jobs:
           curl -sLO "https://github.com/goreleaser/nfpm/releases/download/v2.46.0/nfpm_2.46.0_amd64.deb"
           sudo dpkg -i nfpm_2.46.0_amd64.deb
 
+      - name: Build matching optional computer helper
+        run: |
+          docker build -f packaging/computer-builder.Containerfile -t odin-computer-builder .
+          docker run --rm --network none --user "$(id -u):$(id -g)" \
+            -v "$PWD:/source" odin-computer-builder
+
       - name: Build .deb package
         run: |
           mkdir -p dist

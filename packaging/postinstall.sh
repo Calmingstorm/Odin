@@ -41,8 +41,17 @@ if ! id "$SERVICE_USER" > /dev/null 2>&1; then
 fi
 
 # Create FHS directories
+# Computer evidence must never follow a symlink, including on upgrades. Check
+# before mkdir/chown can touch an unexpected target. Existing receipts are kept.
+for directory in /var /var/lib "$DATA_DIR" "$DATA_DIR/computer"; do
+    if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
+        echo "Odin: unsafe computer state directory: $directory" >&2
+        exit 1
+    fi
+done
 mkdir -p "$CONFIG_DIR"
-mkdir -p "$DATA_DIR"/{sessions,context,skills,search,knowledge,trajectories}
+mkdir -p "$DATA_DIR"/{sessions,context,skills,search,knowledge,trajectories,computer}
+chmod 0700 "$DATA_DIR/computer"
 mkdir -p "$LOG_DIR"
 mkdir -p "$WORKSPACE_DIR"
 
@@ -91,17 +100,18 @@ fi
 # Install Python dependencies from pyproject.toml
 echo "  Installing Python dependencies (this can take a few minutes)..."
 if [ -f "$APP_DIR/pyproject.toml" ]; then
-    # [pdf] installs PyMuPDF so the advertised analyze_pdf tool actually works.
-    # Without it the tool is hidden by the catalog gate, so an official package
-    # would silently ship without a capability it documents.
-    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR[pdf]"
+    # Optional Python runtimes are small and safe on headless machines. Install
+    # them on BOTH fresh installs and upgrades; missing extras must not silently
+    # hide documented tools. OS desktop packages remain APT Recommends. Installing
+    # dependencies is not an authorization grant and never enables computer use.
+    "$APP_DIR/.venv/bin/pip" install --quiet "$APP_DIR[pdf,computer]"
 else
     echo "Odin: mandatory application metadata is missing." >&2
     exit 1
 fi
 # A successful dependency command alone does not prove the installed app imports.
 (cd "$APP_DIR" && "$APP_DIR/.venv/bin/python" -c \
-    'import src.__main__; import src.discord.client; import pymupdf')
+    'import src.__main__; import src.discord.client; import pymupdf; import PIL; import Xlib; import dbus_next')
 
 # Install Playwright browsers for native browser support (optional feature)
 "$APP_DIR/.venv/bin/playwright" install chromium 2>/dev/null || \
@@ -147,6 +157,10 @@ echo ""
 echo "============================================================"
 echo "  Odin installed."
 echo "============================================================"
+echo "  Computer Python runtime and private state are provisioned; existing enablement is preserved."
+echo "  Desktop packages are APT recommendations (headless: --no-install-recommends)."
+echo "  Screen access, target configuration and GNOME extension enablement require your consent."
+echo "  Computer setup: /usr/share/doc/odin/computer-use/PACKAGING.md"
 
 if [ "$FRESH_INSTALL" = true ]; then
     SSH_PUB="$(cat "$APP_DIR/.ssh/id_ed25519.pub" 2>/dev/null || echo '(key not generated)')"

@@ -19,6 +19,13 @@ do not. This handoff is not an all-gates-green or merge/release approval.
 
 ## Start here: first use without the build history
 
+For `.deb` installs, first read [PACKAGING.md](PACKAGING.md): the package provisions
+the Python extras, private state, matching guardian and inert system extension
+files. The manual source checklist below is not a second package-install recipe.
+APT recommendations supply available computer OS dependencies by default;
+headless installs can use `--no-install-recommends`. Target selection, desktop
+grants, extension activation and computer enablement remain explicit choices.
+
 For help on **your own screen**, use target **B, existing-session X11**, or
 **C, existing-session Wayland**, matching your actual desktop, below.
 Target A opens an isolated application, not your desktop. Choose and provision the
@@ -72,7 +79,12 @@ selection or document content remained unchanged; shared focus is an accepted
 limitation. Refresh observations and decide anew, never replay an unknown action. These
 limits are operationally significant, not just theoretical caveats.
 
-## 1. Provision offline, before the manual restart
+## 1. Manual source provisioning, before the authorized restart
+
+For a `.deb`, verify the package-provisioned items rather than manually duplicating
+them. Ordinary upgrades preserve configuration/enablement and prior service state;
+they do not start computer tasks or grant desktop access. No package success is
+established by this historical source-deployment handoff.
 
 1. Review the selected PR revision and its release evidence. Package the matching
    Python runtime assets and WebUI through the normal externally owned deployment
@@ -91,7 +103,7 @@ limits are operationally significant, not just theoretical caveats.
    receipt and private evidence data; do not make it web-served or shared.
 3. Install the optional `computer` Python extra into the service environment:
    current `pyproject.toml` specifies `Pillow>=12.3,<13` and Linux
-   `python-xlib>=0.33,<1`; `all` includes this extra. These packages alone neither
+   `python-xlib>=0.33,<1` and `dbus-next>=0.2.3,<1`; `all` includes this extra. These packages alone neither
    enable input nor install the system desktop dependencies.
 4. Provision system packages deliberately. Debian/Ubuntu names include `systemd`,
    `sudo`, `bubblewrap`, `xvfb`, `dbus`, `xdotool`, `openbox`, `drawing`, `xed`,
@@ -114,8 +126,9 @@ limits are operationally significant, not just theoretical caveats.
    least-privilege policy with the actual service UID; do not grant blanket sudo
    or relax desktop, namespace, accessibility or security settings to force a pass.
 
-The isolated target checks **both** Drawing and Xed executables at Enable, even
-when the first task requests only Xed. The attached target does not require that
+The isolated target checks **common dependencies** at Enable and the **selected
+application profile** at task start. Xed is unavailable on some distributions;
+missing Xed does not block an installed Drawing profile. The attached target does not require that
 isolated desktop stack; it needs the service's computer extra, X11 libraries and
 extensions, authorization, and the selected installed native application. Do not
 install or launch an isolated desktop just to help in an existing application.

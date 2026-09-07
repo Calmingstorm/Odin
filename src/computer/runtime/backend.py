@@ -81,7 +81,7 @@ class LinuxDesktopBackend:
         if self._closed or self._process is not None:
             raise RuntimeFailure("backend instances are single-use")
         validate_session(session_id)
-        preflight()
+        preflight(self.app_profile)
         descriptor = self.startup_descriptor(session_id)
         assert self._descriptor is not None  # startup_descriptor establishes this identity.
         owned = descriptor['token']

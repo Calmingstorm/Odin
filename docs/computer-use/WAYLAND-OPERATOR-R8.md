@@ -40,9 +40,22 @@ increment. They are unsupported, not classified as affected by the Mutter bug.
 
 ## Provisioning before the operator's deployment
 
+For the `.deb`, [PACKAGING.md](PACKAGING.md) replaces manual build/install steps:
+it supplies the computer extra, private service-owned state, precompiled root-owned
+guardian and inert system extension files. APT installs available Recommends by
+default; `--no-install-recommends` is appropriate for headless use. GNOME and portal
+backends are only Suggests: the package never chooses a new desktop implicitly.
+Debian 13 is the official qualified stack path, not a claim of verified package
+installation. Stock Ubuntu 24.04's older libei does not meet the guardian's
+**libei >= 1.3.901** requirement. Mint/Ubuntu optional support depends on available
+libraries; a missing requirement is not a compositor defect diagnosis.
+
+The following is the **manual source-deployment** checklist. Package users verify
+the provisioned artifacts and still make all target/consent choices themselves.
+
 1. Install the `computer` Python extra into the service environment. It now
    includes `dbus-next>=0.2.3,<1`, in addition to Pillow and python-xlib.
-2. Install distribution packages for GNOME/Mutter, public RemoteDesktop and
+2. In an explicitly chosen existing GNOME desktop, provision public RemoteDesktop and
    ScreenCast portals, PipeWire, GI/Gio/Gtk3/GStreamer, the PipeWire GStreamer
    plugin, Inkscape, libei and libxkbcommon. The system `/usr/bin/python3` used by
    the portal/probe helpers needs the GI modules. Service-venv imports alone do
@@ -52,21 +65,26 @@ increment. They are unsupported, not classified as affected by the Mutter bug.
    Private nested qualification additionally needs Xvfb and xdotool; these never
    target the operator's X11 display. Linux pidfds and unprivileged namespaces
    must be available. Runtime does not install dependencies or compile code.
-3. Compile the **matching** `src/computer/runtime/assets/wayland_owned_input.c`
+3. For a source deployment, compile the **matching** `src/computer/runtime/assets/wayland_owned_input.c`
    during packaging with C11, libei and libxkbcommon, then install the resulting
    native helper to the configured absolute path. Compiler flags are
    `-std=c11 -Wall -Wextra -Werror`, pkg-config packages `libei-1.0 xkbcommon`,
    plus `-lm`. The executable and its entire path must be root-owned, not
    group/other-writable and contain no symlink components. Do not configure a
-   checkout-local executable or a user-writable helper.
+   checkout-local executable or a user-writable helper. The `.deb` already contains
+   `/usr/libexec/odin-computer-wayland-input`; its configured release build uses
+   a Debian 13 container and `packaging/build-computer-helper.sh`. Installation
+   never compiles it. This handoff does not claim that pipeline has run.
 4. Package every `src/computer/runtime/assets/wayland_probe_*.py` asset alongside
    the runtime. The real qualifier uses these installed helpers, not the
    developer feasibility scripts and not cached JSON approval files.
-5. Explicitly install and enable the matching companion extension from
-   `assets/wayland-scope/` in the **chosen GNOME session**. This is trusted
+5. For source installs, install the matching companion extension from
+   `assets/wayland-scope/`; the `.deb` installs its inert system copy automatically.
+   **Explicitly enable** it in the chosen GNOME session. This loads trusted
    compositor code and requires the operator's decision. See its README for
-   installation and removal. Odin never installs/enables it or changes Shell
-   accessibility/security settings. Missing extension means input is refused.
+   installation and removal. Package hooks and runtime never enable it, change
+   Shell accessibility/security settings, or restart a login session. Missing or
+   inactive extension means input is refused.
 6. Configure the actual local Unix session bus address and desktop UID, and
    provision the existing private service-owned storage directory. The portal
    helper drops to that UID when the service is root; a non-root service cannot

@@ -50,7 +50,9 @@ The WebUI shows every tool Odin can reach, how often each has run, and lets you 
 
 ## Quick start
 
-Debian or Ubuntu. The package installs its dependencies during setup, which can take a few minutes:
+Debian or Ubuntu. APT resolves dependencies and the package installs Python extras
+during setup, which can take a few minutes. Optional computer-use support has
+distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
 
 ```bash
 curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.95.0_amd64.deb
@@ -218,8 +220,31 @@ The package installs:
 | Local command workspace | `/var/lib/odin-workspace` |
 | Logs | `/var/log/odin` |
 | Systemd unit | `/usr/lib/systemd/system/odin.service` |
+| Private computer evidence (service-owned, 0700) | `/var/lib/odin/computer` |
+| Precompiled root-owned Wayland guardian | `/usr/libexec/odin-computer-wayland-input` |
+| Inert GNOME scope extension (not enabled) | `/usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/` |
+| Computer-use installation handoff | `/usr/share/doc/odin/computer-use/PACKAGING.md` |
 
 The package installs the application files and systemd unit. Its post-install script creates the `odin` service account, virtual environment, SSH key, data directories, configuration links, and local command workspace. A new installation is enabled but is not started until credentials are configured. Upgrades preserve configuration and data and restart the service only if it was already running.
+
+Fresh installs and upgrades install the `pdf` and `computer` Python extras and
+provision private computer state with symlink rejection. Computer enablement is
+preserved on upgrade; installing the package does not authorize a computer task.
+Base dependencies are Python/venv, SSH, systemd and sudo. Computer OS tools,
+libraries and applications are APT **Recommends**; headless operators can install
+with `sudo apt install --no-install-recommends ./odin_VERSION_amd64.deb`.
+Direct `dpkg -i` does not resolve dependencies, so APT is recommended.
+Compositor/portal packages are **Suggests**, never an implicit new desktop.
+
+Desktop target configuration, grants, Wayland UID/session bus, GNOME extension
+activation and portal consent remain explicit operator choices. Debian 13 is the
+qualified Wayland stack path. Stock Ubuntu 24.04's older libei does not meet the
+guardian's `libei >= 1.3.901` requirement; this is a dependency limitation, not a
+compositor diagnosis. Missing Xed on a distribution does not block isolated
+Drawing: common dependencies are checked at Enable, the selected app at start.
+See [PACKAGING.md](docs/computer-use/PACKAGING.md) for source versus package setup
+and exact evidence limits. R9 exercised local package install/upgrade in disposable
+containers, not a release pipeline or zero-click desktop setup.
 
 ### First-time setup
 

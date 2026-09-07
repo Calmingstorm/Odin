@@ -1,18 +1,25 @@
 # Explicit GNOME Wayland scope provider
 
-This extension is an **operator-installed opt-in** evidence provider for GNOME
-Shell 46–48. Installing it is a trusted compositor-code change. It has not been
-qualified on an active workstation by this implementation. Do not automatically
-install, enable, reload Shell, log out, or modify a user's desktop session.
+This extension is an **operator-enabled opt-in** evidence provider for GNOME
+Shell 46–48. Enabling it loads trusted compositor code. It has not been
+qualified on an active workstation by this implementation. The `.deb` may
+automatically install matching inert system files under
+`/usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/`; it does not enable
+them. Never automatically enable the extension, reload Shell, log out, change
+session settings, or otherwise modify a user's desktop session.
 Development/qualification belongs in a separate user/container/native or nested
 GNOME Wayland session with a private D-Bus, not the operator's active desktop.
 
-For an explicitly authorized target session, the operator installs this directory
-under `~/.local/share/gnome-shell/extensions/odin-scope@calmingstorm.net/` and
-enables `odin-scope@calmingstorm.net` using GNOME Extensions. On versions requiring
+For an explicitly authorized target session, a source-deployment operator installs
+this directory under `~/.local/share/gnome-shell/extensions/odin-scope@calmingstorm.net/`.
+Package users already have the system copy; avoid a stale user copy shadowing it.
+The operator then explicitly enables `odin-scope@calmingstorm.net` using GNOME
+Extensions. On versions requiring
 a session restart for newly installed extensions, defer to the operator. No
 unsafe-mode, Eval, Introspect allowlist changes or portal impersonation is used.
-Disable/remove the extension to revoke the provider. Backend owner pinning makes
+Disable the extension in the chosen session to revoke the provider; remove a
+manual copy only if it is operator-managed, and manage packaged files through the
+package manager. Backend owner pinning makes
 Shell restart a session failure rather than silently following its replacement.
 
 The private interface is `org.gnome.Shell.Extensions.OdinScope`, object path

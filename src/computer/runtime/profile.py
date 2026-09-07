@@ -112,9 +112,13 @@ def clean_environment() -> dict[str, str]:
     return {"PATH": "/usr/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
 
 
-def preflight() -> None:
-    required = ("sudo", "systemd-run", "systemctl", "bwrap", "Xvfb", "python3",
-                "dbus-daemon", "xdotool", "openbox", "drawing", "xed")
+def preflight(app_profile: str | None = None) -> None:
+    if app_profile is not None and app_profile not in APP_PROFILES:
+        raise ValueError("unapproved application profile")
+    required: tuple[str, ...] = ("sudo", "systemd-run", "systemctl", "bwrap", "Xvfb", "python3",
+                                 "dbus-daemon", "xdotool", "openbox")
+    if app_profile is not None:
+        required = (*required, app_profile)
     missing = [name for name in required if not os.access(f"/usr/bin/{name}", os.X_OK)]
     if missing:
         raise RuntimeError("desktop dependencies unavailable: " + ", ".join(missing))

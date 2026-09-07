@@ -19,9 +19,52 @@ depends:
   - python3 (>= 3.11)
   - python3-venv
   - openssh-client
+  # Already required by the service and maintainer hooks, not a desktop stack.
+  - systemd
+  - sudo
 
 recommends:
   - python3-pip
+  # Optional computer runtime. APT installs these by default; headless operators
+  # can use --no-install-recommends without breaking the base service.
+  - bubblewrap (>= 0.8.0)
+  - xvfb
+  - dbus
+  - xdotool
+  - openbox
+  - python3-xlib
+  - python3-gi
+  - gir1.2-atspi-2.0
+  - gir1.2-gtk-3.0
+  - at-spi2-core
+  - libgail-common
+  - fontconfig
+  - fonts-dejavu-core
+  - libx11-6
+  - libxi6
+  - libxtst6
+  - x11-xserver-utils
+  - drawing
+  # Xed is available on Mint, not every Debian/Ubuntu repository. Absence
+  # refuses only Xed; it must not prevent the installed Drawing profile.
+  - xed
+  - inkscape
+  - libreoffice-writer
+  # Native guardian is shipped in this same package, never compiled at install.
+  # Its libraries are optional because the helper is only launched for Wayland.
+  - libc6 (>= 2.34)
+  - libei1 (>= 1.3.901)
+  - libxkbcommon0 (>= 0.5.0)
+  - gir1.2-gstreamer-1.0
+  - gir1.2-gst-plugins-base-1.0
+  - gstreamer1.0-pipewire
+
+# Never select/replace a user's compositor or portal backend during an Odin
+# upgrade. These belong to an existing, explicitly selected GNOME desktop.
+suggests:
+  - gnome-shell
+  - xdg-desktop-portal
+  - xdg-desktop-portal-gnome
 
 contents:
   - src: ./src
@@ -52,6 +95,23 @@ contents:
   - src: ./packaging/odin.service
     dst: /usr/lib/systemd/system/odin.service
 
+  - src: ./build/computer/odin-computer-wayland-input
+    dst: /usr/libexec/odin-computer-wayland-input
+    file_info:
+      owner: root
+      group: root
+      mode: 0755
+
+  # Installing files makes the provider available. No hook enables it, edits
+  # dconf, connects to a desktop bus or restarts/reloads GNOME Shell.
+  - src: ./assets/wayland-scope/extension.js
+    dst: /usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/extension.js
+  - src: ./assets/wayland-scope/metadata.json
+    dst: /usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/metadata.json
+  - src: ./docs/computer-use
+    dst: /usr/share/doc/odin/computer-use
+    type: tree
+
   - dst: /etc/odin/
     type: dir
     file_info:
@@ -61,6 +121,11 @@ contents:
     type: dir
     file_info:
       mode: 0755
+
+  - dst: /var/lib/odin/computer/
+    type: dir
+    file_info:
+      mode: 0700
 
   - dst: /var/log/odin/
     type: dir
