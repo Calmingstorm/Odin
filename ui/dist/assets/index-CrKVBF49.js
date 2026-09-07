@@ -6226,7 +6226,7 @@ ${u.text}`:u.text).join(`
           <div class="section-eyebrow">Current session</div>
           <div class="computer-state">{{ status.state || 'unknown' }}</div>
         </div>
-        <span class="badge badge-info">{{ loading ? 'Checking status' : 'Status current' }}</span>
+        <span class="badge badge-info">{{ loading ? 'Checking status' : 'Session status' }}</span>
       </div>
       <div class="space-y-4">
       <section class="hm-card" aria-labelledby="computer-lifecycle-title">

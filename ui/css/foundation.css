@@ -279,6 +279,7 @@ kbd { padding: 2px 5px; color: #818b99; background: #090c11; border: 1px solid #
 
 /* Computer operator uses the same page, card, control, and detail primitives
    as the rest of System. Keep only content-specific presentation here. */
+.computer-page > .page-header { position: sticky; top: calc(var(--hm-topbar-h) + var(--hm-section-tabs-h)); z-index: 10; padding-block: 12px; background: var(--hm-bg-raised); border-bottom: 1px solid var(--hm-border-subtle); }
 .computer-status-card { display: flex; align-items: center; justify-content: space-between; gap: 12px; border-left: 2px solid var(--hm-accent); }
 .computer-state { margin-top: 2px; color: #f0d49f; font-size: 1rem; font-weight: 650; text-transform: capitalize; }
 .profile-list { display: grid; gap: 8px; }

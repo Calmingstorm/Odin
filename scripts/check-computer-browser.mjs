@@ -99,6 +99,7 @@ try {
   assert.equal(await emergencyControls.locator('.btn').count(), 2);
   const pauseControl = page.getByRole('button', { name: 'Pause and revoke agent input' });
   assert.ok((await pauseControl.boundingBox()).height >= 44, 'pause/revoke remains a mobile-sized touch target');
+  assert.equal(await page.locator('.computer-page > .page-header').evaluate(el => getComputedStyle(el).position), 'sticky', 'emergency controls stay reachable while scrolling');
   assert.ok((await page.locator('.computer-page > .space-y-4 > .hm-card').count()) >= 4, 'computer sections render as shared cards');
   assert.equal(await page.locator('.computer-page [style]').count(), 0, 'rendered computer page has no inline layout styles');
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
