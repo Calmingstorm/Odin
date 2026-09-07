@@ -727,7 +727,28 @@ class ComputerController:
                     crop = (asdict(current.frame_metadata.crop)
                             if current.frame_metadata is not None
                             and current.frame_metadata.crop is not None else None)
-                    after, _ = await self._capture(grant, crop=crop)
+                    try:
+                        after, _ = await self._capture(grant, crop=crop)
+                    except ComputerError as exc:
+                        if (grant.environment != "existing_session" or not visual
+                                or exc.code not in {
+                                    "invalid_bounds", "invalid_source_crop",
+                                    "invalid_observation_crop", "display_asleep",
+                                    "topology_changed", "input_focus_unavailable",
+                                    "wayland_capture_dimensions_changed",
+                                    "wayland_capture_source_changed"}):
+                            raise
+                        # Input and release were acknowledged. Failure to obtain
+                        # verification pixels cannot undo that evidence. Retire
+                        # the old crop/binding and require explicit observation.
+                        await self._auth(context)
+                        self._active(grant)
+                        live.observations.clear()
+                        result["status"] = "executed"
+                        result["verification"].update(
+                            status="unavailable", reason=exc.code,
+                            next_action="observe_again_without_crop")
+                        return self.store.finish_action(grant.session_id, inp["action_id"], result)
                     await self._auth(context)
                     self._active(grant)
                     age = self.monotonic() - after.captured_at

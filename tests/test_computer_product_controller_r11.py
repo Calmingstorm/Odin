@@ -256,3 +256,46 @@ async def test_unicode_preflight_details_are_durable_known_no_input(tmp_path, co
     finally:
         await controller.close()
         store.close()
+
+
+@pytest.mark.parametrize("reason", ["invalid_bounds", "display_asleep", "input_focus_unavailable"])
+async def test_failed_post_capture_preserves_acknowledged_execution(tmp_path, reason):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    context = RequestContext("o", "c", "t", "h")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        sid = grant["session_id"]
+        observed = await controller.observe(context, {"session_id": sid, "generation": 1})
+        obs = controller._live[sid].observations[observed["observation_id"]]
+        await controller.validate_observation_delivery(
+            context, obs.frame_metadata, obs.image_sha256)
+
+        async def unavailable():
+            raise ComputerError(reason)
+
+        async def executed(payload):
+            backend.observe = unavailable
+            backend.injected += 1
+            return {"status": "executed", "injected": True, "released": True}
+
+        backend.act = executed
+        action = {"session_id": sid, "generation": 1, "action_id": "close",
+                  "observation_id": obs.observation_id, "consent_generation": 1,
+                  "source_id": "opaque", "source_revision": 1, "operation": "key",
+                  "key": "ctrl+w", "expect": {"type": "visual_change"}}
+        result = await controller.act(context, action)
+        assert result["status"] == "executed"
+        assert result["verification"]["status"] == "unavailable"
+        assert result["verification"]["reason"] == reason
+        assert result["verification"]["next_action"] == "observe_again_without_crop"
+        assert result["execution"] == {"injected": True, "released": True}
+        assert store.get_session(sid).state == "active"
+        assert not controller._live[sid].observations
+        assert sid not in controller._delivered_observations
+        assert await controller.act(context, action) == result
+        assert backend.injected == 1
+    finally:
+        await controller.close()
+        store.close()
