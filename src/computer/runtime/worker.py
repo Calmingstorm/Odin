@@ -71,7 +71,8 @@ class Worker:
         os.umask(0o077)
         os.environ.clear()
         os.environ.update(ENVIRONMENT)
-        for folder in ("home/.config", "home/.cache", "home/.local/share", "run", "exports"):
+        for folder in ("home/.config", "home/.cache", "home/.local/share", "run", "exports",
+                       "tmp/.X11-unix"):
             Path("/workspace", folder).mkdir(parents=True, exist_ok=True, mode=0o700)
         self.spawn([
             "/usr/bin/dbus-daemon", "--nofork", "--nopidfile",
@@ -79,7 +80,7 @@ class Worker:
         ])
         self.spawn([
             "/usr/bin/Xvfb", DISPLAY, "-screen", "0", f"{WIDTH}x{HEIGHT}x24",
-            "-nolisten", "tcp", "-noreset", "-ac",
+            "-nolisten", "tcp", "-noreset", "-ac", "-extension", "GLX",
         ])
         end = time.monotonic() + 5.0
         while not (
@@ -102,7 +103,7 @@ class Worker:
         end = time.monotonic() + 8.0
         while time.monotonic() < end:
             try:
-                observation = self.desktop.snapshot()
+                observation = self.desktop.snapshot(packed=True)
                 if observation["window"]["pid"] > 0:
                     return {"ok": True, "event": "ready", "profile": self.profile,
                             "width": WIDTH, "height": HEIGHT, "containment": containment_report()}
@@ -120,7 +121,7 @@ class Worker:
         operation = message.get("op")
         if operation == "observe":
             assert self.desktop is not None  # Operations follow successful startup.
-            observation = self.desktop.snapshot()
+            observation = self.desktop.snapshot(packed=True)
             observation["image"] = pack_blob(observation.pop("image_bytes"))
             return {"ok": True, "id": request_id, "observation": observation}
         if operation == "act":
@@ -128,7 +129,7 @@ class Worker:
             action = message.get("action")
             if not isinstance(action, dict):
                 raise ValueError("action must be an object")
-            receipt = self.desktop.execute(action, self.cancelled)
+            receipt = self.desktop.grounded_execute(action, self.cancelled)
             return {"ok": True, "id": request_id, "receipt": receipt}
         if operation == "export":
             name = message.get("name")
@@ -162,7 +163,8 @@ class Worker:
         try:
             assert self.desktop is not None  # Pause follows successful startup.
             released = self.desktop.release_all()
-            self.emit({"ok": bool(released.get("ok")), "id": message.get("id"), "state": "paused"})
+            self.emit({"ok": bool(released.get("ok")), "released": released.get("ok") is True,
+                       "id": message.get("id"), "state": "paused"})
         finally:
             self.operation_lock.release()
 

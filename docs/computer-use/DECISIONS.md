@@ -34,6 +34,31 @@ tag or pipeline. Packages may be installed under R2, recording reversible change
 The acknowledged historical service-owned zombies are dead and out of scope for
 further reap attempts. New fixtures still need exact-identity cleanup verification.
 
+### R4 isolated-launch correction, after non-graphical preflight
+
+The first two runtime launches failed before graphics. Four subsequent diagnostic
+units ran only true or a read-only containment probe. Measured failures: bwrap0.9
+requires explicit --unshare-user with --disable-userns; inherited systemd masked
+proc submounts prevented a new private proc mount; /dev/shm was not a mount point
+for the old remount operation. The fourth diagnostic exited0 with uid65534,
+private PID2, read-only private proc/shm, absent host home/display/devices/sys.
+
+Use explicit user namespace creation; remove outer ProtectKernelTunables and
+ProtectKernelLogs masked-proc setup ONLY for this fixed bwrap bootstrap and mount
+the resulting private proc read-only instead. No host proc/sys tree is exposed to
+the application. NoNewPrivileges, empty capability sets, strict filesystem/home,
+private network/devices, owned cgroup and resource bounds remain unchanged. Create
+a bounded private shm mount before remounting it read-only. Add deterministic
+profile assertions and repeat actual containment checks before any GUI action.
+This is not permission to weaken the sandbox until it happens to launch.
+
+Further scratch-only startup diagnostics exposed the host NVIDIA GLX initialization
+crashing private Xvfb before ready. Match the previously successful private XI2
+fixture: disable GLX only on the new private X server, and precreate its owned
+socket directory. Drawing/Xed use the 2D path; hardware/GL applications are not
+approved profiles. Do not alter the host driver, compositor or any real-session
+graphics setting. Failed startup must remain failed, not a fake ready receipt.
+
 ## Revision R3 — ordinary-turn tools, no conversation restriction (2026-09-07)
 
 Aaron's binding ruling in `10-ruling-no-channel-lock.md` and the current task

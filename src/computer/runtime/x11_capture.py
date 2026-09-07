@@ -73,9 +73,9 @@ def capture_budget(width: int, height: int, bits: int, pad: int) -> tuple[int, i
     stride = ((width * bits + pad - 1) // pad) * (pad // 8)
     payload = stride * height
     wire = (payload + 3) // 4 * 4  # X11 reply padding, distinct from scanline padding.
-    # Allow a protocol receive buffer, reply bytes and packed RGB simultaneously.
+    # Allow protocol receive/reply buffers and both packed bytearray/bytes copies.
     # Rendering has a separate bounded delivered allocation. Not a total RSS claim.
-    if wire > MAX_SOURCE_BYTES or 2 * wire + packed > MAX_CAPTURE_WORKING_BYTES:
+    if wire > MAX_SOURCE_BYTES or 2 * wire + 2 * packed > MAX_CAPTURE_WORKING_BYTES:
         raise CaptureError("capture_allocation_limit")
     return stride, payload
 
@@ -103,7 +103,7 @@ def packed_rgb(data: bytes, width: int, height: int, *, bits: int, pad: int,
 class _XlibConnection:
     def __init__(self, display_name: str):
         try:
-            from Xlib import X, display
+            from Xlib import X, display  # type: ignore[import-untyped]
         except ImportError:
             raise CaptureError("capture_dependency_unavailable: python-xlib required") from None
         self._x = X

@@ -55,7 +55,8 @@ def sandbox_argv(app_profile: str) -> list[str]:
     if app_profile not in APP_PROFILES:
         raise ValueError("unapproved application profile")
     args = [
-        "/usr/bin/bwrap", "--unshare-all", "--disable-userns", "--die-with-parent",
+        "/usr/bin/bwrap", "--unshare-all", "--unshare-user", "--disable-userns",
+        "--die-with-parent",
         "--new-session", "--cap-drop", "ALL", "--clearenv", "--uid", "65534", "--gid", "65534",
         "--ro-bind", "/usr", "/usr", "--symlink", "usr/bin", "/bin",
         "--symlink", "usr/lib", "/lib", "--symlink", "usr/lib64", "/lib64",
@@ -71,6 +72,7 @@ def sandbox_argv(app_profile: str) -> list[str]:
         "--dir", "/workspace/tmp", "--dir", "/workspace/exports",
         "--symlink", "workspace/tmp", "/tmp", "--symlink", "workspace/run", "/run",
         "--symlink", "/workspace/tmp", "/var/tmp", "--chdir", "/workspace",
+        "--size", "1048576", "--tmpfs", "/dev/shm", "--remount-ro", "/proc",
         "--remount-ro", "/dev/shm", "--remount-ro", "/dev", "--remount-ro", "/",
     ]
     for key, value in ENVIRONMENT.items():
@@ -87,7 +89,9 @@ def launch_argv(session_id: str, app_profile: str, *, runtime_sudo: bool = False
     properties = [
         "DynamicUser=yes", "PrivateTmp=yes", "PrivateNetwork=yes", "PrivateDevices=yes",
         "ProtectSystem=strict", "ProtectHome=yes", "NoNewPrivileges=yes",
-        "ProtectKernelTunables=yes", "ProtectKernelModules=yes", "ProtectKernelLogs=yes",
+        # Masked host-proc submounts prevent unprivileged mounting of a NEW procfs.
+        # The fixed sandbox exposes only read-only private proc, no host /sys.
+        "ProtectKernelModules=yes",
         "ProtectControlGroups=yes", "ProtectClock=yes", "RestrictRealtime=yes",
         "RestrictSUIDSGID=yes", "LockPersonality=yes", "RemoveIPC=yes",
         "MemoryMax=1G", "MemorySwapMax=0", "CPUQuota=100%", "TasksMax=128",

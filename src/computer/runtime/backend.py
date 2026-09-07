@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import sys
+import time
 import uuid
 from pathlib import Path
 from typing import Any
@@ -14,7 +15,6 @@ from ..models import BackendCapabilities, BackendObservation, CaptureScope
 from .profile import (
     APP_PROFILES,
     MAX_EXPORT_BYTES,
-    MAX_IMAGE_BYTES,
     basename,
     clean_environment,
     preflight,
@@ -49,11 +49,13 @@ class LinuxDesktopBackend:
         self._heartbeat_task: asyncio.Task[None] | None = None
         self._unit: str | None = None
         self._last_window = None
-        self._last_observation = None
+        self._last_observation: str | None = None
         self._paused = False
         self._source_id = uuid.uuid4().hex
         self._source_revision = 0
         self._consent_generation = 1
+        self._frame: BackendObservation | None = None
+        self._captured_at = 0.0
 
     async def start(self, session_id: str) -> dict:
         if not self.enabled:
@@ -145,39 +147,106 @@ class LinuxDesktopBackend:
 
     async def observe(self) -> BackendObservation:
         async with self._ordinary:
+            from ..render import render_frame
+            self._frame = None
+            captured = time.monotonic()
             reply = await self._rpc("observe")
             result = reply["observation"]
-            result["image_bytes"] = unpack_blob(result.pop("image"), cap=MAX_IMAGE_BYTES)
+            if "source_revision" not in result or "raster_mode" not in result:
+                # Unknown worker metadata never grants an inferred input mapping.
+                from ..vision import FrameMetadata, _validate_png
+                image = unpack_blob(result["image"], cap=2 * 1024 * 1024)
+                self._source_revision += 1
+                source = SourceGeometry(self._source_id, self._source_revision,
+                                        self._consent_generation, result["width"], result["height"])
+                metadata = FrameMetadata(
+                    observation_id=uuid.uuid4().hex, session_id=self._source_id, generation=1,
+                    captured_monotonic_ns=max(1, int(captured * 1e9)),
+                    source_id=source.source_id, source_revision=source.source_revision,
+                    consent_generation=source.consent_generation,
+                    source_width=source.pixel_width, source_height=source.pixel_height,
+                    width=source.pixel_width, height=source.pixel_height)
+                _validate_png(image, metadata)
+                if self._closed or self._paused or time.monotonic() - captured > 5:
+                    raise RuntimeFailure("capture revoked or expired")
+                return BackendObservation(source, CaptureScope(self._consent_generation,
+                                          frozenset({self._source_id})), result["width"],
+                                          result["height"], AffineTransform(), image)
+            pixels = unpack_blob(result["image"], cap=16 * 1024 * 1024)
             self._last_window = result["window"]
-            self._last_observation = result.get("observation_id")
-            # Worker lacks lifecycle epochs: fresh revision each capture, capture-only.
-            self._source_revision += 1
+            observation_id = result["observation_id"]
+            if not isinstance(observation_id, str):
+                raise RuntimeFailure("invalid private observation identity")
+            self._last_observation = observation_id
+            revision = result["source_revision"]
+            if type(revision) is not int or revision < max(1, self._source_revision):
+                raise RuntimeFailure("invalid private source revision")
+            self._source_revision = revision
             source = SourceGeometry(self._source_id, self._source_revision,
-                                    self._consent_generation, result["width"], result["height"])
-            scope = CaptureScope(self._consent_generation, frozenset({self._source_id}))
-            return BackendObservation(source, scope, result["width"], result["height"],
-                                      AffineTransform(), result["image_bytes"], focused=True,
-                                      modal=uuid.uuid4().hex if result.get("modal") else None)
+                                    self._consent_generation, result["width"], result["height"],
+                                    self._source_id, result["width"], result["height"],
+                                    AffineTransform())
+            rendered = await asyncio.to_thread(render_frame,
+                pixels, source, mode=result["raster_mode"],
+                observation_id=observation_id, session_id=self._source_id,
+                generation=1, captured_monotonic_ns=max(1, int(captured * 1e9)))
+            if self._closed or self._paused or time.monotonic() - captured > 5:
+                raise RuntimeFailure("capture revoked or expired")
+            scope = CaptureScope(self._consent_generation, frozenset({self._source_id}),
+                                 frozenset({self._source_id}))
+            metadata = rendered.metadata
+            self._frame = BackendObservation(
+                source, scope, metadata.width, metadata.height, metadata.delivered_to_source,
+                rendered.png, focused=result.get("focused") is True,
+                modal=result.get("modal_id"), resize_scale=metadata.resize_scale)
+            self._captured_at = captured
+            return self._frame
 
     async def act(self, action: dict) -> dict:
-        raise RuntimeFailure("R1 adapter input mapping unavailable; capture only")
+        """Private click-only increment; pointer evidence is not click-effect proof."""
+        async with self._ordinary:
+            frame = self._frame
+            if (self._closed or self._paused or frame is None or not frame.focused
+                    or frame.modal is not None
+                    or not 0 <= time.monotonic() - self._captured_at <= 5):
+                raise RuntimeFailure("capture only; fresh focused nonmodal observation required")
+            required = {"type", "source_id", "source_revision", "consent_generation",
+                        "x", "y", "expected"}
+            if (type(action) is not dict or set(action) != required
+                    or action["type"] != "click"):
+                raise RuntimeFailure("unsupported grounded action")
+            source = frame.source
+            for key in ("source_id", "source_revision", "consent_generation"):
+                if (type(action[key]) is not type(getattr(source, key))
+                        or action[key] != getattr(source, key)):
+                    raise RuntimeFailure("stale source binding")
+            expected = action["expected"]
+            if (type(expected) is not dict or set(expected) != {"type", "x", "y"}
+                    or expected["type"] != "pointer_at"
+                    or any(type(expected[k]) is not int or expected[k] != action[k]
+                           for k in ("x", "y"))):
+                raise RuntimeFailure("unsupported postcondition")
+            x, y = source.input_point(frame.delivered_to_source, action["x"], action["y"],
+                                      frame.width, frame.height)
+            payload = {"type": "click", "x": int(x), "y": int(y),
+                       "source_revision": source.source_revision,
+                       "expected_window": self._last_window,
+                       "observation_id": self._last_observation,
+                       "expected": {"type": "pointer_at", "x": int(x), "y": int(y)}}
+            self._frame = None  # Consume before sending, including lost/failed replies.
+            self._last_window = None
+            receipt = (await self._rpc("act", action=payload, timeout=5.0))["receipt"]
+            if receipt.get("released") is not True:
+                self._paused = True  # Failed owned-input cleanup requires teardown.
+            post = receipt.get("postcondition", {"type": "pointer_at", "status": "unavailable"})
+            receipt["postcondition"] = {**post, "source_id": source.source_id,
+                                        "source_revision": source.source_revision,
+                                        "consent_generation": source.consent_generation}
+            return receipt
 
     async def _legacy_private_act(self, action: dict) -> dict:
-        """Unexposed private primitive retained for later adapter migration."""
-        async with self._ordinary:
-            if self._paused:
-                raise RuntimeFailure("desktop input is paused")
-            if not isinstance(action, dict):
-                raise ValueError("action must be an object")
-            payload = dict(action)
-            if "kind" in payload and "type" not in payload:
-                payload["type"] = payload.pop("kind")
-            if self._last_window is None:
-                raise RuntimeFailure("a fresh observation is required")
-            payload.setdefault("expected_window", self._last_window)
-            payload.setdefault("observation_id", self._last_observation)
-            self._last_window = None  # No stale frame can be reused after a mutation.
-            return (await self._rpc("act", action=payload, timeout=5.0))["receipt"]
+        """Compatibility name, never an alternate admission route."""
+        return await self.act(action)
 
     async def export(self, name: str) -> bytes:
         basename(name)
@@ -187,6 +256,7 @@ class LinuxDesktopBackend:
 
     async def pause(self) -> dict:
         self._paused = True
+        self._frame = None
         self._last_window = None
         try:
             return await self._rpc("pause", timeout=0.7)
@@ -207,6 +277,7 @@ class LinuxDesktopBackend:
 
     async def stop(self) -> dict:
         self._closed = True  # Independent of both ordinary-action and write locks.
+        self._frame = None
         async with self._stop_lock:
             if self._heartbeat_task:
                 self._heartbeat_task.cancel()

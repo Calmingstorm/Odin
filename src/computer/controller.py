@@ -5,7 +5,9 @@ import hashlib
 import inspect
 import time
 import uuid
+from copy import deepcopy
 
+from .actions import click_arguments, click_payload, click_receipt
 from .models import (
     BackendCapabilities,
     BackendObservation,
@@ -16,6 +18,8 @@ from .models import (
 )
 from .policy import (
     FRAME_FRESH_SECONDS,
+    MAX_ACTIONS,
+    MAX_INPUT_SECONDS,
     MAX_TASK_SECONDS,
     STOP_TIMEOUT_SECONDS,
     exact_keys,
@@ -23,7 +27,7 @@ from .policy import (
     observation_input,
     owned,
 )
-from .store import FRAME_MAX_PIXELS, ComputerStore
+from .store import FRAME_MAX_PIXELS, ComputerStore, canonical_hash
 
 _KEYS = frozenset({"Return", "Escape", "Tab", "BackSpace", "Delete", "Left", "Right",
                    "Up", "Down", "Home", "End", "Page_Up", "Page_Down", "space",
@@ -374,6 +378,83 @@ class ComputerController:
         return current
 
     async def act(self, context, inp):
-        # R2 accepts overlap, not unverified release/detach safety or ungrounded input.
         await self._auth(context)
-        raise ComputerError("grounded_actions_unavailable")
+        # Retain the historical empty probe's refusal, not an unconditional gate.
+        if type(inp) is dict and not inp:
+            raise ComputerError("grounded_actions_unavailable")
+        click_arguments(inp)
+        inp = deepcopy(inp)
+        payload_hash = canonical_hash(inp)
+        async with self._actions:
+            await self._auth(context)
+            # Receipts survive revocation/expiry. Identity and turn ownership do not.
+            grant = self._grant(context, inp, generation=False)
+            existing = self.store.receipt(grant.session_id, inp["action_id"], payload_hash)
+            if existing is not None:
+                return existing
+            grant = self._grant(context, inp)
+            live = self._active(grant)
+            if (grant.environment != "isolated" or live.capabilities is None
+                    or live.capabilities.environment != "isolated"):
+                raise ComputerError("attachment_unavailable")
+            if self._delivered_observations.get(grant.session_id) != inp["observation_id"]:
+                raise ComputerError("observation_not_delivered")
+            original = live.observations.get(inp["observation_id"])
+            if original is None:
+                raise ComputerError("stale_observation")
+            # Unexpected modals pause, never become an implicit consent grant.
+            if original.modal is not None:
+                await self._pause(grant.session_id)
+                raise ComputerError("unexpected_modal")
+            click_payload(inp, original)
+            try:
+                current = await self.validate_action_binding(grant, inp["observation_id"])
+            except ComputerError:
+                if any(obs.modal is not None for obs in live.observations.values()):
+                    await self._pause(grant.session_id)
+                raise
+            if current.image_sha256 != original.image_sha256:
+                raise ComputerError("visual_target_changed")
+            payload, target = click_payload(inp, current)
+            await self._auth(context)
+            self._active(grant)
+            if not all(0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS
+                       for obs in (original, current)):
+                raise ComputerError("stale_observation")
+            if not callable(getattr(live.backend, "act", None)):
+                raise ComputerError("grounded_actions_unavailable")
+            existing = self.store.begin_action(grant, inp["action_id"], payload_hash, MAX_ACTIONS)
+            if existing is not None:
+                return existing
+            # Pending is now durable, before even constructing the input coroutine.
+            self._delivered_observations.pop(grant.session_id, None)
+            live.observations.clear()
+            try:
+                self._active(grant)
+                raw = await _bounded(live.backend.act(payload),
+                                     min(MAX_INPUT_SECONDS, live.deadline - self.monotonic()))
+                self._active(grant)
+                await self._auth(context)
+                self._active(grant)
+                result = click_receipt(raw, current, target)
+                if result["status"] not in {"unknown", "unavailable"}:
+                    after, _ = await self._capture(grant)
+                    await self._auth(context)
+                    self._active(grant)
+                    age = self.monotonic() - after.captured_at
+                    if (after.geometry != current.geometry
+                            or not 0 <= age <= FRAME_FRESH_SECONDS):
+                        raise ComputerError("postcondition_binding_changed")
+                    result["observation_id"] = after.observation_id
+                    result["verification"]["evidence_id"] = after.evidence_id
+                receipt = self.store.finish_action(grant.session_id, inp["action_id"], result)
+            except (Exception, asyncio.CancelledError) as exc:
+                self.store.finish_action(grant.session_id, inp["action_id"],
+                                         {"status": "unknown", "reason": "input_outcome_unknown"})
+                await self._stop(grant.session_id, "cancelled")
+                if isinstance(exc, asyncio.CancelledError):
+                    raise
+                return self.store.receipt(grant.session_id, inp["action_id"], payload_hash)
+            if receipt["status"] == "unknown":
+                await self._stop(grant.session_id, "cancelled")
+            return receipt

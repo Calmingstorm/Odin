@@ -5,6 +5,7 @@ Receipts confirm injection only: the worker owns deadlines and postconditions.
 """
 
 import ctypes
+import hashlib
 import os
 import secrets
 import struct
@@ -102,6 +103,13 @@ class NativeDesktop:
         self._observation, self._window_at_observation = None, None
         self._expected, self._attempted, self._injected = None, False, False
         self._type_dirty, self._observed_identity = False, None
+        self._source_revision = 0
+        self._source_fingerprint = None
+        self._root_extent = None
+        self._captured_at = 0.0
+        self._modal_id = None
+        self._input_quarantined = False
+        self._raster_digest = None
 
     def _guard(self):
         if self._cancelled is not None and self._cancelled.is_set():
@@ -224,6 +232,10 @@ class NativeDesktop:
 
     def _assert_window(self):
         self._guard()
+        if self._root_extent is not None:
+            extent = tuple(int(v) for v in self._run("getdisplaygeometry").split())
+            if extent != self._root_extent:
+                raise PrimitiveError("rejected", "Private source geometry changed")
         window = self._window()
         if (window != self._expected
                 or self._identity(window["pid"]) != self._observed_identity):
@@ -233,30 +245,44 @@ class NativeDesktop:
     def _capture(self):
         if self._capture_backend:
             return self._capture_backend()
-        import gi  # type: ignore[import-not-found]  # Optional worker-local GI dependency.
+        # Pure protocol client per capture avoids GI display objects crossing
+        # startup/operation threads and native teardown crashes in this sandbox.
+        from Xlib import X  # type: ignore[import-untyped]
+        from Xlib import display as xdisplay  # type: ignore[import-untyped]
 
-        gi.require_version("Gdk", "3.0")
-        from gi.repository import Gdk  # type: ignore[import-not-found]  # GI runtime namespace.
-
-        display = Gdk.Display.open(":77")
-        if display is None:
-            raise PrimitiveError("unsupported", "Gdk cannot open the private display")
+        display = xdisplay.Display(":77")
         try:
-            root = display.get_default_screen().get_root_window()
-            width, height = root.get_width(), root.get_height()
+            screen = display.screen()
+            root = screen.root
+            geometry = root.get_geometry()
+            width, height = geometry.width, geometry.height
             finite(width, 1, 4096)
             finite(height, 1, 4096)
-            pixbuf = Gdk.pixbuf_get_from_window(root, 0, 0, width, height)
-            if pixbuf is None:
+            # Fixed private Xvfb profile: reject other native layouts, never guess.
+            fmt = next(f for f in display.display.info.pixmap_formats
+                       if f.depth == screen.root_depth)
+            visual = next(v for d in screen.allowed_depths for v in d.visuals
+                          if v.visual_id == screen.root_visual)
+            if (screen.root_depth != 24 or fmt.bits_per_pixel != 32 or fmt.scanline_pad != 32
+                    or display.display.info.image_byte_order != 0
+                    or visual.visual_class != X.TrueColor
+                    or (visual.red_mask, visual.green_mask, visual.blue_mask)
+                    != (0xFF0000, 0xFF00, 0xFF)):
+                raise PrimitiveError("unsupported", "Unsupported private Xvfb pixel layout")
+            if width * height * 4 > 16 * 1024 * 1024:
+                raise PrimitiveError("unsupported", "Private capture allocation limit")
+            reply = root.get_image(0, 0, width, height, X.ZPixmap, 0xFFFFFFFF)
+            if reply is None or reply.depth != 24 or len(reply.data) != width * height * 4:
                 raise PrimitiveError("failed", "Native capture returned no pixels")
-            success, image = pixbuf.save_to_bufferv("png", [], [])
-            if not success:
-                raise PrimitiveError("failed", "Native PNG encoding failed")
-            return bytes(image)
+            packed = bytearray(width * height * 3)
+            packed[0::3], packed[1::3], packed[2::3] = (
+                reply.data[2::4], reply.data[1::4], reply.data[0::4])
+            self._root_extent = (width, height)
+            return bytes(packed), width, height, "RGB"
         finally:
             display.close()
 
-    def snapshot(self):
+    def snapshot(self, *, packed=False):
         with self._lock:
             self._deadline, self._cancelled = self._clock() + 2.0, None
             self._observation, self._window_at_observation = None, None
@@ -264,17 +290,99 @@ class NativeDesktop:
             identity = self._identity(window["pid"])
             if identity is None:
                 raise PrimitiveError("rejected", "Observed app process disappeared")
-            image, width, height = sanitize_png(self._capture())
+            captured_at = self._clock()
+            capture = self._capture()
+            if packed:
+                if not isinstance(capture, tuple) or len(capture) != 4:
+                    raise PrimitiveError("unsupported", "Packed native capture required")
+                image, width, height, mode = capture
+            else:
+                image, width, height = sanitize_png(capture)
+                mode = "PNG"
             observation = secrets.token_urlsafe(18)
             nodes, status = self._a11y.snapshot(window, observation, self._guard)
+            if self._root_extent is not None:
+                extent = tuple(int(v) for v in self._run("getdisplaygeometry").split())
+                if extent != (width, height):
+                    raise PrimitiveError("rejected", "Private source changed during capture")
             if self._window() != window or self._identity(window["pid"]) != identity:
                 raise PrimitiveError("rejected", "Window changed during observation")
             self._guard()
             self._observation, self._window_at_observation = observation, dict(window)
             self._observed_identity = identity
+            fingerprint = (width, height, tuple(sorted(window.items())), identity)
+            if fingerprint != self._source_fingerprint:
+                self._source_revision += 1
+                self._source_fingerprint = fingerprint
+                self._modal_id = secrets.token_urlsafe(18) if window["modal"] else None
+            self._captured_at = captured_at
+            self._raster_digest = hashlib.sha256(image).digest() if packed else None
             return {"image_bytes": image, "width": width, "height": height, "window": window,
                     "accessibility": nodes, "accessibility_status": status,
-                    "observation_id": observation, "modal": window["modal"]}
+                    "observation_id": observation, "modal": window["modal"],
+                    "source_revision": self._source_revision, "raster_mode": mode,
+                    "modal_id": self._modal_id, "focused": True}
+
+    def grounded_execute(self, action, cancelled):
+        """Worker entry point. Pointer proof does not establish widget activation."""
+        with self._lock:
+            required = {"type", "x", "y", "source_revision", "expected_window",
+                        "observation_id", "expected"}
+            if (type(action) is not dict or set(action) != required
+                    or self._input_quarantined
+                    or action["type"] != "click"
+                    or self._observation is None
+                    or action["observation_id"] != self._observation
+                    or type(action["source_revision"]) is not int
+                    or action["source_revision"] != self._source_revision
+                    or not 0 <= self._clock() - self._captured_at <= 5
+                    or self._window_at_observation is None
+                    or self._window_at_observation["modal"]):
+                raise PrimitiveError("rejected", "Stale or unsupported grounded action")
+            expected = action["expected"]
+            if (type(expected) is not dict or set(expected) != {"type", "x", "y"}
+                    or expected["type"] != "pointer_at"
+                    or any(type(action[k]) is not int or type(expected[k]) is not int
+                           or action[k] != expected[k] for k in ("x", "y"))):
+                raise PrimitiveError("rejected", "Unsupported pointer postcondition")
+            # Recheck pixels after controller authorization awaits, before input.
+            self._deadline, self._cancelled = self._clock() + 1.75, cancelled
+            observed_extent = self._root_extent
+            current = self._capture()
+            if (self._raster_digest is None or not isinstance(current, tuple)
+                    or current[1:3] != observed_extent
+                    or hashlib.sha256(current[0]).digest() != self._raster_digest):
+                self._observation = None
+                raise PrimitiveError("rejected", "Private pixels changed before input")
+            self._guard()
+            receipt = self.execute(action, cancelled)
+            self._observation = None
+            receipt["postcondition"] = {"type": "pointer_at", "status": "unavailable"}
+            if not receipt["ok"] or not receipt["released"]:
+                receipt["status"] = "unknown" if receipt["effect_uncertain"] else "unavailable"
+                return receipt
+            # Independent read AFTER release, still within execute's two-second budget.
+            self._cancelled = cancelled
+            self._expected = dict(self._window_at_observation)
+            try:
+                self._assert_window()
+                values = dict(line.split("=", 1) for line in self._run(
+                    "getmouselocation", "--shell").splitlines() if "=" in line)
+                actual = {"x": int(values["X"]), "y": int(values["Y"])}
+                self._assert_window()
+                satisfied = (actual == {"x": action["x"], "y": action["y"]}
+                             and int(values["WINDOW"]) == self._expected["id"])
+                receipt["postcondition"] = {
+                    "type": "pointer_at", "status": "satisfied" if satisfied else "not_satisfied",
+                    "target_window_matches": int(values["WINDOW"]) == self._expected["id"],
+                    "method": "pointer_query_after_release", "actual": actual}
+                receipt["status"] = "verified" if satisfied else "not_satisfied"
+            except Exception:
+                receipt["status"] = "executed"
+            finally:
+                self._expected = None
+                self._cancelled = None
+            return receipt
 
     def _input(self, *arguments):
         self._assert_window()
@@ -396,6 +504,7 @@ class NativeDesktop:
                                    not receipt["ok"] or not cleanup),
                                released=cleanup)
                 if not cleanup:
+                    self._input_quarantined = True
                     receipt.update(ok=False, status="failed", error="Input release not confirmed")
             return receipt
 

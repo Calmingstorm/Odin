@@ -20,8 +20,10 @@ fences apply to desktop actions only; generic non-computer tool scopes are uncha
 Platform (X11/Wayland) is independent of environment (isolated/existing-session).
 Launching an application, offline access and disposable processes are isolated
 backend properties, never shared session prerequisites. Real-session assisted
-work is the destination of the same product, not permission for this branch to
-access the active workstation. Both platform families are feasibility gates now.
+work is the destination of the same product. Explicit R4 overnight authorization
+permits bounded, harmless main-session tests, not deployment or standing access.
+Both platform families are feasibility gates now; input eligibility remains
+separate from a successful capture-only experiment.
 
 States: starting → active → paused/cancelled/closed/quarantined. Resume requires
 a new generation, renewed authorization and a new observation. Stop fences the
@@ -78,7 +80,8 @@ correlation. Typed text is not stored in ordinary audit.
   expired evidence, and ordinary-tool execution during and after desktop tasks,
   including mixed batches, later turns, other users and recovered/disabled sessions.
 * Private display/buses/home/network/devices, resource limits, owned cleanup;
-  no mutation or capture of the active workstation session.
+  no active-workstation access without a current explicit test grant. Under R4,
+  capture-only tests assert unchanged session state and no persisted screenshots.
 * Delivered pixel/image byte caps distinct from source bounds; downsampled 1080p,
   1440p, 4K and wide-layout metadata, detail crops and resize rounding; native serialized requests, fallback
   refusal; no base64 stringification in agents, audit, durable summaries.
