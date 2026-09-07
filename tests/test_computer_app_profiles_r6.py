@@ -19,7 +19,7 @@ def test_attached_only_profiles_are_not_isolated_launch_commands(app, tmp_path):
     assert app not in APP_PROFILES
     with pytest.raises(Exception):
         sandbox_argv(app)
-    for platform, environment in [("x11", "isolated"), ("wayland", "existing_session")]:
+    for platform, environment in [("x11", "isolated"), ("wayland", "isolated")]:
         with pytest.raises(ComputerError, match="application_environment_unsupported"):
             validate_profile(app, platform=platform, environment=environment)
     store = ComputerStore(tmp_path / "state.sqlite3", tmp_path / "evidence")

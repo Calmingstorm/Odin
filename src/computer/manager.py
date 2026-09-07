@@ -287,10 +287,11 @@ class ComputerLifecycle:
         attached = self.settings.environment == "existing_session"
         profiles = (ATTACHED_PROFILES if attached else ISOLATED_PROFILES)
         applications = []
-        if self.settings.platform == "x11":
-            for app in sorted(profiles):
-                applications.append(application_profile(
-                    app, platform=self.settings.platform, environment=self.settings.environment))
+        for app in sorted(profiles):
+            profile = application_profile(
+                app, platform=self.settings.platform, environment=self.settings.environment)
+            if profile is not None:
+                applications.append(profile)
         return {
             "enabled": self.enabled, "configured_enabled": bool(desired.enabled),
             "runtime_enabled": self.enabled, "generation": self.generation,

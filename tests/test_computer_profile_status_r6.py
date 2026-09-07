@@ -11,7 +11,7 @@ from src.config.schema import Config
     ("isolated", "x11", {"drawing": "supported", "xed": "supported"}),
     ("existing_session", "x11", {"drawing": "capture_only", "xed": "supported",
                                  "inkscape": "supported", "writer": "supported"}),
-    ("existing_session", "wayland", {}),
+    ("existing_session", "wayland", {"inkscape": "supported"}),
 ])
 def test_profile_status_is_pure_declaration(environment, platform, expected):
     config = Config(discord={"token": "fixture-only"})
