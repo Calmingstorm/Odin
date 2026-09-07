@@ -122,6 +122,8 @@ class ComputerStore:
 
     def create_session(self, context: RequestContext, app: str, *, platform="x11",
                        environment="isolated") -> SessionGrant:
+        from .app_profiles import validate_attached_only_profile
+        validate_attached_only_profile(app, platform=platform, environment=environment)
         now = self.clock()
         values = (uuid.uuid4().hex, context.owner_id, context.channel_id, context.turn_id,
                   context.host_id, 1, "starting", app, now, now + MAX_TASK_SECONDS, 0,

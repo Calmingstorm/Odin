@@ -127,7 +127,7 @@ async def test_kill_failure_preserves_running_state(evidence, monkeypatch):
 async def test_remote_start_requires_lease_and_spawn_failure_has_no_record(monkeypatch):
     reg = pm.ProcessRegistry()
     spawn = AsyncMock(side_effect=OSError("resource unavailable"))
-    monkeypatch.setattr(pm.asyncio, "create_subprocess_shell", spawn)
+    monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell", spawn)
     assert "generation-bound host lease" in await reg.start("example.test", "fixture")
     spawn.assert_not_awaited()
     assert "Failed to start process" in await reg.start("localhost", "fixture")

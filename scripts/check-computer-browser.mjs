@@ -45,7 +45,8 @@ try {
   let enabled = false, runtimeEnabled = false, runtimeGeneration = 0, holdToggle = false, blockedToggle = null;
   let sessionGeneration = 1, recovery;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
-  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: 'drawing', last_action: 'executed', last_verification: 'unknown' });
+  let applicationProfiles = [{ id: 'drawing', label: 'Drawing', input: 'supported' }, { id: 'xed', label: 'Xed', input: 'supported' }];
+  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, application_profiles: applicationProfiles, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: 'drawing', last_action: 'executed', last_verification: 'unknown' });
   const frame = () => ({ frame: { evidence_id: 'opaque-frame', captured_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3600000).toISOString(), fresh_for_ms: 1000 } });
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHj8AAAAASUVORK5CYII=', 'base64');
   await page.route('**/api/**', async route => {
@@ -94,6 +95,25 @@ try {
   assert.match(await lifecycle.innerText(), /backend.environment/);
   assert.match(await lifecycle.innerText(), /Input unavailable: this backend cannot act/);
   assert.match(await lifecycle.innerText(), /Session startup checks capabilities. Unavailable input remains unavailable/);
+  const applications = page.getByRole('region', { name: 'Application profiles', exact: true });
+  assert.match(await applications.innerText(), /Drawing: Input eligible/);
+  assert.match(await applications.innerText(), /not installation, focus, permission or task success/);
+  assert.doesNotMatch(await applications.innerText(), /Inkscape|LibreOffice/);
+  backend = { platform: 'x11', environment: 'existing_session', input_supported: false };
+  applicationProfiles = [
+    { id: 'drawing', label: 'Drawing', input: 'capture_only' },
+    { id: 'inkscape', label: 'Inkscape', input: 'supported' },
+    { id: 'libreoffice', label: 'LibreOffice Writer / Calc / Draw', input: 'supported' },
+    { id: 'xed', label: 'Xed', input: 'supported' },
+  ];
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.status.backend.environment === 'existing_session');
+  assert.match(await applications.innerText(), /Drawing: Capture only/);
+  assert.match(await applications.innerText(), /Inkscape: Input eligible/);
+  assert.match(await applications.innerText(), /LibreOffice Writer \/ Calc \/ Draw: Input eligible/);
+  assert.match(await applications.innerText(), /Pointer and keyboard focus are shared/);
+  assert.match(await lifecycle.innerText(), /Input unavailable/);
+  assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, 0, 'profile listing never captures');
   await enable.click();
   await page.waitForFunction(() => !view.toggling && view.status.runtime_enabled === true);
   assert.equal(await enable.isEnabled(), false);
@@ -174,11 +194,13 @@ try {
   assert.equal(await page.locator('img').count(), 0);
   // A generation change invalidates evidence even with the same session ID.
   await observe.click(); await page.waitForFunction(() => !!view.frameUrl);
-  runtimeGeneration++; backend = undefined; restartRequired = false;
+  runtimeGeneration++; backend = undefined; restartRequired = false; applicationProfiles = [{ id: 'bogus', label: '<script>bad</script>', input: 'ready' }, null];
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading && !view.frameUrl);
   assert.match(await lifecycle.innerText(), /Input capability is unknown/);
   assert.match(await lifecycle.innerText(), /None reported/);
+  assert.match(await applications.innerText(), /No application profiles reported/);
+  assert.equal(await applications.locator('script').count(), 0);
   // Session revocation, independent of runtime generation, also retires pixels.
   await observe.click(); await page.waitForFunction(() => !!view.frameUrl);
   sessionGeneration++;

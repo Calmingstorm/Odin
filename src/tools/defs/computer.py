@@ -28,8 +28,12 @@ _DEFINITIONS = [
         "The operator configures the target and backend; unavailable input is never bypassed. "
         "Isolated tasks use approved offline Drawing/Xed apps. Existing-session access requires "
         "an explicit current user request. Pause/cancel stops input, not applied effects. "
-        "Attached X11 input supports the focused native Xed app only; Drawing is capture-only "
-        "there. Check returned input_limits: attached typing is printable ASCII, with explicit "
+        "Attached X11 input supports focused native Xed, Inkscape or LibreOffice Writer/Calc/Draw "
+        "document windows (app=libreoffice). LibreOffice/Inkscape are attached-X11 only, never "
+        "launched by this tool; the operator must open the application. Only recognized "
+        "same-process file dialogs are input-eligible, not macros/settings/security prompts. "
+        "Drawing is capture-only there because interpreter provenance cannot be proved. "
+        "Check returned input_limits: attached typing is printable ASCII, with explicit "
         "Return/Tab key calls for line breaks. The pointer is shared, not independent. "
         "Foreground only. Never operate terminals, security prompts or Odin's control plane.",
         {
@@ -37,7 +41,7 @@ _DEFINITIONS = [
                 "start", "status", "stop", "pause", "resume", "cancel", "close", "export",
             ]},
             "session_id": _SESSION,
-            "app": {"type": "string", "enum": ["drawing", "xed"]},
+            "app": {"type": "string", "enum": ["drawing", "xed", "libreoffice", "inkscape"]},
             "generation": {"type": "integer", "minimum": 1},
             "name": {"type": "string", "maxLength": 128,
                      "description": "Explicit saved output basename, never a host path."},
@@ -85,7 +89,8 @@ _DEFINITIONS = [
                 "Return", "Escape", "Tab", "BackSpace", "Delete", "space", "Left",
                 "Right", "Up", "Down", "Home", "End", "Page_Up", "Page_Down",
                 "ctrl+a", "ctrl+z", "ctrl+y", "ctrl+s", "ctrl+shift+s", "ctrl+o",
-                "ctrl+n", "ctrl+f", "ctrl+Home", "ctrl+End", "shift+Tab",
+                "ctrl+n", "ctrl+f", "ctrl+b", "ctrl+i", "ctrl+u",
+                "ctrl+Home", "ctrl+End", "shift+Tab",
                 "shift+Left", "shift+Right", "shift+Up", "shift+Down",
             ]},
             "expected_modal": {"type": "string", "maxLength": 128,

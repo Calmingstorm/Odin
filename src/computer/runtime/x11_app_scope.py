@@ -14,6 +14,8 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from ..app_profiles import ATTACHED_PROFILES
+
 MAX_DEPTH = 32
 MAX_PROPERTY = 4096
 _DENIED = re.compile(
@@ -22,6 +24,19 @@ _DENIED = re.compile(
     r"credential|pinentry|keyring|sudo|odin|command prompt|\bshell\b", re.I)
 _FILE_DIALOGS = frozenset({"open", "open file", "open image", "save", "save as", "save as…",
                            "save image"})
+_PROFILE_FILE_DIALOGS = {"inkscape": _FILE_DIALOGS | {"select file to save to"}}
+_NATIVE_EXECUTABLES = {
+    "xed": ("/usr/bin/xed", "/usr/libexec/xed"),
+    "libreoffice": ("/usr/lib/libreoffice/program/soffice.bin",),
+    "inkscape": ("/usr/bin/inkscape",),
+}
+_LIBREOFFICE_DOCUMENT_CLASSES = frozenset({
+    "libreoffice-writer", "libreoffice-calc", "libreoffice-draw",
+})
+_NATIVE_DOCUMENT_DENIED = re.compile(
+    r"macro|\bbasic\b|script|certificate|digital signature|extension|options|"
+    r"preferences|settings|customiz|database|recovery|repair|overwrite|replace|"
+    r"remote|login|sign in", re.I)
 
 
 class ScopeFailure(RuntimeError):  # noqa: N818 - Scope adapter failure API.
@@ -51,7 +66,7 @@ def _trusted_file(path):
 
 def _process_identity(pid, profile):
     """Authoritative XRes PID, then stable local /proc identity, not WM_PID."""
-    if profile != "xed":
+    if profile not in _NATIVE_EXECUTABLES:
         # Interpreter argv is writable by the process. A trusted Python binary
         # plus /usr/bin/drawing in cmdline cannot prove which script is running.
         # Drawing remains supported only in the owned isolated launch tier.
@@ -83,18 +98,15 @@ def _process_identity(pid, profile):
     first = read_identity()
     start, uids, executable, inode, cmdline = first
     script_identity = None
-    if profile == "xed":
-        candidates = (Path("/usr/bin/xed"), Path("/usr/libexec/xed"))
-        approved = False
-        for candidate in candidates:
-            if candidate.exists():
-                real, expected_inode = _trusted_file(candidate)
-                if executable == real and inode == expected_inode:
-                    approved = True
-        if not approved:
-            raise ScopeFailure("application_identity_unavailable")
-    else:
-        raise ScopeFailure("unapproved_application_profile")
+    approved = False
+    for path in _NATIVE_EXECUTABLES[profile]:
+        candidate = Path(path)
+        if candidate.exists():
+            real, expected_inode = _trusted_file(candidate)
+            if executable == real and inode == expected_inode:
+                approved = True
+    if not approved:
+        raise ScopeFailure("application_identity_unavailable")
     if first != read_identity():
         raise ScopeFailure("application_identity_changed")
     return {"pid": pid, "uid": uids[0], "start_ticks": start,
@@ -112,7 +124,7 @@ class AppScope:
     """
 
     def __init__(self, connection, profile):
-        if profile not in {"xed", "drawing"}:
+        if profile not in ATTACHED_PROFILES:
             raise ScopeFailure("unapproved_application_profile")
         # Operator-configured explicit display only. Tests must never access :0.
         name = connection.get_display_name()
@@ -163,6 +175,10 @@ class AppScope:
         title = modern_title or legacy_title
         wm_class = self._text(window, "WM_CLASS")
         if any(_DENIED.search(text) for text in (modern_title, legacy_title, wm_class)):
+            raise ScopeFailure("application_scope_unavailable")
+        if self.profile in {"libreoffice", "inkscape"} and any(
+                _NATIVE_DOCUMENT_DENIED.search(text)
+                for text in (modern_title, legacy_title, wm_class)):
             raise ScopeFailure("application_scope_unavailable")
         # Metadata is used only for rejection/classification, never PID approval.
         # Harmless document title changes (dirty asterisk) are not source changes.
@@ -276,9 +292,19 @@ class AppScope:
         if any(value not in allowed_types for value in types):
             raise ScopeFailure("application_scope_unavailable")
         transient = self._values(target, "WM_TRANSIENT_FOR")
+        file_dialogs = _PROFILE_FILE_DIALOGS.get(self.profile, _FILE_DIALOGS)
         modal = bool(transient or self._atom("_NET_WM_STATE_MODAL") in states
                      or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
+        if (self.profile == "libreoffice" and not modal
+                and not _LIBREOFFICE_DOCUMENT_CLASSES.intersection(wm_class.casefold().split())):
+            # Native soffice also owns the start center, macro IDE and settings.
+            # Metadata only narrows scope; it never establishes process identity.
+            raise ScopeFailure("application_scope_unavailable")
         chain, chain_metadata, seen = [], [], {_xid(target)}
+        chain_dialogs_safe = True
+        if (self.profile == "inkscape" and not modal
+                and "inkscape" not in wm_class.casefold().split()):
+            raise ScopeFailure("application_scope_unavailable")
         cursor = target
         for _ in range(MAX_DEPTH):
             parent_ids = self._values(cursor, "WM_TRANSIENT_FOR")
@@ -291,13 +317,49 @@ class AppScope:
             actual, _ = self._target(cursor, root)
             if _xid(actual) != _xid(cursor) or self._pid(cursor) != pid:
                 raise ScopeFailure("application_scope_unavailable")
-            chain_metadata.append(self._metadata(cursor)[2])
+            parent_title, parent_class, parent_digest = self._metadata(cursor)
+            if self.profile in {"libreoffice", "inkscape"}:
+                parent_types = self._values(cursor, "_NET_WM_WINDOW_TYPE")
+                parent_states = self._values(cursor, "_NET_WM_STATE")
+                parent_modal = bool(
+                    self._values(cursor, "WM_TRANSIENT_FOR")
+                    or self._atom("_NET_WM_STATE_MODAL") in parent_states
+                    or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in parent_types)
+                classes = set(parent_class.casefold().split())
+                permitted_classes = ({"inkscape"} if self.profile == "inkscape" else
+                                     {"libreoffice", "soffice", *_LIBREOFFICE_DOCUMENT_CLASSES})
+                if parent_modal:
+                    chain_dialogs_safe &= (
+                        bool(self._values(cursor, "WM_TRANSIENT_FOR"))
+                        and parent_title.casefold() in file_dialogs
+                        and bool(classes & permitted_classes)
+                        and self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in parent_types
+                        and all(value in allowed_types for value in parent_types))
+                else:
+                    document_classes = ({"inkscape"} if self.profile == "inkscape" else
+                                        _LIBREOFFICE_DOCUMENT_CLASSES)
+                    chain_dialogs_safe &= bool(classes & document_classes)
+                parent_attrs = cursor.get_attributes()
+                chain_dialogs_safe &= (parent_attrs.map_state == X.IsViewable
+                                       and not parent_attrs.override_redirect
+                                       and all(value in allowed_types for value in parent_types))
+                # Intermediate-dialog title/state changes invalidate an already
+                # delivered scope even when both titles are independently safe.
+                parent_digest = hashlib.sha256(json.dumps(
+                    [parent_digest, parent_title if parent_modal else None,
+                     parent_types, parent_states], separators=(",", ":")).encode()).hexdigest()
+            chain_metadata.append(parent_digest)
             chain.append(_xid(cursor))
         else:
             raise ScopeFailure("application_scope_unavailable")
-        safe_dialog = (bool(chain) and title.casefold() in _FILE_DIALOGS
-                       and self.profile in wm_class.casefold().split()
+        dialog_classes = ({self.profile} if self.profile != "libreoffice" else
+                          {"libreoffice", "soffice", *_LIBREOFFICE_DOCUMENT_CLASSES})
+        safe_dialog = (bool(chain) and chain_dialogs_safe and title.casefold() in file_dialogs
+                       and bool(dialog_classes.intersection(wm_class.casefold().split()))
                        and self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
+        if self.profile == "libreoffice" and chain:
+            safe_dialog = safe_dialog and bool(
+                _LIBREOFFICE_DOCUMENT_CLASSES.intersection(parent_class.casefold().split()))
         evidence = {"topology": topology, "source_rect": source,
                     "source_origin": source[:2],
                     "window": _xid(target), "focus_window": _xid(focused),

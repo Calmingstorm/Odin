@@ -5,6 +5,48 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 Authority: Aaron's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
+## Revision R6: reaping and useful attached applications (2026-09-07)
+
+The current assignment explicitly adds the shipped service's growing zombie leak
+to this branch. Diagnose production read-only and reproduce/fix in development;
+never restart, inject into, or modify the running service to clear the symptom.
+Preserve subprocess ownership of exit status. Age, process name and parent PID
+alone are not proof that an exit status is abandoned. Regression tests must mix
+short-lived orphan descendants with still-owned asyncio/Popen children, verify
+their actual exit codes, and contain/reap the experiments themselves.
+
+Existing-session Xed alone is not the requested usable capability. Extend the
+explicit native application profiles to installed LibreOffice document tools,
+starting with useful Writer and Draw tasks, with exact executable/XRes/process
+identity and freshly grounded application/dialog scope. A broader catalogue is
+not qualification: demonstrate actual GUI work and independent saved/reopened
+artifact checks before calling an application qualified. Keep isolated launch
+profiles separate; do not imply a newly attached profile works in the sandbox.
+Interpreter argv and window names must not become execution-provenance shortcuts.
+Unknown applications and unsafe dialogs remain refused, including terminals,
+credential/security prompts and Odin's control plane. Macro execution is outside
+this increment. Preserve source mapping, finite input leases and no-replay rules.
+
+Development and fault/lifecycle tests stay on private displays. Any current-grant
+main-session verification is scratch-only, first proven privately, with private
+evidence and exact before/after restoration. No existing work is modified. No
+deployment, restart, master merge, release pipeline, tag or live-install edits.
+The handoff must name the applications and operations actually qualified, not
+generalize from either a fake fixture or one successful editor keystroke.
+
+### R6 action-specific attached keyboard grounding
+
+Under R2's accepted shared-widget-focus limitation, X11 existing-session `type` and
+`key` actions ground to the freshly revalidated same native application, focus,
+modal and source binding, not equality of every screenshot pixel. Exact source
+geometry/revision, consent and native application scope remain mandatory. This
+permits caret blinking and other raster-only changes; it does not establish that
+the same internal widget or document content remains unchanged. Click/drag and
+all isolated actions retain full-raster equality. Freshness, delivery, authority,
+per-key guardian checks, unexpected-modal pause and durable no-replay receipts
+are unchanged. See `KEYBOARD-GROUNDING-R6.md` for the tradeoff and boundaries.
+Other platforms retain full-raster equality pending their own grounding review.
+
 ## Revision R5: complete the deploy-testable capability (2026-09-07)
 
 ### R5 crash workload recovery (2026-09-07)

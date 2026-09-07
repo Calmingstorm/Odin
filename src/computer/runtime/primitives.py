@@ -23,7 +23,8 @@ PROFILES = {"drawing": ("/usr/bin/drawing", "--new-window"),
 KEYS = frozenset({"Return", "Escape", "Tab", "BackSpace", "Delete", "space", "Left",
                   "Right", "Up", "Down", "Home", "End", "Page_Up", "Page_Down",
                   "ctrl+a", "ctrl+c", "ctrl+v", "ctrl+x", "ctrl+z", "ctrl+y", "ctrl+s",
-                  "ctrl+o", "ctrl+n", "ctrl+f", "ctrl+shift+s", "ctrl+Home", "ctrl+End",
+                  "ctrl+o", "ctrl+n", "ctrl+f", "ctrl+b", "ctrl+i", "ctrl+u",
+                  "ctrl+shift+s", "ctrl+Home", "ctrl+End",
                   "shift+Tab",
                   "shift+Left", "shift+Right", "shift+Up", "shift+Down"})
 PHYSICAL = frozenset({"move", "click", "double_click", "scroll", "key", "type", "polyline"})

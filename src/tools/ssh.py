@@ -110,6 +110,11 @@ async def terminate_process_tree(
     reap timeouts are swallowed; cancellation of the cleanup itself still
     propagates.
     """
+    from .local_supervisor import SupervisedShell
+
+    if isinstance(proc, SupervisedShell):
+        await proc.terminate_tree(grace=grace)
+        return
     pgid = owned_pgid
     if pgid is None and proc.returncode is None:
         try:
@@ -230,6 +235,7 @@ async def run_local_command(
     from ..observability.diagnostics import command_display, safe_error
 
     log.info("Local exec: %s", command_display(command))
+    from .local_supervisor import create_supervised_shell
 
     proc: asyncio.subprocess.Process | None = None
     try:
@@ -240,7 +246,7 @@ async def run_local_command(
         # start_new_session puts the shell at the head of its own process
         # group, so timeout/cancellation cleanup can take out descendants
         # (`sh -c 'x & ...'`) instead of just the shell leader.
-        proc = await asyncio.create_subprocess_shell(
+        proc = await create_supervised_shell(
             command,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,

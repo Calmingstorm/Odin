@@ -11,7 +11,8 @@ from .policy import exact_keys, integer
 KEYS = frozenset({"Return", "Escape", "Tab", "BackSpace", "Delete", "space", "Left",
                   "Right", "Up", "Down", "Home", "End", "Page_Up", "Page_Down",
                   "ctrl+a", "ctrl+z", "ctrl+y", "ctrl+s", "ctrl+shift+s", "ctrl+o",
-                  "ctrl+n", "ctrl+f", "ctrl+Home", "ctrl+End", "shift+Tab",
+                  "ctrl+n", "ctrl+f", "ctrl+b", "ctrl+i", "ctrl+u",
+                  "ctrl+Home", "ctrl+End", "shift+Tab",
                   "shift+Left", "shift+Right", "shift+Up", "shift+Down"})
 
 

@@ -8,6 +8,7 @@ import uuid
 from copy import deepcopy
 
 from .actions import click_receipt
+from .app_profiles import validate_attached_only_profile
 from .gui_actions import action_arguments, action_payload, visual_receipt
 from .models import (
     BackendCapabilities,
@@ -285,6 +286,8 @@ class ComputerController:
             capabilities = getattr(backend, "capabilities", None)
             if type(capabilities) is not BackendCapabilities:
                 raise ComputerError("backend_capabilities_unknown")
+            validate_attached_only_profile(inp["app"], platform=capabilities.platform,
+                                           environment=capabilities.environment)
             if capabilities.environment == "existing_session":
                 supported = getattr(backend, "input_supported", None)
                 if type(supported) is not bool:
@@ -598,7 +601,15 @@ class ComputerController:
                 if any(obs.modal is not None for obs in live.observations.values()):
                     await self._pause(grant.session_id)
                 raise
-            if current.image_sha256 != original.image_sha256:
+            # R6: attached keyboard targets the freshly verified native app/focus
+            # binding, not pixels that may change with a blinking caret. Geometry
+            # (including source revision/native scope) was compared above. This
+            # retains R2's shared-widget-focus limitation, not an exclusivity claim.
+            # Pointer targeting and every isolated action remain raster-exact.
+            attached_keyboard = (grant.platform == "x11"
+                                 and grant.environment == "existing_session"
+                                 and inp["operation"] in {"type", "key"})
+            if not attached_keyboard and current.image_sha256 != original.image_sha256:
                 raise ComputerError("visual_target_changed")
             payload, target = action_payload(inp, current)
             await self._auth(context)

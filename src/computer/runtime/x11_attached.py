@@ -17,6 +17,7 @@ import uuid
 from fractions import Fraction
 from pathlib import Path
 
+from ..app_profiles import ATTACHED_NATIVE_PROFILES, ATTACHED_PROFILES
 from ..geometry import AffineTransform, SourceGeometry
 from ..models import BackendCapabilities, BackendObservation, CaptureScope
 from .profile import validate_session
@@ -41,7 +42,7 @@ def attachment_configuration(display_name, xauthority, monitor_names, app_profil
                    or any(ord(c) < 32 for c in n) for n in monitor_names)
             or len(set(monitor_names)) != len(monitor_names)):
         raise AttachedFailure("explicit_monitor_names_required")
-    if app_profile not in {"drawing", "xed"}:
+    if app_profile not in ATTACHED_PROFILES:
         raise AttachedFailure("unapproved_application_profile")
     return {"display_name": display_name, "monitor_names": list(monitor_names),
             "app_profile": app_profile, "xauthority": xauthority}
@@ -91,13 +92,15 @@ class X11AttachedBackend:
             display_name, xauthority, monitor_names, app_profile)
         if type(input_enabled) is not bool:
             raise AttachedFailure("invalid_input_configuration")
-        self._input_enabled = input_enabled
+        self._input_enabled = input_enabled and app_profile in ATTACHED_NATIVE_PROFILES
         if type(runtime_sudo) is not bool:
             raise AttachedFailure("invalid_runtime_privilege_configuration")
         self._runtime_sudo = runtime_sudo
-        self.input_supported = input_enabled and not runtime_sudo
-        self.input_blocker = None if input_enabled else INPUT_BLOCKER
-        if input_enabled:
+        self.input_supported = self._input_enabled and not runtime_sudo
+        self.input_blocker = None if self._input_enabled else INPUT_BLOCKER
+        if app_profile == "drawing":
+            self.input_blocker = "attached_application_provenance_unavailable"
+        if self._input_enabled:
             self.capabilities = BackendCapabilities("x11", "existing_session", "shared", "shared",
                                                     "verified", "verified")
         self._started = self._closed = self._paused = False

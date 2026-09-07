@@ -267,14 +267,34 @@ class ComputerLifecycle:
         await self._settle(cleanup())
 
     def snapshot(self):
+        from .app_profiles import ATTACHED_NATIVE_PROFILES, ATTACHED_PROFILES, ISOLATED_PROFILES
+
         desired = self.bot.config.computer
         restart = [name for name, value in self.settings.model_dump().items()
                    if name != "enabled" and getattr(desired, name) != value]
+        # Pure declarations: do not open a display or probe application processes
+        # from operator status, including disabled startup. Eligibility is not
+        # installation, focus, task authorization or measured input readiness.
+        attached = self.settings.environment == "existing_session"
+        profiles = (ATTACHED_PROFILES if attached else ISOLATED_PROFILES)
+        labels = {"xed": "Xed", "drawing": "Drawing", "inkscape": "Inkscape",
+                  "libreoffice": "LibreOffice Writer / Calc / Draw"}
+        applications = []
+        if self.settings.platform == "x11":
+            for app in sorted(profiles):
+                capture_only = attached and app not in ATTACHED_NATIVE_PROFILES
+                applications.append({
+                    "id": app, "label": labels[app],
+                    "input": "capture_only" if capture_only else "supported",
+                    "reason": ("attached_application_provenance_unavailable"
+                               if capture_only else None),
+                })
         return {
             "enabled": self.enabled, "configured_enabled": bool(desired.enabled),
             "runtime_enabled": self.enabled, "generation": self.generation,
             "restart_required": restart, "error": self.error,
             "available": self.enabled,
+            "application_profiles": applications,
             "state": "quarantined" if self._service is not None and self.error else "unavailable",
             "backend": {"platform": self.settings.platform,
                         "environment": self.settings.environment,

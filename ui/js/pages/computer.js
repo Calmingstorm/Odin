@@ -36,6 +36,18 @@ export default {
         <p v-else class="page-lede">Backend reports input support; session authorization and startup checks still apply.</p>
         <p class="text-gray-400">Runtime settings are generation-pinned. Pending restart-required settings are not live; this page does not restart Odin.</p>
       </section>
+      <section class="mb-4" aria-labelledby="computer-apps-title">
+        <h2 id="computer-apps-title" class="font-semibold mb-2">Application profiles</h2>
+        <ul v-if="applicationProfiles.length" class="mb-2">
+          <li v-for="profile in applicationProfiles" :key="profile.id">
+            <strong>{{ profile.label }}</strong>: {{ profile.input === 'supported' ? 'Input eligible' : 'Capture only' }}
+            <span v-if="profile.input === 'capture_only'"> (application provenance unavailable)</span>
+          </li>
+        </ul>
+        <p v-else class="page-lede">No application profiles reported for this backend.</p>
+        <p class="page-lede">Profiles describe supported scope, not installation, focus, permission or task success. Input readiness is checked against a fresh observation.</p>
+        <p v-if="status.backend?.environment === 'existing_session'" class="page-lede">Open and focus the application, then ask for help in ordinary chat. Apps stay open when the turn ends. Pointer and keyboard focus are shared. Unknown apps, terminals, security prompts and control-plane actions remain unavailable.</p>
+      </section>
       <p v-if="status.state === 'unavailable'" class="page-lede mb-4">Disabled or unavailable. Check configured state, lifecycle state and backend prerequisites separately.</p>
       <p v-if="status.state === 'paused'" class="page-lede mb-4">Agent input is revoked. This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</p>
       <p v-if="status.state === 'unknown'" class="page-lede mb-4">Outcome is unknown. Refresh status; do not replay the last action.</p>
@@ -83,6 +95,9 @@ export default {
     const name = ref(''), artifact = ref(null);
     let generation = 0, timer = null, active = false, token = api.token, lastRefresh = 0;
     const enabledLabel = value => value === true ? 'Enabled' : value === false ? 'Disabled' : 'Unknown';
+    const applicationProfiles = computed(() => Array.isArray(status.value.application_profiles)
+      ? status.value.application_profiles.filter(p => p && typeof p.id === 'string' && typeof p.label === 'string'
+        && ['supported', 'capture_only'].includes(p.input)).slice(0, 16) : []);
     const restartSettings = computed(() => {
       const value = status.value.restart_required;
       if (Array.isArray(value)) return value.length ? value.join(', ') : 'None reported';
@@ -213,6 +228,6 @@ export default {
     }
     function cleanup() { active = false; clearInterval(timer); timer = null; invalidate(); adminReady.value = false; }
     onMounted(start); onActivated(start); onDeactivated(cleanup); onUnmounted(cleanup);
-    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover };
+    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, applicationProfiles };
   },
 };

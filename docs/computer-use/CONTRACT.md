@@ -1,4 +1,4 @@
-# Computer contract and acceptance matrix (R3)
+# Computer contract and acceptance matrix (R6)
 
 Three configured-only tools: `computer_session`, `computer_observe`,
 `computer_act`. No desktop dependency imports, prompt text, processes, listeners,
@@ -43,7 +43,10 @@ release and application-preserving detach are separate capabilities. Capture
 permission is not input confinement. R2 accepts shared or unknown separation when
 honestly exposed to the operator/model; it does not accept unknown cleanup safety.
 Existing-session input requires verified owned-input release and application-safe
-detach regardless of separation. No backend currently claims those guarantees.
+detach regardless of separation. R5's bounded X11 guardian supplies these measured
+capabilities with shared-input and crash-recovery limitations documented in the
+handoff. Wayland remains unavailable; a laboratory compositor fix is not a
+production backend qualification.
 Capabilities are server-owned evidence assertions, not model-supplied consent.
 Moving/restoring the human pointer must never be described as independence.
 Shared widget focus is observable as a limitation; detected focus changes require
@@ -110,3 +113,12 @@ correlation. Typed text is not stored in ordinary audit.
 The build evidence document will separate unit/contract proof, actual runtime
 measurements, and uncompleted release gates. A service returning exit 0 is not
 evidence that drawing, postcondition verification, or containment succeeded.
+
+R6 distinguishes fixed profile eligibility from GUI qualification. Isolated
+launch remains Drawing/Xed. Attached X11 profiles may target installed native
+Xed, Inkscape and LibreOffice Writer/Calc/Draw with verified process identity;
+the tools never launch or close the operator's applications. The handoff names
+the tasks actually measured for each application. Macro IDEs, extensions,
+security prompts and unknown dialogs do not inherit document-window permission.
+No UI declaration of an eligible profile establishes that an application is
+installed, focused, authorized, input-ready or qualified for an arbitrary task.

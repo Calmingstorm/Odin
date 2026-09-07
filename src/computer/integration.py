@@ -71,8 +71,11 @@ class ComputerIntegration:
         return self.enabled and name in COMPUTER_TOOLS
 
     def _backend(self, app):
+        from .app_profiles import ATTACHED_NATIVE_PROFILES, validate_profile
         from .models import ComputerError
 
+        validate_profile(app, platform=getattr(self.settings, "platform", "x11"),
+                         environment=getattr(self.settings, "environment", "isolated"))
         if getattr(self.settings, "platform", "x11") != "x11":
             raise ComputerError("wayland_owned_input_lifecycle_unverified")
         if getattr(self.settings, "environment", "isolated") == "existing_session":
@@ -82,7 +85,8 @@ class ComputerIntegration:
                 enabled=self.enabled, app_profile=app,
                 display_name=self.settings.display, xauthority=self.settings.xauthority,
                 monitor_names=self.settings.monitor_names,
-                input_enabled=app == "xed", runtime_sudo=bool(self.settings.runtime_sudo))
+                input_enabled=app in ATTACHED_NATIVE_PROFILES,
+                runtime_sudo=bool(self.settings.runtime_sudo))
         from .runtime.backend import LinuxDesktopBackend
 
         return LinuxDesktopBackend(enabled=self.enabled, app_profile=app,

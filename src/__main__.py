@@ -725,6 +725,15 @@ def main() -> None:
         except Exception:
             log.exception("bot close error")
         try:
+            from .tools.local_supervisor import shutdown_local_supervisors
+
+            await shutdown_local_supervisors()
+        except Exception:
+            from .restart import block_reexec
+
+            block_reexec("local command supervisor cleanup unverified")
+            log.exception("Local command supervisor cleanup unverified")
+        try:
             await health.stop()
         except Exception:
             log.exception("health stop error")

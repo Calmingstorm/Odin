@@ -78,8 +78,10 @@ async def test_command_source_preserves_middle_before_both_cuts(
         wait=AsyncMock(return_value=0),
     )
     spawn = AsyncMock(return_value=proc)
-    target = "create_subprocess_exec" if remote else "create_subprocess_shell"
-    monkeypatch.setattr(asyncio, target, spawn)
+    if remote:
+        monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    else:
+        monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell", spawn)
     callback = AsyncMock() if streaming else None
     with result_capture():
         if remote:

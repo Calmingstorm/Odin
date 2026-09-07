@@ -1941,7 +1941,8 @@ _SPAWN_PRIMITIVES = {
 _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     # --- uses the workspace -------------------------------------------------
     "src/tools/ssh.py": "run_local_command — takes cwd from the caller; THE seam",
-    "src/tools/process_manager.py": "background manage_process — resolves workspace per spawn",
+    "src/tools/local_supervisor.py": "fixed absolute -I helper; forwards validated cwd/env",
+    "src/tools/local_supervisor_worker.py": "shell owner inherits caller-validated cwd/env",
     # --- deliberately does not ----------------------------------------------
     "src/tools/ssh_pool.py": "argv-form ssh control-socket management, no user command text",
     "src/tools/hosts/control.py": (

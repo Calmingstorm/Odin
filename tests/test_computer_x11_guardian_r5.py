@@ -245,7 +245,7 @@ def test_normal_completion_has_empty_ledger_after_verified_up():
 
 def backend(**kwargs):
     return attached.X11AttachedBackend(enabled=True, display_name=":177",
-                                       monitor_names=["fixture"], **kwargs)
+                                       monitor_names=["fixture"], app_profile="xed", **kwargs)
 
 
 async def observed(monkeypatch):
