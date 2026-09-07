@@ -171,14 +171,19 @@ class LinuxDesktopBackend:
             if not future.done():
                 future.cancel()
 
-    async def observe(self) -> BackendObservation:
+    async def observe(self, crop=None) -> BackendObservation:
         async with self._ordinary:
+            from ..gui_actions import crop_arguments
             from ..render import render_frame
+            from ..vision import FrameCrop
+            crop = crop_arguments(crop)
             self._frame = None
             captured = time.monotonic()
             reply = await self._rpc("observe")
             result = reply["observation"]
             if "source_revision" not in result or "raster_mode" not in result:
+                if crop is not None:
+                    raise RuntimeFailure("crop_requires_source_metadata")
                 # Unknown worker metadata never grants an inferred input mapping.
                 from ..vision import FrameMetadata, _validate_png
                 image = unpack_blob(result["image"], cap=2 * 1024 * 1024)
@@ -215,7 +220,8 @@ class LinuxDesktopBackend:
             rendered = await asyncio.to_thread(render_frame,
                 pixels, source, mode=result["raster_mode"],
                 observation_id=observation_id, session_id=self._source_id,
-                generation=1, captured_monotonic_ns=max(1, int(captured * 1e9)))
+                generation=1, captured_monotonic_ns=max(1, int(captured * 1e9)),
+                crop=FrameCrop(**crop) if crop is not None else None)
             if self._closed or self._paused or time.monotonic() - captured > 5:
                 raise RuntimeFailure("capture revoked or expired")
             scope = CaptureScope(self._consent_generation, frozenset({self._source_id}),
@@ -225,6 +231,8 @@ class LinuxDesktopBackend:
                 source, scope, metadata.width, metadata.height, metadata.delivered_to_source,
                 rendered.png, focused=result.get("focused") is True,
                 modal=result.get("modal_id"), resize_scale=metadata.resize_scale,
+                crop=tuple(crop[k] for k in ("x", "y", "width", "height"))
+                if crop is not None else None,
                 modal_kind=("safe_application" if result.get("modal_kind") == "safe_application"
                             else "unrecognized") if result.get("modal_id") is not None else None,
                 accessibility=tuple(result.get("accessibility", ())))
@@ -239,7 +247,10 @@ class LinuxDesktopBackend:
             if (self._closed or self._paused or frame is None or not frame.focused
                     or not 0 <= time.monotonic() - self._captured_at <= 5):
                 raise RuntimeFailure("capture only; fresh focused nonmodal observation required")
-            fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
+            fields = {"click": {"x", "y"}, "double_click": {"x", "y"},
+                      "right_click": {"x", "y"}, "middle_click": {"x", "y"},
+                      "scroll": {"x", "y", "direction", "count"},
+                      "type": {"text"}, "key": {"chord"},
                       "polyline": {"points", "duration"}}
             required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
             if (type(action) is not dict or not isinstance(action.get("type"), str)
@@ -273,14 +284,21 @@ class LinuxDesktopBackend:
             if "expected_modal" in action:
                 payload["expected_modal"] = action["expected_modal"]
             from .accessibility import PrimitiveError, bounded_text, finite
-            from .primitives import KEYS
+            from .primitives import parse_key_chord
             try:
-                if action["type"] == "click":
+                if action["type"] in {
+                        "click", "double_click", "right_click", "middle_click", "scroll"}:
                     if any(type(action[k]) is not int for k in ("x", "y")):
                         raise RuntimeFailure("click coordinates must be integers")
                     x, y = source.input_point(frame.delivered_to_source, action["x"], action["y"],
                                               frame.width, frame.height)
                     payload.update(x=int(x), y=int(y))
+                    if action["type"] == "scroll":
+                        if (action["direction"] not in ("up", "down", "left", "right")
+                                or type(action["count"]) is not int
+                                or not 1 <= action["count"] <= 20):
+                            raise RuntimeFailure("invalid_scroll")
+                        payload.update(direction=action["direction"], count=action["count"])
                     if pointer:
                         payload["expected"] = {"type": "pointer_at", "x": int(x), "y": int(y)}
                 elif action["type"] == "polyline":
@@ -297,8 +315,7 @@ class LinuxDesktopBackend:
                 elif action["type"] == "type":
                     payload["text"] = bounded_text(action["text"])
                 else:
-                    if not isinstance(action["chord"], str) or action["chord"] not in KEYS:
-                        raise RuntimeFailure("unsupported key chord")
+                    parse_key_chord(action["chord"])
                     payload["chord"] = action["chord"]
             except PrimitiveError as exc:
                 raise RuntimeFailure(str(exc)) from exc

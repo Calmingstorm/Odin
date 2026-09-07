@@ -1,7 +1,6 @@
-"""Explicit attached X11 capture and opt-in app-scoped supervised XTEST input.
+"""Attached capture and input with persistent XI2 devices and shared widget focus.
 
-Shared cursor/focus and same-key overlap are limitations, not separation claims.
-No application/session is launched or destroyed. Input creates no native devices.
+No application/session is launched or destroyed, and devices are never removed.
 """
 from __future__ import annotations
 
@@ -17,9 +16,8 @@ import uuid
 from fractions import Fraction
 from pathlib import Path
 
-from ..app_profiles import ATTACHED_NATIVE_PROFILES, ATTACHED_PROFILES, validate_profile_action
 from ..geometry import AffineTransform, SourceGeometry
-from ..models import BackendCapabilities, BackendObservation, CaptureScope
+from ..models import BackendCapabilities, BackendObservation, CaptureScope, ComputerError
 from .profile import validate_session
 
 MAX_REPLY = 3 * 1024 * 1024
@@ -32,7 +30,7 @@ class AttachedFailure(RuntimeError):  # noqa: N818 - Mirrors runtime adapter fai
     """Static failure with no native IDs, pixels, titles or credentials."""
 
 
-def attachment_configuration(display_name, xauthority, monitor_names, app_profile):
+def attachment_configuration(display_name, xauthority, monitor_names, app_profile=None):
     if type(display_name) is not str or not re.fullmatch(r":[0-9]{1,5}", display_name):
         raise AttachedFailure("explicit_local_display_required")
     if (type(xauthority) is not str or (xauthority and not xauthority.startswith("/"))
@@ -43,10 +41,8 @@ def attachment_configuration(display_name, xauthority, monitor_names, app_profil
                    or any(ord(c) < 32 for c in n) for n in monitor_names)
             or len(set(monitor_names)) != len(monitor_names)):
         raise AttachedFailure("explicit_monitor_names_required")
-    if app_profile not in ATTACHED_PROFILES:
-        raise AttachedFailure("unapproved_application_profile")
     return {"display_name": display_name, "monitor_names": list(monitor_names),
-            "app_profile": app_profile, "xauthority": xauthority}
+            "xauthority": xauthority}
 
 
 def worker_environment(xauthority):
@@ -77,9 +73,10 @@ def same_application_scope(before, after):
 
 
 class X11AttachedBackend:
-    creates_devices = False
-    input_limits = {"text": "printable_ascii_existing_keymap_only", "lease_seconds": 2,
-                    "cursor": "shared_not_restored", "keyboard_overlap": "uncertain_no_replay"}
+    creates_devices = True
+    input_limits = {"text": "unicode_existing_keymap_only", "lease_seconds": 2,
+                    "widget_focus": "shared_within_window",
+                    "keyboard_overlap": "uncertain_no_replay"}
     capabilities = BackendCapabilities("x11", "existing_session", "unknown", "unknown",
                                        "unknown", "verified")
     input_supported = False
@@ -93,17 +90,12 @@ class X11AttachedBackend:
             display_name, xauthority, monitor_names, app_profile)
         if type(input_enabled) is not bool:
             raise AttachedFailure("invalid_input_configuration")
-        self._input_enabled = input_enabled and app_profile in ATTACHED_NATIVE_PROFILES
+        self._input_enabled = input_enabled
         if type(runtime_sudo) is not bool:
             raise AttachedFailure("invalid_runtime_privilege_configuration")
         self._runtime_sudo = runtime_sudo
         self.input_supported = self._input_enabled and not runtime_sudo
         self.input_blocker = None if self._input_enabled else INPUT_BLOCKER
-        if app_profile == "drawing":
-            self.input_blocker = "attached_application_provenance_unavailable"
-        if self._input_enabled:
-            self.capabilities = BackendCapabilities("x11", "existing_session", "shared", "shared",
-                                                    "verified", "verified")
         self._started = self._closed = self._paused = False
         self._generation = 1
         self._revision = 0
@@ -116,6 +108,13 @@ class X11AttachedBackend:
         self._workers = {}
         self._reapers = {}
         self._release_failed = False
+        self._persistent_devices = False
+        self._device_state = "not_created"
+        self._device_capabilities = {}
+        self._topology_task = None
+        self._topology_epoch = 0
+        self._topology_error = None
+        self._power_status = "unknown"
         self._frame = self._scope = self._fingerprint = None
         self._modal_id = None
         self._captured_at = 0.0
@@ -131,10 +130,36 @@ class X11AttachedBackend:
         if self._runtime_descriptor is None:
             self._runtime_descriptor = {
                 "version": 1, "kind": "processes", "session_id": session_id,
-                "boot_id": boot_id(), "no_persistent_devices": True,
+                "boot_id": boot_id(), "no_persistent_devices": not self._input_enabled,
                 "input_was_enabled": self._input_enabled, "launch_pending": False,
                 "processes": []}
         return copy.deepcopy(self._runtime_descriptor)
+
+    @property
+    def application_provenance(self):
+        from ..provenance import canonical_application_provenance
+        return canonical_application_provenance(self._scope)
+
+    def _accept_device_receipt(self, receipt):
+        """Only a fenced, released guardian receipt can prove persistent idle."""
+        if receipt.get("persistent_input_devices") is True:
+            self._persistent_devices = True
+            self._device_state = ("retained_inactive" if receipt.get("released") is True
+                                  and receipt.get("owned_devices") in {
+                                      "persistent_idle", "retained_inactive"}
+                                  else "persistent_release_unverified")
+        elif receipt.get("persistent_input_devices") is False and not self._persistent_devices:
+            self._device_state = "not_created"
+        pointer, keyboard = receipt.get("pointer"), receipt.get("keyboard_focus")
+        if pointer in {"independent", "shared"} and keyboard in {
+                "independent_per_window", "shared"}:
+            self.capabilities = BackendCapabilities(
+                "x11", "existing_session", pointer,
+                "independent" if keyboard == "independent_per_window" else "shared",
+                "verified", "verified")
+            self._device_capabilities = {key: receipt[key] for key in (
+                "pointer", "keyboard_focus", "widget_focus", "shared_pointer",
+                "shared_keyboard", "persistent_input_devices") if key in receipt}
 
     def _record_spawn(self, child=None, *, identity=None, pending=False):
         if self._runtime_descriptor is None:
@@ -257,8 +282,84 @@ class X11AttachedBackend:
                     return
         self._children.discard(child)
 
-    async def _read_worker(self, operation, *, selected=None):
-        return await self._work("capture", self._read_worker_owned, operation, selected=selected)
+    async def _read_worker(self, operation, *, selected=None, crop=None):
+        return await self._work("capture", self._read_worker_owned, operation,
+                                selected=selected, crop=crop)
+
+    async def _start_topology(self):
+        ready = asyncio.get_running_loop().create_future()
+        self._topology_error = None
+        self._topology_task = asyncio.create_task(
+            self._work("topology", self._watch_topology, ready))
+        self._topology_task.add_done_callback(
+            lambda task: task.exception() if not task.cancelled() else None)
+        await asyncio.wait_for(asyncio.shield(ready), CAPTURE_TIMEOUT)
+
+    def _topology_event(self, event):
+        if (type(event) is not dict or event.get("ok") is not True
+                or event.get("event") not in {"topology_ready", "topology_changed"}
+                or type(event.get("topology_revision")) is not int
+                or event.get("power_status") not in {
+                    "on", "disabled", "unsupported", "display_asleep"}
+                or type(event.get("sources")) is not list):
+            raise AttachedFailure("topology_monitor_unavailable")
+        sources = event["sources"]
+        names = [source.get("name") for source in sources if type(source) is dict]
+        if len(names) != len(sources) or len(set(names)) != len(names):
+            raise AttachedFailure("topology_monitor_unavailable")
+        self._topology_epoch += 1
+        self._revision += 1
+        self._frame = self._fingerprint = None
+        self._power_status = event["power_status"]
+        for source_id, previous in tuple(self._sources.items()):
+            matches = [source for source in sources if source["name"] == previous["name"]]
+            if len(matches) != 1:
+                raise AttachedFailure("selected_sources_unavailable")
+            self._sources[source_id] = matches[0]
+
+    async def _watch_topology(self, revoked, ready):
+        child = None
+        try:
+            async with self._spawn_lock:
+                if self._closed or self._paused or revoked.is_set():
+                    raise AttachedFailure("capture_revoked")
+                self._record_spawn()
+                child = await asyncio.create_subprocess_exec(
+                    *self._worker_argv("x11_attached_worker.py"), "--watch-topology",
+                    stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.DEVNULL,
+                    env=worker_environment(self._config["xauthority"]),
+                    start_new_session=True, limit=MAX_REPLY + 1)
+                self._children.add(child)
+                self._workers[revoked] = child
+            self._record_spawn(child, pending=self._runtime_sudo)
+            if self._runtime_sudo:
+                await self._worker_ready(child, "capture")
+            if self._closed or self._paused or revoked.is_set():
+                raise AttachedFailure("capture_revoked")
+            child.stdin.write(json.dumps(self._config).encode() + b"\n")
+            await child.stdin.drain()
+            while not revoked.is_set() and not self._closed and not self._paused:
+                line = await child.stdout.readline()
+                if not line or len(line) > MAX_REPLY:
+                    raise AttachedFailure("topology_monitor_unavailable")
+                self._topology_event(json.loads(line))
+                if not ready.done():
+                    ready.set_result(True)
+        except Exception as exc:
+            if not self._closed and not self._paused and not revoked.is_set():
+                self._topology_error = "topology_monitor_unavailable"
+                self._frame = self._fingerprint = None
+                self._topology_epoch += 1
+                self._revision += 1
+            if not ready.done():
+                ready.set_exception(exc)
+        finally:
+            if not ready.done():
+                ready.set_exception(AttachedFailure("capture_revoked"))
+            if child is not None:
+                child.stdin.close()
+                await self._reap(child)
 
     async def _work(self, kind, operation, *args, **kwargs):
         """Own the complete worker lifetime, not the caller's observation wait.
@@ -298,12 +399,14 @@ class X11AttachedBackend:
             if kind == "capture" and child not in self._reapers:
                 self._reapers[child] = asyncio.create_task(self._reap_owned(child))
 
-    async def _read_worker_owned(self, revoked, operation, *, selected=None):
+    async def _read_worker_owned(self, revoked, operation, *, selected=None, crop=None):
         if self._closed or self._paused:
             raise AttachedFailure("capture_revoked")
         request = {**self._config, "operation": operation, "input_enabled": self._input_enabled}
         if selected is not None:
             request["selected"] = selected
+        if crop is not None:
+            request["crop"] = crop
         async with self._spawn_lock:
             if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("capture_revoked")
@@ -336,15 +439,20 @@ class X11AttachedBackend:
                 return output
 
             output = await asyncio.wait_for(communicate_bounded(), CAPTURE_TIMEOUT)
-            if child.returncode != 0 or self._closed or self._paused or revoked.is_set():
+            if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("capture_worker_failed_or_revoked")
             reply = json.loads(output)
+            if type(reply) is dict and reply.get("error") in {
+                    "display_asleep", "topology_changed", "invalid_source_crop"}:
+                raise ComputerError(reply["error"])
+            if child.returncode != 0:
+                raise AttachedFailure("capture_worker_failed_or_revoked")
             if type(reply) is not dict or reply.get("ok") is not True:
                 raise AttachedFailure("capture_unavailable")
             return reply
         except asyncio.CancelledError:
             raise
-        except AttachedFailure:
+        except (AttachedFailure, ComputerError):
             raise
         except Exception:
             raise AttachedFailure("capture_unavailable") from None
@@ -367,11 +475,19 @@ class X11AttachedBackend:
                 raise AttachedFailure("selected_sources_unavailable")
             for monitor in monitors:
                 self._sources[uuid.uuid4().hex] = monitor
+            await self._start_topology()
+            if self._input_enabled:
+                self._device_state = "persistent_release_unverified"
+                device = await self._read_worker("input_capabilities")
+                self._accept_device_receipt(device)
+                if device.get("released") is not True:
+                    raise AttachedFailure("owned_release_unverified")
             self.input_supported = self._input_enabled
             self._selected = next(iter(self._sources))
             return {"ok": True, "session_id": session_id, "capture_only": not self._input_enabled,
                     "input_supported": self.input_supported, "input_blocker": self.input_blocker,
                     "input_limits": dict(self.input_limits),
+                    "input_devices": dict(self._device_capabilities),
                     "sources": self.sources(), "capabilities": self.capabilities.public()}
         except BaseException:
             await asyncio.shield(self.detach())
@@ -392,18 +508,29 @@ class X11AttachedBackend:
             self._frame = None
             return {"selected_source": source_id, "capture_only": not self._input_enabled}
 
-    async def observe(self):
+    async def observe(self, crop=None):
         async with self._lock:
             if not self._started or self._closed or self._paused or self._selected is None:
                 raise AttachedFailure("capture_not_active")
+            if self._topology_error:
+                raise ComputerError(self._topology_error)
+            if self._power_status == "display_asleep":
+                raise ComputerError("display_asleep")
+            topology_epoch = self._topology_epoch
             selected_id = self._selected
+            from ..gui_actions import crop_arguments
+            monitor = self._sources[selected_id]
+            crop = crop_arguments(crop, width=monitor["width"], height=monitor["height"])
             generation = self._generation
             captured_at = time.monotonic()
-            reply = await self._read_worker("capture", selected=self._sources[selected_id])
+            reply = await self._read_worker("capture", selected=monitor, crop=crop)
             if self._paused or self._closed or generation != self._generation:
                 raise AttachedFailure("capture_revoked")
+            if topology_epoch != self._topology_epoch:
+                raise ComputerError("topology_changed")
             binding = reply.get("input_scope") if self._input_enabled else None
-            fingerprint = (selected_id, generation, self._sources[selected_id], binding)
+            fingerprint = (selected_id, generation, topology_epoch,
+                           self._sources[selected_id], binding)
             if fingerprint != self._fingerprint:
                 self._revision += 1
                 self._fingerprint = fingerprint
@@ -419,6 +546,9 @@ class X11AttachedBackend:
                                  frozenset({selected_id}) if eligible else frozenset())
             try:
                 image = base64.b64decode(reply["image"], validate=True)
+                expected_crop = [crop[k] for k in ("x", "y", "width", "height")] if crop else None
+                if reply.get("crop") != expected_crop:
+                    raise ValueError("crop mismatch")
                 if len(image) > 2 * 1024 * 1024:
                     raise ValueError("image limit")
                 transform = AffineTransform(**{
@@ -428,7 +558,8 @@ class X11AttachedBackend:
                                            modal=self._modal_id,
                                            modal_kind=(binding.get("modal_kind")
                                                        if binding else None),
-                                           resize_scale=tuple(reply["resize_scale"]))
+                                           resize_scale=tuple(reply["resize_scale"]),
+                                           crop=tuple(expected_crop) if expected_crop else None)
                 self._frame, self._scope, self._captured_at = frame, binding, captured_at
                 return frame
             except Exception:
@@ -442,18 +573,19 @@ class X11AttachedBackend:
         async with self._lock:
             frame = self._frame
             if (self._closed or self._paused or self._release_failed or frame is None
-                    or not frame.focused or not self._scope
+                    or not frame.focused or not self._scope or self._topology_error
                     or not 0 <= time.monotonic() - self._captured_at <= 5):
                 raise AttachedFailure("fresh_app_scoped_observation_required")
-            fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
+            fields = {"click": {"x", "y"}, "double_click": {"x", "y"},
+                      "right_click": {"x", "y"}, "middle_click": {"x", "y"},
+                      "scroll": {"x", "y", "direction", "count"},
+                      "type": {"text"}, "key": {"chord"},
                       "polyline": {"points", "duration"}}
             required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
             if (type(action) is not dict or type(action.get("type")) is not str
                     or action["type"] not in fields
                     or set(action) - {"expected_modal"} != required | fields[action["type"]]):
                 raise AttachedFailure("unsupported_grounded_action")
-            validate_profile_action(self._config["app_profile"], {
-                "operation": action.get("type"), "key": action.get("chord")})
             for key in ("source_id", "source_revision", "consent_generation"):
                 if (type(action[key]) is not type(getattr(frame.source, key))
                         or action[key] != getattr(frame.source, key)):
@@ -470,12 +602,19 @@ class X11AttachedBackend:
             if action["type"] == "type":
                 text = action["text"]
                 if (type(text) is not str or not 1 <= len(text) <= 512
-                        or any(not 32 <= ord(c) <= 126 for c in text)):
-                    raise AttachedFailure("printable_ascii_only")
+                        or any(ord(c) < 32 or 127 <= ord(c) <= 159
+                               or 0xD800 <= ord(c) <= 0xDFFF for c in text)):
+                    raise AttachedFailure("invalid_text")
             elif action["type"] == "key":
-                from ..gui_actions import KEYS
-                if type(action["chord"]) is not str or action["chord"] not in KEYS:
-                    raise AttachedFailure("unsupported_key")
+                from .primitives import parse_key_chord
+                try:
+                    parse_key_chord(action["chord"])
+                except ValueError:
+                    raise AttachedFailure("unsupported_key") from None
+            elif action["type"] == "scroll":
+                if (action["direction"] not in ("up", "down", "left", "right")
+                        or type(action["count"]) is not int or not 1 <= action["count"] <= 20):
+                    raise AttachedFailure("invalid_scroll")
             elif action["type"] == "polyline":
                 duration = action["duration"]
                 if type(duration) not in (int, float) or not 0 <= duration <= 1:
@@ -489,8 +628,10 @@ class X11AttachedBackend:
                 local = frame.source.input_point(frame.delivered_to_source, *p,
                                                  frame.width, frame.height)
                 return [int(local[0]) + origin[0], int(local[1]) + origin[1]]
-            if action["type"] == "click":
+            if action["type"] in {"click", "double_click", "right_click", "middle_click", "scroll"}:
                 payload["x"], payload["y"] = point([action["x"], action["y"]])
+                if action["type"] == "scroll":
+                    payload.update(direction=action["direction"], count=action["count"])
             elif action["type"] == "polyline":
                 if type(action["points"]) is not list or not 2 <= len(action["points"]) <= 256:
                     raise AttachedFailure("invalid_polyline")
@@ -512,7 +653,11 @@ class X11AttachedBackend:
             if (receipt.get("released") is True and receipt.get("status") == "executed"
                     and not self._closed and not self._paused):
                 try:
-                    after = await self._read_worker("capture", selected=monitor)
+                    crop = (dict(zip(("x", "y", "width", "height"), frame.crop, strict=True))
+                            if frame.crop else None)
+                    after = await self._read_worker("capture", selected=monitor, crop=crop)
+                    if after.get("crop") != (list(frame.crop) if frame.crop else None):
+                        raise AttachedFailure("postcondition_crop_mismatch")
                     data = base64.b64decode(after["image"], validate=True)
                     evidence = receipt["postcondition"]
                     evidence.update(
@@ -553,6 +698,7 @@ class X11AttachedBackend:
             if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("input_revoked")
             sent = True  # Any partial write may authorize work; never infer a retry.
+            self._device_state = "persistent_release_unverified"
             child.stdin.write(json.dumps(request).encode() + b"\n")
             await child.stdin.drain()
             if self._runtime_sudo:
@@ -573,6 +719,7 @@ class X11AttachedBackend:
                 raise AttachedFailure("input_outcome_unknown")
             if receipt.get("released") is not True:
                 self._release_failed = True
+            self._accept_device_receipt(receipt)
             received = True
             return receipt
         except asyncio.CancelledError:
@@ -594,6 +741,8 @@ class X11AttachedBackend:
                         if (child.returncode != 0 or type(receipt) is not dict
                                 or receipt.get("released") is not True):
                             self._release_failed = True
+                        else:
+                            self._accept_device_receipt(receipt)
                     if self._runtime_sudo and not await self._identities_gone(child):
                         self._release_failed = True
                 except Exception:
@@ -614,18 +763,25 @@ class X11AttachedBackend:
         async with self._stop_lock:
             settled = await self._cleanup_workers()
         return {"paused": True, "input_revoked": True, "capture_revoked": True,
-                "released": settled and not self._release_failed}
+                "released": settled and not self._release_failed
+                and self._device_state != "persistent_release_unverified"}
 
     async def resume(self, *, consent_generation):
         if self._closed or not self._paused:
             raise AttachedFailure("capture_not_paused")
         if type(consent_generation) is not int or consent_generation <= self._generation:
             raise AttachedFailure("renewed_capture_consent_required")
-        if (self._release_failed or self._jobs or self._children or self._guardians
+        if (self._release_failed or self._device_state == "persistent_release_unverified"
+                or self._jobs or self._children or self._guardians
                 or any(not task.done() for task in self._reapers.values())):
             raise AttachedFailure("owned_release_unverified")
         self._generation = consent_generation
         self._paused = False
+        try:
+            await self._start_topology()
+        except BaseException:
+            await asyncio.shield(self.pause())
+            raise
         return {"resumed": True, "capture_only": not self._input_enabled}
 
     async def _cleanup_workers(self):
@@ -654,11 +810,12 @@ class X11AttachedBackend:
         self._frame = None
         async with self._stop_lock:
             settled = await self._cleanup_workers()
-            clean = settled and not self._release_failed
+            clean = (settled and not self._release_failed
+                     and self._device_state != "persistent_release_unverified")
             return {"stopped": clean, "released": clean,
                     "applications_preserved": True,
                     "input_revoked": True, "capture_revoked": True,
-                    "owned_devices": "not_created", "input_was_enabled": self._input_enabled,
+                    "owned_devices": self._device_state, "input_was_enabled": self._input_enabled,
                     "state": "closed" if clean else "quarantined",
                     "recovery": None if clean else "owned_x11_cleanup_unverified"}
 

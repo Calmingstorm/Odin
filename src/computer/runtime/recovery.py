@@ -50,7 +50,7 @@ def validate_descriptor(value, session_id):
                 or (not value['launch_pending'] and not value['processes'])
                 or set(value) != common | {'token', 'unit'}):
             raise ValueError('invalid unit ownership')
-    elif (value.get('no_persistent_devices') is not True
+    elif (type(value.get('no_persistent_devices')) is not bool
           or type(value.get('input_was_enabled')) is not bool
           or set(value) != common | {'no_persistent_devices', 'input_was_enabled'}):
         raise ValueError('unknown device cleanup')
@@ -148,6 +148,8 @@ async def verify_absence(descriptor):
                 return {'status': 'unknown', 'reason': 'unit_absence_unproven'}
             if not await asyncio.to_thread(_cgroup_empty, unit):
                 return {'status': 'unknown', 'reason': 'cgroup_absence_unproven'}
+        if descriptor.get('no_persistent_devices') is False:
+            return {'status': 'unknown', 'reason': 'persistent_input_state_unproven'}
         if descriptor.get('input_was_enabled'):
             return {'status': 'unknown', 'reason': 'owned_input_release_unproven'}
         return {'status': 'absence_verified', 'reason': 'owned_runtime_gone'}
