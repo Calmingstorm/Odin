@@ -319,15 +319,20 @@ def test_accessibility_load_uses_bounded_timeout_once(monkeypatch):
     api.set_timeout.assert_called_once_with(100, 100)
 
 
-@pytest.mark.parametrize("problem", ["name", "states", "bounds"])
-def test_accessibility_unbounded_metadata_refused(problem):
+@pytest.mark.parametrize("problem,diagnostic", [
+    ("name", "Accessible name is unbounded"),
+    ("states", "Accessible states exceed metadata bounds"),
+    ("bounds", "Accessible bounds are invalid"),
+])
+def test_accessibility_unbounded_metadata_refused(problem, diagnostic):
     access = accessibility.Accessibility()
     access.api = NS(CoordType=NS(SCREEN=0))
     node = NS(get_role_name=lambda: "frame",
               get_name=lambda: "x" * (16385 if problem == "name" else 1),
               get_state_set=lambda: NS(get_states=lambda: range(65 if problem == "states" else 1)),
               get_component_iface=lambda: NS(
-                  get_extents=lambda coord: NS(x=0, y=0, width=-1, height=2)))
-    with pytest.raises(accessibility.PrimitiveError) as exc:
+                  get_extents=lambda coord: NS(
+                      x=0, y=0, width=-1 if problem == "bounds" else 2, height=2)))
+    with pytest.raises(accessibility.PrimitiveError, match=diagnostic) as exc:
         access._data(node)
     assert exc.value.status == "unsupported"

@@ -245,6 +245,7 @@ def test_injector_protocol_and_resource_closure(monkeypatch, op):
 
 
 def test_main_failure_emits_fail_closed_receipt(monkeypatch, capsys):
+    monkeypatch.setattr(sys, "path", list(sys.path))
     monkeypatch.setattr(lifecycle, "parent_watch", Mock())
     monkeypatch.setattr(lifecycle, "announce", Mock())
     monkeypatch.setattr(lifecycle, "read_gate", Mock(side_effect=ValueError("invalid gate")))
