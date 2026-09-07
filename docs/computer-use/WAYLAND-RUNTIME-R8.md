@@ -46,6 +46,14 @@ EI xkb keymap; no guessed US keyboard. Scope extension is currently in the
 top-level `assets/wayland-scope/` tree and must be packaged and explicitly enabled
 by the operator. The backend does not install or enable it.
 
+Runtime implementation commit: `fbb5404`. Final recorded combined command
+passed **166 tests in14.43seconds**. Scoped lint for backend, guardian Python
+transport, identity module and backend tests passed; staged whitespace check and
+post-commit clean worktree check passed. Import validation passed separately.
+**Combined new-file lint did not pass**: 58 initial diagnostics, including48
+line-length diagnostics in the portal module/tests, plus native-guardian test
+style diagnostics. These remain unfinished cleanup, not waived or falsely green.
+
 Runtime-agent recorded validation: required four documents read to EOF; module
 import passed; 156 portal/scope/native guardian tests passed, and 10 additional
 backend/async native-process transport tests passed. Fake fixtures explicitly do
