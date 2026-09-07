@@ -6,6 +6,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 # Snapshot actual production modules, not mocked transport/evidence.
 COPY --from=runtime src /work/src
+COPY --from=portal src/computer/runtime/wayland_portal.py /work/src/computer/runtime/wayland_portal.py
 COPY --from=runtime assets/wayland-scope /usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net
 COPY scripts/computer-feasibility/r8-composed-diagnostics /usr/share/gnome-shell/extensions/odin-composed-diagnostic@private.invalid
 COPY --from=probe src/computer/runtime/wayland_probe.py /work/src/computer/runtime/wayland_probe.py

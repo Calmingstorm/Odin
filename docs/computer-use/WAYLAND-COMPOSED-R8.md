@@ -47,6 +47,7 @@ logs `/home/odin/tmp/r8-composed-<name>-driver.log`, ownership receipts
 | native3 | r8b | Same eligible result. Correct diagnostic uses authenticated capture metadata; actual production Snapshot returns `wayland_scope_unavailable`. No app input. |
 | native4 | r8c | Parent runtime7c4437f fixes included. Eligible+capture pass. Separate read-only private diagnostic proves scope rejects an empty banner bin. No app input. |
 | native5 | r8d | Parent banner77fad9a included, but newer parent probe now refuses `probe_private_telemetry_or_sender_error` before scope. Fresh refused capture passes; same Inkscape process survives detach. No input. |
+| native6 | r8e | Actual ComputerController entrypoint now used. Before any portal/start, app_profiles.py:66 refuses Inkscape because `(platform, environment) != ('x11', 'existing_session')`. Exact error `application_environment_unsupported`. Same app preserved, no input. |
 
 Each of these is an **exit1 application failure**, not a successful task. Native1
 identified a true integration mismatch: probe case-insensitive `libGL` regexp
@@ -66,6 +67,16 @@ recorded; parent is correcting the GI import refactor. An unchanged rerun would
 not establish anything further. Next harness also uses ComputerController and
 ComputerStore, including the real delivered-observation gate (fixture renderer
 acceptance, not an actual model or Discord delivery).
+
+**Current parent integration blocker after native6:** `validate_profile` in
+`src/computer/app_profiles.py` still hard-codes X11 for attached-only Inkscape
+and Writer, and `application_profile` line16 also refuses all Wayland offerings.
+Actual ComputerController catches the former before constructing runtime
+authority. The harness must not bypass these gates or mislabel Inkscape as Xed.
+Parent owns app offerings; a narrow legitimate Wayland/Inkscape provision and
+tests are required to continue. Image r8e contains portal0bfa9428, current typed
+runtime with injected=True, actual qualifier GI import correction and banner fix.
+Runtime composition cannot substantiate usable public API while this gate fails.
 
 Image manifests and actual source/guardian SHA256 inventories are in each root.
 Native4 uses the current parent runtime snapshot, not only the initial runtime
