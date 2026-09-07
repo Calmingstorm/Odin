@@ -27,7 +27,9 @@ def appearance_transition(before, after, before_scope, after_scope):
                     or row[1] not in {0, 1, 2}):
                 return None
             result[row[0]] = row[1]
-        if result.get(scope.get("window")) != 2 or inventory["root"] not in result:
+        target = scope.get("window")
+        if (type(target) is not int or result.get(target) != 2
+                or inventory["root"] not in result):
             return None
         return result
 
