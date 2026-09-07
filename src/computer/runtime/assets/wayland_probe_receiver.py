@@ -196,15 +196,16 @@ def initialize_gtk():
     import gi
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    gi.require_version("GdkWayland", "3.0")
-    from gi.repository import Gdk, GdkWayland, GLib, Gtk
+    from gi.repository import Gdk, GLib, Gtk
 
     Gdk.set_allowed_backends("wayland")
     initialized, _argv = Gtk.init_check([])
     if not initialized:
         raise RuntimeError("GTK native Wayland initialization failed")
     display = Gdk.Display.get_default()
-    if not isinstance(display, GdkWayland.WaylandDisplay):
+    # GTK3 distributions need not ship a separate GdkWayland typelib. The
+    # concrete GObject type is authoritative even without that optional typelib.
+    if display is None or getattr(getattr(display, "__gtype__", None), "name", None) != "GdkWaylandDisplay":
         raise RuntimeError("native GDK Wayland display required; fallback refused")
     return Gtk, Gdk, GLib, display
 

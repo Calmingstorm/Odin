@@ -251,7 +251,7 @@ def test_native_wayland_required_no_x_fallback(monkeypatch, native, initialized)
     calls = []
 
     class WaylandDisplay:
-        pass
+        __gtype__ = SimpleNamespace(name="GdkWaylandDisplay")
 
     display = WaylandDisplay() if native else object()
     fake = SimpleNamespace(
