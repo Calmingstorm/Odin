@@ -60,7 +60,8 @@ def test_helper_initialization_closes_child_socket(monkeypatch, fail):
         assert helper.sock is parent
         assert popen.call_args.kwargs["pass_fds"] == (19,)
         assert json.loads(parent.sendall.call_args.args[0]) == {
-            "display_name": ":fake", "mode": "shared"}
+            "display_name": ":fake", "mode": "shared", "expected_device_identity": None,
+            "keyboard_mapping_identity": None}
     child.close.assert_called_once()
 
 
@@ -205,7 +206,7 @@ def test_execute_revalidates_application_and_always_closes(monkeypatch, case, re
             return {"status": "executed"}
     monkeypatch.setattr(g, "Guardian", Exerciser)
     request = dict(config, selected=selected, scope={"rect": [0, 0, 50, 50]},
-                   action={"type": "click"})
+                   action={"type": "click"}, input_mode="shared", expected_device_identity=[11, 12])
     authorize = Mock()
     if reason:
         with pytest.raises(g.GuardianFailure, match=reason):
@@ -223,6 +224,8 @@ def test_execute_revalidates_application_and_always_closes(monkeypatch, case, re
 @pytest.mark.parametrize("op", ["key", "invalid", "quit"])
 def test_injector_protocol_and_resource_closure(monkeypatch, op):
     n = native()
+    monkeypatch.setattr(lifecycle, "REVOKED", False)
+    monkeypatch.setattr(g.select, "select", lambda *args: ([], [], []))
     stream = Mock()
     stream.readline.side_effect = [
         b'{"display_name":":fake"}\n',
