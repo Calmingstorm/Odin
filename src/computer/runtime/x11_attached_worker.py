@@ -48,6 +48,11 @@ def run(request, capture=None):
         # Removing even an idle master can crash existing GTK clients.
         native = ExistingXTest(config["display_name"])
         try:
+            # A legacy session may have stranded physical devices on an Odin
+            # seat. Shared input must not bless that state or delete by name.
+            if any(row[2] in (1, 2) and row[1].startswith(
+                    ("Odin session ", "Odin persistent ")) for row in native._topology()):
+                raise ValueError("other_odin_masters_present")
             return {"ok": True, "released": not any(native.owned_release_state().values()),
                     "device_identity": native.identity(), "owned_devices": "not_created",
                     "session_input_devices": False, "persistent_input_devices": False,

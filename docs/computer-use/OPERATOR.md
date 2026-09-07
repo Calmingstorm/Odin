@@ -25,8 +25,11 @@ Odin's own control surface remain denied. Process/window provenance and fresh
 source/focus checks remain safety boundaries. Eligibility is not task success.
 
 The tools provide click, double/right/middle click, drag/polyline, scroll, generic
-keys, Unicode typing and bounded observation crops. Attached X11 uses task-owned
-independent master devices, removed after verified input restoration on Stop.
+keys, Unicode typing and bounded observation crops. Attached X11 currently uses
+the shared core pointer and keyboard, creating no extra master devices. Native
+master removal crashed an ordinary application even after held input was released,
+so independent attached input is not qualified or offered. Stop verifies the
+original core-device identities and attachments after draining owned input.
 Server-lifetime persistent devices belong only to isolated environments.
 Independent per-window keyboard focus does not isolate widget focus inside a
 window. Concurrent user input can overlap. Inspect actual session capabilities.

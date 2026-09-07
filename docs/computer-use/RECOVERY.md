@@ -12,15 +12,15 @@ before ending the task and destroying its sandbox.
 
 Input leases bound ordinary loss handling, not hard real-time recovery from a
 permanently blocked display server. Timeout means quarantine, not success.
-Attached independent X11 devices must not remain after a clean Stop. Cleanup
-releases owned held input, fences Odin's input clients, verifies/restores recorded
-physical slaves to the core pair, checks active-grab conflicts on the owned pair,
-removes that pair and verifies the result. `retained_inactive` is not clean for an
-attached session. Persistent devices are isolated-only. Do not run manual
+Production attached X11 uses shared core input and creates no extra masters.
+Stop drains owned input and verifies the final core hierarchy against its starting
+identity. A pre-existing reserved Odin master blocks admission: this version must
+not bless stranded devices from an earlier version. `retained_inactive` is never
+clean attached cleanup. Persistent devices are isolated-only. Do not run manual
 name-based device deletion or held-input crash experiments in a user's session.
-If the display server or another client's grab prevents verified cleanup, the
-independent restoration owner retains the recorded identities and retries;
-quarantine is a failure report, not proof that the user's input is restored.
+The isolated native-removal qualification path remains unqualified for preserving
+ordinary applications; its clean hierarchy result alone is not safe desktop
+detach. Quarantine is a failure report, not proof that human input is restored.
 
 | Observation | Operator response |
 | --- | --- |
