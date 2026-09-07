@@ -163,7 +163,11 @@ def main():
     report('real_app_started_before_attach', pid=app.pid)
     trials = []
     failures = []
-    for mode in ('orderly', 'eof'):
+    modes = (('guardian-orderly', 'guardian-eof', 'guardian-cancel', 'guardian-lease')
+             if os.environ.get('WAYLAND_GUARDIAN_LAB') == '1' else ('orderly', 'eof'))
+    if os.environ.get('WAYLAND_GUARDIAN_FAULTS') == '1':
+        modes += ('guardian-loss', 'guardian-revoke')
+    for mode in modes:
         for name in ('ready', 'go', 'exited', 'held', 'release-go'):
             Path('/tmp/lifecycle-' + name).unlink(missing_ok=True)
         log = Path('/evidence/portal-' + mode + '.jsonl')

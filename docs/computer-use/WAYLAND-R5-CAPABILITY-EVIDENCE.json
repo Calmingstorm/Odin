@@ -1,0 +1,60 @@
+{
+  "schema": "odin_wayland_feasibility_v1",
+  "evidence_scope": "disposable_nested_wayland_gtk3_and_gedit",
+  "production_input_eligible": false,
+  "reason_codes": [
+    "WAYLAND_RUNTIME_NOT_INTEGRATED",
+    "REAL_NATIVE_COMPOSITOR_LIFECYCLE_NOT_MEASURED",
+    "VOLUNTARY_EI_DEVICE_CLOSE_UNPROVEN",
+    "SOURCE_CLOCK_AND_REPLACEMENT_FENCING_UNPROVEN"
+  ],
+  "stock_profile": {
+    "mutter_package": "46.2-1ubuntu0.24.04.16",
+    "backend": "nested-X11-no-Xwayland-clients",
+    "libei": "1.2.1-1",
+    "portal": "1.18.4-1ubuntu2.24.04.2",
+    "sole_ei_sender_eof_owned_button_release": "observed_failure",
+    "reason_code": "MUTTER_EIS_DROP_DEVICE_BUTTON_INDEX_BUG",
+    "stock_existing_session_input": "refuse",
+    "guardian_controller_transport_eof": "measured_release_only_while_guardian_and_portal_owner_live"
+  },
+  "causal_fix": {
+    "upstream_commit": "4ae305f19e391edda1aab0f9a9c47b01062f6330",
+    "source_change": "drop_device: bit_is_set(device->button_state, key) -> bit_is_set(device->button_state, button)",
+    "upstream_url": "https://github.com/GNOME/mutter/commit/4ae305f19e391edda1aab0f9a9c47b01062f6330",
+    "same_build_options_baseline_eof": "failed_with_actual_held_button_after_portal_close",
+    "one_line_fixed_eof": "actual_gtk_release_and_same_application_fresh_input_passed",
+    "fixed_guardian_process_loss": "actual_gtk_release_and_same_application_fresh_input_passed_three_times",
+    "fixed_portal_session_close_while_held": "actual_gtk_release_and_same_application_fresh_input_passed_once",
+    "final_corpus_artifact": "/home/odin/tmp/wayland-r5-guardian-fixed3-20260907/r5-analysis.json",
+    "final_corpus_application_exit": 0,
+    "final_outer_exit": 70,
+    "final_outer_reason": "unattributed_new_global_sudo_zombie_not_owned_fixture_cgroup",
+    "package_version_not_sufficient": true,
+    "runtime_library_hash_required": true,
+    "do_not_infer_all_gnome_46_or_wayland_support": true
+  },
+  "integration_contract": {
+    "helper_source": "scripts/computer-feasibility/wayland-owned-input.c",
+    "helper_role": "sole_ei_fd_owner_with_independent_finite_lease",
+    "portal_role": "separate_owned_session_lifetime_must_outlive_controller",
+    "admission": "trusted_adapter_only_after_consent_source_mapping_and_current_generation",
+    "mapping": "exact_portal_mapping_id_and_one_negotiated_region_or_refuse",
+    "input_limit_ms": 2000,
+    "renewal": false,
+    "gesture_count_per_helper": 1,
+    "release_order": "fence_commands_then_release_original_owned_key_button_then_dispatch_before_stop_and_close",
+    "receipt_semantics": "release_sent_is_not_delivery_or_authorization_to_replay",
+    "eis_path_loss": "unsupported_release_exit_3_and_revoke_input_no_alternate_device_cleanup",
+    "fault_binary": "wayland-owned-input-fault-fixture_is_lab_only_never_production",
+    "required_remaining_gates": [
+      "target_compositor_exact_build_and_backend_verified",
+      "same_key_and_button_operator_overlap_ownership",
+      "arbitrary_supported_inputs_and_focus_or_modal_changes",
+      "source_revision_and_permission_revocation_fences",
+      "trusted_capture_clock_transform_and_multi_source_mapping",
+      "runtime_supervision_and_process_identity_cleanup",
+      "tool_receipts_unknown_effect_no_replay_and_fresh_postcondition"
+    ]
+  }
+}

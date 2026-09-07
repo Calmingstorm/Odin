@@ -23,6 +23,8 @@ date --iso-8601=seconds
 id
 dpkg-query -W gnome-shell libmutter-14-0 xdg-desktop-portal \
   xdg-desktop-portal-gnome libei1 libeis1 pipewire wireplumber xwayland libgtk-3-0t64
+echo 'Runtime library bytes (package version alone does not identify causal-build code):'
+sha256sum /usr/lib/x86_64-linux-gnu/libmutter-14.so.0.0.0 /usr/lib/x86_64-linux-gnu/mutter-14/libmutter-clutter-14.so.0.0.0
 # All processes are descendants in the private container PID namespace. No
 # process-name matching, host kill, session settings, or device forwarding.
 pipewire > /evidence/pipewire.log 2>&1 &

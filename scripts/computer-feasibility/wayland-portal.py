@@ -31,6 +31,113 @@ def take_fd(fd_list, index):
     return chosen
 
 
+def run_owned_guardian(fd, mapping_id, mode, revoke=None):
+    """Portal owner outlives a lost controller; no second holder of its EI FD.
+
+    File gates below are private test orchestration only. Runtime integration
+    sends the same bounded wire commands from a separately supervised worker.
+    Portal-owner crash is a DIFFERENT unsupported fault on affected Mutter.
+    """
+    output = open('/evidence/guardian-' + mode + '.jsonl', 'w')
+    errors = open('/evidence/guardian-' + mode + '.stderr', 'w')
+    executable = ('/usr/local/bin/wayland-owned-input-fault-fixture'
+                  if mode == 'guardian-loss' else '/usr/local/bin/wayland-owned-input')
+    child = subprocess.Popen([executable, str(fd), mapping_id],
+                             pass_fds=(fd,), stdin=subprocess.PIPE,
+                             stdout=output, stderr=errors)
+    os.close(fd)
+    report('guardian_fd_transferred', guardian_pid=child.pid,
+           sole_ei_owner=True, portal_owner_survives_controller_loss=True)
+    controller = None
+    try:
+        deadline = time.monotonic() + 4
+        while '"event":"ready"' not in Path(output.name).read_text():
+            if child.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError('owned guardian negotiation failed')
+            time.sleep(.02)
+        if mode == 'guardian-eof':
+            controller = subprocess.Popen(['python3', '/harness/wayland-controller-probe.py',
+                                           str(child.stdin.fileno())],
+                                          pass_fds=(child.stdin.fileno(),))
+            child.stdin.close()
+            report('controller_transport_transferred', controller_pid=controller.pid,
+                   parent_writer_closed=True, owns_ei_fd=False)
+        else:
+            child.stdin.write(b'H 42 272 250 250 2000\n')
+            child.stdin.flush()
+        deadline = time.monotonic() + 2
+        while '"event":"held"' not in Path(output.name).read_text():
+            if child.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError('owned guardian did not dispatch')
+            time.sleep(.02)
+        Path('/tmp/lifecycle-held').touch()
+        deadline = time.monotonic() + 4
+        while not Path('/tmp/lifecycle-release-go').exists():
+            if child.poll() is not None or time.monotonic() > deadline:
+                raise RuntimeError('owned guardian delivery gate failed')
+            time.sleep(.02)
+        report('guardian_controller_trigger', mode=mode)
+        if mode == 'guardian-orderly':
+            child.stdin.write(b'R\n')
+            child.stdin.flush()
+        elif mode == 'guardian-cancel':
+            # Late command in the same write: the guardian must fence it.
+            child.stdin.write(b'C\nH 42 272 250 250 2000\n')
+            child.stdin.flush()
+        elif mode == 'guardian-eof':
+            controller.wait(timeout=3)
+            if controller.returncode:
+                raise RuntimeError('controller did not exit at held-state gate')
+            report('controller_process_reaped', pid=controller.pid, code=controller.returncode)
+        elif mode == 'guardian-lease':
+            pass  # Live but silent controller: release must be independent.
+        elif mode == 'guardian-loss':
+            child.stdin.write(b'F\n')
+            child.stdin.flush()
+        elif mode == 'guardian-revoke':
+            if revoke is None: raise RuntimeError('missing owned portal close actuator')
+            revoke()  # Genuine compositor withdrawal with owned input still held.
+        else:
+            raise ValueError('unknown guardian mode')
+        child.wait(timeout=4)
+        expected_code = 3 if mode == 'guardian-revoke' else 0
+        if child.returncode != expected_code:
+            raise RuntimeError('owned guardian failed with ' + str(child.returncode))
+        rows = [json.loads(row) for row in Path(output.name).read_text().splitlines()]
+        if len([r for r in rows if r['event'] == 'held']) != 1:
+            raise RuntimeError('late/repeated input or missing held receipt')
+        if mode == 'guardian-revoke':
+            if not any(r['event'] == 'unsupported_release' for r in rows) or any(r['event'] == 'release_sent' for r in rows):
+                raise RuntimeError('guardian hid revoked input path as its own release')
+        elif mode == 'guardian-loss':
+            if not any(r['event'] == 'guardian_loss' for r in rows) or any(r['event'] == 'release_sent' for r in rows):
+                raise RuntimeError('genuine guardian loss fixture not established')
+        elif not any(r['event'] == 'release_sent' for r in rows):
+            raise RuntimeError('guardian did not report ordered release (still not delivery proof)')
+        report('guardian_exited', mode=mode, code=child.returncode,
+               ordered_release_submitted=mode not in ('guardian-loss', 'guardian-revoke'),
+               application_release_must_be_measured=True)
+    finally:
+        if not child.stdin.closed:
+            child.stdin.close()
+        if child.poll() is None:
+            # EOF release window before owned-only failed-fixture teardown.
+            try: child.wait(timeout=3)
+            except subprocess.TimeoutExpired:
+                child.terminate()
+                try: child.wait(timeout=1)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+        output.close()
+        errors.close()
+        if controller is not None:
+            try: controller.wait(timeout=4)
+            except subprocess.TimeoutExpired:
+                controller.terminate()
+                controller.wait(timeout=2)
+
+
 def main():
     import gi
     gi.require_version("Gio", "2.0")
@@ -40,6 +147,13 @@ def main():
     bus = Gio.bus_get_sync(Gio.BusType.SESSION, None)
     session = None
     retained_fds = []
+
+    def close_owned():
+        nonlocal session
+        bus.call_sync(DEST, session, 'org.freedesktop.portal.Session', 'Close', None,
+                      None, Gio.DBusCallFlags.NONE, 3000, None)
+        session = None
+        report('owned_session_closed')
 
     def call(interface, method, args):
         return bus.call_sync(DEST, PATH, interface, method, args, None,
@@ -133,6 +247,14 @@ def main():
                                 raise RuntimeError('isolated operator readiness timeout')
                             time.sleep(.05)
                     args = ["/usr/local/bin/wayland-ei", str(fd)] + ([mode] if mode else [])
+                    if mode and mode.startswith('guardian-'):
+                        # Mapping is portal granted metadata, never model input.
+                        mapping = start['streams'][0][1]['mapping_id']
+                        retained_fds.remove(fd)
+                        run_owned_guardian(fd, mapping, mode, close_owned)
+                        Path('/tmp/lifecycle-exited').touch()
+                        time.sleep(2)
+                        continue
                     child = subprocess.Popen(args, pass_fds=(fd,), stdout=subprocess.PIPE,
                                              stderr=subprocess.PIPE, text=True)
                     # A parent-held duplicate would invalidate the EOF experiment.
@@ -188,9 +310,7 @@ def main():
             os.close(fd)
         if session:
             try:
-                bus.call_sync(DEST, session, "org.freedesktop.portal.Session", "Close", None,
-                              None, Gio.DBusCallFlags.NONE, 3000, None)
-                report("owned_session_closed")
+                close_owned()
             except GLib.Error as exc:
                 report("session_cleanup_error", reason=str(exc))
 
