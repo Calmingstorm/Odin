@@ -58,6 +58,7 @@ async def test_start_selects_eligible_monitor_and_reports_real_readiness(monkeyp
                 "persistent_input_devices": False, "owned_devices": "not_created",
                 "device_identity": [11, 12]}
     monkeypatch.setattr(backend, "_read_worker", read)
+    monkeypatch.setattr(backend, "_start_device_lifecycle", lambda: read("input_capabilities"))
     monkeypatch.setattr(backend, "_start_topology", AsyncMock())
     result = await backend.start("r13-scope-fixture")
     assert result["input_supported"] is eligible

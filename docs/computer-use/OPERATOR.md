@@ -25,8 +25,9 @@ Odin's own control surface remain denied. Process/window provenance and fresh
 source/focus checks remain safety boundaries. Eligibility is not task success.
 
 The tools provide click, double/right/middle click, drag/polyline, scroll, generic
-keys, Unicode typing and bounded observation crops. X11 uses persistent independent
-master devices where available, with a reported shared-pointer fallback.
+keys, Unicode typing and bounded observation crops. Attached X11 uses task-owned
+independent master devices, removed after verified input restoration on Stop.
+Server-lifetime persistent devices belong only to isolated environments.
 Independent per-window keyboard focus does not isolate widget focus inside a
 window. Concurrent user input can overlap. Inspect actual session capabilities.
 Unicode does not imply every character exists in the active keyboard layout;
@@ -80,7 +81,13 @@ restart a user's graphical session to test setup.
   names with `xrandr --listmonitors` and `xrandr --query` in that session. Configure
   `environment: existing_session`, `platform: x11`, `display`, `xauthority` and
   `monitor_names` from measurement, not another machine's connectors. Capture is
-  monitor-wide, not application-private. Verify service-UID access. Blank
+  monitor-wide, not application-private. Verify service-UID access. X11 capture
+  permission alone does not grant application-process inspection: a service UID
+  different from the desktop UID requires explicit worker privilege provisioning.
+  `application_uid_mismatch` or `application_process_unreadable` means input is
+  unavailable, even if screenshots work. Run the worker under the desktop identity
+  or deliberately provision `runtime_sudo`; never remove process-identity checks.
+  Blank
   Xauthority means `/dev/null`, not cookie discovery. Never use `xhost +` or
   publish cookies. Native X11 libraries and XTEST/XInput/XRes/RandR are required.
 * **Existing-session Wayland:** configure `environment: existing_session`,
@@ -118,7 +125,16 @@ provisioned choice, not automatic escalation. Never bypass refusal with shell in
 4. Open a new scratch document in the intended application and keep sensitive
    windows off the granted monitor. Request a short unsaved note, then Stop.
    Authorize any save separately to a new filename. Do not overwrite real work.
+   For an attached session, omit `app` when starting. An explicit `app: xed` or
+   `app: drawing` requests an isolated launch and is rejected while the configured
+   environment is `existing_session`, never redirected onto the real desktop.
+   Selecting the isolated environment is an operator configuration change.
 5. Observe before acting; use fresh session/generation/source/observation bindings.
+   Startup selects a granted monitor containing an eligible focused application
+   when possible. Check `input_readiness` and `input_blocker`; device availability
+   is not an actionable target. Wrong-monitor, denied-application, privilege and
+   missing-focus failures have separate static reasons. Status without a current
+   observation does not claim input readiness.
    Inspect actual text/drawing and saved files. Pixel changes alone are not success.
 6. Exercise Pause/revoke and explicitly authorized resume only while the originating
    foreground task remains alive. Stop ends it. Inspect cleanup and verify the

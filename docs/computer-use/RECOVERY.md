@@ -12,10 +12,15 @@ before ending the task and destroying its sandbox.
 
 Input leases bound ordinary loss handling, not hard real-time recovery from a
 permanently blocked display server. Timeout means quarantine, not success.
-Persistent independent X11 devices under the R11 contract remain after detach by
-design; presence alone is not a leak. Held input must still be released and worker
-cleanup verified. Do not remove devices to tidy the display or simulate held-input
-crashes in an active user's session.
+Attached independent X11 devices must not remain after a clean Stop. Cleanup
+releases owned held input, fences Odin's input clients, verifies/restores recorded
+physical slaves to the core pair, checks active-grab conflicts on the owned pair,
+removes that pair and verifies the result. `retained_inactive` is not clean for an
+attached session. Persistent devices are isolated-only. Do not run manual
+name-based device deletion or held-input crash experiments in a user's session.
+If the display server or another client's grab prevents verified cleanup, the
+independent restoration owner retains the recorded identities and retries;
+quarantine is a failure report, not proof that the user's input is restored.
 
 | Observation | Operator response |
 | --- | --- |
