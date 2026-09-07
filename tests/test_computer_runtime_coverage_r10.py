@@ -82,12 +82,23 @@ def test_recovery_identity_parser_and_boot_validation(monkeypatch):
 
 @pytest.mark.parametrize("change", [
     dict(version=2), dict(processes=[{"pid": True, "start_ticks": 1}]),
-    dict(no_persistent_devices=False)])
+    dict(no_persistent_devices="false")])
 def test_descriptor_rejects_invalid_ownership(change):
     value = descriptor()
     value.update(change)
     with pytest.raises(ValueError):
         recovery.validate_descriptor(value, "s")
+
+
+@pytest.mark.asyncio
+async def test_persistent_device_descriptor_does_not_prove_cleanup(monkeypatch):
+    value = descriptor()
+    value.update(no_persistent_devices=False, input_was_enabled=True)
+    assert recovery.validate_descriptor(value, "s") == value
+    monkeypatch.setattr(recovery, "boot_id", lambda: value["boot_id"])
+    monkeypatch.setattr(recovery, "_processes_gone", lambda _: None)
+    assert await recovery.verify_absence(value) == {
+        "status": "unknown", "reason": "persistent_input_state_unproven"}
 
 
 def test_process_tree_inspection_is_conservative(tmp_path, monkeypatch):

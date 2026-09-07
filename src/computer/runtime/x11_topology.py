@@ -13,7 +13,7 @@ class TopologyUnavailable(ValueError):  # noqa: N818
 
 class RandRRevision:
     def __init__(self, display, root):
-        from Xlib.ext import randr
+        from Xlib.ext import randr  # type: ignore[import-untyped]
 
         self.display = display
         self.revision = 1

@@ -1,5 +1,7 @@
 """Operation-specific fields must not become mandatory dummy action arguments."""
 
+import pytest
+
 from src.llm.openai_codex import CodexChatClient
 from src.tools.defs.computer import computer_definitions
 
@@ -28,5 +30,12 @@ def test_public_key_vocabulary_is_executable_by_controller_and_private_backend()
 
     action = next(tool for tool in computer_definitions() if tool["name"] == "computer_act")
     assert "enum" not in action["input_schema"]["properties"]["key"]
-    assert controller_parse is native_parse
-    assert native_parse("super+alt+F12") == (("super", "alt"), "F12")
+    # primitives is deliberately reloaded by the native suite. Function identity
+    # is not a contract; both parser references must implement the same grammar.
+    for chord, expected in [("super+alt+F12", (("super", "alt"), "F12")),
+                            ("alt+F4", (("alt",), "F4")), ("F12", ((), "F12"))]:
+        assert controller_parse(chord) == native_parse(chord) == expected
+    for chord in ("alt++F4", "ctrl+ctrl+a", "not-allowed", [], True):
+        for parse in (controller_parse, native_parse):
+            with pytest.raises(ValueError, match="unsupported_key"):
+                parse(chord)

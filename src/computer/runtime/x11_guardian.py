@@ -16,12 +16,19 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from typing import Literal, TypeAlias, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 LEASE_SECONDS = 2.0
 DISPATCH_SECONDS = 1.75
 MAX_MESSAGE = 65536
+
+InputStep: TypeAlias = (
+    tuple[Literal["move"], int, int]
+    | tuple[Literal["button", "key"], int, bool]
+    | tuple[Literal["wait"], float]
+)
 
 
 class GuardianFailure(RuntimeError):  # noqa: N818 - Runtime adapter failure convention.
@@ -255,7 +262,7 @@ def input_steps(action, native):
     """Fixed action vocabulary. No model-supplied native code or arbitrary chord."""
     kind = action["type"]
     if kind in {"click", "double_click", "right_click", "middle_click", "scroll"}:
-        button = {"right_click": 3, "middle_click": 2}.get(kind, 1)
+        button: int | None = {"right_click": 3, "middle_click": 2}.get(kind, 1)
         count, delay = (2, .08) if kind == "double_click" else (1, .03)
         if kind == "scroll":
             count = action.get("count", 1)
@@ -264,11 +271,12 @@ def input_steps(action, native):
             button = {"up": 4, "down": 5, "left": 6, "right": 7}.get(action.get("direction"))
             if button is None:
                 raise GuardianFailure("invalid_scroll_direction")
-        steps = [("move", action["x"], action["y"])]
+        steps: list[InputStep] = [("move", action["x"], action["y"])]
         for i in range(count):
             if i:
                 steps.append(("wait", delay))
-            steps.extend([("button", button, True), ("button", button, False)])
+            steps.extend([("button", cast(int, button), True),
+                          ("button", cast(int, button), False)])
         return steps
     if kind == "polyline":
         points, duration = action["points"], action["duration"]

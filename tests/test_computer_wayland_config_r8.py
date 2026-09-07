@@ -78,7 +78,7 @@ def test_real_composition_selects_portal_backend_and_actual_qualifier(tmp_path):
 
     from src.computer.integration import ComputerIntegration
     from src.computer.runtime.wayland_backend import WaylandRuntimeBackend
-    from src.computer.runtime.wayland_probe import GnomeSameStackQualifier
+    from src.computer.runtime.wayland_probe import SameStackQualifier
     from src.config.schema import Config
 
     settings = ComputerUseConfig(
@@ -86,19 +86,19 @@ def test_real_composition_selects_portal_backend_and_actual_qualifier(tmp_path):
         wayland_bus_address="unix:path=/run/user/1000/bus", wayland_uid=1000)
     facade = ComputerIntegration(SimpleNamespace(config=Config(
         discord={"token": "fixture"}, computer=settings)), controller=object(), settings=settings)
-    selected = facade._backend("inkscape")
+    selected = facade._backend(None)
     assert type(selected) is WaylandRuntimeBackend
-    assert type(selected._qualify) is GnomeSameStackQualifier
+    assert type(selected._qualify) is SameStackQualifier
     assert selected.config.expected_uid == 1000
     assert selected.config.bus_address == settings.wayland_bus_address
     assert selected.input_supported is False
     assert selected._portal is None and selected._guardian is None
 
 
-@pytest.mark.parametrize("app", ["xed", "drawing", "writer", "calc", "draw", "libreoffice"])
-def test_unqualified_wayland_apps_not_offered(app):
+@pytest.mark.parametrize("app", [None, "xed", "drawing", "writer", "calc", "draw",
+                                 "libreoffice", "user-local-application"])
+def test_attached_wayland_does_not_gate_application_profiles(app):
     from src.computer.app_profiles import application_profile, validate_profile
 
     assert application_profile(app, platform="wayland", environment="existing_session") is None
-    with pytest.raises(ValueError):
-        validate_profile(app, platform="wayland", environment="existing_session")
+    assert validate_profile(app, platform="wayland", environment="existing_session") is None

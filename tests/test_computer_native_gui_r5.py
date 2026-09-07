@@ -25,6 +25,7 @@ def visual_action(desktop, kind="click", **fields):
 
 @pytest.mark.parametrize("kind,fields", [
     ("type", {"text": "hello"}), ("key", {"chord": "Return"}),
+    ("key", {"chord": "alt+F4"}), ("key", {"chord": "F12"}),
     ("polyline", {"points": [[20, 20], [25, 26]], "duration": 0}), ("click", {}),
 ])
 def test_visual_change_independently_measured_and_consumed(kind, fields):
@@ -93,7 +94,7 @@ def test_visual_change_cancelled_before_input():
 @pytest.mark.parametrize("kind,fields", [
     ("type", {"text": "\0"}), ("type", {"text": "x" * 513}),
     ("type", {"text": "\ud800"}), ("type", {"text": 1}),
-    ("key", {"chord": "alt+F4"}), ("key", {"chord": []}),
+    ("key", {"chord": "alt++F4"}), ("key", {"chord": []}),
     ("polyline", {"points": [[20, True], [25, 26]], "duration": 0}),
     ("polyline", {"points": [[20, 20]], "duration": 0}),
     ("polyline", {"points": [[20, 20], [25, 26]], "duration": float("nan")}),

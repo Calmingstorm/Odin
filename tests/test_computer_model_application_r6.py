@@ -75,11 +75,14 @@ def test_render_colors_do_not_prove_correct_house_arrangement():
         verify.inspect_home_icon(output.getvalue())
 
 
-def test_production_tools_unchanged():
+def test_historical_harness_uses_current_production_tool_contract():
     tools = driver.r5.computer_definitions()
     assert {t["name"] for t in tools} == driver.r5.COMPUTER_TOOLS
     assert all(t["strict"] is False for t in tools)
-    assert "inkscape" in tools[0]["input_schema"]["properties"]["app"]["enum"]
+    session = next(tool for tool in tools if tool["name"] == "computer_session")
+    schema = session["input_schema"]
+    assert schema["properties"]["app"]["enum"] == ["drawing", "xed"]
+    assert "app" not in schema["required"]
 
 
 def test_fixture_refuses_live_evidence_and_unowned_launch(monkeypatch):
