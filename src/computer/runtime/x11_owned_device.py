@@ -15,7 +15,12 @@ import os
 import re
 import threading
 import time
+from collections.abc import Callable
 from contextlib import contextmanager
+
+EndpointRow = tuple[int, str, int, int, bool]
+EndpointIdentity = tuple[EndpointRow, ...]
+CoreSlaveIdentity = tuple[tuple[int, str, int, bool], ...]
 
 
 class X11DeviceError(RuntimeError):
@@ -226,7 +231,7 @@ class ExistingXTest:
         self._mapping_changed = False
         self._text_state = None
         self.keyboard_mapping_identity = None
-        self.dispatch_check = None
+        self.dispatch_check: Callable[[], None] | None = None
         if not self._display:
             raise X11DeviceError("display_unavailable")
         try:
@@ -766,9 +771,12 @@ class SessionXTest(PersistentXTest):
             raise X11DeviceError("invalid_session_create")
         self.prefix, self._create_session = prefix, create
         self._created_pair = self._detached = False
-        self._core_slave_baseline = ()
-        self._nonowned_baseline = ()
-        self._session_physical_slaves = ()
+        self._remove_attempted = False
+        self._owned_identity: EndpointIdentity = ()
+        self._core_slave_baseline: CoreSlaveIdentity = ()
+        self._nonowned_baseline: EndpointIdentity = ()
+        self._session_physical_slaves: CoreSlaveIdentity = ()
+        self.session_lease_fd: int | None = None
         super().__init__(display_name)
         # Kept for compatibility, but now means the full pre-create core-slave
         # identity, including disabled endpoints.
@@ -787,7 +795,7 @@ class SessionXTest(PersistentXTest):
                        for r in rows):
                     raise X11DeviceError("other_odin_masters_present")
                 core_pointer, core_keyboard = self._core_pair(rows)
-                self._nonowned_baseline = tuple(rows)
+                self._nonowned_baseline = self._ordered(rows)
                 self._core_slave_baseline = self._capture_core_slaves(
                     rows, core_pointer, core_keyboard)
                 add = _AddMaster(self._XI_ADD_MASTER, self.prefix.encode("ascii"), 1, 1)
@@ -797,26 +805,56 @@ class SessionXTest(PersistentXTest):
                             raise X11DeviceError("session_creation_failed")
                     self._created_pair = True
                 except X11DeviceError:
-                    self._created_pair = True
-                    raise
+                    current = self._topology()
+                    prefixed = self._prefixed(current)
+                    if not prefixed and self._ordered(current) == self._nonowned_baseline:
+                        raise HierarchyAddUnavailableError(
+                            "independent_pointer_unavailable") from None
+                    if prefixed:
+                        self._created_pair = True
+                        try:
+                            self._pin_owned_pair(current)
+                        except X11DeviceError:
+                            raise X11DeviceError("session_creation_incomplete") from None
+                    raise X11DeviceError("session_creation_census_changed") from None
             elif not found:
                 raise X11DeviceError("session_not_found")
             elif len(found) != 4:
                 raise X11DeviceError("session_topology_invalid")
-            pointer = [r for r in self._topology()
-                       if r[1] == self.prefix + " pointer" and r[2] == 1 and r[4]]
-            if len(pointer) != 1:
-                raise X11DeviceError("session_topology_invalid")
-            self._owned_pair(self._topology())
-            if self._xi.XISetClientPointer(self._display, 0, pointer[0][0]):
+            current = self._topology()
+            pointer, _keyboard, _xt_pointer, _xt_keyboard = self._pin_owned_pair(current)
+            if (self._create_session
+                    and self._nonowned(current) != self._nonowned_baseline):
+                raise X11DeviceError("session_creation_census_changed")
+            if self._xi.XISetClientPointer(self._display, 0, pointer[0]):
                 raise X11DeviceError("independent_pointer_unavailable")
         finally:
             self._x.XUngrabServer(self._display)
 
     def _startup_failure_cleanup(self):
-        # Startup lacks the completed detach proof. Do not remove a possibly
-        # partial seat and strand slaves; close() only closes local handles.
-        pass
+        """Remove only a complete pair pinned against the exact safe baseline."""
+        if not self._created_pair:
+            return
+        self._x.XGrabServer(self._display)
+        try:
+            rows = self._topology()
+            if not self._owned_identity:
+                raise X11DeviceError("session_creation_incomplete")
+            self._owned_pair(rows)
+            if self._nonowned(rows) != self._nonowned_baseline:
+                raise X11DeviceError("session_startup_cleanup_unsafe")
+            self._close_owned_devices()
+            try:
+                self._remove_pair_if_exact(rows)
+                self.sync()
+            except X11DeviceError:
+                if self._ordered(self._topology()) != self._nonowned_baseline:
+                    raise X11DeviceError("session_startup_cleanup_failed") from None
+            if self._ordered(self._topology()) != self._nonowned_baseline:
+                raise X11DeviceError("session_startup_cleanup_failed")
+            self._created_pair = False
+        finally:
+            self._x.XUngrabServer(self._display)
 
     @staticmethod
     def _core_pair(rows):
@@ -836,6 +874,24 @@ class SessionXTest(PersistentXTest):
             if use in (3, 4) and attachment in {core_pointer, core_keyboard}
         ))
 
+    @staticmethod
+    def _ordered(rows) -> EndpointIdentity:
+        return tuple(sorted(rows))
+
+    def _prefixed(self, rows) -> EndpointIdentity:
+        return tuple(r for r in rows if r[1].startswith(self.prefix + " "))
+
+    def _nonowned(self, rows) -> EndpointIdentity:
+        return self._ordered(r for r in rows if not r[1].startswith(self.prefix + " "))
+
+    def _pin_owned_pair(self, rows):
+        pair = self._owned_pair(rows)
+        identity = self._ordered(self._prefixed(rows))
+        if self._owned_identity and identity != self._owned_identity:
+            raise X11DeviceError("owned_endpoint_changed")
+        self._owned_identity = identity
+        return pair
+
     def _owned_pair(self, rows):
         expected = ((self.prefix + " pointer", 1), (self.prefix + " keyboard", 2),
                     (self.prefix + " XTEST pointer", 3),
@@ -853,7 +909,35 @@ class SessionXTest(PersistentXTest):
         if (pointer[3] != keyboard[0] or keyboard[3] != pointer[0]
                 or selected[3][3] != pointer[0] or selected[4][3] != keyboard[0]):
             raise X11DeviceError("session_topology_invalid")
+        if self._owned_identity and self._ordered(prefixed) != self._owned_identity:
+            raise X11DeviceError("owned_endpoint_changed")
         return pointer, keyboard, selected[3], selected[4]
+
+    def _open_owned_devices_exact(self, rows):
+        """Reopen only retained XTEST endpoint IDs after a failed remove."""
+        _pointer, _keyboard, xt_pointer, xt_keyboard = self._owned_pair(rows)
+        expected = {"buttons": xt_pointer[0], "keys": xt_keyboard[0]}
+        if self._devices:
+            actual = {kind: device.contents.device_id
+                      for kind, device in self._devices.items()}
+            if actual != expected:
+                raise X11DeviceError("owned_endpoint_changed")
+            return
+        opened = {}
+        try:
+            for kind in ("buttons", "keys"):
+                ident = expected[kind]
+                with self._checked():
+                    device = self._xi.XOpenDevice(self._display, ident)
+                    if not device or device.contents.device_id != ident:
+                        raise X11DeviceError("xtest_open_failed")
+                opened[kind] = device
+        except BaseException:
+            for device in opened.values():
+                with self._checked():
+                    self._xi.XCloseDevice(self._display, device)
+            raise
+        self._devices = opened
 
     def _release_xtest_held(self):
         held = self.owned_release_state()
@@ -892,7 +976,7 @@ class SessionXTest(PersistentXTest):
             if (use in (3, 4) and attachment in {pointer[0], keyboard[0]}
                     and ident not in own and ident not in baseline_ids):
                 raise X11DeviceError("session_physical_topology_changed")
-        current = []
+        current_rows: list[tuple[int, int]] = []
         for ident, name, use, enabled in baseline:
             row = by_id.get(ident)
             if row is None or (row[1], row[2], row[4]) != (name, use, enabled):
@@ -902,8 +986,8 @@ class SessionXTest(PersistentXTest):
             if row[3] not in {core, master}:
                 raise X11DeviceError("session_physical_topology_changed")
             if row[3] == master:
-                current.append((ident, use))
-        current = tuple(sorted(current))
+                current_rows.append((ident, use))
+        current = tuple(sorted(current_rows))
         if self._session_physical_slaves != baseline:
             raise X11DeviceError("session_physical_topology_changed")
         # XIChangeHierarchy takes an array of the *union*, not packed concrete
@@ -937,6 +1021,17 @@ class SessionXTest(PersistentXTest):
                 self._xi.XCloseDevice(self._display, device)
             self._devices.clear()
 
+    def _removed_receipt(self, rows):
+        if not self._remove_attempted:
+            raise X11DeviceError("owned_endpoint_changed")
+        if self._ordered(rows) != self._nonowned_baseline:
+            raise X11DeviceError("owned_master_remove_unverified")
+        self._detached = True
+        self._created_pair = False
+        return {"released": True, "owned_devices": "removed",
+                "physical_slaves_restored": True, "no_inflight_input": True,
+                "no_active_grabs": True, "owned_masters_removed": True}
+
     def _remove_pair_if_exact(self, rows):
         pointer, _keyboard, _xt_pointer, _xt_keyboard = self._owned_pair(rows)
         core_pointer, core_keyboard = self._core_pair(rows)
@@ -954,8 +1049,16 @@ class SessionXTest(PersistentXTest):
         no_inflight_input means Odin clients only; no_active_grabs is the narrow
         conflict probe of the two owned masters, never a global X11 guarantee.
         """
-        if self._detached:
-            raise X11DeviceError("session_already_detached")
+        self._x.XGrabServer(self._display)
+        try:
+            rows = self._topology()
+            if self._detached:
+                return self._removed_receipt(rows)
+            if not self._prefixed(rows):
+                return self._removed_receipt(rows)
+            self._open_owned_devices_exact(rows)
+        finally:
+            self._x.XUngrabServer(self._display)
         # Let applications receive release events before the short hierarchy
         # critical section. This is bounded settling, NOT proof that arbitrary
         # GTK/WM clients drained all device-related requests.
@@ -970,6 +1073,8 @@ class SessionXTest(PersistentXTest):
 
     def _detach_fenced(self):
         rows = self._topology()
+        if not self._prefixed(rows):
+            return self._removed_receipt(rows)
         pointer, keyboard, _xt_pointer, _xt_keyboard = self._owned_pair(rows)
         core_pointer, core_keyboard = self._core_pair(rows)
         if any(self.owned_release_state().values()):
@@ -984,25 +1089,11 @@ class SessionXTest(PersistentXTest):
                 raise X11DeviceError("physical_slave_restore_failed")
         self._probe_no_active_grabs(pointer[0], keyboard[0])
         self._close_owned_devices()
+        self._remove_attempted = True
         self._remove_pair_if_exact(rows)
         self.sync()
-        names = {self.prefix + suffix for suffix in
-                 (" pointer", " keyboard", " XTEST pointer", " XTEST keyboard")}
         remaining = self._topology()
-        if any(r[1] in names for r in remaining):
-            raise X11DeviceError("owned_master_remove_failed")
-        for ident, _name, use, _enabled in self._core_slave_baseline:
-            expected = core_pointer if use == 3 else core_keyboard
-            match = [r for r in remaining if r[0] == ident]
-            if len(match) != 1 or match[0][3] != expected:
-                raise X11DeviceError("physical_slave_restore_failed")
-        self._detached = True
-        if any(r[2] in (1, 2) and r[1].startswith(("Odin session ", "Odin persistent "))
-               for r in remaining):
-            raise X11DeviceError("other_odin_masters_present")
-        return {"released": True, "owned_devices": "removed", "physical_slaves_restored": True,
-                "no_inflight_input": True, "no_active_grabs": True,
-                "owned_masters_removed": True}
+        return self._removed_receipt(remaining)
 
 
 def open_input(display_name, *, mode="auto"):

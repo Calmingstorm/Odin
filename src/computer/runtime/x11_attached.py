@@ -112,6 +112,7 @@ class X11AttachedBackend:
         self._device_capabilities = {}
         self._device_identity = None
         self._topology_task = None
+        self._topology_child = None
         self._topology_epoch = 0
         self._topology_error = None
         self._power_status = "unknown"
@@ -129,6 +130,9 @@ class X11AttachedBackend:
         self._session_prefix = "Odin session " + uuid.uuid4().hex
         self._restoration = {}
         self._detach_job = None
+        self._pause_job = None
+        self._lease_revoked = False
+        self._shared_cleanup_identity = None
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -151,7 +155,8 @@ class X11AttachedBackend:
         identity = receipt.get("device_identity")
         if self._device_identity is not None and identity != self._device_identity:
             self._release_failed = True
-            self._device_state = "persistent_release_unverified"
+            self._device_state = ("session_release_unverified" if self.creates_devices
+                                  else "persistent_release_unverified")
             raise AttachedFailure("input_device_identity_changed")
         if identity is not None:
             self._device_identity = copy.deepcopy(identity)
@@ -273,8 +278,14 @@ class X11AttachedBackend:
             self._reapers[child] = task
         await asyncio.shield(task)
 
-    async def _reap_owned(self, child):
+    async def _reap_owned(self, child: asyncio.subprocess.Process):
         assert child.stdin is not None
+        if self._topology_child is not None and child is self._topology_child:
+            child.stdin.close()
+            try:
+                await asyncio.wait_for(child.wait(), 3)
+            except TimeoutError:
+                self._release_failed = True
         if self._runtime_sudo:
             child.stdin.close()
             try:
@@ -353,6 +364,7 @@ class X11AttachedBackend:
                     stderr=asyncio.subprocess.DEVNULL,
                     env=worker_environment(self._config["xauthority"]),
                     start_new_session=True, limit=MAX_REPLY + 1)
+                self._topology_child = child
                 self._children.add(child)
                 self._workers[revoked] = child
             self._record_spawn(child, pending=self._runtime_sudo)
@@ -365,6 +377,9 @@ class X11AttachedBackend:
             await child.stdin.drain()
             while not revoked.is_set() and not self._closed and not self._paused:
                 line = await child.stdout.readline()
+                if revoked.is_set() or self._closed or self._paused:
+                    self._accept_shutdown_identity(line)
+                    break
                 if not line or len(line) > MAX_REPLY:
                     raise AttachedFailure("topology_monitor_unavailable")
                 self._topology_event(json.loads(line))
@@ -384,7 +399,21 @@ class X11AttachedBackend:
             if child is not None:
                 assert child.stdin is not None
                 child.stdin.close()
+                if child.stdout is not None:
+                    try:
+                        while line := await asyncio.wait_for(child.stdout.readline(), 2):
+                            self._accept_shutdown_identity(line)
+                    except Exception:
+                        pass
                 await self._reap(child)
+
+    def _accept_shutdown_identity(self, line):
+        try:
+            receipt = json.loads(line)
+            if receipt.get("event") == "shared_identity_at_close" and receipt.get("ok") is True:
+                self._shared_cleanup_identity = receipt.get("device_identity")
+        except (ValueError, TypeError):
+            pass
 
     async def _work(self, kind, operation, *args, **kwargs):
         """Own the complete worker lifetime, not the caller's observation wait.
@@ -493,13 +522,22 @@ class X11AttachedBackend:
         self._lifecycle_job = asyncio.create_task(self._own_device_lifecycle(ready))
         self._lifecycle_job.add_done_callback(
             lambda task: task.exception() if not task.cancelled() else None)
-        return await asyncio.wait_for(asyncio.shield(ready), CAPTURE_TIMEOUT)
+        result = await asyncio.wait_for(asyncio.shield(ready), CAPTURE_TIMEOUT)
+        if result.get("session_input_devices") is False:
+            await asyncio.wait_for(asyncio.shield(self._lifecycle_job), CAPTURE_TIMEOUT)
+            if self._device_state != "not_created":
+                raise AttachedFailure("shared_fallback_cleanup_unverified")
+            assert self._session_lease_fd is not None
+            os.close(self._session_lease_fd)
+            self._session_lease_fd = None
+        return result
 
     async def _own_device_lifecycle(self, ready):
         child = None
         try:
+            assert self._session_lease_fd is not None
             async with self._spawn_lock:
-                if self._closed:
+                if self._closed or self._paused or self._lease_revoked:
                     raise AttachedFailure("input_revoked")
                 self._record_spawn()
                 child = await asyncio.create_subprocess_exec(
@@ -510,23 +548,30 @@ class X11AttachedBackend:
                     env=worker_environment(self._config["xauthority"]),
                     start_new_session=True, limit=65536)
                 self._lifecycle = child
+            assert child.stdin is not None and child.stdout is not None
             self._record_spawn(child, pending=self._runtime_sudo)
             if self._runtime_sudo:
                 await self._worker_ready(child, "lifecycle")
-            if self._closed:
+            if self._closed or self._paused or self._lease_revoked:
                 raise AttachedFailure("input_revoked")
             child.stdin.write(json.dumps({**self._config,
                 "session_prefix": self._session_prefix,
                 "session_lease_fd": self._session_lease_fd}).encode() + b"\n")
             await child.stdin.drain()
             first = json.loads(await asyncio.wait_for(child.stdout.readline(), CAPTURE_TIMEOUT))
-            if first.get("ok") is not True or first.get("session_input_devices") is not True:
+            shared = (first.get("session_input_devices") is False
+                      and first.get("persistent_input_devices") is False
+                      and first.get("owned_devices") == "not_created"
+                      and first.get("pointer") == "shared")
+            if first.get("ok") is not True or not (
+                    first.get("session_input_devices") is True or shared):
                 raise AttachedFailure("session_devices_unavailable")
             ready.set_result(first)
             while True:
                 receipt = json.loads(await child.stdout.readline())
                 self._restoration = receipt
-                if receipt.get("owned_devices") == "removed" and receipt.get("released") is True:
+                if (receipt.get("owned_devices") == ("not_created" if shared else "removed")
+                        and receipt.get("released") is True):
                     break
                 self._device_state = "session_release_unverified"
                 self._paused = True
@@ -549,7 +594,8 @@ class X11AttachedBackend:
                 ready.set_exception(exc)
         finally:
             if child is not None:
-                child.stdin.close()
+                if child.stdin is not None:
+                    child.stdin.close()
                 if child.returncode is None:
                     try:
                         await asyncio.wait_for(child.wait(), CLEANUP_TIMEOUT)
@@ -600,11 +646,13 @@ class X11AttachedBackend:
                     "application_scope_unavailable"))
                 self.input_readiness = "target_available" if scope_ready else "no_input_target"
             if self._input_enabled:
-                self._device_state = "session_release_unverified"
-                device = await self._start_device_lifecycle()
+                # Shared-only until independent per-application detach is safe.
+                # No created pair, lifecycle FD, or sudo closefrom permission.
+                device = await self._read_worker("input_capabilities")
                 self._accept_device_receipt(device)
                 if (device.get("released") is not True or self._device_identity is None
-                        or self.capabilities.pointer_separation not in {"independent", "shared"}):
+                        or self.creates_devices
+                        or self.capabilities.pointer_separation != "shared"):
                     raise AttachedFailure("owned_release_unverified")
             self.input_supported = self._input_enabled and scope_ready
             return {"ok": True, "session_id": session_id, "capture_only": not self.input_supported,
@@ -779,8 +827,9 @@ class X11AttachedBackend:
             request = {**self._config, "selected": monitor, "scope": self._scope, "action": payload}
             request["input_mode"] = self.capabilities.pointer_separation
             request["expected_device_identity"] = copy.deepcopy(self._device_identity)
-            request["session_prefix"] = self._session_prefix
-            request["session_lease_fd"] = self._session_lease_fd
+            if self.creates_devices:
+                request["session_prefix"] = self._session_prefix
+                request["session_lease_fd"] = self._session_lease_fd
             self._frame = None  # Consume before dispatch; lost replies are not retryable.
             receipt = await self._input_worker(request)
             if receipt.get("released") is not True:
@@ -839,7 +888,8 @@ class X11AttachedBackend:
             if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("input_revoked")
             sent = True  # Any partial write may authorize work; never infer a retry.
-            self._device_state = "persistent_release_unverified"
+            self._device_state = ("session_release_unverified" if self.creates_devices
+                                  else "persistent_release_unverified")
             child.stdin.write(json.dumps(request).encode() + b"\n")
             await child.stdin.drain()
             if self._runtime_sudo:
@@ -899,20 +949,50 @@ class X11AttachedBackend:
         raise AttachedFailure("existing_session_export_not_granted")
 
     async def pause(self):
+        if self._pause_job is None or self._pause_job.done():
+            self._pause_job = asyncio.create_task(self._pause_owned())
+        return await asyncio.shield(self._pause_job)
+
+    async def _pause_owned(self):
         self._paused = True
         self._frame = None
+        # Emergency pause restores physical attachments too. A removed seat is
+        # terminal for this backend: fresh consent must create a fresh session.
+        if self.creates_devices or self._device_state == "session_release_unverified":
+            self._lease_revoked = True
+            self.input_supported = False
+            if self._session_lease_fd is not None:
+                os.pwrite(self._session_lease_fd, b"0", 0)
+            if self._lifecycle is not None:
+                self._lifecycle.stdin.close()
         async with self._stop_lock:
             settled = await self._cleanup_workers()
+            if self._lease_revoked and self._lifecycle_job is not None:
+                if self._lifecycle is not None:
+                    self._lifecycle.stdin.close()
+                _done, pending = await asyncio.wait({self._lifecycle_job}, timeout=CLEANUP_TIMEOUT)
+                settled = settled and not pending
+            restored = self._restoration_verified()
+            if self._lease_revoked and restored:
+                self._device_state = "removed"
         return {"paused": True, "input_revoked": True, "capture_revoked": True,
-                "released": settled and not self._release_failed
-                and self._device_state != "persistent_release_unverified"}
+                "released": settled and (restored if self._lease_revoked else (
+                    not self._release_failed and self._device_state not in {
+                        "persistent_release_unverified", "session_release_unverified"})),
+                "owned_devices": self._device_state,
+                "resume_requires_new_session": self._lease_revoked}
 
     async def resume(self, *, consent_generation):
         if self._closed or not self._paused:
             raise AttachedFailure("capture_not_paused")
         if type(consent_generation) is not int or consent_generation <= self._generation:
             raise AttachedFailure("renewed_capture_consent_required")
-        if (self._release_failed or self._device_state == "persistent_release_unverified"
+        if (self._lease_revoked or (self.creates_devices and (
+                self._session_lease_fd is None
+                or os.pread(self._session_lease_fd, 1, 0) != b"1"))):
+            raise AttachedFailure("session_devices_revoked_new_session_required")
+        if (self._release_failed or self._device_state in {
+                "persistent_release_unverified", "session_release_unverified"}
                 or self._jobs or self._children or self._guardians
                 or any(not task.done() for task in self._reapers.values())):
             raise AttachedFailure("owned_release_unverified")
@@ -969,14 +1049,13 @@ class X11AttachedBackend:
                 _done, pending = await asyncio.wait({self._lifecycle_job}, timeout=max(
                     0, cleanup_deadline - time.monotonic()))
                 settled = settled and not pending
-            restored = (self._restoration.get("owned_devices") == "removed" and all(
-                self._restoration.get(key) is True for key in (
-                    "released", "physical_slaves_restored", "no_inflight_input",
-                    "no_active_grabs", "owned_masters_removed")))
+            restored = self._restoration_verified()
             if restored:
                 self._device_state = "removed"
             clean = (settled and (restored or (not self._release_failed
                      and self._device_state == "not_created" and not self.creates_devices)))
+            if clean and not self.creates_devices and self._device_identity is not None:
+                clean = self._shared_cleanup_identity == self._device_identity
             if settled and self._session_lease_fd is not None:
                 os.close(self._session_lease_fd)
                 self._session_lease_fd = None
@@ -984,11 +1063,22 @@ class X11AttachedBackend:
                     **{key: self._restoration.get(key) is True for key in (
                         "physical_slaves_restored", "no_inflight_input",
                         "no_active_grabs", "owned_masters_removed")},
-                    "applications_preserved": True,
+                    # XI2 state cannot prove arbitrary clients consumed their
+                    # device events. GDK can issue stale XIBarrierReleasePointer
+                    # requests after removal and abort on XI_BadDevice.
+                    "applications_preserved": not self.creates_devices,
                     "input_revoked": True, "capture_revoked": True,
                     "owned_devices": self._device_state, "input_was_enabled": self._input_enabled,
-                    "state": "closed" if clean else "quarantined",
-                    "recovery": None if clean else "owned_x11_cleanup_unverified"}
+                    "state": "closed" if clean and not self.creates_devices else "quarantined",
+                    "recovery": ("application_preservation_unverified" if clean and
+                                 self.creates_devices else None if clean else
+                                 "owned_x11_cleanup_unverified")}
+
+    def _restoration_verified(self):
+        return self._restoration.get("owned_devices") == "removed" and all(
+            self._restoration.get(key) is True for key in (
+                "released", "physical_slaves_restored", "no_inflight_input",
+                "no_active_grabs", "owned_masters_removed"))
 
     stop = detach
     close = detach

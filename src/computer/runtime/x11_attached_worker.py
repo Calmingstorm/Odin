@@ -43,9 +43,19 @@ def run(request, capture=None):
     config = attachment_configuration(request["display_name"], request["xauthority"],
                                       request["monitor_names"])
     owned = capture is None
-    if request["operation"] == "input_capabilities":
-        from src.computer.runtime.x11_owned_device import input_capabilities
-        return {"ok": True, **input_capabilities(config["display_name"])}
+    if request["operation"] in {"input_capabilities", "verify_shared_identity"}:
+        from src.computer.runtime.x11_owned_device import ExistingXTest
+        # Removing even an idle master can crash existing GTK clients.
+        native = ExistingXTest(config["display_name"])
+        try:
+            return {"ok": True, "released": not any(native.owned_release_state().values()),
+                    "device_identity": native.identity(), "owned_devices": "not_created",
+                    "session_input_devices": False, "persistent_input_devices": False,
+                    "pointer": "shared", "keyboard_focus": "shared",
+                    "widget_focus": "shared_within_window", "shared_pointer": True,
+                    "shared_keyboard": True}
+        finally:
+            native.close()
     if owned:
         capture = X11MonitorCapture(config["display_name"], enabled=True,
                                     connection_factory=AttachedConnection)
@@ -195,6 +205,11 @@ def watch_topology(request):
             # watcher cleanly; this stream accepts no commands after its gate.
             ready, _, _ = select.select([sys.stdin.buffer], [], [], .1)
             if ready:
+                # Read-only final census on the already owned watcher. No new
+                # privileged child is spawned after the controller revokes it.
+                with contextlib.redirect_stdout(sys.stderr):
+                    final = safe_run({**request, "operation": "verify_shared_identity"})
+                print(json.dumps({**final, "event": "shared_identity_at_close"}), flush=True)
                 break
     finally:
         capture.close()

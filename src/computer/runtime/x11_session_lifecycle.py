@@ -39,7 +39,11 @@ def input_lease(fd):
 
 def serve(request):
     from src.computer.runtime import x11_worker_lifecycle as lifecycle
-    from src.computer.runtime.x11_owned_device import SessionXTest
+    from src.computer.runtime.x11_owned_device import (
+        ExistingXTest,
+        HierarchyAddUnavailableError,
+        SessionXTest,
+    )
 
     fd = request["session_lease_fd"]
     native = None
@@ -47,7 +51,25 @@ def serve(request):
                "physical_slaves_restored": False, "no_inflight_input": False,
                "no_active_grabs": False, "owned_masters_removed": False}
     try:
-        native = SessionXTest(request["display_name"], request["session_prefix"], create=True)
+        try:
+            native = SessionXTest(request["display_name"], request["session_prefix"], create=True)
+        except HierarchyAddUnavailableError:
+            # Only the creator's unchanged post-error census authorizes this.
+            # Shared input has guardian ledgers, never disposable master removal.
+            shared = ExistingXTest(request["display_name"])
+            try:
+                identity = shared.identity()
+                if any(shared.owned_release_state().values()):
+                    raise RuntimeError("shared_devices_not_idle")
+                receipt = {"released": True, "owned_devices": "not_created"}
+                emit({"ok": True, **receipt, "device_identity": identity,
+                      "session_input_devices": False, "persistent_input_devices": False,
+                      "pointer": "shared", "keyboard_focus": "shared",
+                      "widget_focus": "shared_within_window", "shared_pointer": True,
+                      "shared_keyboard": True})
+            finally:
+                shared.close()
+            return
         identity = native.identity()
         if any(native.owned_release_state().values()):
             raise RuntimeError("new_session_devices_not_idle")

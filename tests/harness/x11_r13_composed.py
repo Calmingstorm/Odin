@@ -85,6 +85,9 @@ async def controller_run(out, display, authority):
         persist()
         assert requested == [None] and grant["app"] is None
         assert grant["input_supported"] is True, grant
+        assert backend.capabilities.pointer_separation == "shared"
+        assert backend.creates_devices is False
+        assert backend._session_lease_fd is None
         assert grant["application_provenance"]["exe_basename"] == "xed"
         args = {"session_id": grant["session_id"], "generation": grant["generation"]}
 
@@ -116,7 +119,8 @@ async def controller_run(out, display, authority):
             assert receipt["status"] not in {"unknown", "unavailable"}, receipt
             assert receipt["execution"] == {"injected": True, "released": True}, receipt
             assert receipt["application_provenance"]["exe_basename"] == "xed"
-            assert pointer() == [950, 650]
+            # Shared fallback intentionally moves the core pointer. Independence
+            # is not claimed; every native endpoint must still be unchanged.
             # Every stock/core slave, including the synthetic Xvfb physical pair,
             # retains its identity and original attachment throughout input.
             initial_ids = {r["id"] for r in initial}
@@ -126,7 +130,7 @@ async def controller_run(out, display, authority):
                   crop={"x": 70, "y": 170, "width": 30, "height": 30}, x=15, y=15)
         await act("type-note", "type", text="Stock controller note 123")
         await act("newline", "key", key="Return")
-        await act("second-line", "type", text="Independent pointer and clean Stop")
+        await act("second-line", "type", text="Shared pointer and clean Stop")
         await act("save-dialog", "key", key="ctrl+s")
         destination = out / "scratch" / "note.txt"
         await act("save-path", "type", text=str(destination))
@@ -134,7 +138,7 @@ async def controller_run(out, display, authority):
         await asyncio.sleep(.5)
         result["saved_text"] = destination.read_text()
         assert result["saved_text"] == (
-            "Stock controller note 123\nIndependent pointer and clean Stop\n")
+            "Stock controller note 123\nShared pointer and clean Stop\n")
         await observe("saved-document")
         result["stop"] = await controller.session(context, {**args, "operation": "stop"})
         await asyncio.sleep(.75)
@@ -147,12 +151,11 @@ async def controller_run(out, display, authority):
         result["app_alive_after_stop"] = result["app_state_after_stop"] not in {"Z", "X", "gone"}
         assert result["app_alive_after_stop"]
         assert result["final_devices"] == initial, result["final_devices"]
-        assert pointer() == [950, 650]
         cleanup = result["stop"]["cleanup"]
         assert all(cleanup[key] is True for key in (
             "complete", "stopped", "released", "capture_revoked", "input_revoked",
             "applications_preserved"))
-        assert cleanup["owned_devices"] != "retained_inactive"
+        assert cleanup["owned_devices"] == "not_created"
         result["passed"] = True
     except BaseException:
         result["error"] = traceback.format_exc()

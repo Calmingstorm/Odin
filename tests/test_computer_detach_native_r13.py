@@ -36,7 +36,9 @@ def test_private_xvfb_detach_lifecycle_r13(tmp_path):
     evidence = json.loads(result.stdout.splitlines()[-1])
     assert evidence["server_alive"] is True
     assert all(receipt["owned_masters_removed"] for key, receipt in evidence.items()
-               if key != "server_alive")
+               if key not in {"server_alive", "backend_cycle"})
+    assert evidence["backend_cycle"]["owned_devices"] == "not_created"
+    assert evidence["backend_cycle"]["stopped"] is True
     assert evidence["backend_cycle"]["stopped"] is True
 
 

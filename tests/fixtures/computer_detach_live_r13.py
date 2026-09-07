@@ -208,15 +208,15 @@ def backend_start_detach(display_name, authority):
                                     xauthority=authority, monitor_names=["screen"],
                                     input_enabled=True)
         started = await backend.start("r13-fixture")
-        assert started["ok"] is True and started["input_supported"] is True
-        assert backend._lifecycle is not None and backend._topology_task is not None
+        assert started["ok"] is True
+        # Production attached now uses existing shared endpoints only.
+        assert backend.creates_devices is False
+        assert backend._lifecycle is None and backend._topology_task is not None
         assert backend._children
         receipt = await backend.detach()
         assert receipt["stopped"] is True and receipt["released"] is True
-        assert receipt["owned_devices"] == "removed"
-        assert all(receipt[key] is True for key in (
-            "physical_slaves_restored", "no_inflight_input", "no_active_grabs",
-            "owned_masters_removed"))
+        assert receipt["owned_devices"] == "not_created"
+        assert receipt["applications_preserved"] is True
         assert not backend._children and not backend._guardians
         assert backend._session_lease_fd is None
         return receipt
