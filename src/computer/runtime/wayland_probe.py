@@ -7,7 +7,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import logging
 import os
 import re
 import secrets
@@ -23,6 +22,26 @@ _ASSETS = Path(__file__).with_name("assets")
 _REMEDY = ("Keep this session capture-only. Install matching GNOME/Mutter and probe "
            "dependencies, or use a compositor/backend whose disposable same-stack "
            "button-release probe passes; then begin a new consented session.")
+
+
+def _behavior_refusal(public, code):
+    if code == "compositor_held_button_eof_release_failed":
+        return InputAdmission(
+            "refused", code,
+            f"{public.name} {public.version} ({public.backend}): the receiver received a held "
+            "button but did not receive its release after the sole EI sender exited. "
+            "This is the stuck-button damage class. Older Mutter builds contain the "
+            "meta-eis-client drop_device button-state index defect (key instead of button).",
+            "Do not enable input on this build. Install your distribution's Mutter update "
+            "containing upstream fix 4ae305f19e391edda1aab0f9a9c47b01062f6330, or an "
+            "equivalent vendor fix; start a new desktop session at your convenience and "
+            "run qualification again. Odin will not patch or restart the compositor.",
+            public, "same_stack_disposable", ("held_button_eof_release_failed",))
+    return InputAdmission(
+        "refused", code,
+        f"{public.name} {public.version}: disposable {public.backend} "
+        "probe did not verify held-input EOF release and receiver recovery.",
+        _REMEDY, public, "same_stack_disposable")
 
 
 def _manifest(identity) -> dict:
@@ -196,8 +215,6 @@ class GnomeSameStackQualifier:
                         if status != 0:
                             raise RuntimeError("probe_sandbox_or_dependency_failed")
                         result = json.loads(output)
-                        logging.getLogger(__name__).debug(
-                            "Private Wayland probe result: %s", result)
                         if (result.get("nonce") != data["nonce"]
                                 or result.get("binding_digest") != manifest["binding_digest"]):
                             raise RuntimeError("probe_measurement_binding_mismatch")
@@ -205,12 +222,7 @@ class GnomeSameStackQualifier:
                             code = result.get("code", "probe_behavior_failed")
                             if not re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code):
                                 code = "probe_behavior_failed"
-                            return InputAdmission(
-                                "refused", code,
-                                f"{public.name} {public.version}: disposable {public.backend} "
-                                "probe did not verify held-input EOF release "
-                                "and receiver recovery.",
-                                _REMEDY, public, "same_stack_disposable")
+                            return _behavior_refusal(public, code)
                         required = {"held_button_received", "held_key_received", "sole_sender_eof",
                                     "button_release_received", "key_release_received",
                                     "same_receiver_fresh_input", "private_compositor_survived",
