@@ -472,7 +472,14 @@ class ComputerController:
         # a conservative lower bound, not a fabricated source/arrival timestamp.
         captured = self.monotonic()
         request = {"crop": crop} if crop is not None else {}
-        raw = await _bounded(live.backend.observe(**request), 5)
+        try:
+            raw = await _bounded(live.backend.observe(**request), 5)
+        except ComputerError as exc:
+            if exc.code in {"display_asleep", "topology_changed", "stale_source_binding",
+                            "capture_revoked", "portal_closed"}:
+                live.observations.clear()
+                self._delivered_observations.pop(grant.session_id, None)
+            raise
         self._active(grant)
         if not 0 <= self.monotonic() - captured <= FRAME_FRESH_SECONDS:
             raise ComputerError("stale_observation")

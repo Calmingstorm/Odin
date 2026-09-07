@@ -154,3 +154,31 @@ async def test_isolated_start_still_requires_launch_profile(tmp_path):
     finally:
         await controller.close()
         store.close()
+
+
+@pytest.mark.parametrize("reason", ["display_asleep", "topology_changed", "portal_closed"])
+async def test_capture_lifecycle_failure_retires_delivered_pixels(tmp_path, reason):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    context = RequestContext("o", "c", "t", "h")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        sid = grant["session_id"]
+        observed = await controller.observe(context, {"session_id": sid, "generation": 1})
+        obs = controller._live[sid].observations[observed["observation_id"]]
+        await controller.validate_observation_delivery(
+            context, obs.frame_metadata, obs.image_sha256)
+
+        async def unavailable():
+            raise ComputerError(reason)
+
+        backend.observe = unavailable
+        with pytest.raises(ComputerError, match=reason):
+            await controller.observe(context, {"session_id": sid, "generation": 1})
+        assert not controller._live[sid].observations
+        assert sid not in controller._delivered_observations
+        assert backend.injected == 0
+    finally:
+        await controller.close()
+        store.close()
