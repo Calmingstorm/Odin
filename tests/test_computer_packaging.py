@@ -39,6 +39,12 @@ def test_wheel_assets_are_explicit_not_incidental():
     assert any(item.startswith("dbus-next") for item in dependencies)
 
 
+def test_clean_dev_install_includes_computer_contract_test_clients():
+    metadata = tomllib.loads((ROOT / "pyproject.toml").read_text())
+    extras = metadata["project"]["optional-dependencies"]
+    assert set(extras["computer"]) <= set(extras["dev"])
+
+
 def test_packaging_never_compiles_or_activates_a_desktop_at_install():
     hook = (ROOT / "packaging/postinstall.sh").read_text()
     for command in ("gsettings set", "gnome-extensions enable", "xhost +", "cc -std"):
