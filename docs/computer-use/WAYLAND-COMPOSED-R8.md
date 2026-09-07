@@ -46,6 +46,7 @@ logs `/home/odin/tmp/r8-composed-<name>-driver.log`, ownership receipts
 | native2 | r8b | Final corrected selector: genuine qualifier eligible, fresh PipeWire capture; focused=false and task refused before input. Initial diagnostic mistakenly used raw grant props, reported source unavailable. |
 | native3 | r8b | Same eligible result. Correct diagnostic uses authenticated capture metadata; actual production Snapshot returns `wayland_scope_unavailable`. No app input. |
 | native4 | r8c | Parent runtime7c4437f fixes included. Eligible+capture pass. Separate read-only private diagnostic proves scope rejects an empty banner bin. No app input. |
+| native5 | r8d | Parent banner77fad9a included, but newer parent probe now refuses `probe_private_telemetry_or_sender_error` before scope. Fresh refused capture passes; same Inkscape process survives detach. No input. |
 
 Each of these is an **exit1 application failure**, not a successful task. Native1
 identified a true integration mismatch: probe case-insensitive `libGL` regexp
@@ -59,7 +60,12 @@ export, input or gate mutation. In a stable normal native Inkscape window:
 `mode=user`, `overview=false`, `animation=false`, `modal=0`, `stage=null`,
 `bannerBinVisible=true`, `banner=false` (actual `_banner` is null). Only Inkscape
 remains in window stacking. GNOME's empty container visibility incorrectly trips
-the production gate. Parent has the diagnosis for an authoritative narrow fix.
+the production gate. Parent corrected this narrowly in77fad9a. Native5 instead
+exposes a new probe telemetry failure on the later parent snapshot. This remains
+recorded; parent is correcting the GI import refactor. An unchanged rerun would
+not establish anything further. Next harness also uses ComputerController and
+ComputerStore, including the real delivered-observation gate (fixture renderer
+acceptance, not an actual model or Discord delivery).
 
 Image manifests and actual source/guardian SHA256 inventories are in each root.
 Native4 uses the current parent runtime snapshot, not only the initial runtime

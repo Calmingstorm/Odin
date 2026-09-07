@@ -24,10 +24,12 @@ def successful_evidence(tmp_path):
                      checks=sorted(evidence.REQUIRED_CHECKS),
                      compositor={'name': 'fixture_not_real_evidence'})
     rows = [dict(kind='started', result=dict(input_supported=True, input_admission=admission))]
-    rows.extend(dict(kind='action', label=label, result=dict(status='executed', released=True))
+    rows.extend(dict(kind='action', label=label, entrypoint='ComputerController.act',
+                     result=dict(status='executed', execution=dict(released=True, injected=True)))
                 for label in ['rectangle-tool', 'rectangle', 'deselect', 'save'])
     rows += [dict(kind='saved_artifact', sha256=hashlib.sha256(svg).hexdigest()),
              dict(kind='stopped', task_ok=True, result=dict(stopped=True, released=True)),
+             dict(kind='controller_stopped', result=dict(state='closed')),
              dict(kind='application_preserved', alive_same_process=True)]
     cleanup = dict(owned_residuals=[], new_helpers=[], census_errors=[],
                    baseline_complete=True, scan_complete=True, owned_cgroup_absent=True)
@@ -75,7 +77,7 @@ def test_logged_failure_remains_failure(successful_evidence):
 
 def test_release_receipt_required(successful_evidence):
     root, rows, save = successful_evidence
-    rows[2]['result']['released'] = False
+    rows[2]['result']['execution']['released'] = False
     save(rows)
     with pytest.raises(ValueError, match='execution_and_release_required'):
         evidence.analyze(root)

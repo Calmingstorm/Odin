@@ -17,6 +17,10 @@ from pathlib import Path
 from src.computer.runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
 from src.computer.runtime.wayland_probe import GnomeSameStackQualifier
 
+from src.computer.controller import ComputerController
+from src.computer.models import RequestContext
+from src.computer.store import ComputerStore
+
 EVIDENCE = Path('/evidence')
 
 
@@ -65,14 +69,21 @@ async def main():
         qualify=GnomeSameStackQualifier(record_spawn=probe_spawn))
     backend.runtime_identity_callback = lambda identity: record(
         'runtime_identity', identity=identity)
+    context = RequestContext('private-owner', 'private-channel', 'private-turn', 'private-host')
+    store = ComputerStore('/tmp/work/composition.sqlite3', '/tmp/work/frames')
+    controller = ComputerController(store, lambda _app: backend,
+                                    lambda requested: requested == context, enabled=True)
+    grant = None
     application_pid = int((EVIDENCE / 'inkscape.pid').read_text())
     application_stat = Path(f'/proc/{application_pid}/stat')
     application_start = application_stat.read_text().rsplit(')', 1)[1].split()[19]
     consent = asyncio.create_task(operator())
     task_ok = False
     try:
-        started = await backend.start('a' * 32)
-        record('started', result=started)
+        started = await controller.session(context, {'operation': 'start', 'app': 'inkscape'})
+        grant = {'session_id': started['session_id'], 'generation': started['generation']}
+        record('started', result=started, entrypoint='ComputerController.session',
+               authorization='private_fixture_context_only')
         await consent
         if not started['input_supported']:
             try:
@@ -82,17 +93,22 @@ async def main():
                        focused=frame.focused)
             except Exception as capture_error:
                 record('refused_capture_error', error=str(capture_error))
-            raise RuntimeError('production_input_refused:' + str(started['input_blocker']))
+            raise RuntimeError('production_input_refused:' + started['input_admission']['code'])
         await asyncio.sleep(3)
 
         async def observe(label):
-            frame = await backend.observe()
-            (EVIDENCE / f'{label}.png').write_bytes(frame.image_bytes)
+            observed = await controller.observe(context, grant)
+            frame = controller._live[grant['session_id']].observations[observed['observation_id']]
+            image = observed['image_bytes']
+            (EVIDENCE / f'{label}.png').write_bytes(image)
+            await controller.validate_observation_delivery(
+                context, frame.frame_metadata, hashlib.sha256(image).hexdigest())
             record('observation', label=label, focused=frame.focused,
                    source_id=frame.source.source_id, source_revision=frame.source.source_revision,
                    consent_generation=frame.source.consent_generation,
                    width=frame.width, height=frame.height,
-                   sha256=hashlib.sha256(frame.image_bytes).hexdigest())
+                   sha256=hashlib.sha256(image).hexdigest(),
+                   delivery='actual_delivery_gate_fixture_renderer_not_model')
             return frame
 
         async def action(label, kind, **fields):
@@ -108,12 +124,17 @@ async def main():
                 except Exception as error:
                     record('scope_diagnostic', error=str(error))
                 raise RuntimeError('production_authenticated_focus_unavailable')
-            payload = dict(type=kind, source_id=frame.source.source_id,
+            payload = dict(**grant, action_id=label, observation_id=frame.observation_id,
+                operation={'polyline': 'drag'}.get(kind, kind), source_id=frame.source.source_id,
                 source_revision=frame.source.source_revision,
                 consent_generation=frame.source.consent_generation,
-                expected={'type': 'visual_change'}, **fields)
-            result = await backend.act(payload)
-            record('action', label=label, payload=payload, result=result)
+                expect={'type': 'visual_change'},
+                **{('key' if k == 'chord' else k): value for k, value in fields.items()})
+            result = await controller.act(context, payload)
+            record('action', label=label, payload=payload, result=result,
+                   entrypoint='ComputerController.act')
+            if result['status'] not in {'executed', 'verified', 'not_satisfied'}:
+                raise RuntimeError('controller_action_failed:' + result['status'])
             await asyncio.sleep(.3)
             return result
 
@@ -143,8 +164,13 @@ async def main():
         if not consent.done():
             consent.cancel()
         await asyncio.gather(consent, return_exceptions=True)
+        if grant is not None:
+            controller_stop = await controller.session(context, {**grant, 'operation': 'close'})
+            record('controller_stopped', result=controller_stop)
+        await controller.close()
         stopped = await backend.stop()
         record('stopped', result=stopped, task_ok=task_ok)
+        store.close()
         # Detaching product transports must preserve the same existing app.
         current = Path(f'/proc/{application_pid}/stat').read_text().rsplit(')', 1)[1].split()
         preserved = current[19] == application_start and current[0] not in {'Z', 'X', 'x'}

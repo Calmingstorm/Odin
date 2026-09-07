@@ -33,8 +33,14 @@ def analyze(directory):
     if [row['label'] for row in actions] != ['rectangle-tool', 'rectangle', 'deselect', 'save']:
         raise ValueError('complete_actual_gui_actions_required')
     for row in actions:
-        if row['result']['status'] != 'executed' or row['result']['released'] is not True:
+        if (row['result']['status'] not in {'executed', 'verified', 'not_satisfied'}
+                or row['result']['execution']['released'] is not True
+                or row['result']['execution']['injected'] is not True
+                or row.get('entrypoint') != 'ComputerController.act'):
             raise ValueError('execution_and_release_required')
+    controller_stops = [row for row in rows if row['kind'] == 'controller_stopped']
+    if len(controller_stops) != 1 or controller_stops[0]['result']['state'] != 'closed':
+        raise ValueError('controller_cleanup_required')
     stop = stops[0]
     if not (stop['task_ok'] and stop['result']['stopped'] and stop['result']['released']):
         raise ValueError('production_cleanup_required')
