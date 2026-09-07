@@ -209,6 +209,47 @@ def test_pointer_foreign_leaf_rejected(app):
         checker.assert_snapshot(before, monitor, (50, 60))
 
 
+def test_owned_pointer_callback_retains_descent_and_core_is_untouched(app):
+    display, checker, monitor = app
+    before = checker.snapshot(monitor)
+    display.pointer = (700, 500)
+    queried = []
+
+    def owned_query(identity):
+        queried.append(identity)
+        return NS(same_screen=True, root_x=50, root_y=60,
+                  child=display.windows[identity].child)
+
+    assert checker.assert_snapshot(before, monitor, (50, 60),
+                                   pointer_query=owned_query) == before
+    assert queried == [10, 20, 21]
+    assert display.pointer == (700, 500)
+    with pytest.raises(scope.ScopeFailure, match="pointer_scope_changed"):
+        checker.assert_snapshot(before, monitor, (51, 60), pointer_query=owned_query)
+    display.target.child = Window(display, 30, display.target)
+    display.windows[30] = display.target.child
+    display.owners[30] = 9999
+    with pytest.raises(scope.ScopeFailure, match="pointer_scope_changed"):
+        checker.assert_snapshot(before, monitor, (50, 60), pointer_query=owned_query)
+
+
+def test_owned_pointer_callback_cannot_skip_target_or_final_snapshot(app):
+    display, checker, monitor = app
+    before = checker.snapshot(monitor)
+    with pytest.raises(scope.ScopeFailure, match="pointer_scope_changed"):
+        checker.assert_snapshot(before, monitor, (50, 60), pointer_query=lambda identity:
+                                NS(same_screen=True, root_x=50, root_y=60, child=0))
+
+    def changed_query(identity):
+        if identity == 21:
+            display.target.props["WM_NAME"] = b"Password"
+        return NS(same_screen=True, root_x=50, root_y=60,
+                  child=display.windows[identity].child)
+
+    with pytest.raises(scope.ScopeFailure, match="pointer_scope_changed"):
+        checker.assert_snapshot(before, monitor, (50, 60), pointer_query=changed_query)
+
+
 def test_bounded_ancestor_cycle(app):
     display, checker, monitor = app
     display.target.parent = display.leaf

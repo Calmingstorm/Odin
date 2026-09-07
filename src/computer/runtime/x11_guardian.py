@@ -381,7 +381,8 @@ def execute(request, *, controller_fd=0, authorize=None):
                 if pointer[0] is not None:
                     if native.pointer() != pointer[0]:
                         raise GuardianFailure("shared_pointer_changed")
-                    scope.assert_snapshot(expected, monitor, point=pointer[0])
+                    scope.assert_snapshot(expected, monitor, point=pointer[0],
+                                          pointer_query=native.query_pointer)
                 else:
                     scope.assert_snapshot(expected, monitor)
         helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]),

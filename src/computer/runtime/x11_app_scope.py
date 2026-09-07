@@ -322,7 +322,7 @@ class AppScope:
         except Exception:
             return None
 
-    def assert_snapshot(self, expected, monitor, point=None):
+    def assert_snapshot(self, expected, monitor, point=None, *, pointer_query=None):
         current = self.snapshot(monitor)
         if (current is None or current != expected or not current["focused"]
                 or current["modal_kind"] == "unrecognized"):
@@ -345,7 +345,9 @@ class AppScope:
                     target_seen |= identity == current["window"]
                     if target_seen and self._pid(window) != current["process"]["pid"]:
                         raise ValueError
-                    query = window.query_pointer()
+                    # Native injection's client is bound to the owned master.
+                    query = (window.query_pointer() if pointer_query is None
+                             else pointer_query(identity))
                     if not query.same_screen or (query.root_x, query.root_y) != (x, y):
                         raise ValueError
                     if not _xid(query.child):

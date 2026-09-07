@@ -528,14 +528,27 @@ class ExistingXTest:
         self._assert_identity()
 
     def pointer(self) -> tuple[int, int]:
+        query = self.query_pointer(self._x.XDefaultRootWindow(self._display))
+        return query.root_x, query.root_y
+
+    def query_pointer(self, window):
+        """Hit-test on this client's selected, identity-pinned master."""
+        from types import SimpleNamespace
+
+        if type(window) is not int or not 0 < window <= 0xFFFFFFFF:
+            raise X11DeviceError("invalid_pointer_window")
+        self._assert_identity()
         with self._checked():
             root, child = C.c_ulong(), C.c_ulong()
             rx, ry, wx, wy, mask = C.c_int(), C.c_int(), C.c_int(), C.c_int(), C.c_uint()
-            if not self._x.XQueryPointer(self._display, self._x.XDefaultRootWindow(self._display),
+            if not self._x.XQueryPointer(self._display, window,
                                         C.byref(root), C.byref(child), C.byref(rx), C.byref(ry),
                                         C.byref(wx), C.byref(wy), C.byref(mask)):
                 raise X11DeviceError("pointer_unavailable")
-            return rx.value, ry.value
+            result = SimpleNamespace(same_screen=True, root_x=rx.value, root_y=ry.value,
+                                     child=child.value)
+        self._assert_identity()
+        return result
 
     def _assert_keyboard_mapping(self, expected=None):
         self._assert_identity()
