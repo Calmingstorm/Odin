@@ -169,10 +169,21 @@ class WaylandGuardian:
             self._child.stdin.write(data.encode("ascii"))
             await self._child.stdin.drain()
 
-    async def _receive(self, event: str, *, timeout: float):
+    async def _receive(self, event: str, *, timeout: float, pixel_guard=None):
         async def receive():
+            previous_step = 0
             while True:
                 row = await self._events.get()
+                if row.get("event") == "pixel_gate":
+                    step = row.get("step")
+                    if (pixel_guard is None or set(row) != {"event", "step"}
+                            or type(step) is not int or not previous_step < step <= 1_000_000):
+                        raise WaylandGuardianError("wayland_guardian_unexpected_receipt")
+                    # One fresh authenticated focus check per native dispatch.
+                    await asyncio.wait_for(pixel_guard(), 0.45)
+                    await self._send(f"G {step}\n")
+                    previous_step = step
+                    continue
                 if row.get("event") == event:
                     return row
                 if row.get("event") == "action_rejected" and event == "action_done":
@@ -202,10 +213,11 @@ class WaylandGuardian:
             self._ready = await self._receive("selected", timeout=2)
             return self.ready
 
-    async def act(self, command: str):
+    async def act(self, command: str, *, pixel_guard=None):
         if (type(command) is not str or not command or len(command) > 32000
-                or command[0] not in "MPDKTJQWVLYZ" or "\n" in command or "\r" in command
-                or "\x00" in command):
+                or command[0] not in "MPDKTJQWVLYZE" or "\n" in command or "\r" in command
+                or "\x00" in command
+                or (command.startswith("E ") != (pixel_guard is not None))):
             raise WaylandGuardianError("wayland_guardian_invalid_action")
         async with self._action_lock:
             if not self.alive:
@@ -215,7 +227,7 @@ class WaylandGuardian:
             self._last_terminal = {}
             try:
                 await self._send("B 2000\n" + command + "\n")
-                receipt = await self._receive("action_done", timeout=3)
+                receipt = await self._receive("action_done", timeout=3, pixel_guard=pixel_guard)
                 self._active = False
             except BaseException as exc:
                 await self.close()

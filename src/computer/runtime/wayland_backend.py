@@ -105,7 +105,10 @@ class WaylandRuntimeBackend:
                     "effect_expectations": ["visual_change", "region_changed"],
                     "accessible_targets": "unavailable", "replace_field": "unavailable",
                     "element_targeting": "observed_pixel_region_click",
-                    "replace_field_pixels": "unavailable_native_compound_guard_required",
+                    "replace_field_pixels": "pixel_fields_v1_capability_required",
+                    "pixel_field_requires": ["fresh_observed_editable_region", "single_line_text",
+                        "whole_native_keyplan", "exact_focus_each_chord", "visual_verification"],
+                    "pixel_field_budget": "two_second_lease_short_values_only",
                     "click_count": "native_click_modifiers_v1_capability_required",
                     "click_modifiers": "native_click_modifiers_v1_capability_required",
                     "scroll_modifiers": "native_pointer_modifiers_v1_capability_required",
@@ -390,7 +393,8 @@ class WaylandRuntimeBackend:
         fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
                   "double_click": {"x", "y"}, "right_click": {"x", "y"},
                   "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
-                  "polyline": {"points", "duration"}}
+                  "polyline": {"points", "duration"},
+                  "replace_field_pixels": {"region", "text"}}
         required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
         click_types = {"click", "double_click", "right_click", "middle_click"}
         optional = {"expected_modal"}
@@ -448,6 +452,23 @@ class WaylandRuntimeBackend:
                 raise ComputerError("wayland_point_outside_authenticated_application")
             return f"{float(x):.8f} {float(y):.8f}"
 
+        if action["type"] == "replace_field_pixels":
+            from ..gui_actions import crop_arguments
+
+            region = crop_arguments(action["region"], frame.width, frame.height)
+            text = action["text"]
+            if (type(text) is not str or len(text) > 256
+                    or any(ord(c) < 32 or 127 <= ord(c) <= 159
+                           or 0xD800 <= ord(c) <= 0xDFFF for c in text)):
+                raise ComputerError("wayland_invalid_unicode_text")
+            if not self._guardian or self._guardian.ready.get("pixel_fields_v1") is not True:
+                raise ComputerError("wayland_pixel_fields_unavailable")
+            # Ground the complete rectangle, not only its click center.
+            point([region["x"], region["y"]])
+            point([region["x"] + region["width"] - 1, region["y"] + region["height"] - 1])
+            center = point([region["x"] + (region["width"] - 1) // 2,
+                            region["y"] + (region["height"] - 1) // 2])
+            return f"E {center} " + (text.encode("utf-8").hex() if text else "-")
         if action["type"] in {"click", "right_click", "middle_click", "double_click"}:
             button = {"right_click": 273, "middle_click": 274}.get(action["type"], 272)
             default = 2 if action["type"] == "double_click" else 1
@@ -563,8 +584,23 @@ class WaylandRuntimeBackend:
             watchdog = asyncio.create_task(
                 self._watch_action(metadata, fresh_scope, self._generation))
             self._jobs.add(watchdog)
+            generation = self._generation
+
+            async def pixel_guard():
+                self._active()
+                if (generation != self._generation or self._scope_provider is None
+                        or not 0 <= time.monotonic() - self._captured_at <= 5):
+                    raise ComputerError("wayland_generation_revoked")
+                current_scope = await self._scope_provider.snapshot(metadata)
+                self._active()
+                if (generation != self._generation
+                        or _scope_binding(current_scope) != _scope_binding(scope)):
+                    raise ComputerError("wayland_focus_changed")
+
             try:
-                delivered = await self._guardian.act(command)
+                delivered = (await self._guardian.act(command, pixel_guard=pixel_guard)
+                             if action["type"] == "replace_field_pixels"
+                             else await self._guardian.act(command))
                 if self._paused or self._closed or delivered.get("event") != "action_done":
                     raise ComputerError("wayland_action_revoked_outcome_unknown")
                 receipt: dict[str, Any] = {"status": "executed", "injected": True, "released": True,
@@ -572,6 +608,8 @@ class WaylandRuntimeBackend:
                        if "diagnostics" in delivered else {}),
                     "application_provenance": canonical_application_provenance(scope),
                     "release_basis": "guardian_owned_ledger_and_qualified_compositor",
+                    **({"targeting_path": "explicit_pixel_region"}
+                       if action["type"] == "replace_field_pixels" else {}),
                     "postcondition": {"type": "visual_change", "status": "unavailable",
                         "source_id": frame.source.source_id,
                         "source_revision": frame.source.source_revision,
