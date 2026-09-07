@@ -56,6 +56,17 @@ The deployed installation still needs operator-authorized desktop-identity or
 shared route does **not** need sudo closefrom override, new privileges, or a new
 sudo policy beyond the existing explicitly configured worker execution path.
 
+Final read-only workstation preflight used the actual backend subprocess/identity
+gate with an explicit in-memory `runtime_sudo=true`, not a root-only substitute.
+It resolved the current focused application on DP-4 and returned the precise
+outside-source reason for the other three monitors. No pixels were captured,
+input sent, devices created, focus changed or live configuration written. The
+current sudo policy already permits this worker path; no new sudo grant is
+needed. `/tmp/cu-r13-live-worker-preflight-owned.json` completed exit0 with verified
+cleanup. To activate it in the deployed service, the operator must deliberately
+set `computer.runtime_sudo: true` and apply the restart-pinned configuration via
+the authorized deployment path. This round does not perform that deploy/restart.
+
 ## F4: System UI parity
 
 Computer uses shared card, header, detail and control styles instead of inline
