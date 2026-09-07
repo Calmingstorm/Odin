@@ -69,10 +69,10 @@ def test_general_focused_apps_and_ordinary_dialogs_accepted(monkeypatch, wm_clas
 @pytest.mark.parametrize("text", ["Terminal", "Authentication", "Password", "Polkit",
                                   "Keyring", "Pinentry", "sudo", "Odin", "Security"])
 @pytest.mark.parametrize("field", ["WM_NAME", "WM_CLASS", "_NET_WM_NAME"])
-def test_denied_classes_remain_refused(monkeypatch, text, field):
+def test_names_do_not_deny_focused_applications(monkeypatch, text, field):
     display, checker, monitor = app_scope(monkeypatch, None, "custom-app")
     display.target.props[field] = text.encode()
-    assert checker.snapshot(monitor) is None
+    assert checker.snapshot(monitor)["focused"] is True
 
 
 @pytest.mark.parametrize("parent_pid", [1234, 9999])
@@ -94,7 +94,7 @@ def test_dialog_chain_is_normal_and_binds_parent_identity(monkeypatch, parent_pi
     with pytest.raises(scope.ScopeFailure):
         checker.assert_snapshot(evidence, monitor)
     main.props["WM_NAME"] = b"Authentication"
-    assert checker.snapshot(monitor) is None
+    assert checker.snapshot(monitor)["modal_kind"] == "safe_application"
 
 
 def test_unparented_focused_dialog_eligible(monkeypatch):

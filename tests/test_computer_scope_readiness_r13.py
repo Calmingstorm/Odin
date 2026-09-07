@@ -72,10 +72,12 @@ async def test_start_selects_eligible_monitor_and_reports_real_readiness(monkeyp
     await backend.detach()
 
 
-def test_denied_focus_reports_precise_static_reason(app):
+def test_readiness_is_not_denied_by_application_name(app):
     display, checker, monitor = app
     display.windows[20].props["WM_CLASS"] = b"terminal"
-    assert checker.inspect(monitor) == (None, "denied_application")
+    binding, reason = checker.inspect(monitor)
+    assert binding["focused"] is True
+    assert reason is None
 
 
 @pytest.mark.parametrize("state,age,expected", [

@@ -8,11 +8,26 @@ from io import BytesIO
 
 from .models import ComputerError
 
-POINTER_OPERATIONS = frozenset({"click", "double_click", "right_click", "middle_click", "scroll"})
+STROKE_OPERATIONS = frozenset({"drag", "polyline"})
+POINTER_OPERATIONS = frozenset({"click", "double_click", "right_click", "middle_click", "scroll",
+                                *STROKE_OPERATIONS})
 TARGET_RADIUS = 24
 MAX_CHANGED_FRACTION = .02
 MAX_CHANGED_PIXELS = 48
 CHANNEL_TOLERANCE = 12
+
+
+def pointer_anchor(action):
+    """Delivered-image anchor checked once, BEFORE dispatch and button-down.
+
+    A stroke changes its own canvas. Neither this raster comparison nor its
+    neighbourhood tolerance belongs in the held-input loop. The native guardian
+    still verifies the hit before pressing, source/focus during movement, and
+    revocation, overlap, deadlines and unconditional owned-input release.
+    """
+    if action["operation"] in STROKE_OPERATIONS:
+        return action["points"][0]
+    return action["x"], action["y"]
 
 
 def pointer_target_stable(before: bytes, after: bytes, x: int, y: int) -> bool:

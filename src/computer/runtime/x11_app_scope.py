@@ -16,17 +16,12 @@ from typing import Any
 
 MAX_DEPTH = 32
 MAX_PROPERTY = 4096
-_DENIED = re.compile(
-    r"terminal|xterm|konsole|gnome-terminal|xfce4-terminal|alacritty|kitty|"
-    r"password|passphrase|authentication|authenticate|polkit|security|"
-    r"credential|pinentry|keyring|sudo|odin|command prompt|\bshell\b", re.I)
-
 # Only these pixel-free reasons may leave the private scope adapter.
 SCOPE_REASONS = frozenset({
     "application_identity_unavailable", "application_identity_changed",
     "application_scope_unavailable", "application_scope_changed",
     "source_scope_unavailable", "application_uid_mismatch",
-    "application_process_unreadable", "denied_application",
+    "application_process_unreadable",
     "no_focused_application", "focused_application_outside_source",
 })
 
@@ -105,7 +100,7 @@ class AppScope:
     """Use an owner-provided python-xlib Display; never closes it.
 
     The worker must run with the application's UID or explicitly provisioned root
-    inspection privileges. No privilege escalation is attempted here. Denied/unknown
+    inspection privileges. No privilege escalation is attempted here. Unavailable
     snapshot returns None. assert_snapshot returns fresh evidence or raises a
     static ScopeFailure. rect is root-absolute and clipped to the source monitor.
     """
@@ -158,11 +153,10 @@ class AppScope:
         legacy_title = self._text(window, "WM_NAME")
         title = modern_title or legacy_title
         wm_class = self._text(window, "WM_CLASS")
-        if any(_DENIED.search(text) for text in (modern_title, legacy_title, wm_class)):
-            raise ScopeFailure("denied_application")
-        # Metadata is used only for rejection/classification, never PID approval.
+        # Titles/classes are provenance, never an application permission list.
+        # Task authorization is not inferred from a name or this native binding.
         # Harmless document title changes (dirty asterisk) are not source changes.
-        # Title rejection stays live above; modal titles are bound separately.
+        # Modal titles are bound separately.
         digest = hashlib.sha256(wm_class.encode()).hexdigest()
         return title, wm_class, digest
 
@@ -383,7 +377,7 @@ class AppScope:
                            or target["process"] == current["process"])
                 if not related:
                     raise ValueError
-                # Bounds and denial/provenance checks apply to the actual hit,
+                # Bounds and provenance checks apply to the actual hit,
                 # including every descendant and its transient family, not just
                 # the focused top-level. Popup extent may exceed that top-level.
                 left, top, width, height = target["rect"]

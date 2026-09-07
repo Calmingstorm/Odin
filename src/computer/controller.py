@@ -736,13 +736,16 @@ class ComputerController:
                                  and grant.environment == "existing_session"
                                  and inp["operation"] in {"type", "key"})
             if not attached_keyboard and current.image_sha256 != original.image_sha256:
-                from .grounding import POINTER_OPERATIONS, pointer_target_stable
+                from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
                 stable = False
                 if (grant.environment == "existing_session"
                         and inp["operation"] in POINTER_OPERATIONS):
                     before, _ = self.store.read_evidence(context, original.evidence_id)
                     after, _ = self.store.read_evidence(context, current.evidence_id)
-                    stable = pointer_target_stable(before, after, inp["x"], inp["y"])
+                    # For strokes this is only the START anchor, before dispatch.
+                    # Post-press raster changes are the action's effects, not a
+                    # stale-target failure. Native lifecycle checks remain live.
+                    stable = pointer_target_stable(before, after, *pointer_anchor(inp))
                 if not stable:
                     raise ComputerError("visual_target_changed")
             payload, target = action_payload(inp, current)

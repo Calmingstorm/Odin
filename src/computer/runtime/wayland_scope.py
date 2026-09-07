@@ -18,7 +18,6 @@ import stat
 import time
 from pathlib import Path
 
-from .x11_app_scope import _DENIED
 from .x11_app_scope import _process_identity as _application_identity
 
 BUS_NAME = "org.gnome.Shell.Extensions.OdinScope"
@@ -135,8 +134,7 @@ def _validate_observation(result, challenge, source, source_digest):
     for field in ("title", "wm_class"):
         text = result.get(field)
         if (not isinstance(text, str) or len(text) > 4096 or "\x00" in text
-                or any(0xD800 <= ord(c) <= 0xDFFF for c in text)
-                or _DENIED.search(text)):
+                or any(0xD800 <= ord(c) <= 0xDFFF for c in text)):
             _fail("wayland_focus_unavailable")
     if (type(result.get("pid")) is not int or result["pid"] <= 1
             or type(result.get("focus_serial")) is not int or result["focus_serial"] < 1

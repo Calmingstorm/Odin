@@ -129,10 +129,10 @@ def test_main_session_and_remote_rejected_before_requests(name):
 
 
 @pytest.mark.parametrize("title", [b"Terminal", b"Password", b"Odin", b"Security dialog"])
-def test_negative_metadata_is_not_approved(app, title):
+def test_title_is_not_an_application_permission_gate(app, title):
     display, checker, monitor = app
     display.target.props["WM_NAME"] = title
-    assert checker.snapshot(monitor) is None
+    assert checker.snapshot(monitor)["focused"] is True
 
 
 def test_focus_other_owner_and_no_focus_rejected(app):
@@ -242,7 +242,7 @@ def test_owned_pointer_callback_cannot_skip_target_or_final_snapshot(app):
 
     def changed_query(identity):
         if identity == 21:
-            display.target.props["WM_NAME"] = b"Password"
+            display.target.geometry[2] += 1
         return NS(same_screen=True, root_x=50, root_y=60,
                   child=display.windows[identity].child)
 
@@ -264,7 +264,7 @@ def test_bounded_property(app):
 
 @pytest.mark.parametrize("title,kind", [(b"Save As", "safe_application"),
                                       ("Save As…".encode(), "safe_application"),
-                                      ("Save As… authentication".encode(), None),
+                                      ("Save As… authentication".encode(), "safe_application"),
                                       (b"Information", "safe_application"),
                                       (b"Confirmation", "safe_application")])
 def test_same_process_dialog_classification(app, title, kind):
@@ -409,11 +409,11 @@ def test_installed_identity_records_writable_ancestor(tmp_path):
     assert scope._trusted_file(Path(binary)) is False
 
 
-def test_both_title_channels_reject_security(app):
+def test_neither_title_channel_is_an_application_denial(app):
     display, checker, monitor = app
     display.target.props["_NET_WM_NAME"] = b"Harmless"
     display.target.props["WM_NAME"] = b"Authentication"
-    assert checker.snapshot(monitor) is None
+    assert checker.snapshot(monitor)["focused"] is True
 
 
 def test_absent_atom_is_requeried_when_dialog_creates_it(app):

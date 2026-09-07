@@ -143,3 +143,51 @@ async def test_capture_only_does_not_query_input_readiness(monkeypatch):
     monkeypatch.setattr(backend, "_read_worker", read)
     await backend.follow_focus()
     read.assert_not_called()
+
+
+@pytest.mark.parametrize("operation", ["drag", "polyline"])
+async def test_stroke_checks_start_once_and_allows_its_own_canvas_changes(
+        tmp_path, monkeypatch, operation):
+    from src.computer import grounding
+
+    checked = []
+    original_check = grounding.pointer_target_stable
+    def check(before, after, x, y):
+        checked.append((x, y))
+        return original_check(before, after, x, y)
+    monkeypatch.setattr(grounding, "pointer_target_stable", check)
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        action.update(operation=operation, points=[[2, 2], [10, 7], [15, 8]], duration=.2)
+        backend = controller._live[action["session_id"]].backend
+        original_inject = backend._input_worker
+        async def draw(request):
+            receipt = await original_inject(request)
+            # The stroke changes far more than the anchor's tolerance. This is
+            # post-press evidence, not a reason to cancel or reject the drawing.
+            state["image"] = raster(size=(20, 10))
+            return receipt
+        monkeypatch.setattr(backend, "_input_worker", draw)
+        result = await controller.act(ctx, action)
+        assert result["status"] == "verified"
+        assert checked == [(2, 2)]
+        assert calls[0]["action"]["type"] == "polyline"
+        assert calls[0]["action"]["points"] == [[105, 205], [121, 215], [131, 217]]
+        assert controller.store.get_session(action["session_id"]).state == "active"
+        assert await controller.act(ctx, action) == result
+        assert len(calls) == 1 and checked == [(2, 2)]
+
+
+@pytest.mark.parametrize("operation", ["drag", "polyline"])
+@pytest.mark.parametrize("change", ["pixels", "focus"])
+async def test_stroke_still_refuses_changed_start_or_native_target_before_press(
+        tmp_path, monkeypatch, operation, change):
+    async with fixture(tmp_path, monkeypatch) as (controller, ctx, action, state, calls):
+        action.update(operation=operation, points=[[2, 2], [10, 7]], duration=.2)
+        if change == "pixels":
+            state["image"] = raster(size=(20, 10))
+        else:
+            state["binding"]["window"] = 91
+        with pytest.raises(ComputerError, match=("visual_target_changed" if change == "pixels"
+                                                else "stale_source_binding")):
+            await controller.act(ctx, action)
+        assert not calls

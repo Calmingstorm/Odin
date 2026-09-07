@@ -118,10 +118,9 @@ def test_generic_application_keeps_provenance_without_executable_allowlist(provi
                                            ("Password", "custom-app"),
                                            ("Authentication", "polkit-kde"),
                                            ("Credential", "kwalletmanager")])
-def test_same_denied_class_boundary_as_gnome(provider, title, wm_class):
+def test_same_name_independent_admission_as_gnome(provider, title, wm_class):
     provider.snapshot_patch = {"title": title, "wm_class": wm_class}
-    with pytest.raises(common.WaylandScopeFailure):
-        asyncio.run(provider.snapshot(SOURCE))
+    assert asyncio.run(provider.snapshot(SOURCE))["safe_focus"] is True
 
 
 @pytest.mark.parametrize("patch", [{"challenge": "replay"}, {"source_digest": "other"},

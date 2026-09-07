@@ -146,7 +146,7 @@ def test_pid_reuse_rejected_against_pinned_start(provider, monkeypatch):
 
 @pytest.mark.parametrize("patch", [
     {"native_wayland": False}, {"safe_focus": False}, {"challenge": "replay"},
-    {"source_digest": "different"}, {"wm_class": "terminal"}, {"pid": True},
+    {"source_digest": "different"}, {"wm_class": "bad\x00class"}, {"pid": True},
     {"focus_serial": 0}, {"focus_token": "title"},
     {"bounds": {"x": -1, "y": 0, "width": 30, "height": 30}},
     {"bounds": {"x": 1900, "y": 0, "width": 30, "height": 30}},
@@ -195,10 +195,9 @@ def test_reply_extra_private_fields_are_discarded(provider):
 @pytest.mark.parametrize("field", ["title", "wm_class"])
 @pytest.mark.parametrize("text", ["Terminal", "Password", "Polkit", "Keyring", "Pinentry",
                                   "Authentication", "sudo", "Odin", "Security"])
-def test_shared_denied_class_boundary(provider, field, text):
+def test_application_names_are_provenance_not_denial(provider, field, text):
     provider.mutate = lambda result: result | {field: text}
-    with pytest.raises(scope.WaylandScopeFailure, match="focus_unavailable"):
-        asyncio.run(provider.snapshot(SOURCE))
+    assert asyncio.run(provider.snapshot(SOURCE))["safe_focus"] is True
 
 
 def test_ordinary_portal_dialog_records_modal_provenance(provider):

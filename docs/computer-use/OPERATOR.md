@@ -20,9 +20,11 @@ permissions; this is not a separate chat mode.
 Attached use targets the
 user's chosen window without an application launch profile. Ordinary applications,
 menus, file pickers and document open/new/save/close/reopen are ordinary tasks.
-Terminals, shells, security/authentication/password prompts, keyrings, polkit and
-Odin's own control surface remain denied. Process/window provenance and fresh
-source/focus checks remain safety boundaries. Eligibility is not task success.
+Attached native scope does not deny applications by title or class. Names are
+provenance, not task authorization; the assistant's tool-use restrictions and
+the user's explicit task still govern what it may do. Process/window provenance,
+fresh source/focus checks and input lifecycle gates remain. Eligibility is not
+task success.
 
 The tools provide click, double/right/middle click, drag/polyline, scroll, generic
 keys, Unicode typing and bounded observation crops. Attached X11 currently uses

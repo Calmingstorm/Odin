@@ -53,7 +53,7 @@ def same_application_scope(before, after):
     """Fresh trusted process/source and same top-level family, not exact focus.
 
     Postcondition evidence only, never permission to reuse an observation.
-    Both scopes originate in AppScope's XRes/process and rejection checks.
+    Both scopes originate in AppScope's XRes/process and geometry checks.
     """
     if not isinstance(before, dict) or not isinstance(after, dict):
         return False

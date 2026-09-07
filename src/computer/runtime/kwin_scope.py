@@ -2,7 +2,7 @@
 
 The provider must share the real org.kde.KWin connection, executable inode, UID
 and pinned process. A metadata proxy cannot satisfy this protocol. The common
-snapshot path supplies denied-class policy, challenge, double-read application
+snapshot path supplies metadata validation, challenge, double-read application
 provenance and source/focus freshness validation.
 """
 from __future__ import annotations
