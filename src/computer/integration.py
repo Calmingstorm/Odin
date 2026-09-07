@@ -217,7 +217,7 @@ class ComputerIntegration:
                 grant.images.append(image)
                 return image
             unknown = isinstance(result, dict) and (
-                result.get("status") == "unknown"
+                result.get("status") in {"unknown", "interrupted"}
                 or result.get("state") in {"unknown", "quarantined"}
                 or (isinstance(result.get("cleanup"), dict)
                     and result["cleanup"].get("complete") is not True)

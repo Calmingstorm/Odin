@@ -8,9 +8,9 @@ import uuid
 from copy import deepcopy
 from dataclasses import asdict
 
-from .actions import click_receipt
 from .app_profiles import application_profile
-from .gui_actions import action_arguments, action_payload, crop_arguments, visual_receipt
+from .effects import effect_receipt, execution_receipt, region_effect
+from .gui_actions import action_arguments, action_payload, crop_arguments
 from .models import (
     BackendCapabilities,
     BackendObservation,
@@ -318,9 +318,10 @@ class ComputerController:
         return result
 
     def _input_status(self, live, grant):
+        limits = getattr(live.backend, "input_limits", {})
         readiness = getattr(live.backend, "input_readiness", None)
         if not isinstance(readiness, str):
-            return {}
+            return {"input_limits": deepcopy(limits)}
         supported = getattr(live.backend, "input_supported", False) is True
         blocker = getattr(live.backend, "input_blocker", None)
         if grant.state != "active":
@@ -330,7 +331,7 @@ class ComputerController:
             supported, readiness, blocker = (
                 False, "observation_required", "fresh_observation_required")
         return {"input_supported": supported, "input_readiness": readiness,
-                "input_blocker": blocker}
+                "input_blocker": blocker, "input_limits": deepcopy(limits)}
 
     async def session(self, context: RequestContext, inp: dict) -> dict:
         exact_keys(inp, {"operation", "session_id", "generation", "app", "name"}, {"operation"})
@@ -750,6 +751,9 @@ class ComputerController:
             if live.capabilities is None or live.capabilities.environment != grant.environment:
                 raise ComputerError("attachment_unavailable")
             input_eligible(live.capabilities)
+            supported_effects = getattr(live.backend, "input_limits", {}).get("effect_expectations")
+            if supported_effects is not None and inp["expect"]["type"] not in supported_effects:
+                raise ComputerError("unsupported_postcondition")
             if self._delivered_observations.get(grant.session_id) != inp["observation_id"]:
                 raise ComputerError("observation_not_delivered")
             original = live.observations.get(inp["observation_id"])
@@ -824,7 +828,24 @@ class ComputerController:
                     stable = pointer_target_stable(before, after, *pointer_anchor(inp))
                 if not stable:
                     raise ComputerError("visual_target_changed")
-            payload, target = action_payload(inp, current)
+            dispatch_inp = deepcopy(inp)
+            if inp["expect"]["type"] == "field_text_equals":
+                # AT-SPI handles are observation scoped. Rebind only a unique,
+                # exact metadata match, never a name or coordinates alone.
+                old = [n for n in original.accessibility
+                       if n.get("handle") == inp["expect"]["target"]]
+                def identity(node):
+                    return {k: v for k, v in node.items() if k not in {"handle", "parent"}}
+                matches = [n for n in current.accessibility if len(old) == 1
+                           and identity(n) == identity(old[0])]
+                if len(matches) != 1:
+                    raise ComputerError("accessible_target_changed")
+                dispatch_inp["expect"]["target"] = matches[0]["handle"]
+                if "target" in dispatch_inp:
+                    dispatch_inp["target"] = matches[0]["handle"]
+            payload, target = action_payload(dispatch_inp, current)
+            before_image = (self.store.read_evidence(context, current.evidence_id)[0]
+                            if inp["expect"]["type"] == "region_changed" else None)
             await self._auth(context)
             self._active(grant)
             if (not 0 <= self.monotonic() - original.captured_at <= DELIVERED_GROUNDING_SECONDS
@@ -843,16 +864,19 @@ class ComputerController:
             if live.task_context is not None:
                 live.task_context.invalidate("action_may_change_ui_state")
             next_observation = None
+            settled_result = None
             try:
                 self._active(grant)
                 raw = await _bounded(live.backend.act(payload),
                                      min(MAX_ACTION_RPC_SECONDS, live.deadline - self.monotonic()))
+                # Settle release before any later capture/auth/metadata failure.
+                settled_result = execution_receipt(raw, {"status": "unknown"})
+                settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
                 self._active(grant)
                 await self._auth(context)
                 self._active(grant)
-                visual = inp["expect"]["type"] == "visual_change"
-                result = (visual_receipt(raw, current) if visual
-                          else click_receipt(raw, current, target))
+                visual = inp["expect"]["type"] != "pointer_at"
+                result = settled_result
                 if result["status"] not in {"unknown", "unavailable"}:
                     crop = (asdict(current.frame_metadata.crop)
                             if current.frame_metadata is not None
@@ -875,7 +899,8 @@ class ComputerController:
                         await self._auth(context)
                         self._active(grant)
                         live.observations.clear()
-                        result["status"] = "executed"
+                        if result["status"] != "interrupted":
+                            result["status"] = "executed"
                         result["verification"].update(
                             status="unavailable", reason=exc.code,
                             next_action="observe_again_without_crop")
@@ -884,7 +909,8 @@ class ComputerController:
                     self._active(grant)
                     age = self.monotonic() - after.captured_at
                     binding_matches = after.geometry == current.geometry
-                    disappeared = (visual and grant.environment == "existing_session"
+                    disappeared = (inp["expect"]["type"] == "window_gone"
+                                   and grant.environment == "existing_session"
                                    and result["verification"].get("target_disappeared") is True)
                     if (disappeared
                             or (visual and result["verification"].get("target_application_matches")
@@ -909,17 +935,39 @@ class ComputerController:
                                 and after.focused)))
                     if not 0 <= age <= FRAME_FRESH_SECONDS:
                         raise ComputerError("postcondition_binding_changed")
+                    expected_transition = (
+                        inp["expect"]["type"] in {"dialog_appeared", "menu_appeared"}
+                        and result["verification"].get("status") == "satisfied")
+                    if (expected_transition
+                            and result["verification"].get("target_application_matches") is True
+                            and provenance is not None
+                            and getattr(live.backend, "application_provenance", None)
+                            == provenance):
+                        binding_matches = (after.source.source_id == current.source.source_id
+                                           and after.scope.consent_generation
+                                           == current.scope.consent_generation
+                                           and after.scope.capture_sources
+                                           == current.scope.capture_sources
+                                           and after.focused)
                     if not binding_matches:
-                        if grant.environment != "existing_session":
-                            raise ComputerError("postcondition_binding_changed")
                         # A document/menu transition is not an unknown input
                         # outcome after acknowledged injection and release.
                         # Require NEW observation delivery before any further
                         # input; never reuse authority for the changed target.
-                        result["status"] = "not_satisfied"
+                        if result["status"] != "interrupted":
+                            result["status"] = "not_satisfied"
                         result["verification"].update(
                             status="not_satisfied", target_application_matches=False,
                             reason="target_changed_observe_again")
+                    if (after.modal != current.modal and not expected_transition
+                            and inp["expect"]["type"] != "window_gone"):
+                        if result["status"] != "interrupted":
+                            result["status"] = "not_satisfied"
+                        result["verification"].update(
+                            status="not_satisfied", reason="unexpected_dialog_transition")
+                    if before_image is not None and result["status"] != "interrupted":
+                        region_effect(result, inp["expect"], before_image, after_image,
+                                      binding_matches=after.geometry == current.geometry)
                     result["observation_id"] = after.observation_id
                     result["verification"]["evidence_id"] = after.evidence_id
                     # Reuse the verification capture, not a second screenshot.
@@ -938,9 +986,22 @@ class ComputerController:
                     }
                 receipt = self.store.finish_action(grant.session_id, inp["action_id"], result)
             except (Exception, asyncio.CancelledError) as exc:
-                self.store.finish_action(grant.session_id, inp["action_id"],
-                                         {"status": "unknown", "reason": "input_outcome_unknown"})
-                await self._stop(grant.session_id, "cancelled")
+                known_release = (settled_result is not None
+                                 and settled_result["execution"]["released"])
+                if known_release:
+                    assert settled_result is not None
+                    failed = settled_result
+                    failed.setdefault("verification", {}).update(
+                        next_action="observe_and_reconcile", delivery="unavailable")
+                    failed["diagnostics"].update(phase="verification", replay_allowed=False)
+                    live.observations.clear()
+                    self._delivered_observations.pop(grant.session_id, None)
+                else:
+                    failed = execution_receipt(
+                        None, {"status": "unknown", "reason": "input_outcome_unknown"})
+                self.store.finish_action(grant.session_id, inp["action_id"], failed)
+                if not known_release or isinstance(exc, asyncio.CancelledError):
+                    await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 return self.store.receipt(grant.session_id, inp["action_id"], payload_hash)

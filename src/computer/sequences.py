@@ -9,9 +9,10 @@ import asyncio
 from copy import deepcopy
 from dataclasses import asdict
 
-from .actions import _REQUIRED, click_receipt
+from .actions import _REQUIRED
+from .effects import effect_receipt, region_effect
 from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
-from .gui_actions import action_arguments, action_payload, visual_receipt
+from .gui_actions import action_arguments, action_payload
 from .models import ComputerError
 from .policy import (
     DELIVERED_GROUNDING_SECONDS,
@@ -52,7 +53,8 @@ def sequence_arguments(inp):
             item = {**item, "operation": "polyline", "expect": {"type": "visual_change"}}
         else:
             exact_keys(item, {"action_id", "operation", "expect", "x", "y", "text", "key",
-                              "direction", "count", "duration", "points"},
+                              "direction", "count", "duration", "points", "modifiers",
+                              "region", "target"},
                        {"action_id", "operation", "expect"})
         step = {**shared, **item}
         action_arguments(step)
@@ -125,6 +127,13 @@ async def execute_sequence(controller, context, inp):
             raise ComputerError("stale_observation")
         _preflight_backend(grant, steps)
         for step in steps:
+            supported = (live.capabilities.limits or {}).get("effect_expectations")
+            if supported is not None and step["expect"]["type"] not in supported:
+                raise ComputerError("unsupported_postcondition")
+            # Fresh accessible handles require per-view reconciliation; the
+            # initial sequence contract does not silently synthesize that.
+            if step["operation"] == "replace_field":
+                raise ComputerError("sequence_accessible_target_requires_single_action")
             try:
                 action_payload(step, original)
             except ComputerError:
@@ -150,7 +159,7 @@ async def execute_sequence(controller, context, inp):
                 and original.frame_metadata.crop is not None else None)
         settled, attempted = [], None
         latest, latest_image = None, None
-        reason, cancelled, stop_required = None, False, False
+        reason, cancelled, stop_required, effect_uncertain = None, False, False, False
 
         def remaining():
             controller._active(grant)
@@ -185,9 +194,7 @@ async def execute_sequence(controller, context, inp):
                 latest, latest_image = None, None
                 attempted = index
                 raw = await _bounded(live.backend.act(payload), budget)
-                result = (visual_receipt(raw, current)
-                          if step["expect"]["type"] == "visual_change"
-                          else click_receipt(raw, current, target))
+                result = effect_receipt(raw, current, step["expect"], target)
                 # Commit injection/release facts BEFORE any capture/auth await.
                 controller.store.finish_action(grant.session_id, step["action_id"], result)
                 settled.append(result)
@@ -195,8 +202,14 @@ async def execute_sequence(controller, context, inp):
                 if result["status"] == "unknown":
                     stop_required = True
                     raise ComputerError("input_outcome_unknown")
+                if result["status"] == "interrupted":
+                    effect_uncertain = True
                 await authorize()
                 latest, latest_image = await capture()
+                if step["expect"]["type"] == "region_changed" and not effect_uncertain:
+                    before_image = controller.store.read_evidence(context, current.evidence_id)[0]
+                    region_effect(result, step["expect"], before_image, latest_image,
+                                  binding_matches=latest.geometry == current.geometry)
                 result.setdefault("verification", {}).update(evidence_id=latest.evidence_id)
                 result["observation_id"] = latest.observation_id
                 controller.store.finish_action(grant.session_id, step["action_id"], result)
@@ -242,7 +255,8 @@ async def execute_sequence(controller, context, inp):
                     if live.task_context is not None:
                         live.task_context.invalidate(reason)
                 result = {"status": "verified" if reason is None else
-                          "unknown" if stop_required else "not_satisfied",
+                          "unknown" if stop_required else
+                          "interrupted" if effect_uncertain else "not_satisfied",
                           "verification": verification}
                 if reason is not None:
                     result["reason"] = reason

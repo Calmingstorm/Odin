@@ -4,7 +4,8 @@ import math
 import re
 from typing import Any
 
-from .actions import _REQUIRED, click_arguments, click_payload
+from .actions import _REQUIRED, click_payload
+from .effects import expectation_arguments
 from .geometry import GeometryError, opaque_id
 from .models import ComputerError
 from .policy import exact_keys, integer
@@ -28,14 +29,30 @@ def action_arguments(inp):
     fields = {"click": {"x", "y"}, "double_click": {"x", "y"},
               "right_click": {"x", "y"}, "middle_click": {"x", "y"},
               "scroll": {"x", "y", "direction", "count"},
-              "type": {"text"}, "key": {"key"},
+              "type": {"text"}, "key": {"key"}, "replace_field": {"text", "target"},
               "drag": {"points", "duration"}, "polyline": {"points", "duration"}}
-    exact_keys(inp, _REQUIRED | set().union(*fields.values()) | {"expected_modal"}, _REQUIRED)
+    optional = {"expected_modal", "modifiers", "count", "region"}
+    exact_keys(inp, _REQUIRED | set().union(*fields.values()) | optional, _REQUIRED)
     operation = inp["operation"]
     if type(operation) is not str or operation not in fields:
         raise ComputerError("unsupported_operation")
-    exact_keys(inp, _REQUIRED | fields[operation] | {"expected_modal"},
-               _REQUIRED | fields[operation])
+    clicks = {"click", "double_click", "right_click", "middle_click"}
+    allowed = {"expected_modal"} | (
+        {"count", "modifiers", "region"} if operation in clicks else set())
+    required = fields[operation] - ({"x", "y"} if "region" in inp else set())
+    exact_keys(inp, _REQUIRED | fields[operation] | allowed, _REQUIRED | required)
+    if "region" in inp:
+        if "x" in inp or "y" in inp:
+            raise ComputerError("invalid_target")
+        crop_arguments(inp["region"])
+    if operation in clicks:
+        integer(inp.get("count", 2 if operation == "double_click" else 1), 1, 3)
+        modifiers = inp.get("modifiers", [])
+        if (type(modifiers) is not list or len(modifiers) > 4
+                or any(type(m) is not str or m not in {"ctrl", "alt", "shift", "super"}
+                       for m in modifiers)
+                or len(set(modifiers)) != len(modifiers)):
+            raise ComputerError("invalid_modifiers")
     for key in ("session_id", "source_id", "action_id", "observation_id", "expected_modal"):
         if key in inp:
             try:
@@ -45,28 +62,39 @@ def action_arguments(inp):
     for key in ("generation", "consent_generation", "source_revision"):
         integer(inp[key], 1, 2**63 - 1)
     expected = inp["expect"]
-    exact_keys(expected, {"type", "x", "y"}, {"type"})
-    if expected["type"] == "pointer_at" and operation == "click":
-        return click_arguments(inp)
-    if expected != {"type": "visual_change"}:
-        raise ComputerError("unsupported_postcondition")
+    expectation_arguments(expected)
+    if expected["type"] == "field_text_equals" and operation != "replace_field":
+        raise ComputerError("field_text_verification_requires_replace_field")
+    if expected["type"] == "pointer_at":
+        if (operation != "click" or "region" in inp
+                or any(expected[k] != inp[k] for k in ("x", "y"))):
+            raise ComputerError("postcondition_target_mismatch")
     if operation in {"click", "double_click", "right_click", "middle_click", "scroll"}:
-        for key in ("x", "y"):
-            integer(inp[key], 0, 999_999)
+        if "region" not in inp:
+            for key in ("x", "y"):
+                integer(inp[key], 0, 999_999)
         if operation == "scroll":
             if type(inp["direction"]) is not str or inp["direction"] not in {
                     "up", "down", "left", "right"}:
                 raise ComputerError("invalid_arguments")
             integer(inp["count"], 1, 20)
-    elif operation == "type":
+    elif operation in {"type", "replace_field"}:
         text = inp["text"]
-        if (type(text) is not str or not 1 <= len(text) <= 512
+        minimum = 0 if operation == "replace_field" else 1
+        if (type(text) is not str or not minimum <= len(text) <= 512
                 or any(ord(c) < 32 and c not in "\n\t" for c in text)):
             raise ComputerError("invalid_text")
         try:
             text.encode("utf-8")
         except UnicodeError:
             raise ComputerError("invalid_text") from None
+        if operation == "replace_field":
+            try:
+                opaque_id(inp["target"])
+            except GeometryError:
+                raise ComputerError("invalid_target") from None
+            if expected != {"type": "field_text_equals", "target": inp["target"], "text": text}:
+                raise ComputerError("field_text_verification_required")
     elif operation == "key":
         try:
             parse_key_chord(inp["key"])
@@ -87,6 +115,21 @@ def action_arguments(inp):
 
 
 def action_payload(inp, observation):
+    inp = dict(inp)
+    if "region" in inp:
+        region = crop_arguments(inp["region"], observation.width, observation.height)
+        inp["x"] = region["x"] + (region["width"] - 1) // 2
+        inp["y"] = region["y"] + (region["height"] - 1) // 2
+    if inp["expect"]["type"] == "region_changed":
+        crop_arguments({k: inp["expect"][k] for k in ("x", "y", "width", "height")},
+                       observation.width, observation.height)
+    if inp["operation"] == "replace_field" or inp["expect"]["type"] == "field_text_equals":
+        target_id = inp.get("target", inp["expect"].get("target"))
+        matches = [node for node in observation.accessibility if node.get("handle") == target_id]
+        if (len(matches) != 1 or matches[0].get("text_readable") is not True
+                or (inp["operation"] == "replace_field"
+                    and "replace_field" not in matches[0].get("capabilities", []))):
+            raise ComputerError("accessible_target_unavailable")
     source = observation.source
     if any(inp[key] != getattr(source, key) for key in
            ("source_id", "source_revision", "consent_generation")):
@@ -99,12 +142,16 @@ def action_payload(inp, observation):
         raise ComputerError("stale_modal_binding")
     if inp["operation"] == "click":
         payload, target = click_payload(inp, observation)
+        for key in ("count", "modifiers"):
+            if key in inp:
+                payload[key] = inp[key]
     else:
         payload = {key: inp[key] for key in
                    ("source_id", "source_revision", "consent_generation")}
         payload.update(type={"drag": "polyline"}.get(inp["operation"], inp["operation"]),
                        expected=dict(inp["expect"]))
-        for key in ("text", "points", "duration", "x", "y", "direction", "count"):
+        for key in ("text", "target", "points", "duration", "x", "y", "direction", "count",
+                    "modifiers"):
             if key in inp:
                 payload[key] = inp[key]
         if inp["operation"] == "key":
@@ -180,19 +227,9 @@ def visual_receipt(raw, observation):
                    or any(c not in "0123456789abcdef" for c in v) for v in actual.values())):
         return unknown
     binding = evidence["target_application_matches"]
-    disappeared = (evidence.get("target_disappeared") is True
-                   and evidence.get("target_state") in {"destroyed", "unmapped"}
-                   and evidence.get("target_state_method") == "native_window_state_after_release")
-    satisfied = disappeared or (binding and actual["before_sha256"] != actual["after_sha256"])
+    satisfied = binding and actual["before_sha256"] != actual["after_sha256"]
     result["status"] = "verified" if satisfied else "not_satisfied"
     result["verification"].update(
         status="satisfied" if satisfied else "not_satisfied", actual=dict(actual),
         method="raster_digest_after_release", target_application_matches=binding)
-    if disappeared:
-        result["verification"].update(type="target_disappeared",
-                                      scope="native_window_presence_only",
-                                      method="native_window_state_after_release",
-                                      target_disappeared=True,
-                                      target_state=evidence["target_state"],
-                                      target_state_method=evidence["target_state_method"])
     return result

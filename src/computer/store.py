@@ -379,9 +379,9 @@ class ComputerStore:
 
     def finish_action(self, session_id: str, action_id: str, result: dict) -> dict:
         allowed = {"status", "reason", "verification", "observation_id", "execution",
-                   "unsupported_characters"}
+                   "unsupported_characters", "diagnostics"}
         if set(result) - allowed or result.get("status") not in {
-            "executed", "verified", "not_satisfied", "unavailable", "unknown"
+            "executed", "verified", "not_satisfied", "unavailable", "unknown", "interrupted"
         }:
             raise ComputerError("invalid_receipt")
         with self.lock:

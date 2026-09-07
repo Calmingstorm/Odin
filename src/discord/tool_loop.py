@@ -2621,12 +2621,12 @@ class ToolLoopRunner:
             action_receipt = result.get("__computer_action_receipt__")
             if isinstance(action_receipt, dict):
                 failed = action_receipt.get("status") in {
-                    "unavailable", "not_satisfied", "rejected", "failed", "unknown",
+                    "unavailable", "not_satisfied", "rejected", "failed", "unknown", "interrupted",
                 }
                 tool_result = ToolResult(
                     json.dumps(action_receipt, ensure_ascii=True), ok=not failed,
                     error="computer_not_satisfied" if failed else None,
-                    uncertain_outcome=action_receipt.get("status") == "unknown",
+                    uncertain_outcome=action_receipt.get("status") in {"unknown", "interrupted"},
                     tool_name=tool_name,
                 )
             try:

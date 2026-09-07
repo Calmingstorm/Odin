@@ -101,7 +101,11 @@ class WaylandRuntimeBackend:
     input_blocker: str | None = "wayland_session_not_qualified"
     input_limits = {"lease_seconds": 2, "text": "unicode_current_keymap", "max_text_chars": 256,
                     "max_scroll_count": 20, "max_points": 256,
-                    "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app"}
+                    "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app",
+                    "effect_expectations": ["visual_change", "region_changed"],
+                    "accessible_targets": "unavailable", "replace_field": "unavailable",
+                    "click_count": "native_click_modifiers_v1_capability_required",
+                    "click_modifiers": "native_click_modifiers_v1_capability_required"}
 
     def __init__(self, *, enabled=False, app_profile=None, environment="existing_session",
                  config: WaylandSessionConfig, qualify=None):
@@ -383,9 +387,13 @@ class WaylandRuntimeBackend:
                   "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
                   "polyline": {"points", "duration"}}
         required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
+        click_types = {"click", "double_click", "right_click", "middle_click"}
+        optional = {"expected_modal"}
+        if type(action) is dict and action.get("type") in click_types:
+            optional |= {"count", "modifiers"}
         if (type(action) is not dict or type(action.get("type")) is not str
                 or action["type"] not in fields
-                or set(action) - {"expected_modal"} != required | fields[action["type"]]):
+                or set(action) - optional != required | fields[action["type"]]):
             raise ComputerError("wayland_unsupported_grounded_action")
         if frame.modal is not None:
             if (frame.modal_kind != "safe_application"
@@ -397,7 +405,13 @@ class WaylandRuntimeBackend:
             if (type(action[name]) is not type(getattr(frame.source, name))
                     or action[name] != getattr(frame.source, name)):
                 raise ComputerError("wayland_stale_source_binding")
-        if action["expected"] != {"type": "visual_change"}:
+        from ..effects import expectation_arguments
+        expectation_arguments(action["expected"])
+        if action["expected"]["type"] == "region_changed":
+            from ..gui_actions import crop_arguments
+            crop_arguments({k: action["expected"][k] for k in ("x", "y", "width", "height")},
+                           frame.width, frame.height)
+        elif action["expected"] != {"type": "visual_change"}:
             raise ComputerError("wayland_visual_postcondition_required")
         if action["type"] == "type":
             text = action["text"]
@@ -429,6 +443,19 @@ class WaylandRuntimeBackend:
 
         if action["type"] in {"click", "right_click", "middle_click", "double_click"}:
             button = {"right_click": 273, "middle_click": 274}.get(action["type"], 272)
+            default = 2 if action["type"] == "double_click" else 1
+            count, modifiers = action.get("count", default), action.get("modifiers", [])
+            if (type(count) is not int or not 1 <= count <= 3
+                    or type(modifiers) is not list or len(modifiers) > 4
+                    or any(type(m) is not str or m not in {"ctrl", "alt", "shift", "super"}
+                           for m in modifiers) or len(set(modifiers)) != len(modifiers)):
+                raise ComputerError("wayland_unsupported_grounded_action")
+            if count != default or modifiers:
+                if not self._guardian or self._guardian.ready.get("bounded_clicks") is not True:
+                    raise ComputerError("wayland_unsupported_grounded_action")
+                words = ["V", str(button), str(count), str(len(modifiers)), *modifiers,
+                         point([action["x"], action["y"]])]
+                return " ".join(words)
             prefix = "Q" if action["type"] == "double_click" else "P"
             return f"{prefix} {button} " + point([action["x"], action["y"]])
         if action["type"] == "scroll":
@@ -442,7 +469,11 @@ class WaylandRuntimeBackend:
                 or type(duration) not in {int, float} or not math.isfinite(duration)
                 or not 0 <= duration <= 1):
             raise ComputerError("wayland_invalid_polyline")
-        return f"D 272 {len(points)} " + " ".join(point(p) for p in points)
+        if not self._guardian or self._guardian.ready.get("timed_polyline") is not True:
+            # Old D silently ignored duration. Never claim requested timing when
+            # the provisioned native guardian cannot enforce it.
+            raise ComputerError("wayland_unsupported_grounded_action")
+        return f"L 272 {len(points)} {round(duration * 1000)} " + " ".join(point(p) for p in points)
 
     async def _watch_action(self, metadata, original_scope, generation) -> None:
         try:
@@ -509,6 +540,8 @@ class WaylandRuntimeBackend:
                 if self._paused or self._closed or delivered.get("event") != "action_done":
                     raise ComputerError("wayland_action_revoked_outcome_unknown")
                 receipt: dict[str, Any] = {"status": "executed", "injected": True, "released": True,
+                    **({"diagnostics": delivered["diagnostics"]}
+                       if "diagnostics" in delivered else {}),
                     "application_provenance": canonical_application_provenance(scope),
                     "release_basis": "guardian_owned_ledger_and_qualified_compositor",
                     "postcondition": {"type": "visual_change", "status": "unavailable",
@@ -523,7 +556,9 @@ class WaylandRuntimeBackend:
                     # unknown outcomes after the controller reserves an action ID.
                     details = exc.details
                     receipt = {"status": "unavailable", "injected": False, "released": True,
-                               "reason": details.get("reason", "unsupported_key")}
+                               "reason": details.get("reason", "unsupported_key"),
+                               **({"diagnostics": details["diagnostics"]}
+                                  if "diagnostics" in details else {})}
                     if details.get("reason") == "unsupported_character":
                         receipt["unsupported_characters"] = [
                             {"index": row["index"], "codepoint": row["codepoint"],
@@ -533,6 +568,14 @@ class WaylandRuntimeBackend:
                 self._paused = True
                 cleanup = await self._guardian.close()
                 self._release_failed |= not cleanup.get("release_submitted", False)
+                if (isinstance(exc, WaylandGuardianError)
+                        and "diagnostics" in getattr(exc, "details", {})):
+                    details = exc.details
+                    sent = details.get("input_was_sent") is not False
+                    return {"status": "unknown" if sent else "unavailable", "injected": sent,
+                            "released": details["diagnostics"]["release"] == "confirmed",
+                            "reason": details["diagnostics"]["reason"],
+                            "diagnostics": details["diagnostics"]}
                 raise
             finally:
                 watchdog.cancel()
