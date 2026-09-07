@@ -2707,10 +2707,18 @@ class ToolLoopRunner:
         *,
         call_id: str | None = None,
     ) -> None:
-        """Write execution + tool_end audit records — never crash tool
-        execution on audit failure. (Inline block of the old `_run_tool`.)"""
+        """Write terminal audit evidence without letting audit failure crash a tool."""
         # Audit log — never crash tool execution on audit failure
         try:
+            # Computer executions are their own tool_end event. Persist one
+            # complete result, retaining the call identity used by tool_start.
+            # Other tools keep their existing event contract for now.
+            terminal_fields = {}
+            if tool_name in {"computer_session", "computer_observe", "computer_act"}:
+                terminal_fields = {
+                    "event_type": "tool_end",
+                    "attribution": {"call_id": call_id, "iteration": st.iteration},
+                }
             scrubbed_input = _scrub_tool_input_for_storage(
                 tool_name,
                 {
@@ -2731,7 +2739,10 @@ class ToolLoopRunner:
                 risk_level=tool_result.risk_level if tool_result else None,
                 risk_reason=tool_result.risk_reason if tool_result else None,
                 audit_metadata=tool_result.audit_metadata if tool_result else None,
+                **terminal_fields,
             )
+            if terminal_fields:
+                return
             await self._audit.log_event(
                 event_type="tool_end",
                 action=tool_name,

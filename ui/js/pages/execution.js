@@ -74,8 +74,10 @@ export default {
         if (idx >= 0) {
           const task = activeTasks.value[idx];
           task.status = payload.error || payload.metadata?.error || ['error', 'failed', 'cancelled', 'denied', 'outcome_unknown'].includes(payload.status || payload.metadata?.status) ? 'error' : 'success';
-          task.elapsed = payload.duration_ms ?? payload.metadata?.elapsed_ms ?? (Date.now() - task.startTime);
-          task.result = payload.detail || '';
+          // A canonical execution may also be the terminal lifecycle event.
+          // Prefer its full result and measured duration over legacy fields.
+          task.elapsed = payload.execution_time_ms ?? payload.duration_ms ?? payload.metadata?.elapsed_ms ?? (Date.now() - task.startTime);
+          task.result = payload.result_summary ?? payload.detail ?? '';
           task.fadingOut = true;
           setTimeout(() => {
             const i = activeTasks.value.indexOf(task);
