@@ -328,6 +328,29 @@ class AppScope:
     def snapshot(self, monitor):
         return self.inspect(monitor)[0]
 
+    def target_state(self, expected, monitor):
+        """Measure the prior native target, not absence from the CURRENT focus.
+
+        Only a real BadWindow proves destruction. Scope/PID/topology errors are
+        unavailable, never evidence of a successful close. Unmapped is reported
+        as disappearance, not a claim that the process exited or a file saved.
+        """
+        from Xlib import X, error  # type: ignore[import-untyped]
+
+        root = self.connection.screen().root
+        source, topology = self._topology(root, monitor)
+        if source != expected["source_rect"] or topology != expected["topology"]:
+            raise ScopeFailure("source_scope_unavailable")
+        target = self._window(expected["window"])
+        try:
+            attributes = target.get_attributes()
+            process = _process_identity(self._pid(target))
+        except error.BadWindow:
+            return "destroyed"
+        if process != expected["process"]:
+            return "replaced"
+        return "present" if attributes.map_state == X.IsViewable else "unmapped"
+
     def inspect(self, monitor):
         """Return private binding and a public-safe, explicit refusal reason."""
         try:

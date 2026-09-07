@@ -425,7 +425,27 @@ def _execute(request, *, controller_fd=0, authorize=None):
                                     if request.get("session_prefix") is not None else {}))
         if authorize is not None:
             authorize(helper)
-        return Guardian(native, helper, validate, controller_fd=controller_fd).run(steps)
+        receipt = Guardian(native, helper, validate, controller_fd=controller_fd).run(steps)
+        if (request.get("verify_pointer") is True and receipt.get("status") == "executed"
+                and receipt.get("released") is True and receipt.get("injected") is True):
+            # Measured AFTER the helper is fenced and owned input released. This
+            # proves pointer location only, never that a widget accepted a click.
+            try:
+                from src.computer.runtime.x11_attached import same_application_scope
+                actual = native.pointer()
+                current = scope.snapshot(monitor)
+                matches = same_application_scope(expected, current)
+                if matches:
+                    try:
+                        scope.assert_snapshot(current, monitor, point=actual,
+                                              pointer_query=native.query_pointer)
+                    except Exception:
+                        matches = False
+                receipt["pointer_observation"] = {
+                    "x": actual[0], "y": actual[1], "target_window_matches": matches}
+            except Exception:
+                pass  # A missing postcondition does not erase acknowledged input.
+        return receipt
     finally:
         if helper is not None and helper.process.poll() is None:
             helper.fence()

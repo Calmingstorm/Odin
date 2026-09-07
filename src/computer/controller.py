@@ -781,7 +781,7 @@ class ComputerController:
                     try:
                         after, _ = await self._capture(grant, crop=crop)
                     except ComputerError as exc:
-                        if (grant.environment != "existing_session" or not visual
+                        if (grant.environment != "existing_session"
                                 or exc.code not in {
                                     "invalid_bounds", "invalid_source_crop",
                                     "invalid_observation_crop", "display_asleep",
@@ -804,21 +804,33 @@ class ComputerController:
                     self._active(grant)
                     age = self.monotonic() - after.captured_at
                     binding_matches = after.geometry == current.geometry
-                    if visual and result["verification"].get("target_application_matches") is True:
+                    disappeared = (visual and grant.environment == "existing_session"
+                                   and result["verification"].get("target_disappeared") is True)
+                    if (disappeared
+                            or (visual and result["verification"].get("target_application_matches")
+                                is True)
+                            or (not visual and grant.environment == "existing_session"
+                                and result["verification"].get("target_binding_matches")
+                                is True)):
                         # A confirmed same-app title/modal transition still invalidates
                         # the old observation. It never permits retargeting another source.
                         binding_matches = (
                             after.source.source_id == current.source.source_id
-                            and after.scope == current.scope
+                            and after.scope.consent_generation == current.scope.consent_generation
+                            and after.scope.capture_sources == current.scope.capture_sources
+                            and after.source.pixel_width == current.source.pixel_width
+                            and after.source.pixel_height == current.source.pixel_height
                             and after.width == current.width and after.height == current.height
                             and after.delivered_to_source == current.delivered_to_source
-                            and after.source.pixel_to_input == current.source.pixel_to_input
-                            and after.source.input_region_id == current.source.input_region_id
-                            and after.focused)
+                            and (disappeared or (
+                                after.scope == current.scope
+                                and after.source.pixel_to_input == current.source.pixel_to_input
+                                and after.source.input_region_id == current.source.input_region_id
+                                and after.focused)))
                     if not 0 <= age <= FRAME_FRESH_SECONDS:
                         raise ComputerError("postcondition_binding_changed")
                     if not binding_matches:
-                        if not (visual and grant.environment == "existing_session"):
+                        if grant.environment != "existing_session":
                             raise ComputerError("postcondition_binding_changed")
                         # A document/menu transition is not an unknown input
                         # outcome after acknowledged injection and release.

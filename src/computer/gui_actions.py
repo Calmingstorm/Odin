@@ -180,9 +180,19 @@ def visual_receipt(raw, observation):
                    or any(c not in "0123456789abcdef" for c in v) for v in actual.values())):
         return unknown
     binding = evidence["target_application_matches"]
-    satisfied = binding and actual["before_sha256"] != actual["after_sha256"]
+    disappeared = (evidence.get("target_disappeared") is True
+                   and evidence.get("target_state") in {"destroyed", "unmapped"}
+                   and evidence.get("target_state_method") == "native_window_state_after_release")
+    satisfied = disappeared or (binding and actual["before_sha256"] != actual["after_sha256"])
     result["status"] = "verified" if satisfied else "not_satisfied"
     result["verification"].update(
         status="satisfied" if satisfied else "not_satisfied", actual=dict(actual),
         method="raster_digest_after_release", target_application_matches=binding)
+    if disappeared:
+        result["verification"].update(type="target_disappeared",
+                                      scope="native_window_presence_only",
+                                      method="native_window_state_after_release",
+                                      target_disappeared=True,
+                                      target_state=evidence["target_state"],
+                                      target_state_method=evidence["target_state_method"])
     return result

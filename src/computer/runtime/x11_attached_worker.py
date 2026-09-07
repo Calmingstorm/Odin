@@ -120,6 +120,12 @@ def run(request, capture=None):
         reason = None
         if app_scope and binding is None:
             _, reason = app_scope.inspect(monitor)
+        target_state = None
+        if app_scope and request.get("verify_scope") is not None:
+            try:
+                target_state = app_scope.target_state(request["verify_scope"], monitor)
+            except Exception:
+                target_state = "unavailable"
         return {"ok": True, "source_width": observation.source.pixel_width,
                 "source_height": observation.source.pixel_height,
                 "width": observation.width, "height": observation.height,
@@ -129,6 +135,7 @@ def run(request, capture=None):
                 **status,
                 "input_scope": binding,
                 "input_scope_reason": reason,
+                "prior_target_state": target_state,
                 "image": base64.b64encode(observation.image_bytes).decode("ascii")}
     finally:
         if owned:

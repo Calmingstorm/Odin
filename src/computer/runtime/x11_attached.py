@@ -316,9 +316,9 @@ class X11AttachedBackend:
                     return
         self._children.discard(child)
 
-    async def _read_worker(self, operation, *, selected=None, crop=None):
+    async def _read_worker(self, operation, *, selected=None, crop=None, verify_scope=None):
         return await self._work("capture", self._read_worker_owned, operation,
-                                selected=selected, crop=crop)
+                                selected=selected, crop=crop, verify_scope=verify_scope)
 
     async def _start_topology(self):
         ready = asyncio.get_running_loop().create_future()
@@ -453,7 +453,8 @@ class X11AttachedBackend:
             if kind == "capture" and child not in self._reapers:
                 self._reapers[child] = asyncio.create_task(self._reap_owned(child))
 
-    async def _read_worker_owned(self, revoked, operation, *, selected=None, crop=None):
+    async def _read_worker_owned(self, revoked, operation, *, selected=None, crop=None,
+                                 verify_scope=None):
         if self._closed or self._paused:
             raise AttachedFailure("capture_revoked")
         request = {**self._config, "operation": operation, "input_enabled": self._input_enabled}
@@ -461,6 +462,8 @@ class X11AttachedBackend:
             request["selected"] = selected
         if crop is not None:
             request["crop"] = crop
+        if verify_scope is not None:
+            request["verify_scope"] = verify_scope
         async with self._spawn_lock:
             if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("capture_revoked")
@@ -811,8 +814,10 @@ class X11AttachedBackend:
                     raise AttachedFailure("unexpected_modal")
             elif "expected_modal" in action:
                 raise AttachedFailure("stale_modal_binding")
-            if action["expected"] != {"type": "visual_change"}:
-                raise AttachedFailure("attached_visual_postcondition_required")
+            pointer_expected = (action["type"] == "click" and action["expected"] == {
+                "type": "pointer_at", "x": action.get("x"), "y": action.get("y")})
+            if action["expected"] != {"type": "visual_change"} and not pointer_expected:
+                raise AttachedFailure("unsupported_postcondition")
             payload = {"type": action["type"]}
             if action["type"] == "type":
                 text = action["text"]
@@ -856,6 +861,8 @@ class X11AttachedBackend:
                 key = "text" if action["type"] == "type" else "chord"
                 payload[key] = action[key]
             request = {**self._config, "selected": monitor, "scope": self._scope, "action": payload}
+            if pointer_expected:
+                request["verify_pointer"] = True
             request["input_mode"] = self.capabilities.pointer_separation
             request["expected_device_identity"] = copy.deepcopy(self._device_identity)
             if self.creates_devices:
@@ -866,16 +873,30 @@ class X11AttachedBackend:
             if receipt.get("released") is not True:
                 self._release_failed = True
                 self._paused = True
-            receipt["postcondition"] = {"type": "visual_change", "status": "unavailable",
+            receipt["postcondition"] = {"type": action["expected"]["type"], "status": "unavailable",
                                          "source_id": frame.source.source_id,
                                          "source_revision": frame.source.source_revision,
                                          "consent_generation": frame.source.consent_generation}
+            if pointer_expected:
+                measured = receipt.pop("pointer_observation", None)
+                if (receipt.get("released") is True and receipt.get("status") == "executed"
+                        and type(measured) is dict
+                        and type(measured.get("x")) is int and type(measured.get("y")) is int
+                        and type(measured.get("target_window_matches")) is bool):
+                    x, y = measured["x"] - origin[0], measured["y"] - origin[1]
+                    if 0 <= x < frame.source.input_width and 0 <= y < frame.source.input_height:
+                        receipt["postcondition"].update(
+                            status="observed", method="pointer_query_after_release",
+                            actual={"x": x, "y": y},
+                            target_window_matches=measured["target_window_matches"])
+                return receipt
             if (receipt.get("released") is True and receipt.get("status") == "executed"
                     and not self._closed and not self._paused):
                 try:
                     crop = (dict(zip(("x", "y", "width", "height"), frame.crop, strict=True))
                             if frame.crop else None)
-                    after = await self._read_worker("capture", selected=monitor, crop=crop)
+                    after = await self._read_worker("capture", selected=monitor, crop=crop,
+                                                  verify_scope=self._scope)
                     if after.get("crop") != (list(frame.crop) if frame.crop else None):
                         raise AttachedFailure("postcondition_crop_mismatch")
                     data = base64.b64decode(after["image"], validate=True)
@@ -886,6 +907,10 @@ class X11AttachedBackend:
                             self._scope, after.get("input_scope")),
                         actual={"before_sha256": hashlib.sha256(frame.image_bytes).hexdigest(),
                                 "after_sha256": hashlib.sha256(data).hexdigest()})
+                    if after.get("prior_target_state") in {"destroyed", "unmapped"}:
+                        evidence.update(target_disappeared=True,
+                                        target_state=after["prior_target_state"],
+                                        target_state_method="native_window_state_after_release")
                 except Exception:
                     pass  # Actual input receipt stays; verification explicitly unavailable.
             return receipt

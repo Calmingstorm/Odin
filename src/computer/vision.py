@@ -299,7 +299,13 @@ class ModelFramePlan:
 
 
 def plan_model_frames(messages: list[dict]) -> ModelFramePlan:
-    """Keep latest full frame and at most its latest matching crop.
+    """Keep the newest observation, full OR crop, plus a same-capture overview.
+
+    computer_observe(crop=...) makes a fresh, independently grounded capture with
+    its own ID and timestamp. It is NOT a derivative of an earlier full frame.
+    Never discard valid crop pixels for lacking an older overview, or relabel a
+    stale overview as current. A same-capture overview may accompany a crop only
+    when their full binding matches.
 
     Only tagged computer images are changed. Preserve every message and native
     tool/result pair, replacing retired image blocks with bounded text. This
@@ -319,18 +325,13 @@ def plan_model_frames(messages: list[dict]) -> ModelFramePlan:
                 frames.append((i, j, _validate_native_frame(block)))
     if not frames:
         return ModelFramePlan(list(messages), (), 0)
-    full = next((f for f in reversed(frames) if f[2].kind == "full"), None)
-    if full is None:
-        raise VisionError("Current full frame required")
-    keep = {(full[0], full[1])}
-    base = full[2]
-    newest = frames[-1][2]
-    if newest.binding != base.binding:
-        raise VisionError("Newest crop requires its matching full frame")
-    for i, j, metadata in reversed(frames):
-        if metadata.kind == "crop" and metadata.binding == base.binding:
-            keep.add((i, j))
-            break
+    newest = frames[-1]
+    keep = {(newest[0], newest[1])}
+    if newest[2].kind == "crop":
+        for i, j, metadata in reversed(frames):
+            if metadata.kind == "full" and metadata.binding == newest[2].binding:
+                keep.add((i, j))
+                break
     planned = list(messages)
     for i, j, _metadata in frames:
         if (i, j) not in keep:

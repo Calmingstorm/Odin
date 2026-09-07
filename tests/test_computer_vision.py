@@ -180,11 +180,11 @@ def test_retirement_preserves_native_tool_pair_and_unrelated_images():
     assert "base64" not in repr(plan)
 
 
-def test_crop_only_and_malformed_tag_refused():
+def test_fresh_crop_stands_alone_and_malformed_tag_is_refused():
     result = observation_image(png(2, 2), metadata(kind="crop", crop=FrameCrop(0, 0, 2, 2),
                                                 width=2, height=2))
-    with pytest.raises(VisionError, match="full frame"):
-        plan_model_frames([image_message(result)])
+    plan = plan_model_frames([image_message(result)])
+    assert plan.frame_count == 1 and plan.protected_message_indices == (0,)
     with pytest.raises(VisionError):
         plan_model_frames([{"role": "user", "content": [
             {"type": "image", "__computer_frame__": {"data": "hidden"}}]}])
@@ -214,8 +214,10 @@ def test_newer_crop_without_matching_full_cannot_reuse_old_full():
     crop = image_message(observation_image(png(2, 2), metadata(
         observation_id="obs_2", captured_monotonic_ns=20, kind="crop",
         crop=FrameCrop(0, 0, 2, 2), width=2, height=2)))
-    with pytest.raises(VisionError, match="matching full"):
-        plan_model_frames([full, crop])
+    plan = plan_model_frames([full, crop])
+    assert plan.frame_count == 1 and plan.protected_message_indices == (1,)
+    assert plan.messages[0]["content"][0]["type"] == "text"
+    assert plan.messages[1] == crop
 
 
 @pytest.mark.parametrize("sw,sh,dw,dh,scale", [
@@ -293,8 +295,11 @@ def test_rotated_crop_raster_edges_and_pixel_centers(rotation, corners):
 def test_matching_dimensions_do_not_let_crop_retarget_source_binding(changes):
     full = image_message(observation_image(png(), metadata()))
     crop = metadata(kind="crop", crop=FrameCrop(0, 0, 2, 2), width=2, height=2, **changes)
-    with pytest.raises(VisionError, match="matching full"):
-        plan_model_frames([full, image_message(observation_image(png(2, 2), crop))])
+    detail = image_message(observation_image(png(2, 2), crop))
+    plan = plan_model_frames([full, detail])
+    assert plan.frame_count == 1 and plan.protected_message_indices == (1,)
+    assert plan.messages[0]["content"][0]["type"] == "text"
+    assert plan.messages[1] == detail  # Never relabel the old source as this crop's parent.
 
 
 def test_json_round_trip_transform_checked_and_global_coordinates_rejected():
