@@ -48,7 +48,7 @@ def sequence_arguments(inp):
     steps, ids = [], set()
     for item in items:
         if operation == "strokes":
-            exact_keys(item, {"action_id", "points", "duration"},
+            exact_keys(item, {"action_id", "points", "duration", "modifiers"},
                        {"action_id", "points", "duration"})
             item = {**item, "operation": "polyline", "expect": {"type": "visual_change"}}
         else:

@@ -105,7 +105,11 @@ _DEFINITIONS = [
         "no held keys "
         "across calls. Click variants require x,y; scroll requires x,y,direction,count; "
         "type requires text; key requires key; drag/polyline require points,duration. "
-        "Clicks accept count 1..3, modifier lists, or region instead of x,y. replace_field "
+        "Clicks accept count 1..3 or region instead of x,y. Clicks, scroll and drag/polyline "
+        "accept modifiers held only for that action (also per step/stroke). For an application's "
+        "constrained drag use modifiers=[shift]; constraint behavior is application-defined, "
+        "not geometric snapping by this tool. Consult input_limits for native support. "
+        "replace_field "
         "requires an observed accessible target and text, with field_text_equals matching "
         "target/text; unsupported accessibility never falls back to Ctrl+A. "
         "Supply only fields for that operation. Unicode typing and generic keysym chords "
@@ -215,7 +219,9 @@ for _case, (_operation, _fields) in zip(
         _case["oneOf"] = [{"required": ["x", "y"], "properties": {"region": False}},
                           {"required": ["region"], "properties": {"x": False, "y": False}}]
     else:
-        _case["properties"].update(modifiers=False, region=False)
+        _case["properties"]["region"] = False
+        if _operation not in {"scroll", "drag", "polyline"}:
+            _case["properties"]["modifiers"] = False
     if _operation == "type":
         _case["properties"]["text"] = {"type": "string", "minLength": 1, "maxLength": 512}
 
@@ -242,7 +248,8 @@ _ACTION_SCHEMA["properties"].update({
                 "items": {"type": "object", "additionalProperties": False,
                           "required": ["action_id", "points", "duration"],
                           "properties": {key: deepcopy(_ACTION_SCHEMA["properties"][key])
-                                         for key in ("action_id", "points", "duration")}}},
+                                         for key in ("action_id", "points", "duration",
+                                                     "modifiers")}}},
 })
 _ACTION_SCHEMA["properties"]["operation"]["enum"].extend(["sequence", "strokes"])
 _ACTION_SCHEMA["required"].remove("expect")

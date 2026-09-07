@@ -350,22 +350,22 @@ class Guardian:
 def input_steps(action, native):
     """Fixed action vocabulary. No model-supplied native code or arbitrary chord."""
     kind = action["type"]
+    modifier_codes = []
+    if kind in {"click", "double_click", "right_click", "middle_click", "scroll", "polyline"}:
+        modifiers = action.get("modifiers", [])
+        if (type(modifiers) is not list or len(modifiers) > 4
+                or any(type(m) is not str or m not in MODIFIER_KEYSYMS for m in modifiers)
+                or len(set(modifiers)) != len(modifiers)):
+            raise GuardianFailure("unsupported_key")
+        if modifiers:
+            modifier_codes = native.key_plan(modifiers)
     if kind in {"click", "double_click", "right_click", "middle_click", "scroll"}:
         button: int | None = {"right_click": 3, "middle_click": 2}.get(kind, 1)
         count, delay = (2, .08) if kind == "double_click" else (1, .03)
-        modifier_codes = []
         if kind != "scroll":
             count = action.get("count", count)
-            modifiers = action.get("modifiers", [])
             if type(count) is not int or not 1 <= count <= 3:
                 raise GuardianFailure("unsupported_action")
-            if (type(modifiers) is not list or len(modifiers) > 4
-                    or any(type(m) is not str or m not in MODIFIER_KEYSYMS for m in modifiers)
-                    or len(set(modifiers)) != len(modifiers)):
-                raise GuardianFailure("unsupported_key")
-            modifier_codes = [native.keycode(MODIFIER_KEYSYMS[m]) for m in modifiers]
-            if len(set(modifier_codes)) != len(modifier_codes):
-                raise GuardianFailure("unsupported_key")
             delay = .08
         if kind == "scroll":
             count = action.get("count", 1)
@@ -391,10 +391,13 @@ def input_steps(action, native):
                 or type(duration) not in (float, int) or not math.isfinite(duration)
                 or not 0 <= duration <= 1):
             raise GuardianFailure("invalid_polyline")
-        steps = [("move", *points[0]), ("button", 1, True)]
+        steps = [("move", *points[0])]
+        steps.extend(("key", code, True) for code in modifier_codes)
+        steps.append(("button", 1, True))
         for point in points[1:]:
             steps += [("wait", duration / (len(points) - 1)), ("move", *point)]
-        return steps + [("button", 1, False)]
+        return steps + [("button", 1, False)] + [
+            ("key", code, False) for code in reversed(modifier_codes)]
     if kind == "type":
         text = action["text"]
         if type(text) is not str or not 1 <= len(text) <= 512:
@@ -403,8 +406,7 @@ def input_steps(action, native):
     elif kind == "key":
         from src.computer.runtime.primitives import parse_key_chord
         modifiers, symbol = parse_key_chord(action["chord"])
-        chords = [[native.keycode(MODIFIER_KEYSYMS[k]) for k in modifiers]
-                  + [native.keycode(symbol)]]
+        chords = [native.key_plan(modifiers, symbol)]
     else:
         raise GuardianFailure("unsupported_action")
     return [event for chord in chords for event in

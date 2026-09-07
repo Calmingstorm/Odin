@@ -77,6 +77,11 @@ class X11AttachedBackend:
                     "keyboard_overlap": "uncertain_no_replay",
                     "click_count": {"minimum": 1, "maximum": 3},
                     "click_modifiers": ["ctrl", "alt", "shift", "super"],
+                    "scroll_modifiers": ["ctrl", "alt", "shift", "super"],
+                    "drag_modifiers": ["ctrl", "alt", "shift", "super"],
+                    "constrained_drag": "shift_held_application_defined_no_geometric_snapping",
+                    "key_chords": "active_group_base_symbols_explicit_modifiers_only",
+                    "modifier_mapping": "conventional_unambiguous_xkb_slots_only",
                     "accessible_targets": "unavailable", "replace_field": "unavailable",
                     "effect_expectations": ["visual_change", "pointer_at", "region_changed",
                                             "dialog_appeared", "menu_appeared", "window_gone"]}
@@ -836,6 +841,8 @@ class X11AttachedBackend:
             clicks = {"click", "double_click", "right_click", "middle_click"}
             optional = {"expected_modal"} | ({"count", "modifiers"}
                         if type(action) is dict and action.get("type") in clicks else set())
+            if type(action) is dict and action.get("type") in {"scroll", "polyline"}:
+                optional.add("modifiers")
             if (type(action) is not dict or type(action.get("type")) is not str
                     or action["type"] not in fields
                     or set(action) - optional != required | fields[action["type"]]):
@@ -861,6 +868,7 @@ class X11AttachedBackend:
             if action["type"] in clicks:
                 from ..policy import integer
                 integer(action.get("count", 2 if action["type"] == "double_click" else 1), 1, 3)
+            if action["type"] in clicks | {"scroll", "polyline"}:
                 modifiers = action.get("modifiers", [])
                 if (type(modifiers) is not list or len(modifiers) > 4
                         or any(type(m) is not str or m not in {"ctrl", "alt", "shift", "super"}

@@ -204,7 +204,7 @@ class WaylandGuardian:
 
     async def act(self, command: str):
         if (type(command) is not str or not command or len(command) > 32000
-                or command[0] not in "MPDKTJQWVL" or "\n" in command or "\r" in command
+                or command[0] not in "MPDKTJQWVLYZ" or "\n" in command or "\r" in command
                 or "\x00" in command):
             raise WaylandGuardianError("wayland_guardian_invalid_action")
         async with self._action_lock:

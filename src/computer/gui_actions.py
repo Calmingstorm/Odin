@@ -39,6 +39,8 @@ def action_arguments(inp):
     clicks = {"click", "double_click", "right_click", "middle_click"}
     allowed = {"expected_modal"} | (
         {"count", "modifiers", "region"} if operation in clicks else set())
+    if operation in {"scroll", "drag", "polyline"}:
+        allowed.add("modifiers")
     required = fields[operation] - ({"x", "y"} if "region" in inp else set())
     exact_keys(inp, _REQUIRED | fields[operation] | allowed, _REQUIRED | required)
     if "region" in inp:
@@ -47,6 +49,7 @@ def action_arguments(inp):
         crop_arguments(inp["region"])
     if operation in clicks:
         integer(inp.get("count", 2 if operation == "double_click" else 1), 1, 3)
+    if operation in clicks | {"scroll", "drag", "polyline"}:
         modifiers = inp.get("modifiers", [])
         if (type(modifiers) is not list or len(modifiers) > 4
                 or any(type(m) is not str or m not in {"ctrl", "alt", "shift", "super"}

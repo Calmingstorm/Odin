@@ -25,18 +25,25 @@ PHYSICAL = frozenset({"move", "click", "double_click", "right_click", "middle_cl
                       "scroll", "key", "type", "polyline"})
 SEMANTIC = frozenset({"invoke", "focus", "set_text", "replace_field", "select", "value"})
 CLICKS = frozenset({"click", "double_click", "right_click", "middle_click"})
+MODIFIED_POINTER = CLICKS | {"scroll", "polyline"}
+
+
+def pointer_modifiers(action):
+    """Validate pointer modifiers without touching a keymap or issuing input."""
+    modifiers = action.get("modifiers", [])
+    if (type(modifiers) is not list or len(modifiers) > 4
+            or any(type(item) is not str or item not in {"ctrl", "alt", "shift", "super"}
+                   for item in modifiers) or len(set(modifiers)) != len(modifiers)):
+        raise PrimitiveError("rejected", "Invalid pointer modifiers")
+    return modifiers
 
 
 def click_options(action):
     """Normalize optional click count/modifiers before any native input."""
     count = action.get("count", 2 if action["type"] == "double_click" else 1)
-    modifiers = action.get("modifiers", [])
-    if (type(count) is not int or not 1 <= count <= 3
-            or type(modifiers) is not list or len(modifiers) > 4
-            or any(type(item) is not str or item not in {"ctrl", "alt", "shift", "super"}
-                   for item in modifiers) or len(set(modifiers)) != len(modifiers)):
-        raise PrimitiveError("rejected", "Invalid click count/modifiers")
-    return count, modifiers
+    if type(count) is not int or not 1 <= count <= 3:
+        raise PrimitiveError("rejected", "Invalid click count")
+    return count, pointer_modifiers(action)
 
 
 def field_expectation(action):
@@ -489,7 +496,9 @@ class NativeDesktop:
             required = {"type", "source_revision", "expected_window", "observation_id", "expected"}
             optional = {"expected_modal"}
             if type(action) is dict and action.get("type") in CLICKS:
-                optional |= {"count", "modifiers"}
+                optional.add("count")
+            if type(action) is dict and action.get("type") in MODIFIED_POINTER:
+                optional.add("modifiers")
             if (type(action) is not dict or not isinstance(action.get("type"), str)
                     or action["type"] not in fields
                     or set(action) - optional != required | fields[action["type"]]
@@ -537,6 +546,8 @@ class NativeDesktop:
                 raise PrimitiveError("rejected", "Pixel coordinates must be integers")
             if action["type"] in CLICKS:
                 click_options(action)
+            if action["type"] in MODIFIED_POINTER:
+                pointer_modifiers(action)
             if action["type"] == "scroll":
                 self._scroll(action)
             # Recheck pixels after controller authorization awaits, before input.
@@ -659,7 +670,9 @@ class NativeDesktop:
         binding = {"type", "expected_window", "observation_id", "source_revision",
                    "expected", "expected_modal"}
         if kind in CLICKS:
-            binding |= {"count", "modifiers"}
+            binding.add("count")
+        if kind in MODIFIED_POINTER:
+            binding.add("modifiers")
         if set(action) - (binding | fields[kind]):
             raise PrimitiveError("rejected", "Unsupported native action fields")
         if kind == "key":
@@ -668,7 +681,9 @@ class NativeDesktop:
                 modifiers, keysym = parse_key_chord(chord)
             except ValueError:
                 raise PrimitiveError("rejected", "unsupported_key") from None
-            keys = [*modifiers, keysym]
+            keys = self._resolve_key_plan(modifiers, keysym)
+            if 0.05 * 2 * len(keys) + 0.15 > self._deadline - self._clock():
+                raise PrimitiveError("rejected", "Key action exceeds private dispatch budget")
             for key in keys:
                 self._keys.add(key)
                 self._key_order.append(key)
@@ -695,15 +710,18 @@ class NativeDesktop:
                 raise PrimitiveError("rejected", "Polyline points must be coordinate pairs")
             points = [self._point(*point) for point in points]
             duration = finite(action.get("duration", 0), 0, 1.0)
+            modifiers = self._resolve_click_modifiers(pointer_modifiers(action))
             # xdotool dispatch has per-vertex window and pointer queries. Reserve
             # their measured cost before pressing, not after half a stroke lands.
             probe_started = self._clock()
             self._assert_window()
             vertex_cost = max(0.02, 3 * (self._clock() - probe_started) + 0.01)
-            if duration + len(points) * vertex_cost + 0.15 > self._deadline - self._clock():
+            if (duration + (len(points) + 2 * len(modifiers)) * vertex_cost + 0.15
+                    > self._deadline - self._clock()):
                 raise PrimitiveError("rejected", "Polyline exceeds private dispatch budget")
             self._input("mousemove", *points[0])
             self._pointer(*points[0])
+            self._press_modifiers(modifiers)
             self._buttons.add(1)
             self._input("mousedown", 1)
             started = self._clock()
@@ -726,14 +744,20 @@ class NativeDesktop:
                 modifiers = self._resolve_click_modifiers(names)
             if kind == "scroll":
                 button, count = self._scroll(action)
+                modifiers = self._resolve_click_modifiers(pointer_modifiers(action))
+            if kind in MODIFIED_POINTER:
+                probe_started = self._clock()
+                self._assert_window()
+                step_cost = max(0.02, 3 * (self._clock() - probe_started) + 0.01)
+                delay = 0.08 if kind == "double_click" else 0.03
+                if ((3 + 3 * count + 2 * len(modifiers)) * step_cost
+                        + (count - 1) * delay + 0.15 > self._deadline - self._clock()):
+                    raise PrimitiveError("rejected", "Pointer action exceeds dispatch budget")
             self._input("mousemove", *point)
             self._pointer(*point)
             if kind == "move":
                 return
-            for key in modifiers:
-                self._keys.add(key)
-                self._key_order.append(key)
-                self._input("keydown", key)
+            self._press_modifiers(modifiers)
             for index in range(count):
                 if index:
                     self._guard()
@@ -745,23 +769,35 @@ class NativeDesktop:
                 self._run("mouseup", button)
                 self._buttons.discard(button)
 
+    def _press_modifiers(self, modifiers):
+        # execute's finally releases the ledger even on partial dispatch/cancel.
+        for key in modifiers:
+            self._keys.add(key)
+            self._key_order.append(key)
+            self._input("keydown", key)
+
     def _resolve_click_modifiers(self, modifiers):
-        """Read the private native keymap before pointer motion or any key press."""
-        if not modifiers:
+        return self._resolve_key_plan(modifiers)
+
+    def _resolve_key_plan(self, modifiers, symbol=None):
+        """Read and prove private XKB mapping before motion or any key press."""
+        if not modifiers and symbol is None:
             return []
-        from Xlib import XK
-        from Xlib import display as xdisplay  # type: ignore[import-untyped]
+        from .x11_owned_device import X11DeviceError, _load_native, resolve_key_plan
         names = {"ctrl": "Control_L", "alt": "Alt_L", "shift": "Shift_L", "super": "Super_L"}
         self._guard()
-        display = xdisplay.Display(":77")
+        lib, _, _ = _load_native()
+        display = lib.XOpenDisplay(b":77")
+        if not display:
+            raise PrimitiveError("unsupported", "Private keyboard mapping unavailable")
         try:
-            resolved = [names[name] for name in modifiers]
-            if any(not display.keysym_to_keycode(XK.string_to_keysym(name)) for name in resolved):
-                raise PrimitiveError("unsupported", "Click modifier unavailable in native keymap")
+            resolve_key_plan(lib, display, 0x100, modifiers, symbol)
             self._guard()
-            return resolved
+            return [names[name] for name in modifiers] + ([symbol] if symbol is not None else [])
+        except X11DeviceError:
+            raise PrimitiveError("unsupported", "unsupported_key") from None
         finally:
-            display.close()
+            lib.XCloseDisplay(display)
 
     @staticmethod
     def _scroll(action):

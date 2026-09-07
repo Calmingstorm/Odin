@@ -37,6 +37,11 @@ class LinuxDesktopBackend:
         "max_polyline_seconds": 1, "polyline_dispatch_budget": "native_prepress_estimate",
         "click_count": {"min": 1, "max": 3},
         "click_modifiers": ["ctrl", "alt", "shift", "super"],
+        "scroll_modifiers": ["ctrl", "alt", "shift", "super"],
+        "drag_modifiers": ["ctrl", "alt", "shift", "super"],
+        "constrained_drag": "shift_held_application_defined_no_geometric_snapping",
+        "key_chords": "active_group_base_symbols_explicit_modifiers_only",
+        "modifier_mapping": "conventional_unambiguous_xkb_slots_only",
         "click_modifier_resolution": "existing_native_keymap_before_input",
         "accessibility": "isolated_atspi_observation_scoped",
         "replace_field": "available_nodes_only", "replace_field_max_chars": 512,
@@ -272,7 +277,10 @@ class LinuxDesktopBackend:
             optional = {"expected_modal"}
             if type(action) is dict and action.get("type") in {
                     "click", "double_click", "right_click", "middle_click"}:
-                optional |= {"count", "modifiers"}
+                optional.add("count")
+            if type(action) is dict and action.get("type") in {
+                    "click", "double_click", "right_click", "middle_click", "scroll", "polyline"}:
+                optional.add("modifiers")
             if (type(action) is not dict or not isinstance(action.get("type"), str)
                     or action["type"] not in fields
                     or set(action) - optional != required | fields[action["type"]]):
@@ -302,7 +310,13 @@ class LinuxDesktopBackend:
                        and expected["type"] == "pointer_at"
                        and all(type(expected[k]) is int and expected[k] == action[k]
                                for k in ("x", "y")))
-            from .primitives import click_options, field_expectation, parse_key_chord
+            from .primitives import (
+                MODIFIED_POINTER,
+                click_options,
+                field_expectation,
+                parse_key_chord,
+                pointer_modifiers,
+            )
             field = field_expectation(action)
             if ((action["type"] == "replace_field" and not field)
                     or not pointer and not visual and not field):
@@ -315,6 +329,8 @@ class LinuxDesktopBackend:
                 payload["expected_modal"] = action["expected_modal"]
             from .accessibility import PrimitiveError, bounded_text, finite
             try:
+                if action["type"] in MODIFIED_POINTER:
+                    payload["modifiers"] = pointer_modifiers(action)
                 if action["type"] in {
                         "click", "double_click", "right_click", "middle_click", "scroll"}:
                     if any(type(action[k]) is not int for k in ("x", "y")):

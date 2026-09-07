@@ -3,6 +3,8 @@
  * B ms; then M x y | P button x y | D button n x y ... | K n key... |
  * T utf8_hex | J ctrl+a | Q button x y | W direction count x y |
  * V button count modifier_count [modifier...] x y | L button n duration_ms x y ...
+ * Y modifier_count [modifier...] direction count x y |
+ * Z modifier_count [modifier...] button n duration_ms x y ...
  * Source-local actions release,
  * emits action_done, returns idle on SAME EI context. N heartbeat renews idle
  * only; ignored while active. S mapping_id selects an exact region while idle.
@@ -105,7 +107,7 @@ static void load_keymap(struct guardian *g) {
 }
 static void ready_receipt(struct guardian *g,const char *event) {
   char line[640];
-  int n=snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"single-ei-owner\",\"protocol\":1,\"bounded_clicks\":true,\"timed_polyline\":true,\"width\":%.17g,\"height\":%.17g,\"pointer\":true,\"keyboard\":%s,\"text\":%s,\"keymap_format\":\"%s\",\"keymap_layouts\":%u,\"monotonic_us\":%llu}\n",event,g->width,g->height,g->keyboard?"true":"false",g->keymap?"true":"false",g->keymap?"xkb_v1":"none",g->keymap?xkb_keymap_num_layouts(g->keymap):0,(unsigned long long)ei_now(g->ctx));
+  int n=snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"single-ei-owner\",\"protocol\":1,\"bounded_clicks\":true,\"timed_polyline\":true,\"pointer_modifiers_v1\":true,\"width\":%.17g,\"height\":%.17g,\"pointer\":true,\"keyboard\":%s,\"text\":%s,\"keymap_format\":\"%s\",\"keymap_layouts\":%u,\"monotonic_us\":%llu}\n",event,g->width,g->height,g->keyboard?"true":"false",g->keymap?"true":"false",g->keymap?"xkb_v1":"none",g->keymap?xkb_keymap_num_layouts(g->keymap):0,(unsigned long long)ei_now(g->ctx));
   if(n>0 && n<(int)sizeof line)(void)write(1,line,(size_t)n);
 }
 /* Owned ledger is always written BEFORE a down, never releases human state. */
@@ -123,11 +125,16 @@ static void move(struct guardian *g,struct point p) {
 }
 static void release(struct guardian *g,const char *reason) {
   bool sent=false,unsupported=false;
-  for(unsigned k=247;k;k--)if(g->keys[k]) {
-    if(!g->klost && !g->disconnected){key(g,k,false);sent=true;}else{g->keys[k]=false;unsupported=true;}
-  }
+  /* End a constrained drag before releasing its modifier keys. */
   for(unsigned b=272;b<=279;b++)if(g->buttons[b-272]) {
     if(!g->plost && !g->disconnected){button(g,b,false);sent=true;}else{g->buttons[b-272]=false;unsupported=true;}
+  }
+  for(unsigned i=g->nmodifiers;i;i--)if(g->keys[g->modifiers[i-1]]) {
+    unsigned k=g->modifiers[i-1];
+    if(!g->klost && !g->disconnected){key(g,k,false);sent=true;}else{g->keys[k]=false;unsupported=true;}
+  }
+  for(unsigned k=247;k;k--)if(g->keys[k]) {
+    if(!g->klost && !g->disconnected){key(g,k,false);sent=true;}else{g->keys[k]=false;unsupported=true;}
   }
   if(sent)receipt("release_sent",reason,ei_now(g->ctx));
   g->release_unknown |= unsupported;
@@ -204,7 +211,11 @@ static unsigned named_modifier(struct guardian *g,const char *name) {
   struct xkb_state *state=xkb_state_new(g->keymap);if(!state)return 0;
   xkb_state_update_mask(state,0,0,0,0,0,g->group);
   xkb_state_update_key(state,code,XKB_KEY_DOWN);
-  bool active=xkb_state_mod_name_is_active(state,mod,XKB_STATE_MODS_DEPRESSED)>0;
+  xkb_mod_index_t index=xkb_keymap_mod_get_index(g->keymap,mod);
+  bool active=index<32 && xkb_state_mod_name_is_active(state,mod,XKB_STATE_MODS_DEPRESSED)>0
+    && xkb_state_serialize_mods(state,XKB_STATE_MODS_DEPRESSED)==((xkb_mod_mask_t)1<<index)
+    && !xkb_state_serialize_mods(state,XKB_STATE_MODS_LATCHED|XKB_STATE_MODS_LOCKED)
+    && xkb_state_serialize_layout(state,XKB_STATE_LAYOUT_EFFECTIVE)==g->group;
   xkb_state_unref(state);return active?code:0;
 }
 static bool named_chord(struct guardian *g,char *text) {
@@ -316,6 +327,20 @@ static bool command(struct guardian *g,char *line) {
     receipt("held","owned-ledger-before-dispatch",ei_now(g->ctx));return true;
   }
   if(!g->begun)return false;
+  if(*verb=='Y'||*verb=='Z'){
+    if(!number(&rest,&g->nmodifiers,0,4))return false;
+    if(g->nmodifiers){
+      if(!g->keyboard||!g->keymap){reject(g,"keymap_unavailable");return true;}
+      if(g->depressed||g->latched||g->locked||g->group>=xkb_keymap_num_layouts(g->keymap)){reject(g,"modifier_state_active");return true;}
+      for(unsigned i=0;i<g->nmodifiers;i++){
+        char *name=token(&rest);unsigned code=name?named_modifier(g,name):0;
+        if(code<9||code>255){reject(g,"unsupported_key");return true;}
+        g->modifiers[i]=code-8;
+        for(unsigned j=0;j<i;j++)if(g->modifiers[j]==g->modifiers[i])return false;
+      }
+    }
+    *verb=*verb=='Y'?'W':'L';
+  }
   g->kind=*verb;
   if(*verb=='V'){
     if(!number(&rest,&g->button,272,279)||!number(&rest,&g->clicks,1,3)||!number(&rest,&g->nmodifiers,0,4))return false;
@@ -338,11 +363,11 @@ static bool command(struct guardian *g,char *line) {
       if(!number(&rest,&ms,0,1000))return false;
       g->point_interval=(uint64_t)ms*1000/(g->count-1);
       /* Keep the two-second lease; reserve dispatch overhead before down. */
-      uint64_t budget=(uint64_t)ms*1000+(uint64_t)(g->count+2)*2000;
+      uint64_t budget=(uint64_t)ms*1000+(uint64_t)(g->count+2+2*g->nmodifiers)*2000;
       if(ei_now(g->ctx)+budget+250000>=g->lease){reject(g,"lease-expired");return true;}
     }
     for(unsigned i=0;i<g->count;i++)if(!point(g,&rest,&g->points[i],false))return false;
-    g->planned=g->count+(*verb=='M'?0:*verb=='Q'?4:2);
+    g->planned=g->count+(*verb=='M'?0:*verb=='Q'?4:2)+2*g->nmodifiers;
   }else if(*verb=='W'){
     char *direction=token(&rest);
     if(!direction||!number(&rest,&g->count,1,20)||!point(g,&rest,&g->points[0],false)||rest)return false;
@@ -375,7 +400,12 @@ static bool command(struct guardian *g,char *line) {
   if(rest||cancelled||ei_now(g->ctx)>=g->lease)return false;
   if(g->kind=='K')g->planned=2*g->count;
   if(g->kind=='T')for(unsigned i=0;i<g->count;i++)g->planned+=2*g->text[i].n;
-  if(g->kind=='W')g->planned=1+g->count;
+  if(g->kind=='W')g->planned=1+g->count+2*g->nmodifiers;
+  /* Whole pointer plan including all modifier releases, before any event. */
+  if(g->kind=='W'||g->kind=='V'){
+    uint64_t wait=g->kind=='W'?(uint64_t)(g->count-1)*30000:(uint64_t)(g->clicks-1)*80000;
+    if(ei_now(g->ctx)+wait+(uint64_t)g->planned*2000+250000>=g->lease){reject(g,"lease-expired");return true;}
+  }
   g->action=true;g->next_step=0;start(g,*verb=='M'||*verb=='P'||*verb=='D'||*verb=='Q'||*verb=='W'||*verb=='V'||*verb=='L',*verb=='K'||*verb=='J'||*verb=='T'||g->nmodifiers);return true;
 }
 static void action_receipt(struct guardian *g,const char *event,const char *reason) {
@@ -401,7 +431,14 @@ static void step(struct guardian *g) {
   if(!g->action||g->kind=='H'||g->done_pending)return;
   uint64_t now=ei_now(g->ctx);if(now<g->next_step)return;
   if(g->kind=='M'||g->kind=='P'||g->kind=='D'||g->kind=='L'){
-    if(g->index<g->count){move(g,g->points[g->index]);if(!g->index&&g->kind!='M')button(g,g->button,true);g->index++;g->next_step=now+(g->index<g->count?g->point_interval:0);}else complete(g);
+    if(g->index<g->count){
+      move(g,g->points[g->index]);
+      if(!g->index&&g->kind!='M'){
+        for(unsigned i=0;i<g->nmodifiers;i++)key(g,g->modifiers[i],true);
+        button(g,g->button,true);
+      }
+      g->index++;g->next_step=now+(g->index<g->count?g->point_interval:0);
+    }else complete(g);
   }else if(g->kind=='V'){
     if(!g->phase){
       if(!g->index){move(g,g->points[0]);for(unsigned i=0;i<g->nmodifiers;i++)key(g,g->modifiers[i],true);}
@@ -419,7 +456,7 @@ static void step(struct guardian *g) {
     else if(g->phase==2){button(g,g->button,true);g->phase=3;}
     else complete(g);
   }else if(g->kind=='W'){
-    if(!g->index)move(g,g->points[0]);
+    if(!g->index){move(g,g->points[0]);for(unsigned i=0;i<g->nmodifiers;i++)key(g,g->modifiers[i],true);}
     ei_device_scroll_discrete(g->pointer,g->scroll_x,g->scroll_y);ei_device_frame(g->pointer,now);
     g->input_sent=true;g->completed++;
     if(++g->index==g->count)complete(g);else g->next_step=now+30000;

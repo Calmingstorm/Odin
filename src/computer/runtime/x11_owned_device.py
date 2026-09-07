@@ -209,6 +209,120 @@ def _load_native():
         raise X11DeviceError("native_libraries_unavailable") from None
 
 
+def _prove_modifier_effects(display, keyboard_id, group, codes, slots):
+    """Simulate each modifier in the actual XKB map, not keysym naming alone."""
+    context = keymap = state = None
+    try:
+        bridge = C.CDLL("libX11-xcb.so.1")
+        common = C.CDLL("libxkbcommon.so.0")
+        x11 = C.CDLL("libxkbcommon-x11.so.0")
+        p, u = C.c_void_p, C.c_uint32
+        specs = [(bridge, "XGetXCBConnection", [p], p),
+                 (common, "xkb_context_new", [C.c_int], p),
+                 (common, "xkb_context_unref", [p], None),
+                 (common, "xkb_keymap_unref", [p], None),
+                 (common, "xkb_state_new", [p], p),
+                 (common, "xkb_state_unref", [p], None),
+                 (common, "xkb_state_update_mask", [p, u, u, u, u, u, u], C.c_int),
+                 (common, "xkb_state_update_key", [p, u, C.c_int], C.c_int),
+                 (common, "xkb_state_serialize_mods", [p, C.c_int], u),
+                 (common, "xkb_state_serialize_layout", [p, C.c_int], u),
+                 (x11, "xkb_x11_get_core_keyboard_device_id", [p], C.c_int32),
+                 (x11, "xkb_x11_keymap_new_from_device", [p, p, C.c_int32, C.c_int], p)]
+        for lib, name, args, result in specs:
+            fn = getattr(lib, name)
+            fn.argtypes, fn.restype = args, result
+        context = common.xkb_context_new(0)
+        connection = bridge.XGetXCBConnection(display)
+        if not context or not connection:
+            raise X11DeviceError("unsupported_key")
+        if keyboard_id == 0x100:
+            keyboard_id = x11.xkb_x11_get_core_keyboard_device_id(connection)
+        keymap = x11.xkb_x11_keymap_new_from_device(context, connection, keyboard_id, 0)
+        if not keymap:
+            raise X11DeviceError("unsupported_key")
+        for code, slot in zip(codes, slots, strict=True):
+            state = common.xkb_state_new(keymap)
+            if not state:
+                raise X11DeviceError("unsupported_key")
+            common.xkb_state_update_mask(state, 0, 0, 0, 0, 0, group)
+            common.xkb_state_update_key(state, code, 1)
+            # Effective layout plus depressed/latched/locked real modifiers.
+            if (common.xkb_state_serialize_mods(state, 1) != 1 << slot
+                    or common.xkb_state_serialize_mods(state, 2 | 4)
+                    or common.xkb_state_serialize_layout(state, 128) != group):
+                raise X11DeviceError("unsupported_key")
+            common.xkb_state_unref(state)
+            state = None
+    except (OSError, AttributeError):
+        raise X11DeviceError("unsupported_key") from None
+    finally:
+        if state:
+            common.xkb_state_unref(state)
+        if keymap:
+            common.xkb_keymap_unref(keymap)
+        if context:
+            common.xkb_context_unref(context)
+
+
+def resolve_key_plan(x, display, keyboard_id, modifiers, symbol_name=None):
+    """Read-only XKB admission; no shifted-level or modifier-slot guessing.
+
+    Explicit modifiers apply to a proven base key (ctrl+shift+s). A/exclam
+    requiring implicit levels are rejected rather than silently sent as a/1.
+    """
+    names = {"ctrl": ("Control_L", 2), "shift": ("Shift_L", 0),
+             "alt": ("Alt_L", 3), "super": ("Super_L", 6)}
+    if (type(modifiers) not in (list, tuple) or len(modifiers) > 4
+            or any(type(m) is not str or m not in names for m in modifiers)
+            or len(set(modifiers)) != len(modifiers)):
+        raise X11DeviceError("unsupported_key")
+    state = _XkbState()
+    if (x.XkbGetState(display, keyboard_id, C.byref(state)) != 0
+            or state.base_mods or state.latched_mods or state.locked_mods
+            or state.latched_group or state.group > 3):
+        raise X11DeviceError("unsupported_key")
+
+    def base_code(name):
+        if type(name) is not str or re.fullmatch(r"[A-Za-z0-9_]{1,128}", name) is None:
+            raise X11DeviceError("unsupported_key")
+        symbol = x.XStringToKeysym(name.encode("ascii"))
+        code = x.XKeysymToKeycode(display, symbol) if symbol else 0
+        consumed, actual = C.c_uint(), C.c_ulong()
+        if (not 8 <= code <= 255 or not x.XkbLookupKeySym(
+                display, code, state.group << 13, C.byref(consumed), C.byref(actual))
+                or actual.value != symbol):
+            raise X11DeviceError("unsupported_key")
+        return code
+
+    codes = [base_code(names[m][0]) for m in modifiers]
+    mapping = x.XGetModifierMapping(display)
+    if not mapping:
+        raise X11DeviceError("unsupported_key")
+    try:
+        m = mapping.contents
+        if not 1 <= m.max_keypermod <= 256 or not m.modifiermap:
+            raise X11DeviceError("unsupported_key")
+        slots = list(m.modifiermap[:8 * m.max_keypermod])
+        for name, code in zip(modifiers, codes, strict=True):
+            if {i // m.max_keypermod for i, value in enumerate(slots) if value == code} != {
+                    names[name][1]}:
+                raise X11DeviceError("unsupported_key")
+        if codes:
+            _prove_modifier_effects(display, keyboard_id, state.group, codes,
+                                    [names[name][1] for name in modifiers])
+        if symbol_name is not None:
+            code = base_code(symbol_name)
+            if code in slots:
+                raise X11DeviceError("unsupported_key")
+            codes.append(code)
+    finally:
+        x.XFreeModifiermap(mapping)
+    if len(set(codes)) != len(codes):
+        raise X11DeviceError("unsupported_key")
+    return codes
+
+
 class ExistingXTest:
     prefix = "Virtual core"
     independent_pointer = False
@@ -596,6 +710,14 @@ class ExistingXTest:
         if baseline is not None and mapping != baseline:
             raise X11DeviceError("injected_keyboard_mapping_changed")
         self.keyboard_mapping_identity = mapping
+
+    def key_plan(self, modifiers, symbol_name=None):
+        self._assert_keyboard_mapping()
+        with self._checked():
+            codes = resolve_key_plan(self._x, self._display, self._keyboard_id(),
+                                     modifiers, symbol_name)
+        self._assert_keyboard_mapping()
+        return codes
 
     def keycode(self, name: str) -> int:
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,128}", name):

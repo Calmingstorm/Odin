@@ -105,7 +105,10 @@ class WaylandRuntimeBackend:
                     "effect_expectations": ["visual_change", "region_changed"],
                     "accessible_targets": "unavailable", "replace_field": "unavailable",
                     "click_count": "native_click_modifiers_v1_capability_required",
-                    "click_modifiers": "native_click_modifiers_v1_capability_required"}
+                    "click_modifiers": "native_click_modifiers_v1_capability_required",
+                    "scroll_modifiers": "native_pointer_modifiers_v1_capability_required",
+                    "drag_modifiers": "native_pointer_modifiers_v1_capability_required",
+                    "constrained_drag": "shift_held_application_defined_no_geometric_snapping"}
 
     def __init__(self, *, enabled=False, app_profile=None, environment="existing_session",
                  config: WaylandSessionConfig, qualify=None):
@@ -391,6 +394,8 @@ class WaylandRuntimeBackend:
         optional = {"expected_modal"}
         if type(action) is dict and action.get("type") in click_types:
             optional |= {"count", "modifiers"}
+        if type(action) is dict and action.get("type") in {"scroll", "polyline"}:
+            optional.add("modifiers")
         if (type(action) is not dict or type(action.get("type")) is not str
                 or action["type"] not in fields
                 or set(action) - optional != required | fields[action["type"]]):
@@ -458,12 +463,23 @@ class WaylandRuntimeBackend:
                 return " ".join(words)
             prefix = "Q" if action["type"] == "double_click" else "P"
             return f"{prefix} {button} " + point([action["x"], action["y"]])
+        modifiers = action.get("modifiers", [])
+        if (type(modifiers) is not list or len(modifiers) > 4
+                or any(type(m) is not str or m not in {"ctrl", "alt", "shift", "super"}
+                       for m in modifiers) or len(set(modifiers)) != len(modifiers)):
+            raise ComputerError("wayland_unsupported_grounded_action")
+        if modifiers and (not self._guardian
+                or self._guardian.ready.get("pointer_modifiers_v1") is not True):
+            raise ComputerError("wayland_pointer_modifiers_unavailable")
+        modifier_words = " ".join([str(len(modifiers)), *modifiers])
         if action["type"] == "scroll":
             if (type(action["direction"]) is not str
                     or action["direction"] not in {"up", "down", "left", "right"}
                     or type(action["count"]) is not int or not 1 <= action["count"] <= 20):
                 raise ComputerError("wayland_invalid_scroll")
-            return f"W {action['direction']} {action['count']} " + point([action["x"], action["y"]])
+            prefix = f"Y {modifier_words}" if modifiers else "W"
+            return (f"{prefix} {action['direction']} {action['count']} "
+                    + point([action["x"], action["y"]]))
         points, duration = action["points"], action["duration"]
         if (type(points) is not list or not 2 <= len(points) <= 256
                 or type(duration) not in {int, float} or not math.isfinite(duration)
@@ -473,7 +489,9 @@ class WaylandRuntimeBackend:
             # Old D silently ignored duration. Never claim requested timing when
             # the provisioned native guardian cannot enforce it.
             raise ComputerError("wayland_unsupported_grounded_action")
-        return f"L 272 {len(points)} {round(duration * 1000)} " + " ".join(point(p) for p in points)
+        prefix = f"Z {modifier_words}" if modifiers else "L"
+        return (f"{prefix} 272 {len(points)} {round(duration * 1000)} "
+                + " ".join(point(p) for p in points))
 
     async def _watch_action(self, metadata, original_scope, generation) -> None:
         try:
