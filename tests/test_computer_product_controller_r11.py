@@ -158,6 +158,29 @@ async def test_isolated_start_still_requires_launch_profile(tmp_path):
         store.close()
 
 
+@pytest.mark.parametrize("platform", ["x11", "wayland"])
+@pytest.mark.parametrize("app", ["xed", "drawing"])
+async def test_explicit_isolated_request_refused_before_attached_start(tmp_path, platform, app):
+    from unittest.mock import AsyncMock, Mock
+
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    backend.capabilities = replace(backend.capabilities, platform=platform)
+    backend.start = AsyncMock()
+    store.create_session = Mock(wraps=store.create_session)
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    try:
+        with pytest.raises(ComputerError, match="isolated_request_conflicts.*omit app"):
+            await controller.session(RequestContext("o", "c", "t", "h"),
+                                     {"operation": "start", "app": app})
+        backend.start.assert_not_awaited()
+        store.create_session.assert_not_called()
+        assert not controller._live
+    finally:
+        await controller.close()
+        store.close()
+
+
 @pytest.mark.parametrize("reason", ["display_asleep", "topology_changed", "portal_closed"])
 async def test_capture_lifecycle_failure_retires_delivered_pixels(tmp_path, reason):
     store = ComputerStore(tmp_path / "db", tmp_path / "evidence")

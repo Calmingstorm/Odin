@@ -117,8 +117,19 @@ def test_attached_factory_is_generic_with_pinned_operator_settings():
     service.settings.monitor_names = ["fixture"]
     service.settings.runtime_sudo = True
     xed = service._backend()
-    drawing = service._backend("drawing")
     assert xed._input_enabled and xed._runtime_sudo
-    assert drawing._input_enabled and drawing._runtime_sudo
-    assert "app_profile" not in xed._config and "app_profile" not in drawing._config
-    assert not xed._children and not drawing._children
+    assert "app_profile" not in xed._config
+    assert not xed._children
+
+
+@pytest.mark.parametrize("platform", ["x11", "wayland"])
+@pytest.mark.parametrize("app", ["xed", "drawing"])
+def test_explicit_isolated_app_never_constructs_attached_backend(platform, app):
+    from src.computer.models import ComputerError
+
+    service, _ = fixture(SimpleNamespace())
+    service.settings.environment = "existing_session"
+    service.settings.platform = platform
+    # No display/bus configuration exists: rejection must precede backend setup.
+    with pytest.raises(ComputerError, match="isolated_request_conflicts.*omit app"):
+        service._backend(app)

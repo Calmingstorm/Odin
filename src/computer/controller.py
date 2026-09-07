@@ -327,6 +327,11 @@ class ComputerController:
             if capabilities.environment == "isolated" and app is None:
                 raise ComputerError("isolated_app_required")
             if capabilities.environment == "existing_session":
+                if app is not None:
+                    raise ComputerError(
+                        "isolated_request_conflicts_with_existing_session: app requests an "
+                        "isolated launch; select the isolated environment, or omit app "
+                        "to explicitly attach")
                 supported = getattr(backend, "input_supported", None)
                 if type(supported) is not bool:
                     raise ComputerError("attachment_unavailable")

@@ -72,7 +72,13 @@ class ComputerIntegration:
 
     def _backend(self, app=None):
         from .app_profiles import validate_profile
+        from .models import ComputerError
 
+        if (getattr(self.settings, "environment", "isolated") == "existing_session"
+                and app is not None):
+            raise ComputerError(
+                "isolated_request_conflicts_with_existing_session: app requests an isolated "
+                "launch; select the isolated environment, or omit app to explicitly attach")
         if getattr(self.settings, "environment", "isolated") == "isolated":
             validate_profile(app, platform=getattr(self.settings, "platform", "x11"),
                              environment="isolated")
