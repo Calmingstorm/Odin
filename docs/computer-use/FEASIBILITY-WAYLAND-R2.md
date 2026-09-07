@@ -285,3 +285,13 @@ semantics and independently trustworthy seat-state telemetry, without pretending
 focus-out is a release or clearing human state. Then remeasure held-input EOF and
 same-application post-EOF markers. No production backend eligibility, client-loss
 release guarantee, full lifecycle matrix, Stage6 pass or deployment readiness claim.
+
+Parent post-run reconciliation: the three temporary `sleep` identities and their
+reported parent3400417 were later absent. `computer_R3_final_workload_cleanup`
+verified all23 recorded Wayland identities and fixture containers absent; its
+only failed check was historical parent-owned zombies. This does not change the
+failed EOF experiment or retroactively change its outer exit70. The shell fixture
+tests were then made hermetic by stubbing host inventory alongside Docker;
+permission/disappearance/catatonit semantics remain separate real ledger tests.
+Final combined shell/telemetry suite:15 passed, including explicit exit70 on
+inventory verification failure. Runtime inventory checks were not relaxed.
