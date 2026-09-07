@@ -1,5 +1,9 @@
 #!/usr/bin/python3
-"""Private GUI-only attached acceptance. No operator display, no target writes."""
+"""Private GUI-only acceptance, narrowed in R7 to offered Writer save / Inkscape.
+
+Historical filename retained; Writer close/reopen and Calc/Draw are not offered.
+No operator display, no script-generated target documents.
+"""
 import argparse
 import asyncio
 import hashlib
@@ -69,12 +73,18 @@ def outer(args):
 async def exercise(task, app, d):
     sys.path.insert(0,'/code')
     from src.computer.controller import ComputerController
-    from src.computer.models import RequestContext
+    from src.computer.models import ComputerError, RequestContext
     from src.computer.runtime.x11_attached import X11AttachedBackend
     from src.computer.store import ComputerStore
     from src.computer.vision import observation_image
-    profile = 'inkscape' if task == 'inkscape' else 'libreoffice'
+    profile = 'inkscape' if task == 'inkscape' else 'writer'
     class EvidenceBackend(X11AttachedBackend):
+        input_calls = 0
+
+        async def _input_worker(self, request):
+            self.input_calls += 1
+            return await super()._input_worker(request)
+
         async def act(self,payload):
             try:
                 result = await super().act(payload)
@@ -152,17 +162,27 @@ async def exercise(task, app, d):
         await observe()
         marker = 'R6 private note.'
         if task == 'writer':
+            # Ordinary controller refusal, before native dispatch or any document
+            # mutation. These are lifecycle/menu paths, not a shortcut blacklist.
+            for operation, fields in [('click', {'x': 45, 'y': 167}),
+                                      ('drag', {'points': [[100, 100], [110, 110]],
+                                                'duration': .1}),
+                                      ('key', {'key': 'ctrl+o'}),
+                                      ('key', {'key': 'ctrl+n'})]:
+                try:
+                    await act_once(operation, **fields)
+                except ComputerError as exc:
+                    assert exc.code == 'application_task_not_offered'
+                    assert backend.input_calls == 0
+                    record('policy_refused', operation=operation, key=fields.get('key'),
+                           reason=exc.code, native_input_calls=backend.input_calls)
+                else:
+                    raise RuntimeError('unoffered_writer_action_not_refused')
             await act('type',text=marker)
             await act('key',key='Return')
             await act('key',key='ctrl+b')
             await act('type',text='Save verified.')
             await act('key',key='ctrl+b')
-        elif task == 'calc':
-            for row in [('Item','Count'),('Panels','3'),('Bolts','12')]:
-                await act('type',text=row[0])
-                await act('key',key='Tab')
-                await act('type',text=row[1])
-                await act('key',key='Return')
         elif task == 'inkscape':
             await act('type',text='r')
             await act('drag',points=[[550,350],[650,400],[750,480]],duration=.3)
@@ -171,8 +191,8 @@ async def exercise(task, app, d):
             await act('drag',points=[[600,520],[660,570],[720,620]],duration=.3)
             await act('key',key='Escape')
         else:
-            raise RuntimeError('drawing_coordinates_require_private_frame_review')
-        suffix = {'writer':'odt','calc':'ods','draw':'odg','inkscape':'svg'}[task]
+            raise RuntimeError('application_task_not_offered')
+        suffix = {'writer':'odt','inkscape':'svg'}[task]
         target = Path('/workspace/home/result.'+suffix)
         await act('key',key='ctrl+shift+s')
         await act('key',key='ctrl+a')
@@ -186,44 +206,15 @@ async def exercise(task, app, d):
             with zipfile.ZipFile(target) as archive:
                 assert archive.testzip() is None
                 content = archive.read('content.xml').decode('utf-8')
-            assert ('R6 private note.' in content if task == 'writer' else 'Panels' in content)
+            assert 'R6 private note.' in content
         record('saved_artifact',task=task,size=target.stat().st_size,
                sha256=hashlib.sha256(target.read_bytes()).hexdigest(),content_verified=True)
         await observe()
         if task == 'writer':
             saved_windows = {w['xid'] for w in census() if 'result.odt' in (w['title'] or '')}
             assert len(saved_windows) == 1
-            # The native menu path is bounded and affects only this disposable ODT.
-            await act('click',x=18,y=32)
-            await observe()
-            menu_frame = Path(f'/workspace/frame-{index-1:03}.png')
-            from PIL import Image
-            Image.open(menu_frame).crop((0,40,285,260)).save('/workspace/menu-crop.png')
-            menu = subprocess.run(['tesseract','/workspace/menu-crop.png','stdout','--psm','6','tsv'],
-                                  capture_output=True,text=True,check=True,timeout=10).stdout
-            matches = []
-            for line in menu.splitlines()[1:]:
-                fields = line.split('\t')
-                if len(fields) == 12 and fields[11].strip() == 'Close':
-                    matches.append((int(fields[6])+int(fields[8])//2,
-                                    40+int(fields[7])+int(fields[9])//2))
-            record('close_menu_candidates',matches=matches)
-            assert len(matches) == 1, 'one_visible_close_menu_item_required'
-            await act('click',x=matches[0][0],y=matches[0][1])
-            await asyncio.sleep(1)
-            assert saved_windows.isdisjoint({w['xid'] for w in census()}), 'saved_document_window_not_closed'
-            record('document_closed',old_windows=sorted(saved_windows))
-            await act('key',key='ctrl+o')
-            await act('type',text=str(target))
-            await act('key',key='Return')
-            await asyncio.sleep(1)
-            reopened_windows = {w['xid'] for w in census() if 'result.odt' in (w['title'] or '')}
-            assert len(reopened_windows) == 1 and saved_windows.isdisjoint(reopened_windows)
-            await observe()
-            # Harmless supported navigation after disk reopen; no output generated by a script.
-            await act('key',key='ctrl+Home')
-            await act('key',key='ctrl+End')
-            await observe()
+            # Verify the actual GUI-written ZIP/XML. Disk parsing is not a claim
+            # of a GUI close/reopen; that unqualified lifecycle is not attempted.
             with zipfile.ZipFile(target) as archive:
                 assert archive.testzip() is None
                 document = ET.fromstring(archive.read('content.xml'))
@@ -240,7 +231,9 @@ async def exercise(task, app, d):
                     and paragraphs[1].text == 'Save verified.') or any(
                         s.get('{'+ns['text']+'}style-name') in bold_styles
                         and ''.join(s.itertext()) == 'Save verified.' for s in spans)
-            record('task_complete',saved=True,reopened=True,new_windows=sorted(reopened_windows),
+            record('task_complete',task_scope='writer_keyboard_note_bold_save',
+                   saved=True,reopened=False,close_reopen='not_offered',
+                   saved_windows=sorted(saved_windows),
                    paragraphs=[marker,'Save verified.'],second_paragraph_bold=True,
                    final_frame=index-1,sha256=hashlib.sha256(target.read_bytes()).hexdigest())
         else:
@@ -340,6 +333,6 @@ def inner():
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
     parser.add_argument('--execute-isolated',action='store_true')
-    parser.add_argument('--task',choices=['census','writer','calc','draw','inkscape'],default='writer')
+    parser.add_argument('--task',choices=['census','writer','inkscape'],default='writer')
     args = parser.parse_args()
     raise SystemExit(inner() if os.environ.get('XI2_PRIVATE_SANDBOX') == '1' else outer(args))

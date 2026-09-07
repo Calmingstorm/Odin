@@ -41,3 +41,14 @@ def test_partial_not_full_qualification():
     source = SCRIPT.read_text()
     assert "record('task_partial',saved=True,reopened=False)" in source
     assert 'gtk-cursor-blink=false' in source
+
+
+def test_r7_only_offered_apps_and_no_writer_close_reopen_attempt():
+    source = SCRIPT.read_text()
+    assert "choices=['census','writer','inkscape']" in source
+    assert "profile = 'inkscape' if task == 'inkscape' else 'writer'" in source
+    assert "saved=True,reopened=False,close_reopen='not_offered'" in source
+    assert "await act('key',key='ctrl+o')" not in source
+    assert 'close_menu_candidates' not in source
+    assert "assert backend.input_calls == 0" in source
+    assert "exc.code == 'application_task_not_offered'" in source
