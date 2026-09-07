@@ -5,6 +5,7 @@ import base64
 import contextlib
 import hashlib
 import json
+import select
 import signal
 import sys
 import time
@@ -173,7 +174,11 @@ def watch_topology(request):
             if not reply.get("ok"):
                 break
             signal.alarm(0)
-            time.sleep(.1)
+            # Parent-owned stdin is a liveness lease. EOF stops the read-only
+            # watcher cleanly; this stream accepts no commands after its gate.
+            ready, _, _ = select.select([sys.stdin.buffer], [], [], .1)
+            if ready:
+                break
     finally:
         capture.close()
 
