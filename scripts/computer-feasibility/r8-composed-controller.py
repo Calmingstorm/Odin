@@ -24,6 +24,32 @@ from src.computer.store import ComputerStore
 EVIDENCE = Path('/evidence')
 
 
+class DiagnosticBackend(WaylandRuntimeBackend):
+    """Preserve production exceptions which the public controller sanitizes."""
+
+    async def act(self, action):
+        guardian = self._guardian
+        if guardian is not None and not getattr(guardian, '_fixture_recording', False):
+            original_put = guardian._events.put_nowait
+
+            def recording_put(row):
+                record('guardian_event', row=row)
+                return original_put(row)
+
+            guardian._events.put_nowait = recording_put
+            guardian._fixture_recording = True
+        try:
+            return await super().act(action)
+        except BaseException as error:
+            record('runtime_action_exception', error=str(error),
+                   exception_type=type(error).__name__, traceback=traceback.format_exc(),
+                   guardian_failed=getattr(guardian, '_failed', None),
+                   guardian_ready=getattr(guardian, '_ready', None),
+                   guardian_returncode=(guardian._child.returncode
+                                        if guardian and guardian._child else None))
+            raise
+
+
 def record(kind, **fields):
     row = {'kind': kind, 'at': time.monotonic(), **fields}
     with (EVIDENCE / 'composition.jsonl').open('a') as stream:
@@ -64,7 +90,7 @@ async def main():
         record('probe_spawn', pid=pid)
 
     address = os.environ['DBUS_SESSION_BUS_ADDRESS'].split(',guid=', 1)[0]
-    backend = WaylandRuntimeBackend(enabled=True, app_profile='inkscape',
+    backend = DiagnosticBackend(enabled=True, app_profile='inkscape',
         config=WaylandSessionConfig(address, os.getuid(), '/usr/local/bin/wayland-owned-input'),
         qualify=GnomeSameStackQualifier(record_spawn=probe_spawn))
     backend.runtime_identity_callback = lambda identity: record(

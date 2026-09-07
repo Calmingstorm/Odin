@@ -48,6 +48,15 @@ logs `/home/odin/tmp/r8-composed-<name>-driver.log`, ownership receipts
 | native4 | r8c | Parent runtime7c4437f fixes included. Eligible+capture pass. Separate read-only private diagnostic proves scope rejects an empty banner bin. No app input. |
 | native5 | r8d | Parent banner77fad9a included, but newer parent probe now refuses `probe_private_telemetry_or_sender_error` before scope. Fresh refused capture passes; same Inkscape process survives detach. No input. |
 | native6 | r8e | Actual ComputerController entrypoint now used. Before any portal/start, app_profiles.py:66 refuses Inkscape because `(platform, environment) != ('x11', 'existing_session')`. Exact error `application_environment_unsupported`. Same app preserved, no input. |
+| native7 | r8f | Parent8bff004 + portal0bfa942: real Controller start eligible, focused observation and delivery receipt accepted. First type `r` returns unknown; runtime cleanup quarantined, outer cleanup succeeds, same app preserved. |
+| native8 | r8f | Diagnostic subclass calls unchanged production backend, tees guardian event queue without consuming/changing events. Selected receipt has keyboard=true, text=false, keymap_format=none, keymap_layouts=0. Begin then closed reason=invalid-command, exit2. Raw exception `WaylandGuardianError: wayland_guardian_input_path_lost`. No successful task. |
+
+Native8 concrete blocker is absent guardian keymap, not an inferred portal timeout
+or modifier-change event. Full exception/event evidence lives in
+`/home/odin/tmp/r8-composed-native8-20260907/composition.jsonl`. The first
+`T 72` command is refused because `g.keymap` is absent. Do not replace the keymap
+with a fabricated US layout or waive the modifier/scope protections. Parent owns
+runtime fixes. Portal deadline followup f9df52b is ready for a final image rebuild.
 
 Each of these is an **exit1 application failure**, not a successful task. Native1
 identified a true integration mismatch: probe case-insensitive `libGL` regexp
