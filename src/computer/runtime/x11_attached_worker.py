@@ -104,6 +104,7 @@ def run(request, capture=None):
             from src.computer.runtime.x11_app_scope import AppScope
             app_scope = AppScope(capture._connection._display)
         monitor = topology.monitors[selected["index"]]
+        accessibility, accessibility_status, accessibility_private = [], "unavailable", {}
         # GUI save/close can settle focus and title in separate events. Discard
         # every raced raster and take a wholly new bounded observation, never
         # relax equality or replay the preceding input to obtain a stable frame.
@@ -119,9 +120,44 @@ def run(request, capture=None):
 
         for attempt in range(3):
             binding = app_scope.snapshot(monitor) if app_scope else None
-            before_inventory = inventory(binding)
-            observation = capture.capture(topology, selected["index"], crop=crop)
-            after_inventory = inventory(binding)
+            accessibility, accessibility_status, accessibility_private = [], "unavailable", {}
+            native_accessibility = None
+            try:
+                if binding:
+                    from src.computer.runtime.x11_accessibility import (
+                        AttachedAccessibility,
+                        public_nodes,
+                    )
+                    native_accessibility = AttachedAccessibility(
+                        capture._connection._display, binding)
+                    accessibility_deadline = time.monotonic() + 1.0
+                    def guard():
+                        if time.monotonic() >= accessibility_deadline:
+                            raise TimeoutError("bounded accessibility observation expired")
+                        app_scope.assert_snapshot(binding, monitor)
+                    try:
+                        nodes, accessibility_status, private = native_accessibility.capture(guard)
+                        rect = ([monitor.x + crop.x, monitor.y + crop.y, crop.width, crop.height]
+                                if crop else binding["source_rect"])
+                        accessibility = public_nodes(nodes, binding["source_origin"], rect)
+                        accessibility_private = {row["handle"]: private[row["handle"]]
+                                                 for row in accessibility}
+                    except Exception:
+                        accessibility, accessibility_private = [], {}
+                        accessibility_status = "unavailable"
+                before_inventory = inventory(binding)
+                observation = capture.capture(topology, selected["index"], crop=crop)
+                after_inventory = inventory(binding)
+                if native_accessibility and accessibility:
+                    try:
+                        native_accessibility.stable(guard)
+                    except Exception:
+                        accessibility, accessibility_private = [], {}
+                        accessibility_status = "unavailable"
+            finally:
+                if native_accessibility:
+                    with contextlib.suppress(Exception):
+                        native_accessibility.close()
             if not app_scope or binding == app_scope.snapshot(monitor):
                 break
             if attempt < 2:
@@ -150,6 +186,8 @@ def run(request, capture=None):
                                      else None),
                 "input_scope_reason": reason,
                 "prior_target_state": target_state,
+                "accessibility": accessibility, "accessibility_status": accessibility_status,
+                "accessibility_private": accessibility_private,
                 "image": base64.b64encode(observation.image_bytes).decode("ascii")}
     finally:
         if owned:

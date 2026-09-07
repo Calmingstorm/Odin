@@ -54,6 +54,7 @@ def safe_reason(reason):
         "invalid_scroll_count", "invalid_scroll_direction", "invalid_text", "unsupported_action",
         "unsupported_key", "unsupported_character", "injected_keyboard_mapping_unavailable",
         "input_guardian_unavailable",
+        "accessible_target_unavailable", "accessible_target_changed", "native_field_failed",
         "application_identity_unavailable", "application_identity_changed",
         "application_scope_unavailable", "application_scope_changed", "source_scope_unavailable",
         "application_uid_mismatch", "application_process_unreadable",
@@ -78,6 +79,7 @@ InputStep: TypeAlias = (
     tuple[Literal["move"], int, int]
     | tuple[Literal["button", "key"], int, bool]
     | tuple[Literal["wait"], float]
+    | tuple[Literal["semantic"]]
 )
 
 
@@ -213,7 +215,7 @@ class Guardian:
         self.phase = "preflight"
         self.steps_completed = 0
 
-    def guard(self):
+    def guard(self, *, check_helper=True):
         from src.computer.runtime import x11_worker_lifecycle
         session_fd = vars(self.native).get("session_lease_fd")
         if session_fd is not None and os.pread(session_fd, 1, 0) != b"1":
@@ -225,7 +227,7 @@ class Guardian:
         if self.controller_fd is not None and select.select([self.controller_fd], [], [], 0)[0]:
             message = os.read(self.controller_fd, 4096)
             raise GuardianFailure("controller_eof" if not message else "controller_cancel")
-        if self.helper.process.poll() is not None:
+        if check_helper and self.helper.process.poll() is not None:
             raise GuardianFailure("input_helper_eof")
         if self.native.identity() != self.identity:
             raise GuardianFailure("input_device_identity_changed")
@@ -245,7 +247,7 @@ class Guardian:
         if self.clock() >= self.dispatch_deadline:
             raise GuardianFailure("input_dispatch_expired")
 
-    def run(self, steps):
+    def run(self, steps, *, semantic=None):
         released = False
         sampled_step_seconds = DISPATCH_STEP_SECONDS
         first_down = True
@@ -279,6 +281,19 @@ class Guardian:
                         time.sleep(WAIT_QUANTUM_SECONDS)
                     self.dispatch_guard()
                     self.steps_completed += 1
+                    continue
+                if kind == "semantic":
+                    if semantic is None:
+                        raise GuardianFailure("unsupported_action")
+                    def before_effect():
+                        self.dispatch_guard()
+                        self.validate(step)
+                        self.dispatch_guard()
+                        self.phase = "dispatch"
+                        self.injected = True
+                    semantic(before_effect)
+                    self.steps_completed += 1
+                    self.guard()
                     continue
                 if kind in {"key", "button"}:
                     self.ledger.prepare(kind, step[1], step[2])
@@ -472,7 +487,8 @@ def _execute(request, *, controller_fd=0, authorize=None):
         if native.independent_pointer:
             native.focus(expected["focus_window"])
         try:
-            steps = input_steps(request["action"], native)
+            steps = ([('semantic',)] if request["action"]["type"] == "replace_field"
+                     else input_steps(request["action"], native))
             if dispatch_budget(steps) >= DISPATCH_SECONDS:
                 raise GuardianFailure("input_dispatch_expired")
             # Validate every vertex before pressing. Dispatch rechecks scope.
@@ -541,7 +557,49 @@ def _execute(request, *, controller_fd=0, authorize=None):
             authorize(helper)
         guardian = Guardian(native, helper, validate, controller_fd=controller_fd)
         dispatched = True
-        receipt = guardian.run(steps)
+        if request["action"]["type"] == "replace_field":
+            from src.computer.runtime.accessibility import PrimitiveError, bounded_text
+            from src.computer.runtime.x11_accessibility import AttachedAccessibility
+            accessibility = AttachedAccessibility(connection._display, expected)
+            saved = request.get("accessible_reference")
+            action = request["action"]
+            def semantic_guard():
+                guardian.dispatch_guard()
+                validate(('semantic',))
+                guardian.dispatch_guard()
+            def semantic(before_effect):
+                try:
+                    if (type(saved) is not dict or action.get("target") != saved.get("handle")
+                            or action.get("observation_id") != saved.get("observation_id")):
+                        raise GuardianFailure("accessible_target_changed")
+                    bounded_text(action.get("text"))
+                    accessibility.restore(saved, semantic_guard)
+                    accessibility.execute(action, saved["window"], semantic_guard,
+                                          before_effect=before_effect)
+                except PrimitiveError as exc:
+                    reason = ("accessible_target_changed" if exc.status == "rejected" else
+                              "accessible_target_unavailable" if exc.status == "unsupported"
+                              else "native_field_failed")
+                    raise GuardianFailure(reason) from None
+            try:
+                receipt = guardian.run(steps, semantic=semantic)
+                if receipt.get("status") == "executed" and receipt.get("released") is True:
+                    # Original GI node after helper fence and owned-ledger release.
+                    def readback_guard():
+                        guardian.guard(check_helper=False)
+                        validate(('semantic',))
+                        guardian.guard(check_helper=False)
+                    try:
+                        actual = accessibility.read_field(action["target"], saved["window"],
+                                                          readback_guard)
+                        receipt["field_observation"] = {**actual, "target": action["target"]}
+                    except Exception:
+                        pass
+            finally:
+                with contextlib.suppress(Exception):
+                    accessibility.close()
+        else:
+            receipt = guardian.run(steps)
         if (request.get("verify_pointer") is True and receipt.get("status") == "executed"
                 and receipt.get("released") is True and receipt.get("injected") is True):
             # Measured AFTER the helper is fenced and owned input released. This

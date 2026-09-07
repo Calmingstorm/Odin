@@ -144,6 +144,8 @@ class X11AttachedBackend:
         self._pause_job = None
         self._lease_revoked = False
         self._shared_cleanup_identity = None
+        self._accessibility_private = {}
+        self.input_limits = copy.deepcopy(type(self).input_limits)
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -814,7 +816,18 @@ class X11AttachedBackend:
                                            modal_kind=(binding.get("modal_kind")
                                                        if binding else None),
                                            resize_scale=tuple(reply["resize_scale"]),
-                                           crop=tuple(expected_crop) if expected_crop else None)
+                                           crop=tuple(expected_crop) if expected_crop else None,
+                                           accessibility=tuple(reply.get("accessibility", [])))
+                self._accessibility_private = reply.get("accessibility_private", {})
+                field_available = any("replace_field" in n.get("capabilities", [])
+                                      for n in frame.accessibility)
+                self.input_limits["accessible_targets"] = (
+                    "observation_native_handles" if frame.accessibility else "unavailable")
+                self.input_limits["replace_field"] = (
+                    "native_atspi_same_node_readback" if field_available else "unavailable")
+                self.input_limits["effect_expectations"] = [
+                    *type(self).input_limits["effect_expectations"],
+                    *(["field_text_equals"] if field_available else [])]
                 self._frame, self._scope, self._captured_at = frame, binding, captured_at
                 self._window_inventory = reply.get("window_inventory")
                 return frame
@@ -836,6 +849,7 @@ class X11AttachedBackend:
                       "right_click": {"x", "y"}, "middle_click": {"x", "y"},
                       "scroll": {"x", "y", "direction", "count"},
                       "type": {"text"}, "key": {"chord"},
+                      "replace_field": {"target", "text"},
                       "polyline": {"points", "duration"}}
             required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
             clicks = {"click", "double_click", "right_click", "middle_click"}
@@ -861,8 +875,13 @@ class X11AttachedBackend:
                 "type": "pointer_at", "x": action.get("x"), "y": action.get("y")})
             from ..effects import expectation_arguments
             expectation_arguments(action["expected"])
+            field_expected = (action["type"] == "replace_field" and action["expected"] == {
+                "type": "field_text_equals", "target": action.get("target"),
+                "text": action.get("text")})
+            if action["type"] == "replace_field" and not field_expected:
+                raise AttachedFailure("field_text_verification_required")
             if (action["expected"]["type"] in {"pointer_at", "field_text_equals"}
-                    and not pointer_expected):
+                    and not (pointer_expected or field_expected)):
                 raise AttachedFailure("unsupported_postcondition")
             payload = {"type": action["type"]}
             if action["type"] in clicks:
@@ -877,9 +896,10 @@ class X11AttachedBackend:
                 for key in ("count", "modifiers"):
                     if key in action:
                         payload[key] = action[key]
-            if action["type"] == "type":
+            if action["type"] in {"type", "replace_field"}:
                 text = action["text"]
-                if (type(text) is not str or not 1 <= len(text) <= 512
+                if (type(text) is not str
+                        or not (0 if field_expected else 1) <= len(text) <= 512
                         or any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) <= 159
                                or 0xD800 <= ord(c) <= 0xDFFF for c in text)):
                     raise ComputerError("invalid_text")
@@ -915,10 +935,21 @@ class X11AttachedBackend:
                     raise AttachedFailure("invalid_polyline")
                 payload.update(points=[point(p) for p in action["points"]],
                                duration=action["duration"])
+            elif field_expected:
+                target = action["target"]
+                if type(target) is not str or target not in self._accessibility_private:
+                    raise AttachedFailure("accessible_target_unavailable")
+                saved = self._accessibility_private[target]
+                if "replace_field" not in saved.get("metadata", {}).get("capabilities", []):
+                    raise AttachedFailure("accessible_target_unavailable")
+                payload.update(target=target, text=action["text"],
+                               observation_id=saved["observation_id"])
             else:
                 key = "text" if action["type"] == "type" else "chord"
                 payload[key] = action[key]
             request = {**self._config, "selected": monitor, "scope": self._scope, "action": payload}
+            if field_expected:
+                request["accessible_reference"] = copy.deepcopy(saved)
             if pointer_expected:
                 request["verify_pointer"] = True
             request["input_mode"] = self.capabilities.pointer_separation
@@ -927,16 +958,29 @@ class X11AttachedBackend:
                 request["session_prefix"] = self._session_prefix
                 request["session_lease_fd"] = self._session_lease_fd
             self._frame = None  # Consume before dispatch; lost replies are not retryable.
+            self._accessibility_private = {}
             receipt = await self._input_worker(request)
             if receipt.get("released") is not True:
                 self._release_failed = True
                 self._paused = True
-            receipt["postcondition"] = {"type": ("pointer_at" if pointer_expected
+            receipt["postcondition"] = {"type": ("field_text_equals" if field_expected else
+                                                 "pointer_at" if pointer_expected
                                                  else "visual_change"),
                                          "status": "unavailable",
                                          "source_id": frame.source.source_id,
                                          "source_revision": frame.source.source_revision,
                                          "consent_generation": frame.source.consent_generation}
+            if field_expected:
+                measured = receipt.pop("field_observation", None)
+                if (receipt.get("released") is True and receipt.get("status") == "executed"
+                        and type(measured) is dict and measured.get("text_complete") is True
+                        and type(measured.get("text")) is str
+                        and measured.get("target") == action["target"]):
+                    receipt["postcondition"].update(
+                        status="observed", method="accessibility_text_after_release",
+                        target=action["target"], target_application_matches=True,
+                        actual={"text": measured["text"], "text_complete": True})
+                return receipt
             if pointer_expected:
                 measured = receipt.pop("pointer_observation", None)
                 if (receipt.get("released") is True and receipt.get("status") == "executed"

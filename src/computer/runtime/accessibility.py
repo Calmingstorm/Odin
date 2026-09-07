@@ -43,6 +43,7 @@ class Reference:
     capabilities: list
     metadata: dict = field(default_factory=dict)
     children: dict = field(default_factory=dict)
+    lineage: tuple = ()
 
 
 class Accessibility:
@@ -57,6 +58,33 @@ class Accessibility:
         self.observation_id = None
         self.status_detail = "not_observed"
         self.root_diagnostics = []
+        # Hold proxies to prevent Python/native object reuse assigning an old
+        # identity to an identical-looking replacement widget.
+        self._node_identities = []
+
+    def node_identity(self, node):
+        for original, token in self._node_identities:
+            if original == node:
+                return token
+        if len(self._node_identities) >= 2048:
+            raise PrimitiveError("unsupported", "Accessible identity budget exhausted")
+        token = secrets.token_urlsafe(24)
+        self._node_identities.append((node, token))
+        return token
+
+    def lineage(self, node, root, guard):
+        result = []
+        ancestor = node
+        for _ in range(7):
+            guard()
+            if ancestor == root:
+                return tuple(result)
+            ancestor = ancestor.get_parent()
+            if ancestor is None:
+                break
+            fingerprint, public = self._data(ancestor)
+            result.append((public["node_identity"], fingerprint))
+        raise PrimitiveError("rejected", "Accessible ancestry left its observed root")
 
     def _load(self):
         if self.api is None:
@@ -105,6 +133,8 @@ class Accessibility:
         if "set_text" in capabilities and text_readable and text_complete:
             capabilities.append("replace_field")
         public = {"role": str(role)[:64], "name": name[:128], "text": text,
+                  "node_identity": self.node_identity(node),
+                  "focused": state.contains(api.StateType.FOCUSED),
                   "text_readable": text_readable, "text_complete": text_complete,
                   "bounds": dict(zip(("x", "y", "width", "height"), bounds, strict=True)),
                   "states": list(states), "capabilities": capabilities}
@@ -211,13 +241,18 @@ class Accessibility:
                     if node.get_process_id() != window["pid"]:
                         continue
                     handle = secrets.token_urlsafe(18)
+                    lineage = self.lineage(node, root, guard)
                     public.update(handle=handle, parent=parent, depth=depth, index=index)
+                    public["root_identity"] = self.node_identity(root)
+                    public["ancestor_identity"] = hashlib.sha256(repr(lineage).encode()).hexdigest()
                     nodes.append(public)
                     self.references[handle] = Reference(
                         node, root, fingerprint, root_fingerprint, dict(window),
                         public["capabilities"],
                         {key: value for key, value in public.items()
-                         if key not in {"handle", "parent", "depth", "index"}},
+                         if key not in {"handle", "parent", "depth", "index",
+                                        "root_identity", "ancestor_identity"}},
+                        lineage=lineage,
                     )
                     if parent is not None:
                         self.references[parent].children[index] = (node, fingerprint)
@@ -252,6 +287,7 @@ class Accessibility:
             root_current, _ = self._data(ref.root)
             if (current != ref.fingerprint or root_current != ref.root_fingerprint
                     or public != ref.metadata
+                    or self.lineage(ref.node, ref.root, guard) != ref.lineage
                     or ref.node.get_process_id() != window["pid"]
                     or ref.root.get_process_id() != window["pid"]):
                 raise PrimitiveError("rejected", "Accessible target changed since observation")
@@ -328,6 +364,7 @@ class Accessibility:
             if ((root_current[0], root_current[2])
                     != (ref.root_fingerprint[0], ref.root_fingerprint[2])
                     or current[:3] != ref.fingerprint[:3]
+                    or public["node_identity"] != ref.metadata["node_identity"]
                     or ref.node.get_process_id() != window["pid"]
                     or ref.root.get_process_id() != window["pid"]):
                 raise PrimitiveError("rejected", "Field readback target changed")
@@ -339,6 +376,9 @@ class Accessibility:
                 ancestor = ancestor.get_parent()
             if ancestor != ref.root:
                 raise PrimitiveError("rejected", "Field left its observed native root")
+            if tuple(row[0] for row in self.lineage(ref.node, ref.root, guard)) != tuple(
+                    row[0] for row in ref.lineage):
+                raise PrimitiveError("rejected", "Field ancestry changed after editing")
             if not public["text_readable"] or not public["text_complete"]:
                 raise PrimitiveError("unsupported", "Full field text is unavailable")
             guard()
