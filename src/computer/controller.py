@@ -290,6 +290,11 @@ class ComputerController:
         if profile is not None:
             result["application_profile"] = profile
         if live is not None:
+            from .admission import InputAdmission
+
+            admission = getattr(live.backend, "input_admission", None)
+            if type(admission) is InputAdmission:
+                result["input_admission"] = admission.public()
             sources = getattr(live.backend, "sources", None)
             if callable(sources):
                 result["sources"] = sources()
@@ -330,7 +335,18 @@ class ComputerController:
                 self._live[grant.session_id] = LiveSession(
                     backend, self.monotonic() + MAX_TASK_SECONDS, capabilities=capabilities)
                 self._prepare_runtime(grant, backend)
-                await _bounded(backend.start(grant.session_id), 20)
+                # Wayland portal consent is interactive. Only this fixed backend
+                # family gets a longer startup window; input leases stay two seconds.
+                timeout = 120 if capabilities.platform == "wayland" else 20
+                await _bounded(backend.start(grant.session_id), timeout)
+                measured = getattr(backend, "capabilities", None)
+                if (type(measured) is not BackendCapabilities
+                        or (measured.platform, measured.environment)
+                        != (capabilities.platform, capabilities.environment)):
+                    raise ComputerError("backend_capabilities_changed")
+                if getattr(backend, "input_supported", False) is True:
+                    input_eligible(measured)
+                self._live[grant.session_id].capabilities = measured
                 current = self.store.get_session(grant.session_id)
                 if current.generation != grant.generation or current.state != "starting":
                     raise ComputerError("grant_revoked")
@@ -344,6 +360,10 @@ class ComputerController:
                 await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
+                from .admission import InputAdmissionError
+
+                if type(exc) is InputAdmissionError:
+                    raise exc from None
                 raise ComputerError("start_unavailable") from None
             return self._public_session(self.store.get_session(grant.session_id))
         if operation not in {"status", "stop", "cancel", "close", "pause", "resume", "export",
