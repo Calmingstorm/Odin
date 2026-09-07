@@ -10,6 +10,7 @@ Native libraries and display access are deferred until construction.
 from __future__ import annotations
 
 import ctypes as C  # noqa: N812 - conventional short ctypes ABI declarations
+import hashlib
 import os
 import re
 import threading
@@ -18,6 +19,59 @@ from contextlib import contextmanager
 
 class X11DeviceError(RuntimeError):
     """Bounded native failure."""
+
+
+class HierarchyAddUnavailableError(X11DeviceError):
+    """Add rejected and a post-error census proved no retained endpoints."""
+
+
+def _endpoint_keymap(display, device_id):
+    """Read the complete XKB map, including types/actions, for an exact endpoint.
+
+    Xlib's core lookup follows the client master, not the injected XTEST slave.
+    Comparing complete serialized maps avoids accepting different key types,
+    modifiers or actions with identical base symbols. No map is changed.
+    Missing introspection fences keys, not independent pointer support.
+    """
+    try:
+        bridge = C.CDLL("libX11-xcb.so.1")
+        common = C.CDLL("libxkbcommon.so.0")
+        x11 = C.CDLL("libxkbcommon-x11.so.0")
+        libc = C.CDLL(None)
+        specs = [(bridge, "XGetXCBConnection", [C.c_void_p], C.c_void_p),
+                 (common, "xkb_context_new", [C.c_int], C.c_void_p),
+                 (common, "xkb_context_unref", [C.c_void_p], None),
+                 (common, "xkb_keymap_unref", [C.c_void_p], None),
+                 (common, "xkb_keymap_get_as_string", [C.c_void_p, C.c_int], C.c_void_p),
+                 (x11, "xkb_x11_keymap_new_from_device",
+                  [C.c_void_p, C.c_void_p, C.c_int32, C.c_int], C.c_void_p),
+                 (libc, "free", [C.c_void_p], None)]
+        for lib, name, args, result in specs:
+            fn = getattr(lib, name)
+            fn.argtypes, fn.restype = args, result
+        context = common.xkb_context_new(0)
+        if not context:
+            raise X11DeviceError("injected_keyboard_mapping_unavailable")
+        keymap = text = None
+        try:
+            connection = bridge.XGetXCBConnection(display)
+            if not connection:
+                raise X11DeviceError("injected_keyboard_mapping_unavailable")
+            keymap = x11.xkb_x11_keymap_new_from_device(context, connection, device_id, 0)
+            if not keymap:
+                raise X11DeviceError("injected_keyboard_mapping_unavailable")
+            text = common.xkb_keymap_get_as_string(keymap, 1)
+            if not text:
+                raise X11DeviceError("injected_keyboard_mapping_unavailable")
+            return hashlib.sha256(C.string_at(text)).hexdigest()
+        finally:
+            if text:
+                libc.free(text)
+            if keymap:
+                common.xkb_keymap_unref(keymap)
+            common.xkb_context_unref(context)
+    except (OSError, AttributeError):
+        raise X11DeviceError("injected_keyboard_mapping_unavailable") from None
 
 
 class UnsupportedCharacters(X11DeviceError):  # noqa: N818 - structured native result
@@ -157,6 +211,8 @@ class ExistingXTest:
         self._invalidated = False
         self._mapping_changed = False
         self._text_state = None
+        self.keyboard_mapping_identity = None
+        self.dispatch_check = None
         if not self._display:
             raise X11DeviceError("display_unavailable")
         try:
@@ -439,9 +495,14 @@ class ExistingXTest:
                 or type(down) is not bool):
             raise X11DeviceError("invalid_input_code")
         self._assert_identity()
+        if kind == "keys" and down:
+            self._assert_keyboard_mapping()
         fn = (self._xt.XTestFakeDeviceKeyEvent if kind == "keys"
               else self._xt.XTestFakeDeviceButtonEvent)
         with self._checked():
+            # Preparation can block. Recheck at the final non-native boundary.
+            if self.dispatch_check is not None:
+                self.dispatch_check()
             if not fn(self._display, self._devices[kind], code, int(down), None, 0, 0):
                 raise X11DeviceError("xtest_input_failed")
         self._assert_identity()
@@ -460,6 +521,8 @@ class ExistingXTest:
             height = self._x.XDisplayHeight(self._display, screen)
             if type(x) is not int or type(y) is not int or not (0 <= x < width and 0 <= y < height):
                 raise X11DeviceError("pointer_out_of_bounds")
+            if self.dispatch_check is not None:
+                self.dispatch_check()
             if not self._xt.XTestFakeMotionEvent(self._display, screen, x, y, 0):
                 raise X11DeviceError("xtest_motion_failed")
         self._assert_identity()
@@ -474,9 +537,31 @@ class ExistingXTest:
                 raise X11DeviceError("pointer_unavailable")
             return rx.value, ry.value
 
+    def _assert_keyboard_mapping(self, expected=None):
+        self._assert_identity()
+        master = next(r[0] for r in self._initial if r[2] == 2)
+        slave = self._devices["keys"].contents.device_id
+        with self._checked():
+            mapping = _endpoint_keymap(self._display, master)
+            if mapping != _endpoint_keymap(self._display, slave):
+                raise X11DeviceError("injected_keyboard_mapping_mismatch")
+            states = []
+            for ident in (master, slave):
+                state = _XkbState()
+                if self._x.XkbGetState(self._display, ident, C.byref(state)) != 0:
+                    raise X11DeviceError("injected_keyboard_state_unavailable")
+                states.append((state.group, state.locked_mods, state.latched_group))
+            if states[0] != states[1]:
+                raise X11DeviceError("injected_keyboard_state_mismatch")
+        baseline = expected if expected is not None else self.keyboard_mapping_identity
+        if baseline is not None and mapping != baseline:
+            raise X11DeviceError("injected_keyboard_mapping_changed")
+        self.keyboard_mapping_identity = mapping
+
     def keycode(self, name: str) -> int:
         if not isinstance(name, str) or not re.fullmatch(r"[A-Za-z0-9_]{1,128}", name):
             raise X11DeviceError("unsupported_key_name")
+        self._assert_keyboard_mapping()
         with self._checked():
             symbol = self._x.XStringToKeysym(name.encode("ascii"))
             code = self._x.XKeysymToKeycode(self._display, symbol) if symbol else 0
@@ -492,6 +577,7 @@ class ExistingXTest:
         """
         if not isinstance(text, str) or len(text) > 4096:
             raise X11DeviceError("invalid_text")
+        self._assert_keyboard_mapping()
         with self._checked():
             state = _XkbState()
             if self._x.XkbGetState(self._display, self._keyboard_id(), C.byref(state)) != 0:
@@ -611,9 +697,15 @@ class PersistentXTest(ExistingXTest):
             rows = self._topology()
             if not any(r[1].startswith(self.prefix + " ") for r in rows):
                 add = _AddMaster(1, self.prefix.encode("ascii"), 1, 1)
-                with self._checked():
-                    if self._xi.XIChangeHierarchy(self._display, C.byref(add), 1):
-                        raise X11DeviceError("independent_pointer_unavailable")
+                try:
+                    with self._checked():
+                        if self._xi.XIChangeHierarchy(self._display, C.byref(add), 1):
+                            raise X11DeviceError("independent_pointer_unavailable")
+                except X11DeviceError:
+                    # A failed add may leave partial endpoints. Never hide them.
+                    if any(r[1].startswith(self.prefix + " ") for r in self._topology()):
+                        raise X11DeviceError("persistent_creation_incomplete") from None
+                    raise HierarchyAddUnavailableError("independent_pointer_unavailable") from None
             masters = [r for r in self._topology() if r[1] == self.prefix + " pointer"]
             if len(masters) != 1 or masters[0][2] != 1 or not masters[0][4]:
                 raise X11DeviceError("persistent_master_invalid")
@@ -624,11 +716,13 @@ class PersistentXTest(ExistingXTest):
 
 
 def open_input(display_name, *, mode="auto"):
+    if mode not in {"auto", "shared", "independent"}:
+        raise X11DeviceError("invalid_input_mode")
     if mode == "shared":
         return ExistingXTest(display_name)
     try:
         return PersistentXTest(display_name)
-    except X11DeviceError:
+    except HierarchyAddUnavailableError:
         if mode != "auto":
             raise
         return ExistingXTest(display_name)

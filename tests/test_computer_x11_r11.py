@@ -57,7 +57,7 @@ def test_unicode_keysym_conversion():
 
 def test_fallback_is_only_explicit_or_creation_unavailable(monkeypatch):
     def denied(name):
-        raise d.X11DeviceError("denied")
+        raise d.HierarchyAddUnavailableError("denied")
     monkeypatch.setattr(d, "PersistentXTest", denied)
     monkeypatch.setattr(d, "ExistingXTest", lambda name: ("shared", name))
     assert d.open_input(":193") == ("shared", ":193")

@@ -92,7 +92,8 @@ class OwnedLedger:
 
 
 class InjectionHelper:
-    def __init__(self, display_name, environment, *, mode="shared"):
+    def __init__(self, display_name, environment, *, mode="shared",
+                 expected_device_identity=None, keyboard_mapping_identity=None):
         self.sock, child_sock = socket.socketpair()
         try:
             self.process = subprocess.Popen(
@@ -105,7 +106,10 @@ class InjectionHelper:
         finally:
             child_sock.close()
         self.buffer = b""
-        self.sock.sendall(json.dumps({"display_name": display_name, "mode": mode}).encode() + b"\n")
+        self.sock.sendall(json.dumps({"display_name": display_name, "mode": mode,
+                                     "expected_device_identity": expected_device_identity,
+                                     "keyboard_mapping_identity": keyboard_mapping_identity
+                                     }).encode() + b"\n")
 
     def exchange(self, command, guard):
         guard()
@@ -304,6 +308,12 @@ def input_steps(action, native):
              + [('key', code, False) for code in reversed(chord)])]
 
 
+def assert_admitted_identity(native, expected):
+    """Compare wire lists and native tuples without coercing device values."""
+    if expected is None or json.dumps(native.identity()) != json.dumps(expected):
+        raise GuardianFailure("input_device_identity_changed")
+
+
 def execute(request, *, controller_fd=0, authorize=None):
     from src.computer.runtime.x11_app_scope import AppScope
     from src.computer.runtime.x11_attached import attachment_configuration, worker_environment
@@ -329,7 +339,11 @@ def execute(request, *, controller_fd=0, authorize=None):
         scope = AppScope(connection._display)
         expected = request["scope"]
         scope.assert_snapshot(expected, monitor)
-        native = open_input(config["display_name"])
+        mode = request.get("input_mode")
+        if mode not in {"shared", "independent"}:
+            raise GuardianFailure("input_mode_required")
+        native = open_input(config["display_name"], mode=mode)
+        assert_admitted_identity(native, request.get("expected_device_identity"))
         if native.independent_pointer:
             native.focus(expected["focus_window"])
         try:
@@ -371,7 +385,8 @@ def execute(request, *, controller_fd=0, authorize=None):
                 else:
                     scope.assert_snapshot(expected, monitor)
         helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]),
-                                 mode="independent" if native.independent_pointer else "shared")
+                                 mode=mode, expected_device_identity=native.identity(),
+                                 keyboard_mapping_identity=native.keyboard_mapping_identity)
         if authorize is not None:
             authorize(helper)
         return Guardian(native, helper, validate, controller_fd=controller_fd).run(steps)
@@ -387,20 +402,35 @@ def injector(fd):
     from src.computer.runtime.x11_worker_lifecycle import parent_watch
     parent_watch(injector=True)
     from src.computer.runtime.x11_owned_device import open_input
-    stream = socket.socket(fileno=fd).makefile("rwb", buffering=0)
+    sock = socket.socket(fileno=fd)
+    stream = sock.makefile("rwb", buffering=0)
     first = json.loads(stream.readline(MAX_MESSAGE))
     native = open_input(first["display_name"], mode=first.get("mode", "shared"))
+    ledger = None
+    deadline = time.monotonic() + LEASE_SECONDS
     if native.independent_pointer:
         # Dedicated endpoints survive their clients. Keep a second potential-down
         # ledger in the injector so a killed guardian cannot strand held input.
         # Shared fallback preserves its original external-ledger behavior.
         parent_watch(injector=False)
         ledger = OwnedLedger(native)
-        deadline = time.monotonic() + LEASE_SECONDS
-    else:
-        ledger = None
     pending = bytearray()
     try:
+        if first.get("expected_device_identity") is not None:
+            assert_admitted_identity(native, first["expected_device_identity"])
+        native.keyboard_mapping_identity = first.get("keyboard_mapping_identity")
+        def dispatch_check():
+            # No X calls. Preparation, mapping validation and identity queries
+            # can each return only after the fixed lease has already expired.
+            from src.computer.runtime import x11_worker_lifecycle
+            if x11_worker_lifecycle.REVOKED:
+                raise GuardianFailure("supervisor_parent_revoked")
+            if time.monotonic() >= deadline:
+                raise GuardianFailure("input_lease_expired")
+            if select.select([stream], [], [], 0)[0]:
+                if not sock.recv(1, socket.MSG_PEEK):
+                    raise GuardianFailure("controller_eof")
+        native.dispatch_check = dispatch_check
         while True:
             if ledger is not None:
                 from src.computer.runtime import x11_worker_lifecycle
@@ -431,6 +461,7 @@ def injector(fd):
                 raise GuardianFailure("unsupported_helper_operation")
             if ledger is not None and op in {"key", "button"}:
                 ledger.prepare(op, *args)
+            dispatch_check()
             getattr(native, op)(*args)
             native.sync()
             if ledger is not None and op in {"key", "button"}:
@@ -441,6 +472,7 @@ def injector(fd):
             ledger.release()
         native.close()
         stream.close()
+        sock.close()
 
 
 if __name__ == "__main__":
