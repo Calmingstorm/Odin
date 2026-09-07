@@ -5,6 +5,35 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 Authority: Aaron's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
+## Revision R8: compositor-specific Wayland input admission (2026-09-07)
+
+Aaron requires production Wayland support in this branch. Replace the blanket
+platform refusal with an actual input adapter and compositor-specific admission.
+Qualify at least one unmodified distribution compositor, not only the previously
+patched laboratory build. Preserve the X11 implementation and all ordinary tools.
+The new adapter still needs consent, source-local mapping, application grounding,
+bounded independent input release and application-preserving detach.
+
+Session admission must distinguish a measured button-release defect from missing
+evidence or missing portal/input facilities. A refusal must identify the detected
+compositor/build and tested backend when known, explain the actual failed check,
+and provide an operator remedy. A version string alone is not a behavior proof:
+vendor patches, loaded library identity and native versus nested backends matter.
+
+The startup test itself is subject to the no-damage rule. Never discover whether
+a compositor leaves buttons held by deliberately abandoning held input on the
+operator's desktop. A duplicate EI descriptor prevents genuine last-owner EOF;
+an ordinary release, a replacement device, or a successful portal Close cannot
+be substituted for measured EOF release. Destructive or unsafe demonstrations are
+not authorized. Evaluate contained behavioral qualification and exact active-stack
+binding, and explicitly document which parts are measured versus inferred. Do not
+claim that testing a different compositor instance proves the running instance.
+
+All new graphical/fault tests use owned disposable environments. No production
+deployment, restart, live-install edit, main-session input experiment, master merge,
+tag or pipeline. Record actual qualified/refused versions, cleanup evidence,
+remaining limitations and local test results before claiming completion.
+
 ## Revision R7: autonomous cleanup and qualified offerings (2026-09-07)
 
 The reported Cinnamon wake issue is a pre-existing operator/compositor issue,
