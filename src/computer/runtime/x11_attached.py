@@ -232,11 +232,12 @@ class X11AttachedBackend:
                 worker_environment(self._config["xauthority"]).items()] + argv + ["--identity-gate"]
         return argv
 
-    async def _worker_ready(self, child, role, *, parent=None, pending=False):
+    async def _worker_ready(self, child, role, *, parent=None, pending=False, line=None):
         """Private stdout identity, verified against proc before persistence/ACK."""
         from .recovery import process_identity
         assert child.stdout is not None
-        line = await asyncio.wait_for(child.stdout.readline(), 2)
+        if line is None:
+            line = await asyncio.wait_for(child.stdout.readline(), 2)
         message = json.loads(line)
         identity = message.get("identity")
         if (message.get("ready") != role or type(identity) is not dict
@@ -1057,6 +1058,8 @@ class X11AttachedBackend:
         received = False
         sent = False
         line = None
+        previous_device_state = self._device_state
+        preflight_refusal = False
         try:
             self._record_spawn(child, pending=self._runtime_sudo)
             guardian_identity = None
@@ -1071,14 +1074,29 @@ class X11AttachedBackend:
             await child.stdin.drain()
             if self._runtime_sudo:
                 assert guardian_identity is not None
-                identity = await self._worker_ready(child, "injector",
-                    parent=guardian_identity["pid"])
-                if self._closed or self._paused or revoked.is_set():
-                    raise AttachedFailure("input_revoked")
-                child.stdin.write(json.dumps({"ack": identity}).encode() + b"\n")
-                await child.stdin.drain()
+                # Preflight can finish before an injector exists. Preserve that
+                # terminal evidence instead of consuming it as a failed ready
+                # message and subsequently trying to parse EOF as the receipt.
+                line = await asyncio.wait_for(child.stdout.readline(), 2)
+                message = json.loads(line)
+                details = message.get("diagnostics") if type(message) is dict else None
+                preflight_refusal = (
+                    type(message) is dict and message.get("status") == "unavailable"
+                    and message.get("injected") is False
+                    and type(message.get("released")) is bool
+                    and type(details) is dict and details.get("phase") == "preflight"
+                    and details.get("steps_completed") == 0)
+                if not preflight_refusal:
+                    identity = await self._worker_ready(child, "injector",
+                        parent=guardian_identity["pid"], line=line)
+                    line = None
+                    if self._closed or self._paused or revoked.is_set():
+                        raise AttachedFailure("input_revoked")
+                    child.stdin.write(json.dumps({"ack": identity}).encode() + b"\n")
+                    await child.stdin.drain()
             # Do not close stdin: controller EOF is revocation, not framing.
-            line = await asyncio.wait_for(child.stdout.readline(), 4)
+            if line is None:
+                line = await asyncio.wait_for(child.stdout.readline(), 4)
             await asyncio.wait_for(child.wait(), 1)
             if self._runtime_sudo and not await self._identities_gone(child):
                 raise AttachedFailure("privileged_worker_remaining")
@@ -1087,7 +1105,14 @@ class X11AttachedBackend:
                 raise AttachedFailure("input_outcome_unknown")
             if receipt.get("released") is not True:
                 self._release_failed = True
-            self._accept_device_receipt(receipt)
+            if (preflight_refusal and receipt.get("released") is True
+                    and receipt.get("device_identity") is None
+                    and receipt.get("input_opened") is False):
+                # Guardian exited before opening native input. Preserve the
+                # previous device evidence; do not manufacture new identity.
+                self._device_state = previous_device_state
+            else:
+                self._accept_device_receipt(receipt)
             received = True
             return receipt
         except asyncio.CancelledError:

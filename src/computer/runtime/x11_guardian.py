@@ -630,6 +630,7 @@ def _execute(request, *, controller_fd=0, authorize=None):
         reason = safe_reason(str(exc))
         return {"status": "unavailable", "injected": False, "released": idle,
                 "reason": reason,
+                "input_opened": native is not None,
                 "diagnostics": diagnostics("preflight", len(steps), 0, idle, reason)}
     finally:
         if helper is not None and helper.process.poll() is None:

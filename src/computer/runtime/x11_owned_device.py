@@ -209,7 +209,7 @@ def _load_native():
         raise X11DeviceError("native_libraries_unavailable") from None
 
 
-def _prove_modifier_effects(display, keyboard_id, group, codes, slots):
+def _prove_modifier_effects(display, keyboard_id, group, codes, slots, locked_mods=0):
     """Simulate each modifier in the actual XKB map, not keysym naming alone."""
     context = keymap = state = None
     try:
@@ -245,11 +245,11 @@ def _prove_modifier_effects(display, keyboard_id, group, codes, slots):
             state = common.xkb_state_new(keymap)
             if not state:
                 raise X11DeviceError("unsupported_key")
-            common.xkb_state_update_mask(state, 0, 0, 0, 0, 0, group)
+            common.xkb_state_update_mask(state, 0, 0, locked_mods, 0, 0, group)
             common.xkb_state_update_key(state, code, 1)
             # Effective layout plus depressed/latched/locked real modifiers.
             if (common.xkb_state_serialize_mods(state, 1) != 1 << slot
-                    or common.xkb_state_serialize_mods(state, 2 | 4)
+                    or common.xkb_state_serialize_mods(state, 2 | 4) != locked_mods
                     or common.xkb_state_serialize_layout(state, 128) != group):
                 raise X11DeviceError("unsupported_key")
             common.xkb_state_unref(state)
@@ -279,7 +279,7 @@ def resolve_key_plan(x, display, keyboard_id, modifiers, symbol_name=None):
         raise X11DeviceError("unsupported_key")
     state = _XkbState()
     if (x.XkbGetState(display, keyboard_id, C.byref(state)) != 0
-            or state.base_mods or state.latched_mods or state.locked_mods
+            or state.base_mods or state.latched_mods or state.locked_mods & ~18
             or state.latched_group or state.group > 3):
         raise X11DeviceError("unsupported_key")
 
@@ -290,7 +290,8 @@ def resolve_key_plan(x, display, keyboard_id, modifiers, symbol_name=None):
         code = x.XKeysymToKeycode(display, symbol) if symbol else 0
         consumed, actual = C.c_uint(), C.c_ulong()
         if (not 8 <= code <= 255 or not x.XkbLookupKeySym(
-                display, code, state.group << 13, C.byref(consumed), C.byref(actual))
+                display, code, (state.group << 13) | state.locked_mods,
+                C.byref(consumed), C.byref(actual))
                 or actual.value != symbol):
             raise X11DeviceError("unsupported_key")
         return code
@@ -310,7 +311,7 @@ def resolve_key_plan(x, display, keyboard_id, modifiers, symbol_name=None):
                 raise X11DeviceError("unsupported_key")
         if codes:
             _prove_modifier_effects(display, keyboard_id, state.group, codes,
-                                    [names[name][1] for name in modifiers])
+                                    [names[name][1] for name in modifiers], state.locked_mods)
         if symbol_name is not None:
             code = base_code(symbol_name)
             if code in slots:
@@ -714,8 +715,14 @@ class ExistingXTest:
     def key_plan(self, modifiers, symbol_name=None):
         self._assert_keyboard_mapping()
         with self._checked():
+            state = _XkbState()
+            if self._x.XkbGetState(self._display, self._keyboard_id(), C.byref(state)) != 0:
+                raise X11DeviceError("keyboard_state_unavailable")
             codes = resolve_key_plan(self._x, self._display, self._keyboard_id(),
                                      modifiers, symbol_name)
+            # Keep lock/group admission pinned through guardian dispatch, just
+            # like Unicode text. A lock toggle is not permission to remap keys.
+            self._text_state = (state.group, state.locked_mods, state.latched_group)
         self._assert_keyboard_mapping()
         return codes
 
