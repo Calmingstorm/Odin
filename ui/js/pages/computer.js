@@ -64,6 +64,17 @@ export default {
         <p class="text-xs text-gray-500 mt-3">Runtime settings are generation-pinned. Pending restart-required settings are not live; this page does not restart Odin.</p>
       </section>
       <computer-provisioning v-if="adminReady" @saved="refresh" />
+      <section class="hm-card" aria-labelledby="computer-accessibility-title">
+        <div class="section-card-header">
+          <h2 id="computer-accessibility-title" class="text-sm font-semibold text-gray-300">Desktop accessibility (AT-SPI)</h2>
+          <span class="badge badge-info" role="status" aria-live="polite">{{ accessibilityLabel }}</span>
+        </div>
+        <p class="page-lede">AT-SPI is Linux's accessibility interface. Enabling it lets Odin target UI elements by identity and replace field contents reliably when the application exposes editable elements.</p>
+        <p class="page-lede">Without accessible elements, Odin can use pixels and coordinates. Field replacement uses the explicit pixel action (replace_field_pixels): click an observed field, select all, then type. It is less reliable and needs visual verification; identity-based replace_field never silently switches paths.</p>
+        <p class="page-lede">Enabled is a session setting, not proof that a particular application exposes editable elements or that input is authorized. Fresh observations, application safety checks and consent still apply.</p>
+        <p class="text-xs text-gray-500 mt-3">Read-only org.a11y.Status IsEnabled check for the configured runtime operator session, refreshed with status about every 5 seconds while this page is open. {{ accessibilityDetail }}</p>
+        <p class="page-lede">This page does not enable or disable accessibility. Change it explicitly in your desktop's accessibility settings; that affects your whole user session, not just Odin.</p>
+      </section>
       <section v-if="status.input_admission" class="hm-card text-break" aria-labelledby="computer-input-admission-title">
         <div class="section-card-header">
           <h2 id="computer-input-admission-title" class="text-sm font-semibold text-gray-300">Input eligibility evidence</h2>
@@ -187,6 +198,17 @@ export default {
     let generation = 0, timer = null, active = false, token = api.token, lastRefresh = 0;
     const enabledLabel = value => value === true ? 'Enabled' : value === false ? 'Disabled' : 'Unknown';
     const attached = computed(() => status.value.backend?.environment === 'existing_session');
+    const accessibilityFresh = computed(() => {
+      const checked = Date.parse(status.value.accessibility?.checked_at || '');
+      return Number.isFinite(checked) && now.value - checked < 15000 && now.value >= checked - 5000;
+    });
+    const accessibilityLabel = computed(() => accessibilityFresh.value
+      ? enabledLabel(status.value.accessibility?.enabled) : 'Unknown / not current');
+    const accessibilityDetail = computed(() => {
+      if (!accessibilityFresh.value) return 'No current property read; unknown does not mean disabled.';
+      if (status.value.accessibility?.reason === 'property_read') return 'Last checked: ' + status.value.accessibility.checked_at;
+      return 'Property unavailable for this target. Isolated sessions, an unbound operator identity, an inactive accessibility service or an inaccessible session bus may prevent this read. Unknown does not mean disabled.';
+    });
     const inputLimits = computed(() => Object.entries(status.value.input_limits || {})
       .filter(([, value]) => typeof value === 'number' && Number.isFinite(value))
       .map(([key, value]) => `${key}: ${value}`).join(', '));
@@ -329,6 +351,6 @@ export default {
     }
     function cleanup() { active = false; clearInterval(timer); timer = null; invalidate(); adminReady.value = false; }
     onMounted(start); onActivated(start); onDeactivated(cleanup); onUnmounted(cleanup);
-    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, applicationProfiles, attached, scriptIdentity, inputLimits };
+    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, applicationProfiles, attached, scriptIdentity, inputLimits, accessibilityLabel, accessibilityDetail };
   },
 };

@@ -118,7 +118,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             message, code = "Computer operation unavailable; outcome unknown. Refresh status.", 409
         return web.json_response({"error": message}, status=code, headers=_PRIVATE)
 
-    def status_json(value, actor):
+    def status_json(value, actor, *, accessibility=None):
         if value.get("owner_id") not in (None, "", actor["owner_id"]):
             raise PermissionError
         state = value.get("state", "unknown")
@@ -259,11 +259,21 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                            if recovery.get("reason") in reasons else "unknown"),
                 "complete": recovery.get("complete") is True,
             }
+        if accessibility is not None:
+            result["accessibility"] = accessibility
         return web.json_response(result, headers=_PRIVATE)
 
     async def status(request):
         value, actor = await call(request, "status")
-        return status_json(value, actor)
+        from ...computer.accessibility_status import read_accessibility_status
+
+        # Inspect the generation-pinned target, not pending provisioning edits.
+        # Existing operator/host authorization runs before and after this await;
+        # the route's delivery fence still applies to the final response.
+        service, _ = context(request, emergency=True)
+        accessibility = await read_accessibility_status(getattr(service, "settings", None))
+        authenticate(request)
+        return status_json(value, actor, accessibility=accessibility)
 
     async def stop(request):
         value, actor = await call(request, "stop")
