@@ -5,7 +5,6 @@ from __future__ import annotations
 import ctypes
 import json
 import os
-from pathlib import Path
 import re
 import resource
 import selectors
@@ -14,6 +13,7 @@ import socket
 import struct
 import subprocess
 import time
+from pathlib import Path
 
 from wayland_probe_private import assert_private_environment, require_same_stack
 
@@ -122,7 +122,8 @@ class Trial:
                 raise TrialError("probe_eis_fd_shape_invalid")
             fd = fds[0]
             with socket.socket(fileno=os.dup(fd)) as peer:
-                pid, uid, _gid = struct.unpack("3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
+                pid, uid, _gid = struct.unpack(
+                    "3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
                 if pid != self.compositor.pid or uid != os.getuid():
                     raise TrialError("probe_eis_compositor_peer_mismatch")
             sender = self.spawn(["/usr/bin/python3", "-s", "/probe/assets/wayland_probe_sender.py",
@@ -140,7 +141,8 @@ class Trial:
 
     def clean_after(self, index, *, require_focus=True):
         samples = [row for row in self.rows[index:] if row.get("kind") == "sample"]
-        return bool(samples and (not require_focus or (samples[-1].get("active") and samples[-1].get("focused")))
+        return bool(samples and (not require_focus or (
+                        samples[-1].get("active") and samples[-1].get("focused")))
                     and samples[-1].get("keys") == [] and samples[-1].get("buttons") == []
                     and not samples[-1].get("state", 0) & 257)
 
@@ -151,9 +153,12 @@ class Trial:
         from gi.repository import Gio, GLib
         identity = self.marker["identity"]
         self.stage = "bus_start"
-        self.spawn(["/usr/bin/dbus-daemon", "--session", "--nofork", "--nopidfile", "--address=unix:path=/run/probe/bus"])
-        self.spawn(["/usr/bin/dbus-daemon", "--session", "--nofork", "--nopidfile", "--address=unix:path=/run/probe/system-bus"])
-        self.wait(lambda: Path("/run/probe/bus").is_socket() and Path("/run/probe/system-bus").is_socket(),
+        self.spawn(["/usr/bin/dbus-daemon", "--session", "--nofork", "--nopidfile",
+                    "--address=unix:path=/run/probe/bus"])
+        self.spawn(["/usr/bin/dbus-daemon", "--session", "--nofork", "--nopidfile",
+                    "--address=unix:path=/run/probe/system-bus"])
+        self.wait(lambda: Path("/run/probe/bus").is_socket()
+                  and Path("/run/probe/system-bus").is_socket(),
                   "probe_private_bus_start_failed")
         os.environ["DBUS_SESSION_BUS_ADDRESS"] = "unix:path=/run/probe/bus"
         os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = "unix:path=/run/probe/system-bus"
@@ -162,8 +167,10 @@ class Trial:
             argv += ["--headless", "--virtual-monitor", "800x600"]
         elif identity["backend"] == "x11-nested":
             os.mkdir("/tmp/.X11-unix", mode=0o1777)
-            self.spawn(["/usr/bin/Xvfb", ":97", "-screen", "0", "800x600x24", "-nolisten", "tcp", "-noreset"])
-            self.wait(lambda: Path("/tmp/.X11-unix/X97").is_socket(), "probe_private_xvfb_start_failed")
+            self.spawn(["/usr/bin/Xvfb", ":97", "-screen", "0", "800x600x24", "-nolisten", "tcp",
+                        "-noreset"])
+            self.wait(lambda: Path("/tmp/.X11-unix/X97").is_socket(),
+                      "probe_private_xvfb_start_failed")
             os.environ["DISPLAY"] = ":97"
             argv += ["--nested"]
         else:
@@ -171,21 +178,28 @@ class Trial:
         assert_private_environment()
         self.compositor = self.spawn(argv)
         self.stage = "compositor_start"
-        self.wait(lambda: Path("/run/probe/wayland-probe").is_socket(), "probe_compositor_start_failed", 20)
+        self.wait(lambda: Path("/run/probe/wayland-probe").is_socket(),
+                  "probe_compositor_start_failed", 20)
         if identity["backend"] == "x11-nested":
             # Only our isolated Xvfb. Give the nested compositor outer pointer
             # focus; otherwise virtual events can target an unfocused surface.
             assert_private_environment()
             subprocess.run(["/usr/bin/xdotool", "mousemove", "400", "300", "click", "1"],
-                           check=True, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.bus = Gio.DBusConnection.new_for_address_sync("unix:path=/run/probe/bus",
-            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+                           check=True, timeout=3,
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        self.bus = Gio.DBusConnection.new_for_address_sync(
+            "unix:path=/run/probe/bus",
+            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
 
         def dbus(method, value):
-            return self.bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-                method, GLib.Variant("(s)", (value,)), None, Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+            return self.bus.call_sync(
+                "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                method, GLib.Variant("(s)", (value,)), None,
+                Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
         self.stage = "dbus_owner"
-        self.wait(lambda: dbus("NameHasOwner", "org.gnome.Mutter.RemoteDesktop"), "probe_private_remote_desktop_unavailable", 15)
+        self.wait(lambda: dbus("NameHasOwner", "org.gnome.Mutter.RemoteDesktop"),
+                  "probe_private_remote_desktop_unavailable", 15)
         self.owner = dbus("GetNameOwner", "org.gnome.Mutter.RemoteDesktop")
         if dbus("GetConnectionUnixProcessID", self.owner) != self.compositor.pid:
             raise TrialError("probe_private_bus_owner_mismatch")
@@ -196,8 +210,10 @@ class Trial:
         versions = []
         def version_ready():
             try:
-                versions.append(self.bus.call_sync(shell_owner, "/org/gnome/Shell", "org.freedesktop.DBus.Properties", "Get",
-                    GLib.Variant("(ss)", ("org.gnome.Shell", "ShellVersion")), None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0])
+                versions.append(self.bus.call_sync(
+                    shell_owner, "/org/gnome/Shell", "org.freedesktop.DBus.Properties", "Get",
+                    GLib.Variant("(ss)", ("org.gnome.Shell", "ShellVersion")), None,
+                    Gio.DBusCallFlags.NONE, 1000, None).unpack()[0])
                 return True
             except GLib.Error:
                 return False
@@ -205,32 +221,41 @@ class Trial:
         if versions[-1] != identity["version"]:
             raise TrialError("probe_private_compositor_version_mismatch")
         self.stage = "rd_session"
-        self.session = self.call("/org/gnome/Mutter/RemoteDesktop", "org.gnome.Mutter.RemoteDesktop", "CreateSession").unpack()[0]
+        self.session = self.call(
+            "/org/gnome/Mutter/RemoteDesktop", "org.gnome.Mutter.RemoteDesktop",
+            "CreateSession").unpack()[0]
         self.call(self.session, "org.gnome.Mutter.RemoteDesktop.Session", "Start")
         self.stage = "sender_connect"
         self.connect_sender()
         self.command("escape", "escape_sent")
         self.stage = "receiver_start"
-        self.receiver = self.spawn(["/usr/bin/python3", "-s", "/probe/assets/wayland_probe_receiver.py"], capture=True)
-        self.wait(lambda: any(row.get("kind") == "receiver_ready" for row in self.rows), "probe_receiver_start_failed", 10)
+        self.receiver = self.spawn(
+            ["/usr/bin/python3", "-s", "/probe/assets/wayland_probe_receiver.py"], capture=True)
+        self.wait(lambda: any(row.get("kind") == "receiver_ready" for row in self.rows),
+                  "probe_receiver_start_failed", 10)
         self.command("escape", "escape_sent")
         focus_index = len(self.rows)
-        self.wait(lambda: len([row for row in self.rows[focus_index:] if row.get("kind") == "sample"]) >= 8,
+        self.wait(lambda: len([
+                    row for row in self.rows[focus_index:] if row.get("kind") == "sample"]) >= 8,
                   "probe_receiver_samples_not_ready")
         if identity["backend"] == "x11-nested":
             assert_private_environment()
-            windows = subprocess.run(["/usr/bin/xdotool", "search", "--pid", str(self.compositor.pid)],
-                                     check=True, timeout=3, capture_output=True, text=True).stdout.split()
+            windows = subprocess.run(
+                ["/usr/bin/xdotool", "search", "--pid", str(self.compositor.pid)],
+                check=True, timeout=3, capture_output=True, text=True).stdout.split()
             if not windows or not all(value.isdecimal() for value in windows):
                 raise TrialError("probe_nested_outer_window_missing")
-            subprocess.run(["/usr/bin/xdotool", "windowfocus", windows[-1], "mousemove", "250", "250", "click", "1", "key", "Escape"],
-                           check=True, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            subprocess.run(
+                ["/usr/bin/xdotool", "windowfocus", windows[-1], "mousemove", "250", "250",
+                 "click", "1", "key", "Escape"],
+                check=True, timeout=3, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
             focus_index = len(self.rows)
         self.wait(lambda: self.clean_after(focus_index), "probe_receiver_focus_not_ready")
         baseline = len(self.rows)
         self.stage = "receiver_baseline"
         self.command("fresh", "fresh_sent")
-        self.wait(lambda: self.event_after(baseline, "key_press", key=97) and self.clean_after(baseline),
+        self.wait(lambda: self.event_after(baseline, "key_press", key=97)
+                  and self.clean_after(baseline),
                   "probe_receiver_initial_input_not_delivered")
         require_same_stack(identity, self.compositor.pid)
         self.checks.add("exact_mapped_stack")
@@ -252,7 +277,8 @@ class Trial:
         self.checks.add("sole_sender_eof")
         self.wait(lambda: self.event_after(release_index, "button_release", button=1)
                   and self.event_after(release_index, "key_release", key=65505)
-                  and self.clean_after(release_index, require_focus=False), "compositor_held_button_eof_release_failed", 4)
+                  and self.clean_after(release_index, require_focus=False),
+                  "compositor_held_button_eof_release_failed", 4)
         self.checks.update(("button_release_received", "key_release_received"))
         receiver_pid = self.receiver.pid
         self.stage = "fresh_input"
@@ -266,7 +292,8 @@ class Trial:
                   and self.event_after(fresh_index, "key_press", key=97)
                   and self.event_after(fresh_index, "key_release", key=97)
                   and self.clean_after(fresh_index), "probe_same_receiver_fresh_input_failed")
-        if self.receiver.pid != receiver_pid or self.receiver.poll() is not None or self.compositor.poll() is not None:
+        if (self.receiver.pid != receiver_pid or self.receiver.poll() is not None
+                or self.compositor.poll() is not None):
             raise TrialError("probe_same_receiver_or_compositor_lost")
         require_same_stack(identity, self.compositor.pid)
         self.checks.update(("same_receiver_fresh_input", "private_compositor_survived"))
@@ -322,14 +349,17 @@ def main():
     if libc.prctl(36, 1, 0, 0, 0) != 0:
         raise RuntimeError("probe_private_subreaper_failed")
     trial = Trial(marker)
-    result = {"nonce": marker["nonce"], "binding_digest": marker["identity"]["binding_digest"], "passed": False}
+    result = {"nonce": marker["nonce"], "binding_digest": marker["identity"]["binding_digest"],
+              "passed": False}
     try:
         trial.run()
         result["passed"] = True
     except Exception as exc:
         code = str(exc)
-        result["code"] = code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code) else "probe_private_" + trial.stage + "_failed"
-        result["diagnostic"] = {"stage": trial.stage, "type": type(exc).__name__, "detail": str(exc)[:512]}
+        result["code"] = (code if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code)
+                          else "probe_private_" + trial.stage + "_failed")
+        result["diagnostic"] = {"stage": trial.stage, "type": type(exc).__name__,
+                                "detail": str(exc)[:512]}
         result["stack_detail"] = getattr(exc, "stack_detail", None)
         result["errors"] = [row for rows in trial.outputs.values() for row in rows
                             if row.get("kind") == "error" or row.get("event") == "error"][-4:]

@@ -7,9 +7,9 @@ from __future__ import annotations
 import hashlib
 import json
 import os
-from pathlib import Path
 import re
 import stat
+from pathlib import Path
 
 
 def assert_private_environment() -> dict:
@@ -68,7 +68,8 @@ def measured_object(path: str) -> dict:
 
 def device_equal(left: str, right: str) -> bool:
     try:
-        return tuple(int(x, 16) for x in left.split(":")) == tuple(int(x, 16) for x in right.split(":"))
+        return tuple(int(x, 16) for x in left.split(":")) == tuple(
+            int(x, 16) for x in right.split(":"))
     except (TypeError, ValueError):
         return False
 
@@ -101,9 +102,12 @@ def require_same_stack(expected: dict, pid: int) -> dict:
     for item in expected["libraries"]:
         if item["path"] not in actual or not object_equal(item, actual[item["path"]]):
             error = RuntimeError("private_compositor_mapped_stack_mismatch")
-            error.stack_detail = {"expected": item, "actual": actual.get(item["path"]),
-                                  "loaded_candidates": [value for path, value in actual.items()
-                                                        if Path(path).name == Path(item["path"]).name]}
+            error.stack_detail = {
+                "expected": item, "actual": actual.get(item["path"]),
+                "loaded_candidates": [
+                    value for path, value in actual.items()
+                    if Path(path).name == Path(item["path"]).name],
+            }
             raise error
     expected_paths = {item["path"] for item in expected["libraries"]}
     if any(relevant_library(p) and p not in expected_paths for p in actual):

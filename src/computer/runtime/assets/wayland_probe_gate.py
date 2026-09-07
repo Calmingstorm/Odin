@@ -3,12 +3,12 @@
 import ctypes
 import json
 import os
-from pathlib import Path
 import select
 import signal
-import sys
 import subprocess
+import sys
 import time
+from pathlib import Path
 
 
 def reap_owned(child):
@@ -59,7 +59,9 @@ def supervise(argv):
 def main():
     parent = int(sys.argv[1])
     libc = ctypes.CDLL(None, use_errno=True)
-    if libc.prctl(36, 1, 0, 0, 0) or libc.prctl(1, signal.SIGTERM, 0, 0, 0) or os.getppid() != parent:
+    if (libc.prctl(36, 1, 0, 0, 0)
+            or libc.prctl(1, signal.SIGTERM, 0, 0, 0)
+            or os.getppid() != parent):
         return 2
     os.write(1, b"PROBE_GATE_READY\n")
     deadline = time.monotonic() + 10

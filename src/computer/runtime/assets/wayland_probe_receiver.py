@@ -205,7 +205,8 @@ def initialize_gtk():
     display = Gdk.Display.get_default()
     # GTK3 distributions need not ship a separate GdkWayland typelib. The
     # concrete GObject type is authoritative even without that optional typelib.
-    if display is None or getattr(getattr(display, "__gtype__", None), "name", None) != "GdkWaylandDisplay":
+    if (display is None
+            or getattr(getattr(display, "__gtype__", None), "name", None) != "GdkWaylandDisplay"):
         raise RuntimeError("native GDK Wayland display required; fallback refused")
     return Gtk, Gdk, GLib, display
 

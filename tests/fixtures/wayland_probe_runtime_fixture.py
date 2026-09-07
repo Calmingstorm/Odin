@@ -4,20 +4,23 @@ This fixtures the active identity transport boundary, not behavioral evidence:
 the production bwrap/helper/real GNOME/libei/GTK path remains unchanged.
 """
 import asyncio
-from dataclasses import dataclass, asdict
 import hashlib
 import json
 import logging
 import os
-from pathlib import Path
-import re
 import subprocess
 import sys
 import time
+from dataclasses import asdict, dataclass
+from pathlib import Path
 
 sys.path.insert(0, "/work")
+from src.computer.runtime.assets.wayland_probe_private import (
+    mapped_objects,
+    measured_object,
+    relevant_library,
+)
 from src.computer.runtime.wayland_probe import qualify
-from src.computer.runtime.assets.wayland_probe_private import measured_object, mapped_objects, relevant_library
 
 
 @dataclass(frozen=True)
@@ -65,7 +68,9 @@ def main():
         for path in ("/tmp/home", "/tmp/runtime"):
             Path(path).mkdir(mode=0o700, exist_ok=True)
         backend = os.environ.get("PROBE_FIXTURE_BACKEND", "native")
-        system = subprocess.run(["dbus-daemon", "--session", "--fork", "--print-address"], capture_output=True, text=True, check=True)
+        system = subprocess.run(
+            ["dbus-daemon", "--session", "--fork", "--print-address"],
+            capture_output=True, text=True, check=True)
         os.environ["DBUS_SYSTEM_BUS_ADDRESS"] = system.stdout.strip()
         argv = ["/usr/bin/gnome-shell", "--wayland", "--no-x11", "--wayland-display=wayland-active"]
         if backend == "native":
@@ -82,20 +87,28 @@ def main():
             if shell.poll() is not None:
                 raise RuntimeError("fixture compositor startup failed")
             try:
-                owner = bus.call_sync("org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus", "GetNameOwner",
-                    GLib.Variant("(s)", ("org.gnome.Shell",)), None, Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
+                owner = bus.call_sync(
+                    "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
+                    "GetNameOwner", GLib.Variant("(s)", ("org.gnome.Shell",)), None,
+                    Gio.DBusCallFlags.NONE, 1000, None).unpack()[0]
                 break
             except Exception:
                 time.sleep(.1)
         if owner is None:
             raise RuntimeError("fixture Shell owner missing")
         time.sleep(2)
-        version = bus.call_sync(owner, "/org/gnome/Shell", "org.freedesktop.DBus.Properties", "Get",
-            GLib.Variant("(ss)", ("org.gnome.Shell", "ShellVersion")), None, Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+        version = bus.call_sync(
+            owner, "/org/gnome/Shell", "org.freedesktop.DBus.Properties", "Get",
+            GLib.Variant("(ss)", ("org.gnome.Shell", "ShellVersion")), None,
+            Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
         fields = Path(f"/proc/{shell.pid}/stat").read_text().rsplit(") ", 1)[1].split()
-        libraries = tuple(Obj(**item) for item in mapped_objects(shell.pid) if relevant_library(item["path"]))
-        identity = Identity(shell.pid, os.getuid(), int(fields[19]), Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
-            int(fields[3]), backend, version, Obj(**measured_object("/usr/bin/gnome-shell")), libraries, owner, shell.pid, os.getuid())
+        libraries = tuple(Obj(**item) for item in mapped_objects(shell.pid)
+                          if relevant_library(item["path"]))
+        identity = Identity(
+            shell.pid, os.getuid(), int(fields[19]),
+            Path("/proc/sys/kernel/random/boot_id").read_text().strip(),
+            int(fields[3]), backend, version, Obj(**measured_object("/usr/bin/gnome-shell")),
+            libraries, owner, shell.pid, os.getuid())
         result = asyncio.run(qualify(identity))
         print(json.dumps(result.public()), flush=True)
         expected = os.environ.get("PROBE_FIXTURE_EXPECT", "eligible")

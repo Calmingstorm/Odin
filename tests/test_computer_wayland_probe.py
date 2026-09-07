@@ -3,9 +3,9 @@ import asyncio
 import importlib.util
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -19,7 +19,8 @@ def identity(**changes):
     values = dict(binding_digest="b" * 64, compositor_name="gnome-shell", backend="native",
                   pid=123, uid=1003, start_ticks=42, boot_id="test", session_id=100,
                   eis_peer_pid=123, eis_peer_uid=1003, shell_owner=":1.2", version="48.7",
-                  executable=obj, libraries=(SimpleNamespace(**{**vars(obj), "path": "/usr/lib/libmutter-16.so"}),))
+                  executable=obj, libraries=(
+                      SimpleNamespace(**{**vars(obj), "path": "/usr/lib/libmutter-16.so"}),))
     return SimpleNamespace(**(values | changes))
 
 
@@ -74,7 +75,8 @@ def test_pidfd_cleanup_does_not_signal_reaped_pid(monkeypatch):
     class Done:
         returncode = 0
         pid = os.getpid()
-    monkeypatch.setattr(probe.signal, "pidfd_send_signal", lambda *args: pytest.fail("signaled exited"))
+    monkeypatch.setattr(
+        probe.signal, "pidfd_send_signal", lambda *args: pytest.fail("signaled exited"))
     asyncio.run(probe._cleanup(Done(), 99))
 
 
@@ -92,7 +94,8 @@ time.sleep(.05)
                "m=importlib.util.module_from_spec(s);s.loader.exec_module(m); "
                "assert ctypes.CDLL(None).prctl(36,1,0,0,0)==0; "
                f"assert m.supervise([{sys.executable!r},'-c',{code!r}])==0; "
-               "import pathlib,os; assert not pathlib.Path(f'/proc/self/task/{os.getpid()}/children').read_text().strip()")
+               "import pathlib,os; assert not "
+               "pathlib.Path(f'/proc/self/task/{os.getpid()}/children').read_text().strip()")
     result = subprocess.run([sys.executable, "-c", harness], capture_output=True, timeout=5)
     assert result.returncode == 0, result.stderr
 

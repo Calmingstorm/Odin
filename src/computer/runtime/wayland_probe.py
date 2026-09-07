@@ -9,12 +9,12 @@ import asyncio
 import json
 import logging
 import os
-from pathlib import Path
 import re
 import secrets
 import signal
 import stat
 import tempfile
+from pathlib import Path
 
 from ..admission import CompositorIdentity, InputAdmission
 from .assets.wayland_probe_private import device_equal, measured_object, object_equal
@@ -31,7 +31,8 @@ def _manifest(identity) -> dict:
     digest = identity.binding_digest
     if not re.fullmatch(r"[0-9a-f]{64}", digest):
         raise ValueError("identity_binding_invalid")
-    if (identity.compositor_name != "gnome-shell" or identity.backend not in {"native", "x11-nested"}
+    if (identity.compositor_name != "gnome-shell"
+            or identity.backend not in {"native", "x11-nested"}
             or identity.pid <= 1 or identity.uid < 0 or identity.start_ticks <= 0
             or identity.eis_peer_pid != identity.pid or identity.eis_peer_uid != identity.uid
             or not re.fullmatch(r":[0-9]+[.][0-9]+", identity.shell_owner)):
@@ -90,7 +91,8 @@ def _sandbox_argv(marker: Path) -> list[str]:
     argv += ["--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--tmpfs", "/run",
              "--dir", "/run/probe", "--chmod", "0700", "/run/probe", "--tmpfs", "/home",
              "--dir", "/home/probe", "--dir", "/etc", "--dir", "/probe",
-             "--ro-bind", str(_ASSETS), "/probe/assets", "--ro-bind", str(marker), "/probe/private.json"]
+             "--ro-bind", str(_ASSETS), "/probe/assets",
+             "--ro-bind", str(marker), "/probe/private.json"]
     for path in ("/etc/fonts", "/etc/ld.so.cache", "/etc/ld.so.conf", "/etc/ld.so.conf.d",
                  "/etc/passwd", "/etc/group", "/etc/localtime"):
         if Path(path).exists():
@@ -105,7 +107,8 @@ def _sandbox_argv(marker: Path) -> list[str]:
            "OMP_NUM_THREADS": "1", "GSK_RENDERER": "cairo", "PYTHONDONTWRITEBYTECODE": "1"}
     for key, value in env.items():
         argv += ["--setenv", key, value]
-    argv += ["--chdir", "/home/probe", "--", "/usr/bin/python3", "-s", "/probe/assets/wayland_probe_session.py"]
+    argv += ["--chdir", "/home/probe", "--", "/usr/bin/python3", "-s",
+             "/probe/assets/wayland_probe_session.py"]
     return argv
 
 
@@ -125,7 +128,7 @@ async def _cleanup(proc, pidfd) -> None:
                 pass
         try:
             await asyncio.wait_for(proc.wait(), 3)
-        except asyncio.TimeoutError:
+        except TimeoutError:
             if pidfd is not None:
                 try:
                     signal.pidfd_send_signal(pidfd, signal.SIGKILL)
@@ -152,7 +155,8 @@ class GnomeSameStackQualifier:
                 async with self._lock:
                     manifest = _manifest(identity)
                     await asyncio.to_thread(_validate_active, manifest)
-                    for path in ("/usr/bin/bwrap", "/usr/bin/python3", "/usr/bin/dbus-daemon", "/usr/bin/gnome-shell"):
+                    for path in ("/usr/bin/bwrap", "/usr/bin/python3", "/usr/bin/dbus-daemon",
+                                 "/usr/bin/gnome-shell"):
                         _trusted_program(path)
                     if manifest["backend"] == "x11-nested":
                         _trusted_program("/usr/bin/Xvfb")
@@ -192,15 +196,20 @@ class GnomeSameStackQualifier:
                         if status != 0:
                             raise RuntimeError("probe_sandbox_or_dependency_failed")
                         result = json.loads(output)
-                        logging.getLogger(__name__).debug("Private Wayland probe result: %s", result)
-                        if result.get("nonce") != data["nonce"] or result.get("binding_digest") != manifest["binding_digest"]:
+                        logging.getLogger(__name__).debug(
+                            "Private Wayland probe result: %s", result)
+                        if (result.get("nonce") != data["nonce"]
+                                or result.get("binding_digest") != manifest["binding_digest"]):
                             raise RuntimeError("probe_measurement_binding_mismatch")
                         if not result.get("passed"):
                             code = result.get("code", "probe_behavior_failed")
                             if not re.fullmatch(r"[a-z][a-z0-9_]{0,95}", code):
                                 code = "probe_behavior_failed"
-                            return InputAdmission("refused", code,
-                                f"{public.name} {public.version}: disposable {public.backend} probe did not verify held-input EOF release and receiver recovery.",
+                            return InputAdmission(
+                                "refused", code,
+                                f"{public.name} {public.version}: disposable {public.backend} "
+                                "probe did not verify held-input EOF release "
+                                "and receiver recovery.",
                                 _REMEDY, public, "same_stack_disposable")
                         required = {"held_button_received", "held_key_received", "sole_sender_eof",
                                     "button_release_received", "key_release_received",
@@ -211,20 +220,31 @@ class GnomeSameStackQualifier:
                         await asyncio.to_thread(_validate_active, manifest)
                         if identity.binding_digest != manifest["binding_digest"]:
                             raise RuntimeError("active_compositor_binding_changed")
-                        return InputAdmission("eligible", "same_stack_button_release_verified",
-                            f"{public.name} {public.version}: identical disposable {public.backend} stack released received held input after the sole EI sender exited; the same receiver accepted fresh input.",
-                            "This is same-stack disposable evidence, not a fault test of the active desktop. Fresh portal consent and authenticated active-session/source scope are still required.",
-                            public, "same_stack_disposable", tuple(sorted(required)) + ("identity_sha256:" + manifest["binding_digest"],))
+                        return InputAdmission(
+                            "eligible", "same_stack_button_release_verified",
+                            f"{public.name} {public.version}: identical disposable "
+                            f"{public.backend} "
+                            "stack released received held input after the sole EI sender exited; "
+                            "the same receiver accepted fresh input.",
+                            "This is same-stack disposable evidence, not a fault test "
+                            "of the active "
+                            "desktop. Fresh portal consent and authenticated active-session/source "
+                            "scope are still required.",
+                            public, "same_stack_disposable",
+                            tuple(sorted(required)) + (
+                                "identity_sha256:" + manifest["binding_digest"],))
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            code = str(exc) if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", str(exc)) else "probe_unavailable"
+            code = (str(exc) if re.fullmatch(r"[a-z][a-z0-9_]{0,95}", str(exc))
+                    else "probe_unavailable")
             if isinstance(exc, TimeoutError):
                 code = "probe_deadline_exceeded"
             name = f"{public.name} {public.version}" if public else "Unidentified compositor"
-            return InputAdmission("refused", code,
-                f"{name}: safe per-session same-stack qualification could not be completed ({code}).",
-                _REMEDY, public)
+            return InputAdmission(
+                "refused", code,
+                f"{name}: safe per-session same-stack qualification could not be completed "
+                f"({code}).", _REMEDY, public)
         finally:
             if proc is not None:
                 await asyncio.shield(_cleanup(proc, pidfd))
