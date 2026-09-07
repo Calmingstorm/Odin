@@ -1,0 +1,1 @@
+{"census_complete": true, "cleanup_ok": true, "completed": true, "deadline_exceeded": false, "interrupted_signal": null, "primary_pid": 4186157, "primary_returncode": 0, "reaped": [{"identity": {"pid": 4186196, "start_ticks": 394966219, "uid": 1003}, "wait_status": 0}], "residuals": [], "schema": 1, "seconds": 3.479, "signals": [], "supervisor_pid": 4186155}

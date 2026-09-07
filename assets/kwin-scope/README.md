@@ -62,11 +62,21 @@ state, and integer source-local content bounds.
 
 It denies Xwayland/non-native focus, lock/input-method clients, lock screen,
 fullscreen effects such as overview, shortcut inhibition, interactive
-selection/move/resize, pointer constraints, popup grabs, keyboard-focus versus
+selection/move/resize, pointer constraints, unrelated keyboard-focus versus
 toplevel mismatch, ambiguous output geometry and overlapping higher surfaces.
 Bounds use `clientGeometry`, excluding KWin decoration controls, and round
-inward before clipping to the selected output. Popup grabs are conservatively
-denied, so open native application menus temporarily make scope unavailable.
+inward before clipping to the selected output. An ordinary native grabbed popup
+is eligible only when the actual keyboard-focused surface has the `xdg_popup`
+role and KWin's compositor-resolved Wayland popup-parent chain reaches the
+eligible active application. Every intermediate popup must retain the same
+`wl_client`, PID, visibility/security eligibility and unconstrained pointer.
+The chain is bounded to 64 hops; app ID or PID equality alone is insufficient.
+KWin assigns ordinary XDG popups `WindowType::Unknown`, so the native role is
+checked explicitly rather than trusting a menu-type hint. Bounds belong to the
+focused popup, not the underlying application. Higher overlapping surfaces
+still deny scope, and keyboard-surface changes rotate the focus token even if
+the active toplevel does not change. Non-grabbing popups, unrelated/foreign
+popups and unresolved parent chains remain unavailable.
 
 The Python adapter independently pins the provider owner to `org.kde.KWin`,
 the expected executable/inode, UID and PID, then brackets application process
@@ -86,5 +96,11 @@ from the sole EI sender did not synthesize release for a held button/key within
 four seconds. The controller therefore fails closed with
 `compositor_held_button_eof_release_failed`. No usable stock-KWin companion
 package should be published until complete input admission passes. The scope
-plugin was not loaded into a real desktop; compile success is not an in-process
-runtime smoke.
+plugin's read-only API was loaded into an isolated rootless-container virtual
+KWin, not the workstation desktop. A real GTK context menu was opened and its
+item selected using a separately authorized scratch EI helper, with observed
+button releases. Native snapshots changed from application bounds to popup
+bounds and back, with distinct focus serials/tokens. This proves popup scope
+resolution and menu-item targeting in that isolated session, not production
+input admission, a portal stream, or EOF release qualification. See
+`evidence/20260907-native-popup/RESULT.md` for exact results and limits.

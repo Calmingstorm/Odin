@@ -1,0 +1,5 @@
+{"event": "button_press", "button": 3}
+{"event": "menu_opened"}
+{"event": "menu_button_release", "button": 3}
+{"event": "menu_button_release", "button": 1}
+{"event": "item_selected"}

@@ -11,6 +11,7 @@
 #include "wayland/seat.h"
 #include "wayland/subcompositor.h"
 #include "wayland/surface.h"
+#include "wayland/xdgshell.h"
 #include "wayland_server.h"
 #include "window.h"
 #include "workspace.h"
@@ -70,6 +71,41 @@ bool intersects(const RectF &a, const RectF &b)
         && a.y() < b.y() + b.height() && b.y() < a.y() + a.height();
 }
 
+bool eligibleWindow(Window *window)
+{
+    return window && window->surface() && window->isShown() && !window->isMinimized()
+        && !window->isDeleted() && !window->isInternal() && !window->isLockScreen()
+        && !window->isLockScreenOverlay() && !window->isInputMethod() && !window->isOutline()
+        && window->isOnCurrentDesktop() && window->isOnCurrentActivity()
+        && !window->isInteractiveMove() && !window->isInteractiveResize()
+        && (window->isNormalWindow() || window->isDialog() || window->isUtility()
+            || window->isMenu() || window->isDropdownMenu() || window->isPopupMenu()
+            // KWin assigns WindowType::Unknown to ordinary XdgPopupWindow.
+            || (window->isPopupWindow() && window->surface()->role() == XdgPopupInterface::role()));
+}
+
+bool unconstrained(SurfaceInterface *surface)
+{
+    return surface && !(surface->lockedPointer() && surface->lockedPointer()->isLocked())
+        && !(surface->confinedPointer() && surface->confinedPointer()->isConfined());
+}
+
+// KWin's XdgPopupWindow::initialize derives transientFor directly from the
+// xdg_popup parent wl_surface. Never infer this relation from a title, app ID,
+// PID alone, or a client-provided menu window-type hint.
+bool popupBelongsTo(Window *target, Window *application, ClientConnection *client)
+{
+    Window *cursor = target;
+    for (int depth = 0; cursor != application && depth < 64; ++depth) {
+        if (!eligibleWindow(cursor) || !cursor->hasPopupGrab()
+            || cursor->surface()->role() != XdgPopupInterface::role()
+            || cursor->surface()->client() != client || cursor->pid() != client->processId()
+            || !unconstrained(cursor->surface())) return false;
+        cursor = cursor->transientFor();
+    }
+    return cursor == application;
+}
+
 QString normalizedBackendClass()
 {
     const OutputBackend *backend = kwinApp() ? kwinApp()->outputBackend() : nullptr;
@@ -94,6 +130,13 @@ quint64 randomToken()
 OdinScope::OdinScope()
 {
     m_focusToken = randomToken();
+    if (waylandServer() && waylandServer()->seat()) {
+        connect(waylandServer()->seat(), &SeatInterface::focusedKeyboardSurfaceAboutToChange,
+                this, [this](SurfaceInterface *) {
+            ++m_focusSerial;
+            m_focusToken = randomToken();
+        });
+    }
     if (workspace()) {
         connect(workspace(), &Workspace::windowActivated, this, [this] {
             ++m_focusSerial;
@@ -177,23 +220,18 @@ QString OdinScope::Snapshot(const QString &requestText)
         || waylandServer()->isKeyboardShortcutsInhibited() || input()->isSelectingWindow()
         || (effects && effects->activeFullScreenEffect())) return unavailable();
 
-    Window *focus = workspace()->activeWindow();
-    SurfaceInterface *surface = focus ? focus->surface() : nullptr;
-    if (!focus || !surface || rootSurface(waylandServer()->seat()->focusedKeyboardSurface()) != surface
-        || !focus->isActive() || !focus->isShown() || focus->isMinimized() || focus->isDeleted()
-        || focus->isInternal() || focus->isLockScreen() || focus->isLockScreenOverlay()
-        || focus->isInputMethod() || focus->isOutline() || !focus->isOnCurrentDesktop()
-        || !focus->isOnCurrentActivity() || focus->isInteractiveMove() || focus->isInteractiveResize()
-        || !(focus->isNormalWindow() || focus->isDialog() || focus->isUtility()
-             || focus->isMenu() || focus->isDropdownMenu() || focus->isPopupMenu())) return unavailable();
-    ClientConnection *client = surface->client();
+    Window *application = workspace()->activeWindow();
+    if (!eligibleWindow(application) || !application->isActive()
+        || application->hasPopupGrab() || !unconstrained(application->surface())) return unavailable();
+    SurfaceInterface *surface = rootSurface(waylandServer()->seat()->focusedKeyboardSurface());
+    Window *focus = surface ? waylandServer()->findWindow(surface) : nullptr;
+    if (!eligibleWindow(focus)) return unavailable();
+    ClientConnection *client = application->surface()->client();
     if (!client || client->tearingDown() || client->processId() <= 1 || client->userId() != geteuid()
         || client == waylandServer()->screenLockerClientConnection()
-        || client == waylandServer()->inputMethodConnection() || focus->pid() != client->processId()
-        || (surface->lockedPointer() && surface->lockedPointer()->isLocked())
-        || (surface->confinedPointer() && surface->confinedPointer()->isConfined())
-        || focus->hasPopupGrab()) return unavailable();
-    const QString title = focus->caption(), windowClass = focus->resourceClass();
+        || client == waylandServer()->inputMethodConnection() || application->pid() != client->processId()
+        || !popupBelongsTo(focus, application, client)) return unavailable();
+    const QString title = application->caption(), windowClass = application->resourceClass();
     if (!boundedText(title) || !boundedText(windowClass)) return unavailable();
 
     const RectF content = focus->clientGeometry();
@@ -212,7 +250,7 @@ QString OdinScope::Snapshot(const QString &requestText)
             && other->isOnCurrentDesktop() && other->isOnCurrentActivity()
             && intersects(clipped, other->frameGeometry())) return unavailable();
     }
-    if (workspace()->activeWindow() != focus
+    if (workspace()->activeWindow() != application
         || rootSurface(waylandServer()->seat()->focusedKeyboardSurface()) != surface) return unavailable();
     const QJsonObject bounds{{"x", x - sourceRect.x()}, {"y", y - sourceRect.y()},
                              {"width", right - x}, {"height", bottom - y}};
