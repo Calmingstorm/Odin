@@ -72,14 +72,8 @@ class ComputerController:
         self._live: dict[str, LiveSession] = {}
         self._actions = asyncio.Lock()
         self._watchdogs: dict[str, asyncio.Task] = {}
+        self._delivered_observations: dict[str, str] = {}
         self.store.recover()
-
-    def restrict(self, context: RequestContext) -> None:
-        foreground(context)
-        self.store.restrict(context)
-
-    def is_restricted(self, owner_id: str, channel_id: str) -> bool:
-        return self.store.is_restricted(owner_id, channel_id)
 
     async def _auth(self, context, *, emergency=False):
         foreground(context)
@@ -119,13 +113,15 @@ class ComputerController:
 
     async def _stop(self, sid, state):
         grant = self.store.set_state(sid, "quarantined", revoke=True)
+        self._delivered_observations.pop(sid, None)
         live = self._live.get(sid)
         if live is None:
-            return grant.public()
+            return self._public_session(grant)
         live.observations.clear()
         timer = self._watchdogs.pop(sid, None)
         if timer and timer is not asyncio.current_task():
             timer.cancel()
+        result = None
         try:
             # Attached adapters revoke their own devices only, never stop session apps.
             if live.capabilities is None:
@@ -134,12 +130,21 @@ class ComputerController:
                          else live.backend.stop)
             result = await _bounded(operation(), STOP_TIMEOUT_SECONDS)
             clean = isinstance(result, dict) and result.get("stopped") is True
+            if clean and live.capabilities.environment == "existing_session":
+                clean = (result.get("released") is True
+                         and result.get("applications_preserved") is True
+                         and result.get("input_revoked") is True
+                         and result.get("capture_revoked") is True
+                         and result.get("owned_devices") in {"removed", "retained_inactive"})
         except (Exception, asyncio.CancelledError):
             clean = False
+        # Commit the cleanup evidence BEFORE dropping the live adapter. Inactive
+        # retained devices must not become indistinguishable from actual removal.
+        self.store.record_cleanup(sid, result, clean=clean)
         if clean:
             self._live.pop(sid, None)
             grant = self.store.set_state(sid, state)
-        return grant.public()
+        return self._public_session(grant)
 
     async def set_enabled(self, enabled: bool):
         self.enabled = bool(enabled)
@@ -149,6 +154,23 @@ class ComputerController:
     async def close(self):
         await self.set_enabled(False)
 
+    async def finish_turn(self, context: RequestContext):
+        """Release this turn's owned desktop, never a later turn's session."""
+        await self._auth(context, emergency=True)
+        grant = self.store.find_session(context)
+        if (grant is not None and grant.turn_id == context.turn_id
+                and grant.state in {"starting", "active", "paused", "quarantined"}):
+            owned(context, grant)
+            return await self._stop(grant.session_id, "cancelled")
+        return None
+
+    def _public_session(self, grant):
+        live = self._live.get(grant.session_id)
+        capabilities = live.capabilities if live is not None else None
+        return {**grant.public(), "backend_capabilities": (
+            capabilities.public() if capabilities is not None else None),
+                "cleanup": self.store.cleanup(grant.session_id)}
+
     async def session(self, context: RequestContext, inp: dict) -> dict:
         exact_keys(inp, {"operation", "session_id", "generation", "app", "name"}, {"operation"})
         operation = inp["operation"]
@@ -157,7 +179,6 @@ class ComputerController:
             exact_keys(inp, {"operation", "app"}, {"operation", "app"})
             if not isinstance(inp["app"], str) or not 1 <= len(inp["app"]) <= 96:
                 raise ComputerError("unsupported_app")
-            self.restrict(context)
             backend = self.backend_factory(inp["app"])
             if inspect.isawaitable(backend):
                 backend = await backend
@@ -187,7 +208,7 @@ class ComputerController:
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 raise ComputerError("start_unavailable") from None
-            return self.store.get_session(grant.session_id).public()
+            return self._public_session(self.store.get_session(grant.session_id))
         if operation not in {"status", "stop", "cancel", "close", "pause", "resume", "export",
                              "reconcile"}:
             raise ComputerError("unsupported_operation")
@@ -196,10 +217,10 @@ class ComputerController:
         grant = self._grant(context, inp, same_turn=False,
                             generation=operation in {"resume", "export", "reconcile"})
         if operation == "status":
-            return grant.public()
+            return self._public_session(grant)
         if operation in {"stop", "cancel", "close"}:
             if grant.state in {"cancelled", "closed"}:
-                return grant.public()
+                return self._public_session(grant)
             return await self._stop(grant.session_id,
                                     "closed" if operation == "close" else "cancelled")
         if operation == "pause":
@@ -230,7 +251,7 @@ class ComputerController:
                 grant = self.store.set_state(grant.session_id, "active")
                 obs, _ = await self._capture(grant, acknowledge_modal=True)
                 live.modal_identity = obs.modal
-                return self.store.get_session(grant.session_id).public()
+                return self._public_session(self.store.get_session(grant.session_id))
         if operation == "reconcile":
             return await self.observe(context, {"session_id": grant.session_id,
                                                 "generation": grant.generation})
@@ -254,7 +275,7 @@ class ComputerController:
         grant = self.store.set_state(sid, "paused", revoke=True)
         live = self._live.get(sid)
         if live is None:
-            return self.store.set_state(sid, "quarantined").public()
+            return self._public_session(self.store.set_state(sid, "quarantined"))
         live.observations.clear()
         pause = getattr(live.backend, "pause", None)
         if pause is None:
@@ -265,7 +286,7 @@ class ComputerController:
                 return await self._stop(sid, "cancelled")
         except (Exception, asyncio.CancelledError):
             return await self._stop(sid, "cancelled")
-        return grant.public()
+        return self._public_session(grant)
 
     async def _capture(self, grant, *, acknowledge_modal=False):
         from .vision import FrameCrop, FrameMetadata, _validate_png
@@ -318,7 +339,23 @@ class ComputerController:
             self._active(grant)
             if not 0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS:
                 raise ComputerError("stale_observation")
-        return {**obs.public(), "image_bytes": image}
+        live = self._active(grant)
+        return {**obs.public(), "image_bytes": image,
+                "backend_capabilities": (live.capabilities.public()
+                                         if live.capabilities is not None else None)}
+
+    async def validate_observation_delivery(self, context, metadata, digest):
+        """Recheck live ownership, generation, freshness and exact pixels at delivery."""
+        await self._auth(context)
+        grant = self._grant(context, {"session_id": metadata.session_id,
+                                      "generation": metadata.generation})
+        live = self._active(grant)
+        obs = live.observations.get(metadata.observation_id)
+        if (obs is None or obs.frame_metadata != metadata or obs.image_sha256 != digest
+                or not 0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS
+                or self._delivered_observations.get(grant.session_id) == obs.observation_id):
+            raise ComputerError("stale_observation")
+        self._delivered_observations[grant.session_id] = obs.observation_id
 
     async def validate_action_binding(self, grant, observation_id):
         """No input: compare full source geometry/consent/focus against fresh capture."""
@@ -337,6 +374,6 @@ class ComputerController:
         return current
 
     async def act(self, context, inp):
-        # No new action layer atop unverified input separation in this contract increment.
+        # R2 accepts overlap, not unverified release/detach safety or ungrounded input.
         await self._auth(context)
         raise ComputerError("grounded_actions_unavailable")

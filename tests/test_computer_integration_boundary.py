@@ -88,9 +88,6 @@ async def test_native_disabled_same_name_skill_survives_enable_disable():
     assert not (await call())[0].ok  # No authenticated foreground grant.
     desktop.enabled = False
     assert (await call())[0] == "legacy-skill"
-    dispatcher.computer_restricted = lambda *_: True
-    assert not (await call())[0].ok  # Disable cannot erase persistent restriction.
-    dispatcher.computer_restricted = None
     token = request_tool_scope.set(frozenset())
     try:
         assert not (await call())[0].ok  # Empty scope means deny all, not unrestricted.
@@ -98,6 +95,35 @@ async def test_native_disabled_same_name_skill_survives_enable_disable():
         request_tool_scope.reset(token)
     assert dispatcher.skills.dispatch.await_count == 2
     desktop._handle_computer_act.assert_not_called()
+
+
+@pytest.mark.parametrize("response", [
+    {"state": "quarantined"},  # Recovered session, no trustworthy cleanup receipt.
+    {"state": "quarantined", "cleanup": {"complete": False}},
+    {"state": "closed", "cleanup": {"complete": False}},
+    {"state": "closed", "cleanup": {}},
+    {"state": "closed", "cleanup": {"complete": "yes"}},
+])
+async def test_quarantine_and_unproven_cleanup_are_not_successful_tool_calls(response):
+    import asyncio
+
+    from src.computer.integration import ForegroundGrant, _grant
+    from src.computer.models import RequestContext
+
+    service, controller = integration(enabled=True)
+    controller.session.return_value = response
+    controller.observe = AsyncMock()
+    controller.act = AsyncMock()
+    context = RequestContext("alice", "channel", "turn", "localhost")
+    token = _grant.set(ForegroundGrant(
+        context, "channel", "call", "computer_session", asyncio.current_task()))
+    try:
+        result = await service._handle_computer_session({"operation": "stop"})
+        assert result.ok is False
+        assert result.uncertain_outcome is True
+        assert result.error == "outcome_unknown"
+    finally:
+        _grant.reset(token)
 
 
 async def test_executor_name_reservation_is_optional_but_scope_is_not():
@@ -110,9 +136,6 @@ async def test_executor_name_reservation_is_optional_but_scope_is_not():
     executor.computer_reserved = lambda name: name == "computer_act"
     assert (await executor._execute_inner("computer_act", {})).error == "permission_denied"
     executor.computer_reserved = lambda _: False
-    executor.computer_restricted = lambda *_: True
-    assert (await executor._execute_inner("computer_act", {})).error == "permission_denied"
-    executor.computer_restricted = None
     token = request_tool_scope.set(frozenset())
     try:
         assert (await executor._execute_inner("computer_act", {})).error == "permission_denied"

@@ -41,18 +41,25 @@ class Stub:
         return {"stopped": True}
     async def detach(self):
         self.detached = True
-        return {"stopped": True}
+        return {"stopped": True, "released": True, "applications_preserved": True,
+                "input_revoked": True, "capture_revoked": True, "owned_devices": "removed"}
 
 
 @pytest.mark.parametrize("platform", ["x11", "wayland"])
-@pytest.mark.parametrize(
-    "pointer,keyboard",
-    [("shared", "independent"), ("independent", "unknown"), ("unknown", "shared")],
-)
-def test_existing_session_requires_both_separations(platform, pointer, keyboard):
-    with pytest.raises(ComputerError, match="separation"):
+@pytest.mark.parametrize("pointer", ["independent", "shared", "unknown"])
+@pytest.mark.parametrize("keyboard", ["independent", "shared", "unknown"])
+def test_r2_overlap_accepted_but_lifecycle_still_required(platform, pointer, keyboard):
+    with pytest.raises(ComputerError, match="lifecycle"):
         input_eligible(BackendCapabilities(platform,"existing_session",pointer,keyboard))
     input_eligible(BackendCapabilities(platform,"isolated",pointer,keyboard))
+    capabilities = BackendCapabilities(platform,"existing_session",pointer,keyboard,
+                                       "verified", "verified")
+    input_eligible(capabilities)
+    public = capabilities.public()
+    assert public["pointer_separation"] == pointer
+    assert public["keyboard_separation"] == keyboard
+    for kind, value in (("pointer", pointer), ("keyboard", keyboard)):
+        assert (f"{kind}_separation_{value}" in public["limitations"]) == (value != "independent")
 
 
 @pytest.mark.asyncio

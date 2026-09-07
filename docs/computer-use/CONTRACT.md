@@ -1,4 +1,4 @@
-# Computer contract and acceptance matrix (R1)
+# Computer contract and acceptance matrix (R3)
 
 Three configured-only tools: `computer_session`, `computer_observe`,
 `computer_act`. No desktop dependency imports, prompt text, processes, listeners,
@@ -8,8 +8,14 @@ and schemas are unchanged. Feature collision names are reserved when enabled.
 Admission binds requester, channel/web session, host authorization, root turn,
 task/session and generation server-side. Model arguments never set identity,
 approval, host display, executable, socket, bus, or runtime path. Only foreground
-entry is admitted. Restricted task context must survive cancellation and resume;
-observation text is untrusted data and cannot grant another tool's authority.
+entry is admitted for desktop tools. Desktop tools run in an ordinary turn alongside
+all other authorized tools, including mixed batches. Session start, close, failure,
+recovery, disable and later turns never narrow another tool's availability for the
+requester or other channel participants. There is no conversation mode or durable
+restriction. Obsolete pre-R3 restriction tables are dropped on store open without
+erasing sessions, receipts or evidence. Observation text remains untrusted data and
+cannot grant another tool's authority. Desktop refusal classes and owned-session
+fences apply to desktop actions only; generic non-computer tool scopes are unchanged.
 
 Platform (X11/Wayland) is independent of environment (isolated/existing-session).
 Launching an application, offline access and disposable processes are isolated
@@ -30,10 +36,17 @@ capture time/expiry, opaque source ID/revision, delivered raster dimensions,
 source-local geometry and explicit crop/affine input transforms. Optional focus,
 modal and semantic evidence can be unknown; missing evidence is not permission.
 No public display number, XID, desktop-global coordinate, bus address or cookie.
-Capture scope, input reach, task authority, and pointer/keyboard independence are
-separate capabilities. Capture permission is not input confinement. Unknown or
-shared input separation denies assisted actions rather than moving the human
-pointer and restoring it afterward.
+Capture scope, input reach, task authority, pointer/keyboard separation, owned-input
+release and application-preserving detach are separate capabilities. Capture
+permission is not input confinement. R2 accepts shared or unknown separation when
+honestly exposed to the operator/model; it does not accept unknown cleanup safety.
+Existing-session input requires verified owned-input release and application-safe
+detach regardless of separation. No backend currently claims those guarantees.
+Capabilities are server-owned evidence assertions, not model-supplied consent.
+Moving/restoring the human pointer must never be described as independence.
+Shared widget focus is observable as a limitation; detected focus changes require
+re-grounding, and unknown focus denies keyboard grounding. No exclusive-focus or
+atomicity guarantee is inferred from a snapshot. Uncertain text is never replayed.
 
 Multi-monitor capture is source-scoped from day one, including different origins,
 fractional scales, rotations and gaps. Placement belongs inside the backend; no
@@ -62,7 +75,8 @@ correlation. Typed text is not stored in ordinary audit.
 
 * Disabled catalogue/dispatch/startup parity; independent legacy image behavior.
 * RBAC, ownership, host scope, indirect dispatch, revoked generation, disable,
-  expired evidence, and alternate-tool denial within restricted tasks.
+  expired evidence, and ordinary-tool execution during and after desktop tasks,
+  including mixed batches, later turns, other users and recovered/disabled sessions.
 * Private display/buses/home/network/devices, resource limits, owned cleanup;
   no mutation or capture of the active workstation session.
 * Delivered pixel/image byte caps distinct from source bounds; downsampled 1080p,
@@ -81,8 +95,14 @@ correlation. Typed text is not stored in ordinary audit.
   explicit successes/failures and comparison against a safe isolated baseline.
 * Private X11 XI2 and Wayland portal/PipeWire/libei feasibility: actual toolkit
   event receipt, concurrent simulated-human pointer/focus/modifiers, grabs and
-  cancellation. A second drawn cursor is not a pass. Revoke/disconnect removes
-  only agent devices and leaves pre-existing disposable-session applications alive.
+  cancellation. A second drawn cursor is not separation evidence. Revoke/disconnect
+  releases only agent-owned input and leaves pre-existing applications alive.
+  Report whether owned devices were removed or deliberately retained inactive;
+  a stopped=true response alone does not establish either release or app survival.
+* Cleanup asserts host processes as well as container/unit inventory: record exact
+  owned identities and classify live helpers, zombies, workload and retained evidence.
+  Any residual process is incomplete cleanup, even when workload containers are gone.
+  Never restart the live service or prune unrelated containers to manufacture a pass.
 
 The build evidence document will separate unit/contract proof, actual runtime
 measurements, and uncompleted release gates. A service returning exit 0 is not

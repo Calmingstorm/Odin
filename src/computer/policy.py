@@ -1,8 +1,7 @@
-"""Fail-closed admission and restricted-actor policy independent of tool presentation."""
+"""Desktop-only admission, ownership and input policy independent of tool presentation."""
 
 from .models import BackendCapabilities, ComputerError, RequestContext, SessionGrant
 
-COMPUTER_TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 MAX_TASK_SECONDS = 1200
 MAX_ACTIONS = 200
 MAX_INPUT_SECONDS = 2.0
@@ -25,12 +24,6 @@ def owned(context: RequestContext, grant: SessionGrant, *, same_turn: bool = Tru
         raise ComputerError("not_found")
 
 
-def check_tool(store, context: RequestContext, tool_name: str) -> None:
-    if (store.is_restricted(context.owner_id, context.channel_id)
-            and tool_name not in COMPUTER_TOOLS):
-        raise ComputerError("restricted_computer_task")
-
-
 def exact_keys(value: dict, allowed: set[str], required: set[str] | None = None) -> None:
     if not isinstance(value, dict) or set(value) - allowed or (required or set()) - set(value):
         raise ComputerError("invalid_arguments")
@@ -46,10 +39,10 @@ def input_eligible(capabilities: BackendCapabilities) -> None:
     if type(capabilities) is not BackendCapabilities:
         raise ComputerError("backend_capabilities_unknown")
     if capabilities.environment == "existing_session" and (
-        capabilities.pointer_separation != "independent"
-        or capabilities.keyboard_separation != "independent"
+        capabilities.owned_input_release != "verified"
+        or capabilities.application_preserving_detach != "verified"
     ):
-        raise ComputerError("assisted_input_separation_unproven")
+        raise ComputerError("assisted_input_lifecycle_unproven")
 
 
 def observation_input(grant, live, observation) -> None:

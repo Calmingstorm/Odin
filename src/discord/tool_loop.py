@@ -395,6 +395,7 @@ class _ChatTurn:
     # from historical fingerprints).
     wait_judgment_pending: bool = False
     pending_image_blocks: list = field(default_factory=list)
+    _computer_frame_error: bool = False
     _op_tool_details: list = field(default_factory=list)
     _pending_validations: list = field(default_factory=list)
     _validation_required: bool = False
@@ -499,7 +500,6 @@ class ToolLoopDeps:
     # Exact cleanup target for agents spawned by a cancelled main turn.
     kill_agents_for_turn: Callable[[str], list[str]] = lambda _turn_id: []
     get_computer: Callable = lambda: None
-    computer_restricted: Callable = lambda _owner, _channel: False
 
 
 class ToolLoopRunner:
@@ -529,29 +529,36 @@ class ToolLoopRunner:
         self._window_observer = deps.window_observer
         self._on_turn_suspended = deps.on_turn_suspended
         self._get_computer = deps.get_computer
-        self._computer_restricted = deps.computer_restricted
-
-    def _computer_mode(self, st) -> bool:
-        return bool(getattr(self, "_computer_restricted", lambda *_: False)(
-            st.user_id, str(st.message.channel.id)))
 
     def _computer_service(self):
         return getattr(self, "_get_computer", lambda: None)()
 
     async def _stop_computer_turn(self, st):
         computer = self._computer_service()
-        if computer is not None and self._computer_mode(st):
+        if computer is not None:
             try:
                 await computer.finish_turn(st)
             except Exception:
                 log.exception("Computer stop could not be confirmed")
 
     def _computer_frames(self, st, *, capture=False):
-        if not self._computer_mode(st):
-            return
-        from ..computer.vision import plan_model_frames
+        if self._computer_service() is None:
+            return frozenset()
+        if not any(
+            isinstance(block, dict) and "__computer_frame__" in block
+            for message in st.messages if isinstance(message.get("content"), list)
+            for block in message["content"]
+        ):
+            if getattr(st, "_computer_required_frames", frozenset()):
+                self._retire_computer_frames(st)
+            return frozenset()
+        from ..computer.vision import VisionError, plan_model_frames
 
-        plan = plan_model_frames(st.messages)
+        try:
+            plan = plan_model_frames(st.messages)
+        except VisionError:
+            self._retire_computer_frames(st)
+            return frozenset()
         st.messages = plan.messages
         stamps = frozenset(
             (b["__computer_frame__"]["observation_id"], b["__computer_frame__"]["sha256"])
@@ -561,7 +568,23 @@ class ToolLoopRunner:
         if capture:
             st._computer_required_frames = stamps
         elif not getattr(st, "_computer_required_frames", frozenset()).issubset(stamps):
-            raise PermissionError("Computer frame lost during compaction; stopped.")
+            self._retire_computer_frames(st)
+            return frozenset()
+        return stamps
+
+    @staticmethod
+    def _retire_computer_frames(st):
+        """Retire unusable desktop evidence without disabling ordinary work."""
+        st.messages = [
+            {**message, "content": [
+                {"type": "text", "text": "[Computer frame unavailable; obtain fresh observation.]"}
+                if isinstance(block, dict) and "__computer_frame__" in block else block
+                for block in message["content"]
+            ]} if isinstance(message.get("content"), list) else message
+            for message in st.messages
+        ]
+        st._computer_required_frames = frozenset()
+        st._computer_frame_error = True
 
     def _scoped_tools_for_request(
         self,
@@ -1661,13 +1684,6 @@ class ToolLoopRunner:
             )
         request_client = serving_identity.client
         st._computer_serving = serving_identity
-        if self._computer_mode(st):
-            from ..computer.integration import require_vision
-
-            try:
-                require_vision(serving_identity)
-            except PermissionError as exc:
-                return ("done", await self._llm_error_done(st, LLMRequestError(str(exc))))
         # Pre-admission and breaker identity are frozen beside the client that
         # every physical attempt will invoke.
         preflight_incompatible_effort(
@@ -1710,21 +1726,15 @@ class ToolLoopRunner:
                 cache_result=False,
                 request_config=request_config,
             )
-            computer = self._computer_service()
-            if computer is not None:
-                from ..computer.integration import COMPUTER_TOOLS, require_vision
+            # Frame integrity follows the evidence, not a conversation mode.
+            # Desktop admission is per call; it never narrows unrelated tools.
+            if self._computer_frames(st):
+                from ..computer.integration import require_vision
 
-                if self._computer_mode(st):
+                try:
                     require_vision(serving_identity)
-                    self._computer_frames(st)
-                    st.tools = [t for t in (st.tools or []) if t["name"] in COMPUTER_TOOLS]
-                else:
-                    try:
-                        require_vision(serving_identity)
-                    except PermissionError:
-                        st.tools = [t for t in (st.tools or []) if t["name"] not in COMPUTER_TOOLS]
-            elif self._computer_mode(st):
-                st.tools = []
+                except PermissionError:
+                    self._retire_computer_frames(st)
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -2379,8 +2389,7 @@ class ToolLoopRunner:
 
         # Tier 3: Completion classifier — uses LLM to judge whether
         # the user's request was fully addressed.
-        if (st.tools_used_in_loop and st.continuation_count < st.max_continuations
-                and not self._computer_mode(st)):
+        if st.tools_used_in_loop and st.continuation_count < st.max_continuations:
             is_complete, reason = await self._completion_classifier.classify(
                 st.message.content,
                 llm_resp.text or "",
@@ -2436,12 +2445,34 @@ class ToolLoopRunner:
         return ("done", (_final, False, False, st.tools_used_in_loop, False))
 
     async def _run_one_tool(self, st: _ChatTurn, block) -> dict:
+        from contextlib import ExitStack
+
         from ..tools.runtime_delivery import execution_delivery_scope
 
         with execution_delivery_scope(
             st.user_id, str(st.message.channel.id),
             allowed_tools=getattr(st.message, "allowed_tools", None),
         ):
+            computer = self._computer_service()
+            if computer is not None and computer.reserves_tool(block.name):
+                # The grant belongs only to this foreground task/call. Other
+                # members of a mixed batch retain their ordinary authority.
+                with ExitStack() as admission:
+                    try:
+                        if (block.name == "computer_act"
+                                and getattr(st, "_computer_frame_error", False)):
+                            raise PermissionError("Computer action requires a fresh observation.")
+                        admission.enter_context(computer.foreground(st, block))
+                    except PermissionError as exc:
+                        denial = str(exc)
+                        await st.durability.after_tool(
+                            block, ok=False, uncertain=False, result_text=denial,
+                        )
+                        return {
+                            "type": "tool_result", "tool_use_id": block.id,
+                            "content": f"Permission denied: {denial}",
+                        }
+                    return await self._run_one_tool_captured(st, block)
             return await self._run_one_tool_captured(st, block)
 
     async def _run_one_tool_captured(self, st: _ChatTurn, block) -> dict:
@@ -2577,6 +2608,24 @@ class ToolLoopRunner:
             log.warning("Unexpected tool error for %s: %s", tool_name, e)
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
+
+        # Only a newly issued, live-owned computer response may repair evidence.
+        # Historical transcript scans and legacy analyze_image never do so.
+        if (tool_name in {"computer_session", "computer_observe", "computer_act"}
+                and isinstance(result, dict)
+                and ("__computer_frame__" in result or "__image_block__" in result)):
+            try:
+                computer = self._computer_service()
+                if computer is None:
+                    raise ValueError("Computer service unavailable")
+                await computer.validate_delivery(st, block, result)
+                st.pending_image_blocks.append(result["__image_block__"])
+                st._computer_frame_error = False
+                result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
+            except Exception:
+                st._computer_frame_error = True
+                error = "computer_observation_rejected"
+                result = "Computer observation rejected; obtain a fresh observation."
 
         # Handle special image block return from analyze_image
         if isinstance(result, dict) and "__image_block__" in result:

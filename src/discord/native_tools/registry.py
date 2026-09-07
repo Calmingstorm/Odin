@@ -92,7 +92,6 @@ class NativeToolDispatcher:
             channel_state=channel_state,
         )
         self._handlers: dict[str, tuple[str, str, Shape]] = {}
-        self.computer_restricted = None
 
     # -- registration ---------------------------------------------------------
 
@@ -141,13 +140,11 @@ class NativeToolDispatcher:
         computer_tool = owner is not None and getattr(owner, "enabled") and tool_name in (
             "computer_session", "computer_observe", "computer_act")
         channel_id = getattr(getattr(message, "channel", None), "id", None)
-        if (computer_tool or self.computer_restricted is not None) and channel_id is None:
+        if computer_tool and channel_id is None:
             denied = True
         if computer_tool:
             denied = denied or not getattr(owner, "grant_allows")(
                 tool_name, user_id, str(channel_id))
-        elif self.computer_restricted is not None:
-            denied = denied or self.computer_restricted(user_id, str(channel_id))
         if denied:
             return ToolResult(output="Permission denied: restricted tool authority.",
                               ok=False, error="permission_denied", tool_name=tool_name), effects

@@ -63,9 +63,6 @@ class ComputerStore:
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
         self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS restrictions (
-                owner_id TEXT NOT NULL, channel_id TEXT NOT NULL, turn_id TEXT NOT NULL,
-                created_at REAL NOT NULL, PRIMARY KEY(owner_id, channel_id));
             CREATE TABLE IF NOT EXISTS sessions (
                 session_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, channel_id TEXT NOT NULL,
                 turn_id TEXT NOT NULL, host_id TEXT NOT NULL, generation INTEGER NOT NULL,
@@ -77,12 +74,14 @@ class ComputerStore:
                 session_id TEXT NOT NULL, action_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
                 status TEXT NOT NULL, result TEXT NOT NULL,
                 PRIMARY KEY(session_id,action_id));
+            CREATE TABLE IF NOT EXISTS session_cleanup (
+                session_id TEXT PRIMARY KEY, result TEXT NOT NULL);
             CREATE TABLE IF NOT EXISTS evidence (
                 evidence_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
                 kind TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL,
                 device INTEGER NOT NULL, inode INTEGER NOT NULL, expires_at REAL NOT NULL);
         """)
-        # Additive upgrade of pre-R1 development stores; no destructive recreation.
+        # Upgrade development stores without recreating sessions or their evidence.
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -94,6 +93,8 @@ class ComputerStore:
                 ):
                     if name not in columns:
                         self.db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
+                # R3 removes conversation restrictions, including persisted pre-R3 state.
+                self.db.execute("DROP TABLE IF EXISTS restrictions")
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
@@ -115,19 +116,8 @@ class ComputerStore:
                 self.db.execute("ROLLBACK")
                 raise
 
-    def restrict(self, context: RequestContext) -> None:
-        with self.lock:
-            self.db.execute("INSERT OR IGNORE INTO restrictions VALUES (?,?,?,?)",
-                            (context.owner_id, context.channel_id, context.turn_id, self.clock()))
-
-    def is_restricted(self, owner_id: str, channel_id: str) -> bool:
-        with self.lock:
-            return self.db.execute("SELECT 1 FROM restrictions WHERE channel_id=?",
-                                   (str(channel_id),)).fetchone() is not None
-
     def create_session(self, context: RequestContext, app: str, *, platform="x11",
                        environment="isolated") -> SessionGrant:
-        self.restrict(context)
         now = self.clock()
         values = (uuid.uuid4().hex, context.owner_id, context.channel_id, context.turn_id,
                   context.host_id, 1, "starting", app, now, now + MAX_TASK_SECONDS, 0,
@@ -166,6 +156,26 @@ class ComputerStore:
                             "turn_id=COALESCE(?,turn_id) WHERE session_id=?",
                             (state, int(revoke), int(revoke), turn_id, session_id))
         return self.get_session(session_id)
+
+    def record_cleanup(self, session_id: str, result: object, *, clean: bool) -> None:
+        """Persist bounded evidence, never arbitrary backend error strings or paths."""
+        values = result if type(result) is dict else {}
+        receipt = {key: (values.get(key) if type(values.get(key)) is bool else None)
+                   for key in ("stopped", "released", "applications_preserved",
+                               "input_revoked", "capture_revoked")}
+        devices = values.get("owned_devices")
+        receipt["owned_devices"] = (devices if type(devices) is str and devices in
+                                    {"removed", "retained_inactive"} else "unknown")
+        receipt["complete"] = clean is True
+        with self.lock:
+            self.db.execute("INSERT OR REPLACE INTO session_cleanup VALUES (?,?)",
+                            (session_id, json.dumps(receipt, sort_keys=True)))
+
+    def cleanup(self, session_id: str) -> dict | None:
+        with self.lock:
+            row = self.db.execute("SELECT result FROM session_cleanup WHERE session_id=?",
+                                  (session_id,)).fetchone()
+        return json.loads(row[0]) if row is not None else None
 
     def receipt(self, session_id: str, action_id: str, payload_hash: str) -> dict | None:
         with self.lock:

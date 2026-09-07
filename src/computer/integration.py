@@ -6,7 +6,7 @@ import contextvars
 import hashlib
 import json
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from ..tools.output_authorization import tool_scope_allows
@@ -14,6 +14,7 @@ from ..tools.result_validator import ToolResult
 from .models import RequestContext
 
 COMPUTER_TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
+NONVISUAL_OPERATIONS = frozenset({"stop", "cancel", "close", "status"})
 VISION_MODELS = frozenset({"gpt-5.4", "gpt-5.4-mini", "gpt-5.5",
                           "gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"})
 
@@ -25,6 +26,8 @@ class ForegroundGrant:
     call_id: str
     tool_name: str
     task: object
+    nonvisual_operation: str | None = None
+    images: list[dict] = field(default_factory=list, compare=False)
 
 
 _grant: contextvars.ContextVar[ForegroundGrant | None] = contextvars.ContextVar(
@@ -72,12 +75,6 @@ class ComputerIntegration:
         return all(not self.bot.tool_executor.check_permission(name, context.owner_id)
                    for name in COMPUTER_TOOLS)
 
-    def is_restricted(self, owner, channel):
-        try:
-            return self.controller.is_restricted(str(owner), str(channel))
-        except Exception:
-            return True
-
     def _context(self, st):
         from .models import RequestContext
 
@@ -98,21 +95,18 @@ class ComputerIntegration:
     def web_binding(binding):
         return "web:" + hashlib.sha256(binding.encode("utf-8")).hexdigest()
 
-    def preflight(self, st, calls):
-        """Persist taint before ANY member of a mixed response batch executes."""
-        context = self._context(st)
-        self.controller.restrict(replace(context, channel_id=str(st.message.channel.id)))
-        self.controller.restrict(context)
-        require_vision(getattr(st, "_computer_serving", None))
-        if not self.bot.config.computer.enabled or not self._authorize(context):
-            raise PermissionError("Computer use disabled or authority denied")
-
     @contextmanager
     def foreground(self, st, block):
         context = self._context(st)
-        require_vision(getattr(st, "_computer_serving", None))
+        values = getattr(block, "input", None)
+        operation = values.get("operation") if isinstance(values, dict) else None
+        nonvisual = (block.name == "computer_session" and isinstance(operation, str)
+                     and operation in NONVISUAL_OPERATIONS)
+        if not nonvisual:
+            require_vision(getattr(st, "_computer_serving", None))
         grant = ForegroundGrant(context, str(st.message.channel.id), str(block.id),
-                                block.name, asyncio.current_task())
+                                block.name, asyncio.current_task(),
+                                operation if nonvisual else None)
         token = _grant.set(grant)
         try:
             yield
@@ -131,15 +125,30 @@ class ComputerIntegration:
         if grant is None or not self.grant_allows(name, grant.context.owner_id, grant.conversation):
             return ToolResult("Permission denied: no foreground computer grant.", ok=False,
                               error="permission_denied", tool_name=name)
+        if (grant.nonvisual_operation is not None
+                and (not isinstance(values, dict)
+                     or values.get("operation") != grant.nonvisual_operation)):
+            return ToolResult("Permission denied: computer operation changed.", ok=False,
+                              error="permission_denied", tool_name=name)
         method = {"computer_session": self.controller.session,
                   "computer_observe": self.controller.observe,
                   "computer_act": self.controller.act}[name]
         try:
             result = await method(grant.context, values)
             if isinstance(result, dict) and "image_bytes" in result:
-                return self.output_image(result)
+                from .models import ComputerError
+
+                try:
+                    image = self.output_image(result)
+                except (ValueError, TypeError, KeyError):
+                    raise ComputerError("invalid_observation_response") from None
+                grant.images.append(image)
+                return image
             unknown = isinstance(result, dict) and (
-                result.get("status") == "unknown" or result.get("state") == "unknown"
+                result.get("status") == "unknown"
+                or result.get("state") in {"unknown", "quarantined"}
+                or (isinstance(result.get("cleanup"), dict)
+                    and result["cleanup"].get("complete") is not True)
                 or result.get("uncertain_outcome") is True)
             return ToolResult(json.dumps(result, ensure_ascii=True), ok=not unknown,
                               error="outcome_unknown" if unknown else None,
@@ -169,6 +178,28 @@ class ComputerIntegration:
 
     async def _handle_computer_act(self, values):
         return await self._tool("computer_act", values)
+
+    async def validate_delivery(self, st, block, image):
+        """Consume only this invocation's native image, never transcript evidence."""
+        from .vision import VisionError, _validate_native_frame
+
+        grant = _grant.get()
+        if (grant is None or grant.nonvisual_operation is not None
+                or grant.call_id != str(block.id)
+                or grant.context != self._context(st)
+                or not self.grant_allows(block.name, st.user_id, str(st.message.channel.id))
+                or not any(image is issued for issued in grant.images)):
+            raise VisionError("Computer observation delivery is not authorized")
+        grant.images.clear()
+        native = image.get("__image_block__")
+        if (not isinstance(native, dict) or native.get("type") != "image"
+                or "__computer_frame__" not in native
+                or not isinstance(image.get("__prompt__"), str)
+                or image.get("__computer_frame__") != native["__computer_frame__"]):
+            raise VisionError("Invalid computer observation response")
+        metadata = _validate_native_frame(native)
+        await self.controller.validate_observation_delivery(
+            grant.context, metadata, native["__computer_frame__"]["sha256"])
 
     @staticmethod
     def output_image(result):
@@ -202,8 +233,7 @@ class ComputerIntegration:
         await self.controller.session(context, {"operation": "stop"})
 
     async def finish_turn(self, st):
-        if self.is_restricted(st.user_id, str(st.message.channel.id)):
-            await self.stop_context(self._context(st))
+        await self.controller.finish_turn(self._context(st))
 
     async def stop_channel(self, owner_id, channel_id):
         from .models import RequestContext

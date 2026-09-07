@@ -20,9 +20,9 @@ _SESSION = {"type": "string", "description": "Opaque session ID from computer_se
 _DEFINITIONS = [
     _tool(
         "computer_session",
-        "Manage one isolated offline desktop task. Starting permanently restricts this "
-        "conversation to computer tools, including after close; use a new empty conversation "
-        "for unrelated privileged work. Never controls the host desktop. Approved Drawing/Xed "
+        "Manage one isolated offline desktop task alongside ordinary authorized tools. "
+        "Starting or closing a desktop session does not change other tools' availability. "
+        "Never controls the host desktop. Approved Drawing/Xed "
         "apps only. Pause/cancel stops input, not already applied effects. Foreground only.",
         {
             "operation": {"type": "string", "enum": [

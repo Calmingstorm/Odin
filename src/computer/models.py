@@ -67,6 +67,8 @@ class BackendCapabilities:
     environment: str
     pointer_separation: str = "unknown"
     keyboard_separation: str = "unknown"
+    owned_input_release: str = "unknown"
+    application_preserving_detach: str = "unknown"
 
     def __post_init__(self):
         if self.platform not in {"x11", "wayland"} or self.environment not in {
@@ -77,6 +79,27 @@ class BackendCapabilities:
             self.pointer_separation, self.keyboard_separation
         )):
             raise ComputerError("invalid_input_separation")
+        if any(type(v) is not str or v not in {"verified", "failed", "unknown"} for v in (
+            self.owned_input_release, self.application_preserving_detach
+        )):
+            raise ComputerError("invalid_input_lifecycle")
+
+    def public(self) -> dict[str, Any]:
+        """Report limitations without inventing a platform-wide input guarantee."""
+        limitations = []
+        for kind in ("pointer", "keyboard"):
+            separation = getattr(self, f"{kind}_separation")
+            if separation != "independent":
+                limitations.append(f"{kind}_separation_{separation}")
+        for kind in ("owned_input_release", "application_preserving_detach"):
+            if getattr(self, kind) != "verified":
+                limitations.append(f"{kind}_{getattr(self, kind)}")
+        return {"platform": self.platform, "environment": self.environment,
+                "pointer_separation": self.pointer_separation,
+                "keyboard_separation": self.keyboard_separation,
+                "owned_input_release": self.owned_input_release,
+                "application_preserving_detach": self.application_preserving_detach,
+                "limitations": limitations}
 
 
 @dataclass(frozen=True)
