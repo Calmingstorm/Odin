@@ -148,6 +148,20 @@ def _full_turn():
 
 
 class TestRoundTrip:
+    def test_computer_delivery_authority_is_not_resumed_from_history(self):
+        _, store, load = _blob_dict()
+        turn = _full_turn()
+        turn._computer_frame_error = False
+        payload = snapshot_chat_turn(turn, store_blob=store, generation_seq=1)
+        assert "_computer_frame_error" not in payload["fields"]
+        restored = restore_field_values(payload, load_blob=load,
+                                        stuck_tracker_cls=StuckLoopTracker)
+        assert "_computer_frame_error" not in restored
+        resumed = _ChatTurn(message=turn.message, policy=turn.policy, trace=None,
+                            tools=turn.tools, _cancel=turn._cancel, **restored)
+        assert resumed._computer_frame_error is True
+        assert resumed.tools == turn.tools  # No conversation tool-scope restriction.
+
     def test_snapshot_is_json_safe_and_restores_every_persisted_field(self):
         blobs, store, load = _blob_dict()
         st = _full_turn()

@@ -121,6 +121,10 @@ RECONSTRUCTED_FIELDS: frozenset[str] = frozenset({
     "trace",
     "_generation_budget_snapshot",
     "_computer_serving",  # Live client/serving identity, re-captured before each request.
+    # Native delivery authority is process-local. New/resumed turns start blocked
+    # for computer_act only until a freshly owned observation is delivered. Never
+    # restore a historical transcript's pixels as current action authority.
+    "_computer_frame_error",
     "durability",
 })
 

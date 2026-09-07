@@ -395,7 +395,7 @@ class _ChatTurn:
     # from historical fingerprints).
     wait_judgment_pending: bool = False
     pending_image_blocks: list = field(default_factory=list)
-    _computer_frame_error: bool = False
+    _computer_frame_error: bool = True  # Only fresh owned delivery admits computer_act.
     _op_tool_details: list = field(default_factory=list)
     _pending_validations: list = field(default_factory=list)
     _validation_required: bool = False
