@@ -19,6 +19,7 @@ spec.loader.exec_module(receiver)
 @pytest.fixture(autouse=True)
 def no_native_gi(monkeypatch):
     original = builtins.__import__
+    original_dynamic = importlib.import_module
 
     def safe_import(name, *args, **kwargs):
         if name == "gi" or name.startswith("gi."):
@@ -26,6 +27,13 @@ def no_native_gi(monkeypatch):
         return original(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", safe_import)
+
+    def safe_dynamic(name, *args, **kwargs):
+        if name == "gi" or name.startswith("gi."):
+            raise AssertionError("Tests must not import real GI")
+        return original_dynamic(name, *args, **kwargs)
+
+    monkeypatch.setattr(importlib, "import_module", safe_dynamic)
 
 
 class Widget:
@@ -269,6 +277,14 @@ def test_native_wayland_required_no_x_fallback(monkeypatch, native, initialized)
         return original(name, *args, **kwargs)
 
     monkeypatch.setattr(builtins, "__import__", fake_import)
+    def fake_dynamic(name, *args, **kwargs):
+        if name == "gi":
+            return SimpleNamespace(require_version=lambda *args: calls.append(args))
+        if name.startswith("gi.repository."):
+            return getattr(fake, name.rsplit(".", 1)[-1])
+        raise AssertionError("Unexpected dynamic import in GTK fixture: " + name)
+
+    monkeypatch.setattr(importlib, "import_module", fake_dynamic)
     monkeypatch.setenv("GDK_BACKEND", "x11")
     if native and initialized:
         assert receiver.initialize_gtk()[-1] is display

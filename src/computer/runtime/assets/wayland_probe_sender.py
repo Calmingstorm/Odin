@@ -14,6 +14,7 @@ submits event groups and dispatch services its nonblocking backend.
 
 import argparse
 import ctypes as c
+import importlib
 import json
 import os
 import select
@@ -77,7 +78,7 @@ class Sender:
         self.active = set()
         self.connected = False
         self.held = False
-        self.hold_devices = None
+        self.hold_devices: tuple[int, int] | None = None
         if not self.ctx:
             os.close(fd)
             raise ProbeError("ei_new_sender failed")
@@ -194,7 +195,10 @@ class Sender:
 
     def release(self):
         if self.held:
-            button, keyboard = self.hold_devices
+            held_devices = self.hold_devices
+            if held_devices is None:
+                raise ProbeError("held input has no device ownership")
+            button, keyboard = held_devices
             if button in self.active:
                 self.button(button, False)
             if keyboard in self.active:
@@ -336,7 +340,8 @@ def main():
     try:
         # Shared asset checks nonce, fixed environment and independent private
         # mount/PID namespaces. Missing guard is deliberately a hard refusal.
-        from wayland_probe_private import assert_private_environment
+        assert_private_environment = importlib.import_module(
+            "wayland_probe_private").assert_private_environment
 
         assert_private_environment()
         lifetime = time.monotonic() + 120

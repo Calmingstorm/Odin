@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import importlib
 import json
 import os
 import re
@@ -14,8 +15,11 @@ import struct
 import subprocess
 import time
 from pathlib import Path
+from typing import Any
 
-from wayland_probe_private import assert_private_environment, require_same_stack
+_private = importlib.import_module("wayland_probe_private")
+assert_private_environment = _private.assert_private_environment
+require_same_stack = _private.require_same_stack
 
 
 class TrialError(RuntimeError):
@@ -25,33 +29,38 @@ class TrialError(RuntimeError):
 class Trial:
     def __init__(self, marker):
         self.marker = marker
-        self.children = []
-        self.outputs = {}
-        self.buffers = {}
+        self.children: list[subprocess.Popen[bytes]] = []
+        self.outputs: dict[int, list[dict[str, Any]]] = {}
+        self.buffers: dict[int, bytearray] = {}
         self.selector = selectors.DefaultSelector()
-        self.rows = []
+        self.rows: list[dict[str, Any]] = []
         self.deadline = time.monotonic() + 70
-        self.compositor = None
-        self.receiver = None
-        self.sender = None
-        self.session = None
-        self.bus = None
-        self.owner = None
-        self.checks = set()
+        self.compositor: subprocess.Popen[bytes] | None = None
+        self.receiver: subprocess.Popen[bytes] | None = None
+        self.sender: subprocess.Popen[bytes] | None = None
+        self.session: str | None = None
+        # GI's system-installed connection object is a dynamic boundary.
+        self.bus: Any | None = None
+        self.owner: str | None = None
+        self.checks: set[str] = set()
         self.total_output = 0
         self.stage = "init"
 
-    def spawn(self, argv, *, capture=False, pass_fds=()):
+    def spawn(self, argv: list[str], *, capture: bool = False,
+              pass_fds: tuple[int, ...] = ()) -> subprocess.Popen[bytes]:
         child = subprocess.Popen(argv, stdin=subprocess.PIPE if capture else subprocess.DEVNULL,
                                  stdout=subprocess.PIPE if capture else subprocess.DEVNULL,
                                  stderr=subprocess.DEVNULL, env=dict(os.environ),
                                  pass_fds=pass_fds, start_new_session=True)
         self.children.append(child)
         if capture:
+            stdout = child.stdout
+            if stdout is None:
+                raise TrialError("probe_private_capture_pipe_missing")
             self.outputs[child.pid] = []
             self.buffers[child.pid] = bytearray()
-            os.set_blocking(child.stdout.fileno(), False)
-            self.selector.register(child.stdout, selectors.EVENT_READ, child.pid)
+            os.set_blocking(stdout.fileno(), False)
+            self.selector.register(stdout, selectors.EVENT_READ, child.pid)
         return child
 
     def pump(self, delay=0.05):
@@ -94,27 +103,36 @@ class Trial:
         raise TrialError(code)
 
     def command(self, op, expect=None):
-        before = len(self.outputs[self.sender.pid])
-        self.sender.stdin.write(json.dumps({"op": op}).encode() + b"\n")
-        self.sender.stdin.flush()
+        sender = self.sender
+        if sender is None or sender.stdin is None:
+            raise TrialError("probe_sender_not_connected")
+        before = len(self.outputs[sender.pid])
+        sender.stdin.write(json.dumps({"op": op}).encode() + b"\n")
+        sender.stdin.flush()
         if expect:
             self.wait(lambda: any(row.get("event") == expect
-                      for row in self.outputs[self.sender.pid][before:]),
+                      for row in self.outputs[sender.pid][before:]),
                       "probe_sender_command_failed", 10)
 
     def call(self, path, interface, method, parameters=None, fd=False):
-        from gi.repository import Gio
+        gio = importlib.import_module("gi.repository.Gio")
+        bus = self.bus
+        if bus is None:
+            raise TrialError("probe_private_bus_not_connected")
         if fd:
-            return self.bus.call_with_unix_fd_list_sync(self.owner, path, interface, method,
-                parameters, None, Gio.DBusCallFlags.NONE, 4000, None, None)
-        return self.bus.call_sync(self.owner, path, interface, method,
-            parameters, None, Gio.DBusCallFlags.NONE, 4000, None)
+            return bus.call_with_unix_fd_list_sync(self.owner, path, interface, method,
+                parameters, None, gio.DBusCallFlags.NONE, 4000, None, None)
+        return bus.call_sync(self.owner, path, interface, method,
+            parameters, None, gio.DBusCallFlags.NONE, 4000, None)
 
     def connect_sender(self):
-        from gi.repository import GLib
+        glib = importlib.import_module("gi.repository.GLib")
         assert_private_environment()
+        compositor = self.compositor
+        if compositor is None:
+            raise TrialError("probe_private_compositor_missing")
         result, fd_list = self.call(self.session, "org.gnome.Mutter.RemoteDesktop.Session",
-                                   "ConnectToEIS", GLib.Variant("(a{sv})", ({},)), fd=True)
+                                   "ConnectToEIS", glib.Variant("(a{sv})", ({},)), fd=True)
         fds = fd_list.steal_fds()
         try:
             index = result.unpack()[0]
@@ -124,7 +142,7 @@ class Trial:
             with socket.socket(fileno=os.dup(fd)) as peer:
                 pid, uid, _gid = struct.unpack(
                     "3i", peer.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12))
-                if pid != self.compositor.pid or uid != os.getuid():
+                if pid != compositor.pid or uid != os.getuid():
                     raise TrialError("probe_eis_compositor_peer_mismatch")
             sender = self.spawn(["/usr/bin/python3", "-s", "/probe/assets/wayland_probe_sender.py",
                                  "--fd", str(fd)], capture=True, pass_fds=(fd,))
@@ -148,9 +166,10 @@ class Trial:
 
     def run(self):
         self.stage = "gi_import"
-        import gi
+        gi = importlib.import_module("gi")
         gi.require_version("Gio", "2.0")
-        from gi.repository import Gio, GLib
+        gio = importlib.import_module("gi.repository.Gio")
+        glib = importlib.import_module("gi.repository.GLib")
         identity = self.marker["identity"]
         self.stage = "bus_start"
         self.spawn(["/usr/bin/dbus-daemon", "--session", "--nofork", "--nopidfile",
@@ -187,16 +206,19 @@ class Trial:
             subprocess.run(["/usr/bin/xdotool", "mousemove", "400", "300", "click", "1"],
                            check=True, timeout=3,
                            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        self.bus = Gio.DBusConnection.new_for_address_sync(
+        self.bus = gio.DBusConnection.new_for_address_sync(
             "unix:path=/run/probe/bus",
-            Gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
-            | Gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+            gio.DBusConnectionFlags.AUTHENTICATION_CLIENT
+            | gio.DBusConnectionFlags.MESSAGE_BUS_CONNECTION, None, None)
+        bus = self.bus
+        if bus is None:
+            raise TrialError("probe_private_bus_not_connected")
 
         def dbus(method, value):
-            return self.bus.call_sync(
+            return bus.call_sync(
                 "org.freedesktop.DBus", "/org/freedesktop/DBus", "org.freedesktop.DBus",
-                method, GLib.Variant("(s)", (value,)), None,
-                Gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
+                method, glib.Variant("(s)", (value,)), None,
+                gio.DBusCallFlags.NONE, 3000, None).unpack()[0]
         self.stage = "dbus_owner"
         self.wait(lambda: dbus("NameHasOwner", "org.gnome.Mutter.RemoteDesktop"),
                   "probe_private_remote_desktop_unavailable", 15)
@@ -210,12 +232,12 @@ class Trial:
         versions = []
         def version_ready():
             try:
-                versions.append(self.bus.call_sync(
+                versions.append(bus.call_sync(
                     shell_owner, "/org/gnome/Shell", "org.freedesktop.DBus.Properties", "Get",
-                    GLib.Variant("(ss)", ("org.gnome.Shell", "ShellVersion")), None,
-                    Gio.DBusCallFlags.NONE, 1000, None).unpack()[0])
+                    glib.Variant("(ss)", ("org.gnome.Shell", "ShellVersion")), None,
+                    gio.DBusCallFlags.NONE, 1000, None).unpack()[0])
                 return True
-            except GLib.Error:
+            except glib.Error:
                 return False
         self.wait(version_ready, "probe_private_shell_not_ready", 12)
         if versions[-1] != identity["version"]:
@@ -271,8 +293,11 @@ class Trial:
         release_index = len(self.rows)
         self.stage = "held_eof_release"
         self.command("eof")
-        self.sender.wait(timeout=3)
-        if self.sender.returncode != 0:
+        sender = self.sender
+        if sender is None:
+            raise TrialError("probe_sender_not_connected")
+        sender.wait(timeout=3)
+        if sender.returncode != 0:
             raise TrialError("probe_sender_exit_failed")
         self.checks.add("sole_sender_eof")
         self.wait(lambda: self.event_after(release_index, "button_release", button=1)

@@ -6,6 +6,7 @@ connect to a display, or inspect the host session. The sibling private guard run
 before any graphical initialization. No command-line configuration is accepted.
 """
 
+import importlib
 import json
 import os
 import signal
@@ -193,22 +194,24 @@ def initialize_gtk():
     # The guard has already validated a disposable namespace. There is no X11
     # fallback, even if the inherited environment or installed GTK prefers it.
     os.environ["GDK_BACKEND"] = "wayland"
-    import gi
+    gi = importlib.import_module("gi")
     gi.require_version("Gtk", "3.0")
     gi.require_version("Gdk", "3.0")
-    from gi.repository import Gdk, GLib, Gtk
+    gdk = importlib.import_module("gi.repository.Gdk")
+    glib = importlib.import_module("gi.repository.GLib")
+    gtk = importlib.import_module("gi.repository.Gtk")
 
-    Gdk.set_allowed_backends("wayland")
-    initialized, _argv = Gtk.init_check([])
+    gdk.set_allowed_backends("wayland")
+    initialized, _argv = gtk.init_check([])
     if not initialized:
         raise RuntimeError("GTK native Wayland initialization failed")
-    display = Gdk.Display.get_default()
+    display = gdk.Display.get_default()
     # GTK3 distributions need not ship a separate GdkWayland typelib. The
     # concrete GObject type is authoritative even without that optional typelib.
     if (display is None
             or getattr(getattr(display, "__gtype__", None), "name", None) != "GdkWaylandDisplay"):
         raise RuntimeError("native GDK Wayland display required; fallback refused")
-    return Gtk, Gdk, GLib, display
+    return gtk, gdk, glib, display
 
 
 def watchdog(_signum, _frame):
@@ -230,7 +233,8 @@ def main():
     signal.signal(signal.SIGALRM, watchdog)
     signal.alarm(WATCHDOG_SECONDS)
     try:
-        from wayland_probe_private import assert_private_environment
+        assert_private_environment = importlib.import_module(
+            "wayland_probe_private").assert_private_environment
 
         assert_private_environment()
         return Receiver(*initialize_gtk()).run()

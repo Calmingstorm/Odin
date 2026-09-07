@@ -12,6 +12,14 @@ import stat
 from pathlib import Path
 
 
+class StackMismatchError(RuntimeError):
+    """Same-stack refusal carrying bounded diagnostic object measurements."""
+
+    def __init__(self, stack_detail: dict[str, object]) -> None:
+        super().__init__("private_compositor_mapped_stack_mismatch")
+        self.stack_detail = stack_detail
+
+
 def assert_private_environment() -> dict:
     nonce = os.environ.get("ODIN_WAYLAND_PROBE_NONCE", "")
     if not re.fullmatch(r"[0-9a-f]{64}", nonce):
@@ -101,14 +109,12 @@ def require_same_stack(expected: dict, pid: int) -> dict:
     actual = {item["path"]: item for item in mapped_objects(pid)}
     for item in expected["libraries"]:
         if item["path"] not in actual or not object_equal(item, actual[item["path"]]):
-            error = RuntimeError("private_compositor_mapped_stack_mismatch")
-            error.stack_detail = {
+            raise StackMismatchError({
                 "expected": item, "actual": actual.get(item["path"]),
                 "loaded_candidates": [
                     value for path, value in actual.items()
                     if Path(path).name == Path(item["path"]).name],
-            }
-            raise error
+            })
     expected_paths = {item["path"] for item in expected["libraries"]}
     if any(relevant_library(p) and p not in expected_paths for p in actual):
         raise RuntimeError("private_compositor_vendor_stack_mismatch")

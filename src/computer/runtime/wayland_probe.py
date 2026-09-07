@@ -83,9 +83,10 @@ def _validate_active(expected: dict) -> None:
             maps[row[5]] = row
     for item in [expected["executable"], *expected["libraries"]]:
         measured = measured_object(item["path"])
-        row = maps.get(item["path"])
-        if (not object_equal(item, measured) or not row or int(row[4]) != item["inode"]
-                or not device_equal(row[3], item["device"])):
+        mapped_row = maps.get(item["path"])
+        if (not object_equal(item, measured) or not mapped_row
+                or int(mapped_row[4]) != item["inode"]
+                or not device_equal(mapped_row[3], item["device"])):
             raise RuntimeError("active_compositor_mapped_stack_changed")
 
 
@@ -131,7 +132,7 @@ def _sandbox_argv(marker: Path) -> list[str]:
     return argv
 
 
-async def _cleanup(proc, pidfd) -> None:
+async def _cleanup(proc: asyncio.subprocess.Process, pidfd: int | None) -> None:
     # Never signal a numeric PID/PGID after asyncio's watcher may have reaped it.
     # The pidfd pins the gated subreaper supervisor. It terminates/reaps bwrap,
     # whose PID namespace teardown also removes independently forked jobs.
@@ -165,8 +166,8 @@ class GnomeSameStackQualifier:
 
     async def __call__(self, identity) -> InputAdmission:
         public = None
-        proc = None
-        pidfd = None
+        proc: asyncio.subprocess.Process | None = None
+        pidfd: int | None = None
         try:
             public = CompositorIdentity(identity.compositor_name, identity.version,
                                         identity.backend, identity.binding_digest)
@@ -194,16 +195,19 @@ class GnomeSameStackQualifier:
                             str(os.getpid()), stdin=asyncio.subprocess.PIPE,
                             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
                             start_new_session=True, env={"PATH": "/usr/bin:/bin"}, limit=131072)
-                        if await proc.stdout.readline() != b"PROBE_GATE_READY\n":
+                        stdout, stdin = proc.stdout, proc.stdin
+                        if stdout is None or stdin is None:
+                            raise RuntimeError("probe_launcher_failed")
+                        if await stdout.readline() != b"PROBE_GATE_READY\n":
                             raise RuntimeError("probe_launcher_failed")
                         pidfd = os.pidfd_open(proc.pid)
                         if self.record_spawn is not None:
                             await self.record_spawn(proc.pid)
-                        proc.stdin.write(json.dumps(_sandbox_argv(marker)).encode() + b"\n")
-                        await proc.stdin.drain()
-                        proc.stdin.close()
+                        stdin.write(json.dumps(_sandbox_argv(marker)).encode() + b"\n")
+                        await stdin.drain()
+                        stdin.close()
                         output = bytearray()
-                        while chunk := await proc.stdout.read(8192):
+                        while chunk := await stdout.read(8192):
                             output.extend(chunk)
                             if len(output) > 131072:
                                 raise RuntimeError("probe_output_limit")
