@@ -96,7 +96,7 @@ async def test_controller_uses_post_start_measurement_not_constructor_claim(tmp_
     ctx = RequestContext("owner", "channel", "turn", "host")
     try:
         if outcome == "eligible":
-            result = await controller.session(ctx, {"operation": "start", "app": "xed"})
+            result = await controller.session(ctx, {"operation": "start"})
             assert result["backend_capabilities"]["owned_input_release"] == "verified"
             assert result["input_admission"] == backend.input_admission.public()
             assert result["input_supported"] is True
@@ -105,12 +105,12 @@ async def test_controller_uses_post_start_measurement_not_constructor_claim(tmp_
             assert status["input_admission"] == result["input_admission"]
         elif outcome == "refused":
             with pytest.raises(InputAdmissionError, match="Mutter 46.2") as caught:
-                await controller.session(ctx, {"operation": "start", "app": "xed"})
+                await controller.session(ctx, {"operation": "start"})
             assert caught.value.admission == report
             assert backend.detached
         else:
             with pytest.raises(ComputerError, match="start_unavailable"):
-                await controller.session(ctx, {"operation": "start", "app": "xed"})
+                await controller.session(ctx, {"operation": "start"})
             assert backend.detached
     finally:
         await controller.close()
