@@ -602,6 +602,7 @@ class CodexChatClient(ClientLifecycle):
                 "name": t["name"],
                 "description": t.get("description", ""),
                 "parameters": t.get("input_schema", {"type": "object", "properties": {}}),
+                **({"strict": t["strict"]} if type(t.get("strict")) is bool else {}),
             }
             for t in tools
         ]

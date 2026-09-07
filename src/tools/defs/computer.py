@@ -9,6 +9,9 @@ def _tool(name, description, properties, required):
     return {
         "name": name,
         "description": description,
+        # The computer action union has operation-specific optional fields. Do
+        # not let transport normalize every property into a required dummy value.
+        "strict": False,
         "input_schema": {
             "type": "object", "properties": properties, "required": required,
             "additionalProperties": False,

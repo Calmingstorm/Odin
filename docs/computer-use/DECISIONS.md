@@ -38,6 +38,15 @@ fresh source-local topology is authoritative, not a hardcoded fixture. R4's boun
 overnight grant and leave-as-found constraints remain; workers have no implicit
 permission to access the main session. Historical service-owned zombies stay alone.
 
+R5 model-backed validation exposed a transport-level schema defect: omitted strict
+mode caused the backend to fill every operation-specific optional action property
+with dummy values, including unrelated coordinates and keys. Controller rejection
+was correct. Computer definitions now explicitly request non-strict generation;
+the converter preserves an explicitly boolean strict field while leaving all
+existing unannotated tools byte-for-byte unchanged. Runtime validation remains
+strict and authoritative. The final model task must use these shipped definitions,
+not a harness-only schema or silently scrubbed model arguments.
+
 ## Revision R4 — bounded overnight main-session testing (2026-09-07)
 
 Authority: Claudia relayed Aaron's current explicit authorization to test his main
