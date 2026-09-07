@@ -101,6 +101,23 @@ def test_raw_focus_change_refuses_before_other_native_queries():
     assert not obj.native.physical_events.called
 
 
+@pytest.mark.parametrize("reason", ["cancelled", "timeout"])
+def test_ledger_release_ignores_cancelled_or_expired_dispatch_guard(monkeypatch, reason):
+    obj, d, n, events = helper(monkeypatch)
+    d._attempted = True
+    obj.pending["key"].add(37)
+    obj.order.append(("key", 37))
+    d._cancelled.set()
+    d._deadline = -1
+    d._guard.side_effect = PrimitiveError(reason, "Dispatch lease no longer valid")
+    d._guard.reset_mock()
+    assert obj.release()
+    assert events == [("release", "key", 37)]
+    assert not obj.pending["key"]
+    n.close.assert_called_once()
+    d._guard.assert_not_called()
+
+
 async def test_adapter_maps_complete_region_consumes_observation():
     b = LinuxDesktopBackend()
     sent = []

@@ -147,7 +147,9 @@ class IsolatedPixelInput:
             if code not in self.pending[kind]:
                 continue
             try:
-                self.desktop._guard()
+                # Cancellation/expired dispatch leases prohibit new input, not
+                # release of this ledger. Native cleanup remains bounded by the
+                # worker's external teardown, including blocked Xlib calls.
                 n.release_owned(kind, code)
                 field = "keys" if kind == "key" else "buttons"
                 if code in n.owned_release_state()[field]:
@@ -156,7 +158,6 @@ class IsolatedPixelInput:
             except Exception:
                 clean = False
         if clean:
-            self.desktop._guard()
             if any(n.owned_release_state().values()):
                 return False
             n.close()
