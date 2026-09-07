@@ -19,7 +19,8 @@ do not. This handoff is not an all-gates-green or merge/release approval.
 
 ## Start here: first use without the build history
 
-For help on **your own screen**, use target **B, existing-session X11**, below.
+For help on **your own screen**, use target **B, existing-session X11**, or
+**C, existing-session Wayland**, matching your actual desktop, below.
 Target A opens an isolated application, not your desktop. Choose and provision the
 target before your external deployment/restart, leave it disabled, then follow
 section 3. No developer feasibility script is part of ordinary operator setup.
@@ -55,7 +56,7 @@ during, after, or following failure of a computer task. This is not a chat mode.
 | Shared input | Pointer and focus are shared, not independent. The pointer stays where input moved it. Busy input is refused; same-key overlap and racing synthetic clients are not safely separable. Stop is not a hard real-time server-hang guarantee. |
 | Attached text | Printable ASCII using the existing keymap only. Send Return and Tab as separate key actions, not embedded text. No clipboard/keymap changes; do not promise Unicode fidelity. |
 | Application boundary | No arbitrary apps, terminals, security/password dialogs, or Odin WebUI control. Unknown focus/modal/source evidence denies input. |
-| Wayland | Refused in production. Tested stock Mutter 46.2 used `key` instead of `button` in its button-release bit test; upstream one-line fix `4ae305f19e391edda1aab0f9a9c47b01062f6330` repaired the nested experiment, not production eligibility. No compositor fix or Wayland adapter is activated here. |
+| Wayland | Production portal/PipeWire/libei adapter, with per-session behavioral release qualification. Stock Debian GNOME Shell 48.7 / Mutter 48.7 passed native-headless and nested lifecycle tests. Actual controller completed native Inkscape rectangle drawing and Ctrl+S into an operator-opened scratch SVG. Other Wayland apps and all dialogs are not offered. See the R8 runbook and evidence limits below. |
 
 Private cross-UID X11 testing demonstrated actual native Xed actions and owned
 release through a distinct sudo wrapper. Its root-controller fixture does not
@@ -180,6 +181,43 @@ moves the shared pointer back, wakes/sleeps monitors, or closes their applicatio
 That is deliberately different from an explicitly exclusive developer scratch
 test which promises to restore its recorded baseline. Hotplug/replacement still
 requires new consent/start; the runtime must not guess a new input transform.
+
+### C. Existing-session Wayland
+
+Read [WAYLAND-OPERATOR-R8.md](WAYLAND-OPERATOR-R8.md) before provisioning. This is
+an actual portal-mediated input backend, not an X11 fallback or a version allowlist.
+It currently supplies trusted application scope for GNOME Shell/Mutter and native
+Inkscape. Other compositor families lack a qualified scope/identity adapter and
+are reported unsupported, not falsely diagnosed with Mutter's button defect.
+There is no automatically launched isolated Wayland target; a separately
+provisioned private GNOME session can be used for local testing.
+
+```yaml
+computer:
+  enabled: false
+  storage_dir: /var/lib/odin/computer
+  runtime_sudo: false
+  environment: existing_session
+  platform: wayland
+  wayland_bus_address: unix:path=/run/user/1000/bus  # Replace with the actual session bus.
+  wayland_uid: 1000                              # Replace with the desktop UID.
+  wayland_guardian_binary: /usr/libexec/odin-computer-wayland-input
+```
+
+No X11 display, monitor names or Xauthority are used for this target. The human
+selects a monitor and approves remote interaction in the real portal prompt for
+each task. Enable and status alone never open that prompt. Startup/resume allow
+up to 180 seconds for consent, capability negotiation and safe isolated probing;
+the independent active input lease remains two seconds. If consent is declined,
+scope is unavailable, source mapping changes or qualification fails, do not bypass
+the refusal with shell input.
+
+The release probe runs a separate disposable compositor using the active stack's
+identified installed executable and mapped libraries. It never intentionally
+abandons a held button on your desktop. It reports `same_stack_disposable`, not
+`active_session`: this measures the same input implementation, not the active
+instance's mutable state or physical-device coexistence. Mismatched vendor/render
+libraries, missing namespaces/dependencies or unverified scope remain refused.
 
 ## 3. Manual deploy QA
 
