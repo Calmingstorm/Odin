@@ -4,14 +4,23 @@ import argparse
 import os
 from pathlib import Path
 import subprocess
+import threading
+import json
 import uuid
+
+from x11_records import process_identity
 
 p = argparse.ArgumentParser()
 p.add_argument('--execute-isolated', action='store_true', help='requires parent go-ahead')
 p.add_argument('--same-process', action='store_true', help='opt-in GTK shared-focus and disconnect probe')
+p.add_argument('--safe-lifecycle', action='store_true', help='R2 watchdog, release and retained-device lifecycle only')
 args = p.parse_args()
 if not args.execute_isolated:
     raise SystemExit('PREPARED ONLY. Parent authorization required before --execute-isolated.')
+if args.same_process:
+    raise SystemExit('Historical removal probe is unsafe and disabled; use --safe-lifecycle.')
+if not args.safe_lifecycle:
+    raise SystemExit('Historical hierarchy-removal fixtures are disabled; require --safe-lifecycle.')
 root = Path(__file__).resolve().parent
 if any(c in str(root) for c in ': \n\r'):
     raise SystemExit('Unsafe source path')
@@ -49,16 +58,75 @@ env = {'PATH': '/usr/bin', 'HOME': '/workspace/home', 'LANG': 'C.UTF-8', 'LC_ALL
        'XI2_PRIVATE_SANDBOX': '1'}
 if args.same_process:
     env['XI2_SAME_PROCESS'] = '1'
+if args.safe_lifecycle:
+    env['XI2_SAFE_LIFECYCLE'] = '1'
 for k, v in env.items():
     sandbox += ['--setenv', k, v]
-sandbox += ['/usr/bin/dbus-run-session', '--', '/usr/bin/bash', '/harness/x11-session.sh']
+sandbox += ['/usr/bin/dbus-run-session', '--', '/usr/bin/bash',
+            '/harness/x11-lifecycle-session.sh' if args.safe_lifecycle else '/harness/x11-session.sh']
 cmd = ['/usr/bin/systemd-run', '--quiet', '--pipe', '--wait', '--collect', '--service-type=exec',
        '--unit=' + unit] + ['--property=' + x for x in props] + sandbox
 if os.geteuid() != 0:
     cmd = ['/usr/bin/sudo', '-n'] + cmd
 print('OWNED_UNIT=' + unit, flush=True)
-r = subprocess.run(cmd, env={'PATH': '/usr/bin', 'LANG': 'C.UTF-8'}, check=False)
-check = subprocess.run(['/usr/bin/systemctl', 'show', unit, '-p', 'ActiveState', '-p', 'SubState',
-                        '-p', 'ControlGroup'], text=True, capture_output=True)
-print('CLEANUP_UNIT ' + check.stdout.strip(), flush=True)
-raise SystemExit(r.returncode)
+group = Path('/sys/fs/cgroup/system.slice') / unit
+seen = {}
+monitor_errors = []
+finished = threading.Event()
+
+def identity(pid):
+    return process_identity(pid)
+
+def census():
+    while not finished.is_set():
+        try:
+            for file in group.rglob('cgroup.procs'):
+                try:
+                    pids = file.read_text().split()
+                except FileNotFoundError:
+                    continue
+                for pid in pids:
+                    item = identity(pid)
+                    if item:
+                        seen[(item['pid'], item['start_ticks'])] = item
+        except FileNotFoundError:
+            pass
+        except Exception as exc:
+            monitor_errors.append(type(exc).__name__ + ': ' + str(exc))
+            return
+        finished.wait(.02)
+
+monitor = threading.Thread(target=census, daemon=True)
+monitor.start()
+result = 1
+try:
+    result = subprocess.run(cmd, env={'PATH': '/usr/bin', 'LANG': 'C.UTF-8'}, check=False).returncode
+finally:
+    # Stop only this recorded fixture unit, including interrupted wrapper paths.
+    stop = ['/usr/bin/systemctl', 'stop', unit]
+    if os.geteuid() != 0:
+        stop = ['/usr/bin/sudo', '-n'] + stop
+    stopped = subprocess.run(stop, text=True, capture_output=True, timeout=10)
+    check = subprocess.run(['/usr/bin/systemctl', 'show', unit, '-p', 'LoadState',
+                            '-p', 'ActiveState', '-p', 'SubState', '-p', 'ControlGroup'],
+                           text=True, capture_output=True, timeout=10)
+    print('CLEANUP_UNIT ' + check.stdout.strip(), flush=True)
+    finished.set()
+    monitor.join(timeout=2)
+    survivors = []
+    for original in seen.values():
+        current = identity(original['pid'])
+        if current and current['start_ticks'] == original['start_ticks']:
+            survivors.append(current)
+    print('HOST_PROCESS_LEDGER ' + json.dumps({'unit': unit, 'cgroup': str(group),
+          'sample_interval_ms': 20, 'identities': list(seen.values()),
+          'survivors_including_zombies': survivors, 'cgroup_exists': group.exists(),
+          'monitor_errors': monitor_errors}), flush=True)
+    if survivors or group.exists() or monitor_errors or not seen:
+        raise SystemExit('FAIL exact fixture process/cgroup cleanup unverified')
+    state = dict(line.split('=', 1) for line in check.stdout.splitlines() if '=' in line)
+    if not (state.get('ActiveState') == 'inactive' and state.get('SubState') == 'dead'
+            and state.get('ControlGroup') == ''
+            and (stopped.returncode == 0 or state.get('LoadState') == 'not-found')):
+        raise SystemExit('FAIL exact owned-unit cleanup unverified: ' + check.stderr)
+raise SystemExit(result)

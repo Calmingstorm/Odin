@@ -69,4 +69,12 @@ def ready():
     return False
 
 GLib.timeout_add(200, ready)
+if os.environ.get('XI2_SAFE_LIFECYCLE') == '1':
+    def normal_eof(source, condition):
+        if condition & GLib.IO_HUP or not os.read(0, 1):
+            record('normal-controller-eof-app-shutdown')
+            Gtk.main_quit()
+            return False
+        return True
+    GLib.io_add_watch(0, GLib.IO_IN | GLib.IO_HUP, normal_eof)
 Gtk.main()

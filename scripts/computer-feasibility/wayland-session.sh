@@ -1,6 +1,6 @@
 #!/bin/bash
 set -euo pipefail
-# Executed ONLY within the disposable rootless container, after parent go.
+# Executed ONLY within the disposable container, after parent go.
 [[ $HOME == /tmp/home && $XDG_RUNTIME_DIR == /tmp/runtime ]]
 [[ -f /run/.containerenv || -f /.dockerenv ]]
 [[ ${DBUS_SESSION_BUS_ADDRESS:-} == unix:* ]]
@@ -66,6 +66,12 @@ fi
 echo 'CAPABILITY PRESENT ONLY: consent, capture and actual application delivery are not yet proven.'
 if [[ ${WAYLAND_OPERATOR_LAB:-0} == 1 ]]; then
   python3 /harness/wayland-receiver.py > /evidence/receiver.log 2>&1 &
+  receiver=$!
+  printf '%s\n' "$receiver" > /evidence/receiver.pid
   sleep 1
+fi
+if [[ ${WAYLAND_LIFECYCLE_LAB:-0} == 1 ]]; then
+  python3 /harness/wayland-lifecycle.py
+  exit $?
 fi
 python3 /harness/wayland-portal.py | tee /evidence/portal-client.jsonl

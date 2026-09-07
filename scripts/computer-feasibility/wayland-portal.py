@@ -6,6 +6,7 @@ import sys
 import subprocess
 import time
 import uuid
+from pathlib import Path
 
 import gi
 
@@ -112,9 +113,38 @@ def main():
             report("mediated_fd_received", method=method)
             if os.environ.get("WAYLAND_OPERATOR_LAB") == "1":
                 if method == "ConnectToEIS":
-                    result = subprocess.run(["/usr/local/bin/wayland-ei", str(fd)], pass_fds=(fd,), timeout=12, capture_output=True, text=True)
+                    mode = os.environ.get("WAYLAND_LIFECYCLE_MODE")
+                    if mode:
+                        Path('/tmp/lifecycle-ready').touch()
+                        deadline = time.monotonic() + 20
+                        while not Path('/tmp/lifecycle-go').exists():
+                            if time.monotonic() > deadline:
+                                raise RuntimeError('isolated operator readiness timeout')
+                            time.sleep(.05)
+                    args = ["/usr/local/bin/wayland-ei", str(fd)] + ([mode] if mode else [])
+                    child = subprocess.Popen(args, pass_fds=(fd,), stdout=subprocess.PIPE,
+                                             stderr=subprocess.PIPE, text=True)
+                    # A parent-held duplicate would invalidate the EOF experiment.
+                    os.close(fd)
+                    retained_fds.remove(fd)
+                    try:
+                        stdout, stderr = child.communicate(timeout=12)
+                    finally:
+                        if child.poll() is None:
+                            child.terminate()
+                            try: child.wait(timeout=2)
+                            except subprocess.TimeoutExpired:
+                                child.kill()
+                                child.wait()
+                    result = subprocess.CompletedProcess(args, child.returncode, stdout, stderr)
                     report("libei_probe_output", stdout=result.stdout, stderr=result.stderr)
                     report("libei_probe_exit", code=result.returncode)
+                    if result.returncode or (mode and 'HELD mode=' not in result.stdout):
+                        raise RuntimeError('libei sender did not complete negotiated held-input trial')
+                    if mode:
+                        report('lifecycle_sender_exited', mode=mode)
+                        Path('/tmp/lifecycle-exited').touch()
+                        time.sleep(2)
                 else:
                     gi.require_version("Gst", "1.0")
                     gi.require_version("GstApp", "1.0")
@@ -130,6 +160,11 @@ def main():
                     else:
                         report("pipewire_no_frame")
                     pipeline.set_state(Gst.State.NULL)
+                    if not sample:
+                        raise RuntimeError('no real PipeWire frame')
+        if os.environ.get('WAYLAND_LIFECYCLE_MODE'):
+            report('focused_lifecycle_probe_complete', product_backend=False)
+            return 0
         report("incomplete", reason="Independent pointer/focus coexistence and cancellation matrix remain untested; no assisted-input eligibility")
         return 24
     except Exception as exc:
