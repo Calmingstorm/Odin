@@ -161,6 +161,11 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                     backend.get("input_supported")) is bool else None,
                 "readiness": str(backend.get("readiness", "not_checked"))[:64],
             }
+            from ...computer.runtime.x11_app_scope import SCOPE_REASONS
+            blocker = backend.get("input_blocker")
+            if isinstance(blocker, str) and blocker in SCOPE_REASONS | {
+                    "fresh_observation_required", "session_not_active"}:
+                result["backend"]["input_blocker"] = blocker
             for key, allowed in {
                 "pointer": {"independent", "shared", "unknown"},
                 "keyboard_focus": {"independent_per_window", "shared", "unknown"},

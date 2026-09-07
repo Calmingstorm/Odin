@@ -95,6 +95,7 @@ class X11AttachedBackend:
             raise AttachedFailure("invalid_runtime_privilege_configuration")
         self._runtime_sudo = runtime_sudo
         self.input_supported = False  # Probed at startup, never a configured lifecycle claim.
+        self.input_readiness = "not_checked"
         self.input_blocker = None if self._input_enabled else INPUT_BLOCKER
         self._started = self._closed = self._paused = False
         self._generation = 1
@@ -489,6 +490,30 @@ class X11AttachedBackend:
             for monitor in monitors:
                 self._sources[uuid.uuid4().hex] = monitor
             await self._start_topology()
+            self._selected = next(iter(self._sources))
+            scope_ready = False
+            if self._input_enabled:
+                readiness = await self._read_worker("scope_readiness")
+                from .x11_app_scope import SCOPE_REASONS
+                rows = readiness.get("scope_readiness", [])
+                if (type(rows) is not list or len(rows) != len(monitors)
+                        or any(type(row) is not dict or type(row.get("eligible")) is not bool
+                               for row in rows)
+                        or {row.get("name") for row in rows}
+                        != {monitor["name"] for monitor in monitors}):
+                    raise AttachedFailure("scope_readiness_unavailable")
+                for identity, monitor in self._sources.items():
+                    row = next(row for row in rows if row["name"] == monitor["name"])
+                    if row["eligible"]:
+                        self._selected = identity
+                        scope_ready = True
+                        break
+                reasons = [row.get("reason") for row in rows]
+                self.input_blocker = (None if scope_ready else next(
+                    (reason for reason in reasons if isinstance(reason, str)
+                     and reason in SCOPE_REASONS),
+                    "application_scope_unavailable"))
+                self.input_readiness = "target_available" if scope_ready else "no_input_target"
             if self._input_enabled:
                 self._device_state = "persistent_release_unverified"
                 device = await self._read_worker("input_capabilities")
@@ -496,10 +521,10 @@ class X11AttachedBackend:
                 if (device.get("released") is not True or self._device_identity is None
                         or self.capabilities.pointer_separation not in {"independent", "shared"}):
                     raise AttachedFailure("owned_release_unverified")
-            self.input_supported = self._input_enabled
-            self._selected = next(iter(self._sources))
-            return {"ok": True, "session_id": session_id, "capture_only": not self._input_enabled,
+            self.input_supported = self._input_enabled and scope_ready
+            return {"ok": True, "session_id": session_id, "capture_only": not self.input_supported,
                     "input_supported": self.input_supported, "input_blocker": self.input_blocker,
+                    "input_readiness": self.input_readiness,
                     "input_limits": dict(self.input_limits),
                     "input_devices": dict(self._device_capabilities),
                     "sources": self.sources(), "capabilities": self.capabilities.public()}
@@ -520,6 +545,9 @@ class X11AttachedBackend:
                 raise AttachedFailure("capture_source_not_granted")
             self._selected = source_id
             self._frame = None
+            self.input_supported = False
+            self.input_readiness = "observation_required"
+            self.input_blocker = "fresh_observation_required"
             return {"selected_source": source_id, "capture_only": not self._input_enabled}
 
     async def observe(self, crop=None):
@@ -552,6 +580,14 @@ class X11AttachedBackend:
                 self._modal_id = uuid.uuid4().hex if binding and binding.get("modal") else None
             eligible = bool(binding and binding.get("focused") is True and
                             binding.get("modal_kind") in {None, "safe_application"})
+            if self._input_enabled:
+                from .x11_app_scope import SCOPE_REASONS
+                reason = reply.get("input_scope_reason")
+                self.input_supported = eligible
+                self.input_readiness = "target_available" if eligible else "no_input_target"
+                self.input_blocker = (None if eligible else reason if isinstance(reason, str)
+                                      and reason in SCOPE_REASONS
+                                      else "application_scope_unavailable")
             mapping = ({"input_region_id": selected_id, "input_width": reply["source_width"],
                         "input_height": reply["source_height"], "pixel_to_input": AffineTransform()}
                        if eligible else {})

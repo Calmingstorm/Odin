@@ -28,6 +28,7 @@ def test_capture_discards_raced_pixels_without_weakening_binding(
     backend.capture.side_effect = frames
     scope = Mock()
     scope.snapshot.side_effect = snapshots
+    scope.inspect.return_value = (None, "application_scope_unavailable")
     monkeypatch.setattr(worker, "X11MonitorCapture", lambda *a, **k: backend)
     monkeypatch.setattr(x11_app_scope, "AppScope", lambda *a: scope)
     monkeypatch.setattr(worker.time, "sleep", lambda _: None)

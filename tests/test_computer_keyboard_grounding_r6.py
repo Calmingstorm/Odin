@@ -48,6 +48,8 @@ async def fixture(tmp_path, monkeypatch, *, environment="existing_session", plat
     async def read(operation, **kwargs):
         if operation == "sources":
             return {"sources": [monitor]}
+        if operation == "scope_readiness":
+            return {"scope_readiness": [{"name": "fixture", "eligible": True, "reason": None}]}
         if operation == "input_capabilities":
             return {"released": True, "pointer": "shared", "keyboard_focus": "shared",
                     "persistent_input_devices": False, "owned_devices": "not_created",

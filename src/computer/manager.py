@@ -462,7 +462,7 @@ class ComputerLifecycle:
             if isinstance(capabilities, dict):
                 input_supported = value.get("input_supported")
                 live = getattr(service.controller, "_live", {}).get(value.get("session_id"))
-                if live is not None and live.observations:
+                if live is not None and live.observations and "input_readiness" not in value:
                     latest = next(reversed(live.observations.values()))
                     input_supported = bool(latest.scope.input_sources)
                     if capabilities.get("environment") == "existing_session":
@@ -473,7 +473,8 @@ class ComputerLifecycle:
                     "platform": capabilities.get("platform"),
                     "environment": capabilities.get("environment"),
                     "input_supported": input_supported,
-                    "readiness": "session_capabilities",
+                    "readiness": value.get("input_readiness", "session_capabilities"),
+                    "input_blocker": value.get("input_blocker"),
                 }
             return result
         if method == "observe" and "image_bytes" in value:

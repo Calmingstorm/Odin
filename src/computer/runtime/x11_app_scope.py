@@ -21,6 +21,15 @@ _DENIED = re.compile(
     r"password|passphrase|authentication|authenticate|polkit|security|"
     r"credential|pinentry|keyring|sudo|odin|command prompt|\bshell\b", re.I)
 
+# Only these pixel-free reasons may leave the private scope adapter.
+SCOPE_REASONS = frozenset({
+    "application_identity_unavailable", "application_identity_changed",
+    "application_scope_unavailable", "application_scope_changed",
+    "source_scope_unavailable", "application_uid_mismatch",
+    "application_process_unreadable", "denied_application",
+    "no_focused_application", "focused_application_outside_source",
+})
+
 
 class ScopeFailure(RuntimeError):  # noqa: N818 - Scope adapter failure API.
     """Static failure: no titles, native IDs, process arguments or paths."""
@@ -62,9 +71,10 @@ def _process_identity(pid):
         status = (proc / "status").read_text()
         uid_line = next(line for line in status.splitlines() if line.startswith("Uid:"))
         uids = tuple(map(int, uid_line.split()[1:]))
-        if (len(uids) != 4 or len(set(uids)) != 1 or proc.stat().st_uid != uids[0]
-                or os.geteuid() not in {0, uids[0]}):
+        if len(uids) != 4 or len(set(uids)) != 1 or proc.stat().st_uid != uids[0]:
             raise ScopeFailure("application_identity_unavailable")
+        if os.geteuid() not in {0, uids[0]}:
+            raise ScopeFailure("application_uid_mismatch")
         executable = (proc / "exe").resolve(strict=True)
         info = (proc / "exe").stat()
         with (proc / "cmdline").open("rb") as stream:
@@ -94,7 +104,8 @@ def _process_identity(pid):
 class AppScope:
     """Use an owner-provided python-xlib Display; never closes it.
 
-    The worker must run with the observed application's UID. Denied/unknown
+    The worker must run with the application's UID or explicitly provisioned root
+    inspection privileges. No privilege escalation is attempted here. Denied/unknown
     snapshot returns None. assert_snapshot returns fresh evidence or raises a
     static ScopeFailure. rect is root-absolute and clipped to the source monitor.
     """
@@ -148,7 +159,7 @@ class AppScope:
         title = modern_title or legacy_title
         wm_class = self._text(window, "WM_CLASS")
         if any(_DENIED.search(text) for text in (modern_title, legacy_title, wm_class)):
-            raise ScopeFailure("application_scope_unavailable")
+            raise ScopeFailure("denied_application")
         # Metadata is used only for rejection/classification, never PID approval.
         # Harmless document title changes (dirty asterisk) are not source changes.
         # Title rejection stays live above; modal titles are bound separately.
@@ -227,7 +238,7 @@ class AppScope:
         source, topology = self._topology(root, monitor)
         focused = self.connection.get_input_focus().focus
         if _xid(focused) <= 1 or _xid(focused) == _xid(root):
-            raise ScopeFailure("application_scope_unavailable")
+            raise ScopeFailure("no_focused_application")
         actual_focus = _xid(focused)
         # Private pointer-hit evidence only, never public window authority.
         if candidate is not None:
@@ -257,7 +268,7 @@ class AppScope:
         right = min(rect[0] + rect[2], source[0] + source[2])
         bottom = min(rect[1] + rect[3], source[1] + source[3])
         if right <= left or bottom <= top:
-            raise ScopeFailure("source_scope_unavailable")
+            raise ScopeFailure("focused_application_outside_source")
         states = self._values(target, "_NET_WM_STATE")
         types = self._values(target, "_NET_WM_WINDOW_TYPE")
         allowed_types = {self._atom("_NET_WM_WINDOW_TYPE_" + kind) for kind in
@@ -321,10 +332,19 @@ class AppScope:
         return evidence
 
     def snapshot(self, monitor):
+        return self.inspect(monitor)[0]
+
+    def inspect(self, monitor):
+        """Return private binding and a public-safe, explicit refusal reason."""
         try:
-            return self._snapshot(monitor)
+            return self._snapshot(monitor), None
+        except ScopeFailure as exc:
+            reason = str(exc)
+            return None, reason if reason in SCOPE_REASONS else "application_scope_unavailable"
+        except PermissionError:
+            return None, "application_process_unreadable"
         except Exception:
-            return None
+            return None, "application_scope_unavailable"
 
     def assert_snapshot(self, expected, monitor, point=None, *, pointer_query=None):
         current = self.snapshot(monitor)

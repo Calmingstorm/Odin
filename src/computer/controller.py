@@ -304,10 +304,26 @@ class ComputerController:
             supported = getattr(live.backend, "input_supported", None)
             if type(supported) is bool:
                 result["input_supported"] = supported
+            result.update(self._input_status(live, grant))
             limits = getattr(live.backend, "input_limits", None)
             if isinstance(limits, dict):
                 result["input_limits"] = deepcopy(limits)
         return result
+
+    def _input_status(self, live, grant):
+        readiness = getattr(live.backend, "input_readiness", None)
+        if not isinstance(readiness, str):
+            return {}
+        supported = getattr(live.backend, "input_supported", False) is True
+        blocker = getattr(live.backend, "input_blocker", None)
+        if grant.state != "active":
+            supported, readiness, blocker = False, "inactive", "session_not_active"
+        elif not live.observations or not 0 <= self.monotonic() - next(
+                reversed(live.observations.values())).captured_at <= FRAME_FRESH_SECONDS:
+            supported, readiness, blocker = (
+                False, "observation_required", "fresh_observation_required")
+        return {"input_supported": supported, "input_readiness": readiness,
+                "input_blocker": blocker}
 
     async def session(self, context: RequestContext, inp: dict) -> dict:
         exact_keys(inp, {"operation", "session_id", "generation", "app", "name"}, {"operation"})
@@ -551,7 +567,7 @@ class ComputerController:
             if not 0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS:
                 raise ComputerError("stale_observation")
         live = self._active(grant)
-        return {**obs.public(), "image_bytes": image,
+        return {**obs.public(), "image_bytes": image, **self._input_status(live, grant),
                 "backend_capabilities": (live.capabilities.public()
                                          if live.capabilities is not None else None)}
 

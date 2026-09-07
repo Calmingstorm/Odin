@@ -59,6 +59,15 @@ def run(request, capture=None):
             return {"ok": True, "sources": sources, **status}
         if request["operation"] == "sources":
             return {"ok": True, "sources": sources, **status}
+        if request["operation"] == "scope_readiness":
+            from src.computer.runtime.x11_app_scope import AppScope
+            scope = AppScope(capture._connection._display)
+            readiness = []
+            for source in sources:
+                binding, reason = scope.inspect(topology.monitors[source["index"]])
+                readiness.append({"name": source["name"], "eligible": binding is not None,
+                                  "reason": reason})
+            return {"ok": True, "scope_readiness": readiness, **status}
         if request["operation"] != "capture":
             raise ValueError("unsupported operation")
         if ("topology_revision" in request
@@ -92,6 +101,10 @@ def run(request, capture=None):
                 time.sleep(.03)
         else:
             raise ValueError("application changed during capture")
+        # Diagnostic only: never grants a mapping or replaces the private binding.
+        reason = None
+        if app_scope and binding is None:
+            _, reason = app_scope.inspect(monitor)
         return {"ok": True, "source_width": observation.source.pixel_width,
                 "source_height": observation.source.pixel_height,
                 "width": observation.width, "height": observation.height,
@@ -100,6 +113,7 @@ def run(request, capture=None):
                 "crop": observation.crop,
                 **status,
                 "input_scope": binding,
+                "input_scope_reason": reason,
                 "image": base64.b64encode(observation.image_bytes).decode("ascii")}
     finally:
         if owned:
