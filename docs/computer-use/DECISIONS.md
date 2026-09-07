@@ -5,6 +5,35 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 Authority: Aaron's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
+## Revision R4 — bounded overnight main-session testing (2026-09-07)
+
+Authority: Claudia relayed Aaron's current explicit authorization to test his main
+session overnight, including waking monitors if necessary, with nothing destructive.
+This supersedes the historical blanket display-0 prohibition for this testing
+window only. It is not deployment authorization or standing unattended access.
+
+No terminal input, Odin WebUI interaction, existing-work modification, save-over,
+application closure, desktop/session restart, or control-plane change is permitted.
+Do not change accessibility flags or session settings to manufacture a pass. Prefer
+read-only topology/capture checks and newly launched, identifiable scratch apps;
+only those test-owned apps may be closed. Preserve existing focus/pointer/layout
+and record restoration independently. Keep screenshots private and do not post
+operator workspace contents. No agent receives main-session access implicitly.
+
+Nobody is available to issue stop tonight: independently enforced finite leases,
+cancellation, owned-input release and application-preserving cleanup remain gates,
+not aspirations. The X11 private corpus passed release but retained ENABLED devices.
+That does not yet establish leave-as-found detach on an existing desktop. Do not
+create/remove master devices on the main session merely to repeat that corpus;
+prove a safe lifecycle in disposable sessions first. Real capture-only testing is
+useful evidence and must not be labelled real-session input acceptance.
+
+Continue build in the existing branch, with local validation and reviewable
+increments. No deployment, live-install edits, Odin restart/injection, master merge,
+tag or pipeline. Packages may be installed under R2, recording reversible changes.
+The acknowledged historical service-owned zombies are dead and out of scope for
+further reap attempts. New fixtures still need exact-identity cleanup verification.
+
 ## Revision R3 — ordinary-turn tools, no conversation restriction (2026-09-07)
 
 Aaron's binding ruling in `10-ruling-no-channel-lock.md` and the current task
