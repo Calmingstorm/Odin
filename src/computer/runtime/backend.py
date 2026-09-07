@@ -176,7 +176,8 @@ class LinuxDesktopBackend:
             from ..gui_actions import crop_arguments
             from ..render import render_frame
             from ..vision import FrameCrop
-            crop = crop_arguments(crop)
+            if crop is not None:
+                crop = crop_arguments(crop)
             self._frame = None
             captured = time.monotonic()
             reply = await self._rpc("observe")

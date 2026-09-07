@@ -73,7 +73,7 @@ def same_application_scope(before, after):
 
 
 class X11AttachedBackend:
-    creates_devices = True
+    creates_devices = False
     input_limits = {"text": "unicode_existing_keymap_only", "lease_seconds": 2,
                     "widget_focus": "shared_within_window",
                     "keyboard_overlap": "uncertain_no_replay"}
@@ -94,7 +94,7 @@ class X11AttachedBackend:
         if type(runtime_sudo) is not bool:
             raise AttachedFailure("invalid_runtime_privilege_configuration")
         self._runtime_sudo = runtime_sudo
-        self.input_supported = self._input_enabled and not runtime_sudo
+        self.input_supported = False  # Probed at startup, never a configured lifecycle claim.
         self.input_blocker = None if self._input_enabled else INPUT_BLOCKER
         self._started = self._closed = self._paused = False
         self._generation = 1
@@ -143,6 +143,7 @@ class X11AttachedBackend:
     def _accept_device_receipt(self, receipt):
         """Only a fenced, released guardian receipt can prove persistent idle."""
         if receipt.get("persistent_input_devices") is True:
+            self.creates_devices = True
             self._persistent_devices = True
             self._device_state = ("retained_inactive" if receipt.get("released") is True
                                   and receipt.get("owned_devices") in {
@@ -520,7 +521,8 @@ class X11AttachedBackend:
             selected_id = self._selected
             from ..gui_actions import crop_arguments
             monitor = self._sources[selected_id]
-            crop = crop_arguments(crop, width=monitor["width"], height=monitor["height"])
+            if crop is not None:
+                crop = crop_arguments(crop, width=monitor["width"], height=monitor["height"])
             generation = self._generation
             captured_at = time.monotonic()
             reply = await self._read_worker("capture", selected=monitor, crop=crop)
