@@ -41,13 +41,17 @@ class Reference:
     root_fingerprint: tuple
     window: dict
     capabilities: list
+    metadata: dict = field(default_factory=dict)
     children: dict = field(default_factory=dict)
 
 
 class Accessibility:
     """GI calls are worker-local; its outer process deadline remains authoritative."""
 
-    def __init__(self):
+    def __init__(self, *, display=":77"):
+        if display != ":77":
+            raise PrimitiveError("unsupported", "Attached-session AT-SPI is not supported")
+        self.display = display
         self.api: Any | None = None
         self.references = {}
         self.observation_id = None
@@ -68,6 +72,8 @@ class Accessibility:
     def _data(self, node):
         api = self.api
         assert api is not None  # snapshot loads GI before traversing references.
+        if hasattr(node, "clear_cache"):
+            node.clear_cache()
         role = node.get_role_name()
         name = node.get_name() or ""
         if not isinstance(name, str) or len(name) > 16384:
@@ -95,16 +101,32 @@ class Accessibility:
             for interface, action in (("Selection", "select"), ("Value", "value")):
                 if interface in interfaces:
                     capabilities.append(action)
-        text = ""
-        if "Text" in interfaces and "password" not in role.lower():
-            interface = node.get_text_iface()
-            count = (interface.get_character_count()
-                     if hasattr(interface, "get_character_count") else 512)
-            text = (interface.get_text(0, min(512, max(0, count))) or "")[:512]
+        text, text_readable, text_complete = self._text(node, interfaces, role)
+        if "set_text" in capabilities and text_readable and text_complete:
+            capabilities.append("replace_field")
         public = {"role": str(role)[:64], "name": name[:128], "text": text,
+                  "text_readable": text_readable, "text_complete": text_complete,
                   "bounds": dict(zip(("x", "y", "width", "height"), bounds, strict=True)),
                   "states": list(states), "capabilities": capabilities}
         return fingerprint, public
+
+    @staticmethod
+    def _text(node, interfaces, role):
+        """Never confuse an unreadable or truncated field with an empty/full value."""
+        if "Text" not in interfaces or "password" in role.lower():
+            return "", False, False
+        try:
+            interface = node.get_text_iface()
+            count = interface.get_character_count()
+            if type(count) is not int or count < 0:
+                return "", False, False
+            text = interface.get_text(0, min(512, count))
+            bounded_text(text)
+            after_count = interface.get_character_count()
+            complete = count == after_count == len(text) and count <= 512
+            return text, True, complete
+        except Exception:
+            return "", False, False
 
     def _window_root(self, window, guard):
         assert self.api is not None  # Called only after _load().
@@ -149,10 +171,9 @@ class Accessibility:
             return candidates[0]
         raise PrimitiveError("unsupported", "No unambiguous active-window AT-SPI root")
 
-    @staticmethod
-    def _native_frame_bounds(window, guard):
+    def _native_frame_bounds(self, window, guard):
         from Xlib import display as xdisplay  # type: ignore[import-untyped]
-        display = xdisplay.Display(":77")
+        display = xdisplay.Display(self.display)
         try:
             node = display.create_resource_object("window", window["id"])
             for _ in range(64):
@@ -195,6 +216,8 @@ class Accessibility:
                     self.references[handle] = Reference(
                         node, root, fingerprint, root_fingerprint, dict(window),
                         public["capabilities"],
+                        {key: value for key, value in public.items()
+                         if key not in {"handle", "parent", "depth", "index"}},
                     )
                     if parent is not None:
                         self.references[parent].children[index] = (node, fingerprint)
@@ -217,7 +240,7 @@ class Accessibility:
         self.references.clear()
         return [], "unsupported"
 
-    def execute(self, action, window, guard):
+    def execute(self, action, window, guard, before_effect=None):
         if action.get("observation_id") != self.observation_id:
             raise PrimitiveError("rejected", "Stale accessibility observation")
         ref = self.references.get(action.get("target"))
@@ -228,11 +251,13 @@ class Accessibility:
             current, public = self._data(ref.node)
             root_current, _ = self._data(ref.root)
             if (current != ref.fingerprint or root_current != ref.root_fingerprint
+                    or public != ref.metadata
                     or ref.node.get_process_id() != window["pid"]
                     or ref.root.get_process_id() != window["pid"]):
                 raise PrimitiveError("rejected", "Accessible target changed since observation")
             ancestor = ref.node
             for _ in range(7):
+                guard()
                 if ancestor == ref.root:
                     break
                 ancestor = ancestor.get_parent()
@@ -256,7 +281,7 @@ class Accessibility:
                 effect = partial(interface.do_action, choices[0][0])
             elif kind == "focus":
                 effect = ref.node.get_component_iface().grab_focus
-            elif kind == "set_text":
+            elif kind in {"set_text", "replace_field"}:
                 text = bounded_text(action.get("text"))
                 effect = partial(ref.node.get_editable_text_iface().set_text_contents, text)
             elif kind == "select":
@@ -276,9 +301,49 @@ class Accessibility:
             else:
                 raise PrimitiveError("unsupported", "Unsupported semantic action")
             guard()
+            if before_effect is not None:
+                before_effect()
             if not effect():
                 raise PrimitiveError("failed", "AT-SPI did not accept the native action")
         except PrimitiveError:
             raise
         except Exception as exc:
             raise PrimitiveError("unsupported", "AT-SPI interface failed") from exc
+
+    def read_field(self, target, window, guard):
+        """Read the original native node after release; never resolve another field."""
+        ref = self.references.get(target)
+        if ref is None or ref.window != window:
+            raise PrimitiveError("rejected", "Field readback lost its window binding")
+        guard()
+        try:
+            root_current, _ = self._data(ref.root)
+            current, public = self._data(ref.node)
+            # The original native root may acquire a modified-document title;
+            # its identity, role, bounds and native window are still bound.
+            assert self.api is not None
+            if (ref.node.get_state_set().contains(self.api.StateType.DEFUNCT)
+                    or ref.root.get_state_set().contains(self.api.StateType.DEFUNCT)):
+                raise PrimitiveError("rejected", "Field readback node is defunct")
+            if ((root_current[0], root_current[2])
+                    != (ref.root_fingerprint[0], ref.root_fingerprint[2])
+                    or current[:3] != ref.fingerprint[:3]
+                    or ref.node.get_process_id() != window["pid"]
+                    or ref.root.get_process_id() != window["pid"]):
+                raise PrimitiveError("rejected", "Field readback target changed")
+            ancestor = ref.node
+            for _ in range(7):
+                guard()
+                if ancestor == ref.root or ancestor is None:
+                    break
+                ancestor = ancestor.get_parent()
+            if ancestor != ref.root:
+                raise PrimitiveError("rejected", "Field left its observed native root")
+            if not public["text_readable"] or not public["text_complete"]:
+                raise PrimitiveError("unsupported", "Full field text is unavailable")
+            guard()
+            return {"text": public["text"], "text_complete": True}
+        except PrimitiveError:
+            raise
+        except Exception as exc:
+            raise PrimitiveError("unsupported", "Native field readback failed") from exc

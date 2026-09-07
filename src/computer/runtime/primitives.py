@@ -23,7 +23,30 @@ PROFILES = {"drawing": ("/usr/bin/drawing", "--new-window"),
 KEY_PATTERN = r"(?:(?:ctrl|alt|shift|super)\+){0,4}[A-Za-z0-9_]+"
 PHYSICAL = frozenset({"move", "click", "double_click", "right_click", "middle_click",
                       "scroll", "key", "type", "polyline"})
-SEMANTIC = frozenset({"invoke", "focus", "set_text", "select", "value"})
+SEMANTIC = frozenset({"invoke", "focus", "set_text", "replace_field", "select", "value"})
+CLICKS = frozenset({"click", "double_click", "right_click", "middle_click"})
+
+
+def click_options(action):
+    """Normalize optional click count/modifiers before any native input."""
+    count = action.get("count", 2 if action["type"] == "double_click" else 1)
+    modifiers = action.get("modifiers", [])
+    if (type(count) is not int or not 1 <= count <= 3
+            or type(modifiers) is not list or len(modifiers) > 4
+            or any(type(item) is not str or item not in {"ctrl", "alt", "shift", "super"}
+                   for item in modifiers) or len(set(modifiers)) != len(modifiers)):
+        raise PrimitiveError("rejected", "Invalid click count/modifiers")
+    return count, modifiers
+
+
+def field_expectation(action):
+    expected = action.get("expected")
+    return (action.get("type") == "replace_field" and type(expected) is dict
+            and set(expected) == {"type", "target", "text"}
+            and expected["type"] == "field_text_equals"
+            and type(action.get("target")) is str and 1 <= len(action["target"]) <= 128
+            and expected["target"] == action["target"]
+            and type(action.get("text")) is str and expected["text"] == action["text"])
 
 
 def parse_key_chord(value):
@@ -99,7 +122,7 @@ class NativeDesktop:
         if display != ":77" or workspace != "/workspace":
             raise ValueError("NativeDesktop only operates the isolated :77 /workspace desktop")
         self._clock, self._runner, self._capture_backend = clock, command_runner, capture_backend
-        self._a11y = accessibility_backend or Accessibility()
+        self._a11y = accessibility_backend or Accessibility(display=display)
         self._env = {"DISPLAY": display, "HOME": workspace, "PATH": "/usr/bin:/bin",
                      "LANG": "C.UTF-8", "NO_AT_BRIDGE": "0"}
         for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_DATA_DIRS",
@@ -109,6 +132,7 @@ class NativeDesktop:
                 self._env[name] = os.environ[name]
         self._apps, self._processes = {}, set()
         self._buttons, self._keys = set(), set()
+        self._key_order = []
         self._lock = threading.RLock()
         self._deadline, self._cancelled = 0, None
         self._observation, self._window_at_observation = None, None
@@ -390,6 +414,21 @@ class NativeDesktop:
         finally:
             display.close()
 
+    def _assert_field_window(self):
+        """Readback permits a changed title, never another window or focus target."""
+        self._guard()
+        if self._root_extent is not None:
+            extent = tuple(int(v) for v in self._run("getdisplaygeometry").split())
+            if extent != self._root_extent:
+                raise PrimitiveError("rejected", "Private source geometry changed")
+        window = self._window()
+        if (self._expected is None
+                or {k: v for k, v in window.items() if k != "title"}
+                != {k: v for k, v in self._expected.items() if k != "title"}
+                or self._identity(window["pid"]) != self._observed_identity):
+            raise PrimitiveError("rejected", "Field native window changed after input")
+        return window
+
     def snapshot(self, *, packed=False):
         with self._lock:
             self._deadline, self._cancelled = self._clock() + 2.0, None
@@ -445,11 +484,15 @@ class NativeDesktop:
                       "double_click": {"x", "y"}, "right_click": {"x", "y"},
                       "middle_click": {"x", "y"},
                       "scroll": {"x", "y", "direction", "count"},
-                      "polyline": {"points", "duration"}}
+                      "polyline": {"points", "duration"},
+                      "replace_field": {"target", "text"}}
             required = {"type", "source_revision", "expected_window", "observation_id", "expected"}
+            optional = {"expected_modal"}
+            if type(action) is dict and action.get("type") in CLICKS:
+                optional |= {"count", "modifiers"}
             if (type(action) is not dict or not isinstance(action.get("type"), str)
                     or action["type"] not in fields
-                    or set(action) - {"expected_modal"} != required | fields[action["type"]]
+                    or set(action) - optional != required | fields[action["type"]]
                     or self._input_quarantined
                     or self._observation is None
                     or action["observation_id"] != self._observation
@@ -472,9 +515,11 @@ class NativeDesktop:
                        and expected["type"] == "pointer_at"
                        and all(type(action[k]) is int and type(expected[k]) is int
                                and action[k] == expected[k] for k in ("x", "y")))
-            if not visual and not pointer:
+            field = field_expectation(action)
+            if ((action["type"] == "replace_field" and not field)
+                    or not visual and not pointer and not field):
                 raise PrimitiveError("rejected", "Unsupported independently measured postcondition")
-            if action["type"] == "type":
+            if action["type"] in {"type", "replace_field"}:
                 bounded_text(action["text"])
             elif action["type"] == "key":
                 try:
@@ -490,6 +535,8 @@ class NativeDesktop:
                 finite(action["duration"], 0, 1.0)
             elif any(type(action[k]) is not int for k in ("x", "y")):
                 raise PrimitiveError("rejected", "Pixel coordinates must be integers")
+            if action["type"] in CLICKS:
+                click_options(action)
             if action["type"] == "scroll":
                 self._scroll(action)
             # Recheck pixels after controller authorization awaits, before input.
@@ -513,6 +560,20 @@ class NativeDesktop:
             self._cancelled = cancelled
             self._expected = dict(self._window_at_observation)
             try:
+                if field:
+                    self._assert_field_window()
+                    actual = self._a11y.read_field(
+                        action["target"], self._expected, self._assert_field_window)
+                    self._assert_field_window()
+                    satisfied = (actual["text_complete"] is True
+                                 and actual["text"] == expected["text"])
+                    receipt["postcondition"] = {
+                        "type": "field_text_equals", "target": action["target"],
+                        "method": "accessibility_text_after_release",
+                        "target_application_matches": True, "actual": actual,
+                        "status": "satisfied" if satisfied else "not_satisfied"}
+                    receipt["status"] = "verified" if satisfied else "not_satisfied"
+                    return receipt
                 if visual:
                     # Allow a dialog/title transition only in the same process,
                     # independently remeasured after release. Never echo a verdict.
@@ -550,6 +611,10 @@ class NativeDesktop:
                 receipt["status"] = "verified" if satisfied else "not_satisfied"
             except Exception:
                 receipt["status"] = "executed"
+                if field:
+                    receipt["postcondition"].update(
+                        target=action["target"], method="accessibility_text_after_release",
+                        target_application_matches=False)
             finally:
                 self._expected = None
                 self._cancelled = None
@@ -560,6 +625,9 @@ class NativeDesktop:
         self._attempted = True
         self._run(*arguments)
         self._injected = True
+
+    def _semantic_attempt(self):
+        self._attempted = True
 
     def _point(self, x, y):
         window = self._expected
@@ -590,6 +658,8 @@ class NativeDesktop:
                   "key": {"chord"}, "type": {"text"}, "polyline": {"points", "duration"}}
         binding = {"type", "expected_window", "observation_id", "source_revision",
                    "expected", "expected_modal"}
+        if kind in CLICKS:
+            binding |= {"count", "modifiers"}
         if set(action) - (binding | fields[kind]):
             raise PrimitiveError("rejected", "Unsupported native action fields")
         if kind == "key":
@@ -601,6 +671,7 @@ class NativeDesktop:
             keys = [*modifiers, keysym]
             for key in keys:
                 self._keys.add(key)
+                self._key_order.append(key)
                 self._input("keydown", key)
         elif kind == "type":
             text = bounded_text(action.get("text"))
@@ -623,7 +694,14 @@ class NativeDesktop:
             if any(not isinstance(p, (list, tuple)) or len(p) != 2 for p in points):
                 raise PrimitiveError("rejected", "Polyline points must be coordinate pairs")
             points = [self._point(*point) for point in points]
-            duration = finite(action.get("duration", 0), 0, 2.0)
+            duration = finite(action.get("duration", 0), 0, 1.0)
+            # xdotool dispatch has per-vertex window and pointer queries. Reserve
+            # their measured cost before pressing, not after half a stroke lands.
+            probe_started = self._clock()
+            self._assert_window()
+            vertex_cost = max(0.02, 3 * (self._clock() - probe_started) + 0.01)
+            if duration + len(points) * vertex_cost + 0.15 > self._deadline - self._clock():
+                raise PrimitiveError("rejected", "Polyline exceeds private dispatch budget")
             self._input("mousemove", *points[0])
             self._pointer(*points[0])
             self._buttons.add(1)
@@ -642,12 +720,20 @@ class NativeDesktop:
             if button is None:
                 raise PrimitiveError("rejected", "Unsupported mouse button")
             count = 2 if kind == "double_click" else 1
+            modifiers = []
+            if kind in CLICKS:
+                count, names = click_options(action)
+                modifiers = self._resolve_click_modifiers(names)
             if kind == "scroll":
                 button, count = self._scroll(action)
             self._input("mousemove", *point)
             self._pointer(*point)
             if kind == "move":
                 return
+            for key in modifiers:
+                self._keys.add(key)
+                self._key_order.append(key)
+                self._input("keydown", key)
             for index in range(count):
                 if index:
                     self._guard()
@@ -658,6 +744,24 @@ class NativeDesktop:
                 self._input("mousedown", button)
                 self._run("mouseup", button)
                 self._buttons.discard(button)
+
+    def _resolve_click_modifiers(self, modifiers):
+        """Read the private native keymap before pointer motion or any key press."""
+        if not modifiers:
+            return []
+        from Xlib import XK
+        from Xlib import display as xdisplay  # type: ignore[import-untyped]
+        names = {"ctrl": "Control_L", "alt": "Alt_L", "shift": "Shift_L", "super": "Super_L"}
+        self._guard()
+        display = xdisplay.Display(":77")
+        try:
+            resolved = [names[name] for name in modifiers]
+            if any(not display.keysym_to_keycode(XK.string_to_keysym(name)) for name in resolved):
+                raise PrimitiveError("unsupported", "Click modifier unavailable in native keymap")
+            self._guard()
+            return resolved
+        finally:
+            display.close()
 
     @staticmethod
     def _scroll(action):
@@ -685,6 +789,10 @@ class NativeDesktop:
                 self._assert_window()
                 if kind in PHYSICAL:
                     self._physical(action)
+                elif kind == "replace_field":
+                    self._a11y.execute(action, self._expected, self._assert_window,
+                                       before_effect=self._semantic_attempt)
+                    self._injected = True
                 else:
                     self._attempted = True
                     self._a11y.execute(action, self._expected, self._assert_window)
@@ -740,12 +848,16 @@ class NativeDesktop:
     def _release(self):
         clean = True
         for command, held in (("mouseup", self._buttons), ("keyup", self._keys)):
-            for item in sorted(held, key=lambda item: item in ("ctrl", "shift")):
+            items = (list(dict.fromkeys(reversed(self._key_order))) if command == "keyup"
+                     else list(held))
+            items.extend(item for item in held if item not in items)
+            for item in items:
                 try:
                     self._run(command, item)
                     held.discard(item)
                 except Exception:
                     clean = False
+        self._key_order = [key for key in self._key_order if key in self._keys]
         if self._type_dirty:
             try:
                 self._release_typed_keys()

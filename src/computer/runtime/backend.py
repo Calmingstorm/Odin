@@ -31,6 +31,18 @@ class RuntimeFailure(RuntimeError):  # noqa: N818 - Existing private adapter API
 
 class LinuxDesktopBackend:
     capabilities = BackendCapabilities("x11", "isolated", "shared", "shared")
+    input_limits = {
+        "lease_seconds": 2, "max_text_chars": 512,
+        "text": "xdotool_private_keymap", "max_polyline_points": 256,
+        "max_polyline_seconds": 1, "polyline_dispatch_budget": "native_prepress_estimate",
+        "click_count": {"min": 1, "max": 3},
+        "click_modifiers": ["ctrl", "alt", "shift", "super"],
+        "click_modifier_resolution": "existing_native_keymap_before_input",
+        "accessibility": "isolated_atspi_observation_scoped",
+        "replace_field": "available_nodes_only", "replace_field_max_chars": 512,
+        "replace_field_requires": ["replace_field", "text_readable", "text_complete"],
+        "field_text_equals": "independent_same_native_node_after_release",
+    }
 
     def __init__(
         self, *, enabled: bool = False, app_profile: str = "drawing", runtime_sudo: bool = False
@@ -252,11 +264,16 @@ class LinuxDesktopBackend:
                       "right_click": {"x", "y"}, "middle_click": {"x", "y"},
                       "scroll": {"x", "y", "direction", "count"},
                       "type": {"text"}, "key": {"chord"},
-                      "polyline": {"points", "duration"}}
+                      "polyline": {"points", "duration"},
+                      "replace_field": {"target", "text"}}
             required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
+            optional = {"expected_modal"}
+            if type(action) is dict and action.get("type") in {
+                    "click", "double_click", "right_click", "middle_click"}:
+                optional |= {"count", "modifiers"}
             if (type(action) is not dict or not isinstance(action.get("type"), str)
                     or action["type"] not in fields
-                    or set(action) - {"expected_modal"} != required | fields[action["type"]]):
+                    or set(action) - optional != required | fields[action["type"]]):
                 raise RuntimeFailure("unsupported grounded action")
             if frame.modal is not None:
                 if (frame.modal_kind != "safe_application"
@@ -276,7 +293,10 @@ class LinuxDesktopBackend:
                        and expected["type"] == "pointer_at"
                        and all(type(expected[k]) is int and expected[k] == action[k]
                                for k in ("x", "y")))
-            if not pointer and not visual:
+            from .primitives import click_options, field_expectation, parse_key_chord
+            field = field_expectation(action)
+            if ((action["type"] == "replace_field" and not field)
+                    or not pointer and not visual and not field):
                 raise RuntimeFailure("unsupported postcondition")
             payload = {"type": action["type"], "source_revision": source.source_revision,
                        "expected_window": self._last_window,
@@ -285,7 +305,6 @@ class LinuxDesktopBackend:
             if "expected_modal" in action:
                 payload["expected_modal"] = action["expected_modal"]
             from .accessibility import PrimitiveError, bounded_text, finite
-            from .primitives import parse_key_chord
             try:
                 if action["type"] in {
                         "click", "double_click", "right_click", "middle_click", "scroll"}:
@@ -300,6 +319,9 @@ class LinuxDesktopBackend:
                                 or not 1 <= action["count"] <= 20):
                             raise RuntimeFailure("invalid_scroll")
                         payload.update(direction=action["direction"], count=action["count"])
+                    else:
+                        count, modifiers = click_options(action)
+                        payload.update(count=count, modifiers=modifiers)
                     if pointer:
                         payload["expected"] = {"type": "pointer_at", "x": int(x), "y": int(y)}
                 elif action["type"] == "polyline":
@@ -315,6 +337,16 @@ class LinuxDesktopBackend:
                     payload["duration"] = action["duration"]
                 elif action["type"] == "type":
                     payload["text"] = bounded_text(action["text"])
+                elif action["type"] == "replace_field":
+                    text = bounded_text(action["text"])
+                    matches = [node for node in frame.accessibility
+                               if node.get("handle") == action["target"]]
+                    if (len(matches) != 1
+                            or "replace_field" not in matches[0].get("capabilities", ())
+                            or matches[0].get("text_readable") is not True
+                            or matches[0].get("text_complete") is not True):
+                        raise RuntimeFailure("accessible_field_unavailable")
+                    payload.update(target=action["target"], text=text)
                 else:
                     parse_key_chord(action["chord"])
                     payload["chord"] = action["chord"]
