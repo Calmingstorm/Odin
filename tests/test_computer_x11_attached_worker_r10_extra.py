@@ -63,9 +63,7 @@ def native(monkeypatch):
                 "monitor_names": monitor_names}
     monkeypatch.setattr(worker, "attachment_configuration", configuration)
     monkeypatch.setattr(attached, "attachment_configuration", configuration)
-    real_scope = scope.AppScope
-    monkeypatch.setattr(scope, "AppScope", lambda connection: real_scope(connection, "xed"))
-    monkeypatch.setattr(scope, "_process_identity", lambda pid, profile: {
+    monkeypatch.setattr(scope, "_process_identity", lambda pid: {
         "pid": pid, "uid": 65534, "start_ticks": 101, "exe": "/usr/bin/xed"})
     return state
 

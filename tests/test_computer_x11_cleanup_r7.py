@@ -27,6 +27,7 @@ def test_private_xvfb_lifetime_and_monitor_loss(tmp_path):
     assert not owned["residuals"] and not owned["signals"]
     data = json.loads(result.stdout.splitlines()[-1])
     assert len(data["trials"]) == 5 and data["receiver_edges"] == 20
-    assert data["backend"]["capture_workers_reaped"] == 3
+    # Sources, successful capture, rejected capture, and retained event watcher.
+    assert data["backend"]["capture_workers_reaped"] == 4
     assert data["hardware_dpms_tested"] is False
     print(json.dumps({"native_lifecycle": data, "owned": owned}, sort_keys=True))
