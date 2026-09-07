@@ -721,9 +721,42 @@ class ComputerController:
                 raise
             try:
                 current = await self.validate_action_binding(grant, inp["observation_id"])
-            except ComputerError:
+            except ComputerError as exc:
                 if any(obs.modal is not None for obs in live.observations.values()):
                     await self._pause(grant.session_id)
+                elif (grant.environment == "existing_session"
+                      and exc.code == "stale_source_binding"):
+                    # No backend input has been dispatched. A focus/geometry
+                    # change is a recoverable refusal, not permission to rebase
+                    # coordinates or steal focus. The capture that detected it
+                    # is evidence only; explicitly observe the intended app again.
+                    fresh = next(iter(live.observations.values()), None)
+                    live.observations.clear()
+                    self._delivered_observations.pop(grant.session_id, None)
+                    await self._auth(context)
+                    self._active(grant)
+                    existing = self.store.begin_action(
+                        grant, inp["action_id"], payload_hash, MAX_ACTIONS)
+                    if existing is not None:
+                        return existing
+                    verification = {
+                        "status": "unavailable", "reason": exc.code,
+                        "recoverable": True, "source_id": original.source.source_id,
+                        "next_action": "wait_for_intended_application_then_observe_without_crop",
+                        "instruction": (
+                            "No input was sent. Let the user return focus to the intended "
+                            "application, then call computer_observe without crop. Verify "
+                            "the application and target from the new pixels before planning "
+                            "a new action with a new action_id. Do not steal focus, replay "
+                            "this action, reuse its coordinates, or act in another application."),
+                    }
+                    if fresh is not None and fresh.observation_id != original.observation_id:
+                        verification["evidence_id"] = fresh.evidence_id
+                    return self.store.finish_action(grant.session_id, inp["action_id"], {
+                        "status": "unavailable", "reason": exc.code,
+                        "execution": {"injected": False, "released": True},
+                        "verification": verification,
+                    })
                 raise
             # R6: attached keyboard targets the freshly verified native app/focus
             # binding, not pixels that may change with a blinking caret. Geometry
@@ -786,6 +819,7 @@ class ComputerController:
                                     "invalid_bounds", "invalid_source_crop",
                                     "invalid_observation_crop", "display_asleep",
                                     "topology_changed", "input_focus_unavailable",
+                                    "stale_source_binding",
                                     "wayland_capture_dimensions_changed",
                                     "wayland_capture_source_changed"}):
                             raise
