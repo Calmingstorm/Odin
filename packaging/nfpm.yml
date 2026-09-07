@@ -41,6 +41,8 @@ recommends:
   - fontconfig
   - fonts-dejavu-core
   - libx11-6
+  - libx11-xcb1
+  - libxkbcommon-x11-0
   - libxi6
   - libxtst6
   - x11-xserver-utils
@@ -60,11 +62,14 @@ recommends:
   - gstreamer1.0-pipewire
 
 # Never select/replace a user's compositor or portal backend during an Odin
-# upgrade. These belong to an existing, explicitly selected GNOME desktop.
+# upgrade. These belong to the user's explicitly selected desktop.
 suggests:
   - gnome-shell
   - xdg-desktop-portal
   - xdg-desktop-portal-gnome
+  - kwin-wayland (>= 6.1)
+  - xdg-desktop-portal-kde
+  - odin-kwin-scope
 
 contents:
   - src: ./src
