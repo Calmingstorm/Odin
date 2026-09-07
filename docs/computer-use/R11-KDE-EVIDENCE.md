@@ -45,6 +45,14 @@ Evidence: `/tmp/cu-r11-kwin-load-smoke-20260907T1532/`. Inner and outer subreape
 reports completed with zero residual descendants; container removal was verified.
 No real desktop or live service was changed.
 
+A subsequent exact-ABI plugin build also resolved an actual GTK popup: scope
+changed from application bounds to the popup's native bounds, with focus serial
+changes on entry and exit. A scratch EI helper selected a real item and the
+receiver observed both right/left button releases. This measured popup-scope
+handling, not production admission. Evidence and explicit limits are retained in
+`assets/kwin-scope/evidence/20260907-native-popup/`; those engineering artifacts
+are excluded from installed packages. Mandatory stock KWin EOF refusal remains.
+
 ## Distribution limit
 
 Companion sources and exact-ABI package recipe ship, not a universal binary.

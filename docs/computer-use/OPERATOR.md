@@ -43,7 +43,8 @@ a current attached-app allowlist nor general qualification.
 
 **Measured examples, not an application allowlist:** a real X11 Xed task completed
 through the controller with crop delivery, Unicode, click variants, a context menu,
-save, exact UTF-8 verification, document close/reopen and automatic detach. The
+actual popup-menu item selection, save, exact UTF-8 verification, document
+close/reopen and automatic detach. The
 human/core pointer stayed unchanged and the application survived. A real topology
 change invalidated old coordinates. Hardware DPMS sleep/wake is unit-tested but
 not hardware-qualified. Unsupported keyboard characters are reported by index;
