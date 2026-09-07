@@ -9,8 +9,12 @@ ROOT = Path(__file__).resolve().parents[1]
 def test_main_package_ships_companion_sources_not_universal_abi_binary():
     package = yaml.safe_load((ROOT / "packaging/nfpm.yml").read_text())
     entries = [row for row in package["contents"] if "kwin-scope" in row.get("src", "")]
-    assert entries == [{"src": "./assets/kwin-scope", "dst": "/usr/share/odin/kwin-scope",
-                        "type": "tree"}]
+    files = {"CMakeLists.txt", "README.md", "metadata.json", "odinscope.cpp", "odinscope.h"}
+    assert {Path(row["src"]).name for row in entries} == files
+    assert all(row == {"src": "./assets/kwin-scope/" + Path(row["src"]).name,
+                       "dst": "/usr/share/odin/kwin-scope/" + Path(row["src"]).name}
+               for row in entries)
+    assert all("evidence" not in row["src"] for row in entries)
     assert not any("odin-kwin-scope" in dep for dep in package.get("depends", []))
 
 

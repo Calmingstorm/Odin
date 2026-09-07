@@ -123,9 +123,16 @@ contents:
   # KWin uses a private compositor ABI. Ship its opt-in companion sources;
   # the separate version-bound companion package carries the compiled plugin.
   # No main-package hook builds, loads, enables or reloads a desktop plugin.
-  - src: ./assets/kwin-scope
-    dst: /usr/share/odin/kwin-scope
-    type: tree
+  - src: ./assets/kwin-scope/CMakeLists.txt
+    dst: /usr/share/odin/kwin-scope/CMakeLists.txt
+  - src: ./assets/kwin-scope/README.md
+    dst: /usr/share/odin/kwin-scope/README.md
+  - src: ./assets/kwin-scope/metadata.json
+    dst: /usr/share/odin/kwin-scope/metadata.json
+  - src: ./assets/kwin-scope/odinscope.cpp
+    dst: /usr/share/odin/kwin-scope/odinscope.cpp
+  - src: ./assets/kwin-scope/odinscope.h
+    dst: /usr/share/odin/kwin-scope/odinscope.h
 
   - dst: /etc/odin/
     type: dir
