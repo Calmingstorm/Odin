@@ -128,7 +128,8 @@ def effect_receipt(raw, observation, expected, target=None):
 
 def region_effect(result, expected, before, after, *, binding_matches):
     """Compare only the requested delivered-image region, never changed geometry."""
-    if expected["type"] != "region_changed" or not binding_matches:
+    if (expected["type"] != "region_changed" or not binding_matches
+            or result.get("status") in {"interrupted", "unknown", "unavailable"}):
         return
     from PIL import Image, ImageChops
     x, y, width, height = (expected[k] for k in ("x", "y", "width", "height"))

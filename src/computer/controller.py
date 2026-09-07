@@ -892,7 +892,8 @@ class ComputerController:
                         await self._auth(context)
                         self._active(grant)
                         live.observations.clear()
-                        result["status"] = "executed"
+                        if result["status"] != "interrupted":
+                            result["status"] = "executed"
                         result["verification"].update(
                             status="unavailable", reason=exc.code,
                             next_action="observe_again_without_crop")
@@ -946,10 +947,17 @@ class ComputerController:
                         # outcome after acknowledged injection and release.
                         # Require NEW observation delivery before any further
                         # input; never reuse authority for the changed target.
-                        result["status"] = "not_satisfied"
+                        if result["status"] != "interrupted":
+                            result["status"] = "not_satisfied"
                         result["verification"].update(
                             status="not_satisfied", target_application_matches=False,
                             reason="target_changed_observe_again")
+                    if (after.modal != current.modal and not expected_transition
+                            and inp["expect"]["type"] != "window_gone"):
+                        if result["status"] != "interrupted":
+                            result["status"] = "not_satisfied"
+                        result["verification"].update(
+                            status="not_satisfied", reason="unexpected_dialog_transition")
                     if before_image is not None and result["status"] != "interrupted":
                         region_effect(result, inp["expect"], before_image, after_image,
                                       binding_matches=after.geometry == current.geometry)
