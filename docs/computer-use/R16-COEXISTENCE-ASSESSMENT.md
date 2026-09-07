@@ -19,7 +19,7 @@ Prior evidence, not a new run: `R11-X11-NATIVE-EVIDENCE.md` records seven reuse
 cycles on disposable Xvfb/GTK with the core cursor at (850,600) and the independent
 cursor at (120,120), empty owned endpoints after the covered failure cases, and
 the GTK app still accepting text. This supports technical feasibility of separate
-cursor injection. It does not establish safety on Aaron's current desktop.
+cursor injection. It does not establish safety on the operator's current desktop.
 
 The full `REVIEW-CHECKPOINT-R13.md` explicitly records a real Xed task crashing
 with `XI_BadDevice`, minor 42, after fully sequenced release, fencing, restoration,
