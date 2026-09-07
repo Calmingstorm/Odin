@@ -88,6 +88,11 @@ class ComputerIntegration:
                                    runtime_sudo=bool(self.settings.runtime_sudo))
 
     def _authorize(self, context):
+        if context.turn_id == "web-operator":
+            from ..web.computer_binding import operator_context_authorized
+
+            if not operator_context_authorized(context):
+                return False
         manager = getattr(self.bot, "host_access_manager", None)
         if manager is None or not manager.is_host_allowed(context.owner_id, "localhost"):
             return False
@@ -326,3 +331,13 @@ class ComputerIntegration:
     async def operator_download(self, *, owner_id, web_session_id, artifact_id):
         return await self.operator_evidence(owner_id=owner_id, web_session_id=web_session_id,
                                             evidence_id=artifact_id)
+
+    async def operator_recover(self, *, owner_id, web_session_id, session_id, generation):
+        context = self._operator_context(owner_id, web_session_id, emergency=True)
+        return await self.controller.reconcile_recovery(context, session_id, generation)
+
+    async def operator_acknowledge_legacy(self, *, owner_id, web_session_id, session_id,
+                                          generation, acknowledgment):
+        context = self._operator_context(owner_id, web_session_id, emergency=True)
+        return await self.controller.acknowledge_legacy_recovery(
+            context, session_id, generation, acknowledgment)

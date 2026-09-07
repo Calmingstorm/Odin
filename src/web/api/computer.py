@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from aiohttp import web
 
 from ..api_common import admin_gate
+from ..computer_binding import operator_binding, operator_scope
 
 _OPAQUE = re.compile(r"[A-Za-z0-9_-]{8,128}\Z")
 _NAME = re.compile(r"[A-Za-z0-9][A-Za-z0-9_. -]{0,99}\Z")
@@ -15,6 +16,30 @@ _PRIVATE = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
 }
+
+
+class _AuthorizedResponse(web.Response):
+    """Fence after async prepare hooks and immediately before writing the body."""
+
+    async def _write_headers(self):
+        if not self._computer_current():
+            self._set_status(404, "Not Found")
+            self.body = b'{"error":"Not found or no longer authorized"}'
+            self._compressed_body = None
+            for key in ("Content-Encoding", "Content-Disposition", "Content-Type"):
+                self.headers.pop(key, None)
+            self.headers["Content-Type"] = "application/json"
+            self.headers["Content-Length"] = str(len(self.body))
+            self._payload_writer.length = len(self.body)
+            self._computer_denied = True
+        await super()._write_headers()
+
+    async def write_eof(self, data=b""):
+        if not getattr(self, "_computer_denied", False) and not self._computer_current():
+            if self._req is not None and self._req.transport is not None:
+                self._req.transport.close()
+            return
+        await super().write_eof(data)
 
 
 def _expiry(value):
@@ -47,11 +72,12 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             raise web.HTTPUnauthorized(headers=_PRIVATE)
         if require_admin(request) is not None or getattr(identity, "tier", None) != "admin":
             raise web.HTTPForbidden(headers=_PRIVATE)
-        owner = getattr(identity, "user_id", None)
-        session = getattr(request, "_session_id", None)
-        if not owner or not session:
+        if not getattr(identity, "user_id", None) or not getattr(request, "_session_id", None):
             raise web.HTTPUnauthorized(headers=_PRIVATE)
-        return {"owner_id": owner, "web_session_id": session}
+        binding = request.get("computer_operator_binding")
+        if binding is None or binding[2]() is not True:
+            raise PermissionError
+        return {"owner_id": binding[0], "web_session_id": binding[1]}
 
     def context(request, emergency=False):
         actor = authenticate(request)
@@ -63,11 +89,14 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         return service, actor
 
     async def call(request, method, **kwargs):
-        service, actor = context(request, emergency=method in {"status", "stop", "pause"})
+        service, actor = context(request, emergency=method in {
+            "status", "stop", "pause", "recover", "acknowledge_legacy"})
         adapter = getattr(service, f"operator_{method}", None)
         if adapter is None:
             raise web.HTTPServiceUnavailable(headers=_PRIVATE)
-        return await adapter(**actor, **kwargs), actor
+        result = await adapter(**actor, **kwargs)
+        authenticate(request)
+        return result, actor
 
     async def guarded(request, operation):
         try:
@@ -124,6 +153,23 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             }
         if isinstance(value.get("error"), str):
             result["error"] = value["error"][:120]
+        recovery = value.get("recovery")
+        if isinstance(recovery, dict):
+            statuses = {"operator_reconciliation_required", "operator_cleanup_required", "unknown",
+                        "absence_verified", "operator_acknowledged_unverified"}
+            reasons = {"controller_lost", "legacy_runtime_identity_missing", "host_rebooted",
+                       "launch_identity_incomplete", "owned_process_remaining",
+                       "owned_process_group_remaining", "process_inspection_unavailable",
+                       "unit_absence_unproven", "cgroup_absence_unproven",
+                       "owned_input_release_unproven", "owned_runtime_gone",
+                       "inspection_unavailable", "inspection_timeout"}
+            result["recovery"] = {
+                "status": (recovery.get("status")
+                           if recovery.get("status") in statuses else "unknown"),
+                "reason": (recovery.get("reason")
+                           if recovery.get("reason") in reasons else "unknown"),
+                "complete": recovery.get("complete") is True,
+            }
         return web.json_response(result, headers=_PRIVATE)
 
     async def status(request):
@@ -132,7 +178,11 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
 
     async def stop(request):
         value, actor = await call(request, "stop")
-        return status_json(value, actor)
+        # Safety stop bypasses enabled only, never credentials/scopes; no data.
+        status_json(value, actor)
+        state = value.get("state")
+        return web.json_response({"state": state if state in {
+            "cancelled", "closed", "quarantined"} else "unknown"}, headers=_PRIVATE)
 
     async def pause(request):
         value, actor = await call(request, "pause")
@@ -205,6 +255,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         if (not isinstance(body, dict) or set(body) != {"enabled"}
                 or type(body["enabled"]) is not bool):
             raise ValueError
+        authenticate(request)
         # Composition root owns transactional persistence and lifecycle. This
         # hook must collision-preflight before persist, revoke before disable,
         # publish config + catalog atomically, and finish publication on cancel.
@@ -215,7 +266,29 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                 text="Computer lifecycle control is unavailable", headers=_PRIVATE,
             )
         await toggle(body["enabled"])
+        authenticate(request)
         return web.json_response({"enabled": bool(bot.config.computer.enabled)}, headers=_PRIVATE)
+
+    async def recovery(request, *, acknowledge=False):
+        authenticate(request)
+        if request.content_length is None or request.content_length > 512:
+            raise ValueError
+        body = await request.json()
+        keys = {"session_id", "generation"} | ({"acknowledgment"} if acknowledge else set())
+        if not isinstance(body, dict) or set(body) != keys:
+            raise ValueError
+        _opaque(body["session_id"])
+        if type(body["generation"]) is not int or body["generation"] < 0:
+            raise ValueError
+        if acknowledge and body["acknowledgment"] != (
+                "ACKNOWLEDGE UNVERIFIED CLEANUP " + body["session_id"]):
+            raise ValueError
+        value, actor = await call(request, "acknowledge_legacy" if acknowledge else "recover",
+                                  **body)
+        return status_json(value, actor)
+
+    async def acknowledge_legacy(request):
+        return await recovery(request, acknowledge=True)
 
     for method, path, handler in (
         ("GET", "/api/computer", status),
@@ -226,8 +299,19 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         ("POST", "/api/computer/export", export),
         ("GET", "/api/computer/download/{id}", download),
         ("POST", "/api/computer/enabled", enabled),
+        ("POST", "/api/computer/recover", recovery),
+        ("POST", "/api/computer/acknowledge_legacy", acknowledge_legacy),
     ):
         async def wrapped(request, operation=handler):
-            return await guarded(request, operation)
+            binding = operator_binding(bot, request)
+            request["computer_operator_binding"] = binding
+            if binding is None:
+                return await guarded(request, operation)
+            with operator_scope(binding):
+                response = await guarded(request, operation)
+            fenced = _AuthorizedResponse(body=response.body, status=response.status,
+                                         headers=response.headers)
+            fenced._computer_current = binding[2]
+            return fenced
 
         routes.route(method, path)(wrapped)

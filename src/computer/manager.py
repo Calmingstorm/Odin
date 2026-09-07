@@ -353,7 +353,9 @@ class ComputerLifecycle:
 
     def authorize_context(self, context):
         if context.turn_id == "web-operator":
-            return True
+            from ..web.computer_binding import operator_context_authorized
+
+            return operator_context_authorized(context)
         if not self.enabled:
             return False
         if context.surface != "webui":
@@ -413,7 +415,8 @@ class ComputerLifecycle:
             if method in {"status", "stop", "pause"}:
                 return self.snapshot()
             raise PermissionError("Computer unavailable")
-        if not self.enabled and method not in {"status", "stop", "pause"}:
+        if not self.enabled and method not in {
+                "status", "stop", "pause", "recover", "acknowledge_legacy"}:
             raise PermissionError("Computer unavailable")
         if not self.enabled and method in {"status", "pause"}:
             # Failed cleanup stays inspectable without reviving input authority.
@@ -427,7 +430,7 @@ class ComputerLifecycle:
                     "status", "stop", "pause"}:
                 return self.snapshot()
             raise
-        if method in {"status", "stop", "pause"}:
+        if method in {"status", "stop", "pause", "recover", "acknowledge_legacy"}:
             result = {**self.snapshot(), **value}
             result["session_generation"] = value.get("generation")
             result["generation"] = self.generation
@@ -494,3 +497,9 @@ class ComputerLifecycle:
 
     async def operator_download(self, **identity):
         return await self._operator("download", **identity)
+
+    async def operator_recover(self, **identity):
+        return await self._operator("recover", **identity)
+
+    async def operator_acknowledge_legacy(self, **identity):
+        return await self._operator("acknowledge_legacy", **identity)

@@ -244,12 +244,15 @@ async def test_real_facade_foreground_dispatch_revocation_and_operator_artifacts
             "computer_session", {"operation": "start", "app": "xed"},
             message=st.message, user_id="alice", skill_file_delivery="stage")
         assert result.ok
-    status = await manager.operator_status(owner_id="alice", web_session_id="browser")
-    assert status["state"] == "active" and status["backend"]["input_supported"] is True
-    image = await manager.operator_observe(owner_id="alice", web_session_id="browser")
-    assert set(image) == {"frame"} and "image_bytes" not in image
-    evidence = await manager.operator_evidence(owner_id="alice", web_session_id="browser",
-                                               evidence_id=image["frame"]["evidence_id"])
+    from tests.test_computer_operator_auth_r5 import bound_operator
+
+    with bound_operator(bot, "alice", "browser"):
+        status = await manager.operator_status(owner_id="alice", web_session_id="browser")
+        assert status["state"] == "active" and status["backend"]["input_supported"] is True
+        image = await manager.operator_observe(owner_id="alice", web_session_id="browser")
+        assert set(image) == {"frame"} and "image_bytes" not in image
+        evidence = await manager.operator_evidence(owner_id="alice", web_session_id="browser",
+                                                   evidence_id=image["frame"]["evidence_id"])
     assert evidence["data"].startswith(b"\x89PNG")
     assert evidence["expires_at"].endswith("+00:00")
     # A later permission change is noticed while the model is not doing anything.
@@ -345,16 +348,25 @@ async def test_real_bot_composition_has_one_lifecycle_and_disabled_loop_is_inert
 
 async def test_production_manager_api_disabled_status_and_toggle(tmp_path):
     bot, manager = owner(tmp_path, factory=fake_factory)
+    from src.config.schema import ApiTokenIdentity
+    from src.health.server import SessionManager
+
+    principal = ApiTokenIdentity(token="fixture-only", user_id="alice", tier="admin")
+    bot.config.web.api_tokens = [principal]
+    sessions = SessionManager()
+    sid, _ = sessions.create(principal)
 
     @web.middleware
     async def auth(request, handler):
-        request._api_identity = SimpleNamespace(user_id="alice", tier="admin")
-        request._session_id = "browser-session"
+        request._api_identity = principal
+        request._session_id = sid
+        request._session_managed = True
         return await handler(request)
 
     routes = web.RouteTableDef()
     register_computer(routes, bot)
     app = web.Application(middlewares=[auth])
+    app["session_manager"] = sessions
     app.router.add_routes(routes)
     async with TestClient(TestServer(app)) as client:
         response = await client.get("/api/computer")

@@ -21,7 +21,10 @@ def integration(*, enabled=False, host_allowed=True, permission=None):
 
 async def test_real_facade_stop_remains_authorized_after_disable():
     service, controller = integration()
-    result = await service.operator_stop(owner_id="alice", web_session_id="private")
+    from tests.test_computer_operator_auth_r5 import bound_operator
+
+    with bound_operator(service.bot, "alice", "private"):
+        result = await service.operator_stop(owner_id="alice", web_session_id="private")
     assert result["state"] == "cancelled"
     context, operation = controller.operator_session.call_args.args
     assert operation == "stop"

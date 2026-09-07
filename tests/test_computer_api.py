@@ -83,19 +83,34 @@ class Controller:
 
 
 def client(controller, *, enabled=True, user="alice", tier="admin", session="private-session"):
+    import time
+
+    from src.config.schema import ApiTokenIdentity
+    from src.health.server import SessionManager
+
+    principal = ApiTokenIdentity(token="fixture-only", user_id=user or "absent", tier=tier)
+    sessions = SessionManager()
+    if session is not None:
+        sessions._sessions[session] = time.monotonic()
+        sessions._identities[session] = principal
+
     @web.middleware
     async def identity(request, handler):
         if user is not None:
-            request._api_identity = SimpleNamespace(user_id=user, tier=tier)
+            request._api_identity = principal
         if session is not None:
             request._session_id = session
+            request._session_managed = True
         return await handler(request)
 
-    bot = SimpleNamespace(computer=controller, config=SimpleNamespace(
+    bot = SimpleNamespace(computer=controller,
+        host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+        tool_executor=SimpleNamespace(check_permission=lambda *_: None), config=SimpleNamespace(
         computer=SimpleNamespace(enabled=enabled),
-        web=SimpleNamespace(api_token="", api_tokens=[]),
+        web=SimpleNamespace(api_token="", api_tokens=[principal]),
     ))
     app = web.Application(middlewares=[identity])
+    app["session_manager"] = sessions
     routes = web.RouteTableDef()
     register_computer(routes, bot)
     app.router.add_routes(routes)
