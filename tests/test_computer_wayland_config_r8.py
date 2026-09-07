@@ -86,10 +86,19 @@ def test_real_composition_selects_portal_backend_and_actual_qualifier(tmp_path):
         wayland_bus_address="unix:path=/run/user/1000/bus", wayland_uid=1000)
     facade = ComputerIntegration(SimpleNamespace(config=Config(
         discord={"token": "fixture"}, computer=settings)), controller=object(), settings=settings)
-    selected = facade._backend("xed")
+    selected = facade._backend("inkscape")
     assert type(selected) is WaylandRuntimeBackend
     assert type(selected._qualify) is GnomeSameStackQualifier
     assert selected.config.expected_uid == 1000
     assert selected.config.bus_address == settings.wayland_bus_address
     assert selected.input_supported is False
     assert selected._portal is None and selected._guardian is None
+
+
+@pytest.mark.parametrize("app", ["xed", "drawing", "writer", "calc", "draw", "libreoffice"])
+def test_unqualified_wayland_apps_not_offered(app):
+    from src.computer.app_profiles import application_profile, validate_profile
+
+    assert application_profile(app, platform="wayland", environment="existing_session") is None
+    with pytest.raises(ValueError):
+        validate_profile(app, platform="wayland", environment="existing_session")

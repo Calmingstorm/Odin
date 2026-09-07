@@ -76,8 +76,9 @@ def validate_profile(app, *, platform, environment):
 
     if not isinstance(app, str) or app not in ATTACHED_PROFILES:
         raise ComputerError("unsupported_app")
-    if (platform == "wayland" and app in WAYLAND_PROFILES
-            and environment == "existing_session"):
+    if platform == "wayland":
+        if app not in WAYLAND_PROFILES or environment != "existing_session":
+            raise ComputerError("application_environment_unsupported")
         return
     if app not in ISOLATED_PROFILES and (platform, environment) != ("x11", "existing_session"):
         raise ComputerError("application_environment_unsupported")
