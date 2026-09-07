@@ -8,6 +8,7 @@ from typing import Any
 
 from aiohttp import web
 
+from ...computer.models import ComputerError
 from ..api_common import admin_gate
 from ..computer_binding import operator_binding, operator_scope
 
@@ -17,6 +18,38 @@ _PRIVATE = {
     "Cache-Control": "no-store, private",
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
+}
+
+
+class _OperatorError(Exception):
+    """An adapter failure is not evidence of a malformed HTTP request."""
+
+
+# Never serialize arbitrary exception messages, including unknown error codes.
+_PUBLIC_ERRORS = {
+    "not_found": (404, "Not found or no longer authorized", "check_authorization"),
+    "operator_surface_required": (404, "Not found or no longer authorized",
+                                  "check_authorization"),
+    "stale_generation": (409, "Session generation changed. Refresh status and use "
+                         "session_generation, not runtime generation.", "refresh_status"),
+    "recovery_unavailable": (409, "Recovery requires a quarantined session without a "
+                             "live controller. Refresh status; no cleanup was performed.",
+                             "refresh_status"),
+    "legacy_acknowledgment_unavailable": (
+        409, "Legacy acknowledgment requires a quarantined session with no recorded "
+        "runtime identity and no live controller. Inspect the recorded workload instead.",
+        "inspect_recorded_workload"),
+    "explicit_acknowledgment_required": (
+        400, "Explicit acknowledgment must exactly match ACKNOWLEDGE UNVERIFIED CLEANUP "
+        "followed by a space and the selected session ID.", "correct_acknowledgment"),
+    "disabled": (503, "Computer use is disabled. Status and recovery remain available.",
+                 "refresh_status"),
+    "grant_revoked": (409, "Input authority was revoked. Refresh status before continuing.",
+                      "refresh_status"),
+    "runtime_identity_required": (
+        409, "No recorded runtime identity is available. Use the legacy acknowledgment "
+        "flow as the session owner after independently inspecting cleanup.",
+        "inspect_legacy_cleanup"),
 }
 
 
@@ -95,11 +128,18 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
 
     async def call(request, method, **kwargs):
         service, actor = context(request, emergency=method in {
-            "status", "stop", "pause", "recover", "acknowledge_legacy"})
+            "status", "stop", "pause", "recover", "acknowledge_legacy", "reconcile"})
         adapter = getattr(service, f"operator_{method}", None)
         if adapter is None:
             raise web.HTTPServiceUnavailable(headers=_PRIVATE)
-        result = await adapter(**actor, **kwargs)
+        try:
+            result = await adapter(**actor, **kwargs)
+        except ComputerError:
+            raise
+        except (ValueError, TypeError, KeyError) as exc:
+            # A valid request can hit an internal invariant. Do not blame its
+            # body or expose paths, identities or arbitrary exception text.
+            raise _OperatorError from exc
         authenticate(request)
         return result, actor
 
@@ -108,6 +148,14 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             return await operation(request)
         except web.HTTPException:
             raise
+        except ComputerError as exc:
+            code, message, action = _PUBLIC_ERRORS.get(exc.code, (
+                409, "Computer operation unavailable; outcome unknown. Refresh status.",
+                "refresh_status"))
+            public_code = (exc.code if exc.code in _PUBLIC_ERRORS
+                           else "computer_operation_unavailable")
+            return web.json_response({"error": message, "code": public_code,
+                                      "next_action": action}, status=code, headers=_PRIVATE)
         except (PermissionError, FileNotFoundError):
             message, code = "Not found or no longer authorized", 404
         except TimeoutError:
@@ -251,7 +299,9 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                        "owned_process_group_remaining", "process_inspection_unavailable",
                        "unit_absence_unproven", "cgroup_absence_unproven",
                        "owned_input_release_unproven", "owned_runtime_gone",
-                       "inspection_unavailable", "inspection_timeout"}
+                       "inspection_unavailable", "inspection_timeout",
+                       "operator_verified_external_cleanup", "recorded_processes_gone",
+                       "persistent_input_state_unproven", "operator_reconciliation_unsupported"}
             result["recovery"] = {
                 "status": (recovery.get("status")
                            if recovery.get("status") in statuses else "unknown"),
@@ -271,7 +321,16 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         # Existing operator/host authorization runs before and after this await;
         # the route's delivery fence still applies to the final response.
         service, _ = context(request, emergency=True)
-        accessibility = await read_accessibility_status(getattr(service, "settings", None))
+        # Recovery inspection must not depend on reaching a lost desktop. This
+        # optional diagnostic must never hide the persisted session/generation.
+        accessibility = {"enabled": None, "state": "unknown", "reason": "session_quarantined"}
+        if value.get("state") != "quarantined":
+            try:
+                accessibility = await read_accessibility_status(getattr(service, "settings", None))
+            except PermissionError:
+                raise
+            except Exception:
+                accessibility = {"enabled": None, "state": "unknown", "reason": "read_unavailable"}
         authenticate(request)
         return status_json(value, actor, accessibility=accessibility)
 
@@ -368,7 +427,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         authenticate(request)
         return web.json_response({"enabled": bool(bot.config.computer.enabled)}, headers=_PRIVATE)
 
-    async def recovery(request, *, acknowledge=False):
+    async def recovery(request, *, acknowledge=False, reconcile=False):
         authenticate(request)
         if request.content_length is None or request.content_length > 512:
             raise ValueError
@@ -381,13 +440,16 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             raise ValueError
         if acknowledge and body["acknowledgment"] != (
                 "ACKNOWLEDGE UNVERIFIED CLEANUP " + body["session_id"]):
-            raise ValueError
-        value, actor = await call(request, "acknowledge_legacy" if acknowledge else "recover",
-                                  **body)
+            raise ComputerError("explicit_acknowledgment_required")
+        method = "reconcile" if reconcile else "acknowledge_legacy" if acknowledge else "recover"
+        value, actor = await call(request, method, **body)
         return status_json(value, actor)
 
     async def acknowledge_legacy(request):
         return await recovery(request, acknowledge=True)
+
+    async def reconcile(request):
+        return await recovery(request, acknowledge=True, reconcile=True)
 
     for method, path, handler in (
         ("GET", "/api/computer", status),
@@ -400,6 +462,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         ("POST", "/api/computer/enabled", enabled),
         ("POST", "/api/computer/recover", recovery),
         ("POST", "/api/computer/acknowledge_legacy", acknowledge_legacy),
+        ("POST", "/api/computer/reconcile", reconcile),
     ):
         async def wrapped(request, operation=handler):
             binding = operator_binding(bot, request)

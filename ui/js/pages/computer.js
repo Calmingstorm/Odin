@@ -133,7 +133,13 @@ export default {
         </div>
         <p>{{ status.recovery.status }}: {{ status.recovery.reason }}. Cleanup {{ status.recovery.complete ? 'verified' : 'not verified' }}.</p>
         <p class="page-lede">Reconciliation only inspects the recorded workload. It never sends input, terminates applications or replays actions.</p>
-        <button v-if="status.state === 'quarantined'" class="btn btn-ghost btn-touch mt-3" @click="recover" :disabled="recovering || !adminReady">{{ recovering ? 'Checking recorded workload…' : 'Reconcile recorded workload' }}</button>
+        <button v-if="status.state === 'quarantined'" class="btn btn-ghost btn-touch mt-3" @click="recover" :disabled="recovering || !adminReady">{{ recovering ? 'Checking recorded workload…' : 'Verify recorded workload absence' }}</button>
+        <div v-if="status.state === 'quarantined' && status.session_id" class="mt-3">
+          <p class="text-amber-300">Manual reconciliation is an operator attestation, not verified cleanup. Independently inspect the desktop: no held input, owned master devices or workers may remain. Known running workers also block this request. The failed action remains unknown and is never replayed.</p>
+          <label class="block mt-2" for="computer-reconciliation-ack">Type ACKNOWLEDGE UNVERIFIED CLEANUP {{ status.session_id }}</label>
+          <input id="computer-reconciliation-ack" v-model="reconciliationAck" class="input w-full mt-2" autocomplete="off" :disabled="recovering || !adminReady">
+          <button class="btn btn-ghost btn-touch mt-3" @click="reconcile" :disabled="recovering || !adminReady || reconciliationAck !== 'ACKNOWLEDGE UNVERIFIED CLEANUP ' + status.session_id">Acknowledge unverified cleanup</button>
+        </div>
       </section>
       <section class="hm-card" aria-labelledby="computer-session-title">
         <div class="section-card-header">
@@ -193,6 +199,7 @@ export default {
     const loading = ref(false), observing = ref(false), stopping = ref(false), pausing = ref(false);
     const exporting = ref(false), downloading = ref(false), error = ref('');
     const toggling = ref(false), adminReady = ref(false), recovering = ref(false);
+    const reconciliationAck = ref('');
     const frame = ref(null), frameUrl = ref(''), frameExpired = ref(false), now = ref(Date.now());
     const name = ref(''), artifact = ref(null);
     let generation = 0, timer = null, active = false, token = api.token, lastRefresh = 0;
@@ -237,6 +244,7 @@ export default {
     }
     function invalidate() {
       generation++; clearFrame(); artifact.value = null;
+      reconciliationAck.value = '';
       observing.value = false; exporting.value = false; downloading.value = false;
     }
     function current(g, t) { return active && g === generation && t === api.token; }
@@ -249,6 +257,12 @@ export default {
         ? 'Access unavailable or revoked. Authenticate as the session owner, then refresh.'
         : code === 410 ? 'Evidence or artifact expired. Observe or prepare the export again.'
           : code === 503 ? 'Computer use is disabled or unavailable.' : 'Request failed; outcome unknown. Refresh status. No action was replayed.';
+      // Only typed API diagnostics may replace the fallback; Vue interpolation
+      // treats the bounded message as text, never executable HTML.
+      if (![401, 403, 404].includes(code) && typeof e.data?.code === 'string'
+          && /^[a-z_]{1,64}$/.test(e.data.code) && typeof e.data?.error === 'string') {
+        error.value = e.data.error.slice(0, 512);
+      }
     }
     async function refresh() {
       if (loading.value || toggling.value || stopping.value || pausing.value || recovering.value || !active) return;
@@ -295,12 +309,22 @@ export default {
       finally { busy.value = false; }
     }
     async function recover() {
+      return recoveryRequest(false);
+    }
+    async function reconcile() {
+      return recoveryRequest(true);
+    }
+    async function recoveryRequest(acknowledge) {
       if (!active || !adminReady.value || recovering.value || status.value.state !== 'quarantined') return;
       const selected = { session_id: status.value.session_id, generation: status.value.session_generation };
       if (!selected.session_id || !Number.isInteger(selected.generation)) return;
+      if (acknowledge) {
+        if (reconciliationAck.value !== 'ACKNOWLEDGE UNVERIFIED CLEANUP ' + selected.session_id) return;
+        selected.acknowledgment = reconciliationAck.value;
+      }
       invalidate(); const g = generation, t = api.token; recovering.value = true;
       try {
-        const value = await api.post('/api/computer/recover', selected);
+        const value = await api.post(acknowledge ? '/api/computer/reconcile' : '/api/computer/recover', selected);
         if (current(g, t)) acceptStatus(value);
       } catch (e) { if (current(g, t)) fail(e); }
       finally { recovering.value = false; }
@@ -351,6 +375,6 @@ export default {
     }
     function cleanup() { active = false; clearInterval(timer); timer = null; invalidate(); adminReady.value = false; }
     onMounted(start); onActivated(start); onDeactivated(cleanup); onUnmounted(cleanup);
-    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, applicationProfiles, attached, scriptIdentity, inputLimits, accessibilityLabel, accessibilityDetail };
+    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, reconcile, reconciliationAck, applicationProfiles, attached, scriptIdentity, inputLimits, accessibilityLabel, accessibilityDetail };
   },
 };

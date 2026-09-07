@@ -61,6 +61,9 @@ class Backend(Controller):
         assert acknowledgment == "ACKNOWLEDGE UNVERIFIED CLEANUP " + kwargs["session_id"]
         return await self.operator_recover(**kwargs)
 
+    async def operator_reconcile(self, **kwargs):
+        return await self.operator_acknowledge_legacy(**kwargs)
+
 
 ROUTES = [
     ("GET", "/api/computer", None),
@@ -73,6 +76,9 @@ ROUTES = [
     ("POST", "/api/computer/enabled", {"enabled": True}),
     ("POST", "/api/computer/recover", {"session_id": "computer-session", "generation": 1}),
     ("POST", "/api/computer/acknowledge_legacy", {
+        "session_id": "computer-session", "generation": 1,
+        "acknowledgment": "ACKNOWLEDGE UNVERIFIED CLEANUP computer-session"}),
+    ("POST", "/api/computer/reconcile", {
         "session_id": "computer-session", "generation": 1,
         "acknowledgment": "ACKNOWLEDGE UNVERIFIED CLEANUP computer-session"}),
 ]

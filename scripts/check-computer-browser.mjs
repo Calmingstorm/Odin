@@ -8,7 +8,7 @@ const systemSource = fs.readFileSync('ui/js/pages/system.js', 'utf8');
 assert.match(systemSource, /import ComputerPage from ['"]\.\/computer\.js['"]/);
 assert.match(systemSource, /id: ['"]computer['"], label: ['"]Computer['"], component: ComputerPage/);
 const configSource = fs.readFileSync('ui/js/pages/config.js', 'utf8');
-assert.match(configSource, /query: \{ tab: 'computer' \}/);
+assert.match(configSource, /CONFIG_EXCLUDED_SECTIONS = new Set\([\s\S]*?'computer'/);
 assert.doesNotMatch(configSource, /Computer use is under development/);
 const computerSource = fs.readFileSync('ui/js/pages/computer.js', 'utf8');
 assert.match(computerSource, /class="page-header mb-4"/);
@@ -61,6 +61,12 @@ try {
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHj8AAAAASUVORK5CYII=', 'base64');
   await page.route('**/api/**', async route => {
     const req = route.request(), url = new URL(req.url()), path = url.pathname;
+    // Provisioning has its own harness; this component suite exercises status
+    // and recovery without saving configuration.
+    if (path === '/api/config' || path === '/api/config/meta') {
+      assert.equal(req.method(), 'GET');
+      return route.fulfill({ contentType: 'application/json', body: '{}' });
+    }
     requests.push(path);
     assert.equal(url.search, '', 'credentials must not enter URLs');
     assert.equal(req.headers().authorization, 'Bearer fixture-only');
@@ -82,6 +88,13 @@ try {
     else if (path === '/api/computer/recover') {
       assert.deepEqual(req.postDataJSON(), { session_id: 'computer-session', generation: sessionGeneration });
       state = 'closed'; recovery = { status: 'absence_verified', reason: 'owned_runtime_gone', complete: true };
+      body = summary();
+    }
+    else if (path === '/api/computer/reconcile') {
+      assert.deepEqual(req.postDataJSON(), { session_id: 'computer-session', generation: sessionGeneration,
+        acknowledgment: 'ACKNOWLEDGE UNVERIFIED CLEANUP computer-session' });
+      state = 'closed'; sessionGeneration++;
+      recovery = { status: 'operator_acknowledged_unverified', reason: 'controller_lost', complete: false };
       body = summary();
     }
     else if (path === '/api/computer/pause') { state = 'paused'; body = summary(); }
@@ -270,10 +283,31 @@ try {
   await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
   await page.waitForFunction(() => !view.loading && view.status.state === 'quarantined');
   const beforeRecoveryCapture = requests.filter(p => /observe|evidence/.test(p)).length;
-  const reconcile = page.getByRole('button', { name: 'Reconcile recorded workload', exact: true });
-  await reconcile.focus(); await page.keyboard.press('Enter');
+  const verifyWorkload = page.getByRole('button', { name: 'Verify recorded workload absence', exact: true });
+  await verifyWorkload.focus(); await page.keyboard.press('Enter');
   await page.waitForFunction(() => !view.recovering && view.status.state === 'closed');
   assert.match(await page.getByRole('region', { name: 'Recovery evidence' }).innerText(), /Cleanup verified/);
+  assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, beforeRecoveryCapture);
+  // Manual recovery requires an exact, generation-bound human attestation.
+  state = 'quarantined'; recovery = { status: 'operator_reconciliation_required', reason: 'controller_lost', complete: false };
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.status.state === 'quarantined');
+  const acknowledge = page.getByRole('button', { name: 'Acknowledge unverified cleanup', exact: true });
+  const acknowledgment = page.locator('#computer-reconciliation-ack');
+  assert.ok(await acknowledge.isDisabled());
+  await acknowledgment.fill('yes');
+  assert.ok(await acknowledge.isDisabled());
+  await acknowledgment.fill('ACKNOWLEDGE UNVERIFIED CLEANUP computer-session');
+  assert.ok(await acknowledge.isEnabled());
+  sessionGeneration++;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && !view.reconciliationAck);
+  assert.ok(await acknowledge.isDisabled(), 'stale attestation is invalidated with session generation');
+  await acknowledgment.fill('ACKNOWLEDGE UNVERIFIED CLEANUP computer-session');
+  await acknowledge.click();
+  await page.waitForFunction(() => !view.recovering && view.status.state === 'closed');
+  assert.match(await page.getByRole('region', { name: 'Recovery evidence' }).innerText(), /Cleanup not verified/);
+  assert.equal(requests.filter(p => p === '/api/computer/reconcile').length, 1);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, beforeRecoveryCapture);
   // Rejected mutations hide admin controls and are not retried automatically.
   const togglesBefore = requests.filter(p => p.endsWith('/enabled')).length;
