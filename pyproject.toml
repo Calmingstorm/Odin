@@ -26,14 +26,17 @@ dependencies = [
 pdf = ["PyMuPDF>=1.24.0"]
 # Browser automation (browser_screenshot, browser_click, etc.)
 browser = ["playwright>=1.40.0"]
+# Computer observation raster processing, imported only on explicit render calls.
+computer = ["Pillow>=12.3,<13"]
 # All optional executor features
-all = ["odin-bot[pdf,browser]"]
+all = ["odin-bot[pdf,browser,computer]"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov",
     "ruff",
     "aioresponses>=0.7",
+    "Pillow>=12.3,<13",
     # Type gate (RFC-005): checker + stubs pinned so CI findings are
     # deterministic — upgrades are deliberate PRs, never ambient drift.
     "mypy==2.1.0",
