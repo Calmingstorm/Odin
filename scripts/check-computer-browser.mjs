@@ -43,8 +43,9 @@ try {
   page.on('pageerror', e => errors.push(e.message));
   let state = 'active', code = 200, blocked = null, holdObserve = false;
   let enabled = false, runtimeEnabled = false, runtimeGeneration = 0, holdToggle = false, blockedToggle = null;
+  let sessionGeneration = 1, recovery;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
-  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, backend, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: 'drawing', last_action: 'executed', last_verification: 'unknown' });
+  const summary = () => ({ available: true, state, enabled, configured_enabled: enabled, runtime_enabled: runtimeEnabled, generation: runtimeGeneration, session_generation: sessionGeneration, recovery, backend, restart_required: restartRequired, owner_id: 'alice', session_id: 'computer-session', app: 'drawing', last_action: 'executed', last_verification: 'unknown' });
   const frame = () => ({ frame: { evidence_id: 'opaque-frame', captured_at: new Date().toISOString(), expires_at: new Date(Date.now() + 3600000).toISOString(), fresh_for_ms: 1000 } });
   const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aHj8AAAAASUVORK5CYII=', 'base64');
   await page.route('**/api/**', async route => {
@@ -66,7 +67,12 @@ try {
       if (holdObserve) { blocked = route; return; }
       body = frame();
     } else if (path === '/api/computer/evidence/opaque-frame') return route.fulfill({ contentType: 'image/png', body: png });
-    else if (path === '/api/computer/stop') { state = 'cancelled'; body = summary(); }
+    else if (path === '/api/computer/stop') { state = 'cancelled'; body = { state }; }
+    else if (path === '/api/computer/recover') {
+      assert.deepEqual(req.postDataJSON(), { session_id: 'computer-session', generation: sessionGeneration });
+      state = 'closed'; recovery = { status: 'absence_verified', reason: 'owned_runtime_gone', complete: true };
+      body = summary();
+    }
     else if (path === '/api/computer/pause') { state = 'paused'; body = summary(); }
     else if (path === '/api/computer/export') {
       assert.deepEqual(req.postDataJSON(), { name: 'drawing.png' });
@@ -173,6 +179,20 @@ try {
   await page.waitForFunction(() => !view.loading && !view.frameUrl);
   assert.match(await lifecycle.innerText(), /Input capability is unknown/);
   assert.match(await lifecycle.innerText(), /None reported/);
+  // Session revocation, independent of runtime generation, also retires pixels.
+  await observe.click(); await page.waitForFunction(() => !!view.frameUrl);
+  sessionGeneration++;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && !view.frameUrl);
+  state = 'quarantined'; recovery = { status: 'operator_reconciliation_required', reason: 'controller_lost', complete: false };
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.status.state === 'quarantined');
+  const beforeRecoveryCapture = requests.filter(p => /observe|evidence/.test(p)).length;
+  const reconcile = page.getByRole('button', { name: 'Reconcile recorded workload', exact: true });
+  await reconcile.focus(); await page.keyboard.press('Enter');
+  await page.waitForFunction(() => !view.recovering && view.status.state === 'closed');
+  assert.match(await page.getByRole('region', { name: 'Recovery evidence' }).innerText(), /Cleanup verified/);
+  assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, beforeRecoveryCapture);
   // Rejected mutations hide admin controls and are not retried automatically.
   const togglesBefore = requests.filter(p => p.endsWith('/enabled')).length;
   code = 403;

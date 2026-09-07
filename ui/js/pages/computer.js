@@ -39,6 +39,12 @@ export default {
       <p v-if="status.state === 'unavailable'" class="page-lede mb-4">Disabled or unavailable. Check configured state, lifecycle state and backend prerequisites separately.</p>
       <p v-if="status.state === 'paused'" class="page-lede mb-4">Agent input is revoked. This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</p>
       <p v-if="status.state === 'unknown'" class="page-lede mb-4">Outcome is unknown. Refresh status; do not replay the last action.</p>
+      <section v-if="status.recovery" class="mb-4" aria-labelledby="computer-recovery-title">
+        <h2 id="computer-recovery-title" class="font-semibold">Recovery evidence</h2>
+        <p>{{ status.recovery.status }}: {{ status.recovery.reason }}. Cleanup {{ status.recovery.complete ? 'verified' : 'not verified' }}.</p>
+        <p class="page-lede">Reconciliation only inspects the recorded workload. It never sends input, terminates applications or replays actions.</p>
+        <button v-if="status.state === 'quarantined'" class="btn btn-ghost" style="min-height:44px" @click="recover" :disabled="recovering || !adminReady">{{ recovering ? 'Checking recorded workload…' : 'Reconcile recorded workload' }}</button>
+      </section>
       <dl class="grid grid-cols-1 md:grid-cols-2 gap-3 mb-4">
         <div><dt>Owner</dt><dd>{{ status.owner_id || '—' }}</dd></div>
         <div><dt>Session</dt><dd style="overflow-wrap:anywhere">{{ status.session_id || '—' }}</dd></div>
@@ -72,7 +78,7 @@ export default {
     const status = ref({ state: 'unknown', available: false });
     const loading = ref(false), observing = ref(false), stopping = ref(false), pausing = ref(false);
     const exporting = ref(false), downloading = ref(false), error = ref('');
-    const toggling = ref(false), adminReady = ref(false);
+    const toggling = ref(false), adminReady = ref(false), recovering = ref(false);
     const frame = ref(null), frameUrl = ref(''), frameExpired = ref(false), now = ref(Date.now());
     const name = ref(''), artifact = ref(null);
     let generation = 0, timer = null, active = false, token = api.token, lastRefresh = 0;
@@ -107,7 +113,7 @@ export default {
           : code === 503 ? 'Computer use is disabled or unavailable.' : 'Request failed; outcome unknown. Refresh status. No action was replayed.';
     }
     async function refresh() {
-      if (loading.value || toggling.value || stopping.value || pausing.value || !active) return;
+      if (loading.value || toggling.value || stopping.value || pausing.value || recovering.value || !active) return;
       const g = generation, t = api.token; loading.value = true; lastRefresh = Date.now();
       try {
         const value = await api.get('/api/computer');
@@ -118,7 +124,8 @@ export default {
     }
     function acceptStatus(value) {
       if ((status.value.session_id && status.value.session_id !== value.session_id)
-          || (status.value.generation != null && status.value.generation !== value.generation)) invalidate();
+          || (status.value.generation != null && status.value.generation !== value.generation)
+          || (status.value.session_generation != null && status.value.session_generation !== value.session_generation)) invalidate();
       status.value = value; adminReady.value = true; error.value = '';
     }
     async function setEnabled(enabled) {
@@ -139,9 +146,26 @@ export default {
       const busy = operation === 'stop' ? stopping : pausing; busy.value = true;
       try {
         const value = await api.post('/api/computer/' + operation, {});
-        if (current(g, t)) acceptStatus(value);
+        if (current(g, t)) {
+          // Stop intentionally returns state only. Read current lifecycle/session
+          // metadata separately rather than erasing it or treating old data as live.
+          status.value = { ...status.value, ...value };
+          const latest = await api.get('/api/computer');
+          if (current(g, t)) acceptStatus(latest);
+        }
       } catch (e) { if (current(g, t)) fail(e); }
       finally { busy.value = false; }
+    }
+    async function recover() {
+      if (!active || !adminReady.value || recovering.value || status.value.state !== 'quarantined') return;
+      const selected = { session_id: status.value.session_id, generation: status.value.session_generation };
+      if (!selected.session_id || !Number.isInteger(selected.generation)) return;
+      invalidate(); const g = generation, t = api.token; recovering.value = true;
+      try {
+        const value = await api.post('/api/computer/recover', selected);
+        if (current(g, t)) acceptStatus(value);
+      } catch (e) { if (current(g, t)) fail(e); }
+      finally { recovering.value = false; }
     }
     async function observe() {
       clearFrame(); frameExpired.value = false;
@@ -189,6 +213,6 @@ export default {
     }
     function cleanup() { active = false; clearInterval(timer); timer = null; invalidate(); adminReady.value = false; }
     onMounted(start); onActivated(start); onDeactivated(cleanup); onUnmounted(cleanup);
-    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled };
+    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover };
   },
 };
