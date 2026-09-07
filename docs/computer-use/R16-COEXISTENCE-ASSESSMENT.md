@@ -48,11 +48,13 @@ or sends input while waiting. Original observation freshness still applies and
 a new modal stops the settling loop. This handles brief focus excursions, not
 continuous background input or arbitrary window reacquisition.
 
-Important X11 limitation: its source revision advances when the input-scope
-fingerprint changes. If an intermediate capture has seen a different scope,
-returning focus does not restore the old revision, so exact-binding settling
-cannot automatically admit that action. Such cases still take the recoverable
-receipt path below. This is not a completed automatic-reacquisition fix.
+X11 additionally waits up to three 150ms intervals before publishing a changed
+scope revision. Only an exact return of the previous native input scope qualifies;
+window/process provenance, geometry, focus and modal state must all match. This
+allows a brief focus excursion to settle without invalidating the original
+revision. It never activates a window or rolls a published revision backwards.
+Longer excursions still publish the new revision and take the recoverable path
+below. Automatic short-excursion recovery is implemented, not yet live-qualified.
 
 In `ComputerController.act()`, an existing-session `stale_source_binding` still detected
 during the fresh, pre-dispatch validation capture now returns a durable

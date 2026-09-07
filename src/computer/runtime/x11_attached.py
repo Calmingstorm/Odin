@@ -739,6 +739,28 @@ class X11AttachedBackend:
             if topology_epoch != self._topology_epoch:
                 raise ComputerError("topology_changed")
             binding = reply.get("input_scope") if self._input_enabled else None
+            # Give a brief human focus excursion time to settle BEFORE publishing
+            # a new source revision. Only the exact previous native scope can
+            # qualify, including its window/process provenance and geometry.
+            # No activation, input, revision rollback or coordinate remapping.
+            previous_scope = self._scope
+            if (self._input_enabled and previous_scope
+                    and previous_scope.get("focused") is True
+                    and previous_scope.get("modal") is None):
+                for _ in range(3):
+                    if binding == previous_scope or (binding and binding.get("modal")):
+                        break
+                    await asyncio.sleep(0.15)
+                    if self._paused or self._closed or generation != self._generation:
+                        raise AttachedFailure("capture_revoked")
+                    if topology_epoch != self._topology_epoch:
+                        raise ComputerError("topology_changed")
+                    reply = await self._read_worker("capture", selected=monitor, crop=crop)
+                    if self._paused or self._closed or generation != self._generation:
+                        raise AttachedFailure("capture_revoked")
+                    if topology_epoch != self._topology_epoch:
+                        raise ComputerError("topology_changed")
+                    binding = reply.get("input_scope")
             fingerprint = (selected_id, generation, topology_epoch,
                            self._sources[selected_id], binding)
             if fingerprint != self._fingerprint:
