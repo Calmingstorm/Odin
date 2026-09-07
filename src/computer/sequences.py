@@ -78,14 +78,34 @@ def _stable_target(controller, context, original, current, step):
         raise ComputerError("sequence_target_changed")
     if current.image_sha256 == original.image_sha256:
         return
-    # Keyboard is deliberately stricter than ordinary single-action X11: a
-    # same-window field/menu transition must not silently retarget later typing.
+    # A native focused editable node can tolerate selection/text changes without
+    # accepting a different widget. No name-only or bounds-only rebinding.
+    if step["operation"] in {"type", "key"} and _same_focused_field(original, current):
+        return
     if step["operation"] not in POINTER_OPERATIONS:
         raise ComputerError("sequence_visual_target_changed")
     before, _ = controller.store.read_evidence(context, original.evidence_id)
     after, _ = controller.store.read_evidence(context, current.evidence_id)
     if not pointer_target_stable(before, after, *pointer_anchor(step)):
         raise ComputerError("sequence_visual_target_changed")
+
+
+def _same_focused_field(original, current):
+    def focused(observation):
+        return [node for node in observation.accessibility
+                if node.get("focused") is True and node.get("text_readable") is True
+                and "replace_field" in node.get("capabilities", [])]
+
+    before, after = focused(original), focused(current)
+    if len(before) != 1 or len(after) != 1:
+        return False
+    old, new = before[0], after[0]
+    identities = ("node_identity", "root_identity", "ancestor_identity")
+    if any(not isinstance(old.get(key), str) or not old[key]
+           or old[key] != new.get(key) for key in identities):
+        return False
+    return all(old.get(key) == new.get(key) for key in
+               ("role", "bounds", "bounds_space", "capabilities"))
 
 
 def _preflight_backend(grant, steps):
