@@ -14,7 +14,11 @@ COPY --from=runtime src/computer/runtime/assets/wayland_owned_input.c /work/src/
 RUN gcc -std=c11 -D_DEFAULT_SOURCE -Wall -Wextra -Werror \
       /work/src/computer/runtime/assets/wayland_owned_input.c \
       -o /usr/local/bin/wayland-owned-input $(pkg-config --cflags --libs libei-1.0 xkbcommon) -lm \
+    && find /work -type f -name '*.pyc' -delete \
     && find /work/src/computer/runtime -name 'wayland*' -type f -exec sha256sum '{}' ';' > /opt/r8-package-evidence/composed-source.sha256 \
-    && sha256sum /usr/local/bin/wayland-owned-input >> /opt/r8-package-evidence/composed-source.sha256 \
+    && sha256sum /usr/local/bin/wayland-owned-input \
+         /usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/extension.js \
+         /usr/share/gnome-shell/extensions/odin-composed-diagnostic@private.invalid/extension.js \
+         >> /opt/r8-package-evidence/composed-source.sha256 \
     && PYTHONPATH=/work python3 -B -c 'from src.computer.runtime.wayland_backend import WaylandRuntimeBackend; from src.computer.runtime.wayland_probe import GnomeSameStackQualifier'
 USER 1003:1003

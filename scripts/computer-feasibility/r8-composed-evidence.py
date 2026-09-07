@@ -1,9 +1,9 @@
 """Strict artifact/task evidence, separate from startup or input receipts."""
 import hashlib
 import json
-from pathlib import Path
 import sys
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 
 def analyze(directory):
@@ -32,6 +32,9 @@ def analyze(directory):
     stop = stops[0]
     if not (stop['task_ok'] and stop['result']['stopped'] and stop['result']['released']):
         raise ValueError('production_cleanup_required')
+    preserved = [row for row in rows if row['kind'] == 'application_preserved']
+    if len(preserved) != 1 or preserved[0]['alive_same_process'] is not True:
+        raise ValueError('actual_same_application_preserved_required')
     data = (directory / 'r8-composed-scratch.svg').read_bytes()
     root = ET.fromstring(data)
     rects = [node for node in root.iter() if node.tag == '{http://www.w3.org/2000/svg}rect'

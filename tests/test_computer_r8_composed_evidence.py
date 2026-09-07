@@ -26,13 +26,15 @@ def successful_evidence(tmp_path):
     rows.extend(dict(kind='action', label=label, result=dict(status='executed', released=True))
                 for label in ['rectangle-tool', 'rectangle', 'deselect', 'save'])
     rows += [dict(kind='saved_artifact', sha256=hashlib.sha256(svg).hexdigest()),
-             dict(kind='stopped', task_ok=True, result=dict(stopped=True, released=True))]
+             dict(kind='stopped', task_ok=True, result=dict(stopped=True, released=True)),
+             dict(kind='application_preserved', alive_same_process=True)]
     cleanup = dict(owned_residuals=[], new_helpers=[], census_errors=[],
                    baseline_complete=True, scan_complete=True, owned_cgroup_absent=True)
     (tmp_path / 'host-cleanup.json').write_text(json.dumps(cleanup))
 
     def save(new_rows=rows):
-        (tmp_path / 'composition.jsonl').write_text(''.join(json.dumps(row) + '\n' for row in new_rows))
+        (tmp_path / 'composition.jsonl').write_text(
+            ''.join(json.dumps(row) + '\n' for row in new_rows))
 
     save()
     return tmp_path, copy.deepcopy(rows), save
@@ -99,4 +101,11 @@ def test_cleanup_residuals_rejected(successful_evidence):
     cleanup['owned_residuals'] = [{'pid': 123}]
     path.write_text(json.dumps(cleanup))
     with pytest.raises(ValueError, match='exact_owned_cleanup_required'):
+        evidence.analyze(root)
+
+
+def test_missing_real_app_preservation_rejected(successful_evidence):
+    root, rows, save = successful_evidence
+    save([row for row in rows if row['kind'] != 'application_preserved'])
+    with pytest.raises(ValueError, match='actual_same_application_preserved_required'):
         evidence.analyze(root)

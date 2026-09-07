@@ -9,10 +9,10 @@ import hashlib
 import json
 import logging
 import os
-from pathlib import Path
 import time
 import traceback
 import xml.etree.ElementTree as ET
+from pathlib import Path
 
 from src.computer.runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
 from src.computer.runtime.wayland_probe import GnomeSameStackQualifier
@@ -63,7 +63,11 @@ async def main():
     backend = WaylandRuntimeBackend(enabled=True, app_profile='inkscape',
         config=WaylandSessionConfig(address, os.getuid(), '/usr/local/bin/wayland-owned-input'),
         qualify=GnomeSameStackQualifier(record_spawn=probe_spawn))
-    backend.runtime_identity_callback = lambda identity: record('runtime_identity', identity=identity)
+    backend.runtime_identity_callback = lambda identity: record(
+        'runtime_identity', identity=identity)
+    application_pid = int((EVIDENCE / 'inkscape.pid').read_text())
+    application_stat = Path(f'/proc/{application_pid}/stat')
+    application_start = application_stat.read_text().rsplit(')', 1)[1].split()[19]
     consent = asyncio.create_task(operator())
     task_ok = False
     try:
@@ -94,7 +98,8 @@ async def main():
         async def action(label, kind, **fields):
             frame = await observe(label + '-before')
             if not frame.focused:
-                captured = await backend._portal.capture(backend._sources[backend._selected]['node_id'])
+                captured = await backend._portal.capture(
+                    backend._sources[backend._selected]['node_id'])
                 metadata = captured['source_metadata']
                 record('source_diagnostic', metadata=metadata)
                 try:
@@ -115,7 +120,8 @@ async def main():
         # Printable r selects rectangle; normal canvas drag creates a shape.
         # Ctrl+S exercises the newest production native J chord implementation.
         await action('rectangle-tool', 'type', text='r')
-        await action('rectangle', 'polyline', points=[[420, 340], [520, 340], [520, 450]], duration=.3)
+        await action('rectangle', 'polyline',
+                     points=[[420, 340], [520, 340], [520, 450]], duration=.3)
         await action('deselect', 'key', chord='Escape')
         await action('save', 'key', chord='ctrl+s')
         await asyncio.sleep(1)
@@ -139,6 +145,13 @@ async def main():
         await asyncio.gather(consent, return_exceptions=True)
         stopped = await backend.stop()
         record('stopped', result=stopped, task_ok=task_ok)
+        # Detaching product transports must preserve the same existing app.
+        current = Path(f'/proc/{application_pid}/stat').read_text().rsplit(')', 1)[1].split()
+        preserved = current[19] == application_start and current[0] not in {'Z', 'X', 'x'}
+        record('application_preserved', pid=application_pid, start=application_start,
+               alive_same_process=preserved)
+        if not preserved:
+            raise RuntimeError('target_application_not_preserved')
         if not stopped['stopped']:
             raise RuntimeError('production_backend_cleanup_unverified')
 
