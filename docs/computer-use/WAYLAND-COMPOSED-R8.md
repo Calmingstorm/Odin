@@ -3,7 +3,9 @@
 2026-09-07. This record is separate from the already completed stock 12/12
 lifecycle survey. The target is actual `WaylandRuntimeBackend` composition with
 `WaylandPortalSession`, authenticated scope extension, current J-chord guardian,
-and `GnomeSameStackQualifier`. **No completed application task yet at this commit.**
+and `GnomeSameStackQualifier`. **Native9 and frozen-source native10 completed the
+narrow existing-document rectangle/save task.** Historical failures below remain
+failures. The final result is recorded at the end.
 
 ## Task and isolation
 
@@ -138,7 +140,7 @@ From the qualification worktree, build with these contexts (no deploy paths):
 docker buildx build --load --progress plain \
   --build-context runtime=/home/odin/odin-dev \
   --build-context probe=/home/odin/odin-dev \
-  --build-context portal=/home/odin/reviews/computer-use-r8-portal-fix \
+  --build-context portal=/home/odin/odin-dev \
   -f scripts/computer-feasibility/r8-composed.Containerfile \
   -t localhost/odin-wayland-composed:r8-next .
 ```
@@ -157,5 +159,65 @@ python3 scripts/computer-feasibility/owned-test-supervisor-r6.py \
 
 Only after an actual successful run may `r8-composed-evidence.py EVIDENCE_DIR`
 be used to certify the narrow saved-rectangle task. Currently no directory
-passes that verifier. All module/source/image identifiers are preserved in each
-directory; build5/r8e source snapshot must not be conflated with later parent edits.
+passed that verifier before native9. All module/source/image identifiers are
+preserved in each directory; build5/r8e must not be conflated with later sources.
+
+## Final native GUI qualification: native9 and native10
+
+Both runs completed with standalone supervisor `primary_returncode=0`,
+`cleanup_ok=true`, no deadline, residuals or signals. Both pass the independent
+`r8-composed-evidence.py` verifier and exact process/cgroup cleanup recheck.
+
+* **native9/r8g:** all three producer contexts were `/home/odin/odin-dev`,
+  HEAD3c36322 plus pre-existing app-profile edits. Working source bytes and dirty
+  diff are captured in `/home/odin/tmp/r8-composed-native9-source-20260907`.
+  This is not a clean-SHA qualification claim.
+* **native10/r8h:** final repeat uses immutable `git archive` of clean parent
+  **88c126a644e938bf5975def5fe59ef2598c6398a**, extracted to
+  `/home/odin/tmp/r8-composed-native10-source-20260907`. Runtime, probe and portal
+  contexts ALL use that frozen snapshot. Producer archive/hash and SHA are
+  retained there. Independent comparison confirms all12 recorded `/work/src`
+  Wayland source hashes match those exact producer bytes.
+
+The real `ComputerController.session` acquired actual visible portal consent,
+real same-stack qualifier admission and authenticated focused observations.
+Guardian selected `xkb_v1`, two layouts, `text=true`. `ComputerController.act`
+typed `r`, dragged the canvas, sent Escape and Ctrl+S. All four receipts have
+`injected=true` and `released=true`. The first three report raster-change
+`verified`. Save reports **`not_satisfied` for immediate raster change**; that
+does not prove save failure or success. Independent file evidence proves save:
+the initially empty SVG becomes1165 bytes with one black `rect`, width103.27023,
+height113.59724, x389.32874, y130.12048. Both runs save SHA256
+`2b1d458bb33baf0e57c2fe0a8a159132bfa794288e4a995db3af986f6230a2c6`.
+
+Native10 final PNG decodes at1280x900 and matches observation hash
+`329ccdd4a3fd692c36288e917e42a392d0aa94f1fc4a561fb07226840ff758ac`.
+Independent bitmap check finds all7200 pixels in the rectangle interior crop
+at(430,350)-(510,440) black. This is a pixel check, not human visual review.
+The image-analysis tool did not return a usable description. Raw screenshot and
+GUI-saved SVG remain in each evidence directory.
+
+Controller close reports complete=true, released=true, capture_revoked=true,
+input_revoked=true, ei_connection_closed=true, portal_connection_closed=true,
+portal_session_closed=true, applications_preserved=true. Native10 independently
+confirms the same Inkscape PID234/start393625133 alive after detach, before outer
+teardown. Exact cleanup finds no owned residual, no new helper, absent owned
+cgroup, complete baseline/final scans, no census or scan errors. A delayed
+native10 launch-health assertion failed because the short task had already
+exited. Appropriate post-teardown verifier/container-absence/cleanup validation
+then passed **3/3**. Native9 live launch validation passed2/2.
+
+Final evidence under `/home/odin/tmp`:
+
+* `r8-composed-native10-20260907/`: composition, screenshots, SVG, image/source
+  manifests, process census and exact cleanup.
+* `r8-composed-native10-owned.json`, `r8-composed-native10-driver.log`.
+* `r8-composed-native10-verifier.json`, `r8-composed-native10-independent.json`,
+  `r8-composed-native10-cleanup-recheck.json`.
+* `r8-composed-build8.log`, `r8-composed-build8-owned.json`.
+
+No runtime change was needed after the keymap fix; no modifier safety was removed.
+No dialog bypass, live desktop, host bus/device, service restart, deployment,
+merge, push or pipeline action occurred. Scope remains rectangle creation and
+ordinary save into an operator-opened existing document, not arbitrary Inkscape
+tasks, save-as, new/open/close/reopen, other apps, or general model-driven work.
