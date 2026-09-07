@@ -94,3 +94,15 @@ async def test_failed_cleanup_keeps_owned_store_and_allows_retry():
     await service.close()
     assert service._closed
     controller.store.close.assert_called_once()
+
+
+def test_context_revocation_hook_rechecked_with_host_and_tool_authority():
+    service = facade()
+    context = service._context(dispatch_state())
+    assert service._authorize(context)
+    service.bot.computer_authorize_context = lambda _: False
+    assert not service._authorize(context)
+    service.bot.computer_authorize_context = lambda _: True
+    assert service._authorize(context)
+    service.bot.host_access_manager.is_host_allowed = lambda *_: False
+    assert not service._authorize(context)

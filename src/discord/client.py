@@ -151,6 +151,9 @@ class OdinBot(commands.Bot):
         self.tool_catalog = components.tool_catalog
         self.builtin_tool_policy = components.builtin_tool_policy
         self.native_tools = components.native_tools
+        self.computer = components.computer
+        self.computer_set_enabled = self.computer.set_enabled
+        self.computer_authorize_context = self.computer.authorize_context
         self.scheduling_tools = components.scheduling_tools
         self.knowledge_tools = components.knowledge_tools
         self.channel_ops_tools = components.channel_ops_tools
@@ -277,6 +280,11 @@ class OdinBot(commands.Bot):
         # Network/process probes remain in background supervisors; optional
         # integration readiness never delays the Discord gateway.
         await start_mcp(self)
+
+        try:
+            await self.computer.start()
+        except Exception:
+            log.exception("Computer startup failed; desktop tools remain unavailable")
 
     async def close(self) -> None:
         """Graceful shutdown: stop services, persist state, then disconnect.

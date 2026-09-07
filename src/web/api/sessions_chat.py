@@ -41,6 +41,12 @@ async def _pkg_process_web_chat(*args, **kwargs):
     from ...tools.output_authorization import web_output_scope
 
     with web_output_scope(args[0], request):
+        if request.path == "/api/chat":
+            from ..computer_binding import browser_binding
+
+            binding = browser_binding(args[0], request)
+            if binding is not None:
+                kwargs["computer_binding"] = binding
         return await pwc(*args, **kwargs)
 
 def register_chat(routes: web.RouteTableDef, bot) -> None:

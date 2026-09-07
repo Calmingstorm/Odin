@@ -71,6 +71,17 @@ class ComputerIntegration:
         return self.enabled and name in COMPUTER_TOOLS
 
     def _backend(self, app):
+        from .models import ComputerError
+
+        if getattr(self.settings, "platform", "x11") != "x11":
+            raise ComputerError("wayland_owned_input_lifecycle_unverified")
+        if getattr(self.settings, "environment", "isolated") == "existing_session":
+            from .runtime.x11_attached import X11AttachedBackend
+
+            return X11AttachedBackend(
+                enabled=self.enabled, app_profile=app,
+                display_name=self.settings.display, xauthority=self.settings.xauthority,
+                monitor_names=self.settings.monitor_names)
         from .runtime.backend import LinuxDesktopBackend
 
         return LinuxDesktopBackend(enabled=self.enabled, app_profile=app,
@@ -79,6 +90,9 @@ class ComputerIntegration:
     def _authorize(self, context):
         manager = getattr(self.bot, "host_access_manager", None)
         if manager is None or not manager.is_host_allowed(context.owner_id, "localhost"):
+            return False
+        authorize_context = getattr(self.bot, "computer_authorize_context", None)
+        if callable(authorize_context) and authorize_context(context) is not True:
             return False
         return all(not self.bot.tool_executor.check_permission(name, context.owner_id)
                    for name in COMPUTER_TOOLS)
@@ -283,7 +297,7 @@ class ComputerIntegration:
     async def _operator_session(self, operation, *, owner_id, web_session_id):
         context = self._operator_context(owner_id, web_session_id,
                                          emergency=operation == "stop")
-        result = await self.controller.session(context, {"operation": operation})
+        result = await self.controller.operator_session(context, operation)
         return {**result, "available": True, "owner_id": owner_id}
 
     async def operator_status(self, **identity):

@@ -105,7 +105,7 @@ def client(controller, *, enabled=True, user="alice", tier="admin", session="pri
 @pytest.mark.asyncio
 @pytest.mark.parametrize("kwargs,code", [
     ({"user": None}, 401), ({"tier": "user"}, 403), ({"session": None}, 401),
-    ({"enabled": False}, 503), ({"user": "bob"}, 404), ({"session": "other-session"}, 404),
+    ({"user": "bob"}, 404), ({"session": "other-session"}, 404),
 ])
 async def test_auth_disabled_and_owner_fences(kwargs, code):
     controller = Controller()

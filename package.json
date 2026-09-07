@@ -33,7 +33,8 @@
     "check:audit-verify": "node scripts/check-audit-verify.mjs",
     "check:usage-activity": "node scripts/check-usage-activity.mjs",
     "check:output-renderer": "node scripts/check-output-renderer.mjs",
-    "check:live-logs": "node scripts/check-live-log-records.mjs && node scripts/check-live-log-browser.mjs"
+    "check:live-logs": "node scripts/check-live-log-records.mjs && node scripts/check-live-log-browser.mjs",
+    "check:computer": "node scripts/check-computer-browser.mjs"
   },
   "dependencies": {
     "dompurify": "^3.2.0",

@@ -7,6 +7,7 @@ import os
 import shutil
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -202,6 +203,7 @@ class ToolExecutor:
         # AFTER the bot exists (the policy reads live bot.config); None =
         # ungated, so tests and the __new__ patch seam construct unchanged.
         self._builtin_policy = None
+        self.computer_reserved: Callable[[str], bool] = lambda _name: False
         # The configured workspace VALUE is restart-required, but it is
         # re-validated on every local command rather than cached: existence,
         # type, ownership and mode are mutable filesystem state (see

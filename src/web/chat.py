@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import itertools
 import time
+from collections.abc import Callable
 from typing import TYPE_CHECKING
 
 from ..llm.secret_scrubber import scrub_output_secrets
@@ -137,6 +138,8 @@ class WebMessage:
     """
 
     _odin_source = "web"  # trajectory source marker (was recorded as "discord")
+    _computer_web_session_id: str | None = None
+    _computer_web_authorized: Callable[[], bool] | None = None
 
     def __init__(self, channel_id: str, user_id: str, username: str, content: str = "",
                  allowed_tools: list[str] | None = None):
@@ -170,6 +173,7 @@ async def process_web_chat(
     token_allowed_hosts: list[str] | None = None,
     token_default_host: str = "",
     persist_channel_lock: bool = True,
+    computer_binding=None,
 ) -> dict:
     """Process a web chat message through the Codex tool loop.
 
@@ -209,6 +213,7 @@ async def process_web_chat(
                     user_id,
                     username,
                     allowed_tools,
+                    computer_binding,
                 )
         else:
             return await _do_process_web_chat(
@@ -218,6 +223,7 @@ async def process_web_chat(
                 user_id,
                 username,
                 allowed_tools,
+                computer_binding,
             )
     finally:
         if tier_token is not None:
@@ -235,9 +241,12 @@ async def _do_process_web_chat(
     user_id: str,
     username: str,
     allowed_tools: list[str] | None,
+    computer_binding=None,
 ) -> dict:
     msg = WebMessage(channel_id=channel_id, user_id=user_id, username=username, content=content,
                      allowed_tools=allowed_tools)
+    if computer_binding is not None:
+        msg._computer_web_session_id, msg._computer_web_authorized = computer_binding
     web_channel = msg.channel  # type: _WebChannel
     tagged = f"[{username}]: {content}"
     bot.sessions.add_message(channel_id, "user", tagged, user_id=user_id)

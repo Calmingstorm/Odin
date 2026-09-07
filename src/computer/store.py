@@ -244,6 +244,17 @@ class ComputerStore:
                     pass
                 self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
 
+    def purge_evidence(self) -> None:
+        """Disable/shutdown revokes retained downloads and removes their bytes."""
+        with self.lock:
+            rows = self.db.execute("SELECT evidence_id FROM evidence").fetchall()
+            for row in rows:
+                try:
+                    os.unlink(row[0], dir_fd=self.dir_fd)
+                except FileNotFoundError:
+                    pass
+                self.db.execute("DELETE FROM evidence WHERE evidence_id=?", (row[0],))
+
     def put_evidence(
         self, session_id: str, content: bytes, *, kind="frame", name="frame.png"
     ) -> str:

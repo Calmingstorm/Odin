@@ -63,7 +63,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         return service, actor
 
     async def call(request, method, **kwargs):
-        service, actor = context(request, emergency=method in {"stop", "pause"})
+        service, actor = context(request, emergency=method in {"status", "stop", "pause"})
         adapter = getattr(service, f"operator_{method}", None)
         if adapter is None:
             raise web.HTTPServiceUnavailable(headers=_PRIVATE)
@@ -101,6 +101,29 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             if not isinstance(item, str):
                 raise ValueError
             result[key] = item[:160]
+        for key in ("enabled", "configured_enabled", "runtime_enabled"):
+            if type(value.get(key)) is bool:
+                result[key] = value[key]
+        if type(value.get("generation")) is int:
+            result["generation"] = value["generation"]
+        if type(value.get("session_generation")) is int:
+            result["session_generation"] = value["session_generation"]
+        restart = value.get("restart_required")
+        if isinstance(restart, list) and all(isinstance(k, str) for k in restart):
+            result["restart_required"] = [k[:64] for k in restart[:16]]
+        backend = value.get("backend")
+        if isinstance(backend, dict):
+            result["backend"] = {
+                "platform": backend.get("platform") if backend.get("platform") in {
+                    "x11", "wayland"} else "unknown",
+                "environment": backend.get("environment") if backend.get("environment") in {
+                    "isolated", "existing_session"} else "unknown",
+                "input_supported": backend.get("input_supported") if type(
+                    backend.get("input_supported")) is bool else None,
+                "readiness": str(backend.get("readiness", "not_checked"))[:64],
+            }
+        if isinstance(value.get("error"), str):
+            result["error"] = value["error"][:120]
         return web.json_response(result, headers=_PRIVATE)
 
     async def status(request):
@@ -123,6 +146,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({"frame": {
             "evidence_id": _opaque(frame.get("evidence_id")),
             "captured_at": str(frame.get("captured_at", ""))[:64],
+            "timestamp_basis": str(frame.get("timestamp_basis", "unavailable"))[:64],
             "expires_at": _expiry(frame.get("expires_at")),
             "fresh_for_ms": max(0, min(10000, int(frame.get("fresh_for_ms", 0)))),
         }}, headers=_PRIVATE)

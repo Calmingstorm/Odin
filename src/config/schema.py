@@ -1189,13 +1189,41 @@ class MCPConfig(BaseModel):
 
 
 class ComputerUseConfig(BaseModel):
-    """Opt-in offline desktop. Bounds are deliberately not model configurable."""
+    """Opt-in desktop target. These fields are operator-only, not tool input."""
 
     model_config = ConfigDict(extra="forbid")
     enabled: bool = False
     storage_dir: str = "/var/lib/odin/computer"
     # Explicit operator provisioning, never inferred from root/sudo availability.
     runtime_sudo: bool = False
+    environment: Literal["isolated", "existing_session"] = "isolated"
+    platform: Literal["x11", "wayland"] = "x11"
+    display: str = ""
+    xauthority: str = ""
+    monitor_names: list[str] = Field(default_factory=list)
+
+    @field_validator("display")
+    @classmethod
+    def validate_display(cls, value: str) -> str:
+        if value and not re.fullmatch(r":[0-9]{1,5}", value):
+            raise ValueError("computer.display must be an explicit local :N display")
+        return value
+
+    @field_validator("xauthority")
+    @classmethod
+    def validate_xauthority(cls, value: str) -> str:
+        if value and (not Path(value).is_absolute() or any(ord(c) < 32 for c in value)):
+            raise ValueError("computer.xauthority must be an absolute path")
+        return value
+
+    @field_validator("monitor_names", mode="before")
+    @classmethod
+    def validate_monitors(cls, value):
+        if (not isinstance(value, list) or len(value) > 16
+                or any(not isinstance(i, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", i)
+                       for i in value) or len(set(value)) != len(value)):
+            raise ValueError("computer.monitor_names must be unique bounded monitor names")
+        return value
 
     @field_validator("storage_dir")
     @classmethod

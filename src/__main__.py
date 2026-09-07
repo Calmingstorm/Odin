@@ -679,6 +679,16 @@ def main() -> None:
 
     async def shutdown() -> None:
         log.info("Shutting down…")
+        # Desktop authority must not wait for browser/provider/model teardown.
+        computer = getattr(bot, "computer", None)
+        if computer is not None:
+            try:
+                await computer.close()
+            except Exception:
+                from .restart import block_reexec
+
+                block_reexec("computer cleanup unverified")
+                log.exception("Computer cleanup unverified")
         # Teardown order (PR #244 round-15 §3.3, step 1): stop the periodic
         # reaper FIRST. The final no-grace drain does NOT run here — it runs
         # in _finalize_loop, after remaining tasks, async generators and the

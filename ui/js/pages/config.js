@@ -350,9 +350,12 @@ export default {
 
                   <div v-else-if="section === 'computer'" class="cfgc-mcp-owner">
                     <div>
-                      <strong>Computer use is under development</strong>
-                      <p>This review increment provides contracts and isolated feasibility tests, not an enabled desktop capability. Assisted-session input remains unavailable until capture consent and independent input are verified.</p>
+                      <strong>Computer use has a dedicated control plane</strong>
+                      <p>Enable or disable provisioned computer use, inspect backend capabilities, and stop a desktop task from the Computer page. Target and storage settings are operator-provisioned and require a restart. Input is available only where the backend has passed its safety checks.</p>
                     </div>
+                    <router-link class="btn btn-ghost text-xs" :to="{ path: '/system', query: { tab: 'computer' } }">
+                      Open Computer <odin-icon name="chevronRight" :size="14" />
+                    </router-link>
                   </div>
 
                   <div v-else class="cfgc-field-groups">

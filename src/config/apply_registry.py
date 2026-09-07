@@ -142,10 +142,11 @@ class SectionSpec:
 SECTIONS: dict[str, SectionSpec] = {
     "computer": SectionSpec(
         "restart",
-        "Isolated offline desktop prerequisites; disabled by default. "
-        "Never controls the host desktop.",
+        "Operator-provisioned desktop target; disabled by default. "
+        "Existing-session input remains capability-gated independently of capture.",
         owner="computer",
-        restart_reason="Private storage and launcher policy are operator-provisioned at startup.",
+        restart_reason="Storage, platform, target and launcher policy are pinned at startup, "
+        "including off/on cycles.",
     ),
     "timezone": SectionSpec("restart", "Locale and scheduling defaults used across Odin."),
     "discord": SectionSpec(

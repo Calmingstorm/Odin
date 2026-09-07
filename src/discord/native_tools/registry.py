@@ -105,6 +105,8 @@ class NativeToolDispatcher:
         """Native table + skill-domain tools (skill CRUD/meta + user skills)."""
         if "computer" in self.owners:
             register_computer_handlers(self)
+            if self.owners["computer"].reserves_tool(tool_name):
+                return True
         if tool_name in self._handlers:
             return True
         return self.skills.handles(tool_name)
@@ -137,13 +139,12 @@ class NativeToolDispatcher:
 
         denied = not tool_scope_allows(tool_name)
         owner = self.owners.get("computer")
-        computer_tool = owner is not None and getattr(owner, "enabled") and tool_name in (
-            "computer_session", "computer_observe", "computer_act")
+        computer_tool = owner is not None and owner.reserves_tool(tool_name)
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         if computer_tool and channel_id is None:
             denied = True
         if computer_tool:
-            denied = denied or not getattr(owner, "grant_allows")(
+            denied = denied or not owner.enabled or not getattr(owner, "grant_allows")(
                 tool_name, user_id, str(channel_id))
         if denied:
             return ToolResult(output="Permission denied: restricted tool authority.",

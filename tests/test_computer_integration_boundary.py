@@ -9,7 +9,8 @@ from src.computer.integration import ComputerIntegration
 
 
 def integration(*, enabled=False, host_allowed=True, permission=None):
-    controller = SimpleNamespace(session=AsyncMock(return_value={"state": "cancelled"}))
+    controller = SimpleNamespace(session=AsyncMock(return_value={"state": "cancelled"}),
+                                 operator_session=AsyncMock(return_value={"state": "cancelled"}))
     bot = SimpleNamespace(
         config=SimpleNamespace(computer=SimpleNamespace(enabled=enabled)),
         host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: host_allowed),
@@ -22,11 +23,12 @@ async def test_real_facade_stop_remains_authorized_after_disable():
     service, controller = integration()
     result = await service.operator_stop(owner_id="alice", web_session_id="private")
     assert result["state"] == "cancelled"
-    context, request = controller.session.call_args.args
-    assert request == {"operation": "stop"}
+    context, operation = controller.operator_session.call_args.args
+    assert operation == "stop"
     assert context.owner_id == "alice"
     assert context.channel_id == service.web_binding("private")
     assert context.turn_id == "web-operator"
+    controller.session.assert_not_called()
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -67,6 +69,8 @@ async def test_native_disabled_same_name_skill_survives_enable_disable():
         _handle_computer_session=AsyncMock(), _handle_computer_observe=AsyncMock(),
         _handle_computer_act=AsyncMock(),
     )
+    desktop.reserves_tool = lambda name: desktop.enabled and name in {
+        "computer_session", "computer_observe", "computer_act"}
     dispatcher = NativeToolDispatcher(
         owners={"computer": desktop}, skill_manager=SimpleNamespace(),
         tool_catalog=None, prompt_builder=None, channel_state=None,
