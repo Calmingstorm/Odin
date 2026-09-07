@@ -14,9 +14,10 @@ SOURCE = {"node_id": 71, "session_handle": "/org/freedesktop/portal/desktop/sess
           "mapping_id": "stream-1"}
 
 
-def process(pid, uid, profile):
+def process(pid, uid, profile=None):
     return {"pid": pid, "uid": uid, "start_ticks": 345,
-            "exe": "/usr/bin/" + profile, "exe_identity": [5, pid]}
+            "exe": "/usr/bin/" + (profile or "custom-app"), "exe_identity": [5, pid],
+            "trusted_executable": False, "script_identity": None, "cmdline_digest": "a" * 64}
 
 
 class FakeProvider(scope.GNOMEWaylandScopeProvider):
@@ -30,6 +31,9 @@ class FakeProvider(scope.GNOMEWaylandScopeProvider):
         self.observations = 0
         self.mutate = lambda result: result
         self.backend_class = "MetaBackendNative"
+
+    async def snapshot(self, source, unused_legacy_label=None):
+        return await super().snapshot(source)
 
     async def _daemon(self, member, name):
         if member == "GetNameOwner":
@@ -45,7 +49,8 @@ class FakeProvider(scope.GNOMEWaylandScopeProvider):
         request = json.loads(body[0])
         self.observations += 1
         result = {"protocol": 1, "challenge": request["challenge"],
-                  "source_digest": request["source_digest"], "profile": request["profile"],
+                  "source_digest": request["source_digest"],
+                  "wm_class": "custom-app", "title": "document", "modal": False,
                   "native_wayland": True, "safe_focus": True, "pid": 800,
                   "focus_serial": 1, "focus_token": "1234",
                   "bounds": {"x": 10, "y": 20, "width": 800, "height": 600}}
@@ -93,10 +98,9 @@ def test_malformed_or_nonmonitor_source_refused_before_bus(provider, key, value)
 
 
 @pytest.mark.parametrize("profile", ["drawing", "terminal", "unknown", "gnome-shell"])
-def test_unknown_profile_refused_before_bus(provider, profile):
-    with pytest.raises(scope.WaylandScopeFailure):
-        asyncio.run(provider.snapshot(SOURCE, profile))
-    assert provider.observations == 0
+def test_legacy_label_does_not_gate_actual_application(provider, profile):
+    result = asyncio.run(provider.snapshot(SOURCE, profile))
+    assert result["application"]["exe"] == "/usr/bin/custom-app"
 
 
 @pytest.mark.parametrize("attribute,value", [
@@ -142,7 +146,7 @@ def test_pid_reuse_rejected_against_pinned_start(provider, monkeypatch):
 
 @pytest.mark.parametrize("patch", [
     {"native_wayland": False}, {"safe_focus": False}, {"challenge": "replay"},
-    {"source_digest": "different"}, {"profile": "inkscape"}, {"pid": True},
+    {"source_digest": "different"}, {"wm_class": "terminal"}, {"pid": True},
     {"focus_serial": 0}, {"focus_token": "title"},
     {"bounds": {"x": -1, "y": 0, "width": 30, "height": 30}},
     {"bounds": {"x": 1900, "y": 0, "width": 30, "height": 30}},
@@ -163,9 +167,9 @@ def test_focus_changed_between_observations(provider):
 def test_process_changed_between_observations(provider, monkeypatch):
     calls = 0
 
-    def changing(pid, uid, profile):
+    def changing(pid, uid, profile=None):
         nonlocal calls
-        if profile == "xed":
+        if profile is None:
             calls += 1
         return process(pid, uid, profile) | {"start_ticks": calls}
 
@@ -196,9 +200,9 @@ def test_no_ambient_or_remote_bus(address):
                                        expected_compositor_pid=700)
 
 
-def test_process_identity_refuses_current_interpreter_for_native_profile():
-    with pytest.raises(scope.WaylandScopeFailure):
-        scope._process_identity(os.getpid(), os.geteuid(), "xed")
+def test_process_identity_records_current_interpreter_as_unverified_evidence():
+    result = scope._process_identity(os.getpid(), os.geteuid())
+    assert result["script_identity"]["verified"] is False
 
 
 def test_untrusted_installed_executable(tmp_path):

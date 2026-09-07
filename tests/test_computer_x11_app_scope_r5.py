@@ -96,9 +96,9 @@ class Display:
 @pytest.fixture
 def app(monkeypatch):
     display = Display()
-    monkeypatch.setattr(scope, "_process_identity", lambda pid, profile: {
+    monkeypatch.setattr(scope, "_process_identity", lambda pid: {
         "pid": pid, "uid": 65534, "start_ticks": 101, "exe": "/usr/bin/xed"})
-    return display, scope.AppScope(display, "xed"), NS(x=0, y=0, width=800, height=600)
+    return display, scope.AppScope(display), NS(x=0, y=0, width=800, height=600)
 
 
 def test_snapshot_private_proof_and_spoofed_wm_pid_ignored(app):
@@ -124,7 +124,7 @@ def test_main_session_and_remote_rejected_before_requests(name):
     display = Display()
     display.name = name
     with pytest.raises(scope.ScopeFailure):
-        scope.AppScope(display, "xed")
+        scope.AppScope(display)
     assert not display.pid_queries
 
 
@@ -224,8 +224,8 @@ def test_bounded_property(app):
 @pytest.mark.parametrize("title,kind", [(b"Save As", "safe_application"),
                                       ("Save As…".encode(), "safe_application"),
                                       ("Save As… authentication".encode(), None),
-                                      (b"Information", "unrecognized"),
-                                      (b"Confirmation", "unrecognized")])
+                                      (b"Information", "safe_application"),
+                                      (b"Confirmation", "safe_application")])
 def test_same_process_dialog_classification(app, title, kind):
     display, checker, monitor = app
     main = Window(display, 30, display.root)
@@ -249,24 +249,26 @@ def test_same_process_dialog_classification(app, title, kind):
     else:
         assert checker.assert_snapshot(result, monitor) == result
     display.owners[30] = 7777
-    assert checker.snapshot(monitor) is None
+    assert checker.snapshot(monitor)["transient_processes"][0]["pid"] == 7777
+    with pytest.raises(scope.ScopeFailure):
+        checker.assert_snapshot(result, monitor)
 
 
-def test_override_redirect_and_unmapped_rejected(app):
+def test_focused_override_redirect_allowed_and_unmapped_rejected(app):
     display, checker, monitor = app
     display.target.override = True
-    assert checker.snapshot(monitor) is None
+    assert checker.snapshot(monitor) is not None
     display.target.override = False
     display.target.viewable = 0
     assert checker.snapshot(monitor) is None
 
 
-def test_actual_python_process_cannot_impersonate_drawing_or_xed():
+def test_actual_python_process_records_unverified_interpreter_evidence():
     import os
 
-    for profile in ("drawing", "xed"):
-        with pytest.raises(scope.ScopeFailure):
-            scope._process_identity(os.getpid(), profile)
+    result = scope._process_identity(os.getpid())
+    assert result["pid"] == os.getpid()
+    assert result["script_identity"]["verified"] is False
 
 
 def test_lazy_xlib_import():
@@ -290,29 +292,28 @@ def fake_proc(tmp_path, monkeypatch):
     (proc / "stat").write_text("1234 (odd ) process) S " + "0 " * 18 + "3456 0 0\n")
     uid = os.geteuid()
     (proc / "status").write_text(f"Name:\txed\nUid:\t{uid}\t{uid}\t{uid}\t{uid}\n")
-    (proc / "exe").symlink_to("/usr/bin/xed")
+    (proc / "exe").symlink_to("/usr/bin/true")
     (proc / "cmdline").write_bytes(b"/usr/bin/xed\0")
     monkeypatch.setattr(scope, "Path", lambda value: tmp_path if value == "/proc" else Path(value))
     return proc
 
 
 def test_proc_start_exe_uid_stable_identity(fake_proc):
-    result = scope._process_identity(1234, "xed")
+    result = scope._process_identity(1234)
     assert result["pid"] == 1234 and result["start_ticks"] == 3456
-    assert result["exe"] == "/usr/bin/xed"
+    assert result["exe"] == "/usr/bin/true"
 
 
 def test_proc_uid_mismatch_denied(fake_proc):
     (fake_proc / "status").write_text("Uid:\t4242\t4243\t4242\t4242\n")
     with pytest.raises(scope.ScopeFailure):
-        scope._process_identity(1234, "xed")
+        scope._process_identity(1234)
 
 
-def test_proc_wrong_executable_denied(fake_proc):
+def test_proc_arbitrary_executable_accepted(fake_proc):
     (fake_proc / "exe").unlink()
     (fake_proc / "exe").symlink_to("/usr/bin/true")
-    with pytest.raises(scope.ScopeFailure):
-        scope._process_identity(1234, "xed")
+    assert scope._process_identity(1234)["exe"] == "/usr/bin/true"
 
 
 @pytest.mark.parametrize("cmdline", [
@@ -326,18 +327,18 @@ def test_drawing_cmdline_never_proves_script_identity(fake_proc, cmdline):
     (fake_proc / "exe").unlink()
     (fake_proc / "exe").symlink_to("/usr/bin/python3")
     (fake_proc / "cmdline").write_bytes(cmdline)
-    with pytest.raises(scope.ScopeFailure, match="provenance_unavailable"):
-        scope._process_identity(1234, "drawing")
+    result = scope._process_identity(1234)
+    assert result["script_identity"]["verified"] is False
+    assert len(result["script_identity"]["argv_digest"]) == 64
 
 
-def test_installed_identity_rejects_writable_ancestor(tmp_path):
+def test_installed_identity_records_writable_ancestor(tmp_path):
     from pathlib import Path
 
     binary = tmp_path / "application"
     binary.write_bytes(b"not an approved install")
     binary.chmod(0o777)
-    with pytest.raises(scope.ScopeFailure):
-        scope._trusted_file(Path(binary))
+    assert scope._trusted_file(Path(binary)) is False
 
 
 def test_both_title_channels_reject_security(app):
@@ -377,11 +378,5 @@ def test_reparenting_wm_frame_does_not_need_app_pid(app):
 def test_interpreted_application_cannot_self_attest_via_writable_argv():
     import os
 
-    import pytest
-
-    from src.computer.runtime.x11_app_scope import ScopeFailure, _process_identity
-
-    # Reject before reading argv or a window. Even a genuine interpreter process
-    # naming the installed script cannot establish trusted launch provenance.
-    with pytest.raises(ScopeFailure, match="provenance_unavailable"):
-        _process_identity(os.getpid(), "drawing")
+    result = scope._process_identity(os.getpid())
+    assert result["script_identity"]["verified"] is False

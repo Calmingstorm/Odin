@@ -74,6 +74,6 @@ def test_r10_proc_identity_read(monkeypatch, fault):
     monkeypatch.setattr(m, "_trusted_executable", lambda p: ("/usr/bin/xed", (1, 2)))
     if fault:
         with pytest.raises(m.WaylandScopeFailure):
-            m._process_identity(42, 1000, "xed")
+            m._process_identity(42, 1000, "gnome-shell")
     else:
-        assert m._process_identity(42, 1000, "xed")["start_ticks"] == 77
+        assert m._process_identity(42, 1000, "gnome-shell")["start_ticks"] == 77
