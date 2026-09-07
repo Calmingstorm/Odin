@@ -131,7 +131,8 @@ async def execute_sequence(controller, context, inp):
         reserved = [(s["action_id"], canonical_hash({"sequence": inp["action_id"], "step": s}))
                     for s in steps]
         existing = controller.store.begin_sequence(
-            grant, inp["action_id"], payload_hash, reserved, MAX_ACTIONS)
+            grant, inp["action_id"], payload_hash, reserved, MAX_ACTIONS,
+            provenance=getattr(live.backend, "application_provenance", None))
         if existing is not None:
             return existing
         controller._delivered_observations.pop(grant.session_id, None)
@@ -252,5 +253,13 @@ async def execute_sequence(controller, context, inp):
         if latest is not None and latest_image is not None and not stop_required:
             # A known interruption yields its new view to the MODEL, not another
             # step. Only actual final/interruption delivery grants later authority.
-            return {**receipt, "next_observation": {**latest.public(), "image_bytes": latest_image}}
+            return {**receipt, "next_observation": {
+                **latest.public(), "image_bytes": latest_image,
+                "task_context": controller._task_context(live),
+                **controller._input_status(live, grant),
+                "sources": (live.backend.sources()
+                            if callable(getattr(live.backend, "sources", None)) else []),
+                "backend_capabilities": (live.capabilities.public()
+                                         if live.capabilities is not None else None),
+            }}
         return receipt

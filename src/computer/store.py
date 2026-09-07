@@ -294,8 +294,19 @@ class ComputerStore:
             verification["steps"] = steps
         return {**result, "action_id": action_id, "session_id": session_id}
 
-    def begin_sequence(self, grant, action_id, payload_hash, steps, max_actions):
+    def begin_sequence(self, grant, action_id, payload_hash, steps, max_actions,
+                       *, provenance=None):
         """Atomically reserve all step IDs and their budget before any input."""
+        if provenance is not None:
+            from .provenance import validate_application_provenance
+
+            provenance = validate_application_provenance(provenance)
+            if provenance is None:
+                raise ComputerError("invalid_application_provenance")
+        identity = {} if provenance is None else {"application_provenance": provenance}
+        encoded_identity = json.dumps(identity, allow_nan=False)
+        if len(encoded_identity.encode("utf-8")) > 16384:
+            raise ComputerError("invalid_application_provenance")
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -318,13 +329,15 @@ class ComputerStore:
                      max_actions - len(steps), self.clock())).rowcount
                 if not changed:
                     raise ComputerError("grant_revoked_or_limit")
-                initial = {"verification": {"type": "sequence", "step_action_ids": ids[1:]}}
+                initial = {**identity,
+                           "verification": {"type": "sequence", "step_action_ids": ids[1:]}}
                 self.db.execute("INSERT INTO receipts VALUES (?,?,?,?,?)",
                                 (grant.session_id, action_id, payload_hash, "pending",
                                  json.dumps(initial)))
                 for step_id, step_hash in steps:
                     self.db.execute("INSERT INTO receipts VALUES (?,?,?,?,?)",
-                                    (grant.session_id, step_id, step_hash, "pending", "{}"))
+                                    (grant.session_id, step_id, step_hash, "pending",
+                                     encoded_identity))
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
