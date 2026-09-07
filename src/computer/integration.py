@@ -346,7 +346,7 @@ class ComputerIntegration:
 
     async def _operator_session(self, operation, *, owner_id, web_session_id):
         context = self._operator_context(owner_id, web_session_id,
-                                         emergency=operation == "stop")
+                                         emergency=operation in {"status", "stop"})
         result = await self.controller.operator_session(context, operation)
         return {**result, "available": True, "owner_id": owner_id}
 
@@ -380,6 +380,12 @@ class ComputerIntegration:
     async def operator_recover(self, *, owner_id, web_session_id, session_id, generation):
         context = self._operator_context(owner_id, web_session_id, emergency=True)
         return await self.controller.reconcile_recovery(context, session_id, generation)
+
+    async def operator_reconcile(self, *, owner_id, web_session_id, session_id,
+                                 generation, acknowledgment):
+        context = self._operator_context(owner_id, web_session_id, emergency=True)
+        return await self.controller.operator_reconcile(
+            context, session_id, generation, acknowledgment)
 
     async def operator_acknowledge_legacy(self, *, owner_id, web_session_id, session_id,
                                           generation, acknowledgment):

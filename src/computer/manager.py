@@ -439,9 +439,9 @@ class ComputerLifecycle:
                 return self.snapshot()
             raise PermissionError("Computer unavailable")
         if not self.enabled and method not in {
-                "status", "stop", "pause", "recover", "acknowledge_legacy"}:
+                "status", "stop", "pause", "recover", "reconcile", "acknowledge_legacy"}:
             raise PermissionError("Computer unavailable")
-        if not self.enabled and method in {"status", "pause"}:
+        if not self.enabled and method == "pause":
             # Failed cleanup stays inspectable without reviving input authority.
             return self.snapshot()
         try:
@@ -453,11 +453,15 @@ class ComputerLifecycle:
                     "status", "stop", "pause"}:
                 return self.snapshot()
             raise
-        if method in {"status", "stop", "pause", "recover", "acknowledge_legacy"}:
+        if method in {"status", "stop", "pause", "recover", "reconcile", "acknowledge_legacy"}:
             result = {**self.snapshot(), **value}
             result["session_generation"] = value.get("generation")
             result["generation"] = self.generation
             result["available"] = self.enabled
+            if value.get("state") == "quarantined":
+                result["backend"] = {**result["backend"], "input_supported": False,
+                                     "readiness": "inactive",
+                                     "input_blocker": "session_not_active"}
             capabilities = value.get("backend_capabilities")
             if isinstance(capabilities, dict):
                 input_supported = value.get("input_supported")
@@ -524,6 +528,9 @@ class ComputerLifecycle:
 
     async def operator_recover(self, **identity):
         return await self._operator("recover", **identity)
+
+    async def operator_reconcile(self, **identity):
+        return await self._operator("reconcile", **identity)
 
     async def operator_acknowledge_legacy(self, **identity):
         return await self._operator("acknowledge_legacy", **identity)

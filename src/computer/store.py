@@ -200,7 +200,9 @@ class ComputerStore:
                 self.db.execute('INSERT OR REPLACE INTO session_recovery VALUES (?,?)',
                                 (grant.session_id, json.dumps(receipt, sort_keys=True)))
                 if clean or acknowledged:
-                    self.record_cleanup(grant.session_id, {'stopped': clean}, clean=clean)
+                    # Attestation retains the original failed cleanup evidence.
+                    if clean or self.cleanup(grant.session_id) is None:
+                        self.record_cleanup(grant.session_id, {'stopped': clean}, clean=clean)
                     self.set_state(grant.session_id, 'closed', revoke=True)
                 self.db.execute('COMMIT')
             except BaseException:

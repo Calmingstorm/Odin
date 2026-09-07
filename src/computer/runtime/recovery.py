@@ -155,3 +155,26 @@ async def verify_absence(descriptor):
         return {'status': 'absence_verified', 'reason': 'owned_runtime_gone'}
     except Exception:
         return {'status': 'unknown', 'reason': 'inspection_unavailable'}
+
+
+async def verify_reconciliation_prerequisites(descriptor):
+    """Lower bound for explicit operator attestation, NOT release proof.
+
+    Pending launches may have unrecorded children and old descriptors do not
+    identify the display. The operator reconciles those gaps; this read-only
+    check never certifies release. No signalling, display access or input replay.
+    """
+    try:
+        validate_descriptor(descriptor, descriptor.get('session_id'))
+        if descriptor['kind'] != 'processes':
+            return {'status': 'unknown', 'reason': 'operator_reconciliation_unsupported'}
+        if await asyncio.to_thread(boot_id) != descriptor['boot_id']:
+            return {'status': 'attestation_eligible', 'reason': 'host_rebooted'}
+        # Include group/session descendants whose immediate parent has exited.
+        inspection = {**descriptor, 'kind': 'isolated'}
+        reason = await asyncio.to_thread(_processes_gone, inspection)
+        if reason:
+            return {'status': 'unknown', 'reason': reason}
+        return {'status': 'attestation_eligible', 'reason': 'recorded_processes_gone'}
+    except Exception:
+        return {'status': 'unknown', 'reason': 'inspection_unavailable'}

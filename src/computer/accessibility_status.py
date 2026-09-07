@@ -41,7 +41,7 @@ async def _x11_uid(settings):
     # Root-owned or /dev/null authority is valid with explicit runtime sudo.
     # Bind it through logind's exact active local X display, not an arbitrary
     # logged-in account or the service account's own session bus.
-    display = settings.display_name
+    display = settings.display
     sessions = await _loginctl("list-sessions", "--no-legend", "--no-pager")
     matches = set()
     rows = sessions.splitlines()

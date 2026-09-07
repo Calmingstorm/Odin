@@ -152,6 +152,59 @@ class ComputerController:
                 'reason': 'legacy_runtime_identity_missing'}, acknowledged=True)
             return self._public_session(grant)
 
+    def _reconciliation_status(self, grant):
+        """Host administrator lifecycle metadata, never another user's evidence."""
+        return {"session_id": grant.session_id, "generation": grant.generation,
+                "state": grant.state, "platform": grant.platform,
+                "environment": grant.environment, "app": None,
+                "recovery": self.store.recovery_status(grant.session_id),
+                "input_supported": False, "input_readiness": "inactive",
+                "input_blocker": "session_not_active"}
+
+    async def operator_reconcile(self, context, session_id, generation, acknowledgment):
+        """Explicit admin attestation frees admission, not a clean-release claim.
+
+        This host-scoped emergency route can reconcile a stranded singleton after
+        its owner has gone away. Production authorization binds an authenticated
+        admin to this exact host. It cannot stop a live adapter or active session.
+        """
+        await self._auth(context, emergency=True)
+        if context.surface != 'webui' or context.turn_id != 'web-operator':
+            raise ComputerError('operator_surface_required')
+        if acknowledgment != f'ACKNOWLEDGE UNVERIFIED CLEANUP {session_id}':
+            raise ComputerError('explicit_acknowledgment_required')
+        async with self._stop_locks.setdefault(session_id, asyncio.Lock()):
+            grant = self.store.get_session(session_id)
+            if grant.host_id != context.host_id:
+                raise ComputerError('not_found')
+            if type(generation) is not int or grant.generation != generation:
+                raise ComputerError('stale_generation')
+            if (session_id in self._live or grant.state != 'quarantined'
+                    or grant.environment != 'existing_session'):
+                raise ComputerError('recovery_unavailable')
+            descriptor = self.store.runtime_descriptor(session_id)
+            if descriptor is None:
+                raise ComputerError('runtime_identity_required')
+            from .runtime.recovery import verify_reconciliation_prerequisites
+
+            try:
+                result = await _bounded(verify_reconciliation_prerequisites(descriptor), 3.0)
+            except TimeoutError:
+                result = {'status': 'unknown', 'reason': 'inspection_timeout'}
+            await self._auth(context, emergency=True)
+            if result.get('status') == 'attestation_eligible':
+                result = {'status': 'operator_acknowledged_unverified',
+                          'reason': 'operator_verified_external_cleanup',
+                          'operator_id': context.owner_id,
+                          'recorded_processes_absent': True,
+                          'prior_launch_pending': descriptor['launch_pending'],
+                          'acknowledgment': acknowledgment,
+                          'acknowledged_at': self.store.clock()}
+                grant = self.store.finish_recovery(grant, result, acknowledged=True)
+            else:
+                grant = self.store.finish_recovery(grant, result)
+            return self._reconciliation_status(grant)
+
     async def _auth(self, context, *, emergency=False):
         foreground(context)
         result = self.authorize(context)
@@ -651,6 +704,18 @@ class ComputerController:
         if operation not in {"status", "pause", "stop", "cancel", "close"}:
             raise ComputerError("unsupported_operation")
         await self._auth(context, emergency=operation != "pause")
+        if context.surface != "webui":
+            raise ComputerError("operator_surface_required")
+        if operation == "status":
+            # Expose only a foreign stranded singleton's reconciliation metadata.
+            with self.store.lock:
+                row = self.store.db.execute(
+                    "SELECT session_id FROM sessions WHERE host_id=? AND state='quarantined'",
+                    (context.host_id,)).fetchone()
+            if row is not None:
+                grant = self.store.get_session(row[0])
+                if grant.owner_id != context.owner_id:
+                    return self._reconciliation_status(grant)
         grant = self._operator_grant(context)
         if operation == "status":
             return self._public_session(grant)
