@@ -220,6 +220,16 @@ async def test_real_facade_foreground_dispatch_revocation_and_operator_artifacts
 
     monkeypatch.setattr("src.computer.integration.require_vision", lambda _: None)
     backend = Stub()
+    stop_entered, release_stop = asyncio.Event(), asyncio.Event()
+    immediate_stop = backend.stop
+
+    async def controlled_stop():
+        result = await immediate_stop()
+        stop_entered.set()
+        await release_stop.wait()
+        return result
+
+    backend.stop = controlled_stop
 
     def factory(bot, *, settings):
         store = ComputerStore(tmp_path / "private" / "db", tmp_path / "private" / "evidence")
@@ -256,10 +266,16 @@ async def test_real_facade_foreground_dispatch_revocation_and_operator_artifacts
     assert evidence["data"].startswith(b"\x89PNG")
     assert evidence["expires_at"].endswith("+00:00")
     # A later permission change is noticed while the model is not doing anything.
+    watcher = manager._watchers[("alice", "room", "turn")]
     bot.host_access_manager.is_host_allowed = lambda *_: False
-    async with asyncio.timeout(1):
-        while not backend.stopped:
-            await asyncio.sleep(0.01)
+    await stop_entered.wait()
+    # The backend's own stopped flag precedes the controller's durable cleanup
+    # receipt and final session state. It is not a completion primitive.
+    assert backend.stopped and not watcher.done()
+    assert manager._service.controller.store.find_session(
+        manager._service._context(st)).state == "quarantined"
+    release_stop.set()
+    await watcher
     assert manager._service.controller.store.find_session(
         manager._service._context(st)).state == "cancelled"
     await manager.close()
