@@ -17,7 +17,7 @@ import uuid
 from fractions import Fraction
 from pathlib import Path
 
-from ..app_profiles import ATTACHED_NATIVE_PROFILES, ATTACHED_PROFILES
+from ..app_profiles import ATTACHED_NATIVE_PROFILES, ATTACHED_PROFILES, validate_profile_action
 from ..geometry import AffineTransform, SourceGeometry
 from ..models import BackendCapabilities, BackendObservation, CaptureScope
 from .profile import validate_session
@@ -393,6 +393,8 @@ class X11AttachedBackend:
                     or action["type"] not in fields
                     or set(action) - {"expected_modal"} != required | fields[action["type"]]):
                 raise AttachedFailure("unsupported_grounded_action")
+            validate_profile_action(self._config["app_profile"], {
+                "operation": action.get("type"), "key": action.get("chord")})
             for key in ("source_id", "source_revision", "consent_generation"):
                 if (type(action[key]) is not type(getattr(frame.source, key))
                         or action[key] != getattr(frame.source, key)):

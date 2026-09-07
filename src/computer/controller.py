@@ -8,7 +8,7 @@ import uuid
 from copy import deepcopy
 
 from .actions import click_receipt
-from .app_profiles import validate_attached_only_profile
+from .app_profiles import application_profile, validate_attached_only_profile, validate_profile_action
 from .gui_actions import action_arguments, action_payload, visual_receipt
 from .models import (
     BackendCapabilities,
@@ -260,6 +260,9 @@ class ComputerController:
             capabilities.public() if capabilities is not None else None),
                 "cleanup": self.store.cleanup(grant.session_id),
                 "recovery": self.store.recovery_status(grant.session_id)}
+        profile = application_profile(grant.app, platform=grant.platform, environment=grant.environment)
+        if profile is not None:
+            result["application_profile"] = profile
         if live is not None:
             sources = getattr(live.backend, "sources", None)
             if callable(sources):
@@ -579,6 +582,7 @@ class ComputerController:
             if existing is not None:
                 return existing
             grant = self._grant(context, inp)
+            validate_profile_action(grant.app, inp)
             live = self._active(grant)
             if live.capabilities is None or live.capabilities.environment != grant.environment:
                 raise ComputerError("attachment_unavailable")
