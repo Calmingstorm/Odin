@@ -22,6 +22,13 @@ def put(pointer, value):
     pointer._obj.value = value
 
 
+@pytest.fixture(autouse=True)
+def fake_endpoint_keymaps(monkeypatch):
+    # Fake display pointer 123 must never reach the native xkbcommon/XCB helper.
+    # Mismatch and query-failure behavior have dedicated R11 native tests.
+    monkeypatch.setattr(m, "_endpoint_keymap", lambda *_: "same_map")
+
+
 class Fake:
     def __init__(self):
         self.calls, self.events, self.references = [], [], []
