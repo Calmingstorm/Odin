@@ -127,7 +127,7 @@ async def execute_sequence(controller, context, inp):
             raise ComputerError("stale_observation")
         _preflight_backend(grant, steps)
         for step in steps:
-            supported = (live.capabilities.limits or {}).get("effect_expectations")
+            supported = getattr(live.backend, "input_limits", {}).get("effect_expectations")
             if supported is not None and step["expect"]["type"] not in supported:
                 raise ComputerError("unsupported_postcondition")
             # Fresh accessible handles require per-view reconciliation; the
