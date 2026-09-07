@@ -97,6 +97,15 @@ def test_executable_inode_must_match_trusted_kwin(provider, monkeypatch):
         asyncio.run(provider.identity())
 
 
+def test_removed_compositor_executable_returns_static_reason(provider, monkeypatch):
+    def missing(path):
+        raise FileNotFoundError("private native path")
+
+    monkeypatch.setattr(common, "_trusted_executable", missing)
+    with pytest.raises(common.WaylandScopeFailure, match="^wayland_provider_untrusted$"):
+        asyncio.run(provider.identity())
+
+
 def test_generic_application_keeps_provenance_without_executable_allowlist(provider):
     result = asyncio.run(provider.snapshot(SOURCE))
     assert result["authenticated"] and result["safe_focus"]

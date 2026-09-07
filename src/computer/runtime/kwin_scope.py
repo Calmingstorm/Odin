@@ -38,7 +38,10 @@ class KWinWaylandScopeProvider(common.GNOMEWaylandScopeProvider):
                     and pid != self.expected_compositor_pid)):
             common._fail("wayland_provider_untrusted")
         process = common._process_identity(pid, uid)
-        executable, inode = common._trusted_executable("/usr/bin/kwin_wayland")
+        try:
+            executable, inode = common._trusted_executable("/usr/bin/kwin_wayland")
+        except (OSError, ValueError, RuntimeError):
+            common._fail("wayland_provider_untrusted")
         if process.get("exe") != executable or tuple(process.get("exe_identity", ())) != inode:
             common._fail("wayland_provider_untrusted")
         identity = process | {"owner": owner}
