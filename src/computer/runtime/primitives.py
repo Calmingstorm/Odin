@@ -589,7 +589,7 @@ class NativeDesktop:
             self._type_dirty = True
             # xdotool type does not reliably synthesize LF/Tab in GTK editors.
             # One bounded native command chain retains ordered text/control events.
-            arguments = []
+            arguments: list[str] = []
             for part in re.split(r"([\n\t])", text):
                 if part in ("\n", "\t"):
                     arguments.extend(("key", "Return" if part == "\n" else "Tab"))

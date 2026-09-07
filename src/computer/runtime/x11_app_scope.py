@@ -12,6 +12,7 @@ import os
 import re
 import stat
 from pathlib import Path
+from typing import Any
 
 MAX_DEPTH = 32
 MAX_PROPERTY = 4096
@@ -172,7 +173,8 @@ class AppScope:
         return self.connection.create_resource_object("window", _xid(value))
 
     def _ancestors(self, window, root):
-        result, seen = [], set()
+        result: list[Any] = []
+        seen: set[int] = set()
         for _ in range(MAX_DEPTH):
             identity = _xid(window)
             if identity == _xid(root):
@@ -195,7 +197,7 @@ class AppScope:
 
     def _pid(self, window):
         # Imports are lazy: importing this module needs no X11 dependency.
-        from Xlib.ext import res
+        from Xlib.ext import res  # type: ignore[import-untyped]
 
         reply = self.connection.res_query_client_ids([
             {"client": _xid(window), "mask": res.LocalClientPIDMask}])
@@ -230,7 +232,7 @@ class AppScope:
                         "monitors": sorted(monitors)}
 
     def _snapshot(self, monitor):
-        from Xlib import X
+        from Xlib import X  # type: ignore[import-untyped]
 
         version = self.connection.res_query_version(1, 2)
         if (version.server_major, version.server_minor) < (1, 2):

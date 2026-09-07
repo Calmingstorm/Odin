@@ -11,7 +11,7 @@ import struct
 import zlib
 from dataclasses import dataclass
 
-from .vision import FrameMetadata, observation_image
+from .vision import FrameMetadata, ObservationImage, observation_image
 
 
 @dataclass(frozen=True)
@@ -24,7 +24,7 @@ class NativeTransportEvidence:
     provider_acceptance: str = "unverified"
 
 
-def _canary() -> dict:
+def _canary() -> ObservationImage:
     def chunk(kind: bytes, data: bytes) -> bytes:
         return (struct.pack(">I", len(data)) + kind + data
                 + struct.pack(">I", zlib.crc32(kind + data) & 0xFFFFFFFF))

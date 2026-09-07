@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ...odin_log import get_logger
 from .skills_tools import (  # noqa: F401 — re-export (P0 pins import SKILL_CRUD_TOOLS from here)
@@ -42,6 +42,9 @@ from .skills_tools import (  # noqa: F401 — re-export (P0 pins import SKILL_CR
 )
 
 log = get_logger("discord")
+
+if TYPE_CHECKING:
+    from ...computer.integration import ComputerIntegration
 
 # How each handler is invoked. The shapes mirror the exact call forms the
 # two old chains used — do not "simplify" a shape without checking both.
@@ -105,7 +108,7 @@ class NativeToolDispatcher:
         """Native table + skill-domain tools (skill CRUD/meta + user skills)."""
         if "computer" in self.owners:
             register_computer_handlers(self)
-            if self.owners["computer"].reserves_tool(tool_name):
+            if cast("ComputerIntegration", self.owners["computer"]).reserves_tool(tool_name):
                 return True
         if tool_name in self._handlers:
             return True
@@ -138,12 +141,13 @@ class NativeToolDispatcher:
         from ...tools.result_validator import ToolResult
 
         denied = not tool_scope_allows(tool_name)
-        owner = self.owners.get("computer")
+        owner = cast("ComputerIntegration | None", self.owners.get("computer"))
         computer_tool = owner is not None and owner.reserves_tool(tool_name)
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         if computer_tool and channel_id is None:
             denied = True
         if computer_tool:
+            assert owner is not None  # computer_tool requires this exact owner.
             denied = denied or not owner.enabled or not getattr(owner, "grant_allows")(
                 tool_name, user_id, str(channel_id))
         if denied:

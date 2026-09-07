@@ -1,6 +1,7 @@
 """Bounded GUI actions. Visual change is not semantic task success."""
 
 import math
+from typing import Any
 
 from .actions import _REQUIRED, click_arguments, click_payload
 from .geometry import GeometryError, opaque_id
@@ -113,9 +114,10 @@ def visual_receipt(raw, observation):
     if (raw["injected"] is not True or raw.get("status") not in
             {"executed", "verified", "not_satisfied"}):
         return unknown
-    result = {"status": "executed", "execution": {"injected": True, "released": True},
-              "verification": {"status": "unavailable", "type": "visual_change",
-                               "scope": "raster_change_only"}}
+    result: dict[str, Any] = {
+        "status": "executed", "execution": {"injected": True, "released": True},
+        "verification": {"status": "unavailable", "type": "visual_change",
+                         "scope": "raster_change_only"}}
     evidence = raw.get("postcondition")
     if type(evidence) is not dict or evidence.get("status") == "unavailable":
         return result

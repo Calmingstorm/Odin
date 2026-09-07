@@ -9,7 +9,7 @@ import sys
 import time
 import uuid
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 from ..geometry import AffineTransform, SourceGeometry
 from ..models import BackendCapabilities, BackendObservation, CaptureScope
@@ -57,7 +57,7 @@ class LinuxDesktopBackend:
         self._consent_generation = 1
         self._frame: BackendObservation | None = None
         self._captured_at = 0.0
-        self._descriptor = None
+        self._descriptor: dict[str, Any] | None = None
         self.runtime_identity_callback = None
 
     def startup_descriptor(self, session_id: str) -> dict:
@@ -83,6 +83,7 @@ class LinuxDesktopBackend:
         validate_session(session_id)
         preflight()
         descriptor = self.startup_descriptor(session_id)
+        assert self._descriptor is not None  # startup_descriptor establishes this identity.
         owned = descriptor['token']
         self._ready = asyncio.get_running_loop().create_future()
         try:
@@ -290,7 +291,8 @@ class LinuxDesktopBackend:
                         raise RuntimeFailure("invalid bounded polyline")
                     finite(action["duration"], 0, 1.0)
                     payload["points"] = [[int(v) for v in source.input_point(
-                        frame.delivered_to_source, *p, frame.width, frame.height)] for p in points]
+                        frame.delivered_to_source, *cast(tuple[int, int], tuple(p)),
+                        frame.width, frame.height)] for p in points]
                     payload["duration"] = action["duration"]
                 elif action["type"] == "type":
                     payload["text"] = bounded_text(action["text"])

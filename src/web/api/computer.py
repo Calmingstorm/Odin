@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 
 from aiohttp import web
@@ -21,6 +22,8 @@ _PRIVATE = {
 class _AuthorizedResponse(web.Response):
     """Fence after async prepare hooks and immediately before writing the body."""
 
+    _computer_current: Callable[[], bool]
+
     async def _write_headers(self):
         if not self._computer_current():
             self._set_status(404, "Not Found")
@@ -30,6 +33,7 @@ class _AuthorizedResponse(web.Response):
                 self.headers.pop(key, None)
             self.headers["Content-Type"] = "application/json"
             self.headers["Content-Length"] = str(len(self.body))
+            assert self._payload_writer is not None  # prepare establishes the writer.
             self._payload_writer.length = len(self.body)
             self._computer_denied = True
         await super()._write_headers()

@@ -4,8 +4,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+from collections.abc import Callable
 from contextlib import contextmanager
 from contextvars import ContextVar
+from typing import Any
 
 
 def browser_binding(bot, request):
@@ -65,7 +67,9 @@ def browser_binding(bot, request):
     return (sid, current) if current() else None
 
 
-_operator_grant = ContextVar("computer_operator_grant", default=None)
+_operator_grant: ContextVar[
+    tuple[str, str, Callable[[], bool], asyncio.Task[Any] | None] | None
+] = ContextVar("computer_operator_grant", default=None)
 _TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 
 

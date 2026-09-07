@@ -178,7 +178,7 @@ class ExistingXTest:
     def _checked(self):
         if not self._display:
             raise X11DeviceError("display_closed")
-        errors = []
+        errors: list[bool] = []
 
         @_ERROR_HANDLER
         def handler(_display, _event):
@@ -324,7 +324,8 @@ class ExistingXTest:
                 if (s.device_id != device.contents.device_id
                         or not 1 <= s.num_classes <= 32 or not s.data):
                     raise X11DeviceError("device_state_invalid")
-                result, found, address = {"keys": set(), "buttons": set()}, set(), s.data
+                result: dict[str, set[int]] = {"keys": set(), "buttons": set()}
+                found, address = set(), s.data
                 for _ in range(s.num_classes):
                     kind, length = (C.c_ubyte * 2).from_address(address)
                     if length < 2:
@@ -380,7 +381,7 @@ class ExistingXTest:
 
     def physical_held(self) -> dict[str, set[int]]:
         self._assert_identity()
-        result = {"keys": set(), "buttons": set()}
+        result: dict[str, set[int]] = {"keys": set(), "buttons": set()}
         own = {d.contents.device_id for d in self._devices.values()}
         for device_id, _name, use, _attachment, enabled in self._initial:
             if use not in (3, 4) or not enabled or device_id in own:
@@ -488,7 +489,7 @@ class ExistingXTest:
             self._x.XDisplayKeycodes(self._display, C.byref(low), C.byref(high))
             if not 8 <= low.value <= high.value <= 255:
                 raise X11DeviceError("keycode_range_invalid")
-            chords = {}
+            chords: dict[str, list[int]] = {}
             for shifted in (False, True):
                 mask = (state.group << 13) | state.locked_mods | int(shifted)
                 for code in range(low.value, high.value + 1):
