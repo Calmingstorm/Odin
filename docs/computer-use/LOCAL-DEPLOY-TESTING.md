@@ -7,8 +7,11 @@ The development driver has passed a scratch Xed save on the actual main session
 with exact before/after restoration; see R5-MAIN-SESSION.md. This does not establish
 that the externally deployed service works. Deployment QA remains operator-owned.
 R6 additionally completed main-session Inkscape drawing/save, but both scratch
-CLI runs needed honest failure reporting for restoration issues; parent restored
-the complete baseline afterward. Read MAIN-SESSION-R6.md before repeating a test.
+CLI runs reported restoration failures; parent restored the complete baseline.
+Those historical failures remain recorded in MAIN-SESSION-R6.md. Aaron confirmed
+the wake/topology incident is his longstanding Cinnamon issue, not an Odin defect.
+R7 separates production owned-resource cleanup from the opt-in scratch harness's
+stricter exact-baseline restoration. See the R7 evidence before repeating a test.
 
 ## First increment and evidence boundary
 
@@ -21,9 +24,9 @@ during, after, or following failure of a computer task. This is not a chat mode.
 | --- | --- |
 | Isolated X11 | Fixed Drawing and Xed profiles in an owned disposable desktop. Native-model Xed save/close/reopen was demonstrated; Drawing save/reopen and the 30-task corpus use deterministic native GUI drivers. |
 | Corpus | **27/30 distinct isolated tasks**: Xed 14/15, Drawing 13/15. Unicode/tab fidelity, text annotation and selection move failed. This is not a 90% general model success rate. |
-| Existing X11 | Explicitly granted monitor capture; input to focused, identity-verified installed native Xed, Inkscape, and LibreOffice Writer/Calc/Draw document windows. The operator opens/focuses the app; Odin does not launch or close attached applications. Profile eligibility is not task qualification. |
-| R6 qualified work | Inkscape: actual model drew and GUI-saved a recognizable three-part house as vector SVG; independent shape, raster and visual review passed. Writer: deterministic GUI typing, paragraph break, bold formatting and ODT save passed. See R6 reports for fixture conditions, remaining checks and failures. |
-| Not qualified | LibreOffice Calc/Draw are native-profile eligible but have no completed task qualification. Browsers, terminals, games, arbitrary apps, macros and application extensions are not qualified input targets. A listed profile does not promise that every operation works. |
+| Existing X11 | Explicitly granted monitor capture; input to focused, identity-verified installed native Xed, Inkscape, and Writer. The operator opens/focuses the app; Odin does not launch or close attached applications. Profile eligibility is not task qualification. |
+| Qualified work | Inkscape: actual model drew and GUI-saved a recognizable three-part house as vector SVG; independent shape, raster and visual review passed in R6. Writer: R7 deterministic GUI keyboard-only short note, paragraph break, bold formatting and ODT save passed. See application reports for exact fixture conditions and limits. |
+| Not offered | Calc/Draw and the old generic `libreoffice` profile are refused, not aliases. Writer open/new document, close/reopen and pointer/menu actions are refused. Browsers, terminals, games, arbitrary apps, macros and application extensions are not input targets. Inkscape disk-close/reopen is not qualified. |
 | Attached Drawing | Capture-only. Interpreter/script argv cannot establish trusted executed-script identity, so Drawing input is refused. Isolated Drawing is unaffected. |
 | Shared input | Pointer and focus are shared, not independent. The pointer stays where input moved it. Busy input is refused; same-key overlap and racing synthetic clients are not safely separable. Stop is not a hard real-time server-hang guarantee. |
 | Attached text | Printable ASCII using the existing keymap only. Send Return and Tab as separate key actions, not embedded text. No clipboard/keymap changes; do not promise Unicode fidelity. |
@@ -125,11 +128,14 @@ computer:
   monitor_names: [DP-1]  # Illustrative only: replace with exact granted RandR names.
 ```
 
-Use an awake, stable desktop with the operator present for initial deploy testing.
-The R6 overnight test observed a sleep/topology transition that required manual
-baseline restoration; automated unattended testing is not qualified for that case.
-Do not change monitor topology during a task. Hotplug, replacement or mapping
-changes require new consent/start; the runtime must not guess a new input transform.
+Use the operator's new scratch document for initial deploy testing. A changed
+topology invalidates old action coordinates: Stop and start a fresh authorized task
+after the new layout settles. Cleanup must not depend on successfully capturing
+the changed display. Production Stop never rewrites the operator's display layout,
+moves the shared pointer back, wakes/sleeps monitors, or closes their applications.
+That is deliberately different from an explicitly exclusive developer scratch
+test which promises to restore its recorded baseline. Hotplug/replacement still
+requires new consent/start; the runtime must not guess a new input transform.
 
 ## 3. Manual deploy QA
 
@@ -172,7 +178,8 @@ changes require new consent/start; the runtime must not guess a new input transf
    **Stop** to finish or immediately on unexpected focus/input. Both controls are
    independent of model/observation waits. Attached Stop must leave Xed and the
    desktop alive; isolated Stop may remove its owned sandbox. Confirm cleanup,
-   then manually handle only the scratch document. Do not simulate crashes or
+   then manually handle only the scratch document. Closing Writer is the operator's
+   job, not an unfinished runtime cleanup stage. Do not simulate crashes or
    held-key faults in the operator's desktop as a routine QA step.
 
 ## Recovery, privacy and rollback
@@ -224,10 +231,15 @@ readiness, without probing processes or capturing a screen. For drawing, a usefu
 scratch request is: “In this new blank Inkscape document, draw a simple blue house
 with an orange roof and white door. Save only to this new scratch filename. Do not
 modify another window or overwrite a file.” For Writer, request a short note and
-specific formatting, and inspect the document before saving. Keep commands within
-the disclosed key vocabulary and short ASCII chunks.
+bold formatting, and inspect the document before saving. Use `app=writer`, not
+the removed generic `libreoffice`. Writer is intentionally keyboard-only, with
+Return, Escape, BackSpace, Delete, space, ctrl+a, ctrl+b, ctrl+s and ctrl+shift+s.
+No click/drag/menu navigation or open/new/close/reopen workflow is offered. Open
+and focus the intended new document yourself; close or reopen it yourself after
+Odin detaches. Keep commands within the disclosed vocabulary and short ASCII chunks.
 
 Read [APPLICATION-QUALIFICATION-R6.md](APPLICATION-QUALIFICATION-R6.md),
+[APPLICATION-QUALIFICATION-R7.md](APPLICATION-QUALIFICATION-R7.md),
 [MODEL-APPLICATION-R6.md](MODEL-APPLICATION-R6.md),
 [KEYBOARD-GROUNDING-R6.md](KEYBOARD-GROUNDING-R6.md), and
 [DEPENDENCIES-R6.md](DEPENDENCIES-R6.md). Native Inkscape and LibreOffice must be
