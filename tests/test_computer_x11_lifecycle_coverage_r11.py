@@ -155,7 +155,8 @@ def test_injector_independent_stops_on_revocation_or_fixed_lease(monkeypatch, ca
         monkeypatch.setattr(lifecycle, "REVOKED", True)
     else:
         # First monotonic call constructs deadline; the next check is expired.
-        monkeypatch.setattr(guardian.time, "monotonic", Mock(side_effect=[0.0, guardian.LEASE_SECONDS]))
+        monkeypatch.setattr(guardian.time, "monotonic",
+                            Mock(side_effect=[0.0, guardian.LEASE_SECONDS]))
     guardian.injector(42)
     assert native.calls == []
     assert native.closed and stream.closed
@@ -224,7 +225,8 @@ def test_execute_current_admission_identity_mode_and_independent_focus(monkeypat
     ("input_mode", None, "input_mode_required"),
     ("expected_device_identity", None, "input_device_identity_changed"),
 ])
-def test_execute_rejects_unadmitted_mode_or_identity_before_injection(monkeypatch, field, value, reason):
+def test_execute_rejects_unadmitted_mode_or_identity_before_injection(
+        monkeypatch, field, value, reason):
     native = Native()
     request, connection, _scope = _execute_environment(monkeypatch, native)
     request[field] = value
@@ -257,9 +259,11 @@ def test_serve_retains_attachment_and_rejects_redirect_without_recapturing(monke
     monkeypatch.setattr(worker, "attachment_configuration", lambda *args: {
         "display_name": args[0], "xauthority": args[1], "monitor_names": args[2]})
     monkeypatch.setattr(worker, "X11MonitorCapture", lambda *_args, **_kwargs: capture)
-    monkeypatch.setattr(worker, "safe_run", lambda req, actual: calls.append((req, actual)) or {"ok": True})
+    monkeypatch.setattr(worker, "safe_run",
+                        lambda req, actual: calls.append((req, actual)) or {"ok": True})
     monkeypatch.setattr(worker.signal, "alarm", Mock())
-    monkeypatch.setattr(sys, "stdin", SimpleNamespace(buffer=io.BytesIO(json.dumps(redirected).encode() + b"\n")))
+    monkeypatch.setattr(sys, "stdin", SimpleNamespace(
+        buffer=io.BytesIO(json.dumps(redirected).encode() + b"\n")))
     worker.serve(request)
     replies = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert replies == [{"ok": True}, {"ok": False, "error": "attachment_changed"}]
