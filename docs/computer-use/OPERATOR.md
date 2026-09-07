@@ -26,7 +26,7 @@ source/focus checks remain safety boundaries. Eligibility is not task success.
 
 The tools provide click, double/right/middle click, drag/polyline, scroll, generic
 keys, Unicode typing and bounded observation crops. Attached X11 currently uses
-the shared core pointer and keyboard, creating no extra master devices. Native
+the shared-pointer fallback with the core keyboard, creating no extra master devices. Native
 master removal crashed an ordinary application even after held input was released,
 so independent attached input is not qualified or offered. Stop verifies the
 original core-device identities and attachments after draining owned input.

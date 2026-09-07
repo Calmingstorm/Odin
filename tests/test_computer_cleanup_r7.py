@@ -15,9 +15,14 @@ from tests.test_computer_x11_guardian_r5 import rig
 
 
 def backend():
-    return attached.X11AttachedBackend(enabled=True, display_name=":197",
-                                      monitor_names=["screen"], app_profile="xed",
-                                      input_enabled=True)
+    value = attached.X11AttachedBackend(enabled=True, display_name=":197",
+                                       monitor_names=["screen"], app_profile="xed",
+                                       input_enabled=True)
+    # These tests stub all native workers, including the retained topology
+    # watcher. Supply its independently measured final census explicitly.
+    value._accept_shutdown_identity(json.dumps({
+        "event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}))
+    return value
 
 
 class ReceiptWorker:
@@ -258,6 +263,8 @@ async def test_post_input_capture_loss_unknown_action_but_clean_stop_no_replay(
         monkeypatch.setattr(b, "_read_worker", failed_capture)
         monkeypatch.setattr(b, "detach", attached.X11AttachedBackend.detach.__get__(b))
         action.update(operation="type", text="never replay me")
+        b._accept_shutdown_identity(json.dumps({
+            "event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}))
         result = await c.act(ctx, action)
         assert result["status"] == "unknown" and len(calls) == 1
         assert await c.act(ctx, action) == result and len(calls) == 1
@@ -274,6 +281,8 @@ async def test_controller_pending_timeout_reaps_input_before_cleanup_receipt(tmp
             return child
         # Exercise real adapter worker ownership, not a direct-result stub.
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+        b._accept_shutdown_identity(json.dumps({
+            "event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}))
         monkeypatch.setattr(b, "_input_worker",
                             attached.X11AttachedBackend._input_worker.__get__(b))
         # Stub child has no real PID. Production identity recording is covered
