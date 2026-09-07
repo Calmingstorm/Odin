@@ -30,6 +30,7 @@ def action_arguments(inp):
               "right_click": {"x", "y"}, "middle_click": {"x", "y"},
               "scroll": {"x", "y", "direction", "count"},
               "type": {"text"}, "key": {"key"}, "replace_field": {"text", "target"},
+              "replace_field_pixels": {"text", "region"},
               "drag": {"points", "duration"}, "polyline": {"points", "duration"}}
     optional = {"expected_modal", "modifiers", "count", "region"}
     exact_keys(inp, _REQUIRED | set().union(*fields.values()) | optional, _REQUIRED)
@@ -81,9 +82,9 @@ def action_arguments(inp):
                     "up", "down", "left", "right"}:
                 raise ComputerError("invalid_arguments")
             integer(inp["count"], 1, 20)
-    elif operation in {"type", "replace_field"}:
+    elif operation in {"type", "replace_field", "replace_field_pixels"}:
         text = inp["text"]
-        minimum = 0 if operation == "replace_field" else 1
+        minimum = 0 if operation in {"replace_field", "replace_field_pixels"} else 1
         if (type(text) is not str or not minimum <= len(text) <= 512
                 or any(ord(c) < 32 and c not in "\n\t" for c in text)):
             raise ComputerError("invalid_text")
@@ -98,6 +99,12 @@ def action_arguments(inp):
                 raise ComputerError("invalid_target") from None
             if expected != {"type": "field_text_equals", "target": inp["target"], "text": text}:
                 raise ComputerError("field_text_verification_required")
+        elif operation == "replace_field_pixels":
+            # Tab/Return must not advance focus or submit this compound action.
+            if any(ord(c) < 32 or 127 <= ord(c) <= 159 for c in text):
+                raise ComputerError("invalid_text")
+            if expected["type"] not in {"visual_change", "region_changed"}:
+                raise ComputerError("pixel_field_visual_verification_required")
     elif operation == "key":
         try:
             parse_key_chord(inp["key"])
@@ -121,8 +128,9 @@ def action_payload(inp, observation):
     inp = dict(inp)
     if "region" in inp:
         region = crop_arguments(inp["region"], observation.width, observation.height)
-        inp["x"] = region["x"] + (region["width"] - 1) // 2
-        inp["y"] = region["y"] + (region["height"] - 1) // 2
+        if inp["operation"] != "replace_field_pixels":
+            inp["x"] = region["x"] + (region["width"] - 1) // 2
+            inp["y"] = region["y"] + (region["height"] - 1) // 2
     if inp["expect"]["type"] == "region_changed":
         crop_arguments({k: inp["expect"][k] for k in ("x", "y", "width", "height")},
                        observation.width, observation.height)
@@ -159,7 +167,15 @@ def action_payload(inp, observation):
                 payload[key] = inp[key]
         if inp["operation"] == "key":
             payload["chord"] = inp["key"]
+        if inp["operation"] == "replace_field_pixels":
+            payload["region"] = dict(region)
         try:
+            if inp["operation"] == "replace_field_pixels":
+                for x, y in ((region["x"], region["y"]),
+                             (region["x"] + region["width"] - 1,
+                              region["y"] + region["height"] - 1)):
+                    source.input_point(observation.delivered_to_source, x, y,
+                                       observation.width, observation.height)
             if "x" in inp:
                 source.input_point(observation.delivered_to_source, inp["x"], inp["y"],
                                    observation.width, observation.height)

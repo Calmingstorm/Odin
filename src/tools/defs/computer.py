@@ -112,6 +112,12 @@ _DEFINITIONS = [
         "replace_field "
         "requires an observed accessible target and text, with field_text_equals matching "
         "target/text; unsupported accessibility never falls back to Ctrl+A. "
+        "For explicit less-reliable pixel fallback use replace_field_pixels with a freshly "
+        "observed editable field region and single-line text (empty clears). This clicks, "
+        "selects all and types under native focus/geometry guards, with visual_change or "
+        "region_changed only, never accessibility identity or text readback. Single action "
+        "only, not sequence. Inspect returned pixels to verify contents. For other elements "
+        "without accessible identity use click with an observed region. "
         "Supply only fields for that operation. Unicode typing and generic keysym chords "
         "depend on the active keyboard mapping; unsupported input is reported. "
         "No terminal, security-prompt or control-plane actions.",
@@ -121,7 +127,7 @@ _DEFINITIONS = [
             "observation_id": {"type": "string"},
             "operation": {"type": "string", "enum": [
                 "click", "double_click", "right_click", "middle_click", "scroll",
-                "type", "key", "drag", "polyline", "replace_field",
+                "type", "key", "drag", "polyline", "replace_field", "replace_field_pixels",
             ]},
             "generation": {"type": "integer", "minimum": 1},
             "consent_generation": {"type": "integer", "minimum": 1},
@@ -144,7 +150,8 @@ _DEFINITIONS = [
             "target": {"type": "string", "description":
                        "Fresh observed accessible target handle; replace_field only."},
             "region": {"type": "object", "description":
-                       "Delivered-pixel rectangle; center is clicked. Use instead of x,y.",
+                       "Delivered-pixel rectangle; center is clicked. Use instead of x,y. "
+                       "Required observed editable field bounds for replace_field_pixels.",
                        "properties": {"x": {"type": "integer", "minimum": 0},
                                       "y": {"type": "integer", "minimum": 0},
                                       "width": {"type": "integer", "minimum": 1},
@@ -196,6 +203,7 @@ _ACTION_FIELDS = {
     "type": {"text"}, "key": {"key"}, "drag": {"points", "duration"},
     "polyline": {"points", "duration"},
     "replace_field": {"target", "text"},
+    "replace_field_pixels": {"region", "text"},
 }
 _ACTION_SCHEMA = _DEFINITIONS[2]["input_schema"]
 _ACTION_SCHEMA["oneOf"] = [
@@ -213,17 +221,22 @@ _ACTION_SCHEMA["properties"]["key"]["allOf"] = [
 for _case, (_operation, _fields) in zip(
         _ACTION_SCHEMA["oneOf"], _ACTION_FIELDS.items(), strict=True):
     if _operation in {"click", "double_click", "right_click", "middle_click"}:
+        _case["properties"].pop("region", None)
         _case["properties"].pop("count", None)
         _case["properties"]["count"] = {"type": "integer", "minimum": 1, "maximum": 3}
         _case["required"] = []
         _case["oneOf"] = [{"required": ["x", "y"], "properties": {"region": False}},
                           {"required": ["region"], "properties": {"x": False, "y": False}}]
     else:
-        _case["properties"]["region"] = False
+        if _operation != "replace_field_pixels":
+            _case["properties"]["region"] = False
         if _operation not in {"scroll", "drag", "polyline"}:
             _case["properties"]["modifiers"] = False
     if _operation == "type":
         _case["properties"]["text"] = {"type": "string", "minLength": 1, "maxLength": 512}
+    if _operation == "replace_field_pixels":
+        _case["properties"]["expect"] = {
+            "properties": {"type": {"enum": ["visual_change", "region_changed"]}}}
 
 # Reuse the ordinary single-action contract without allowing binding overrides
 # inside a plan. Single actions retain their existing controller dispatch path.
@@ -236,6 +249,9 @@ _STEP_SCHEMA = {
     "required": ["action_id", "operation", "expect"],
     "oneOf": deepcopy(_ACTION_SCHEMA["oneOf"]),
 }
+_STEP_SCHEMA["properties"]["operation"]["enum"].remove("replace_field_pixels")
+_STEP_SCHEMA["oneOf"] = [case for case in _STEP_SCHEMA["oneOf"]
+                         if case["properties"]["operation"]["const"] != "replace_field_pixels"]
 _ACTION_SCHEMA["properties"].update({
     "steps": {"type": "array", "minItems": 1, "maxItems": 8, "items": _STEP_SCHEMA,
               "description": "Ordered non-nested single actions, all planned against the "

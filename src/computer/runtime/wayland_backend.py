@@ -104,6 +104,8 @@ class WaylandRuntimeBackend:
                     "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app",
                     "effect_expectations": ["visual_change", "region_changed"],
                     "accessible_targets": "unavailable", "replace_field": "unavailable",
+                    "element_targeting": "observed_pixel_region_click",
+                    "replace_field_pixels": "unavailable_native_compound_guard_required",
                     "click_count": "native_click_modifiers_v1_capability_required",
                     "click_modifiers": "native_click_modifiers_v1_capability_required",
                     "scroll_modifiers": "native_pointer_modifiers_v1_capability_required",

@@ -152,6 +152,8 @@ async def execute_sequence(controller, context, inp):
                 raise ComputerError("unsupported_postcondition")
             # Fresh accessible handles require per-view reconciliation; the
             # initial sequence contract does not silently synthesize that.
+            if step["operation"] == "replace_field_pixels":
+                raise ComputerError("pixel_field_requires_single_action")
             if step["operation"] == "replace_field":
                 raise ComputerError("sequence_accessible_target_requires_single_action")
             try:

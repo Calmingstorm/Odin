@@ -10,6 +10,7 @@ from .models import ComputerError
 
 STROKE_OPERATIONS = frozenset({"drag", "polyline"})
 POINTER_OPERATIONS = frozenset({"click", "double_click", "right_click", "middle_click", "scroll",
+                                "replace_field_pixels",
                                 *STROKE_OPERATIONS})
 TARGET_RADIUS = 24
 MAX_CHANGED_FRACTION = .02

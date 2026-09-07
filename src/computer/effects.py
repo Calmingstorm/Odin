@@ -63,6 +63,15 @@ def execution_receipt(raw, result):
     if result["status"] in {"interrupted", "unknown"}:
         safe["next_action"] = "stop" if not released else "observe_and_reconcile"
     result["diagnostics"] = safe
+    path = raw.get("targeting_path")
+    if type(path) is str and path in {"native_atspi_identity", "explicit_pixel_region",
+                                     "observed_pixel_coordinates", "native_window_focus"}:
+        result["targeting"] = {"path": path}
+        if path == "explicit_pixel_region":
+            result["targeting"].update(
+                accessible_identity=False, text_readback=False,
+                field_focus="visually_grounded_not_semantically_proven",
+                contents_require_visual_inspection=True)
     return result
 
 

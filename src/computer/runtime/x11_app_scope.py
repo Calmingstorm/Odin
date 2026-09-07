@@ -418,7 +418,8 @@ class AppScope:
         except Exception:
             return None, "application_scope_unavailable"
 
-    def assert_snapshot(self, expected, monitor, point=None, *, pointer_query=None):
+    def assert_snapshot(self, expected, monitor, point=None, *, pointer_query=None,
+                        require_focused_window=False):
         current = self.snapshot(monitor)
         if (current is None or current != expected or not current["focused"]
                 or current["modal_kind"] == "unrecognized"):
@@ -449,6 +450,10 @@ class AppScope:
                 else:
                     raise ValueError
                 target = self._snapshot(monitor, candidate=window)
+                # Compound pixel field input cannot click another same-process
+                # window and then send keys to the old keyboard focus.
+                if require_focused_window and target["window"] != current["window"]:
+                    raise ValueError
                 family = {current["window"], *current["transient_chain"]}
                 related = (target["window"] in family
                            or bool(family.intersection(target["transient_chain"]))

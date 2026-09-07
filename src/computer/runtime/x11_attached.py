@@ -83,6 +83,10 @@ class X11AttachedBackend:
                     "key_chords": "active_group_base_symbols_explicit_modifiers_only",
                     "modifier_mapping": "conventional_unambiguous_xkb_slots_only",
                     "accessible_targets": "unavailable", "replace_field": "unavailable",
+                    "element_targeting": "observed_pixel_region_click",
+                    "replace_field_pixels": "explicit_region_click_select_type_visual_only",
+                    "pixel_field_requires": ["fresh_observed_editable_region", "single_line_text",
+                                             "same_native_window_focus", "visual_inspection"],
                     "effect_expectations": ["visual_change", "pointer_at", "region_changed",
                                             "dialog_appeared", "menu_appeared", "window_gone"]}
     capabilities = BackendCapabilities("x11", "existing_session", "unknown", "unknown",
@@ -826,6 +830,13 @@ class X11AttachedBackend:
                     "observation_native_handles" if frame.accessibility else "unavailable")
                 self.input_limits["replace_field"] = (
                     "native_atspi_same_node_readback" if field_available else "unavailable")
+                self.input_limits["field_targeting_path"] = (
+                    "native_atspi_identity_or_explicit_pixels" if field_available
+                    else "explicit_pixels_only_no_accessible_identity")
+                self.input_limits["accessibility_evidence"] = (
+                    "observed_editable_nodes" if field_available else
+                    "observed_nodes_without_editable_text" if frame.accessibility else
+                    "no_usable_nodes_observed_session_enabled_not_sufficient")
                 self.input_limits["effect_expectations"] = [
                     *type(self).input_limits["effect_expectations"],
                     *(["field_text_equals"] if field_available else [])]
@@ -851,6 +862,7 @@ class X11AttachedBackend:
                       "scroll": {"x", "y", "direction", "count"},
                       "type": {"text"}, "key": {"chord"},
                       "replace_field": {"target", "text"},
+                      "replace_field_pixels": {"region", "text"},
                       "polyline": {"points", "duration"}}
             required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
             clicks = {"click", "double_click", "right_click", "middle_click"}
@@ -881,6 +893,10 @@ class X11AttachedBackend:
                 "text": action.get("text")})
             if action["type"] == "replace_field" and not field_expected:
                 raise AttachedFailure("field_text_verification_required")
+            pixel_field = action["type"] == "replace_field_pixels"
+            if (pixel_field and action["expected"]["type"] not in
+                    {"visual_change", "region_changed"}):
+                raise AttachedFailure("unsupported_postcondition")
             if (action["expected"]["type"] in {"pointer_at", "field_text_equals"}
                     and not (pointer_expected or field_expected)):
                 raise AttachedFailure("unsupported_postcondition")
@@ -897,12 +913,14 @@ class X11AttachedBackend:
                 for key in ("count", "modifiers"):
                     if key in action:
                         payload[key] = action[key]
-            if action["type"] in {"type", "replace_field"}:
+            if action["type"] in {"type", "replace_field", "replace_field_pixels"}:
                 text = action["text"]
                 if (type(text) is not str
-                        or not (0 if field_expected else 1) <= len(text) <= 512
+                        or not (0 if field_expected or pixel_field else 1) <= len(text) <= 512
                         or any((ord(c) < 32 and c not in "\n\t") or 127 <= ord(c) <= 159
                                or 0xD800 <= ord(c) <= 0xDFFF for c in text)):
+                    raise ComputerError("invalid_text")
+                if pixel_field and any(ord(c) < 32 for c in text):
                     raise ComputerError("invalid_text")
             elif action["type"] == "key":
                 from .primitives import parse_key_chord
@@ -931,6 +949,17 @@ class X11AttachedBackend:
                 payload["x"], payload["y"] = point([action["x"], action["y"]])
                 if action["type"] == "scroll":
                     payload.update(direction=action["direction"], count=action["count"])
+            elif pixel_field:
+                from ..gui_actions import crop_arguments
+                region = crop_arguments(action["region"], frame.width, frame.height)
+                left, top = point([region["x"], region["y"]])
+                right, bottom = point([region["x"] + region["width"] - 1,
+                                       region["y"] + region["height"] - 1])
+                if right < left or bottom < top:
+                    raise AttachedFailure("invalid_point")
+                payload.update(region={"x": left, "y": top,
+                                       "width": right - left + 1, "height": bottom - top + 1},
+                               text=action["text"])
             elif action["type"] == "polyline":
                 if type(action["points"]) is not list or not 2 <= len(action["points"]) <= 256:
                     raise AttachedFailure("invalid_polyline")
@@ -961,6 +990,10 @@ class X11AttachedBackend:
             self._frame = None  # Consume before dispatch; lost replies are not retryable.
             self._accessibility_private = {}
             receipt = await self._input_worker(request)
+            receipt["targeting_path"] = (
+                "native_atspi_identity" if field_expected else "explicit_pixel_region"
+                if pixel_field else "native_window_focus" if action["type"] in {"key", "type"}
+                else "observed_pixel_coordinates")
             if receipt.get("released") is not True:
                 self._release_failed = True
                 self._paused = True
