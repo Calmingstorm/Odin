@@ -1,7 +1,8 @@
 /* Sole EI owner. argv: granted fd, exact portal mapping ID.
  * H key button GLOBAL_x GLOBAL_y ms; R; C (qualification compatibility).
  * B ms; then M x y | P button x y | D button n x y ... | K n key... |
- * T ascii_hex | J ctrl+a (named live-keymap chord). Source-local actions release,
+ * T utf8_hex | J ctrl+a | Q button x y | W direction count x y.
+ * Source-local actions release,
  * emits action_done, returns idle on SAME EI context. N heartbeat renews idle
  * only; ignored while active. S mapping_id selects an exact region while idle.
  * Compile -std=c11 -Wall -Wextra -Werror with libei-1.0, xkbcommon, -lm.
@@ -31,7 +32,7 @@ static void receipt(const char *event, const char *reason, uint64_t now) {
   if(n>0 && n<(int)sizeof line) (void)write(1,line,(size_t)n);
 }
 struct point { double x,y; };
-struct chord { unsigned keys[3],n; };
+struct chord { unsigned keys[4],n; };
 struct guardian {
   struct ei *ctx;
   struct ei_device *devices[64],*pointer,*keyboard;
@@ -47,6 +48,8 @@ struct guardian {
   struct point points[256];
   struct chord text[256];
   unsigned combo[16],count,index,phase,button;
+  int scroll_x,scroll_y;
+  uint64_t next_step;
   char kind;
   uint64_t lease,idle,finish,settle;
   const char *reason;
@@ -152,18 +155,20 @@ static unsigned modifier_key(struct guardian *g,xkb_keysym_t sym) {
   }return 0;
 }
 /* Actual EI keymap, not US keycodes. Reject external held/latched/locked mods. */
-static bool ascii_chord(struct guardian *g,unsigned ch,struct chord *out) {
-  unsigned shift=modifier_key(g,XKB_KEY_Shift_L),level3=modifier_key(g,XKB_KEY_ISO_Level3_Shift);
-  for(unsigned mask=0;mask<4;mask++){
-    if(((mask&1)&&!shift)||((mask&2)&&!level3))continue;
+static bool symbol_chord(struct guardian *g,unsigned ch,xkb_keysym_t sym,struct chord *out) {
+  unsigned shift=modifier_key(g,XKB_KEY_Shift_L),level3=modifier_key(g,XKB_KEY_ISO_Level3_Shift),level5=modifier_key(g,XKB_KEY_ISO_Level5_Shift);
+  for(unsigned mask=0;mask<8;mask++){
+    if(((mask&1)&&!shift)||((mask&2)&&!level3)||((mask&4)&&!level5))continue;
     struct xkb_state *state=xkb_state_new(g->keymap);if(!state)return false;
     xkb_state_update_mask(state,0,0,0,0,0,g->group);
     if(mask&1)xkb_state_update_key(state,shift,XKB_KEY_DOWN);
     if(mask&2)xkb_state_update_key(state,level3,XKB_KEY_DOWN);
+    if(mask&4)xkb_state_update_key(state,level5,XKB_KEY_DOWN);
     for(unsigned k=9;k<=255;k++){
-      if(k==shift||k==level3)continue;
-      if(xkb_state_key_get_utf32(state,k)==ch){
+      if(!sym&&(k==shift||k==level3||k==level5))continue;
+      if(sym ? xkb_state_key_get_one_sym(state,k)==sym : xkb_state_key_get_utf32(state,k)==ch){
         out->n=0;if(mask&1)out->keys[out->n++]=shift-8;if(mask&2)out->keys[out->n++]=level3-8;
+        if(mask&4)out->keys[out->n++]=level5-8;
         out->keys[out->n++]=k-8;xkb_state_unref(state);return true;
       }
     }xkb_state_unref(state);
@@ -203,20 +208,72 @@ static bool named_chord(struct guardian *g,char *text) {
     part=plus+1;
   }
   if(strlen(part)==1 && (unsigned char)*part>=32 && (unsigned char)*part<=126){
-    struct chord chord;if(!ascii_chord(g,(unsigned char)*part,&chord))return false;
+    struct chord chord;if(!symbol_chord(g,(unsigned char)*part,0,&chord))return false;
     for(unsigned i=0;i<chord.n;i++)if(!add_combo(g,chord.keys[i]))return false;
     return true;
   }
-  const char *allowed[]={"Return","Escape","Tab","BackSpace","Delete","Left","Right","Up","Down","Home","End","Page_Up","Page_Down","space"};
-  bool known=false;
-  for(unsigned i=0;i<sizeof allowed/sizeof allowed[0];i++)if(!strcmp(part,allowed[i]))known=true;
-  if(!known)return false;
-  unsigned code=modifier_key(g,xkb_keysym_from_name(part,XKB_KEYSYM_NO_FLAGS));
-  return code && add_combo(g,code-8);
+  xkb_keysym_t sym=xkb_keysym_from_name(part,XKB_KEYSYM_NO_FLAGS);
+  struct chord chord;
+  if(!sym||!symbol_chord(g,0,sym,&chord))return false;
+  for(unsigned i=0;i<chord.n;i++)if(!add_combo(g,chord.keys[i]))return false;
+  return true;
+}
+/* Strict UTF-8 decoding and whole-chunk preflight before any input event. */
+static bool text_chords(struct guardian *g,const char *text) {
+  size_t len=strlen(text);unsigned char bytes[1024];
+  if(!len||len%2||len>sizeof bytes*2)return false;
+  for(size_t i=0;i<len/2;i++){
+    int a=hex(text[i*2]),b=hex(text[i*2+1]);if(a<0||b<0)return false;
+    bytes[i]=(unsigned char)(a*16+b);
+  }
+  unsigned cps[256],n=0;size_t pos=0;
+  while(pos<len/2){
+    unsigned first=bytes[pos++],cp,min,extra;
+    if(first<128){cp=first;min=0;extra=0;}
+    else if(first>=0xc2&&first<=0xdf){cp=first&31;min=128;extra=1;}
+    else if(first>=0xe0&&first<=0xef){cp=first&15;min=2048;extra=2;}
+    else if(first>=0xf0&&first<=0xf4){cp=first&7;min=65536;extra=3;}
+    else return false;
+    if(n==256||pos+extra>len/2)return false;
+    for(unsigned j=0;j<extra;j++){unsigned b=bytes[pos++];if((b&0xc0)!=0x80)return false;cp=(cp<<6)|(b&63);}
+    if(cp<min||cp>0x10ffff||(cp>=0xd800&&cp<=0xdfff))return false;
+    cps[n++]=cp;
+  }
+  char report[12000];size_t used=0;unsigned missing=0;
+  for(unsigned i=0;i<n;i++){
+    if(cps[i]<32||(cps[i]>=127&&cps[i]<160)||!symbol_chord(g,cps[i],0,&g->text[i])){
+      int size=snprintf(report+used,sizeof report-used,"%s{\"index\":%u,\"codepoint\":%u}",missing?",":"",i,cps[i]);
+      if(size<0||(size_t)size>=sizeof report-used)return false;
+      used+=(size_t)size;missing++;
+    }
+  }
+  if(missing){
+    char line[12500];int size=snprintf(line,sizeof line,"{\"event\":\"action_rejected\",\"reason\":\"unsupported_character\",\"characters\":[%s],\"input_was_sent\":false}\n",report);
+    if(size<=0||(size_t)size>=sizeof line)return false;
+    /* Reports may exceed PIPE_BUF. Bounded partial-write drain before input. */
+    size_t sent=0;
+    for(unsigned attempt=0;sent<(size_t)size&&attempt<16&&!cancelled;attempt++){
+      ssize_t written=write(1,line+sent,(size_t)size-sent);
+      if(written>0){sent+=(size_t)written;continue;}
+      if(written<0&&(errno==EAGAIN||errno==EWOULDBLOCK||errno==EINTR)){
+        struct pollfd fd={1,POLLOUT,0};(void)poll(&fd,1,10);continue;
+      }
+      return false;
+    }
+    if(sent!=(size_t)size)return false;
+    g->begun=false;g->lease=0;g->idle=ei_now(g->ctx)+2000000;g->count=0;
+    return true;
+  }
+  g->count=n;return true;
 }
 static void start(struct guardian *g,bool p,bool k) {
   if(p){ei_device_start_emulating(g->pointer,++g->sequence);g->pstarted=true;}
   if(k){ei_device_start_emulating(g->keyboard,++g->sequence);g->kstarted=true;}
+}
+static void reject(struct guardian *g,const char *reason) {
+  char line[256];int size=snprintf(line,sizeof line,"{\"event\":\"action_rejected\",\"reason\":\"%s\",\"input_was_sent\":false}\n",reason);
+  if(size>0&&(size_t)size<sizeof line)(void)write(1,line,(size_t)size);
+  g->begun=false;g->lease=0;g->idle=ei_now(g->ctx)+2000000;g->count=0;
 }
 static bool command(struct guardian *g,char *line) {
 #ifdef WAYLAND_FIXTURE_FAULTS
@@ -250,10 +307,20 @@ static bool command(struct guardian *g,char *line) {
   }
   if(!g->begun)return false;
   g->kind=*verb;
-  if(*verb=='M'||*verb=='P'||*verb=='D'){
+  if(*verb=='M'||*verb=='P'||*verb=='D'||*verb=='Q'){
     g->count=1;if(*verb!='M'&&!number(&rest,&g->button,272,279))return false;
     if(*verb=='D'&&!number(&rest,&g->count,2,256))return false;
     for(unsigned i=0;i<g->count;i++)if(!point(g,&rest,&g->points[i],false))return false;
+  }else if(*verb=='W'){
+    char *direction=token(&rest);
+    if(!direction||!number(&rest,&g->count,1,20)||!point(g,&rest,&g->points[0],false)||rest)return false;
+    if(!ei_device_has_capability(g->pointer,EI_DEVICE_CAP_SCROLL)){reject(g,"scroll_capability_unavailable");return true;}
+    g->scroll_x=g->scroll_y=0;
+    if(!strcmp(direction,"up"))g->scroll_y=-120;
+    else if(!strcmp(direction,"down"))g->scroll_y=120;
+    else if(!strcmp(direction,"left"))g->scroll_x=-120;
+    else if(!strcmp(direction,"right"))g->scroll_x=120;
+    else return false;
   }else if(*verb=='K'){
     if(!g->keyboard||!number(&rest,&g->count,1,16))return false;
     for(unsigned i=0;i<g->count;i++){
@@ -262,19 +329,19 @@ static bool command(struct guardian *g,char *line) {
     }
   }else if(*verb=='J'){
     char *chord=token(&rest);
-    if(!chord||strlen(chord)>128||!named_chord(g,chord))return false;
+    if(!chord||strlen(chord)>128||rest)return false;
+    if(!g->keyboard||!g->keymap){reject(g,"keymap_unavailable");return true;}
+    if(g->depressed||g->latched||g->locked){reject(g,"modifier_state_active");return true;}
+    if(!named_chord(g,chord)){reject(g,"unsupported_key");return true;}
     g->kind='K';
   }else if(*verb=='T'){
     char *text=token(&rest);
     if(!text||!g->keymap||g->depressed||g->latched||g->locked||g->group>=xkb_keymap_num_layouts(g->keymap))return false;
-    size_t len=strlen(text);if(!len||len%2||len>512)return false;g->count=(unsigned)len/2;
-    for(unsigned i=0;i<g->count;i++){
-      int a=hex(text[2*i]),b=hex(text[2*i+1]);unsigned ch=(unsigned)(a*16+b);
-      if(a<0||b<0||ch<32||ch>126||!ascii_chord(g,ch,&g->text[i]))return false;
-    }
+    if(rest||!text_chords(g,text))return false;
+    if(!g->begun)return true;
   }else return false;
   if(rest||cancelled||ei_now(g->ctx)>=g->lease)return false;
-  g->action=true;start(g,*verb=='M'||*verb=='P'||*verb=='D',*verb=='K'||*verb=='J'||*verb=='T');return true;
+  g->action=true;g->next_step=0;start(g,*verb=='M'||*verb=='P'||*verb=='D'||*verb=='Q'||*verb=='W',*verb=='K'||*verb=='J'||*verb=='T');return true;
 }
 static void complete(struct guardian *g) {
   receipt("release_begin","completed",ei_now(g->ctx));release(g,"completed");
@@ -289,8 +356,18 @@ static void action_done(struct guardian *g) {
 }
 static void step(struct guardian *g) {
   if(!g->action||g->kind=='H'||g->done_pending)return;
+  uint64_t now=ei_now(g->ctx);if(now<g->next_step)return;
   if(g->kind=='M'||g->kind=='P'||g->kind=='D'){
     if(g->index<g->count){move(g,g->points[g->index]);if(!g->index&&g->kind!='M')button(g,g->button,true);g->index++;}else complete(g);
+  }else if(g->kind=='Q'){
+    if(!g->phase){move(g,g->points[0]);button(g,g->button,true);g->phase=1;}
+    else if(g->phase==1){button(g,g->button,false);g->phase=2;g->next_step=now+80000;}
+    else if(g->phase==2){button(g,g->button,true);g->phase=3;}
+    else complete(g);
+  }else if(g->kind=='W'){
+    if(!g->index)move(g,g->points[0]);
+    ei_device_scroll_discrete(g->pointer,g->scroll_x,g->scroll_y);ei_device_frame(g->pointer,now);
+    if(++g->index==g->count)complete(g);else g->next_step=now+30000;
   }else if(g->kind=='K'){
     if(!g->phase++){for(unsigned i=0;i<g->count;i++)key(g,g->combo[i],true);}else complete(g);
   }else if(g->kind=='T'){
@@ -325,7 +402,7 @@ int main(int argc,char **argv) {
     struct ei_event *event;
     while((event=ei_get_event(g.ctx))){
       enum ei_event_type type=ei_event_get_type(event);struct ei_device *dev=ei_event_get_device(event);
-      if(type==EI_EVENT_SEAT_ADDED)ei_seat_bind_capabilities(ei_event_get_seat(event),EI_DEVICE_CAP_POINTER_ABSOLUTE,EI_DEVICE_CAP_BUTTON,EI_DEVICE_CAP_KEYBOARD,NULL);
+      if(type==EI_EVENT_SEAT_ADDED)ei_seat_bind_capabilities(ei_event_get_seat(event),EI_DEVICE_CAP_POINTER_ABSOLUTE,EI_DEVICE_CAP_BUTTON,EI_DEVICE_CAP_KEYBOARD,EI_DEVICE_CAP_SCROLL,NULL);
       if(type==EI_EVENT_DEVICE_RESUMED&&!g.fenced&&!g.reason){
         bool known=false;for(unsigned i=0;i<g.ndevices;i++)if(g.devices[i]==dev)known=true;
         if(g.ready)fail(&g,"topology-changed",3);

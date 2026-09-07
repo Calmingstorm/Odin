@@ -29,6 +29,8 @@ HEADER = fixture.HEADER.replace(
     "EI_EVENT_DEVICE_PAUSED };", "EI_EVENT_DEVICE_PAUSED, EI_EVENT_KEYBOARD_MODIFIERS };"
 ).replace("#endif", """
 struct ei_keymap;
+#define EI_DEVICE_CAP_SCROLL 4
+void ei_device_scroll_discrete(struct ei_device *, int32_t, int32_t);
 enum ei_keymap_type { EI_KEYMAP_TYPE_XKB=1 };
 struct ei_keymap *ei_device_keyboard_get_keymap(struct ei_device *);
 enum ei_keymap_type ei_keymap_get_type(struct ei_keymap *);
@@ -41,7 +43,7 @@ uint32_t ei_event_keyboard_get_xkb_group(struct ei_event *);
 #endif
 """).replace("#include <stdint.h>", "#include <stdint.h>\n#include <stddef.h>")
 
-LIBRARY = fixture.LIBRARY.replace(
+LIBRARY = fixture.LIBRARY.replace("cap==1 || cap==2", "cap==1 || cap==2 || cap==4").replace(
     '#include "libei.h"', '#include "libei.h"\n#include <xkbcommon/xkbcommon.h>'
 ).replace(
     "static struct ei_region region;",
@@ -73,6 +75,9 @@ LIBRARY = fixture.LIBRARY.replace(
     if(signal=='L') add(EI_EVENT_KEYBOARD_MODIFIERS,&keyboard);"""
 ) + r"""
 struct ei_keymap { int fd; size_t size; };
+void ei_device_scroll_discrete(struct ei_device *d,int32_t x,int32_t y) {
+ (void)d;emit("SCROLL %d %d\n",x,y);
+}
 static struct ei_keymap km;
 struct ei_keymap *ei_device_keyboard_get_keymap(struct ei_device *dev) {
  (void)dev;

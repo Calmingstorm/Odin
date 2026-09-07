@@ -15,6 +15,8 @@ from ..models import ComputerError
 class WaylandGuardianError(ComputerError):
     """Static failure; a sent action may have an unknown outcome."""
 
+    details: dict[str, Any]
+
 
 class _Credentials(TypedDict, total=False):
     user: int
@@ -110,7 +112,7 @@ class WaylandGuardian:
             if self._child is None or self._child.stdout is None:
                 raise WaylandGuardianError("wayland_guardian_disconnected")
             while line := await self._child.stdout.readline():
-                if len(line) > 4096:
+                if len(line) > 16384:
                     raise ValueError("oversized guardian receipt")
                 row = json.loads(line)
                 event = row.get("event")
@@ -145,6 +147,8 @@ class WaylandGuardian:
                 row = await self._events.get()
                 if row.get("event") == event:
                     return row
+                if row.get("event") == "action_rejected" and event == "action_done":
+                    return row
                 if row.get("event") in {"closed", "unsupported_release", "transport_end"}:
                     raise WaylandGuardianError("wayland_guardian_input_path_lost")
                 if row.get("event") not in {"begun", "begin", "selected", "held"}:
@@ -170,7 +174,7 @@ class WaylandGuardian:
 
     async def act(self, command: str):
         if (type(command) is not str or not command or len(command) > 32000
-                or command[0] not in "MPDKTJ" or "\n" in command or "\r" in command
+                or command[0] not in "MPDKTJQW" or "\n" in command or "\r" in command
                 or "\x00" in command):
             raise WaylandGuardianError("wayland_guardian_invalid_action")
         async with self._action_lock:
@@ -182,10 +186,14 @@ class WaylandGuardian:
                 await self._send("B 2000\n" + command + "\n")
                 receipt = await self._receive("action_done", timeout=3)
                 self._active = False
-                return {**receipt, "release_submitted": self._release_submitted}
             except BaseException:
                 await self.close()
                 raise
+            if receipt.get("event") == "action_rejected":
+                error = WaylandGuardianError(str(receipt.get("reason", "action_rejected")))
+                error.details = receipt
+                raise error
+            return {**receipt, "release_submitted": self._release_submitted}
 
     async def _close(self) -> dict[str, bool]:
         self._closing = True
