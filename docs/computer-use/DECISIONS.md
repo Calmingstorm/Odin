@@ -5,6 +5,37 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 Authority: Aaron's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
+## Revision R7: autonomous cleanup and qualified offerings (2026-09-07)
+
+The reported Cinnamon wake issue is a pre-existing operator/compositor issue,
+not an Odin defect. Do not add a compositor restart, wake workaround, periodic
+monitor probe, or automatic production display-configuration repair for it.
+
+Separate two contracts. Production attached cleanup revokes input, releases only
+owned presses, reaps owned workers and purges private evidence without depending
+on a fresh screenshot, stable topology, or awake monitors. It leaves the user's
+applications and intended document edits alone. It must not restore an old desktop
+layout over a user's new layout or move the shared pointer back after ordinary use.
+
+The opt-in exclusive scratch harness has a stricter leave-as-found transaction.
+After stopping input and its own scratch processes, automatically restore the
+validated, durably recorded topology when its resource inventory still matches,
+then baseline window metadata, focus/pointer, and finally original power state.
+Use bounded attempts, independently recorded stages and a final exact comparison;
+failure of one stage must not prevent process/evidence cleanup or power restoration.
+Only geometry-only position drift of an identity-verified hidden baseline client
+may be repaired, and only under that explicit scratch transaction after topology
+restoration; never unhide, activate, resize, or edit that client to force a pass.
+
+Physical unplug/replacement, changed resource identity, concurrent user input,
+unresponsive X server, and unknowable guardian death cannot safely be made into
+verified restoration by retries. Report exact unfinished stages and required
+operator actions, retain uncertainty, and never replay the GUI task. Reproduce
+faults only in owned private displays or harmless stub primitives, never Aaron's
+desktop. Application offerings must match measured tasks: unqualified Calc/Draw
+and Writer lifecycle operations must either gain independent qualification or
+cease to be offered. No deploy, restart, merge, tag, pipeline or live-install edit.
+
 ## Revision R6: reaping and useful attached applications (2026-09-07)
 
 The current assignment explicitly adds the shipped service's growing zombie leak
