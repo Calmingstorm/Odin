@@ -5,6 +5,36 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 Authority: Aaron's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 
+## Revision R3 — ordinary-turn tools, no conversation restriction (2026-09-07)
+
+Aaron's binding ruling in `10-ruling-no-channel-lock.md` and the current task
+supersede Q5's restricted-actor/conversation mechanism completely. Computer tools
+run in an ordinary foreground turn alongside every other authorized tool. A
+desktop session is only an internal capture/input/application lifetime; starting,
+observing, acting, stopping, failing, disabling or restarting it must not change
+any unrelated tool's availability, in this turn, later turns, or for other people
+in the channel. No lock, conversation mode, durable restriction, or batch fence.
+
+Remove the restriction schema, store/controller methods, integration guards,
+dispatch hooks, tool-description clause, and tests that required that behavior.
+Discard any obsolete restriction table when opening a pre-R3 development store;
+keep session ownership, receipts and evidence intact. Regression tests must run
+ordinary tools alongside an active desktop task, after close/failure/recovery,
+and from a later turn and another channel participant. Mixed tool batches remain
+ordinary batches, not a hidden authority transition.
+
+Desktop observations remain explicitly untrusted data, never user authority.
+The desktop capability's own refusal classes, foreground admission, task/host
+ownership, generation fencing, bounded input, private evidence and postconditions
+remain unchanged. Removing the conversation restriction does not grant a desktop
+action permission to operate terminals, security prompts or Odin's control plane.
+The narrow agent image-stringification repair also remains in scope.
+
+Continue feasibility and grounded-action work only in disposable environments.
+No deployment, service restart, active-workstation automation, merge or pipeline.
+Cleanup reports must distinguish dead unreaped children from live workloads;
+do not modify the running service or its parent to manufacture complete reaping.
+
 ## Revision R2 — overlap accepted, damage forbidden (2026-09-07)
 
 Authority: Claudia relayed Aaron's revised instruction: packages may be installed
@@ -184,7 +214,10 @@ These are acceptance targets until measured, not claims of observed performance.
 Resource enforcement is mandatory, not a model instruction. No system-wide
 package installation is authorized; use existing dependencies or ask Aaron.
 
-## Q5 — Execution surfaces and the confirmed image defect
+## Q5 — Execution surfaces and the confirmed image defect (restriction superseded by R3)
+
+Historical Q5 below is retained only to explain the removed design, not as an
+implementation requirement. R3 above is binding.
 
 Foreground Discord/WebUI initiation only through Stage 6. A desktop task is a
 server-enforced restricted actor, not a new root-capable shell assistant. Its
