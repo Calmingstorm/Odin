@@ -1,8 +1,9 @@
 """Conservative, title-free X11 scratch-test state guard.
 
 No display is opened by this module. Callers supply an already authorized Display.
-Snapshot/validate are read-only. Hidden/sticky windows are immutable baselines:
-never unhide or repair them, and fail verification if they change. Other unknown
+Snapshot/validate are read-only. Hidden/sticky windows are immutable by default.
+Only the exclusive scratch harness may opt into same-identity hidden position
+repair; never activate, unhide, resize or change their state. Other unknown
 states fail preflight rather than promising an unimplementable restoration.
 EWMH is asynchronous: restoration is bounded and reports verification failures.
 The identity tuple cannot detect XID reuse by the *same* still-running process;
@@ -152,8 +153,14 @@ def validate(before):
     if len(before["keymap"]) != 32:
         raise PreflightError("invalid keymap")
     clients = before["clients"]
-    if len(set(clients)) != len(clients) or set(clients) != set(before["stacking"]):
+    if (len(set(clients)) != len(clients) or set(clients) != set(before["stacking"])
+            or len(before["stacking"]) != len(clients)
+            or set(before["windows"]) != set(clients)):
         raise PreflightError("incomplete client/stacking baseline")
+    for wid in clients:
+        _validate_identity(before["windows"][wid]["identity"], wid)
+    if before["focus"] > 1:
+        _validate_identity(before["focus_identity"], before["focus"])
     if len(before["workspace"]) != 1 or len(before["active"]) != 1:
         raise PreflightError("workspace/active baseline unavailable")
     if not before["active"][0]:
@@ -168,6 +175,9 @@ def validate(before):
                 "absent active requires hidden clients/typed idle surfaces and nonclient focus")
     if before["active"][0] and before["active"][0] not in clients:
         raise PreflightError("active window is not a baseline client")
+    if before["active"][0] and before["atoms"]["_NET_WM_STATE_HIDDEN"] in before[
+            "windows"][before["active"][0]]["states"]:
+        raise PreflightError("hidden active baseline is not restorable")
     if not set(before["required"].values()) <= set(before["supported"]):
         raise PreflightError("required EWMH restoration unsupported")
     known = {before["atoms"][n] for n in MUTABLE | COMPUTED | IMMUTABLE}
@@ -190,6 +200,25 @@ def validate(before):
             raise PreflightError("invalid frame extents")
 
 
+def _validate_identity(ident, wid):
+    if (not isinstance(ident, dict) or set(ident) != {"xid", "pid", "uid", "start_ticks"}
+            or any(type(v) is not int for v in ident.values())
+            or ident["xid"] != wid or wid <= 1 or ident["pid"] <= 0
+            or ident["uid"] < 0 or ident["start_ticks"] <= 0):
+        raise PreflightError("invalid baseline window/focus identity")
+
+
+def assert_input_idle(d):
+    """Read-only effect-boundary guard. Never release another source's input.
+
+    This is not an exclusive-input lease: a physical event may arrive immediately
+    afterwards. Exclusive operator authorization is still a caller precondition.
+    """
+    keys = d.query_keymap()
+    if len(keys) != 32 or any(keys) or d.screen().root.query_pointer().mask & 0x1F00:
+        raise RuntimeError("input currently held; scratch restoration refused")
+
+
 def _send(d, wid, name, values):
     errors = []
     message = event.ClientMessage(window=wid, client_type=d.intern_atom(name),
@@ -206,6 +235,7 @@ def _owned(d, ident, action):
     with _grab(d):
         if identity(d, ident["xid"]) != ident:
             raise RuntimeError("identity changed; untouched")
+        assert_input_idle(d)
         action()
 
 
@@ -224,7 +254,8 @@ def _states(w, before):
 def _same(a, b, before):
     if _immutable(a, before) or _immutable(b, before):
         return a == b
-    return (a["geometry"] == b["geometry"] and a["workspace"] == b["workspace"]
+    return (a["identity"] == b["identity"] and a.get("window_types") == b.get("window_types")
+            and a["geometry"] == b["geometry"] and a["workspace"] == b["workspace"]
             and a["border"] == b["border"] and a["extents"] == b["extents"]
             and a["map_state"] == b["map_state"]
             and _states(a, before) == _states(b, before))
@@ -265,8 +296,11 @@ def restore_windows(d, before, *, restore_hidden_position=False):
         try:
             if identity(d, wid) != old["identity"]:
                 result["skipped"].append(wid)
-                continue
+                raise RuntimeError("baseline identity changed; untouched")
             current = _record(d, wid, before["atoms"])
+            if current["identity"] != old["identity"]:
+                result["skipped"].append(wid)
+                raise RuntimeError("baseline identity changed during capture; untouched")
             if _same(current, old, before):
                 result["unchanged"].append(wid)
                 continue
@@ -290,11 +324,20 @@ def restore_windows(d, before, *, restore_hidden_position=False):
                       and _record(d, wid, before["atoms"]) == old)
                 result["restored"].append(wid)
                 continue
-            if (not set(current["states"]) <= set(before["atoms"].values())
-                    or current["map_state"] != X.IsViewable):
-                raise RuntimeError("current state unsupported; window untouched")
+            def mutable_now():
+                now = _record(d, wid, before["atoms"])
+                known = {before["atoms"][n] for n in MUTABLE | COMPUTED}
+                if (now["identity"] != old["identity"] or not set(now["states"]) <= known
+                        or now["map_state"] != X.IsViewable
+                        or now.get("window_types") != old.get("window_types")):
+                    raise RuntimeError("current state unsupported; window untouched")
+
+            mutable_now()
             def send(name, values):
-                _owned(d, old["identity"], lambda: _send(d, wid, name, values))
+                def guarded():
+                    mutable_now()
+                    _send(d, wid, name, values)
+                _owned(d, old["identity"], guarded)
             # Change only flags which differ. In particular do not unmaximize an
             # unchanged maximized window and overwrite its WM-private normal size.
             wanted, present = _states(old, before), _states(current, before)
@@ -331,17 +374,19 @@ def restore_focus_pointer(d, before):
     result = {"restored": [], "errors": []}
     root = d.screen().root
     try:
-        if any(d.query_keymap()) or root.query_pointer().mask & 0x1F00:
-            raise RuntimeError("input currently held; focus/pointer restoration refused")
+        assert_input_idle(d)
     except Exception as exc:
         result["errors"].append({"stage": "input", "detail": str(exc)[:180]})
         return result
     for stage in ("workspace", "active", "focus", "pointer"):
         try:
+            assert_input_idle(d)
             if stage == "workspace":
                 if _prop(d, root, "_NET_CURRENT_DESKTOP", limit=1) != before["workspace"]:
-                    _send(d, root.id, "_NET_CURRENT_DESKTOP",
-                          [before["workspace"][0], X.CurrentTime, 0, 0, 0])
+                    with _grab(d):
+                        assert_input_idle(d)
+                        _send(d, root.id, "_NET_CURRENT_DESKTOP",
+                              [before["workspace"][0], X.CurrentTime, 0, 0, 0])
                     _wait(lambda: _prop(d, root, "_NET_CURRENT_DESKTOP", limit=1)
                           == before["workspace"])
             elif stage == "active":
@@ -374,16 +419,21 @@ def restore_focus_pointer(d, before):
                             or _immutable(_record(d, active, before["atoms"]), before)):
                         raise RuntimeError("immutable active baseline changed; window untouched")
                     ident = before["windows"][active]["identity"]
-                    _owned(d, ident, lambda: _send(
-                        d, active, "_NET_ACTIVE_WINDOW", [2, X.CurrentTime, 0, 0, 0]))
+                    def activate():
+                        _focus_client_safe(d, before)
+                        _send(d, active, "_NET_ACTIVE_WINDOW", [2, X.CurrentTime, 0, 0, 0])
+                    _owned(d, ident, activate)
                     _wait(lambda: _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
                           == before["active"])
             elif stage == "focus":
+                if any(e["stage"] in {"workspace", "active"} for e in result["errors"]):
+                    raise RuntimeError("workspace/active restoration failed; focus untouched")
                 if not before["active"][0] and _prop(
                         d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1) != before["active"]:
                     raise RuntimeError("WM has not restored idle active state; focus untouched")
                 ident = before["focus_identity"]
                 def focus():
+                    _focus_client_safe(d, before)
                     _window(d, before["focus"]).set_input_focus(
                         before["focus_revert"], X.CurrentTime)
                     d.sync()
@@ -397,13 +447,17 @@ def restore_focus_pointer(d, before):
                     if ident:
                         _owned(d, ident, focus)
                     else:
-                        focus()
+                        with _grab(d):
+                            assert_input_idle(d)
+                            focus()
                 _wait(focused)
             else:
                 p = root.query_pointer()
                 if [p.root_x, p.root_y] != before["pointer"][:2]:
-                    root.warp_pointer(*before["pointer"][:2])
-                    d.sync()
+                    with _grab(d):
+                        assert_input_idle(d)
+                        root.warp_pointer(*before["pointer"][:2])
+                        d.sync()
                     p = root.query_pointer()
                 if [p.root_x, p.root_y] != before["pointer"][:2]:
                     raise RuntimeError("pointer restoration not acknowledged")
@@ -411,3 +465,14 @@ def restore_focus_pointer(d, before):
         except Exception as exc:
             result["errors"].append({"stage": stage, "detail": str(exc)[:180]})
     return result
+
+
+def _focus_client_safe(d, before):
+    """Recheck active ancestor under the same grab as activation/child focus."""
+    active = before["active"][0]
+    if active:
+        old = before["windows"][active]
+        now = _record(d, active, before["atoms"])
+        if (now["identity"] != old["identity"] or _immutable(now, before)
+                or now["map_state"] != X.IsViewable):
+            raise RuntimeError("active baseline identity/state changed; focus untouched")

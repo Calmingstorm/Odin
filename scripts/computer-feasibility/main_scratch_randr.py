@@ -206,6 +206,22 @@ def _inventory(s):
 
 
 def restore(d, snapshot):
+    """Fence other X clients across stable inventory validation and all writes.
+
+    A server grab is NOT a physical hotplug/input lease. X request failures still
+    fail closed, and exclusive scratch authorization plus a deadline is required.
+    No WM acknowledgement is awaited while grabbed, only server RandR replies.
+    """
+    validate(snapshot)
+    d.grab_server()
+    try:
+        return _restore_locked(d, snapshot)
+    finally:
+        d.ungrab_server()
+        d.sync()
+
+
+def _restore_locked(d, snapshot):
     """Restore only changed topology, using exact mode XIDs, never mode names.
 
     Return False for an exact no-op, True for verified restoration. Refuse hotplug,
@@ -221,6 +237,9 @@ def restore(d, snapshot):
     if _inventory(current) != _inventory(snapshot):
         raise UnsupportedTopology("Resource/transform inventory changed; refusing topology writes")
     root = d.screen().root
+    keys = d.query_keymap()
+    if len(keys) != 32 or any(keys) or root.query_pointer().mask & 0x1F00:
+        raise UnsupportedTopology("Input currently held; refusing topology writes")
     changed = [(a, b) for a, b in zip(current["crtcs"], snapshot["crtcs"], strict=True) if a != b]
     errors = []
     # Xlib's public setter returns None, not the previous handler.

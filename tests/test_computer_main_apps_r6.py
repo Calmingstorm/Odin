@@ -73,6 +73,8 @@ def test_harness_preflight_failure_purges_content_and_records_stages(tmp_path, m
         module.os.umask(old)
     report = json.loads(capsys.readouterr().out)
     assert not report['passed'] and report['screenshots_purged']
+    assert report['cleanup_complete'] and report['session_restored'] is None
+    assert not report['baseline_validated'] and not report['task_complete']
     assert report['failure']['code'] == 'private_topology_unsupported'
     assert closed and not (tmp_path / 'home').exists()
     assert [row['stage'] for row in report['stages']] == [
@@ -247,3 +249,76 @@ def test_power_restoration_noop_and_unknown_refusal(monkeypatch):
     with pytest.raises(RuntimeError, match='unavailable'):
         module.restore_power('unavailable')
     assert not commands
+
+
+@pytest.mark.parametrize('fault', ['validation', 'task', 'cancelled', 'controller'])
+def test_orchestration_outcomes_and_unvalidated_baseline_never_repaired(
+        tmp_path, monkeypatch, capsys, fault):
+    import asyncio
+    import os
+    from types import SimpleNamespace as NS  # noqa: N814 - concise fake constructor
+    from unittest.mock import AsyncMock
+    module = harness_module()
+    calls = []
+    monkeypatch.setattr(module, 'validate_args', lambda _: None)
+    monkeypatch.setattr(module, 'validate_journal', lambda _: tmp_path)
+    monkeypatch.setattr(module.pwd, 'getpwnam', lambda _: NS(pw_uid=1000, pw_gid=1000))
+    monkeypatch.setattr(module.os, 'chown', lambda *_: None)
+    monkeypatch.setattr(module, 'command', lambda *_: '')
+    monkeypatch.setattr(module, 'power_state', lambda: 'Off')
+    d = NS(close=lambda: calls.append('close_display'))
+    monkeypatch.setattr(module.display, 'Display', lambda _: d)
+    monkeypatch.setattr(module.randr, 'capture', lambda _: {})
+    monkeypatch.setattr(module.randr, 'validate', lambda _: None)
+    monkeypatch.setattr(module.randr, 'monitor_geometry',
+        lambda *_: {'x': 0, 'y': 0, 'width': 1280, 'height': 900})
+    monkeypatch.setattr(module.randr, 'restore', lambda *_: calls.append('topology'))
+    monkeypatch.setattr(module.windows, 'snapshot', lambda _: {'active': [10]})
+    monkeypatch.setattr(module.windows, 'assert_input_idle', lambda _: None)
+
+    def validate(_):
+        if fault == 'validation':
+            raise RuntimeError('baseline_unsupported')
+
+    monkeypatch.setattr(module.windows, 'validate', validate)
+    monkeypatch.setattr(module.windows, 'restore_windows',
+        lambda *_, **kw: calls.append('windows'))
+    monkeypatch.setattr(module.windows, 'restore_focus_pointer', lambda *_: calls.append('focus'))
+    monkeypatch.setattr(module, 'restore_power', lambda _: calls.append('power'))
+    controller = NS(close=AsyncMock(), _live={},
+        store=NS(find_session=lambda _: None, cleanup=lambda _: None,
+                 purge_evidence=lambda: calls.append('purge')))
+    if fault == 'controller':
+        controller._live['unreleased'] = object()
+    monkeypatch.setattr(module, 'ComputerIntegration', lambda _: NS(
+        controller=controller, close=AsyncMock()))
+
+    async def launch(*_):
+        if fault == 'cancelled':
+            asyncio.current_task().cancel()
+            await asyncio.sleep(0)
+        raise RuntimeError('deliberate_launch_failure')
+
+    monkeypatch.setattr(module, 'launch', launch)
+    monkeypatch.setenv('DISPLAY', ':987')
+    monkeypatch.setenv('XAUTHORITY', '/tmp/private-fake-authority')
+    args = NS(display=':987', xauthority='/tmp/private-fake-authority', session_user='fake',
+        journal=str(tmp_path), monitor='screen', private_qualification=False)
+    old = os.umask(0o077)
+    try:
+        assert asyncio.run(module.run(args)) == 1
+    finally:
+        os.umask(old)
+    report = json.loads(capsys.readouterr().out)
+    assert not report['passed'] and not report['task_complete']
+    assert report['cleanup_complete'] == (fault != 'controller')
+    if fault in {'validation', 'controller'}:
+        assert not set(calls) & {'topology', 'windows', 'focus', 'power'}
+    else:
+        assert [name for name in calls if name in {'topology', 'windows', 'focus', 'power'}] == [
+            'topology', 'windows', 'focus', 'power']
+        assert report['session_restored']
+    if fault == 'cancelled':
+        assert report['failure']['code'] == 'cooperative_task_deadline'
+    if fault == 'controller':
+        assert report['manual_actions']

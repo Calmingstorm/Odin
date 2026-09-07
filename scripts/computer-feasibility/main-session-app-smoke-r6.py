@@ -36,7 +36,12 @@ sys.path.insert(0, str(ROOT))
 
 import main_scratch_randr as randr  # noqa: E402
 import main_scratch_windows as windows  # noqa: E402
-from main_scratch_cleanup import finish_cleanup, restore_desktop  # noqa: E402
+from main_scratch_cleanup import (  # noqa: E402
+    cleanup_status,
+    close_controller_verified,
+    finish_cleanup,
+    restore_desktop,
+)
 from main_scratch_launcher import identity  # noqa: E402
 from main_scratch_support import (  # noqa: E402
     bounded,
@@ -232,7 +237,6 @@ async def run(args):
     before = d = service = app_identity = None
     app_windows = []
     artifact = failure = None
-    restored = False
     preflight_complete = False
     filename = home / 'scratch.svg'
 
@@ -315,6 +319,8 @@ async def run(args):
         else:
             randr.validate(before['randr'])
             windows.validate(before['windows'])
+            if before['power'] not in {'On', 'Off', 'Standby', 'Suspend'}:
+                raise RuntimeError('power_baseline_unavailable')
             monitor = randr.monitor_geometry(d, args.monitor)
         if monitor['width'] < 1280 or monitor['height'] < 900:
             raise RuntimeError('task_requires_1280x900_monitor')
@@ -400,30 +406,45 @@ async def run(args):
         failure = {'type': type(exc).__name__, 'code': str(exc)[:160]}
         stages.append({'stage': 'task', 'ok': False, 'error_type': type(exc).__name__})
     finally:
+        cleanup_start = len(stages)
         async def cleanup():
-            nonlocal restored
+            controller_ok = True
             if service is not None:
-                await stage(stages, base, 'controller_close', service.controller.close)
+                controller_ok = await stage(stages, base, 'controller_close',
+                    lambda: close_controller_verified(service.controller, context))
                 await stage(stages, base, 'purge_evidence', service.controller.store.purge_evidence)
                 await stage(stages, base, 'integration_close', service.close)
-            if app_identity and before and not before['windows']['active'][0]:
+            if (controller_ok and preflight_complete and app_identity
+                    and not before['windows']['active'][0]):
                 def minimize_scratch():
                     for wid in app_windows:
-                        if windows.identity(d, wid) == {'xid': wid, **app_identity}:
-                            command('xdotool', 'windowminimize', str(wid))
+                        ident = {'xid': wid, **app_identity}
+                        windows._owned(d, ident, lambda: windows._send(
+                            d, wid, 'WM_CHANGE_STATE', [3, 0, 0, 0, 0]))
                 await stage(stages, base, 'minimize_only_scratch', minimize_scratch)
+            terminated = []
             for role in ('inkscape', 'bus'):
-                await stage(stages, base, 'terminate_' + role,
-                            lambda role=role: terminate(role, args, home, processes))
+                terminated.append(await stage(stages, base, 'terminate_' + role,
+                            lambda role=role: terminate(role, args, home, processes)))
             if before is not None and preflight_complete:
+                def require_settled():
+                    if not controller_ok or not all(terminated):
+                        raise RuntimeError('owned_input_or_apps_cleanup_unverified')
+                    windows.assert_input_idle(d)
+
                 def restore_topology():
+                    require_settled()
                     if args.private_qualification:
                         if private_topology(d) != before['randr']:
                             raise RuntimeError('private_topology_changed')
                         return {'changed': False}
                     return {'changed': randr.restore(d, before['randr'])}
 
-                restored = await restore_desktop(stages=stages, base=base, before=before,
+                def power():
+                    require_settled()
+                    return restore_power(before['power'])
+
+                await restore_desktop(stages=stages, base=base, before=before,
                     restore_topology=restore_topology,
                     restore_windows=(lambda: None) if args.private_qualification else
                         lambda: windows.restore_windows(d, before['windows'],
@@ -431,7 +452,7 @@ async def run(args):
                     restore_focus=lambda: (restore_private_empty(d, before['windows'])
                         if args.private_qualification else
                         windows.restore_focus_pointer(d, before['windows'])),
-                    restore_power=lambda: restore_power(before['power']), snapshot=snapshot)
+                    restore_power=power, snapshot=snapshot)
             if d is not None:
                 await stage(stages, base, 'close_x_connection', d.close)
             # All content and screenshots go, including failed action evidence.
@@ -444,9 +465,17 @@ async def run(args):
                     lambda name=name: shutil.rmtree(base / name)
                     if (base / name).exists() else None)
 
-        await finish_cleanup(cleanup())
-        report = {'passed': artifact is not None and restored and all(s['ok'] for s in stages),
-                  'artifact': artifact, 'session_restored': restored, 'stages': stages,
+        try:
+            await finish_cleanup(cleanup())
+        except asyncio.CancelledError:
+            failure = failure or {'type': 'CancelledError', 'code': 'cancelled_during_cleanup'}
+        status = cleanup_status(stages, start=cleanup_start,
+                                baseline_validated=preflight_complete)
+        report = {'passed': artifact is not None and failure is None
+                  and status['cleanup_complete'] and all(s['ok'] for s in stages),
+                  'task_complete': artifact is not None and failure is None,
+                  'artifact_verified': artifact is not None,
+                  'artifact': artifact, **status, 'stages': stages,
                   'actions': actions, 'failure': failure,
                   'screenshots_purged': not (base / 'private-state').exists()}
         durable_json(base / 'result.json', report)
@@ -496,7 +525,18 @@ def main():
         if (base / name).exists():
             shutil.rmtree(base / name)
     print(json.dumps({'private_journal': str(base), 'cleanup_ok': cleanup['cleanup_ok']}))
-    return code if code else (0 if cleanup['cleanup_ok'] else 1)
+    worker_path = base / 'result.json'
+    worker = json.loads(worker_path.read_text()) if worker_path.exists() else {}
+    complete = (worker.get('cleanup_complete') is True and cleanup['cleanup_ok']
+                and not cleanup['deadline_exceeded'] and not cleanup['interrupted_signal'])
+    handoff = {'cleanup_complete': complete, 'worker_result_present': bool(worker),
+               'process_cleanup_ok': cleanup['cleanup_ok'],
+               'manual_actions': worker.get('manual_actions', [])}
+    if not worker or cleanup['deadline_exceeded'] or cleanup['interrupted_signal']:
+        handoff['manual_actions'].append({'stage': 'worker_lost',
+            'action': 'inspect_supervisor_then_before_json_and_live_display_no_automatic_replay'})
+    durable_json(base / 'handoff.json', handoff)
+    return code if code else (0 if complete else 1)
 
 
 if __name__ == '__main__':

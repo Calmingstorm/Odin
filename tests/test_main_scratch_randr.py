@@ -41,6 +41,19 @@ class Fake:
         self.handler = None
         self.display = NS(error_handler=None)
         self.id = 1
+        self.grabbed = False
+
+    def grab_server(self):
+        self.grabbed = True
+
+    def ungrab_server(self):
+        self.grabbed = False
+
+    def query_keymap(self):
+        return [0] * 32
+
+    def query_pointer(self):
+        return NS(mask=0)
 
     def screen(self):
         return NS(root=self)
@@ -57,6 +70,7 @@ class Fake:
         return NS(config_timestamp=42)
 
     def xrandr_set_crtc_config(self, cid, stamp, x, y, mode, rotation, outputs, timestamp):
+        assert self.grabbed
         self.writes.append(("crtc", cid, mode))
         c = self.state["crtcs"][0]
         m = next((m for m in self.state["modes"] if m["id"] == mode), None)
@@ -66,11 +80,13 @@ class Fake:
         return NS(status=0)
 
     def xrandr_set_screen_size(self, w, h, mmw, mmh):
+        assert self.grabbed
         self.writes.append(("screen", w, h, mmw, mmh))
         self.state["screen"] = dict(width_in_pixels=w, height_in_pixels=h,
                                     width_in_millimeters=mmw, height_in_millimeters=mmh)
 
     def xrandr_set_output_primary(self, oid):
+        assert self.grabbed
         self.writes.append(("primary", oid))
         self.state["primary"] = oid
 
@@ -111,6 +127,30 @@ def test_noop_has_no_writes(fake_capture):
     d = Fake(s)
     assert rr.restore(d, s) is False
     assert not d.writes
+
+
+def test_current_inventory_is_validated_under_grab_and_ungrabs_on_failure(monkeypatch):
+    s, d = baseline(), Fake(baseline())
+
+    def capture(value):
+        assert value.grabbed
+        result = copy.deepcopy(value.state)
+        result['outputs'][0]['name'] = 'replaced'
+        return result
+
+    monkeypatch.setattr(rr, 'capture', capture)
+    with pytest.raises(rr.UnsupportedTopology, match='inventory'):
+        rr.restore(d, s)
+    assert not d.grabbed and not d.writes
+
+
+def test_held_input_fences_topology_without_releasing_it(fake_capture):
+    s, d = baseline(), Fake(baseline())
+    d.state['primary'] = 0
+    d.query_keymap = lambda: [1] * 32
+    with pytest.raises(rr.UnsupportedTopology, match='Input currently held'):
+        rr.restore(d, s)
+    assert not d.grabbed and not d.writes
 
 
 def test_restore_exact_mode_id_not_ambiguous_name(fake_capture):

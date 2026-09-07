@@ -71,9 +71,15 @@ async def stage(records, base, name, fn):
                 value = await asyncio.wait_for(value, 25)
         if isinstance(value, dict):
             record['result'] = value
-            if value.get('errors'):
+            if value.get('errors') or value.get('skipped'):
                 raise RuntimeError('stage_reported_errors')
         record['ok'] = True
+    except asyncio.CancelledError:
+        # A self-cancelling stage is failed, not permission to skip later cleanup.
+        # Cancellation of the calling task is still propagated.
+        record['error_type'] = 'CancelledError'
+        if asyncio.current_task().cancelling():
+            raise
     except Exception as exc:
         record['error_type'] = type(exc).__name__
     finally:

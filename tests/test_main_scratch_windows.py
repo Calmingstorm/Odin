@@ -97,7 +97,8 @@ def test_unchanged_and_reused_windows_never_touched(monkeypatch):
     monkeypatch.setattr(m, "_record", lambda d, wid, atoms: b["windows"][wid])
     monkeypatch.setattr(m, "_send", lambda *args: pytest.fail("unexpected mutation"))
     result = m.restore_windows(None, b)
-    assert result == {"restored": [], "unchanged": [10], "skipped": [20], "errors": []}
+    assert result['restored'] == [] and result['unchanged'] == [10]
+    assert result['skipped'] == [20] and result['errors'][0]['xid'] == 20
 
 
 def test_failure_on_first_window_does_not_abort_second(monkeypatch):
@@ -138,6 +139,7 @@ def test_geometry_static_gravity_and_negative_root_coordinates(monkeypatch):
 def test_exclusive_hidden_position_repair_never_maps_or_resizes(monkeypatch, change):
     b, calls = baseline(), []
     b['windows'][10]['states'] = (b['atoms']['_NET_WM_STATE_HIDDEN'],)
+    b['active'] = (20,)
     current = copy.deepcopy(b['windows'])
     current[10]['geometry'] = (21, 30, 500, 400)
     if change == 'size':
@@ -183,6 +185,7 @@ def test_exact_child_focus_and_pointer_independently(monkeypatch):
                        (0,) if name == "_NET_CURRENT_DESKTOP" else (10,))
     monkeypatch.setattr(m, "_owned", lambda d, ident, action: action())
     monkeypatch.setattr(m, "identity", lambda d, wid: b["focus_identity"])
+    monkeypatch.setattr(m, "_record", lambda d, wid, atoms: b["windows"][wid])
     def set_focus(revert, timestamp):
         calls.append(("focus", 11))
         focus_state.focus.id = 11
@@ -399,3 +402,91 @@ def test_idle_wm_derives_zero_active_after_exact_original_focus(monkeypatch):
     monkeypatch.setattr(m, "_window", lambda d, wid: NS(set_input_focus=set_focus))
     assert not m.restore_focus_pointer(d, b)["errors"]
     assert calls == ["focus"]
+
+
+@pytest.mark.parametrize('field,value', [('pid', 0), ('start_ticks', 0), ('uid', -1),
+                                        ('xid', 21), ('uid', True)])
+def test_baseline_identity_must_be_exact_kernel_tuple(field, value):
+    b = baseline()
+    b['windows'][10]['identity'][field] = value
+    with pytest.raises(m.PreflightError, match='identity'):
+        m.validate(b)
+
+
+def test_duplicate_stacking_and_extra_window_metadata_refused():
+    for field, value in [('stacking', (20, 10, 20)),
+                         ('windows', {**baseline()['windows'], 99: {}})]:
+        b = baseline()
+        b[field] = value
+        with pytest.raises(m.PreflightError, match='baseline'):
+            m.validate(b)
+
+
+def test_hidden_active_baseline_refused():
+    b = baseline()
+    b['windows'][10]['states'] = (b['atoms']['_NET_WM_STATE_HIDDEN'],)
+    with pytest.raises(m.PreflightError, match='hidden active'):
+        m.validate(b)
+
+
+def test_identity_changes_during_record_not_reported_unchanged(monkeypatch):
+    b = baseline()
+    current = copy.deepcopy(b['windows'])
+    current[10]['identity']['start_ticks'] += 1
+    monkeypatch.setattr(m, 'identity', lambda d, wid: b['windows'][wid]['identity'])
+    monkeypatch.setattr(m, '_record', lambda d, wid, atoms: current[wid])
+    monkeypatch.setattr(m, '_send', lambda *args: pytest.fail('identity-raced write'))
+    result = m.restore_windows(None, b)
+    assert result['skipped'] == [10] and result['unchanged'] == [20]
+    assert result['errors'][0]['xid'] == 10
+
+
+@pytest.mark.parametrize('kind', ['key', 'button'])
+def test_owned_mutation_rechecks_held_input_under_grab(monkeypatch, kind):
+    calls, ident = [], baseline()['windows'][10]['identity']
+    d = NS(grab_server=lambda: calls.append('grab'),
+           ungrab_server=lambda: calls.append('ungrab'), sync=lambda: calls.append('sync'),
+           query_keymap=lambda: [1 if kind == 'key' else 0] * 32,
+           screen=lambda: NS(root=NS(query_pointer=lambda: NS(mask=0x100))))
+    monkeypatch.setattr(m, 'identity', lambda *_: ident)
+    with pytest.raises(RuntimeError, match='input currently held'):
+        m._owned(d, ident, lambda: calls.append('effect'))
+    assert calls == ['grab', 'ungrab', 'sync']
+
+
+def test_hidden_during_active_refusal_cannot_receive_child_focus(monkeypatch):
+    b = baseline()
+    current = copy.deepcopy(b['windows'])
+    current[10]['states'] = (b['atoms']['_NET_WM_STATE_HIDDEN'],)
+    d = NS(screen=lambda: NS(root=NS(id=1,
+        query_pointer=lambda: NS(mask=0, root_x=50, root_y=70))),
+        query_keymap=lambda: [0] * 32)
+    monkeypatch.setattr(m, '_prop', lambda d, root, name, *args, **kwargs:
+        (0,) if name == '_NET_CURRENT_DESKTOP' else (20,))
+    monkeypatch.setattr(m, '_record', lambda d, wid, atoms: current[wid])
+    monkeypatch.setattr(m, '_owned', lambda *args: pytest.fail('hidden activation/focus'))
+    result = m.restore_focus_pointer(d, b)
+    assert [row['stage'] for row in result['errors']] == ['active', 'focus']
+    assert 'pointer' in result['restored']
+
+
+def test_input_arriving_after_focus_blocks_pointer_warp(monkeypatch):
+    b, held = baseline(), []
+    root = NS(id=1, query_pointer=lambda: NS(mask=0, root_x=0, root_y=0),
+              warp_pointer=lambda *_: pytest.fail('warp under held input'))
+    f = NS(focus=NS(id=99), revert_to=1)
+    d = NS(screen=lambda: NS(root=root), query_keymap=lambda: [bool(held)] * 32,
+           get_input_focus=lambda: f, sync=lambda: None)
+    monkeypatch.setattr(m, '_prop', lambda d, root, name, *args, **kwargs:
+        (0,) if name == '_NET_CURRENT_DESKTOP' else (10,))
+    monkeypatch.setattr(m, 'identity', lambda *_: b['focus_identity'])
+    monkeypatch.setattr(m, '_record', lambda d, wid, atoms: b['windows'][wid])
+    monkeypatch.setattr(m, '_owned', lambda d, ident, action: action())
+
+    def focus(*_):
+        f.focus.id = 11
+        held.append(True)
+
+    monkeypatch.setattr(m, '_window', lambda *_: NS(set_input_focus=focus))
+    result = m.restore_focus_pointer(d, b)
+    assert [row['stage'] for row in result['errors']] == ['pointer']

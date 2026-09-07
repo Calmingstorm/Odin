@@ -60,6 +60,13 @@ def test_reported_restoration_errors_are_failure(tmp_path):
     assert records[0]["result"]["errors"] == ["bad"]
 
 
+def test_skipped_baseline_windows_are_not_success(tmp_path):
+    records = []
+    assert not asyncio.run(support.stage(records, tmp_path, 'restore',
+                                         lambda: {'skipped': [123]}))
+    assert not records[0]['ok']
+
+
 def test_journal_failure_does_not_throw_from_cleanup(tmp_path, monkeypatch):
     def broken(*args):
         raise OSError("disk")
