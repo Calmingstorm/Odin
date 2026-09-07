@@ -20,7 +20,6 @@ const XML = `<node><interface name="${NAME}"><method name="Snapshot">
 <arg type="s" name="challenge" direction="in"/>
 <arg type="s" name="evidence" direction="out"/>
 </method></interface></node>`;
-const DENIED = /terminal|password|passphrase|authenticat|polkit|security|credential|pinentry|keyring|sudo|\bshell\b|macro|\bbasic\b|script|certificate|digital signature|extension|preferences|settings|options|customiz|database|recovery|repair|overwrite|replace|remote|login|sign in/i;
 
 function refuse() {
     throw new Error('wayland_scope_unavailable');
@@ -87,7 +86,6 @@ export default class OdinScope extends Extension {
 
     _snapshot(request) {
         if (!Meta.is_wayland_compositor() || request.protocol !== 1 ||
-            !['xed', 'inkscape', 'writer'].includes(request.profile) ||
             !/^[a-f0-9]{48}$/.test(request.challenge) ||
             !/^[a-f0-9]{64}$/.test(request.source_digest))
             refuse();
@@ -118,27 +116,22 @@ export default class OdinScope extends Extension {
         const focus = global.display.focus_window;
         if (!focus || !focus.appears_focused || focus.minimized ||
             focus.get_client_type() !== Meta.WindowClientType.WAYLAND ||
-            focus.get_window_type() !== Meta.WindowType.NORMAL ||
-            focus.get_transient_for() !== null || !focus.showing_on_its_workspace() ||
+            ![Meta.WindowType.NORMAL, Meta.WindowType.DIALOG,
+                Meta.WindowType.MODAL_DIALOG, Meta.WindowType.UTILITY,
+                Meta.WindowType.MENU, Meta.WindowType.DROPDOWN_MENU,
+                Meta.WindowType.POPUP_MENU].includes(focus.get_window_type()) ||
+            !focus.showing_on_its_workspace() ||
             focus.get_workspace() !== global.workspace_manager.get_active_workspace())
             refuse();
         const pid = focus.get_pid();
         if (!Number.isInteger(pid) || pid <= 1)
             refuse();
-        // Metadata is only additional rejection/component classification.
-        // Native executable identity is independently authenticated by backend.
+        // The Python policy applies the shared denied-class boundary to this
+        // compositor-authenticated metadata. No per-application allowlist.
         const title = focus.get_title() ?? '';
         const appClass = focus.get_wm_class() ?? '';
-        if (DENIED.test(title) || DENIED.test(appClass) ||
-            (request.profile === 'writer' && appClass.toLowerCase() !== 'libreoffice-writer'))
-            refuse();
-        let hasTransient = false;
-        focus.foreach_transient(transient => {
-            if (!transient.minimized && transient.showing_on_its_workspace())
-                hasTransient = true;
-            return !hasTransient;
-        });
-        if (hasTransient)
+        if (typeof title !== 'string' || typeof appClass !== 'string' ||
+            title.length > 4096 || appClass.length > 4096)
             refuse();
         const rect = focus.get_frame_rect();
         // Exclude reserved Shell panel/dock regions even for maximized apps.
@@ -168,7 +161,7 @@ export default class OdinScope extends Extension {
         if (global.display.focus_window !== focus)
             refuse();
         return {protocol: 1, challenge: request.challenge,
-            source_digest: request.source_digest, profile: request.profile,
+            source_digest: request.source_digest, title, wm_class: appClass,
             native_wayland: true, safe_focus: true, pid,
             focus_serial: this._serial, focus_token: String(focus.get_stable_sequence()),
             bounds: {x: x - sx, y: y - sy, width: right - x, height: bottom - y}};

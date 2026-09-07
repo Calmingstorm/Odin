@@ -174,7 +174,15 @@ def test_initial_bus_auth_is_cancellable_and_helper_exits(tmp_path, end):
         process.wait(timeout=1)
         assert time.monotonic() - started < 1
         assert process.poll() is not None
-        assert peer.recv(4096) == b""
+        # AUTH may already be buffered behind the first partial read. Drain the
+        # bounded handshake and require EOF, not a packet-boundary coincidence.
+        trailing = b""
+        while True:
+            chunk = peer.recv(4096)
+            if not chunk:
+                break
+            trailing += chunk
+            assert len(trailing) <= 4096
     finally:
         portal._shutdown(controller)
         controller.close()

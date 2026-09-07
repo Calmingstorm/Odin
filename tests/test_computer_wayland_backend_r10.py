@@ -24,7 +24,7 @@ def test_r10_config_refuses(kwargs):
 
 
 @pytest.mark.parametrize(
-    "kwargs", [dict(environment="owned"), dict(app_profile="unknown"), dict(enabled=1)]
+    "kwargs", [dict(environment="owned"), dict(enabled=1)]
 )
 def test_r10_backend_constructor_refuses(kwargs):
     with pytest.raises(ComputerError):
@@ -123,8 +123,8 @@ async def test_r10_capture_metadata_refused(adapter, fault, code):
 @pytest.mark.parametrize(
     "kind,extra,error",
     [
-        ("type", {"text": "\n"}, "ascii"),
-        ("type", {"text": ""}, "ascii"),
+        ("type", {"text": "\ud800"}, "unicode"),
+        ("type", {"text": ""}, "unicode"),
         ("click", {"x": True, "y": 10}, "invalid_point"),
         ("polyline", {"points": [[10, 10]], "duration": 0}, "invalid_polyline"),
         (
@@ -137,7 +137,6 @@ async def test_r10_capture_metadata_refused(adapter, fault, code):
 async def test_r10_grounded_command_refusals(adapter, monkeypatch, kind, extra, error):
     await adapter.start("session1")
     frame = await adapter.observe()
-    monkeypatch.setattr(m, "validate_profile_action", lambda *a: None)
     with pytest.raises(ComputerError, match=error):
         adapter._command(action(frame, kind, **extra), frame, SCOPE)
     await adapter.stop()
@@ -146,7 +145,6 @@ async def test_r10_grounded_command_refusals(adapter, monkeypatch, kind, extra, 
 async def test_r10_commands_and_shape_validation(adapter, monkeypatch):
     await adapter.start("session1")
     frame = await adapter.observe()
-    monkeypatch.setattr(m, "validate_profile_action", lambda *a: None)
     assert adapter._command(action(frame, "key", chord="ctrl+a"), frame, SCOPE) == "J ctrl+a"
     assert adapter._command(action(frame, "click", x=10, y=10), frame, SCOPE).startswith(
         "P 272 10."
@@ -157,7 +155,7 @@ async def test_r10_commands_and_shape_validation(adapter, monkeypatch):
     for request, error in [
         (action(frame) | {"extra": 1}, "unsupported"),
         (action(frame) | {"expected": {}}, "postcondition"),
-        (action(frame, "key", chord="invalid"), "key_not_supported"),
+        (action(frame, "key", chord="invalid+key"), "unsupported_key"),
     ]:
         with pytest.raises(ComputerError, match=error):
             adapter._command(request, frame, SCOPE)

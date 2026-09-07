@@ -355,7 +355,7 @@ def test_owner_loss_fence_changes_generation_and_cancel_state():
     worker.fence()
     assert not worker.alive
     assert worker.cancel.is_set()
-    assert events == [{"event": "fence", "generation": 2}]
+    assert events == [{"event": "fence", "generation": 2, "reason": "portal_closed"}]
 
 
 def test_open_preserves_authenticated_start_geometry_only():

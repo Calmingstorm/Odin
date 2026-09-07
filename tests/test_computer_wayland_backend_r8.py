@@ -63,7 +63,7 @@ class Scope:
     async def identity(self):
         return {"pid": 123, "uid": os.geteuid()}
 
-    async def snapshot(self, metadata, profile):
+    async def snapshot(self, metadata):
         return self.scope
 
     async def close(self):

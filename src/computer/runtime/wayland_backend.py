@@ -16,11 +16,10 @@ from fractions import Fraction
 from typing import Any
 
 from ..admission import InputAdmission, InputAdmissionError
-from ..app_profiles import validate_profile_action
 from ..geometry import AffineTransform, SourceGeometry
 from ..models import BackendCapabilities, BackendObservation, CaptureScope, ComputerError
 from .profile import validate_session
-from .wayland_guardian import WaylandGuardian
+from .wayland_guardian import WaylandGuardian, WaylandGuardianError
 from .wayland_identity import CompositorRuntimeIdentity, capture_identity, revalidate_identity
 from .wayland_portal import WaylandPortalSession
 from .wayland_scope import GNOMEWaylandScopeProvider
@@ -59,7 +58,7 @@ def _scope_binding(scope):
                                   "compositor")} if scope else None
 
 
-def _bounded_png(data: bytes, width: int, height: int):
+def _bounded_png(data: bytes, width: int, height: int, crop=None):
     from PIL import Image
     if (type(width) is not int or type(height) is not int or min(width, height) < 1
             or max(width, height) > 16384 or width * height > 32_000_000
@@ -70,6 +69,17 @@ def _bounded_png(data: bytes, width: int, height: int):
             raise ComputerError("wayland_capture_dimensions_changed")
         opened.load()
         image = opened.convert("RGB")
+        if crop is not None:
+            if (type(crop) is not dict or set(crop) != {"x", "y", "width", "height"}
+                    or any(type(v) is not int for v in crop.values())
+                    or min(crop["x"], crop["y"]) < 0
+                    or min(crop["width"], crop["height"]) < 1
+                    or crop["x"] + crop["width"] > width
+                    or crop["y"] + crop["height"] > height):
+                raise ComputerError("invalid_observation_crop")
+            image = image.crop((crop["x"], crop["y"], crop["x"] + crop["width"],
+                                crop["y"] + crop["height"]))
+            width, height = image.size
         scale = min(1, math.sqrt(2_000_000 / (width * height)))
         image = image.resize((max(1, int(width * scale)), max(1, int(height * scale))))
         for _ in range(10):
@@ -85,18 +95,16 @@ class WaylandRuntimeBackend:
     startup_timeout_seconds = 180
     input_supported = False
     input_blocker: str | None = "wayland_session_not_qualified"
-    input_limits = {"lease_seconds": 2, "text": "printable_ascii_current_keymap",
+    input_limits = {"lease_seconds": 2, "text": "unicode_current_keymap",
                     "cursor": "shared_not_restored", "scope": "authenticated_native_monitor_app"}
 
-    def __init__(self, *, enabled=False, app_profile="xed", environment="existing_session",
+    def __init__(self, *, enabled=False, app_profile=None, environment="existing_session",
                  config: WaylandSessionConfig, qualify=None):
         if environment != "existing_session":
             raise ComputerError("wayland_existing_session_target_required")
-        if app_profile not in {"xed", "inkscape", "writer"}:
-            raise ComputerError("wayland_application_profile_unavailable")
         if type(config) is not WaylandSessionConfig or type(enabled) is not bool:
             raise ComputerError("wayland_invalid_configuration")
-        self.enabled, self.app_profile, self.config = enabled, app_profile, config
+        self.enabled, self.config = enabled, config
         self.capabilities = BackendCapabilities("wayland", environment)
         self.input_admission = InputAdmission("pending", "wayland_session_not_qualified",
             "Consent, source identity and release behavior are unmeasured for this session.",
@@ -114,6 +122,7 @@ class WaylandRuntimeBackend:
         self._scope: dict[str, Any] | None = None
         self._fingerprint: str | None = None
         self._captured_at = 0.0
+        self._crop = None
         self._sources: dict[str, dict[str, Any]] = {}
         self._selected: str | None = None
         self._descriptor: dict[str, Any] | None = None
@@ -124,6 +133,8 @@ class WaylandRuntimeBackend:
         self._jobs: set[asyncio.Task[None]] = set()
         self._cleanup_task: asyncio.Task[bool] | None = None
         self._cleanup_evidence: dict[str, bool] = {}
+        self._lifecycle_task = None
+        self.lifecycle_reason = None
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -175,6 +186,10 @@ class WaylandRuntimeBackend:
     async def _open(self):
         self._portal = WaylandPortalSession(self.config.bus_address, self.config.expected_uid,
                                             runtime_identity_callback=self._record_spawn)
+        loop = asyncio.get_running_loop()
+        portal = self._portal
+        self._portal.lifecycle_callback = lambda event: loop.call_soon_threadsafe(
+            self._portal_event, event, portal)
         self._record_spawn(None)
         grant = await self._portal.open(timeout_seconds=65)
         self._portal_generation = self._portal.current_generation
@@ -187,6 +202,10 @@ class WaylandRuntimeBackend:
                                                         expected_uid=self.config.expected_uid)
         fd = None
         try:
+            portal_identity = getattr(self._portal, "identity", {})
+            if portal_identity.get("shell", {}).get("executable") == "/usr/bin/kwin_wayland":
+                # Recognition of EIS is not proof of authenticated app scope.
+                raise ComputerError("kwin_application_scope_adapter_unavailable")
             scope_identity = await self._scope_provider.identity()
             fd = await self._portal.connect_eis()
             self._identity = await capture_identity(scope_identity, self._portal.eis_peer)
@@ -256,6 +275,20 @@ class WaylandRuntimeBackend:
                  "height": value.get("size", [0, 0])[1]}
                 for n, (key, value) in enumerate(self._sources.items(), 1)]
 
+    @property
+    def application_provenance(self):
+        return copy.deepcopy(self._scope["application"]) if self._scope else None
+
+    def _portal_event(self, event, portal=None):
+        if self._closed or self._paused or (portal is not None and portal is not self._portal):
+            return
+        self.lifecycle_reason = event.get("reason", "portal_closed")
+        self._revision += 1
+        self._frame = self._scope = self._fingerprint = None
+        self._paused = True
+        self.input_supported = False
+        self._lifecycle_task = asyncio.create_task(self.pause())
+
     async def select_source(self, source_id):
         async with self._lock:
             self._active()
@@ -270,7 +303,7 @@ class WaylandRuntimeBackend:
                 or self._portal.current_generation != self._portal_generation):
             raise ComputerError("wayland_session_revoked")
 
-    async def _capture(self):
+    async def _capture(self, crop=None):
         self._active()
         if self._portal is None or self._selected is None:
             raise ComputerError("wayland_session_revoked")
@@ -288,18 +321,18 @@ class WaylandRuntimeBackend:
             if metadata.get(key) != expected.get(key):
                 raise ComputerError("wayland_capture_source_changed")
         image, width, height = await asyncio.to_thread(_bounded_png, result["image"],
-                                                      result["width"], result["height"])
+                                                      result["width"], result["height"], crop)
         self._active()
         return result, metadata, image, width, height
 
-    async def observe(self):
+    async def observe(self, crop=None):
         async with self._lock:
-            result, metadata, image, width, height = await self._capture()
+            result, metadata, image, width, height = await self._capture(crop)
             scope = None
             if (self.input_supported and self._guardian and self._guardian.alive
                     and self._scope_provider is not None):
                 try:
-                    scope = await self._scope_provider.snapshot(metadata, self.app_profile)
+                    scope = await self._scope_provider.snapshot(metadata)
                     ready = await self._guardian.select(metadata["mapping_id"])
                     if [ready["width"], ready["height"]] != metadata["size"]:
                         raise ComputerError("wayland_input_extent_mismatch")
@@ -325,16 +358,21 @@ class WaylandRuntimeBackend:
             consent = CaptureScope(self._generation, frozenset({self._selected}),
                                    frozenset({self._selected}) if eligible else frozenset())
             frame = BackendObservation(source, consent, width, height,
-                AffineTransform(a=Fraction(result["width"], width),
-                                e=Fraction(result["height"], height)),
+                AffineTransform(a=Fraction(crop["width"] if crop else result["width"], width),
+                                e=Fraction(crop["height"] if crop else result["height"], height),
+                                c=Fraction(crop["x"] if crop else 0),
+                                f=Fraction(crop["y"] if crop else 0)),
                 image, focused=eligible)
             self._frame, self._scope, self._captured_at = frame, scope, result["captured_at"]
+            self._crop = dict(crop) if crop else None
             return frame
 
     capture = observe
 
     def _command(self, action, frame, scope):
         fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
+                  "double_click": {"x", "y"}, "right_click": {"x", "y"},
+                  "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
                   "polyline": {"points", "duration"}}
         required = {"type", "source_id", "source_revision", "consent_generation", "expected"}
         if (type(action) is not dict or type(action.get("type")) is not str
@@ -347,18 +385,21 @@ class WaylandRuntimeBackend:
                 raise ComputerError("wayland_stale_source_binding")
         if action["expected"] != {"type": "visual_change"}:
             raise ComputerError("wayland_visual_postcondition_required")
-        validate_profile_action(self.app_profile, {"operation": action["type"],
-                                                  "key": action.get("chord")})
         if action["type"] == "type":
             text = action["text"]
             if (type(text) is not str or not 1 <= len(text) <= 256
-                    or any(not 32 <= ord(c) <= 126 for c in text)):
-                raise ComputerError("wayland_printable_ascii_required")
-            return "T " + text.encode("ascii").hex()
+                    or any(0xD800 <= ord(c) <= 0xDFFF or ord(c) == 0 for c in text)):
+                raise ComputerError("wayland_invalid_unicode_text")
+            return "T " + text.encode("utf-8").hex()
         if action["type"] == "key":
-            from ..gui_actions import KEYS
-            if type(action["chord"]) is not str or action["chord"] not in KEYS:
-                raise ComputerError("wayland_key_not_supported")
+            chord = action["chord"]
+            if type(chord) is not str or len(chord) > 128:
+                raise ComputerError("unsupported_key")
+            parts = chord.split("+")
+            if (not re.fullmatch(r"[A-Za-z0-9_]+", parts[-1])
+                    or any(p not in {"ctrl", "alt", "shift", "super"} for p in parts[:-1])
+                    or len(set(parts[:-1])) != len(parts[:-1])):
+                raise ComputerError("unsupported_key")
             return "J " + action["chord"]
         bounds = scope["bounds"]
 
@@ -372,8 +413,16 @@ class WaylandRuntimeBackend:
                 raise ComputerError("wayland_point_outside_authenticated_application")
             return f"{float(x):.8f} {float(y):.8f}"
 
-        if action["type"] == "click":
-            return "P 272 " + point([action["x"], action["y"]])
+        if action["type"] in {"click", "right_click", "middle_click", "double_click"}:
+            button = {"right_click": 273, "middle_click": 274}.get(action["type"], 272)
+            prefix = "Q" if action["type"] == "double_click" else "P"
+            return f"{prefix} {button} " + point([action["x"], action["y"]])
+        if action["type"] == "scroll":
+            if (type(action["direction"]) is not str
+                    or action["direction"] not in {"up", "down", "left", "right"}
+                    or type(action["count"]) is not int or not 1 <= action["count"] <= 20):
+                raise ComputerError("wayland_invalid_scroll")
+            return f"W {action['direction']} {action['count']} " + point([action["x"], action["y"]])
         points, duration = action["points"], action["duration"]
         if (type(points) is not list or not 2 <= len(points) <= 256
                 or type(duration) not in {int, float} or not math.isfinite(duration)
@@ -390,7 +439,7 @@ class WaylandRuntimeBackend:
                 self._active()
                 if generation != self._generation:
                     raise ComputerError("wayland_generation_revoked")
-                fresh = await self._scope_provider.snapshot(metadata, self.app_profile)
+                fresh = await self._scope_provider.snapshot(metadata)
                 if _scope_binding(fresh) != _scope_binding(original_scope):
                     raise ComputerError("wayland_focus_changed")
         except asyncio.CancelledError:
@@ -413,8 +462,8 @@ class WaylandRuntimeBackend:
                     or not 0 <= time.monotonic() - self._captured_at <= 5):
                 raise ComputerError("wayland_fresh_qualified_application_observation_required")
             command = self._command(action, frame, scope)
-            _, metadata, image, width, height = await self._capture()
-            fresh_scope = await self._scope_provider.snapshot(metadata, self.app_profile)
+            _, metadata, image, width, height = await self._capture(self._crop)
+            fresh_scope = await self._scope_provider.snapshot(metadata)
             if (width != frame.width or height != frame.height or image != frame.image_bytes
                     or _scope_binding(scope) != _scope_binding(fresh_scope)):
                 self._frame = None
@@ -429,7 +478,7 @@ class WaylandRuntimeBackend:
                 raise ComputerError("wayland_input_extent_mismatch")
             # Identity hashing and region negotiation are awaited. Recheck focus
             # after both, rather than letting their latency widen the input race.
-            fresh_scope = await self._scope_provider.snapshot(metadata, self.app_profile)
+            fresh_scope = await self._scope_provider.snapshot(metadata)
             if _scope_binding(scope) != _scope_binding(fresh_scope):
                 self._frame = None
                 raise ComputerError("wayland_focus_changed_before_dispatch")
@@ -445,12 +494,19 @@ class WaylandRuntimeBackend:
                 if self._paused or self._closed or delivered.get("event") != "action_done":
                     raise ComputerError("wayland_action_revoked_outcome_unknown")
                 receipt: dict[str, Any] = {"status": "executed", "injected": True, "released": True,
+                    "application_provenance": copy.deepcopy(scope["application"]),
                     "release_basis": "guardian_owned_ledger_and_qualified_compositor",
                     "postcondition": {"type": "visual_change", "status": "unavailable",
                         "source_id": frame.source.source_id,
                         "source_revision": frame.source.source_revision,
                         "consent_generation": frame.source.consent_generation}}
-            except BaseException:
+            except BaseException as exc:
+                if (isinstance(exc, WaylandGuardianError)
+                        and getattr(exc, "details", {}).get("event") == "action_rejected"
+                        and getattr(exc, "details", {}).get("input_was_sent") is False):
+                    # Full native preflight failed before any event. Preserve the
+                    # structured per-character report; no unknown-outcome replay.
+                    raise
                 self._paused = True
                 cleanup = await self._guardian.close()
                 self._release_failed |= not cleanup.get("release_submitted", False)
@@ -460,8 +516,8 @@ class WaylandRuntimeBackend:
                 await asyncio.gather(watchdog, return_exceptions=True)
                 self._jobs.discard(watchdog)
             try:
-                _, after_metadata, after_image, _, _ = await self._capture()
-                after_scope = await self._scope_provider.snapshot(after_metadata, self.app_profile)
+                _, after_metadata, after_image, _, _ = await self._capture(self._crop)
+                after_scope = await self._scope_provider.snapshot(after_metadata)
                 receipt["postcondition"].update(
                     status="observed", method="raster_digest_after_release",
                     target_application_matches=(scope["application"] == after_scope["application"]

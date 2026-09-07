@@ -140,7 +140,8 @@ def test_r10_capture_pipeline_and_cleanup(gi_worker, monkeypatch, fault):
 
     def add_probe(flags, callback):
         if fault == "guard_caps":
-            caps = NS(get_structure=lambda n: NS(get_value=lambda key: 9000))
+            caps = NS(get_structure=lambda n: NS(get_value=lambda key: 9000),
+                      to_string=lambda: "video/x-raw,width=9000,height=9000")
             event = NS(type=1, parse_caps=lambda: caps)
             probe_returns.append(callback(None, NS(type=1, get_event=lambda: event)))
         elif fault == "guard_buffer":

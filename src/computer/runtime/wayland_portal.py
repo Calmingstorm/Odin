@@ -237,6 +237,7 @@ class WaylandPortalSession:
             raise ValueError("expected_uid must be a nonnegative integer")
         self.bus_address, self.expected_uid = bus_address, expected_uid
         self.runtime_identity_callback = runtime_identity_callback
+        self.lifecycle_callback = None
         self._generation, self._alive, self._closed = 0, False, False
         self._identity: dict[str, Any] = {}
         self._process_identity: dict[str, int] = {}
@@ -330,6 +331,7 @@ class WaylandPortalSession:
                     with self._lock:
                         self._alive = False
                         self._generation = max(self._generation, message["generation"])
+                    self._notify_lifecycle(message.get("reason", "portal_closed"))
                     continue
                 with self._lock:
                     future = self._pending.pop(message.get("id"), None)
@@ -358,6 +360,16 @@ class WaylandPortalSession:
             for future in pending.values():
                 if not future.done():
                     future.set_exception(PortalError(f"portal helper unavailable: {exc}"))
+            self._notify_lifecycle("portal_transport_lost")
+
+    def _notify_lifecycle(self, reason):
+        callback = self.lifecycle_callback
+        if callback is not None:
+            try:
+                callback({"event": "revoked", "reason": reason,
+                          "generation": self._generation})
+            except Exception:
+                pass
 
     def _abort_transport(self):
         self._alive = False
@@ -568,6 +580,7 @@ class _PortalWorker:
         self.generation, self.alive = 1, False
         self.session: str | None = None
         self.streams: dict[int, dict[str, Any]] = {}
+        self._stream_caps: dict[int, str] = {}
         self.identity: dict[str, Any] = {}
         self.subscriptions: list[int] = []
         self._cleanup_errors: list[str] = []
@@ -612,12 +625,12 @@ class _PortalWorker:
         return {"owner": unique, **_process_identity(pid), "uid": uid,
                 "executable": os.readlink(f"/proc/{pid}/exe")}
 
-    def fence(self):
+    def fence(self, reason="portal_closed"):
         self.alive = False
         self.generation += 1
         self.cancel.set()
         try:
-            self.emit({"event": "fence", "generation": self.generation})
+            self.emit({"event": "fence", "generation": self.generation, "reason": reason})
         except (OSError, EOFError, PortalError):
             # Controller EOF cannot prevent graceful portal Session.Close.
             pass
@@ -626,6 +639,15 @@ class _PortalWorker:
         self.pump()
         if self.cancel.is_set() or self._close_receipt is not None:
             raise PortalError("portal session cancelled or owner lost")
+
+    def stream_parameters(self, node_id, signature):
+        """Fence changed caps, preserving the negotiated contract across captures."""
+        previous = self._stream_caps.get(node_id)
+        self._stream_caps[node_id] = signature
+        if previous is not None and previous != signature:
+            self.fence("pipewire_stream_parameters_changed")
+            return False
+        return True
 
     def call(self, interface, method, args, path=PATH, timeout=3000, cleanup=False):
         return self.bus.call_sync(
@@ -678,10 +700,22 @@ class _PortalWorker:
         if self.session or self.identity:
             raise PortalError("portal session is one-shot")
         variant = self.GLib.Variant
-        self.identity = {"portal": self.owner(DEST), "shell": self.owner("org.gnome.Shell")}
-        if Path(self.identity["shell"]["executable"]).name != "gnome-shell":
-            raise PortalError("compositor is not measured gnome-shell")
-        for name, key in ((DEST, "portal"), ("org.gnome.Shell", "shell")):
+        # This isolated helper does transport discovery only. The caller's
+        # compositor registry applies version/mapped-library/probe admission.
+        compositor = None
+        for name, executable in (("org.gnome.Shell", "gnome-shell"),
+                                 ("org.kde.KWin", "kwin_wayland")):
+            try:
+                candidate = self.owner(name)
+            except Exception:
+                continue
+            if Path(candidate["executable"]).name == executable:
+                compositor, compositor_bus = candidate, name
+                break
+        if compositor is None:
+            raise PortalError("portal_remotedesktop_eis_unavailable")
+        self.identity = {"portal": self.owner(DEST), "shell": compositor}
+        for name, key in ((DEST, "portal"), (compositor_bus, "shell")):
             expected = self.identity[key]["owner"]
             def changed(_b, _s, _p, _i, _n, params, expected=expected):
                 _, old, new = params.unpack()
@@ -691,7 +725,7 @@ class _PortalWorker:
                 "org.freedesktop.DBus", "org.freedesktop.DBus", "NameOwnerChanged",
                 "/org/freedesktop/DBus", name, self.Gio.DBusSignalFlags.NONE, changed))
         if (self.owner(DEST) != self.identity["portal"]
-                or self.owner("org.gnome.Shell") != self.identity["shell"]):
+                or self.owner(compositor_bus) != self.identity["shell"]):
             raise PortalError("portal/compositor identity changed")
         deadline = time.monotonic() + timeout_seconds
         if hasattr(self, "_cancellation"):
@@ -788,7 +822,10 @@ class _PortalWorker:
                 if probe.type & gst.PadProbeType.EVENT_DOWNSTREAM:
                     event = probe.get_event()
                     if event.type == gst.EventType.CAPS:
-                        caps = event.parse_caps().get_structure(0)
+                        full_caps = event.parse_caps()
+                        if not self.stream_parameters(node_id, full_caps.to_string()):
+                            return gst.PadProbeReturn.DROP
+                        caps = full_caps.get_structure(0)
                         width, height = caps.get_value("width"), caps.get_value("height")
                         if (type(width) is not int or type(height) is not int
                                 or not 0 < width <= 8192 or not 0 < height <= 8192
