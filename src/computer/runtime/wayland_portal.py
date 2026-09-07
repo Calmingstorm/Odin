@@ -92,7 +92,9 @@ def _send(sock, lock, message, image=b"", fd=None, transfer=False, *,
                     raise EOFError("portal helper disconnected")
                 return count
             except (BlockingIOError, InterruptedError):
-                select.select([], [sock], [], remaining())
+                poller = select.poll()
+                poller.register(sock, select.POLLOUT)
+                poller.poll(max(1, math.ceil(remaining() * 1000)))
 
     try:
         encoded = json.dumps(message, allow_nan=False).encode()
@@ -246,6 +248,7 @@ class WaylandPortalSession:
         self._close_task: asyncio.Task[dict[str, Any]] | None = None
         self._closing = False
         self._transport_stopped = threading.Event()
+        self._operations_stopped = threading.Event()
         self._reader_thread: threading.Thread | None = None
         self._send_tasks: set[asyncio.Task[None]] = set()
         self._helper_receipt: dict[str, Any] = {}
@@ -308,11 +311,11 @@ class WaylandPortalSession:
                 )
                 self._reader_thread.start()
             except BaseException:
-                parent.close()
-                if self._process is not None:
-                    self._process.kill()
-                    self._process.wait(timeout=3)
                 self._closed = True
+                self._abort_transport()
+                parent.close()
+                child.close()
+                await self.close()
                 raise
             finally:
                 child.close()
@@ -358,6 +361,7 @@ class WaylandPortalSession:
 
     def _abort_transport(self):
         self._alive = False
+        self._operations_stopped.set()
         self._transport_stopped.set()
         # A cancel message cannot pass an already wedged transport. EOF is the
         # cancellation signal, and shutdown wakes both reader and writer now.
@@ -366,6 +370,7 @@ class WaylandPortalSession:
     def _ensure_close(self):
         if self._close_task is None:
             self._closing, self._alive = True, False
+            self._operations_stopped.set()
             self._close_task = asyncio.create_task(self._close())
         return self._close_task
 
@@ -385,7 +390,8 @@ class WaylandPortalSession:
                 send = asyncio.create_task(asyncio.to_thread(
                     _send, self._sock, self._write_lock,
                     {**fields, "id": ident, "action": action, "deadline": deadline},
-                    deadline=deadline, stopped=self._transport_stopped))
+                    deadline=deadline, stopped=(self._transport_stopped if action == "close"
+                                                else self._operations_stopped)))
                 self._send_tasks.add(send)
                 def sent(done):
                     self._send_tasks.discard(done)
@@ -427,11 +433,7 @@ class WaylandPortalSession:
                 self._alive = True
             return result
         except BaseException:
-            cleanup = asyncio.create_task(self.close())
-            try:
-                await asyncio.shield(cleanup)
-            except asyncio.CancelledError:
-                await cleanup
+            await self.close()
             raise
 
     async def connect_eis(self) -> int:
@@ -496,7 +498,10 @@ class WaylandPortalSession:
             if sends:
                 await asyncio.gather(*sends, return_exceptions=True)
             if self._sock is not None:
-                self._sock.close()
+                try:
+                    self._sock.close()
+                except OSError as exc:
+                    result["cleanup_errors"].append("socket_close:" + type(exc).__name__)
             if self._reader_thread is not None:
                 await asyncio.to_thread(self._reader_thread.join, .5)
                 if self._reader_thread.is_alive():
@@ -511,6 +516,8 @@ class WaylandPortalSession:
                         await asyncio.to_thread(self._process.wait, timeout=1)
                     except Exception as exc:
                         result["cleanup_errors"].append("helper_reap:" + type(exc).__name__)
+                except Exception as exc:
+                    result["cleanup_errors"].append("helper_wait:" + type(exc).__name__)
             result["process_reaped"] = self._process is None or self._process.poll() is not None
             # Process exit proves its private D-Bus connection is gone. It does
             # NOT prove that Session.Close was acknowledged by the portal.
@@ -522,12 +529,12 @@ class WaylandPortalSession:
 class _WorkerCancellation:
     """Cancellation independent of GLib, including synchronous authentication."""
 
-    def __init__(self, gio, event, deadline):
+    def __init__(self, gio, event, deadline, lifetime=None):
         self.event, self.done = event, threading.Event()
         self.expired = threading.Event()
         self.cancellable = gio.Cancellable.new()
         self.deadline = deadline
-        self.lifetime = time.monotonic() + 3600
+        self.lifetime = time.monotonic() + 3600 if lifetime is None else lifetime
         self.thread = threading.Thread(target=self._watch, daemon=True,
                                        name="wayland-portal-cancellation")
         self.thread.start()
@@ -563,6 +570,7 @@ class _PortalWorker:
         self.streams: dict[int, dict[str, Any]] = {}
         self.identity: dict[str, Any] = {}
         self.subscriptions: list[int] = []
+        self._cleanup_errors: list[str] = []
         self.eis_used = False
         self.bus: Any = None  # Optional, lazy PyGObject object in the helper only.
         self._close_receipt: dict[str, Any] | None = None
@@ -659,9 +667,12 @@ class _PortalWorker:
             if not complete:
                 try:
                     self.call(REQUEST, "Close", None, path=path, timeout=500, cleanup=True)
-                except Exception:
-                    pass
-            self.bus.signal_unsubscribe(sub)
+                except Exception as exc:
+                    self._cleanup_errors.append("request_close:" + type(exc).__name__)
+            try:
+                self.bus.signal_unsubscribe(sub)
+            except Exception as exc:
+                self._cleanup_errors.append("request_unsubscribe:" + type(exc).__name__)
 
     def open(self, timeout_seconds):
         if self.session or self.identity:
@@ -850,14 +861,19 @@ class _PortalWorker:
                         "generation": self.generation}, image
             raise PortalError(last_reason)
         finally:
-            if pipeline is not None:
-                pipeline.set_state(gst.State.NULL)
-            os.close(fd)
+            try:
+                if pipeline is not None:
+                    pipeline.set_state(gst.State.NULL)
+            except Exception as exc:
+                self._cleanup_errors.append("pipeline_stop:" + type(exc).__name__)
+                raise
+            finally:
+                os.close(fd)
 
     def close(self):
         if self._close_receipt is not None:
             return copy.deepcopy(self._close_receipt)
-        errors: list[str] = []
+        errors = list(self._cleanup_errors)
         result = {"closed": True, "session_close_acknowledged": False,
                   "connection_closed": self.bus is None, "cleanup_errors": errors}
         self.fence()
@@ -905,6 +921,7 @@ def _helper(fd, address, uid):
     lock = threading.Lock()
     commands: queue.Queue[dict[str, Any]] = queue.Queue(maxsize=16)
     stopped, cancel = threading.Event(), threading.Event()
+    lifetime = time.monotonic() + 3600
     worker = None
     def emit(message, image=b"", fd=None):
         _send(sock, lock, message, image, fd, transfer=fd is not None,
@@ -916,10 +933,10 @@ def _helper(fd, address, uid):
                 if received_fd is not None:
                     os.close(received_fd)
                     raise PortalError("unexpected incoming descriptor")
-                if message.get("action") in ("cancel", "close"):
-                    cancel.set()
                 if message.get("action") != "cancel":
                     commands.put_nowait(message)
+                if message.get("action") in ("cancel", "close"):
+                    cancel.set()
         except Exception:
             stopped.set()
             cancel.set()
@@ -928,6 +945,9 @@ def _helper(fd, address, uid):
     receiver.start()
     try:
         while not stopped.is_set():
+            if time.monotonic() >= lifetime:
+                cancel.set()
+                break
             if worker is not None:
                 if worker._close_receipt is None:
                     worker.pump()
@@ -938,6 +958,8 @@ def _helper(fd, address, uid):
             try:
                 command = commands.get(timeout=.01)
             except queue.Empty:
+                if cancel.is_set():
+                    break
                 continue
             action, ident = command.get("action"), command.get("id")
             transferred = None
@@ -949,6 +971,7 @@ def _helper(fd, address, uid):
                     deadline = min(command.get("deadline", float("inf")),
                                    time.monotonic() + command["timeout_seconds"])
                     worker = _PortalWorker(address, uid, emit, cancel, deadline)
+                    worker._cancellation.lifetime = lifetime
                     worker._cancellation.deadline = deadline
                     result = worker.open(command["timeout_seconds"])
                 elif action == "close":

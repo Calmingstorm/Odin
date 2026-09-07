@@ -179,6 +179,7 @@ def request_worker():
     worker.identity = {"portal": {"owner": ":1.99"}}
     worker.cancel = threading.Event()
     worker.check = lambda: None
+    worker._cleanup_errors = []
     return worker
 
 
@@ -391,6 +392,7 @@ def test_controller_eof_does_not_skip_session_close():
     worker.alive, worker.generation = True, 1
     worker.cancel = threading.Event()
     worker._close_receipt, worker.bus = None, None
+    worker._cleanup_errors = []
     worker._cancellation = SimpleNamespace(close=lambda: None)
     worker.context = SimpleNamespace(pop_thread_default=lambda: None)
     worker.session, worker.subscriptions = "/session/owned", []

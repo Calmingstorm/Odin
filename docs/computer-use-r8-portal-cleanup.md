@@ -27,7 +27,8 @@ The retained close receipt distinguishes evidence:
   This is not a `Session.Close` acknowledgment and does not prove when the remote
   portal processes connection EOF.
 * `cleanup_errors`: retained stage-qualified failures, including close-request,
-  connection-close, subscription, reader, forced-kill or reaping failures.
+  connection-close, request-close, subscription, capture-pipeline, reader,
+  forced-kill or reaping failures.
 
 Cleanup attempts `Session.Close` with its own bounded timeout even after ordinary
 operations are cancelled; it then unsubscribes, closes the private bus, stops the
