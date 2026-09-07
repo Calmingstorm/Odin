@@ -133,3 +133,39 @@ async def test_cancelled_detach_continues_all_owned_cleanup(adapter):
     release.set()
     assert await asyncio.wait_for(asyncio.shield(adapter._cleanup_task), 1)
     assert calls == ["guardian", "portal", "scope"]
+
+
+async def test_backend_action_receipt_survives_controller_verification(tmp_path, adapter):
+    import hashlib
+
+    from src.computer.controller import ComputerController
+    from src.computer.models import RequestContext
+    from src.computer.store import ComputerStore
+
+    store = ComputerStore(tmp_path / "state", tmp_path / "evidence")
+    controller = ComputerController(store, lambda _: adapter, lambda _: True, enabled=True)
+    ctx = RequestContext("owner", "channel", "turn", "host")
+    try:
+        session = await controller.session(ctx, {"operation": "start", "app": "xed"})
+        assert session["input_supported"], session.get("input_admission")
+        observation = await controller.observe(ctx, {"session_id": session["session_id"],
+                                                     "generation": session["generation"]})
+        live = controller._live[session["session_id"]]
+        private = live.observations[observation["observation_id"]]
+        await controller.validate_observation_delivery(
+            ctx, private.frame_metadata, hashlib.sha256(observation["image_bytes"]).hexdigest())
+        result = await controller.act(ctx, {
+            "session_id": session["session_id"], "generation": session["generation"],
+            "observation_id": observation["observation_id"], "action_id": "fixture-action",
+            "consent_generation": private.source.consent_generation,
+            "source_id": private.source.source_id,
+            "source_revision": private.source.source_revision,
+            "operation": "type", "text": "fixture", "expect": {"type": "visual_change"},
+        })
+        # Inert fake produces unchanged pixels: not_satisfied, not unknown or a
+        # fabricated visual success. Execution evidence still survives transport.
+        assert result["status"] == "not_satisfied"
+        assert result["execution"] == {"injected": True, "released": True}
+    finally:
+        await controller.close()
+        store.close()

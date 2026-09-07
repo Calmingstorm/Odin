@@ -131,7 +131,10 @@ class WaylandRuntimeBackend:
         if self._descriptor is None:
             self._descriptor = {"version": 1, "kind": "processes", "session_id": session_id,
                 "boot_id": boot_id(), "no_persistent_devices": True,
-                "input_was_enabled": False, "launch_pending": True, "processes": []}
+                # Immutable conservative recovery classification: this adapter
+                # may acquire input after qualification. Never upgrade a stored
+                # capture-only descriptor after the launch fence is persisted.
+                "input_was_enabled": True, "launch_pending": True, "processes": []}
         if self._descriptor["session_id"] != session_id:
             raise ComputerError("wayland_session_identity_changed")
         return copy.deepcopy(self._descriptor)
@@ -229,9 +232,6 @@ class WaylandRuntimeBackend:
                                                          "shared", "verified", "verified")
                 if self._descriptor is None:
                     raise ComputerError("wayland_runtime_identity_missing")
-                self._descriptor["input_was_enabled"] = True
-                if self.runtime_identity_callback:
-                    self.runtime_identity_callback(copy.deepcopy(self._descriptor))
             else:
                 self.input_blocker = admission.code
         except asyncio.CancelledError:
@@ -444,7 +444,7 @@ class WaylandRuntimeBackend:
                 delivered = await self._guardian.act(command)
                 if self._paused or self._closed or delivered.get("event") != "action_done":
                     raise ComputerError("wayland_action_revoked_outcome_unknown")
-                receipt: dict[str, Any] = {"status": "executed", "released": True,
+                receipt: dict[str, Any] = {"status": "executed", "injected": True, "released": True,
                     "release_basis": "guardian_owned_ledger_and_qualified_compositor",
                     "postcondition": {"type": "visual_change", "status": "unavailable",
                         "source_id": frame.source.source_id,
