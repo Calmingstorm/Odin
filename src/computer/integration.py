@@ -70,17 +70,18 @@ class ComputerIntegration:
     def reserves_tool(self, name):
         return self.enabled and name in COMPUTER_TOOLS
 
-    def _backend(self, app):
-        from .app_profiles import ATTACHED_NATIVE_PROFILES, validate_profile
+    def _backend(self, app=None):
+        from .app_profiles import validate_profile
 
-        validate_profile(app, platform=getattr(self.settings, "platform", "x11"),
-                         environment=getattr(self.settings, "environment", "isolated"))
+        if getattr(self.settings, "environment", "isolated") == "isolated":
+            validate_profile(app, platform=getattr(self.settings, "platform", "x11"),
+                             environment="isolated")
         if getattr(self.settings, "platform", "x11") == "wayland":
             from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
             from .runtime.wayland_probe import GnomeSameStackQualifier
 
             return WaylandRuntimeBackend(
-                enabled=self.enabled, app_profile=app,
+                enabled=self.enabled,
                 environment=self.settings.environment,
                 config=WaylandSessionConfig(
                     bus_address=self.settings.wayland_bus_address,
@@ -91,10 +92,10 @@ class ComputerIntegration:
             from .runtime.x11_attached import X11AttachedBackend
 
             return X11AttachedBackend(
-                enabled=self.enabled, app_profile=app,
+                enabled=self.enabled,
                 display_name=self.settings.display, xauthority=self.settings.xauthority,
                 monitor_names=self.settings.monitor_names,
-                input_enabled=app in ATTACHED_NATIVE_PROFILES,
+                input_enabled=True,
                 runtime_sudo=bool(self.settings.runtime_sudo))
         from .runtime.backend import LinuxDesktopBackend
 

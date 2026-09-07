@@ -131,7 +131,7 @@ async def test_failed_resume_cannot_restore_input(rig, problem):
     assert not controller._live.get(started['session_id']) or problem == 'missing'
 
 
-@pytest.mark.parametrize('value', [None, 9, '', 'x' * 97])
+@pytest.mark.parametrize('value', [9, '', 'x' * 97])
 async def test_start_rejects_invalid_profile_before_factory(rig, value):
     controller, backend, store, ctx = rig
     factory = AsyncMock(return_value=backend)

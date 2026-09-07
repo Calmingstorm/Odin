@@ -109,9 +109,14 @@ class ComputerStore:
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
-                self.db.execute("UPDATE receipts SET status='unknown', result=? "
-                                "WHERE status='pending'",
-                                (json.dumps({"status": "unknown", "reason": "controller_lost"}),))
+                for row in self.db.execute(
+                        "SELECT session_id,action_id,result FROM receipts WHERE status='pending'"
+                ).fetchall():
+                    result = json.loads(row[2])
+                    result.update(status="unknown", reason="controller_lost")
+                    self.db.execute("UPDATE receipts SET status='unknown',result=? "
+                                    "WHERE session_id=? AND action_id=?",
+                                    (json.dumps(result), row[0], row[1]))
                 self.db.execute("UPDATE sessions SET state='quarantined', generation=generation+1, "
                                 "consent_generation=consent_generation+1 "
                                 "WHERE state IN ('active','starting','paused')")
@@ -120,10 +125,14 @@ class ComputerStore:
                 self.db.execute("ROLLBACK")
                 raise
 
-    def create_session(self, context: RequestContext, app: str, *, platform="x11",
+    def create_session(self, context: RequestContext, app: str | None = None, *, platform="x11",
                        environment="isolated") -> SessionGrant:
-        from .app_profiles import validate_attached_only_profile
-        validate_attached_only_profile(app, platform=platform, environment=environment)
+        # Preserve the existing NOT NULL schema without making a desktop session
+        # an application profile. Old attached rows remain readable on upgrade.
+        if environment == "existing_session":
+            app = "attached"
+        elif not isinstance(app, str) or not 1 <= len(app) <= 96:
+            raise ComputerError("isolated_app_required")
         now = self.clock()
         values = (uuid.uuid4().hex, context.owner_id, context.channel_id, context.turn_id,
                   context.host_id, 1, "starting", app, now, now + MAX_TASK_SECONDS, 0,
@@ -260,11 +269,15 @@ class ComputerStore:
             raise ComputerError("action_id_conflict")
         result = json.loads(row["result"])
         if row["status"] == "pending":
-            result = {"status": "unknown", "reason": "pending_no_replay"}
+            result.update(status="unknown", reason="pending_no_replay")
         return {**result, "action_id": action_id, "session_id": session_id}
 
     def begin_action(self, grant: SessionGrant, action_id: str, payload_hash: str,
-                     max_actions: int) -> dict | None:
+                     max_actions: int, *, provenance: dict | None = None) -> dict | None:
+        initial = {} if provenance is None else {"application_provenance": provenance}
+        encoded = json.dumps(initial, allow_nan=False)
+        if len(encoded.encode("utf-8")) > 16384:
+            raise ComputerError("invalid_application_provenance")
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -279,7 +292,7 @@ class ComputerStore:
                 if not changed:
                     raise ComputerError("grant_revoked_or_limit")
                 self.db.execute("INSERT INTO receipts VALUES (?,?,?,?,?)",
-                                (grant.session_id, action_id, payload_hash, "pending", "{}"))
+                                (grant.session_id, action_id, payload_hash, "pending", encoded))
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
@@ -293,6 +306,12 @@ class ComputerStore:
         }:
             raise ComputerError("invalid_receipt")
         with self.lock:
+            row = self.db.execute("SELECT result FROM receipts WHERE session_id=? AND action_id=?",
+                                  (session_id, action_id)).fetchone()
+            if row is not None:
+                initial = json.loads(row[0])
+                if "application_provenance" in initial:
+                    result = {**result, "application_provenance": initial["application_provenance"]}
             self.db.execute("UPDATE receipts SET status=?,result=? "
                             "WHERE session_id=? AND action_id=?",
                             (result["status"], json.dumps(result), session_id, action_id))

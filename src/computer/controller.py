@@ -6,13 +6,10 @@ import inspect
 import time
 import uuid
 from copy import deepcopy
+from dataclasses import asdict
 
 from .actions import click_receipt
-from .app_profiles import (
-    application_profile,
-    validate_attached_only_profile,
-    validate_profile_action,
-)
+from .app_profiles import application_profile
 from .gui_actions import action_arguments, action_payload, visual_receipt
 from .models import (
     BackendCapabilities,
@@ -38,11 +35,6 @@ from .policy import (
     owned,
 )
 from .store import FRAME_MAX_PIXELS, ComputerStore, canonical_hash
-
-_KEYS = frozenset({"Return", "Escape", "Tab", "BackSpace", "Delete", "Left", "Right",
-                   "Up", "Down", "Home", "End", "Page_Up", "Page_Down", "space",
-                   "ctrl+s", "ctrl+o", "ctrl+n", "ctrl+a", "ctrl+z", "ctrl+y",
-                   "ctrl+shift+s", "shift+Tab"})
 
 
 def _text(value, maximum=4096) -> str:
@@ -292,13 +284,17 @@ class ComputerController:
             capabilities.public() if capabilities is not None else None),
                 "cleanup": self.store.cleanup(grant.session_id),
                 "recovery": self.store.recovery_status(grant.session_id)}
-        profile = application_profile(grant.app, platform=grant.platform,
-                                      environment=grant.environment)
+        profile = (application_profile(grant.app, platform=grant.platform,
+                                       environment=grant.environment)
+                   if grant.environment == "isolated" else None)
         if profile is not None:
             result["application_profile"] = profile
         if live is not None:
             from .admission import InputAdmission
 
+            provenance = getattr(live.backend, "application_provenance", None)
+            if isinstance(provenance, dict):
+                result["application_provenance"] = deepcopy(provenance)
             admission = getattr(live.backend, "input_admission", None)
             if type(admission) is InputAdmission:
                 result["input_admission"] = admission.public()
@@ -318,24 +314,25 @@ class ComputerController:
         operation = inp["operation"]
         await self._auth(context, emergency=operation in {"stop", "cancel", "close", "status"})
         if operation == "start":
-            exact_keys(inp, {"operation", "app"}, {"operation", "app"})
-            if not isinstance(inp["app"], str) or not 1 <= len(inp["app"]) <= 96:
+            exact_keys(inp, {"operation", "app"}, {"operation"})
+            app = inp.get("app")
+            if app is not None and (not isinstance(app, str) or not 1 <= len(app) <= 96):
                 raise ComputerError("unsupported_app")
-            backend = self.backend_factory(inp["app"])
+            backend = self.backend_factory(app)
             if inspect.isawaitable(backend):
                 backend = await backend
             capabilities = getattr(backend, "capabilities", None)
             if type(capabilities) is not BackendCapabilities:
                 raise ComputerError("backend_capabilities_unknown")
-            validate_attached_only_profile(inp["app"], platform=capabilities.platform,
-                                           environment=capabilities.environment)
+            if capabilities.environment == "isolated" and app is None:
+                raise ComputerError("isolated_app_required")
             if capabilities.environment == "existing_session":
                 supported = getattr(backend, "input_supported", None)
                 if type(supported) is not bool:
                     raise ComputerError("attachment_unavailable")
                 if supported:
                     input_eligible(capabilities)
-            grant = self.store.create_session(context, inp["app"],
+            grant = self.store.create_session(context, app,
                                               platform=capabilities.platform,
                                               environment=capabilities.environment)
             try:
@@ -468,18 +465,22 @@ class ComputerController:
             return await self._stop(sid, "cancelled")
         return self._public_session(grant)
 
-    async def _capture(self, grant, *, acknowledge_modal=False):
+    async def _capture(self, grant, *, acknowledge_modal=False, crop=None):
         from .vision import FrameCrop, FrameMetadata, _validate_png
         live = self._active(grant)
         # The private adapter captures synchronously for each request. This is
         # a conservative lower bound, not a fabricated source/arrival timestamp.
         captured = self.monotonic()
-        raw = await _bounded(live.backend.observe(), 5)
+        request = {"crop": crop} if crop is not None else {}
+        raw = await _bounded(live.backend.observe(**request), 5)
         self._active(grant)
         if not 0 <= self.monotonic() - captured <= FRAME_FRESH_SECONDS:
             raise ComputerError("stale_observation")
         if type(raw) is not BackendObservation:
             raise ComputerError("neutral_observation_required")
+        if (crop is not None
+                and raw.crop != tuple(crop[key] for key in ("x", "y", "width", "height"))):
+            raise ComputerError("capture_crop_mismatch")
         if raw.scope.consent_generation != grant.consent_generation:
             raise ComputerError("stale_capture_consent")
         if raw.width * raw.height > FRAME_MAX_PIXELS:
@@ -511,7 +512,17 @@ class ComputerController:
         return obs, raw.image_bytes
 
     async def observe(self, context, inp):
-        exact_keys(inp, {"session_id", "generation", "source_id"}, {"session_id", "generation"})
+        exact_keys(inp, {"session_id", "generation", "source_id", "crop"},
+                   {"session_id", "generation"})
+        crop = inp.get("crop")
+        if "crop" in inp:
+            from .vision import FrameCrop, VisionError
+
+            exact_keys(crop, {"x", "y", "width", "height"}, {"x", "y", "width", "height"})
+            try:
+                FrameCrop(**crop)
+            except (VisionError, TypeError, ValueError):
+                raise ComputerError("invalid_source_crop") from None
         await self._auth(context)
         grant = self._grant(context, inp)
         async with self._actions:
@@ -528,7 +539,7 @@ class ComputerController:
                 await _bounded(select(source_id), FRAME_FRESH_SECONDS)
                 self._active(grant)
                 await self._auth(context)
-            obs, image = await self._capture(grant)
+            obs, image = await self._capture(grant, crop=crop)
             await self._auth(context)
             self._active(grant)
             if not 0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS:
@@ -625,7 +636,9 @@ class ComputerController:
                 <= DELIVERED_GROUNDING_SECONDS):
             raise ComputerError("stale_observation")
         observation_input(grant, live, obs)
-        current, _ = await self._capture(grant)
+        crop = (asdict(obs.frame_metadata.crop) if obs.frame_metadata is not None
+                and obs.frame_metadata.crop is not None else None)
+        current, _ = await self._capture(grant, crop=crop)
         now = self.monotonic()
         if (not 0 <= now - obs.captured_at <= DELIVERED_GROUNDING_SECONDS
                 or not 0 <= now - current.captured_at <= FRAME_FRESH_SECONDS):
@@ -651,7 +664,6 @@ class ComputerController:
             if existing is not None:
                 return existing
             grant = self._grant(context, inp)
-            validate_profile_action(grant.app, inp)
             live = self._active(grant)
             if live.capabilities is None or live.capabilities.environment != grant.environment:
                 raise ComputerError("attachment_unavailable")
@@ -692,7 +704,9 @@ class ComputerController:
                 raise ComputerError("stale_observation")
             if not callable(getattr(live.backend, "act", None)):
                 raise ComputerError("grounded_actions_unavailable")
-            existing = self.store.begin_action(grant, inp["action_id"], payload_hash, MAX_ACTIONS)
+            provenance = getattr(live.backend, "application_provenance", None)
+            existing = self.store.begin_action(grant, inp["action_id"], payload_hash, MAX_ACTIONS,
+                                               provenance=provenance)
             if existing is not None:
                 return existing
             # Pending is now durable, before even constructing the input coroutine.
@@ -709,7 +723,10 @@ class ComputerController:
                 result = (visual_receipt(raw, current) if visual
                           else click_receipt(raw, current, target))
                 if result["status"] not in {"unknown", "unavailable"}:
-                    after, _ = await self._capture(grant)
+                    crop = (asdict(current.frame_metadata.crop)
+                            if current.frame_metadata is not None
+                            and current.frame_metadata.crop is not None else None)
+                    after, _ = await self._capture(grant, crop=crop)
                     await self._auth(context)
                     self._active(grant)
                     age = self.monotonic() - after.captured_at

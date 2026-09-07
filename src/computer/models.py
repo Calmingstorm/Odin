@@ -55,7 +55,9 @@ class SessionGrant:
 
     def public(self) -> dict[str, Any]:
         return {"session_id": self.session_id, "generation": self.generation,
-                "state": self.state, "app": self.app, "actions": self.actions,
+                "state": self.state,
+                "app": self.app if self.environment == "isolated" else None,
+                "actions": self.actions,
                 "expires_at": self.expires_at, "consent_generation": self.consent_generation,
                 "platform": self.platform, "environment": self.environment}
 

@@ -1,0 +1,156 @@
+"""General attached sessions, truthful crop binding and durable provenance."""
+
+import json
+from dataclasses import asdict, replace
+
+import pytest
+
+from src.computer.controller import ComputerController
+from src.computer.models import BackendCapabilities, BackendObservation, CaptureScope, ComputerError
+from src.computer.render import render_frame
+from src.computer.store import ComputerStore
+from src.computer.vision import FrameCrop
+from tests.test_computer_contract_r1 import RequestContext, Stub
+
+
+class Desktop(Stub):
+    capabilities = BackendCapabilities("x11", "existing_session", "shared", "shared",
+                                       "verified", "verified")
+    input_supported = True
+    application_provenance = {"pid": 42, "exe_basename": "user-application",
+                              "trusted_executable": False}
+
+    def __init__(self):
+        super().__init__()
+        self.crops = []
+        self.ignore_crop = False
+        self.injected = 0
+
+    async def observe(self, *, crop=None):
+        self.crops.append(crop)
+        rendered = render_frame(
+            b"\x00" * 12, self.source, mode="RGB", observation_id="native",
+            session_id="fixture", generation=1, captured_monotonic_ns=1,
+            crop=None if self.ignore_crop or crop is None else FrameCrop(**crop))
+        metadata = rendered.metadata
+        return BackendObservation(
+            self.source, CaptureScope(1, frozenset({"opaque"}), frozenset({"opaque"})),
+            metadata.width, metadata.height, metadata.delivered_to_source, rendered.png,
+            focused=True, crop=tuple(asdict(metadata.crop).values()) if metadata.crop else None,
+            resize_scale=metadata.resize_scale)
+
+    async def act(self, payload):
+        self.injected += 1
+        return {"status": "executed", "injected": True, "released": True}
+
+
+async def test_attached_start_without_app_crop_action_and_receipt(tmp_path):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    requested = []
+
+    def factory(app):
+        requested.append(app)
+        return backend
+
+    controller = ComputerController(store, factory, lambda _: True, enabled=True)
+    context = RequestContext("operator", "channel", "turn", "host")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        assert requested == [None] and grant["app"] is None
+        assert store.get_session(grant["session_id"]).app == "attached"
+        assert "application_profile" not in grant
+        assert grant["application_provenance"] == backend.application_provenance
+        args = {"session_id": grant["session_id"], "generation": 1}
+        crop = {"x": 1, "y": 0, "width": 1, "height": 2}
+        observed = await controller.observe(context, {**args, "crop": crop})
+        obs = controller._live[grant["session_id"]].observations[observed["observation_id"]]
+        assert observed["frame_metadata"]["crop"] == crop
+        await controller.validate_observation_delivery(
+            context, obs.frame_metadata, obs.image_sha256)
+        action = {**args, "action_id": "one", "observation_id": obs.observation_id,
+                  "consent_generation": 1, "source_id": "opaque", "source_revision": 1,
+                  "operation": "type", "text": "é", "expect": {"type": "visual_change"}}
+        result = await controller.act(context, action)
+        assert result["status"] == "executed"
+        assert result["application_provenance"] == backend.application_provenance
+        assert backend.crops[-3:] == [crop, crop, crop]
+        assert await controller.act(context, action) == result
+        assert backend.injected == 1
+    finally:
+        await controller.close()
+        store.close()
+
+
+@pytest.mark.parametrize("crop", [None, {}, {"x": -1, "y": 0, "width": 1, "height": 1},
+                                  {"x": 0, "y": 0, "width": True, "height": 1},
+                                  {"x": 0, "y": 0, "width": 0, "height": 1}])
+async def test_invalid_crop_does_not_capture(tmp_path, crop):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    try:
+        with pytest.raises(ComputerError):
+            await controller.observe(RequestContext("o", "c", "t", "h"),
+                                     {"session_id": "none", "generation": 1, "crop": crop})
+        assert backend.crops == []
+    finally:
+        await controller.close()
+        store.close()
+
+
+async def test_backend_must_return_requested_crop(tmp_path):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    context = RequestContext("o", "c", "t", "h")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        backend.ignore_crop = True
+        with pytest.raises(ComputerError, match="capture_crop_mismatch"):
+            await controller.observe(context, {"session_id": grant["session_id"], "generation": 1,
+                                               "crop": {"x": 0, "y": 0, "width": 1, "height": 1}})
+    finally:
+        await controller.close()
+        store.close()
+
+
+@pytest.mark.parametrize("state", ["pending", "unknown", "unavailable", "verified"])
+def test_provenance_survives_no_replay_and_recovery(tmp_path, state):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    try:
+        grant = store.create_session(RequestContext("o", "c", "t", "h"),
+                                     environment="existing_session")
+        grant = store.set_state(grant.session_id, "active")
+        provenance = dict(Desktop.application_provenance)
+        store.begin_action(grant, "id", "hash", 5, provenance=provenance)
+        provenance["pid"] = 99
+        if state != "pending":
+            store.finish_action(grant.session_id, "id", {"status": state})
+        else:
+            receipt = store.receipt(grant.session_id, "id", "hash")
+            assert receipt["status"] == "unknown" and receipt["reason"] == "pending_no_replay"
+        store.recover()
+        receipt = store.receipt(grant.session_id, "id", "hash")
+        assert receipt["application_provenance"] == Desktop.application_provenance
+        assert receipt["status"] == ("unknown" if state == "pending" else state)
+        if state == "pending":
+            assert receipt["reason"] == "controller_lost"
+        assert json.loads(store.db.execute("SELECT result FROM receipts").fetchone()[0])[
+            "application_provenance"] == Desktop.application_provenance
+    finally:
+        store.close()
+
+
+async def test_isolated_start_still_requires_launch_profile(tmp_path):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    backend.capabilities = replace(backend.capabilities, environment="isolated")
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    try:
+        with pytest.raises(ComputerError, match="isolated_app_required"):
+            await controller.session(RequestContext("o", "c", "t", "h"), {"operation": "start"})
+        assert not controller._live
+    finally:
+        await controller.close()
+        store.close()
