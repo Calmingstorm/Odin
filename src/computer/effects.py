@@ -71,8 +71,12 @@ def effect_receipt(raw, observation, expected, target=None):
     from .gui_actions import visual_receipt
     kind = expected["type"]
     if kind == "field_text_equals":
-        result = {"status": "executed" if type(raw) is dict and raw.get("status") in
-                  {"executed", "verified", "not_satisfied"} else "unknown"}
+        if (type(raw) is dict and raw.get("status") == "unavailable"
+                and raw.get("injected") is False and raw.get("released") is True):
+            result = {"status": "unavailable", "reason": "backend_refused"}
+        else:
+            result = {"status": "executed" if type(raw) is dict and raw.get("status") in
+                      {"executed", "verified", "not_satisfied"} else "unknown"}
     else:
         result = (click_receipt(raw, observation, target) if kind == "pointer_at"
                   else visual_receipt(raw, observation))
