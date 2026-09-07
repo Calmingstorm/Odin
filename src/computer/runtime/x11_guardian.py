@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import math
 import os
 import select
 import socket
@@ -16,13 +17,62 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Literal, TypeAlias, cast
+from typing import Literal, TypeAlias, TypedDict, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
 
 LEASE_SECONDS = 2.0
 DISPATCH_SECONDS = 1.75
 MAX_MESSAGE = 65536
+# Admission reserve, not a latency promise. Slow native round trips are also
+# sampled before the first down. Neither estimate extends the fixed lease.
+DISPATCH_STEP_SECONDS = .005
+WAIT_QUANTUM_SECONDS = .005
+MODIFIER_KEYSYMS = {"ctrl": "Control_L", "alt": "Alt_L", "shift": "Shift_L",
+                   "super": "Super_L"}
+
+
+class ActionDiagnostics(TypedDict):
+    phase: Literal["preflight", "dispatch", "release", "verification", "complete"]
+    steps_planned: int
+    steps_completed: int
+    release: Literal["confirmed", "unknown"]
+    reason: str
+
+
+def safe_reason(reason):
+    """Only static public reason codes, never exception prose or native data."""
+    allowed = {
+        "complete", "invalid_lease", "synthetic_code_already_held",
+        "release_without_owned_intent", "input_helper_eof", "input_helper_protocol",
+        "input_helper_failed", "session_lease_revoked", "supervisor_parent_revoked",
+        "input_lease_expired", "controller_eof", "controller_cancel",
+        "input_device_identity_changed", "other_synthetic_input_held", "human_input_overlap",
+        "input_dispatch_expired", "input_scope_or_native_failed", "owned_release_failed",
+        "display_asleep", "stale_source", "shared_pointer_changed", "invalid_point",
+        "point_outside_source", "point_outside_application", "invalid_polyline",
+        "invalid_scroll_count", "invalid_scroll_direction", "invalid_text", "unsupported_action",
+        "unsupported_key", "unsupported_character", "injected_keyboard_mapping_unavailable",
+        "input_guardian_unavailable",
+        "application_identity_unavailable", "application_identity_changed",
+        "application_scope_unavailable", "application_scope_changed", "source_scope_unavailable",
+        "application_uid_mismatch", "application_process_unreadable",
+        "no_focused_application", "focused_application_outside_source",
+    }
+    return (reason if isinstance(reason, str) and reason in allowed
+            else "input_scope_or_native_failed")
+
+
+def diagnostics(phase, planned, completed, released, reason) -> ActionDiagnostics:
+    return {"phase": phase, "steps_planned": planned, "steps_completed": completed,
+            "release": "confirmed" if released else "unknown", "reason": safe_reason(reason)}
+
+
+def dispatch_budget(steps, *, step_seconds=DISPATCH_STEP_SECONDS):
+    """Reserve a whole plan before any down, including the wait-loop granularity."""
+    return sum(step_seconds + (math.ceil(step[1] / WAIT_QUANTUM_SECONDS)
+                               * WAIT_QUANTUM_SECONDS if step[0] == "wait" else 0)
+               for step in steps)
 
 InputStep: TypeAlias = (
     tuple[Literal["move"], int, int]
@@ -160,6 +210,8 @@ class Guardian:
         self.identity = native.identity()
         self.injected = False
         self.reason = "complete"
+        self.phase = "preflight"
+        self.steps_completed = 0
 
     def guard(self):
         from src.computer.runtime import x11_worker_lifecycle
@@ -195,8 +247,13 @@ class Guardian:
 
     def run(self, steps):
         released = False
+        sampled_step_seconds = DISPATCH_STEP_SECONDS
+        first_down = True
         try:
-            for step in steps:
+            if dispatch_budget(steps) >= self.dispatch_deadline - self.clock():
+                raise GuardianFailure("input_dispatch_expired")
+            for index, step in enumerate(steps):
+                started = self.clock()
                 self.guard()
                 kind = step[0]
                 owned_release = (kind in {"key", "button"} and step[2] is False
@@ -209,24 +266,35 @@ class Guardian:
                     self.dispatch_guard()
                     self.validate(step)
                     self.dispatch_guard()
+                if kind in {"key", "button"} and step[2] and first_down:
+                    # Include measured native move/guard latency before pressing.
+                    if dispatch_budget(steps[index:], step_seconds=sampled_step_seconds) >= (
+                            self.dispatch_deadline - self.clock()):
+                        raise GuardianFailure("input_dispatch_expired")
+                    first_down = False
                 if kind == "wait":
-                    end = min(self.dispatch_deadline + .01, self.clock() + step[1])
+                    end = self.clock() + step[1]
                     while self.clock() < end:
                         self.dispatch_guard()
-                        time.sleep(.005)
+                        time.sleep(WAIT_QUANTUM_SECONDS)
+                    self.dispatch_guard()
+                    self.steps_completed += 1
                     continue
                 if kind in {"key", "button"}:
                     self.ledger.prepare(kind, step[1], step[2])
+                self.phase = "dispatch"
                 self.injected = True  # Dispatch may have effects even without ACK.
                 self.helper.exchange({"op": kind, "args": list(step[1:])},
                                      self.guard if owned_release else self.dispatch_guard)
                 if kind in {"key", "button"}:
                     self.ledger.acknowledged(kind, step[1], step[2])
+                self.steps_completed += 1  # ACK, never merely dispatch intent.
+                sampled_step_seconds = max(sampled_step_seconds, self.clock() - started)
                 self.guard()
         except Exception as exc:
-            self.reason = (str(exc) if isinstance(exc, GuardianFailure)
-                           or type(exc).__name__ == "X11DeviceError"
-                           else "input_scope_or_native_failed")
+            self.reason = safe_reason(str(exc) if isinstance(exc, GuardianFailure)
+                                      or type(exc).__name__ in {"X11DeviceError", "ScopeFailure"}
+                                      else "input_scope_or_native_failed")
         finally:
             triggered = self.clock()
             try:
@@ -247,6 +315,12 @@ class Guardian:
             except Exception:
                 released = False
             latency = (self.clock() - triggered) * 1000
+        if not released or self.ledger.uncertain:
+            if self.reason == "complete":
+                self.reason = "owned_release_failed"
+                self.phase = "release"
+        elif self.reason == "complete":
+            self.phase = "complete"
         success = self.reason == "complete" and released and not self.ledger.uncertain
         persistent_idle = False
         if getattr(self.native, "independent_pointer", False) and released:
@@ -258,7 +332,10 @@ class Guardian:
         independent = getattr(self.native, "independent_pointer", False)
         devices = "persistent_idle" if persistent_idle else "persistent_release_unverified"
         return {"status": status,
-                "injected": self.injected, "released": released, "reason": self.reason,
+                "injected": self.injected,
+                "released": released and not self.ledger.uncertain, "reason": self.reason,
+                "diagnostics": diagnostics(self.phase, len(steps), self.steps_completed,
+                                           released and not self.ledger.uncertain, self.reason),
                 "overlap_uncertain": self.ledger.uncertain, "release_ms": round(latency, 3),
                 "shared_pointer": not independent, "shared_keyboard": not independent,
                 "pointer": "independent" if independent else "shared",
@@ -276,6 +353,20 @@ def input_steps(action, native):
     if kind in {"click", "double_click", "right_click", "middle_click", "scroll"}:
         button: int | None = {"right_click": 3, "middle_click": 2}.get(kind, 1)
         count, delay = (2, .08) if kind == "double_click" else (1, .03)
+        modifier_codes = []
+        if kind != "scroll":
+            count = action.get("count", count)
+            modifiers = action.get("modifiers", [])
+            if type(count) is not int or not 1 <= count <= 3:
+                raise GuardianFailure("unsupported_action")
+            if (type(modifiers) is not list or len(modifiers) > 4
+                    or any(type(m) is not str or m not in MODIFIER_KEYSYMS for m in modifiers)
+                    or len(set(modifiers)) != len(modifiers)):
+                raise GuardianFailure("unsupported_key")
+            modifier_codes = [native.keycode(MODIFIER_KEYSYMS[m]) for m in modifiers]
+            if len(set(modifier_codes)) != len(modifier_codes):
+                raise GuardianFailure("unsupported_key")
+            delay = .08
         if kind == "scroll":
             count = action.get("count", 1)
             if type(count) is not int or not 1 <= count <= 20:
@@ -284,15 +375,20 @@ def input_steps(action, native):
             if button is None:
                 raise GuardianFailure("invalid_scroll_direction")
         steps: list[InputStep] = [("move", action["x"], action["y"])]
+        steps.extend(("key", code, True) for code in modifier_codes)
         for i in range(count):
             if i:
                 steps.append(("wait", delay))
             steps.extend([("button", cast(int, button), True),
                           ("button", cast(int, button), False)])
+        steps.extend(("key", code, False) for code in reversed(modifier_codes))
         return steps
     if kind == "polyline":
         points, duration = action["points"], action["duration"]
-        if (not 2 <= len(points) <= 256 or type(duration) not in (float, int)
+        if (type(points) is not list or not 2 <= len(points) <= 256
+                or any(type(p) is not list or len(p) != 2
+                       or any(type(v) is not int for v in p) for p in points)
+                or type(duration) not in (float, int) or not math.isfinite(duration)
                 or not 0 <= duration <= 1):
             raise GuardianFailure("invalid_polyline")
         steps = [("move", *points[0]), ("button", 1, True)]
@@ -307,8 +403,8 @@ def input_steps(action, native):
     elif kind == "key":
         from src.computer.runtime.primitives import parse_key_chord
         modifiers, symbol = parse_key_chord(action["chord"])
-        mapping = {"ctrl": "Control_L", "shift": "Shift_L", "alt": "Alt_L", "super": "Super_L"}
-        chords = [[native.keycode(mapping[k]) for k in modifiers] + [native.keycode(symbol)]]
+        chords = [[native.keycode(MODIFIER_KEYSYMS[k]) for k in modifiers]
+                  + [native.keycode(symbol)]]
     else:
         raise GuardianFailure("unsupported_action")
     return [event for chord in chords for event in
@@ -347,6 +443,8 @@ def _execute(request, *, controller_fd=0, authorize=None):
                                       request["monitor_names"])
     connection = AttachedConnection(config["display_name"])
     native = helper = None
+    steps = []
+    dispatched = False
     try:
         if connection.power_status() == "display_asleep":
             raise GuardianFailure("display_asleep")
@@ -373,10 +471,24 @@ def _execute(request, *, controller_fd=0, authorize=None):
             native.focus(expected["focus_window"])
         try:
             steps = input_steps(request["action"], native)
-        except (X11DeviceError, ValueError) as exc:
+            if dispatch_budget(steps) >= DISPATCH_SECONDS:
+                raise GuardianFailure("input_dispatch_expired")
+            # Validate every vertex before pressing. Dispatch rechecks scope.
+            if request["action"]["type"] == "polyline":
+                rx, ry, rw, rh = expected["rect"]
+                for x, y in request["action"]["points"]:
+                    if not (monitor.x <= x < monitor.x + monitor.width
+                            and monitor.y <= y < monitor.y + monitor.height):
+                        raise GuardianFailure("point_outside_source")
+                    if not (rx <= x < rx + rw and ry <= y < ry + rh):
+                        raise GuardianFailure("point_outside_application")
+        except (GuardianFailure, X11DeviceError, ValueError) as exc:
             idle = not any(native.owned_release_state().values())
-            return {"status": "unavailable", "injected": False, "released": True,
-                    "reason": str(exc), "unsupported_characters":
+            return {"status": "unavailable", "injected": False, "released": idle,
+                    "reason": safe_reason(str(exc)),
+                    "diagnostics": diagnostics("preflight",
+                                               len(steps),
+                                               0, idle, str(exc)), "unsupported_characters":
                     exc.characters if isinstance(exc, UnsupportedCharacters) else [],
                     "clipboard_fallback": False, "device_identity": native.identity(),
                     "persistent_input_devices": native.independent_pointer,
@@ -425,7 +537,9 @@ def _execute(request, *, controller_fd=0, authorize=None):
                                     if request.get("session_prefix") is not None else {}))
         if authorize is not None:
             authorize(helper)
-        receipt = Guardian(native, helper, validate, controller_fd=controller_fd).run(steps)
+        guardian = Guardian(native, helper, validate, controller_fd=controller_fd)
+        dispatched = True
+        receipt = guardian.run(steps)
         if (request.get("verify_pointer") is True and receipt.get("status") == "executed"
                 and receipt.get("released") is True and receipt.get("injected") is True):
             # Measured AFTER the helper is fenced and owned input released. This
@@ -446,6 +560,17 @@ def _execute(request, *, controller_fd=0, authorize=None):
             except Exception:
                 pass  # A missing postcondition does not erase acknowledged input.
         return receipt
+    except Exception as exc:
+        if dispatched:
+            raise  # Lost post-dispatch evidence must remain unknown, never replay.
+        idle = native is None
+        if native is not None:
+            with contextlib.suppress(Exception):
+                idle = not any(native.owned_release_state().values())
+        reason = safe_reason(str(exc))
+        return {"status": "unavailable", "injected": False, "released": idle,
+                "reason": reason,
+                "diagnostics": diagnostics("preflight", len(steps), 0, idle, reason)}
     finally:
         if helper is not None and helper.process.poll() is None:
             helper.fence()
@@ -574,5 +699,7 @@ if __name__ == "__main__":
                 receipt = execute(request, authorize=authorize if gated else None)
         except Exception:
             receipt = {"status": "unknown", "injected": True, "released": False,
-                       "reason": "input_guardian_unavailable"}
+                       "reason": "input_guardian_unavailable",
+                       "diagnostics": diagnostics("dispatch", 0, 0, False,
+                                                  "input_guardian_unavailable")}
         print(json.dumps(receipt, separators=(",", ":")), flush=True)

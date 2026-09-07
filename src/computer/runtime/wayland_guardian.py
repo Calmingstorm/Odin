@@ -24,6 +24,32 @@ class _Credentials(TypedDict, total=False):
     extra_groups: list[int]
 
 
+_ACTION_REASONS = frozenset({
+    "completed", "cancelled", "orderly", "unsupported_character", "unsupported_key",
+    "keymap_unavailable", "modifier_state_active", "scroll_capability_unavailable",
+    "lease-expired", "signal-cancel", "controller-timeout", "controller-eof",
+    "input-path-lost", "mapping-changed", "topology-changed", "too-many-devices",
+    "modifier-state-changed", "invalid-command", "transport-error", "poll-error",
+    "wayland_guardian_input_path_lost",
+})
+
+
+def _action_diagnostics(row):
+    """Static reason vocabulary and bounded counters, not untrusted native prose."""
+    raw = row.get("diagnostics")
+    if not isinstance(raw, dict):
+        return None
+    if (raw.get("phase") not in {"preflight", "dispatch", "release", "verification", "complete"}
+            or any(type(raw.get(k)) is not int or not 0 <= raw[k] <= 4096
+                   for k in ("steps_planned", "steps_completed"))
+            or raw["steps_completed"] > raw["steps_planned"]
+            or raw.get("release") not in {"confirmed", "unknown"}
+            or raw.get("reason") not in _ACTION_REASONS):
+        return None
+    return {key: raw[key] for key in
+            ("phase", "steps_planned", "steps_completed", "release", "reason")}
+
+
 def trusted_binary(path: str) -> None:
     if type(path) is not str or not path.startswith("/") or any(ord(c) < 32 for c in path):
         raise WaylandGuardianError("wayland_guardian_path_invalid")
@@ -57,6 +83,7 @@ class WaylandGuardian:
         self._closing = self._failed = self._active = False
         self._closed_receipt = self._release_submitted = False
         self._ready: dict[str, Any] = {}
+        self._last_terminal: dict[str, Any] = {}
 
     @property
     def ready(self):
@@ -120,6 +147,7 @@ class WaylandGuardian:
                     self._release_submitted = True
                 elif event == "closed":
                     self._closed_receipt = True
+                    self._last_terminal = row
                 elif event == "unsupported_release":
                     self._failed = True
                 if event not in {"idle", "release_begin", "release_sent"}:
@@ -150,7 +178,9 @@ class WaylandGuardian:
                 if row.get("event") == "action_rejected" and event == "action_done":
                     return row
                 if row.get("event") in {"closed", "unsupported_release", "transport_end"}:
-                    raise WaylandGuardianError("wayland_guardian_input_path_lost")
+                    error = WaylandGuardianError("wayland_guardian_input_path_lost")
+                    error.details = row
+                    raise error
                 if row.get("event") not in {"begun", "begin", "selected", "held"}:
                     raise WaylandGuardianError("wayland_guardian_unexpected_receipt")
         return await asyncio.wait_for(receive(), timeout)
@@ -174,7 +204,7 @@ class WaylandGuardian:
 
     async def act(self, command: str):
         if (type(command) is not str or not command or len(command) > 32000
-                or command[0] not in "MPDKTJQW" or "\n" in command or "\r" in command
+                or command[0] not in "MPDKTJQWVL" or "\n" in command or "\r" in command
                 or "\x00" in command):
             raise WaylandGuardianError("wayland_guardian_invalid_action")
         async with self._action_lock:
@@ -182,18 +212,35 @@ class WaylandGuardian:
                 raise WaylandGuardianError("wayland_guardian_not_active")
             self._active = True
             self._release_submitted = False
+            self._last_terminal = {}
             try:
                 await self._send("B 2000\n" + command + "\n")
                 receipt = await self._receive("action_done", timeout=3)
                 self._active = False
-            except BaseException:
+            except BaseException as exc:
                 await self.close()
+                if isinstance(exc, Exception):
+                    detail = _action_diagnostics(self._last_terminal)
+                    error = WaylandGuardianError("wayland_guardian_input_path_lost")
+                    error.details = {"input_was_sent": self._last_terminal.get("input_was_sent"),
+                                     "diagnostics": detail or {
+                        "phase": "dispatch", "steps_planned": 0, "steps_completed": 0,
+                        "release": "unknown", "reason": "wayland_guardian_input_path_lost"}}
+                    raise error from None
                 raise
             if receipt.get("event") == "action_rejected":
-                error = WaylandGuardianError(str(receipt.get("reason", "action_rejected")))
-                error.details = receipt
+                reason = receipt.get("reason")
+                if reason not in _ACTION_REASONS:
+                    reason = "wayland_guardian_input_path_lost"
+                error = WaylandGuardianError(reason)
+                error.details = {**receipt, "reason": reason, "diagnostics": {
+                    "phase": "preflight", "steps_planned": 0, "steps_completed": 0,
+                    "release": "confirmed", "reason": reason}}
                 raise error
-            return {**receipt, "release_submitted": self._release_submitted}
+            detail = _action_diagnostics(receipt)
+            receipt.pop("diagnostics", None)
+            return {**receipt, "release_submitted": self._release_submitted,
+                    **({"diagnostics": detail} if detail is not None else {})}
 
     async def _close(self) -> dict[str, bool]:
         self._closing = True

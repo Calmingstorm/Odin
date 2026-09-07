@@ -1,7 +1,8 @@
 /* Sole EI owner. argv: granted fd, exact portal mapping ID.
  * H key button GLOBAL_x GLOBAL_y ms; R; C (qualification compatibility).
  * B ms; then M x y | P button x y | D button n x y ... | K n key... |
- * T utf8_hex | J ctrl+a | Q button x y | W direction count x y.
+ * T utf8_hex | J ctrl+a | Q button x y | W direction count x y |
+ * V button count modifier_count [modifier...] x y | L button n duration_ms x y ...
  * Source-local actions release,
  * emits action_done, returns idle on SAME EI context. N heartbeat renews idle
  * only; ignored while active. S mapping_id selects an exact region while idle.
@@ -48,6 +49,9 @@ struct guardian {
   struct point points[256];
   struct chord text[256];
   unsigned combo[16],count,index,phase,button;
+  unsigned modifiers[4],nmodifiers,clicks,planned,completed;
+  uint64_t point_interval;
+  bool input_sent,release_unknown;
   int scroll_x,scroll_y;
   uint64_t next_step;
   char kind;
@@ -100,18 +104,21 @@ static void load_keymap(struct guardian *g) {
   munmap(data,size);
 }
 static void ready_receipt(struct guardian *g,const char *event) {
-  char line[512];
-  int n=snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"single-ei-owner\",\"protocol\":1,\"width\":%.17g,\"height\":%.17g,\"pointer\":true,\"keyboard\":%s,\"text\":%s,\"keymap_format\":\"%s\",\"keymap_layouts\":%u,\"monotonic_us\":%llu}\n",event,g->width,g->height,g->keyboard?"true":"false",g->keymap?"true":"false",g->keymap?"xkb_v1":"none",g->keymap?xkb_keymap_num_layouts(g->keymap):0,(unsigned long long)ei_now(g->ctx));
+  char line[640];
+  int n=snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"single-ei-owner\",\"protocol\":1,\"bounded_clicks\":true,\"timed_polyline\":true,\"width\":%.17g,\"height\":%.17g,\"pointer\":true,\"keyboard\":%s,\"text\":%s,\"keymap_format\":\"%s\",\"keymap_layouts\":%u,\"monotonic_us\":%llu}\n",event,g->width,g->height,g->keyboard?"true":"false",g->keymap?"true":"false",g->keymap?"xkb_v1":"none",g->keymap?xkb_keymap_num_layouts(g->keymap):0,(unsigned long long)ei_now(g->ctx));
   if(n>0 && n<(int)sizeof line)(void)write(1,line,(size_t)n);
 }
 /* Owned ledger is always written BEFORE a down, never releases human state. */
 static void key(struct guardian *g,unsigned k,bool down) {
+  g->input_sent=true;g->completed++;
   g->keys[k]=down;ei_device_keyboard_key(g->keyboard,k,down);ei_device_frame(g->keyboard,ei_now(g->ctx));
 }
 static void button(struct guardian *g,unsigned b,bool down) {
+  g->input_sent=true;g->completed++;
   g->buttons[b-272]=down;ei_device_button_button(g->pointer,b,down);ei_device_frame(g->pointer,ei_now(g->ctx));
 }
 static void move(struct guardian *g,struct point p) {
+  g->input_sent=true;g->completed++;
   ei_device_pointer_motion_absolute(g->pointer,p.x+g->ox,p.y+g->oy);ei_device_frame(g->pointer,ei_now(g->ctx));
 }
 static void release(struct guardian *g,const char *reason) {
@@ -123,6 +130,7 @@ static void release(struct guardian *g,const char *reason) {
     if(!g->plost && !g->disconnected){button(g,b,false);sent=true;}else{g->buttons[b-272]=false;unsupported=true;}
   }
   if(sent)receipt("release_sent",reason,ei_now(g->ctx));
+  g->release_unknown |= unsupported;
   if(unsupported)receipt("unsupported_release","input-path-lost",ei_now(g->ctx));
 }
 static void stop_emulating(struct guardian *g) {
@@ -297,6 +305,8 @@ static bool command(struct guardian *g,char *line) {
   if(*verb=='B'){
     if(g->begun||!number(&rest,&ms,1,2000)||rest)return false;
     g->begun=true;g->lease=ei_now(g->ctx)+(uint64_t)ms*1000;
+    g->planned=g->completed=g->nmodifiers=0;g->point_interval=0;
+    g->input_sent=g->release_unknown=false;
     receipt("begun","nonrenewable-lease",ei_now(g->ctx));return true;
   }
   if(*verb=='H'){
@@ -307,10 +317,32 @@ static bool command(struct guardian *g,char *line) {
   }
   if(!g->begun)return false;
   g->kind=*verb;
-  if(*verb=='M'||*verb=='P'||*verb=='D'||*verb=='Q'){
+  if(*verb=='V'){
+    if(!number(&rest,&g->button,272,279)||!number(&rest,&g->clicks,1,3)||!number(&rest,&g->nmodifiers,0,4))return false;
+    if(g->nmodifiers){
+      if(!g->keyboard||!g->keymap){reject(g,"keymap_unavailable");return true;}
+      if(g->depressed||g->latched||g->locked||g->group>=xkb_keymap_num_layouts(g->keymap)){reject(g,"modifier_state_active");return true;}
+      for(unsigned i=0;i<g->nmodifiers;i++){
+        char *name=token(&rest);unsigned code=name?named_modifier(g,name):0;
+        if(code<9||code>255){reject(g,"unsupported_key");return true;}
+        g->modifiers[i]=code-8;
+        for(unsigned j=0;j<i;j++)if(g->modifiers[j]==g->modifiers[i])return false;
+      }
+    }
+    if(!point(g,&rest,&g->points[0],false))return false;
+    g->planned=1+2*g->clicks+2*g->nmodifiers;
+  }else if(*verb=='M'||*verb=='P'||*verb=='D'||*verb=='Q'||*verb=='L'){
     g->count=1;if(*verb!='M'&&!number(&rest,&g->button,272,279))return false;
-    if(*verb=='D'&&!number(&rest,&g->count,2,256))return false;
+    if((*verb=='D'||*verb=='L')&&!number(&rest,&g->count,2,256))return false;
+    if(*verb=='L'){
+      if(!number(&rest,&ms,0,1000))return false;
+      g->point_interval=(uint64_t)ms*1000/(g->count-1);
+      /* Keep the two-second lease; reserve dispatch overhead before down. */
+      uint64_t budget=(uint64_t)ms*1000+(uint64_t)(g->count+2)*2000;
+      if(ei_now(g->ctx)+budget+250000>=g->lease){reject(g,"lease-expired");return true;}
+    }
     for(unsigned i=0;i<g->count;i++)if(!point(g,&rest,&g->points[i],false))return false;
+    g->planned=g->count+(*verb=='M'?0:*verb=='Q'?4:2);
   }else if(*verb=='W'){
     char *direction=token(&rest);
     if(!direction||!number(&rest,&g->count,1,20)||!point(g,&rest,&g->points[0],false)||rest)return false;
@@ -341,7 +373,18 @@ static bool command(struct guardian *g,char *line) {
     if(!g->begun)return true;
   }else return false;
   if(rest||cancelled||ei_now(g->ctx)>=g->lease)return false;
-  g->action=true;g->next_step=0;start(g,*verb=='M'||*verb=='P'||*verb=='D'||*verb=='Q'||*verb=='W',*verb=='K'||*verb=='J'||*verb=='T');return true;
+  if(g->kind=='K')g->planned=2*g->count;
+  if(g->kind=='T')for(unsigned i=0;i<g->count;i++)g->planned+=2*g->text[i].n;
+  if(g->kind=='W')g->planned=1+g->count;
+  g->action=true;g->next_step=0;start(g,*verb=='M'||*verb=='P'||*verb=='D'||*verb=='Q'||*verb=='W'||*verb=='V'||*verb=='L',*verb=='K'||*verb=='J'||*verb=='T'||g->nmodifiers);return true;
+}
+static void action_receipt(struct guardian *g,const char *event,const char *reason) {
+  bool released=!g->release_unknown;
+  for(unsigned i=0;i<248;i++)if(g->keys[i])released=false;
+  for(unsigned i=0;i<8;i++)if(g->buttons[i])released=false;
+  const char *phase=!strcmp(event,"action_done")?"complete":!g->input_sent?"preflight":!released?"release":"dispatch";
+  char line[768];int n=snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"}}\n",event,reason,g->input_sent?"true":"false",phase,g->planned,g->completed,released?"confirmed":"unknown",reason);
+  if(n>0&&(size_t)n<sizeof line)(void)write(1,line,(size_t)n);
 }
 static void complete(struct guardian *g) {
   receipt("release_begin","completed",ei_now(g->ctx));release(g,"completed");
@@ -351,14 +394,25 @@ static void complete(struct guardian *g) {
 }
 static void action_done(struct guardian *g) {
   stop_emulating(g);
-  receipt("action_done","completed",ei_now(g->ctx));g->begun=g->action=false;g->lease=0;
+  action_receipt(g,"action_done","completed");g->begun=g->action=false;g->lease=0;
   g->index=g->phase=g->count=0;g->kind=0;g->idle=ei_now(g->ctx)+2000000;g->done_pending=false;
 }
 static void step(struct guardian *g) {
   if(!g->action||g->kind=='H'||g->done_pending)return;
   uint64_t now=ei_now(g->ctx);if(now<g->next_step)return;
-  if(g->kind=='M'||g->kind=='P'||g->kind=='D'){
-    if(g->index<g->count){move(g,g->points[g->index]);if(!g->index&&g->kind!='M')button(g,g->button,true);g->index++;}else complete(g);
+  if(g->kind=='M'||g->kind=='P'||g->kind=='D'||g->kind=='L'){
+    if(g->index<g->count){move(g,g->points[g->index]);if(!g->index&&g->kind!='M')button(g,g->button,true);g->index++;g->next_step=now+(g->index<g->count?g->point_interval:0);}else complete(g);
+  }else if(g->kind=='V'){
+    if(!g->phase){
+      if(!g->index){move(g,g->points[0]);for(unsigned i=0;i<g->nmodifiers;i++)key(g,g->modifiers[i],true);}
+      button(g,g->button,true);g->phase=1;
+    }else{
+      button(g,g->button,false);g->phase=0;
+      if(++g->index==g->clicks){
+        for(unsigned i=g->nmodifiers;i;i--)key(g,g->modifiers[i-1],false);
+        complete(g);
+      }else g->next_step=now+80000;
+    }
   }else if(g->kind=='Q'){
     if(!g->phase){move(g,g->points[0]);button(g,g->button,true);g->phase=1;}
     else if(g->phase==1){button(g,g->button,false);g->phase=2;g->next_step=now+80000;}
@@ -367,6 +421,7 @@ static void step(struct guardian *g) {
   }else if(g->kind=='W'){
     if(!g->index)move(g,g->points[0]);
     ei_device_scroll_discrete(g->pointer,g->scroll_x,g->scroll_y);ei_device_frame(g->pointer,now);
+    g->input_sent=true;g->completed++;
     if(++g->index==g->count)complete(g);else g->next_step=now+30000;
   }else if(g->kind=='K'){
     if(!g->phase++){for(unsigned i=0;i<g->count;i++)key(g,g->combo[i],true);}else complete(g);
@@ -445,5 +500,5 @@ int main(int argc,char **argv) {
   for(unsigned i=0;i<g.ndevices;i++)ei_device_unref(g.devices[i]);
   if(g.keymap)xkb_keymap_unref(g.keymap);
   if(g.xctx)xkb_context_unref(g.xctx);
-  receipt("closed",g.reason?g.reason:"unknown",ei_now(g.ctx));ei_unref(g.ctx);return g.status;
+  action_receipt(&g,"closed",g.reason?g.reason:"unknown");ei_unref(g.ctx);return g.status;
 }
