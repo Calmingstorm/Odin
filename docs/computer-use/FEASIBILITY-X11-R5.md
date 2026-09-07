@@ -1,5 +1,13 @@
 # X11 R5: attached owned-input continuation, private corpus passed
 
+## Cross-UID lifecycle gate superseded
+
+See [FEASIBILITY-X11-R5-CROSSUID.md](FEASIBILITY-X11-R5-CROSSUID.md) for the final
+private root-worker acceptance: distinct sudo wrapper, exact root/helper identity
+ACK gates,5 held-input releases,2 capture launch gates, withheld-ACK refusal,
+5 actual Xed actions,71 absent host identities and125 focused tests. This replaces
+the historical privileged-wrapper blocker below, not main-desktop acceptance.
+
 ## Parent identity review correction
 
 The independent final review reproduced an interpreter-provenance bypass: a

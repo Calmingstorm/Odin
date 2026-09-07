@@ -58,10 +58,48 @@ def test_no_ambient_secrets_display_cookie_or_bus(monkeypatch):
 def test_privileged_worker_explicit_operator_only():
     b = backend(runtime_sudo=True)
     argv = b._worker_argv("x11_guardian.py")
-    assert argv[:4] == ["/usr/bin/sudo", "-n", "/usr/bin/env", "-i"]
+    assert argv[:5] == ["/usr/bin/sudo", "-n", "--", "/usr/bin/env", "-i"]
     assert "XAUTHORITY=/dev/null" in argv
-    assert argv[-2] == "-I" and argv[-1].endswith("/x11_guardian.py")
+    assert argv[-3] == "-I" and argv[-2].endswith("/x11_guardian.py")
+    assert argv[-1] == "--identity-gate"
     assert "sudo" not in " ".join(backend()._worker_argv("x11_guardian.py"))
+
+
+def test_privileged_workers_fixed_and_not_ready_before_handshake():
+    b = backend(runtime_sudo=True, input_enabled=True)
+    assert not b.input_supported
+    with pytest.raises(AttachedFailure, match="unapproved_worker"):
+        b._worker_argv("../arbitrary.py")
+
+
+@pytest.mark.asyncio
+async def test_privileged_wrapper_absence_alone_cannot_prove_cleanup():
+    b = backend(runtime_sudo=True)
+    p = StubProcess(False)
+    p.returncode = 0
+    p.reaped.set()
+    b._children.add(p)
+    await b._reap(p)
+    assert b._release_failed and p in b._children
+    assert (await b.detach())["state"] == "quarantined"
+
+
+def test_identity_gate_eof_and_no_ack_are_bounded():
+    import os
+
+    from src.computer.runtime.x11_worker_lifecycle import read_gate
+    reader, writer = os.pipe()
+    try:
+        with pytest.raises(RuntimeError, match="revoked"):
+            read_gate(reader, timeout=.001)
+        os.close(writer)
+        writer = None
+        with pytest.raises(RuntimeError, match="eof"):
+            read_gate(reader)
+    finally:
+        os.close(reader)
+        if writer is not None:
+            os.close(writer)
 
 
 @pytest.mark.asyncio

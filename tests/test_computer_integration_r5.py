@@ -106,3 +106,18 @@ def test_context_revocation_hook_rechecked_with_host_and_tool_authority():
     assert service._authorize(context)
     service.bot.host_access_manager.is_host_allowed = lambda *_: False
     assert not service._authorize(context)
+
+
+def test_attached_factory_enables_only_native_xed_with_pinned_operator_settings():
+    service, _ = fixture(SimpleNamespace())
+    service.settings.environment = "existing_session"
+    service.settings.platform = "x11"
+    service.settings.display = ":187"
+    service.settings.xauthority = ""
+    service.settings.monitor_names = ["fixture"]
+    service.settings.runtime_sudo = True
+    xed = service._backend("xed")
+    drawing = service._backend("drawing")
+    assert xed._input_enabled and xed._runtime_sudo
+    assert not drawing._input_enabled
+    assert not xed._children and not drawing._children

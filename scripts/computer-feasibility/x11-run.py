@@ -18,7 +18,10 @@ p.add_argument('--send-event-probe', action='store_true', help='R5 disposable no
 p.add_argument('--attached-corpus', action='store_true', help='R5 disposable SendEvent toolkit coexistence corpus')
 p.add_argument('--capture-adapter', action='store_true', help='R5 actual capture adapter in private display')
 p.add_argument('--owned-guardian', action='store_true', help='R5 existing XTEST input and release')
+p.add_argument('--crossuid-guardian', action='store_true', help='R5 private root sudo workers, uid65534 apps')
 args = p.parse_args()
+if args.crossuid_guardian:
+    args.owned_guardian = True
 if not args.execute_isolated:
     raise SystemExit('PREPARED ONLY. Parent authorization required before --execute-isolated.')
 if args.same_process:
@@ -102,6 +105,21 @@ if args.owned_guardian:
     sandbox[-2:] = ['/usr/bin/python3', '/harness/x11-owned-guardian-corpus.py']
     at = sandbox.index('/usr/bin/dbus-run-session')
     sandbox[at:] = ['/usr/bin/bash', '/harness/x11-owned-bootstrap.sh']
+if args.crossuid_guardian:
+    props = [p for p in props if not p.startswith('CapabilityBoundingSet=')]
+    at = sandbox.index('/etc')
+    sandbox[at-1] = '--tmpfs'
+    props += ['CapabilityBoundingSet=CAP_SYS_ADMIN CAP_NET_ADMIN CAP_CHOWN CAP_SETUID CAP_SETGID CAP_SETPCAP CAP_SYS_CHROOT CAP_DAC_OVERRIDE CAP_SYS_PTRACE CAP_AUDIT_WRITE CAP_KILL']
+    at = sandbox.index('--cap-drop') + 2
+    sandbox[at:at] = ['--cap-add', 'CAP_DAC_OVERRIDE', '--cap-add', 'CAP_SYS_PTRACE',
+                      '--cap-add', 'CAP_AUDIT_WRITE', '--cap-add', 'CAP_KILL']
+    at = sandbox.index('--remount-ro')
+    sandbox[at:at] = ['--ro-bind', '/harness/x11-crossuid-passwd', '/etc/passwd']
+    # Bind source uses outer namespace paths, not the inner /harness alias.
+    sandbox = [s.replace('/harness/x11-crossuid-passwd', '/xi2-source/x11-crossuid-passwd')
+               .replace('/harness/x11-crossuid-sudoers', '/xi2-source/x11-crossuid-sudoers')
+               for s in sandbox]
+    sandbox[-1] = '/harness/x11-crossuid-bootstrap.sh'
 cmd = ['/usr/bin/systemd-run', '--quiet', '--pipe', '--wait', '--collect', '--service-type=exec',
        '--unit=' + unit] + ['--property=' + x for x in props] + sandbox
 if os.geteuid() != 0:

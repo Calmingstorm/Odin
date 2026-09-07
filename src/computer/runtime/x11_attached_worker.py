@@ -39,6 +39,7 @@ def run(request):
                                 connection_factory=AttachedConnection)
     try:
         topology = capture.topology()
+        assert isinstance(capture._connection, AttachedConnection)
         sources = capture._connection.named_sources(topology, config["monitor_names"])
         if request["operation"] == "sources":
             return {"ok": True, "sources": sources}
@@ -70,13 +71,19 @@ def run(request):
 if __name__ == "__main__":
     signal.alarm(5)
     try:
-        line = sys.stdin.buffer.readline(32769)
-        if len(line) > 32768 or not line.endswith(b"\n"):
-            raise ValueError("invalid request")
+        if "--identity-gate" in sys.argv:
+            from src.computer.runtime.x11_worker_lifecycle import announce, read_gate
+            announce("capture")
+            request = read_gate()
+        else:
+            line = sys.stdin.buffer.readline(32769)
+            if len(line) > 32768 or not line.endswith(b"\n"):
+                raise ValueError("invalid request")
+            request = json.loads(line)
         # python-xlib emits authority warnings to stdout. Protocol records must
         # remain pure JSON and never leak native connection diagnostics.
         with contextlib.redirect_stdout(sys.stderr):
-            reply = run(json.loads(line))
+            reply = run(request)
     except Exception:
         reply = {"ok": False, "error": "explicit_x11_capture_unavailable"}
     print(json.dumps(reply, separators=(",", ":")), flush=True)

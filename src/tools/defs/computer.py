@@ -28,6 +28,9 @@ _DEFINITIONS = [
         "The operator configures the target and backend; unavailable input is never bypassed. "
         "Isolated tasks use approved offline Drawing/Xed apps. Existing-session access requires "
         "an explicit current user request. Pause/cancel stops input, not applied effects. "
+        "Attached X11 input supports the focused native Xed app only; Drawing is capture-only "
+        "there. Check returned input_limits: attached typing is printable ASCII, with explicit "
+        "Return/Tab key calls for line breaks. The pointer is shared, not independent. "
         "Foreground only. Never operate terminals, security prompts or Odin's control plane.",
         {
             "operation": {"type": "string", "enum": [

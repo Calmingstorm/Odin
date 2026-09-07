@@ -139,6 +139,9 @@ class Guardian:
         self.reason = "complete"
 
     def guard(self):
+        from src.computer.runtime import x11_worker_lifecycle
+        if x11_worker_lifecycle.REVOKED:
+            raise GuardianFailure("supervisor_parent_revoked")
         if self.clock() >= self.deadline:
             raise GuardianFailure("input_lease_expired")
         if self.controller_fd is not None and select.select([self.controller_fd], [], [], 0)[0]:
@@ -242,7 +245,7 @@ def input_steps(action, native):
              + [('key', code, False) for code in reversed(chord)])]
 
 
-def execute(request, *, controller_fd=0):
+def execute(request, *, controller_fd=0, authorize=None):
     from src.computer.runtime.x11_app_scope import AppScope
     from src.computer.runtime.x11_attached import attachment_configuration, worker_environment
     from src.computer.runtime.x11_attached_worker import AttachedConnection
@@ -263,7 +266,7 @@ def execute(request, *, controller_fd=0):
         scope.assert_snapshot(expected, monitor)
         native = ExistingXTest(config["display_name"])
         steps = input_steps(request["action"], native)
-        pointer = [None]
+        pointer: list[tuple[int, int] | None] = [None]
         def validate(step):
             if connection.topology() != topology:
                 raise GuardianFailure("stale_source")
@@ -288,6 +291,8 @@ def execute(request, *, controller_fd=0):
                 else:
                     scope.assert_snapshot(expected, monitor)
         helper = InjectionHelper(config["display_name"], worker_environment(config["xauthority"]))
+        if authorize is not None:
+            authorize(helper)
         return Guardian(native, helper, validate, controller_fd=controller_fd).run(steps)
     finally:
         if helper is not None and helper.process.poll() is None:
@@ -298,6 +303,8 @@ def execute(request, *, controller_fd=0):
 
 
 def injector(fd):
+    from src.computer.runtime.x11_worker_lifecycle import parent_watch
+    parent_watch(injector=True)
     from src.computer.runtime.x11_owned_device import ExistingXTest
     stream = socket.socket(fileno=fd).makefile("rwb", buffering=0)
     first = json.loads(stream.readline(MAX_MESSAGE))
@@ -323,18 +330,23 @@ if __name__ == "__main__":
         injector(int(sys.argv[2]))
     else:
         try:
+            from src.computer.runtime.x11_worker_lifecycle import (
+                acknowledge,
+                announce,
+                parent_watch,
+                read_gate,
+            )
+            parent_watch()
+            gated = "--identity-gate" in sys.argv
+            if gated:
+                announce("guardian")
             # Read raw fd without buffered read-ahead: following EOF/cancel is
             # independently observed by select(), not hidden in a Python buffer.
-            line = bytearray()
-            while len(line) <= MAX_MESSAGE:
-                char = os.read(0, 1)
-                if not char or char == b"\n":
-                    break
-                line.extend(char)
-            if char != b"\n" or len(line) > MAX_MESSAGE:
-                raise GuardianFailure("invalid_guardian_request")
+            request = read_gate()
+            def authorize(helper):
+                acknowledge(announce("injector", helper.process.pid))
             with contextlib.redirect_stdout(sys.stderr):
-                receipt = execute(json.loads(line))
+                receipt = execute(request, authorize=authorize if gated else None)
         except Exception:
             receipt = {"status": "unknown", "injected": True, "released": False,
                        "reason": "input_guardian_unavailable"}

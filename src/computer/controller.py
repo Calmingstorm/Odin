@@ -266,6 +266,9 @@ class ComputerController:
             supported = getattr(live.backend, "input_supported", None)
             if type(supported) is bool:
                 result["input_supported"] = supported
+            limits = getattr(live.backend, "input_limits", None)
+            if isinstance(limits, dict):
+                result["input_limits"] = deepcopy(limits)
         return result
 
     async def session(self, context: RequestContext, inp: dict) -> dict:

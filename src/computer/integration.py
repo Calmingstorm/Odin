@@ -81,7 +81,8 @@ class ComputerIntegration:
             return X11AttachedBackend(
                 enabled=self.enabled, app_profile=app,
                 display_name=self.settings.display, xauthority=self.settings.xauthority,
-                monitor_names=self.settings.monitor_names)
+                monitor_names=self.settings.monitor_names,
+                input_enabled=app == "xed", runtime_sudo=bool(self.settings.runtime_sudo))
         from .runtime.backend import LinuxDesktopBackend
 
         return LinuxDesktopBackend(enabled=self.enabled, app_profile=app,
