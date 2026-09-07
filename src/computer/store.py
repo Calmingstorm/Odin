@@ -300,7 +300,8 @@ class ComputerStore:
         return None
 
     def finish_action(self, session_id: str, action_id: str, result: dict) -> dict:
-        allowed = {"status", "reason", "verification", "observation_id", "execution"}
+        allowed = {"status", "reason", "verification", "observation_id", "execution",
+                   "unsupported_characters"}
         if set(result) - allowed or result.get("status") not in {
             "executed", "verified", "not_satisfied", "unavailable", "unknown"
         }:

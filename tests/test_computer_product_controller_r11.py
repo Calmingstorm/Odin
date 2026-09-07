@@ -220,3 +220,39 @@ async def test_attached_document_transition_is_not_unknown_input(tmp_path):
     finally:
         await controller.close()
         store.close()
+
+
+@pytest.mark.parametrize("codepoint", [233, "U+00E9"])
+async def test_unicode_preflight_details_are_durable_known_no_input(tmp_path, codepoint):
+    store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
+    backend = Desktop()
+    controller = ComputerController(store, lambda _: backend, lambda _: True, enabled=True)
+    context = RequestContext("o", "c", "t", "h")
+    try:
+        grant = await controller.session(context, {"operation": "start"})
+        sid = grant["session_id"]
+        observed = await controller.observe(context, {"session_id": sid, "generation": 1})
+        obs = controller._live[sid].observations[observed["observation_id"]]
+        await controller.validate_observation_delivery(
+            context, obs.frame_metadata, obs.image_sha256)
+
+        async def rejected(payload):
+            return {"status": "unavailable", "injected": False, "released": True,
+                    "reason": "unsupported_character",
+                    "unsupported_characters": [{"index": 0, "codepoint": codepoint}]}
+
+        backend.act = rejected
+        action = {"session_id": sid, "generation": 1, "action_id": "text",
+                  "observation_id": obs.observation_id, "consent_generation": 1,
+                  "source_id": "opaque", "source_revision": 1, "operation": "type",
+                  "text": "é", "expect": {"type": "visual_change"}}
+        result = await controller.act(context, action)
+        assert result["status"] == "unavailable"
+        assert result["reason"] == "unsupported_character"
+        assert result["unsupported_characters"] == [{"index": 0, "codepoint": "U+00E9"}]
+        assert result["execution"] == {"injected": False, "released": True}
+        assert store.get_session(sid).state == "active"
+        assert await controller.act(context, action) == result
+    finally:
+        await controller.close()
+        store.close()

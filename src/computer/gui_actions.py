@@ -1,6 +1,7 @@
 """Bounded GUI actions. Visual change is not semantic task success."""
 
 import math
+import re
 from typing import Any
 
 from .actions import _REQUIRED, click_arguments, click_payload
@@ -130,8 +131,31 @@ def visual_receipt(raw, observation):
             or type(raw.get("injected")) is not bool):
         return unknown
     if raw.get("status") == "unavailable" and raw["injected"] is False:
-        return {"status": "unavailable", "reason": "backend_refused",
-                "execution": {"injected": False, "released": True}}
+        refused: dict[str, Any] = {"status": "unavailable", "reason": "backend_refused",
+                                   "execution": {"injected": False, "released": True}}
+        reason = raw.get("reason")
+        if isinstance(reason, str) and reason in {"unsupported_character", "unsupported_key"}:
+            refused["reason"] = reason
+        if reason == "unsupported_character":
+            characters = raw.get("unsupported_characters", raw.get("characters"))
+            if type(characters) is not list or not 1 <= len(characters) <= 512:
+                return unknown
+            normalized, seen = [], set()
+            for character in characters:
+                if type(character) is not dict:
+                    return unknown
+                index, codepoint = character.get("index"), character.get("codepoint")
+                if type(index) is not int or not 0 <= index < 512 or index in seen:
+                    return unknown
+                if isinstance(codepoint, str) and re.fullmatch(r"U\+[0-9A-F]{4,6}", codepoint):
+                    codepoint = int(codepoint[2:], 16)
+                if (type(codepoint) is not int or not 0 <= codepoint <= 0x10FFFF
+                        or 0xD800 <= codepoint <= 0xDFFF):
+                    return unknown
+                seen.add(index)
+                normalized.append({"index": index, "codepoint": f"U+{codepoint:04X}"})
+            refused["unsupported_characters"] = normalized
+        return refused
     if (raw["injected"] is not True or raw.get("status") not in
             {"executed", "verified", "not_satisfied"}):
         return unknown
