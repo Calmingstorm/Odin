@@ -554,6 +554,13 @@ class ComputerController:
         if live.task_context.last_view_id is not None and not raw.focused:
             live.task_context.invalidate("human_focus_changed")
         live.task_context.captured(obs)
+        provenance = getattr(live.backend, "application_provenance", None)
+        if isinstance(provenance, dict):
+            # Already canonical, path-free identity. Titles are deliberately not
+            # persisted in this descriptive context or used to choose a target.
+            live.task_context.application = {
+                key: provenance[key] for key in ("pid", "start_ticks", "exe_basename")
+                if key in provenance}
         if acknowledge_modal:
             live.modal_identity = obs.modal
         return obs, raw.image_bytes

@@ -37,6 +37,7 @@ class TaskContext:
     reason: str | None = None
     target_binding: tuple | None = field(default=None, repr=False)
     target: dict = field(default_factory=dict)
+    application: dict = field(default_factory=dict)
 
     def describe(self, hints, *, delivered_observation_id):
         self.hints.update(context_arguments(hints))
@@ -74,6 +75,7 @@ class TaskContext:
             "delivered_view_id": self.delivered_view_id,
             "state": self.state, "reason": self.reason,
             "target": dict(self.target),
+            "application": dict(self.application),
             "authorizes_input": False,
             "recovery": "Inspect the current view; refresh stale hints before relying on them. "
                         "Do not steal focus or replay interrupted input.",
