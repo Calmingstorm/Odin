@@ -318,7 +318,7 @@ class LinuxDesktopBackend:
                 else:
                     parse_key_chord(action["chord"])
                     payload["chord"] = action["chord"]
-            except PrimitiveError as exc:
+            except (PrimitiveError, ValueError) as exc:
                 raise RuntimeFailure(str(exc)) from exc
             self._frame = None  # Consume before sending, including lost/failed replies.
             self._last_window = None

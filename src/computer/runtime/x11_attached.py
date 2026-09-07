@@ -111,6 +111,7 @@ class X11AttachedBackend:
         self._persistent_devices = False
         self._device_state = "not_created"
         self._device_capabilities = {}
+        self._device_identity = None
         self._topology_task = None
         self._topology_epoch = 0
         self._topology_error = None
@@ -142,6 +143,13 @@ class X11AttachedBackend:
 
     def _accept_device_receipt(self, receipt):
         """Only a fenced, released guardian receipt can prove persistent idle."""
+        identity = receipt.get("device_identity")
+        if self._device_identity is not None and identity != self._device_identity:
+            self._release_failed = True
+            self._device_state = "persistent_release_unverified"
+            raise AttachedFailure("input_device_identity_changed")
+        if identity is not None:
+            self._device_identity = copy.deepcopy(identity)
         if receipt.get("persistent_input_devices") is True:
             self.creates_devices = True
             self._persistent_devices = True
@@ -155,7 +163,7 @@ class X11AttachedBackend:
         if pointer in {"independent", "shared"} and keyboard in {
                 "independent_per_window", "shared"}:
             self.capabilities = BackendCapabilities(
-                "x11", "existing_session", pointer,
+                self.capabilities.platform, self.capabilities.environment, pointer,
                 "independent" if keyboard == "independent_per_window" else "shared",
                 "verified", "verified")
             self._device_capabilities = {key: receipt[key] for key in (
@@ -338,6 +346,7 @@ class X11AttachedBackend:
                 await self._worker_ready(child, "capture")
             if self._closed or self._paused or revoked.is_set():
                 raise AttachedFailure("capture_revoked")
+            assert child.stdin is not None and child.stdout is not None
             child.stdin.write(json.dumps(self._config).encode() + b"\n")
             await child.stdin.drain()
             while not revoked.is_set() and not self._closed and not self._paused:
@@ -359,6 +368,7 @@ class X11AttachedBackend:
             if not ready.done():
                 ready.set_exception(AttachedFailure("capture_revoked"))
             if child is not None:
+                assert child.stdin is not None
                 child.stdin.close()
                 await self._reap(child)
 
@@ -444,7 +454,9 @@ class X11AttachedBackend:
                 raise AttachedFailure("capture_worker_failed_or_revoked")
             reply = json.loads(output)
             if type(reply) is dict and reply.get("error") in {
-                    "display_asleep", "topology_changed", "invalid_source_crop"}:
+                    "display_asleep", "display_power_unavailable", "topology_changed",
+                    "stale_capture_topology", "topology_changed_during_capture",
+                    "topology_changed_during_render", "invalid_source_crop"}:
                 raise ComputerError(reply["error"])
             if child.returncode != 0:
                 raise AttachedFailure("capture_worker_failed_or_revoked")
@@ -481,7 +493,8 @@ class X11AttachedBackend:
                 self._device_state = "persistent_release_unverified"
                 device = await self._read_worker("input_capabilities")
                 self._accept_device_receipt(device)
-                if device.get("released") is not True:
+                if (device.get("released") is not True or self._device_identity is None
+                        or self.capabilities.pointer_separation not in {"independent", "shared"}):
                     raise AttachedFailure("owned_release_unverified")
             self.input_supported = self._input_enabled
             self._selected = next(iter(self._sources))
@@ -643,6 +656,8 @@ class X11AttachedBackend:
                 key = "text" if action["type"] == "type" else "chord"
                 payload[key] = action[key]
             request = {**self._config, "selected": monitor, "scope": self._scope, "action": payload}
+            request["input_mode"] = self.capabilities.pointer_separation
+            request["expected_device_identity"] = copy.deepcopy(self._device_identity)
             self._frame = None  # Consume before dispatch; lost replies are not retryable.
             receipt = await self._input_worker(request)
             if receipt.get("released") is not True:

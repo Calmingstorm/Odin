@@ -25,7 +25,9 @@ class ReceiptWorker:
         self.stdin = self.stdout = self
         self.returncode = None
         self.exitcode = returncode
-        self.receipt = receipt or {"released": True, "status": "unknown"}
+        self.receipt = receipt or {"released": True, "status": "unknown",
+                                   "persistent_input_devices": False,
+                                   "owned_devices": "not_created", "device_identity": [11, 12]}
         self.reading, self.closed, self.exit = (asyncio.Event() for _ in range(3))
         self.reads = self.writes = 0
 

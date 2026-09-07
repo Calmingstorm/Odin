@@ -4,6 +4,7 @@ import base64
 import copy
 import json
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -261,6 +262,10 @@ async def observed(monkeypatch):
     async def read(operation, **kwargs):
         if operation == "sources":
             return {"sources": [monitor]}
+        if operation == "input_capabilities":
+            return {"released": True, "pointer": "shared", "keyboard_focus": "shared",
+                    "persistent_input_devices": False, "owned_devices": "not_created",
+                    "device_identity": [11, 12]}
         return {"ok": True, "source_width": 40, "source_height": 20,
                 "width": 20, "height": 10, "resize_scale": [1, 2],
                 "delivered_to_source": AffineTransform(a=2, e=2).public(),
@@ -268,6 +273,7 @@ async def observed(monkeypatch):
                 "image": base64.b64encode(state["image"]).decode()}
 
     monkeypatch.setattr(b, "_read_worker", read)
+    monkeypatch.setattr(b, "_start_topology", AsyncMock())
     await b.start("guardian-stub")
     return b, state, await b.observe()
 

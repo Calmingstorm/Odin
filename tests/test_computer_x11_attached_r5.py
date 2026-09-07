@@ -1,6 +1,7 @@
 """Read-only attached adapter tests. None connect to the operator's display."""
 import asyncio
 import base64
+from unittest.mock import AsyncMock
 
 import pytest
 
@@ -117,10 +118,11 @@ async def test_four_opaque_sources_capture_only_and_selection(monkeypatch):
     b = backend()
     seen = []
 
-    async def read(operation, *, selected=None):
+    async def read(operation, *, selected=None, crop=None):
         seen.append(selected)
         return {"sources": sources()} if operation == "sources" else reply()
     monkeypatch.setattr(b, "_read_worker", read)
+    monkeypatch.setattr(b, "_start_topology", AsyncMock())
     started = await b.start("test")
     assert len(started["sources"]) == 4 and not started["input_supported"]
     assert started["capture_only"] and b.capabilities.owned_input_release == "unknown"
@@ -151,6 +153,7 @@ async def test_pause_resume_requires_generation_and_detach_is_application_preser
     async def read(operation, **kwargs):
         return {"sources": sources()}
     monkeypatch.setattr(b, "_read_worker", read)
+    monkeypatch.setattr(b, "_start_topology", AsyncMock())
     await b.start("test")
     await b.pause()
     with pytest.raises(AttachedFailure, match="not_active"):
