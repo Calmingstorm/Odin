@@ -10,7 +10,7 @@ export XDG_SESSION_TYPE=wayland GDK_BACKEND=wayland LP_NUM_THREADS=2 OMP_NUM_THR
 export MAGICK_THREAD_LIMIT=1 GSK_RENDERER=cairo NO_AT_BRIDGE=0 GTK_A11Y=atspi
 export GSETTINGS_BACKEND=keyfile
 export PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=/work
-gsettings set org.gnome.shell enabled-extensions "['odin-scope@calmingstorm.net']"
+gsettings set org.gnome.shell enabled-extensions "['odin-scope@calmingstorm.net', 'odin-composed-diagnostic@private.invalid']"
 gsettings set org.gnome.shell disable-user-extensions false
 exec > >(tee /evidence/session.log) 2>&1
 date --iso-8601=seconds

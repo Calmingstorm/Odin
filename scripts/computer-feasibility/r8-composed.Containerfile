@@ -7,6 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Snapshot actual production modules, not mocked transport/evidence.
 COPY --from=runtime src /work/src
 COPY --from=runtime assets/wayland-scope /usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net
+COPY scripts/computer-feasibility/r8-composed-diagnostics /usr/share/gnome-shell/extensions/odin-composed-diagnostic@private.invalid
 COPY --from=probe src/computer/runtime/wayland_probe.py /work/src/computer/runtime/wayland_probe.py
 COPY --from=probe src/computer/runtime/assets /work/src/computer/runtime/assets
 COPY --from=runtime src/computer/runtime/assets/wayland_owned_input.c /work/src/computer/runtime/assets/wayland_owned_input.c

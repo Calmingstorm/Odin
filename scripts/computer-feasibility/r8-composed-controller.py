@@ -71,6 +71,13 @@ async def main():
         record('started', result=started)
         await consent
         if not started['input_supported']:
+            try:
+                frame = await backend.observe()
+                (EVIDENCE / 'refused-capture.png').write_bytes(frame.image_bytes)
+                record('refused_capture', width=frame.width, height=frame.height,
+                       focused=frame.focused)
+            except Exception as capture_error:
+                record('refused_capture_error', error=str(capture_error))
             raise RuntimeError('production_input_refused:' + str(started['input_blocker']))
         await asyncio.sleep(3)
 
@@ -87,7 +94,9 @@ async def main():
         async def action(label, kind, **fields):
             frame = await observe(label + '-before')
             if not frame.focused:
-                metadata = backend._sources[backend._selected]
+                captured = await backend._portal.capture(backend._sources[backend._selected]['node_id'])
+                metadata = captured['source_metadata']
+                record('source_diagnostic', metadata=metadata)
                 try:
                     scope = await backend._scope_provider.snapshot(metadata, 'inkscape')
                     record('scope_diagnostic', scope=scope)
