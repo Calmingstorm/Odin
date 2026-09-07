@@ -85,3 +85,24 @@ class InputAdmissionError(ComputerError):
         target = (f"{identity.name} {identity.version} ({identity.backend})"
                   if identity else "Unidentified compositor")
         super().__init__(f"{admission.code}: {target}. {admission.reason} {admission.remedy}")
+
+
+def public_admission(value) -> dict | None:
+    """Revalidate public status fields at HTTP, dropping native extra metadata."""
+    if not isinstance(value, dict):
+        return None
+    try:
+        compositor = value.get("compositor")
+        if compositor is not None:
+            if not isinstance(compositor, dict):
+                return None
+            compositor = CompositorIdentity(**{
+                key: compositor[key] for key in ("name", "version", "backend", "build_id")})
+        checks = value.get("checks", [])
+        if not isinstance(checks, list) or len(checks) > 16:
+            return None
+        return InputAdmission(
+            **{key: value[key] for key in ("state", "code", "reason", "remedy", "probe_scope")},
+            compositor=compositor, checks=tuple(checks)).public()
+    except (KeyError, TypeError, ValueError):
+        return None

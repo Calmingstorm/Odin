@@ -157,6 +157,23 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             }
         if isinstance(value.get("error"), str):
             result["error"] = value["error"][:120]
+        from ...computer.admission import public_admission
+        from ...computer.app_profiles import application_profile
+
+        admission = public_admission(value.get("input_admission"))
+        if admission is not None:
+            result["input_admission"] = admission
+        profiles = value.get("application_profiles")
+        if isinstance(profiles, list) and isinstance(backend, dict):
+            offered = []
+            for profile in profiles[:16]:
+                if not isinstance(profile, dict) or type(profile.get("id")) is not str:
+                    continue
+                canonical = application_profile(profile["id"], platform=backend.get("platform"),
+                                                environment=backend.get("environment"))
+                if canonical is not None and canonical not in offered:
+                    offered.append(canonical)
+            result["application_profiles"] = offered
         recovery = value.get("recovery")
         if isinstance(recovery, dict):
             statuses = {"operator_reconciliation_required", "operator_cleanup_required", "unknown",
