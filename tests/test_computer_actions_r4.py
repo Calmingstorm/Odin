@@ -14,6 +14,11 @@ from src.tools.defs.computer import computer_definitions
 from tests.test_computer_contract_r1 import Stub
 
 
+def persisted_receipt(result):
+    """R16: pixels are first-delivery transport, never replay authority."""
+    return {key: value for key, value in result.items() if key != "next_observation"}
+
+
 class Backend(Stub):
     def __init__(self):
         super().__init__()
@@ -38,34 +43,59 @@ class Backend(Stub):
 
     def result(self, payload):
         point = self.source.input_point(AffineTransform(), payload["x"], payload["y"], 2, 2)
-        return {"status": "executed", "injected": True, "released": True,
-                "postcondition": {"status": "satisfied", "type": "pointer_at",
-                                  "method": "pointer_query_after_release",
-                                  "target_window_matches": True,
-                                  "actual": {"x": int(point[0]), "y": int(point[1])},
-                                  **{key: payload[key] for key in
-                                     ("source_id", "source_revision", "consent_generation")}}}
+        return {
+            "status": "executed",
+            "injected": True,
+            "released": True,
+            "postcondition": {
+                "status": "satisfied",
+                "type": "pointer_at",
+                "method": "pointer_query_after_release",
+                "target_window_matches": True,
+                "actual": {"x": int(point[0]), "y": int(point[1])},
+                **{
+                    key: payload[key]
+                    for key in ("source_id", "source_revision", "consent_generation")
+                },
+            },
+        }
 
 
 @asynccontextmanager
 async def setup(tmp_path, *, deliver=True, authorize=None, monotonic=None):
     backend = Backend()
     store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
-    controller = ComputerController(store, lambda _: backend, authorize or (lambda _: True),
-                                    enabled=True, **({"monotonic": monotonic} if monotonic else {}))
+    controller = ComputerController(
+        store,
+        lambda _: backend,
+        authorize or (lambda _: True),
+        enabled=True,
+        **({"monotonic": monotonic} if monotonic else {}),
+    )
     ctx = RequestContext("owner", "channel", "turn", "host")
     try:
         grant = await controller.session(ctx, {"operation": "start", "app": "fixture"})
         observed = await controller.observe(
-            ctx, {"session_id": grant["session_id"], "generation": 1})
+            ctx, {"session_id": grant["session_id"], "generation": 1}
+        )
         obs = controller._live[grant["session_id"]].observations[observed["observation_id"]]
         if deliver:
             await controller.validate_observation_delivery(
-                ctx, obs.frame_metadata, obs.image_sha256)
-        inp = {"session_id": grant["session_id"], "generation": 1, "consent_generation": 1,
-               "source_id": "opaque", "source_revision": 1, "action_id": "action-1",
-               "observation_id": obs.observation_id, "operation": "click", "x": 1, "y": 0,
-               "expect": {"type": "pointer_at", "x": 1, "y": 0}}
+                ctx, obs.frame_metadata, obs.image_sha256
+            )
+        inp = {
+            "session_id": grant["session_id"],
+            "generation": 1,
+            "consent_generation": 1,
+            "source_id": "opaque",
+            "source_revision": 1,
+            "action_id": "action-1",
+            "observation_id": obs.observation_id,
+            "operation": "click",
+            "x": 1,
+            "y": 0,
+            "expect": {"type": "pointer_at", "x": 1, "y": 0},
+        }
         yield controller, backend, ctx, inp
     finally:
         await controller.close()
@@ -74,11 +104,13 @@ async def setup(tmp_path, *, deliver=True, authorize=None, monotonic=None):
 
 async def test_pending_durable_before_input_and_private_postcondition_evidence(tmp_path):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
+
         async def check_pending(payload):
             row = controller.store.db.execute("SELECT status FROM receipts").fetchone()
             assert row[0] == "pending"
             assert controller.store.get_session(inp["session_id"]).actions == 1
             return backend.result(payload)
+
         backend.hook = check_pending
         result = await controller.act(ctx, inp)
         assert result["status"] == "verified"
@@ -86,12 +118,14 @@ async def test_pending_durable_before_input_and_private_postcondition_evidence(t
         assert result["verification"]["actual"] == {"x": 1, "y": 0}
         assert controller.store.read_evidence(ctx, result["verification"]["evidence_id"])[0]
         assert controller._delivered_observations.get(inp["session_id"]) is None
-        assert result == await controller.act(ctx, inp)
+        assert result["next_observation"]["image_bytes"]
+        assert persisted_receipt(result) == await controller.act(ctx, inp)
         assert len(backend.calls) == 1
         assert controller.store.get_session(inp["session_id"]).actions == 1
         with pytest.raises(ComputerError, match="action_id_conflict"):
-            await controller.act(ctx, {
-                **inp, "x": 0, "expect": {"type": "pointer_at", "x": 0, "y": 0}})
+            await controller.act(
+                ctx, {**inp, "x": 0, "expect": {"type": "pointer_at", "x": 0, "y": 0}}
+            )
 
 
 async def test_real_adapter_contract_with_fake_wire_no_gui(tmp_path):
@@ -107,18 +141,36 @@ async def test_real_adapter_contract_with_fake_wire_no_gui(tmp_path):
 
     async def rpc(operation, **kwargs):
         if operation == "observe":
-            return {"observation": {
-                "image": pack_blob(bytes(12)), "raster_mode": "RGB", "width": 2, "height": 2,
-                "window": {"id": 17}, "observation_id": "worker-observation",
-                "source_revision": 1, "focused": True, "modal_id": None}}
+            return {
+                "observation": {
+                    "image": pack_blob(bytes(12)),
+                    "raster_mode": "RGB",
+                    "width": 2,
+                    "height": 2,
+                    "window": {"id": 17},
+                    "observation_id": "worker-observation",
+                    "source_revision": 1,
+                    "focused": True,
+                    "modal_id": None,
+                }
+            }
         assert operation == "act"
         payload = kwargs["action"]
         injected.append(payload)
-        return {"receipt": {"status": "executed", "injected": True, "released": True,
-                            "postcondition": {"status": "satisfied", "type": "pointer_at",
-                                              "method": "pointer_query_after_release",
-                                              "target_window_matches": True,
-                                              "actual": {"x": 1, "y": 0}}}}
+        return {
+            "receipt": {
+                "status": "executed",
+                "injected": True,
+                "released": True,
+                "postcondition": {
+                    "status": "satisfied",
+                    "type": "pointer_at",
+                    "method": "pointer_query_after_release",
+                    "target_window_matches": True,
+                    "actual": {"x": 1, "y": 0},
+                },
+            }
+        }
 
     backend._rpc = rpc
     store = ComputerStore(tmp_path / "db", tmp_path / "evidence")
@@ -126,18 +178,30 @@ async def test_real_adapter_contract_with_fake_wire_no_gui(tmp_path):
     ctx = RequestContext("owner", "channel", "turn", "host")
     try:
         grant = await controller.session(ctx, {"operation": "start", "app": "xed"})
-        observed = await controller.observe(ctx, {"session_id": grant["session_id"],
-                                                 "generation": 1})
+        observed = await controller.observe(
+            ctx, {"session_id": grant["session_id"], "generation": 1}
+        )
         obs = controller._live[grant["session_id"]].observations[observed["observation_id"]]
         await controller.validate_observation_delivery(ctx, obs.frame_metadata, obs.image_sha256)
-        inp = {"session_id": grant["session_id"], "generation": 1, "consent_generation": 1,
-               "source_id": obs.source.source_id, "source_revision": 1, "action_id": "click",
-               "observation_id": obs.observation_id, "operation": "click", "x": 1, "y": 0,
-               "expect": {"type": "pointer_at", "x": 1, "y": 0}}
+        inp = {
+            "session_id": grant["session_id"],
+            "generation": 1,
+            "consent_generation": 1,
+            "source_id": obs.source.source_id,
+            "source_revision": 1,
+            "action_id": "click",
+            "observation_id": obs.observation_id,
+            "operation": "click",
+            "x": 1,
+            "y": 0,
+            "expect": {"type": "pointer_at", "x": 1, "y": 0},
+        }
         result = await controller.act(ctx, inp)
         assert result["status"] == "verified"
-        assert result == await controller.act(ctx, inp)
         assert len(injected) == 1 and injected[0]["x"] == 1
+        assert result["next_observation"]["image_bytes"]
+        assert persisted_receipt(result) == await controller.act(ctx, inp)
+        assert len(injected) == 1
         assert "window" not in str(result)
     finally:
         await controller.close()
@@ -174,19 +238,30 @@ async def test_native_adapter_controller_pointer_binding_chain(tmp_path, wrong_w
     ctx = RequestContext("owner", "channel", "turn", "host")
     try:
         grant = await controller.session(ctx, {"operation": "start", "app": "xed"})
-        observed = await controller.observe(ctx, {"session_id": grant["session_id"],
-                                                 "generation": 1})
+        observed = await controller.observe(
+            ctx, {"session_id": grant["session_id"], "generation": 1}
+        )
         obs = controller._live[grant["session_id"]].observations[observed["observation_id"]]
         await controller.validate_observation_delivery(ctx, obs.frame_metadata, obs.image_sha256)
-        inp = {"session_id": grant["session_id"], "generation": 1, "consent_generation": 1,
-               "source_id": obs.source.source_id, "source_revision": 1, "action_id": "click",
-               "observation_id": obs.observation_id, "operation": "click", "x": 25, "y": 26,
-               "expect": {"type": "pointer_at", "x": 25, "y": 26}}
+        inp = {
+            "session_id": grant["session_id"],
+            "generation": 1,
+            "consent_generation": 1,
+            "source_id": obs.source.source_id,
+            "source_revision": 1,
+            "action_id": "click",
+            "observation_id": obs.observation_id,
+            "operation": "click",
+            "x": 25,
+            "y": 26,
+            "expect": {"type": "pointer_at", "x": 25, "y": 26},
+        }
         result = await controller.act(ctx, inp)
         assert result["status"] == ("not_satisfied" if wrong_window else "verified")
         assert result["verification"]["target_binding_matches"] is (not wrong_window)
         assert native.commands.count("mousedown") == 1
-        assert result == await controller.act(ctx, inp)
+        assert result["next_observation"]["image_bytes"]
+        assert persisted_receipt(result) == await controller.act(ctx, inp)
         assert native.commands.count("mousedown") == 1
     finally:
         await controller.close()
@@ -195,25 +270,48 @@ async def test_native_adapter_controller_pointer_binding_chain(tmp_path, wrong_w
 
 async def test_schema_supported_subset_is_declared(tmp_path):
     import jsonschema
+
     async with setup(tmp_path) as (_, _, _, inp):
-        schema = next(tool["input_schema"] for tool in computer_definitions()
-                      if tool["name"] == "computer_act")
+        schema = next(
+            tool["input_schema"]
+            for tool in computer_definitions()
+            if tool["name"] == "computer_act"
+        )
         jsonschema.validate(inp, schema)
 
 
-@pytest.mark.parametrize("change", [
-    {"x": True}, {"x": -1}, {"x": 2}, {"y": 0.1}, {"generation": True},
-    {"consent_generation": 2}, {"source_revision": 2}, {"source_id": "other"},
-    {"action_id": "a" * 97}, {"action_id": "bad\x00id"}, {"action_id": "\ud800"},
-    {"button": "right"}, {"text": "not permitted"}, {"target_id": "terminal"},
-    {"operation": "key"}, {"operation": "semantic"}, {"operation": "type_text"},
-    {"operation": "double_click"}, {"operation": "scroll"}, {"operation": "polyline"},
-    {"operation": "move"}, {"expect": {"type": "text_equals", "text": "forged"}},
-    {"expect": {"type": "pointer_at", "x": True, "y": 0}},
-    {"expect": {"type": "pointer_at", "x": 0, "y": 0}},
-    {"expect": {"type": "pointer_at", "x": 1, "y": 0, "status": "verified"}},
-    {"expect": []}, {"postcondition": {"status": "verified"}},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"x": True},
+        {"x": -1},
+        {"x": 2},
+        {"y": 0.1},
+        {"generation": True},
+        {"consent_generation": 2},
+        {"source_revision": 2},
+        {"source_id": "other"},
+        {"action_id": "a" * 97},
+        {"action_id": "bad\x00id"},
+        {"action_id": "\ud800"},
+        {"button": "right"},
+        {"text": "not permitted"},
+        {"target_id": "terminal"},
+        {"operation": "key"},
+        {"operation": "semantic"},
+        {"operation": "type_text"},
+        {"operation": "double_click"},
+        {"operation": "scroll"},
+        {"operation": "polyline"},
+        {"operation": "move"},
+        {"expect": {"type": "text_equals", "text": "forged"}},
+        {"expect": {"type": "pointer_at", "x": True, "y": 0}},
+        {"expect": {"type": "pointer_at", "x": 0, "y": 0}},
+        {"expect": {"type": "pointer_at", "x": 1, "y": 0, "status": "verified"}},
+        {"expect": []},
+        {"postcondition": {"status": "verified"}},
+    ],
+)
 async def test_invalid_or_unsupported_payload_never_injects(tmp_path, change):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
         with pytest.raises(ComputerError):
@@ -254,8 +352,11 @@ async def test_pre_injection_grounding_changes_fail_closed(tmp_path, problem):
         elif problem == "mapping":
             backend.source = SourceGeometry("opaque", 1, 1, 2, 2)
         else:
-            fields = {"source": {"source_id": "different"}, "revision": {"source_revision": 2},
-                      "region": {"input_region_id": "new-device"}}
+            fields = {
+                "source": {"source_id": "different"},
+                "revision": {"source_revision": 2},
+                "region": {"input_region_id": "new-device"},
+            }
             backend.source = replace(backend.source, **fields[problem])
         with pytest.raises(ComputerError):
             await controller.act(ctx, inp)
@@ -273,24 +374,28 @@ async def test_expired_grounding_denies_input(tmp_path, where):
         elif where == "capture":
             backend.capture_hook = lambda _: now.__setitem__(0, now[0] + 5.01)
         else:
+
             def authorize(_):
                 if backend.capture_count >= 3:
                     now[0] += 5.01
                 return True
+
             controller.authorize = authorize
         with pytest.raises(ComputerError, match="stale_observation"):
             await controller.act(ctx, inp)
         assert not backend.calls
 
 
-@pytest.mark.parametrize("gate", [
-    "existing", "count", "task_deadline", "wall_deadline", "disabled"])
+@pytest.mark.parametrize(
+    "gate", ["existing", "count", "task_deadline", "wall_deadline", "disabled"]
+)
 async def test_environment_counts_and_deadlines(tmp_path, gate):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
         live = controller._live[inp["session_id"]]
         if gate == "existing":
-            live.capabilities = BackendCapabilities("x11", "existing_session", "shared", "shared",
-                                                    "verified", "verified")
+            live.capabilities = BackendCapabilities(
+                "x11", "existing_session", "shared", "shared", "verified", "verified"
+            )
         elif gate == "count":
             controller.store.db.execute("UPDATE sessions SET actions=200")
         elif gate == "task_deadline":
@@ -304,15 +409,26 @@ async def test_environment_counts_and_deadlines(tmp_path, gate):
         assert not backend.calls
 
 
-@pytest.mark.parametrize("case,status", [
-    ("ok_only", "unknown"), ("verdict_only", "executed"), ("wrong_actual", "not_satisfied"),
-    ("source", "unknown"), ("revision_bool", "unknown"), ("method", "unknown"),
-    ("actual_bool", "unknown"), ("unreleased", "unknown"), ("refused", "unavailable"),
-    ("wrong_pointer_window", "not_satisfied"), ("missing_pointer_window", "unknown"),
-    ("nonboolean_pointer_window", "unknown"),
-])
+@pytest.mark.parametrize(
+    "case,status",
+    [
+        ("ok_only", "unknown"),
+        ("verdict_only", "executed"),
+        ("wrong_actual", "not_satisfied"),
+        ("source", "interrupted"),
+        ("revision_bool", "interrupted"),
+        ("method", "interrupted"),
+        ("actual_bool", "interrupted"),
+        ("unreleased", "unknown"),
+        ("refused", "unavailable"),
+        ("wrong_pointer_window", "not_satisfied"),
+        ("missing_pointer_window", "interrupted"),
+        ("nonboolean_pointer_window", "interrupted"),
+    ],
+)
 async def test_only_measured_matching_postconditions_verify(tmp_path, case, status):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
+
         async def receipt(payload):
             result = backend.result(payload)
             if case == "ok_only":
@@ -343,28 +459,42 @@ async def test_only_measured_matching_postconditions_verify(tmp_path, case, stat
             elif case == "refused":
                 return {"status": "unavailable", "injected": False, "released": True}
             return result
+
         backend.hook = receipt
         result = await controller.act(ctx, inp)
         assert result["status"] == status
-        assert await controller.act(ctx, inp) == result
+        assert await controller.act(ctx, inp) == persisted_receipt(result)
         assert len(backend.calls) == 1
         if status == "unknown":
             assert backend.stopped
+        elif status == "interrupted":
+            assert result["reason"] == "effect_unknown_reconcile_no_replay"
+            assert result["execution"] == {"sent": True, "injected": True, "released": True}
+            assert result["diagnostics"]["replay_allowed"] is False
+            assert result["verification"]["status"] == "unavailable"
 
 
-async def test_changed_post_action_source_makes_success_unknown(tmp_path):
+async def test_changed_post_action_source_preserves_release_requires_new_observation(tmp_path):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
+
         async def action(payload):
             result = backend.result(payload)
             backend.source = replace(backend.source, source_revision=2)
             return result
+
         backend.hook = action
         result = await controller.act(ctx, inp)
-        assert result["status"] == "unknown" and backend.stopped
+        assert result["status"] == "not_satisfied" and not backend.stopped
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        assert result["verification"]["reason"] == "target_changed_observe_again"
+        assert controller._delivered_observations.get(inp["session_id"]) is None
+        assert await controller.act(ctx, inp) == persisted_receipt(result)
+        assert len(backend.calls) == 1
 
 
 async def test_changed_visual_target_requires_new_delivery(tmp_path):
     from tests.test_computer_runtime_primitives import png
+
     async with setup(tmp_path) as (controller, backend, ctx, inp):
         original = backend.observe
 
@@ -378,7 +508,7 @@ async def test_changed_visual_target_requires_new_delivery(tmp_path):
         assert not backend.calls
 
 
-async def test_concurrent_stop_during_injection_unknown_and_not_replayed(tmp_path):
+async def test_concurrent_stop_preserves_acknowledged_input_and_never_replays(tmp_path):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
         entered, release = asyncio.Event(), asyncio.Event()
 
@@ -393,7 +523,11 @@ async def test_concurrent_stop_during_injection_unknown_and_not_replayed(tmp_pat
         await controller.session(ctx, {"operation": "stop", "session_id": inp["session_id"]})
         release.set()
         result = await task
-        assert result["status"] == "unknown"
+        assert result["status"] == "verified"
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        assert result["verification"]["delivery"] == "unavailable"
+        assert result["verification"]["next_action"] == "observe_and_reconcile"
+        assert "next_observation" not in result and backend.stopped
         assert (await controller.act(ctx, inp)) == result
         assert len(backend.calls) == 1
 
@@ -414,8 +548,11 @@ async def test_payload_snapshot_cannot_change_across_capture_await(tmp_path):
 
 
 @pytest.mark.parametrize("failure", ["exception", "cancel", "timeout", "revoke", "auth"])
-async def test_pending_failure_unknown_never_replayed(tmp_path, monkeypatch, failure):
+async def test_pending_failure_preserves_known_release_and_never_replays(
+    tmp_path, monkeypatch, failure
+):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
+
         async def action(payload):
             if failure == "exception":
                 raise RuntimeError("sensitive backend output must not persist")
@@ -428,25 +565,35 @@ async def test_pending_failure_unknown_never_replayed(tmp_path, monkeypatch, fai
             if failure == "auth":
                 controller.authorize = lambda _: False
             return backend.result(payload)
+
         if failure == "timeout":
             monkeypatch.setattr("src.computer.controller.MAX_ACTION_RPC_SECONDS", 0.01)
         backend.hook = action
+        expected = "verified" if failure in {"revoke", "auth"} else "unknown"
         if failure == "cancel":
             with pytest.raises(asyncio.CancelledError):
                 await controller.act(ctx, inp)
         else:
-            assert (await controller.act(ctx, inp))["status"] == "unknown"
+            assert (await controller.act(ctx, inp))["status"] == expected
         controller.authorize = lambda _: True
         receipt = await controller.act(ctx, inp)
-        assert receipt["status"] == "unknown"
+        assert receipt["status"] == expected
         assert "sensitive" not in str(receipt)
-        assert len(backend.calls) == 1 and backend.stopped
+        assert len(backend.calls) == 1
+        if expected == "unknown":
+            assert backend.stopped
+        else:
+            assert receipt["execution"] == {"sent": True, "injected": True, "released": True}
+            assert receipt["verification"]["delivery"] == "unavailable"
+            assert receipt["diagnostics"]["replay_allowed"] is False
+            assert "next_observation" not in receipt
 
 
 async def test_pending_crash_recovery_and_concurrent_duplicate(tmp_path):
     async with setup(tmp_path) as (controller, backend, ctx, inp):
         results = await asyncio.gather(controller.act(ctx, inp), controller.act(ctx, dict(inp)))
-        assert results[0] == results[1] and len(backend.calls) == 1
+        assert results[0]["next_observation"]["image_bytes"]
+        assert persisted_receipt(results[0]) == results[1] and len(backend.calls) == 1
         pending = {**inp, "action_id": "lost-action"}
         grant = controller.store.get_session(inp["session_id"])
         controller.store.begin_action(grant, pending["action_id"], canonical_hash(pending), 200)

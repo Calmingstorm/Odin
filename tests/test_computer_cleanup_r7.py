@@ -1,4 +1,5 @@
 """Cancellation/settlement regressions. No native display, global kill or app changes."""
+
 import asyncio
 import json
 
@@ -15,13 +16,18 @@ from tests.test_computer_x11_guardian_r5 import rig
 
 
 def backend():
-    value = attached.X11AttachedBackend(enabled=True, display_name=":197",
-                                       monitor_names=["screen"], app_profile="xed",
-                                       input_enabled=True)
+    value = attached.X11AttachedBackend(
+        enabled=True,
+        display_name=":197",
+        monitor_names=["screen"],
+        app_profile="xed",
+        input_enabled=True,
+    )
     # These tests stub all native workers, including the retained topology
     # watcher. Supply its independently measured final census explicitly.
-    value._accept_shutdown_identity(json.dumps({
-        "event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}))
+    value._accept_shutdown_identity(
+        json.dumps({"event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]})
+    )
     return value
 
 
@@ -30,9 +36,13 @@ class ReceiptWorker:
         self.stdin = self.stdout = self
         self.returncode = None
         self.exitcode = returncode
-        self.receipt = receipt or {"released": True, "status": "unknown",
-                                   "persistent_input_devices": False,
-                                   "owned_devices": "not_created", "device_identity": [11, 12]}
+        self.receipt = receipt or {
+            "released": True,
+            "status": "unknown",
+            "persistent_input_devices": False,
+            "owned_devices": "not_created",
+            "device_identity": [11, 12],
+        }
         self.reading, self.closed, self.exit = (asyncio.Event() for _ in range(3))
         self.reads = self.writes = 0
 
@@ -66,9 +76,12 @@ class ReceiptWorker:
 async def test_stop_does_not_wait_for_action_or_capture_lock(method):
     b = backend()
     async with b._lock:
-        result = await asyncio.wait_for(getattr(b, method)(), .2)
-    assert result["released"] and result["applications_preserved"] if method == "detach" else (
-        result["released"] and result["paused"])
+        result = await asyncio.wait_for(getattr(b, method)(), 0.2)
+    assert (
+        result["released"] and result["applications_preserved"]
+        if method == "detach"
+        else (result["released"] and result["paused"])
+    )
 
 
 @pytest.mark.parametrize("cancel_at", ["spawn", "receipt", "repeated"])
@@ -120,15 +133,20 @@ async def test_cancel_during_worker_lifetime_is_owned(monkeypatch, cancel_at, ki
     assert not (asyncio.all_tasks() - before), "detached release/reaper task survived stop"
 
 
-@pytest.mark.parametrize("exitcode,receipt", [
-    (7, {"released": True, "status": "unknown"}),
-    (0, {"released": False, "status": "unknown"}),
-    (0, ["not a receipt"]),
-])
+@pytest.mark.parametrize(
+    "exitcode,receipt",
+    [
+        (7, {"released": True, "status": "unknown"}),
+        (0, {"released": False, "status": "unknown"}),
+        (0, ["not a receipt"]),
+    ],
+)
 async def test_no_false_success_after_cancel(monkeypatch, exitcode, receipt):
     b, child = backend(), ReceiptWorker(returncode=exitcode, receipt=receipt)
+
     async def spawn(*args, **kwargs):
         return child
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     caller = asyncio.create_task(b._input_worker({}))
     await child.reading.wait()
@@ -145,26 +163,30 @@ async def test_no_false_success_after_cancel(monkeypatch, exitcode, receipt):
 
 async def test_capture_timeout_single_reaper_and_no_lock_dependency(monkeypatch):
     b, child = backend(), StubProcess()
+
     async def spawn(*args, **kwargs):
         return child
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(attached, "CAPTURE_TIMEOUT", .015)
+    monkeypatch.setattr(attached, "CAPTURE_TIMEOUT", 0.015)
     async with b._lock:
         with pytest.raises(attached.AttachedFailure):
             await b._read_worker("capture", selected={})
-        result = await asyncio.wait_for(b.detach(), .2)
+        result = await asyncio.wait_for(b.detach(), 0.2)
     assert result["stopped"] and child.terminations == 1 and not b._children
 
 
 async def test_unresponsive_guardian_quarantines_without_killing_release_owner(monkeypatch):
     b, child = backend(), ReceiptWorker()
+
     async def spawn(*args, **kwargs):
         return child
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-    monkeypatch.setattr(attached, "CLEANUP_TIMEOUT", .025)
+    monkeypatch.setattr(attached, "CLEANUP_TIMEOUT", 0.025)
     task = asyncio.create_task(b._input_worker({}))
     await child.reading.wait()
-    result = await asyncio.wait_for(b.detach(), .2)
+    result = await asyncio.wait_for(b.detach(), 0.2)
     assert not result["stopped"] and b._guardians
     assert child.closed.is_set()
     child.exit.set()
@@ -176,8 +198,10 @@ async def test_unresponsive_guardian_quarantines_without_killing_release_owner(m
 
 async def test_cancelled_pause_cannot_resume_with_live_guardian(monkeypatch):
     b, child = backend(), ReceiptWorker()
+
     async def spawn(*args, **kwargs):
         return child
+
     monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
     input_task = asyncio.create_task(b._input_worker({}))
     await child.reading.wait()
@@ -202,16 +226,19 @@ async def test_controller_close_cancellation_keeps_receipt_owner(tmp_path, cance
     entered, release = asyncio.Event(), asyncio.Event()
     calls = []
     original = native.detach
+
     async def detach():
         calls.append(1)
         entered.set()
         await release.wait()
         return await original()
+
     try:
         grant = await c.session(ctx, {"operation": "start"})
         native.detach = detach
-        close = asyncio.create_task(c.session(ctx, {
-            "operation": "close", "session_id": grant["session_id"]}))
+        close = asyncio.create_task(
+            c.session(ctx, {"operation": "close", "session_id": grant["session_id"]})
+        )
         await entered.wait()
         for _ in range(cancel_count):
             close.cancel()
@@ -233,10 +260,12 @@ async def test_controller_close_cancellation_keeps_receipt_owner(tmp_path, cance
 @pytest.mark.parametrize("failure", ["topology", "capture", "sleep"])
 def test_guardian_scope_loss_releases_ledger_without_scope_retry(failure):
     calls = []
+
     def validate(step):
         calls.append(step)
         if len(calls) > 1:
             raise guardian.GuardianFailure(failure + "_unavailable")
+
     native, helper, guard = rig(validate=validate)
     receipt = guard.run([("button", 1, True), ("key", 38, True)])
     assert receipt["status"] == "unknown" and receipt["released"]
@@ -248,51 +277,73 @@ def test_empty_ledger_release_needs_no_capture_topology_or_server():
     class Unavailable:
         def __getattr__(self, name):
             pytest.fail("empty ledger queried " + name)
+
     assert guardian.OwnedLedger(Unavailable()).release()
 
 
-async def test_post_input_capture_loss_unknown_action_but_clean_stop_no_replay(
-        tmp_path, monkeypatch):
+async def test_post_input_capture_loss_preserves_release_and_clean_explicit_stop_no_replay(
+    tmp_path, monkeypatch
+):
     async with fixture(tmp_path, monkeypatch) as (c, ctx, action, _state, calls):
         b = c._live[action["session_id"]].backend
         read = b._read_worker
+
         async def failed_capture(operation, **kwargs):
             if calls:
                 raise attached.AttachedFailure("capture_unavailable")
             return await read(operation, **kwargs)
+
         monkeypatch.setattr(b, "_read_worker", failed_capture)
         monkeypatch.setattr(b, "detach", attached.X11AttachedBackend.detach.__get__(b))
         action.update(operation="type", text="never replay me")
-        b._accept_shutdown_identity(json.dumps({
-            "event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}))
+        b._accept_shutdown_identity(
+            json.dumps(
+                {"event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}
+            )
+        )
         result = await c.act(ctx, action)
-        assert result["status"] == "unknown" and len(calls) == 1
+        assert result["status"] == "executed" and len(calls) == 1
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        assert result["verification"]["status"] == "unavailable"
+        assert result["verification"]["next_action"] == "observe_and_reconcile"
+        assert result["diagnostics"]["replay_allowed"] is False
+        assert "next_observation" not in result
         assert await c.act(ctx, action) == result and len(calls) == 1
+        await c.session(ctx, {"operation": "stop", "session_id": action["session_id"]})
         status = await c.session(ctx, {"operation": "status", "session_id": action["session_id"]})
         assert status["state"] == "cancelled" and status["cleanup"]["complete"]
 
 
 async def test_controller_pending_timeout_reaps_input_before_cleanup_receipt(tmp_path, monkeypatch):
     from src.computer import controller as control
+
     async with fixture(tmp_path, monkeypatch) as (c, ctx, action, _state, calls):
         b = c._live[action["session_id"]].backend
         child = ReceiptWorker()
+
         async def spawn(*args, **kwargs):
             return child
+
         # Exercise real adapter worker ownership, not a direct-result stub.
         monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
-        b._accept_shutdown_identity(json.dumps({
-            "event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}))
-        monkeypatch.setattr(b, "_input_worker",
-                            attached.X11AttachedBackend._input_worker.__get__(b))
+        b._accept_shutdown_identity(
+            json.dumps(
+                {"event": "shared_identity_at_close", "ok": True, "device_identity": [11, 12]}
+            )
+        )
+        monkeypatch.setattr(
+            b, "_input_worker", attached.X11AttachedBackend._input_worker.__get__(b)
+        )
         # Stub child has no real PID. Production identity recording is covered
         # with actual processes by the private Xvfb test, never a forged /proc.
         monkeypatch.setattr(b, "_record_spawn", lambda *args, **kwargs: None)
         monkeypatch.setattr(b, "detach", attached.X11AttachedBackend.detach.__get__(b))
-        monkeypatch.setattr(control, "MAX_ACTION_RPC_SECONDS", .02)
+        monkeypatch.setattr(control, "MAX_ACTION_RPC_SECONDS", 0.02)
+
         async def exit_on_revoke():
             await child.closed.wait()
             child.exit.set()
+
         exiting = asyncio.create_task(exit_on_revoke())
         action.update(operation="type", text="uncertain input")
         result = await c.act(ctx, action)
