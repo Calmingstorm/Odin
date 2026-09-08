@@ -1,5 +1,6 @@
 """Durable receipts through the normal turn chain; synthetic native IPC only."""
 
+import asyncio
 import json
 
 import pytest
@@ -207,3 +208,56 @@ async def test_native_scope_security_refusal_never_dispatches(normal, monkeypatc
     result = await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
     assert "Image loaded" not in result["content"]
     assert not normal.transports[0].commands
+
+
+@pytest.mark.parametrize("batch", [False, True])
+async def test_concurrent_close_cannot_strip_admitted_receipt_safety(normal, monkeypatch, batch):
+    grant = await start(normal)
+    await observe(normal, grant)
+    inp = action(normal, grant)
+    if batch:
+        for key in ("x", "y", "expect"):
+            inp.pop(key)
+        inp.update(operation="sequence", steps=[
+            dict(action_id="step-0", operation="click", x=1, y=1,
+                 expect={"type": "visual_change"}),
+            dict(action_id="step-1", operation="click", x=3, y=3,
+                 expect={"type": "visual_change"}),
+        ])
+    controller = normal.service.controller
+    authorize = controller._auth
+    entered, settled = asyncio.Event(), asyncio.Event()
+
+    async def gate(context, *, emergency=False):
+        await authorize(context, emergency=emergency)
+        # Real dispatch has settled; hold the subsequent authorization await
+        # while ordinary Close finishes and drops the live backend owner.
+        if not emergency and normal.transports[0].commands and not entered.is_set():
+            entered.set()
+            await settled.wait()
+
+    monkeypatch.setattr(controller, "_auth", gate)
+    pending = asyncio.create_task(normal.runner._run_one_tool(
+        normal.state, call("computer_act", **inp)))
+    try:
+        await asyncio.wait_for(entered.wait(), 2)
+        await normal.runner._run_one_tool(normal.state, call(
+            "computer_session", operation="close", session_id=grant["session_id"]))
+        assert grant["session_id"] not in controller._live
+        settled.set()
+        result = await pending
+    finally:
+        settled.set()
+        if not pending.done():
+            pending.cancel()
+        await asyncio.gather(pending, return_exceptions=True)
+    receipt = durable(normal, grant, "first")
+    safety(receipt, "cooperative_native_ack")
+    if batch:
+        safety(durable(normal, grant, "step-0"), "cooperative_native_ack")
+        safety(durable(normal, grant, "step-1"), "not_required_no_input_sent")
+    assert "Image loaded" not in result["content"]
+    replay = await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
+    text = replay["content"]
+    safety(json.loads(text[text.index("{"):]), "cooperative_native_ack")
+    assert len(normal.transports[0].commands) == 1
