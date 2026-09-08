@@ -41,6 +41,17 @@ _SCOPE_ERRORS = frozenset({
 })
 
 
+def _native_diagnostics(row):
+    """Malformed native enums must not replace the original dispatch failure."""
+    if type(row) is not dict:
+        return None
+    raw = row.get("diagnostics")
+    if (type(raw) is not dict
+            or not all(type(raw.get(k)) is str for k in ("phase", "release", "reason"))):
+        return None
+    return _action_diagnostics(row)
+
+
 def native_failure(row):
     """Sanitize native evidence without promoting execution or cleanup state."""
     if type(row) is not dict:
@@ -60,11 +71,7 @@ def native_failure(row):
     for key in ("input_was_sent", "release_sent", "release_acknowledged"):
         if type(row.get(key)) is bool:
             result[key] = row[key]
-    raw_diagnostics = row.get("diagnostics")
-    diagnostics = None
-    if (type(raw_diagnostics) is dict
-            and all(type(raw_diagnostics.get(k)) is str for k in ("phase", "release", "reason"))):
-        diagnostics = _action_diagnostics(row)
+    diagnostics = _native_diagnostics(row)
     if diagnostics is not None:
         result["diagnostics"] = diagnostics
     return result
@@ -189,7 +196,7 @@ class HyprlandGuardian(WaylandGuardian):
             log.warning(
                 "Hyprland native action failed: diagnostics=%s input_was_sent=%s "
                 "release_sent=%s release_acknowledged=%s native_failure=%s",
-                _action_diagnostics(self._last_terminal),
+                _native_diagnostics(self._last_terminal),
                 *(self._last_terminal.get(key)
                   if type(self._last_terminal.get(key)) is bool else None
                   for key in ("input_was_sent", "release_sent", "release_acknowledged")),
