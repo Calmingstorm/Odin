@@ -199,6 +199,8 @@ async def capture_explicit_output(
             process = await spawning
             raise
         wayland.close()
+        if process.stdout is None:
+            raise HyprlandCaptureError("hyprland_capture_transport_failed")
         header = await asyncio.wait_for(
             process.stdout.readexactly(HEADER.size), remaining(deadline)
         )
