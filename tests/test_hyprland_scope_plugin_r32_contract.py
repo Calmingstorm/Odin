@@ -24,6 +24,8 @@ def test_credentials_and_output_binding_are_not_caller_assertions():
     assert "credentials.uid != getuid() && credentials.uid != 0" in text
     assert 'hook("newVirtualMouse", "CInputManager::newVirtualMouse("' in text
     assert "manager->m_pointers.size() != before.size() + 1" in text
+    assert "SYS_pidfd_open" in text
+    assert "poll(&identity, 1, 0) == 0" in text
 
 
 def test_scope_deadline_and_snapshot_deadline_are_bounded():
@@ -50,6 +52,8 @@ def test_fail_closed_scope_and_epoch_invalidation():
     for event in ("e.monitor.layoutChanged", "e.monitor.focused", "e.window.active", "e.config.preReload", "w->m_events.resize", "m->m_events.dpmsChanged"):
         assert event in text
     assert "w->m_title == b.title" not in text
+    assert 'hook("updateWindowDecos", "Desktop::View::CWindow::updateWindowDecos("' in text
+    assert "pos != s.watchedPos || size != s.watchedSize" in text
 
 
 def test_recovery_retains_failed_ledger_and_distinguishes_receiver_proof():

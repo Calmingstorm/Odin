@@ -15,6 +15,8 @@ compositor-owner runtime directory. Startup never unlinks existing paths.
 `SO_PEERCRED` permits compositor UID and root readers. Root Python may obtain
 snapshots; the user guardian owns its own Wayland connection. Native identity
 comes from `wl_client_get_credentials`, never a supplied PID.
+Each transport peer also retains a pidfd, checked for liveness before device
+authentication and each owned event; dead-peer numeric PID reuse grants nothing.
 
 One newline-terminated JSON object per request, one outstanding request per
 connection, no pipelining. Cap: 8192 request bytes, 16 peers, 64 live snapshots.
@@ -64,6 +66,12 @@ identity additionally matches the native device's client pointer.
 Seat focus hooks release before transferring surfaces. Epochs track
 focus/lock/output/workspace/config/layer changes; target geometry/lifecycle
 signals also invalidate. Dirty-document title updates are harmless. Resource
+position/size changes are additionally intercepted at `CWindow::updateWindowDecos`,
+which both real-position and real-size animation updates invoke in the pinned
+source. The exact symbol was verified in the target executable's export table.
+This catches position-away-and-back epochs, not just final geometry differences.
+
+Resource
 destruction, Unix EOF, expiry and recovery drain the owned ledger. Unrelated
 virtual and physical devices remain outside Odin's owned-device gate.
 

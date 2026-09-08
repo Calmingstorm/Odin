@@ -20,6 +20,8 @@
 #include <sys/un.h>
 #include <sys/stat.h>
 #include <sys/random.h>
+#include <sys/syscall.h>
+#include <poll.h>
 #include <unistd.h>
 #include <chrono>
 #include <cerrno>
@@ -92,7 +94,7 @@ struct Pointer {
     CHyprSignalListener destroy;
     bool dead = false;
 };
-struct Peer { int fd = -1; pid_t pid = 0; wl_event_source* source = nullptr; std::string input; };
+struct Peer { int fd = -1; int pidfd = -1; pid_t pid = 0; wl_event_source* source = nullptr; std::string input; };
 struct State;
 State* live = nullptr;
 HANDLE handle = nullptr;
@@ -105,16 +107,19 @@ using WarpFn = void (*)(CInputManager*, IPointer::SMotionAbsoluteEvent);
 using FocusFn = void (*)(CSeatManager*, SP<CWLSurfaceResource>);
 using PointerFocusFn = void (*)(CSeatManager*, SP<CWLSurfaceResource>, const Vector2D&);
 using NewPointerFn = void (*)(CInputManager*, SP<CVirtualPointerV1Resource>);
+using GeometryFn = void (*)(Desktop::View::CWindow*);
 
 struct State {
     CFunctionHook *keyHook = nullptr, *modHook = nullptr, *buttonHook = nullptr, *axisHook = nullptr;
     CFunctionHook *motionHook = nullptr, *warpHook = nullptr, *focusHook = nullptr, *pointerFocusHook = nullptr;
     CFunctionHook* newPointerHook = nullptr;
+    CFunctionHook* geometryHook = nullptr;
     CHyprSignalListener newKeyboard, newPointer, newLock;
     std::vector<CHyprSignalListener> epochListeners;
     std::vector<CHyprSignalListener> targetListeners;
     PHLWINDOWREF watchedWindow;
     PHLMONITORREF watchedMonitor;
+    Vector2D watchedPos, watchedSize;
     std::vector<std::unique_ptr<Keyboard>> keyboards;
     std::vector<std::unique_ptr<Pointer>> pointers;
     std::map<int, std::unique_ptr<Peer>> peers;
@@ -136,7 +141,7 @@ struct State {
         revoke("plugin-unload");
         if (timer) wl_event_source_remove(timer);
         if (listenerSource) wl_event_source_remove(listenerSource);
-        for (auto& [fd, peer] : peers) { if (peer->source) wl_event_source_remove(peer->source); close(fd); }
+        for (auto& [fd, peer] : peers) { if (peer->source) wl_event_source_remove(peer->source); close(fd); if (peer->pidfd >= 0) close(peer->pidfd); }
         peers.clear();
         if (listener >= 0) close(listener);
         if (!socketPath.empty()) unlink(socketPath.c_str());
@@ -151,7 +156,10 @@ struct State {
         live = nullptr;
     }
     bool isPeer(pid_t pid) const {
-        for (auto& [fd, p] : peers) if (p->pid == pid) return true;
+        for (auto& [fd, p] : peers) if (p->pid == pid) {
+            pollfd identity{p->pidfd, POLLIN, 0};
+            if (p->pidfd >= 0 && poll(&identity, 1, 0) == 0) return true;
+        }
         return false;
     }
     bool authenticated(wl_client* c, pid_t& pid) const {
@@ -188,6 +196,7 @@ struct State {
     }
     bool scope() const {
         return armed && !failed && ns() < deadline && guardianFD >= 0 && peers.contains(guardianFD) &&
+            isPeer(peers.at(guardianFD)->pid) &&
             keyboard && pointer && !keyboard->dead && !pointer->dead && same(bound);
     }
     bool point(const Vector2D& v) const {
@@ -250,6 +259,7 @@ struct State {
             return status(false, "modal-or-unknown-toplevel");
         if (watchedWindow != w || watchedMonitor != m) {
             targetListeners.clear(); watchedWindow = w; watchedMonitor = m;
+            watchedPos = w->m_realPosition->value(); watchedSize = w->m_realSize->value();
             std::function<void()> invalidate = [this] { ++revision; revoke("target-geometry-or-lifecycle"); };
             targetListeners.emplace_back(w->m_events.resize.listen(invalidate));
             targetListeners.emplace_back(w->m_events.unmap.listen(invalidate));
@@ -313,6 +323,7 @@ struct State {
         if (guardianFD == fd) { revoke("guardian-socket-eof"); guardianFD = -1; }
         auto it = peers.find(fd); if (it == peers.end()) return;
         if (it->second->source) wl_event_source_remove(it->second->source);
+        if (it->second->pidfd >= 0) close(it->second->pidfd);
         close(fd); peers.erase(it);
     }
     int readPeer(int fd, uint32_t mask) {
@@ -361,10 +372,12 @@ struct State {
             ucred credentials{}; socklen_t n = sizeof(credentials);
             if (getsockopt(c, SOL_SOCKET, SO_PEERCRED, &credentials, &n) || n != sizeof(credentials) || (credentials.uid != getuid() && credentials.uid != 0) || credentials.pid <= 1 || s.peers.size() >= 16) { close(c); return 0; }
             auto peer = std::make_unique<Peer>(); peer->fd = c; peer->pid = credentials.pid;
+            peer->pidfd = syscall(SYS_pidfd_open, credentials.pid, 0);
+            if (peer->pidfd < 0) { close(c); return 0; }
             peer->source = wl_event_loop_add_fd(wl_display_get_event_loop(g_pCompositor->m_wlDisplay), c, WL_EVENT_READABLE, [](int fd, uint32_t mask, void* state) {
                 return static_cast<State*>(state)->readPeer(fd, mask);
             }, &s);
-            if (!peer->source) { close(c); return 0; }
+            if (!peer->source) { close(peer->pidfd); close(c); return 0; }
             s.peers.emplace(c, std::move(peer)); return 0;
         }, this);
         timer = wl_event_loop_add_timer(loop, [](void* raw) {
@@ -472,6 +485,16 @@ void onNewPointer(CInputManager* manager, SP<CVirtualPointerV1Resource> resource
     p->destroy = resource->m_events.destroy.listen([&s, item] { if (s.pointer == item) s.revoke("pointer-destroy"); item->dead = true; });
     s.pointers.emplace_back(std::move(p));
 }
+void onGeometry(Desktop::View::CWindow* window) {
+    auto& s = *live; auto original = reinterpret_cast<GeometryFn>(s.geometryHook->m_original);
+    if (s.watchedWindow.get() == window) {
+        const auto pos = window->m_realPosition->value(), size = window->m_realSize->value();
+        if (pos != s.watchedPos || size != s.watchedSize) {
+            s.watchedPos = pos; s.watchedSize = size; ++s.revision; s.revoke("window-position-or-size-change");
+        }
+    }
+    original(window);
+}
 CFunctionHook* hook(const char* name, const char* qualified, void* callback) {
     void* address = nullptr;
     for (auto& match : HyprlandAPI::findFunctionsByName(handle, name)) {
@@ -511,6 +534,7 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE pluginHandle) {
     s->focusHook = hook("setKeyboardFocus", "CSeatManager::setKeyboardFocus(", reinterpret_cast<void*>(onFocus));
     s->pointerFocusHook = hook("setPointerFocus", "CSeatManager::setPointerFocus(", reinterpret_cast<void*>(onPointerFocus));
     s->newPointerHook = hook("newVirtualMouse", "CInputManager::newVirtualMouse(", reinterpret_cast<void*>(onNewPointer));
+    s->geometryHook = hook("updateWindowDecos", "Desktop::View::CWindow::updateWindowDecos(", reinterpret_cast<void*>(onGeometry));
     s->newKeyboard = PROTO::virtualKeyboard->m_events.newKeyboard.listen([s](const SP<CVirtualKeyboardV1Resource>& resource) {
         pid_t pid; if (!s->authenticated(resource->client(), pid)) return;
         auto k = std::make_unique<Keyboard>(); k->resource = resource; k->client = resource->client(); k->pid = pid;
