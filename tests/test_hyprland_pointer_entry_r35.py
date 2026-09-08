@@ -64,6 +64,7 @@ struct State {
     Pointer* pointer;
     bool armed=true, failed=false, draining=false;
     bool positioningBoundSurface=false, ownedModifiers=false, pointMatches=true;
+    SP<CWLSurfaceResource> observedPopup;
     unsigned rejected=0, revision=0, boundRevision=0, revokes=0, releases=0;
     std::vector<int> keys, buttons;
     std::string reason;
@@ -83,6 +84,12 @@ struct State {
     }
     bool point(Vector2D p) const {
         return pointMatches && p.x>=0 && p.y>=0 && p.x<100 && p.y<100;
+    }
+    // Model the already-observed destination separately from the destination
+    // chosen by originalWarp, so wrong-focus remains an independent failure.
+    SP<CWLSurfaceResource> destinationAt(Vector2D p) const {
+        if (!point(p)) return {};
+        return observedPopup ? observedPopup : bound.surface.lock();
     }
     void revoke(const char* why) {
         armed=false; reason=why; ++revokes;
@@ -123,6 +130,8 @@ int main(int argc, char** argv) {
     auto target=std::make_shared<CWLSurfaceResource>();
     auto prior=std::make_shared<CWLSurfaceResource>();
     sibling=std::make_shared<CWLSurfaceResource>(); destination=target;
+    auto popup=std::make_shared<CWLSurfaceResource>();
+    if (test=="popup-success") { s.observedPopup=popup; destination=popup; }
     s.bound.surface=target; s.bound.pointerSurface=prior;
     seat.m_state.keyboardFocus=target; seat.m_state.pointerFocus=prior;
     auto owned=std::make_shared<Device>(), physical=std::make_shared<Device>();
@@ -149,9 +158,10 @@ int main(int argc, char** argv) {
     auto device=test=="physical" ? physical : test=="other-owned" ? other : owned;
     onWarp(&input,{device,{40,50}});
     assert(!s.positioningBoundSurface);
-    if (test=="success") {
+    if (test=="success" || test=="popup-success") {
         assert(s.armed && s.scope() && s.revokes==0 && s.revision==0);
-        assert(seat.m_state.pointerFocus.lock()==target && s.bound.pointerSurface.lock()==target);
+        assert(seat.m_state.pointerFocus.lock()==destination && s.bound.pointerSurface.lock()==destination);
+        assert(seat.m_state.keyboardFocus.lock()==target && s.bound.surface.lock()==target);
         assert(warps==1 && focuses==1 && seat.frames==1 && !flagSeen);
         // An ordinary later focus transfer cannot inherit the exemption.
         onPointerFocus(&seat,sibling,{1,2});
@@ -207,7 +217,7 @@ def entry_binary(tmp_path_factory):
 
 
 @pytest.mark.parametrize("scenario", [
-    "success", "owned-key", "owned-button", "owned-modifier", "physical-key",
+    "success", "popup-success", "owned-key", "owned-button", "owned-modifier", "physical-key",
     "physical-button", "mixed-holds", "wrong-keyboard", "sibling-hit",
     "wrong-focus", "other-owned", "physical", "reentry", "post-scope",
     "post-pointer", "dispatch-holds",

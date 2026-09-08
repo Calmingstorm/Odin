@@ -58,17 +58,25 @@ def test_native_keyboard_and_pointer_fences_remain_distinct():
     assert "poll(&identity, 1, 0) != 0" in source
     for event in ("Button", "Axis", "Motion"):
         body = source.split(f"void on{event}(", 1)[1].split("\nvoid ", 1)[0]
-        assert "g_pSeatManager->m_state.pointerFocus != s.bound.surface" in body
-        assert "s.point(" in body
+        assert "s.destinationAt(" in body
+        assert "!= g_pSeatManager->m_state.pointerFocus.lock()" in body
+        if event == "Motion":
+            assert "!s.destination(s.bound, g_pSeatManager->m_state.pointerFocus.lock())" in body
+            assert "s.destinationAt(pos + event.delta)" in body
+            assert "s.destinationAt(pos + event.unaccel)" in body
+        else:
+            assert "!s.destinationAt(g_pPointerManager->position())" in body
     assert 's.revoke("pre-pointer-focus-transfer")' in source
     assert 's.revoke("pre-keyboard-focus-transfer")' in source
     warp = source.split("void onWarp(", 1)[1].split("\nvoid ", 1)[0]
-    assert "!s.point(pos)" in warp
+    assert "const auto destination = s.destinationAt(pos)" in warp
+    assert "!destination" in warp
+    assert "s.destinationAt(pos) != destination" in warp
     assert "s.ownedModifiers" in warp
     assert "s.inputHeld()" in warp
     assert 's.revoke("warp-focus-postcondition-refused")' in warp
     transfer = source.split("void onPointerFocus(", 1)[1].split("\nvoid ", 1)[0]
-    assert "surface == s.bound.surface.lock()" in transfer
+    assert "surface && s.destinationAt(g_pPointerManager->position()) == surface" in transfer
     assert "s.scope()" in transfer
     assert "!s.inputHeld()" in transfer
     assert "s.point(g_pPointerManager->position())" in transfer

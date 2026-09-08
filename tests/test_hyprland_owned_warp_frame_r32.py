@@ -32,6 +32,12 @@ struct Vector2D {
     Vector2D operator*(Vector2D b) const { return {x*b.x,y*b.y}; }
 };
 struct Device {};
+struct Surface {};
+struct Ref {
+    std::shared_ptr<Surface> value;
+    std::shared_ptr<Surface> lock() const { return value; }
+};
+auto rootSurface=std::make_shared<Surface>();
 struct IPointer { struct SMotionAbsoluteEvent {
     std::shared_ptr<Device> device;
     Vector2D absolute;
@@ -54,16 +60,19 @@ struct State {
     bool inputHeld() const { return false; }
     bool positioningBoundSurface=false, ownedModifiers=false;
     std::vector<int> keys, buttons;
-    struct { Vector2D outputPos{0,0}, outputSize{1,1}; int surface=1; } bound;
+    struct { Vector2D outputPos{0,0}, outputSize{1,1}; Ref surface{rootSurface}; } bound;
     bool scope() { return allowed; }
     bool allow() { return allowed; }
     bool point(Vector2D p) { return p.x>=0 && p.y>=0 && p.x<1000 && p.y<1000; }
+    std::shared_ptr<Surface> destinationAt(Vector2D p) {
+        return point(p) ? bound.surface.lock() : nullptr;
+    }
     void revoke(const char*) { allowed=false; }
 };
 State* live;
 // Model receiver buffering: motion updates pending position; frame delivers it.
 struct Seat {
-    struct { int pointerFocus=1; } m_state;
+    struct { Ref pointerFocus{rootSurface}; } m_state;
     Vector2D pending{};
     bool dirty=false;
     unsigned frames=0;
