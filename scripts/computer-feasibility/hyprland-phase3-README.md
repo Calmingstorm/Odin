@@ -1,5 +1,13 @@
 # Hyprland Phase 3: native qualification work, not a backend
 
+**R31 hard exit:** the surviving-owner candidate fails same-button ownership
+preservation even with successful original-resource release. A uinput substitution
+improves the libinput-only cohort but not mixed Wayland/libinput input. The
+[R31 report](../../docs/computer-use/HYPRLAND-OWNED-RELEASE-R31.md) records the
+bounded compositor-side conclusion and its source-only evidence. Phase 4 remains
+closed. `hyprland-owned-release-counterexample.cpp` is a source-logic model,
+**not a native receiver/SIGKILL test**. No R31 native cases were executed.
+
 **R30 live-session preflight:** real outputs are available, but the mandatory
 independent owned-only cleanup prerequisite is not met. Plugin load/unload also
 implicitly reloads compositor configuration. **Do not repoint this isolated
@@ -8,8 +16,9 @@ harness or its lock fixture at a real desktop.** See the
 
 **Gate: INCOMPLETE / NO-GO for live input.** These are isolated research assets.
 They are not installed, packaged, enabled, or called by Odin runtime. No Pinta
-draw test is authorized by these results. No claim that a Hyprland core patch is
-necessary has been established.
+draw test is authorized by these results. R29/R30 did not establish core necessity;
+R31 gives a bounded conclusion for the full mixed-source contract, while retaining
+the credible but unqualified narrower libinput-only alternative.
 
 ## Exact target and source findings
 
