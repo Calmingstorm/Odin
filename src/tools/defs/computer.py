@@ -35,6 +35,11 @@ _DEFINITIONS = [
         "cleanup receipts. Shared-X11 release depends on a surviving guardian and acknowledged "
         "cleanup: abrupt sole-guardian death loses its ledger, with no proven universal "
         "server-side release guarantee. Close detaches without closing documents. "
+        "Hyprland is best-effort, not arbitrary-app qualification: native scoped top-levels "
+        "only, no XWayland or ambiguous modal surfaces. Guardian SIGKILL can leave input held; "
+        "same-button release can clobber the human's hold. An ACK is not receiver proof. "
+        "After unknown release stop; the operator can RELEASE-ALL, close the fenced session, "
+        "then start anew with renewed consent and fresh observation. Never auto-replay. "
         "Never operate terminals, credential/security prompts or Odin's "
         "control plane.",
         {

@@ -133,6 +133,7 @@ class BackendCapabilities:
             limitations.extend([
                 "hyprland_guardian_sigkill_can_leave_owned_input_held",
                 "hyprland_same_button_release_can_clobber_human_hold",
+                "hyprland_native_toplevel_only_not_arbitrary_app_qualification",
             ])
         return {
             "platform": self.platform,

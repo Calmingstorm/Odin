@@ -38,6 +38,8 @@ RESIDUALS = (
     "Hyprland input is best-effort: a hard guardian kill may leave owned input held.",
     "Releasing Odin's button may clobber a simultaneous physical same-button hold.",
     "Cooperative release acknowledgements are not native receiver qualification.",
+    "Not arbitrary-app qualification: only scoped native Wayland top-levels; "
+    "XWayland and ambiguous modal/parented surfaces are not supported.",
 )
 
 
@@ -150,6 +152,8 @@ class HyprlandRuntimeBackend:
         "release": "hyprland_best_effort_cooperative_ack",
         "receiver_release_verified": False,
         "residuals": list(RESIDUALS),
+        "application_scope": "contained_native_wayland_toplevel_no_xwayland_or_ambiguous_modals",
+        "recovery": "operator_release_all_then_close_and_start_new_session",
     }
     # Transport-neutral helpers: no portal access or compositor qualification.
     def _command(self, action, frame, scope):
@@ -161,7 +165,10 @@ class HyprlandRuntimeBackend:
                 or environment != "existing_session"):
             raise ComputerError("hyprland_explicit_session_configuration_required")
         self.config, self.enabled = config, enabled
-        self.capabilities = BackendCapabilities("wayland", environment)
+        # Backend family is immutable provenance, not input eligibility. Publish
+        # it before startup so partial-start cleanup and emergency RELEASE-ALL
+        # retain the right route even when native admission never completes.
+        self.capabilities = BackendCapabilities("wayland", environment, backend="hyprland")
         self.input_admission = InputAdmission(
             "pending", cast(str, self.input_blocker),
             "Native session safety evidence is unmeasured.",
@@ -374,6 +381,14 @@ class HyprlandRuntimeBackend:
         return [{"source_id": self._selected, "label": "Explicitly granted Hyprland output",
                  "width": width, "height": height}]
 
+    @property
+    def input_readiness(self):
+        if self._closed or self._paused or not self.input_supported:
+            return "inactive"
+        if self._frame is None or not 0 <= time.monotonic() - self._captured_at <= 5:
+            return "observation_required"
+        return "ready"
+
     async def select_source(self, source_id):
         async with self._lock:
             self._active()
@@ -545,6 +560,10 @@ class HyprlandRuntimeBackend:
                             "reason": "hyprland_native_no_input_sent"}
                 receipt = {
                     "status": "executed", "injected": True, "released": True,
+                    "targeting_path": (
+                        "explicit_pixel_region" if action["type"] == "replace_field_pixels"
+                        else "native_window_focus" if action["type"] in {"type", "key"}
+                        else "observed_pixel_coordinates"),
                     "release_basis": "hyprland_cooperative_native_ack_best_effort",
                     "receiver_release_verified": False, "residuals": list(RESIDUALS),
                     "application_provenance": canonical_application_provenance(scope),

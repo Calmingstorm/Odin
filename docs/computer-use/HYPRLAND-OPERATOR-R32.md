@@ -180,7 +180,11 @@ checks still apply when disabled.
 
 Recovery fences input/capture before awaiting native cleanup, discards old
 observations and pauses after a cooperative ACK. Unconfirmed release quarantines
-the session. Renew consent and observe again before acting.
+the session. This emergency fence is deliberately permanent for that session:
+**close it, then explicitly start a new session with renewed consent and observe
+again before acting**. Do not call `resume` on an emergency-fenced session. Close
+must report confirmed cleanup before the singleton can be used again. Ordinary
+pause/resume remains available without emergency recovery.
 `receiver_release_verified: false` is intentional even after a positive ACK.
 
 If Odin/the controller is gone, run this standalone operator command from the
@@ -205,9 +209,38 @@ acknowledgment is an attestation after independent inspection, not a release com
 
 ## Qualification/deployment boundary
 
+### Normal foreground turns
+
+The configured route is the ordinary tool route, not a separate drawing driver:
+`computer_session` → lifecycle/integration → controller → native Hyprland runtime.
+`computer_observe` delivers explicit-output pixels through the normal native-image
+transport. `computer_act` requires the delivered observation and uses the same
+durable action IDs, scope fences and post-action image delivery as other backends.
+Returned `input_safety` qualifies each persisted Hyprland action/sequence receipt:
+cooperative release acknowledgement is best-effort and never receiver proof.
+Replaying an action ID returns the receipt only, never new input or new pixels.
+
+Set the explicit target fields above in the **installed runtime's configuration**
+before qualification and use its supported config-protected restart flow. With
+no `computer` section the existing default is still disabled isolated X11; a
+successful separately configured driver does not configure normal turns. Neither
+session start nor turn dispatch discovers an ambient target, loads a plugin,
+changes compositor settings or falls back to a different desktop.
+
+Backend identity is retained even if native startup fails. A clean failed startup
+releases the singleton; missing acknowledgement remains quarantined and retains
+the administrator's RELEASE-ALL route. A capture/scope failure after acknowledged
+input preserves execution evidence, marks the new checkpoint unverified, and
+requires explicit fresh observation instead of replay.
+
+### Operator live acceptance
+
 Unit/contract tests, native builds and API/browser checks are distinct from live
 qualification. Announce build readiness first. The host operator then performs
 a config-protected branch deploy with `config.yml` and `data/` backed up,
-restored and verified intact. Only afterward run the supervised bounded Pinta
-drawing task, inspect the drawing and cleanup, and verify primary work and other
-windows untouched. Installation does not authorize deployment or live input.
+restored and verified intact. Only afterward run a regular-turn drawing task on
+Hyprland through the API, inspect actual final artwork and cleanup, then run the
+X11 Krita no-regression drawing on its separately configured installation. Record
+total GUI input, captures, recovery, elapsed time and verified completion.
+Installation does not authorize deployment or live input. Build/fixture success
+does not establish either live acceptance result.
