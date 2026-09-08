@@ -169,7 +169,13 @@ class AppScope:
             return ""
         if prop.format != 8:
             raise ScopeFailure("application_scope_unavailable")
-        return bytes(prop.value).decode("utf-8", errors="strict").replace("\x00", " ").strip()
+        if prop.property_type == self._atom("UTF8_STRING"):
+            encoding = "utf-8"
+        elif name != "_NET_WM_NAME" and prop.property_type == self._atom("STRING"):
+            encoding = "latin-1"
+        else:
+            raise ScopeFailure("application_scope_unavailable")
+        return bytes(prop.value).decode(encoding, errors="strict").replace("\x00", " ").strip()
 
     def _metadata(self, window):
         modern_title = self._text(window, "_NET_WM_NAME")

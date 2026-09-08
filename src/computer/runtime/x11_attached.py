@@ -441,6 +441,9 @@ class X11AttachedBackend:
 
     async def _start_topology(self):
         ready = asyncio.get_running_loop().create_future()
+        # Resume has fenced the previous watcher. Its census cannot certify
+        # cleanup for a new watcher, including one that fails before readiness.
+        self._shared_cleanup_identity = None
         self._topology_error = None
         self._topology_task = asyncio.create_task(
             self._work("topology", self._watch_topology, ready)
@@ -537,8 +540,10 @@ class X11AttachedBackend:
     def _accept_shutdown_identity(self, line):
         try:
             receipt = json.loads(line)
-            if receipt.get("event") == "shared_identity_at_close" and receipt.get("ok") is True:
-                self._shared_cleanup_identity = receipt.get("device_identity")
+            if receipt.get("event") == "shared_identity_at_close":
+                self._shared_cleanup_identity = (
+                    receipt.get("device_identity") if receipt.get("ok") is True else None
+                )
         except (ValueError, TypeError):
             pass
 
@@ -954,7 +959,7 @@ class X11AttachedBackend:
                 and self._input_enabled
                 and previous_scope
                 and previous_scope.get("focused") is True
-                and previous_scope.get("modal") is None
+                and previous_scope.get("modal") in (None, False)
             ):
                 for _ in range(3):
                     if binding == previous_scope or (binding and binding.get("modal")):

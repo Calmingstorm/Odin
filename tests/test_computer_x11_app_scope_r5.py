@@ -1,4 +1,5 @@
 """Hermetic protocol and /proc stubs. No display, real input, or production bypass."""
+
 from types import SimpleNamespace as NS  # noqa: N814 - Compact protocol reply fixtures.
 
 import pytest
@@ -25,7 +26,12 @@ class Window:
             return None
         if isinstance(value, NS):
             return value
-        return NS(format=8 if isinstance(value, bytes) else 32, bytes_after=0, value=value)
+        return NS(
+            format=8 if isinstance(value, bytes) else 32,
+            bytes_after=0,
+            value=value,
+            property_type="UTF8_STRING" if atom == "_NET_WM_NAME" else "STRING",
+        )
 
     def get_attributes(self):
         return NS(map_state=self.viewable, override_redirect=self.override)
@@ -41,8 +47,12 @@ class Window:
         return NS(monitors=self.display.monitors)
 
     def query_pointer(self):
-        return NS(same_screen=True, root_x=self.display.pointer[0],
-                  root_y=self.display.pointer[1], child=self.child)
+        return NS(
+            same_screen=True,
+            root_x=self.display.pointer[0],
+            root_y=self.display.pointer[1],
+            child=self.child,
+        )
 
 
 class Display:
@@ -53,16 +63,21 @@ class Display:
         self.target = Window(self, 20, self.root)
         self.leaf = Window(self, 21, self.target)
         self.windows = {w.id: w for w in (self.root, self.target, self.leaf)}
-        self.target.props = {"WM_STATE": [1, 0], "_NET_WM_PID": [999999],
-                             "WM_CLASS": b"xed\0Xed\0", "WM_NAME": b"Untitled"}
+        self.target.props = {
+            "WM_STATE": [1, 0],
+            "_NET_WM_PID": [999999],
+            "WM_CLASS": b"xed\0Xed\0",
+            "WM_NAME": b"Untitled",
+        }
         self.focus = self.leaf
         self.pointer = (50, 60)
         self.root.child, self.target.child = self.target, self.leaf
         self.owners = {20: 1234, 21: 1234}
         self.version = (1, 2)
         self.pid_queries = []
-        self.monitors = [NS(name=42, x=0, y=0, width_in_pixels=800,
-                            height_in_pixels=600, crtcs=[88])]
+        self.monitors = [
+            NS(name=42, x=0, y=0, width_in_pixels=800, height_in_pixels=600, crtcs=[88])
+        ]
 
     def get_display_name(self):
         return self.name
@@ -89,15 +104,17 @@ class Display:
         assert len(specs) == 1 and specs[0]["mask"] == 2
         xid = specs[0]["client"]
         self.pid_queries.append(xid)
-        return NS(ids=[{"spec": {"mask": 2, "client": 0x200000},
-                        "value": [self.owners[xid]]}])
+        return NS(ids=[{"spec": {"mask": 2, "client": 0x200000}, "value": [self.owners[xid]]}])
 
 
 @pytest.fixture
 def app(monkeypatch):
     display = Display()
-    monkeypatch.setattr(scope, "_process_identity", lambda pid: {
-        "pid": pid, "uid": 65534, "start_ticks": 101, "exe": "/usr/bin/xed"})
+    monkeypatch.setattr(
+        scope,
+        "_process_identity",
+        lambda pid: {"pid": pid, "uid": 65534, "start_ticks": 101, "exe": "/usr/bin/xed"},
+    )
     return display, scope.AppScope(display), NS(x=0, y=0, width=800, height=600)
 
 
@@ -217,11 +234,9 @@ def test_owned_pointer_callback_retains_descent_and_core_is_untouched(app):
 
     def owned_query(identity):
         queried.append(identity)
-        return NS(same_screen=True, root_x=50, root_y=60,
-                  child=display.windows[identity].child)
+        return NS(same_screen=True, root_x=50, root_y=60, child=display.windows[identity].child)
 
-    assert checker.assert_snapshot(before, monitor, (50, 60),
-                                   pointer_query=owned_query) == before
+    assert checker.assert_snapshot(before, monitor, (50, 60), pointer_query=owned_query) == before
     assert queried == [10, 20, 21]
     assert display.pointer == (700, 500)
     with pytest.raises(scope.ScopeFailure, match="pointer_scope_changed"):
@@ -237,14 +252,17 @@ def test_owned_pointer_callback_cannot_skip_target_or_final_snapshot(app):
     display, checker, monitor = app
     before = checker.snapshot(monitor)
     with pytest.raises(scope.ScopeFailure, match="pointer_scope_changed"):
-        checker.assert_snapshot(before, monitor, (50, 60), pointer_query=lambda identity:
-                                NS(same_screen=True, root_x=50, root_y=60, child=0))
+        checker.assert_snapshot(
+            before,
+            monitor,
+            (50, 60),
+            pointer_query=lambda identity: NS(same_screen=True, root_x=50, root_y=60, child=0),
+        )
 
     def changed_query(identity):
         if identity == 21:
             display.target.geometry[2] += 1
-        return NS(same_screen=True, root_x=50, root_y=60,
-                  child=display.windows[identity].child)
+        return NS(same_screen=True, root_x=50, root_y=60, child=display.windows[identity].child)
 
     with pytest.raises(scope.ScopeFailure, match="pointer_scope_changed"):
         checker.assert_snapshot(before, monitor, (50, 60), pointer_query=changed_query)
@@ -262,22 +280,33 @@ def test_bounded_property(app):
     assert checker.snapshot(monitor) is None
 
 
-@pytest.mark.parametrize("title,kind", [(b"Save As", "safe_application"),
-                                      ("Save As…".encode(), "safe_application"),
-                                      ("Save As… authentication".encode(), "safe_application"),
-                                      (b"Information", "safe_application"),
-                                      (b"Confirmation", "safe_application")])
+@pytest.mark.parametrize(
+    "title,kind",
+    [
+        (b"Save As", "safe_application"),
+        ("Save As…".encode(), "safe_application"),
+        ("Save As… authentication".encode(), "safe_application"),
+        (b"Information", "safe_application"),
+        (b"Confirmation", "safe_application"),
+    ],
+)
 def test_same_process_dialog_classification(app, title, kind):
     display, checker, monitor = app
     main = Window(display, 30, display.root)
     main.props = {"WM_STATE": [1, 0], "WM_CLASS": b"xed\0Xed\0"}
     display.windows[30], display.owners[30] = main, 1234
-    display.target.props.update({"WM_TRANSIENT_FOR": [30], "WM_NAME": title,
-                                 "_NET_WM_WINDOW_TYPE": ["_NET_WM_WINDOW_TYPE_DIALOG"]})
+    display.target.props.update(
+        {
+            "WM_TRANSIENT_FOR": [30],
+            "WM_NAME": title,
+            "_NET_WM_WINDOW_TYPE": ["_NET_WM_WINDOW_TYPE_DIALOG"],
+        }
+    )
     # Production atoms are ints, so model dialog/state constants numerically.
     original_atom = checker._atom
     checker._atom = lambda name: (
-        700 if name == "_NET_WM_WINDOW_TYPE_DIALOG" else original_atom(name))
+        700 if name == "_NET_WM_WINDOW_TYPE_DIALOG" else original_atom(name)
+    )
     display.target.props["_NET_WM_WINDOW_TYPE"] = [700]
     result = checker.snapshot(monitor)
     if kind is None:
@@ -316,10 +345,16 @@ def test_lazy_xlib_import():
     import subprocess
     import sys
 
-    result = subprocess.run([sys.executable, "-c",
-                             "import sys; import src.computer.runtime.x11_app_scope; "
-                             "assert 'Xlib' not in sys.modules"],
-                            capture_output=True, timeout=10)
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; import src.computer.runtime.x11_app_scope; "
+            "assert 'Xlib' not in sys.modules",
+        ],
+        capture_output=True,
+        timeout=10,
+    )
     assert result.returncode == 0
 
 
@@ -384,13 +419,16 @@ def test_user_installed_executable_is_evidence_not_refusal(fake_proc):
     assert result["trusted_executable"] is False
 
 
-@pytest.mark.parametrize("cmdline", [
-    b"/usr/bin/python3\0/usr/bin/drawing\0",
-    b"/usr/bin/python3\0-c\0/usr/bin/drawing\0",
-    b"/usr/bin/python3\0/tmp/drawing\0",
-    b"/usr/bin/python3\0/usr/bin/drawing\0--extra\0",
-    b"/usr/bin/python3\0/usr/bin/drawing-evil\0",
-])
+@pytest.mark.parametrize(
+    "cmdline",
+    [
+        b"/usr/bin/python3\0/usr/bin/drawing\0",
+        b"/usr/bin/python3\0-c\0/usr/bin/drawing\0",
+        b"/usr/bin/python3\0/tmp/drawing\0",
+        b"/usr/bin/python3\0/usr/bin/drawing\0--extra\0",
+        b"/usr/bin/python3\0/usr/bin/drawing-evil\0",
+    ],
+)
 def test_drawing_cmdline_never_proves_script_identity(fake_proc, cmdline):
     (fake_proc / "exe").unlink()
     (fake_proc / "exe").symlink_to("/usr/bin/python3")
