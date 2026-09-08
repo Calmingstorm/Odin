@@ -27,5 +27,14 @@ contents:
     dst: /usr/local/share/doc/odin-hyprland/build-identity.json
     file_info: {owner: root, group: root, mode: 0644}
   - src: ./docs/computer-use/HYPRLAND-OPERATOR-R32.md
+    dst: /usr/local/share/doc/odin-hyprland/HYPRLAND-OPERATOR-R32.md
+    file_info: {owner: root, group: root, mode: 0644}
+  - src: ./docs/computer-use/OPERATOR.md
     dst: /usr/local/share/doc/odin-hyprland/OPERATOR.md
+    file_info: {owner: root, group: root, mode: 0644}
+  - src: ./docs/computer-use/PACKAGING.md
+    dst: /usr/local/share/doc/odin-hyprland/PACKAGING.md
+    file_info: {owner: root, group: root, mode: 0644}
+  - src: ./docs/computer-use/RECOVERY.md
+    dst: /usr/local/share/doc/odin-hyprland/RECOVERY.md
     file_info: {owner: root, group: root, mode: 0644}

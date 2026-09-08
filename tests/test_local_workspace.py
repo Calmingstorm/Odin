@@ -1992,10 +1992,16 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
         "no arbitrary program or shell, reads source only and writes bounded IPC"
     ),
     "src/computer/runtime/hyprland_capture.py": (
-        "unwired explicit trusted native capture helper with inherited authenticated "
+        "explicit trusted native capture helper with inherited authenticated "
         "Wayland FD, bounded argv, empty display environment and explicit / cwd; "
         "no shell or relative file output, only anonymous SHM and bounded stdout; "
-        "caller must establish qualified scope and helper trust before future admission"
+        "native backend establishes compositor scope and helper trust before admission"
+    ),
+    "src/computer/runtime/hyprland_guardian.py": (
+        "operator-pinned root-owned native VP/VK guardian, absolute executable argv, "
+        "explicit UID and kernel-authenticated native socket paths, sanitized env "
+        "and explicit / cwd; no shell, arbitrary program, or relative user path; "
+        "compositor companion enforces bounded native input scope and release"
     ),
     "src/computer/runtime/wayland_probe.py": (
         "fixed installed inert probe gate with generated private marker; absolute helper "

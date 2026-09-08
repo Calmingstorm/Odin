@@ -21,7 +21,19 @@ selecting an output are not themselves task consent.
 
 ## Build, install, then explicitly load once
 
-Use the optional native build/install flow documented below. Compile the
+Use the optional native build/install flow documented below. On the target
+distribution, install the C/C++ toolchain, `pkg-config`, Wayland development
+headers and scanner, xkbcommon development headers, json-c development headers,
+and the exact matching Hyprland development headers. Build from the checkout:
+
+```sh
+sh scripts/build-hyprland-input.sh "$PWD/build/hyprland"
+```
+
+This builds the guardian, capture helper, plugin and build identity without
+connecting to a desktop or activating anything. `--guardian-only` builds only
+the input client for isolated wire tests and does not produce an installable
+full bundle. Compile the
 in-process plugin against the **exact target Hyprland headers/commit and dependency
 ABI**, not merely a similarly numbered release. Keep approved build metadata
 with the output. Successful compilation is not live input qualification.
@@ -111,6 +123,16 @@ Capture uses native explicit-output screencopy-v3. Compositor-loop input scope
 checks have a 250ms freshness budget. Locked/unknown state, unknown focus, changed
 output/geometry and stale identity revoke or refuse input. A screenshot or ready
 helper does not prove task success.
+
+The initial native scope implementation requires a wholly contained native
+Wayland top-level window with keyboard and pointer focus on that window. Unknown
+or modal/parented surfaces and fractional/ambiguous window geometry refuse
+instead of guessing. XWayland application input is not admitted by this route.
+Text and key chords use an owned US virtual keymap without changing the physical
+keyboard layout; characters absent from that keymap are rejected before input.
+Accessible-field identity is not advertised here; grounded pixel field replacement
+and region targeting are available. These are capability limits, not a claim of
+arbitrary-application qualification.
 
 ## Release owned input and recover
 
