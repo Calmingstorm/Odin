@@ -6,6 +6,7 @@ reflection gate (dedup/cooldown/recovery/global cap), turn correlation
 context, the command_failed classifier class, and the agent trajectory-saver
 wiring that was orphaned in production.
 """
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock
@@ -21,20 +22,27 @@ from src.trajectories.saver import TrajectoryTurn
 # Loop reflection gate — Odin's spec: one lesson, not sixty
 # ---------------------------------------------------------------------------
 
+
 class TestLoopReflectionGate:
     def test_first_occurrence_reflects(self):
         gate = LoopReflectionGate()
-        ok, reason = gate.evaluate("loop1", is_error=True,
-                                   failure_class="network", error_text="ECONNRESET")
+        ok, reason = gate.evaluate(
+            "loop1", is_error=True, failure_class="network", error_text="ECONNRESET"
+        )
         assert ok and reason == "first_occurrence"
 
     def test_identical_failure_suppressed_all_night(self):
         gate = LoopReflectionGate(cooldown_hours=12)
-        gate.evaluate("loop1", is_error=True, failure_class="network",
-                      error_text="dns timeout host 10.0.0.5")
+        gate.evaluate(
+            "loop1", is_error=True, failure_class="network", error_text="dns timeout host 10.0.0.5"
+        )
         suppressed = [
-            gate.evaluate("loop1", is_error=True, failure_class="network",
-                          error_text="dns timeout host 10.0.0.7")  # digits normalized
+            gate.evaluate(
+                "loop1",
+                is_error=True,
+                failure_class="network",
+                error_text="dns timeout host 10.0.0.7",
+            )  # digits normalized
             for _ in range(60)
         ]
         assert all(not ok for ok, _ in suppressed)
@@ -42,17 +50,16 @@ class TestLoopReflectionGate:
 
     def test_signature_change_reflects(self):
         gate = LoopReflectionGate()
-        gate.evaluate("loop1", is_error=True, failure_class="network",
-                      error_text="dns timeout")
-        ok, reason = gate.evaluate("loop1", is_error=True, failure_class="auth",
-                                   error_text="401 unauthorized")
+        gate.evaluate("loop1", is_error=True, failure_class="network", error_text="dns timeout")
+        ok, reason = gate.evaluate(
+            "loop1", is_error=True, failure_class="auth", error_text="401 unauthorized"
+        )
         assert ok and reason == "signature_change"
 
     def test_recovery_after_repeated_failure_reflects_once(self):
         gate = LoopReflectionGate()
         for _ in range(3):
-            gate.evaluate("loop1", is_error=True, failure_class="timeout",
-                          error_text="timed out")
+            gate.evaluate("loop1", is_error=True, failure_class="timeout", error_text="timed out")
         ok, reason = gate.evaluate("loop1", is_error=False)
         assert ok and reason == "recovery"
         # Next success is routine again
@@ -61,34 +68,34 @@ class TestLoopReflectionGate:
 
     def test_single_failure_then_success_is_not_recovery(self):
         gate = LoopReflectionGate()
-        gate.evaluate("loop1", is_error=True, failure_class="timeout",
-                      error_text="timed out")
+        gate.evaluate("loop1", is_error=True, failure_class="timeout", error_text="timed out")
         ok, reason = gate.evaluate("loop1", is_error=False)
         assert not ok and reason == "routine_success"
 
     def test_cooldown_expiry_allows_again(self):
         gate = LoopReflectionGate(cooldown_hours=0)  # immediate expiry
-        gate.evaluate("loop1", is_error=True, failure_class="network",
-                      error_text="dns timeout")
-        ok, reason = gate.evaluate("loop1", is_error=True, failure_class="network",
-                                   error_text="dns timeout")
+        gate.evaluate("loop1", is_error=True, failure_class="network", error_text="dns timeout")
+        ok, reason = gate.evaluate(
+            "loop1", is_error=True, failure_class="network", error_text="dns timeout"
+        )
         assert ok and reason == "cooldown_expired"
 
     def test_global_hourly_cap(self):
         gate = LoopReflectionGate(max_per_hour=3)
         granted = 0
         for i in range(10):
-            ok, _ = gate.evaluate(f"loop{i}", is_error=True,
-                                  failure_class="network", error_text=f"err {i}")
+            ok, _ = gate.evaluate(
+                f"loop{i}", is_error=True, failure_class="network", error_text=f"err {i}"
+            )
             granted += ok
         assert granted == 3
 
     def test_loops_are_isolated(self):
         gate = LoopReflectionGate()
-        gate.evaluate("loop1", is_error=True, failure_class="network",
-                      error_text="dns timeout")
-        ok, reason = gate.evaluate("loop2", is_error=True, failure_class="network",
-                                   error_text="dns timeout")
+        gate.evaluate("loop1", is_error=True, failure_class="network", error_text="dns timeout")
+        ok, reason = gate.evaluate(
+            "loop2", is_error=True, failure_class="network", error_text="dns timeout"
+        )
         assert ok and reason == "first_occurrence"
 
     def test_signature_normalizes_digits(self):
@@ -98,14 +105,19 @@ class TestLoopReflectionGate:
 
     def test_gate_never_raises(self):
         gate = LoopReflectionGate()
-        ok, reason = gate.evaluate(None, is_error=True,  # type: ignore[arg-type]
-                                   failure_class=None, error_text=None)  # type: ignore[arg-type]
+        ok, reason = gate.evaluate(
+            None,
+            is_error=True,  # type: ignore[arg-type]
+            failure_class=None,
+            error_text=None,
+        )  # type: ignore[arg-type]
         assert isinstance(ok, bool)
 
 
 # ---------------------------------------------------------------------------
 # Turn correlation context
 # ---------------------------------------------------------------------------
+
 
 class TestCorrelation:
     def test_set_get_reset(self):
@@ -118,6 +130,7 @@ class TestCorrelation:
     @pytest.mark.asyncio
     async def test_propagates_into_gathered_tasks(self):
         import asyncio
+
         set_turn(turn_id="t2", source="discord")
 
         async def child():
@@ -131,12 +144,18 @@ class TestCorrelation:
         import json
 
         from src.audit.logger import AuditLogger
+
         logger = AuditLogger(path=str(tmp_path / "audit.jsonl"))
         set_turn(turn_id="loop:abc:3", source="loop", loop_id="abc", loop_iteration=3)
         await logger.log_execution(
-            user_id="42", user_name="loop", channel_id="ch1",
-            tool_name="run_command", tool_input={"command": "x"},
-            approved=True, result_summary="ok", execution_time_ms=5,
+            user_id="42",
+            user_name="loop",
+            channel_id="ch1",
+            tool_name="run_command",
+            tool_input={"command": "x"},
+            approved=True,
+            result_summary="ok",
+            execution_time_ms=5,
         )
         entry = json.loads((tmp_path / "audit.jsonl").read_text().splitlines()[-1])
         assert entry["turn"]["turn_id"] == "loop:abc:3"
@@ -148,10 +167,13 @@ class TestCorrelation:
 # command_failed classification
 # ---------------------------------------------------------------------------
 
+
 class TestCommandFailedClass:
     CASES = [
-        ("[governor: allowed — high risk, recursive delete]\nScript failed (exit 1):",
-         "command_failed"),
+        (
+            "[governor: allowed — high risk, recursive delete]\nScript failed (exit 1):",
+            "command_failed",
+        ),
         ("Command failed (exit 2):\n/bin/sh: 1: set: Illegal option -o pipefail", "command_failed"),
         ("process exited with code 3", "command_failed"),
         ("Error: HTTP 403: Forbidden\n\n[recovery hint: authentication failure]", "auth"),
@@ -169,6 +191,7 @@ class TestCommandFailedClass:
 # user_content recording
 # ---------------------------------------------------------------------------
 
+
 class _FakeClient:
     """Just enough client surface for _record_user_content."""
 
@@ -182,8 +205,10 @@ class _FakeClient:
         class _Obs:
             trajectory_user_content = enabled
             max_user_content_chars = cap
+
         class _Cfg:
             observability = _Obs()
+
         self.config = _Cfg()
         # P10 migration: _record_user_content delegates to TurnRecorder
         # (narrow-deps since RFC-002 P3)
@@ -222,7 +247,8 @@ class TestUserContentRecording:
     def test_secrets_scrubbed(self):
         turn = TrajectoryTurn()
         _FakeClient()._record_user_content(
-            turn, "use key sk-abcdefghijklmnopqrstuvwx1234 for the api",
+            turn,
+            "use key sk-abcdefghijklmnopqrstuvwx1234 for the api",
         )
         assert "sk-abcdefghijklmnopqrstuvwx1234" not in turn.user_content
 
@@ -235,9 +261,11 @@ class TestUserContentRecording:
 # Tool results persisted into trajectory iterations
 # ---------------------------------------------------------------------------
 
+
 class TestStoredToolResults:
     def test_under_cap_passthrough(self):
         from src.trajectories.saver import stored_tool_results
+
         out = stored_tool_results(
             [{"type": "tool_result", "tool_use_id": "t1", "content": "ok"}],
         )
@@ -245,8 +273,10 @@ class TestStoredToolResults:
 
     def test_caps_with_metadata(self):
         from src.trajectories.saver import stored_tool_results
+
         out = stored_tool_results(
-            [{"tool_use_id": "t1", "content": "x" * 5000}], max_chars=100,
+            [{"tool_use_id": "t1", "content": "x" * 5000}],
+            max_chars=100,
         )
         assert len(out[0]["content"]) == 100
         assert out[0]["truncated"] is True
@@ -254,6 +284,7 @@ class TestStoredToolResults:
 
     def test_skips_non_dicts_and_tolerates_missing_keys(self):
         from src.trajectories.saver import stored_tool_results
+
         out = stored_tool_results(["garbage", None, {}])
         assert out == [{"tool_use_id": "", "content": ""}]
         assert stored_tool_results(None) == []
@@ -301,8 +332,8 @@ class _LoopIterClient:
         self.loop_manager = SimpleNamespace(_loops={})
         self._responses = list(responses)
         self._tool_output = tool_output
-        self.saved = []          # (trajectory, kwargs) per _save_turn_trajectory
-        self.reflected = []      # kwargs per _maybe_loop_reflect
+        self.saved = []  # (trajectory, kwargs) per _save_turn_trajectory
+        self.reflected = []  # kwargs per _maybe_loop_reflect
         self.dispatched = []
 
         async def _chat_with_tools(**kwargs):
@@ -338,9 +369,7 @@ class _LoopIterClient:
                 get_context_compressor=lambda: None,
                 llm_gateway=self._fake_gateway,
                 prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
-                tool_catalog=SimpleNamespace(
-                    merged_definitions=lambda: [{"name": "run_command"}]
-                ),
+                tool_catalog=SimpleNamespace(merged_definitions=lambda: [{"name": "run_command"}]),
                 channel_state=SimpleNamespace(),
                 channel_config=SimpleNamespace(),
                 delivery=SimpleNamespace(),
@@ -368,7 +397,13 @@ class _LoopIterClient:
         return [{"name": "run_command"}]
 
     async def _dispatch_loop_tool(
-        self, tool_name, tool_input, msg_proxy, user_id, *, audit_owned_by_caller=False,
+        self,
+        tool_name,
+        tool_input,
+        msg_proxy,
+        user_id,
+        *,
+        audit_owned_by_caller=False,
     ):
         self.dispatched.append((tool_name, tool_input, user_id, audit_owned_by_caller))
         return self._tool_output
@@ -382,11 +417,10 @@ class _LoopIterClient:
 
 def _tool_call_response(text="", calls=()):
     from types import SimpleNamespace
+
     return SimpleNamespace(
         text=text,
-        tool_calls=[
-            SimpleNamespace(id=i, name=n, input=inp) for (i, n, inp) in calls
-        ],
+        tool_calls=[SimpleNamespace(id=i, name=n, input=inp) for (i, n, inp) in calls],
         input_tokens=10,
         output_tokens=5,
     )
@@ -397,18 +431,25 @@ class TestLoopIterationTrajectory:
     @pytest.mark.parametrize("audit_error", [None, OSError, RuntimeError])
     async def test_persists_tool_calls_and_results(self, audit_error):
         from types import SimpleNamespace
-        fake = _LoopIterClient([
-            _tool_call_response(calls=[("t1", "run_command", {"command": "echo hi"})]),
-            _tool_call_response(text="done"),
-        ])
+
+        fake = _LoopIterClient(
+            [
+                _tool_call_response(calls=[("t1", "run_command", {"command": "echo hi"})]),
+                _tool_call_response(text="done"),
+            ]
+        )
         if audit_error is not None:
             fake.audit.log_event.side_effect = audit_error("audit start unavailable")
             fake.audit.log_execution.side_effect = audit_error("audit finish unavailable")
-        token = set_turn(source="loop", loop_id="l1", loop_iteration=1,
-                         turn_id="loop:l1:1", channel_id="c1")
+        token = set_turn(
+            source="loop", loop_id="l1", loop_iteration=1, turn_id="loop:l1:1", channel_id="c1"
+        )
         try:
             out = await fake._run_loop_iteration(
-                "do the thing", SimpleNamespace(id="c1"), None, "42",
+                "do the thing",
+                SimpleNamespace(id="c1"),
+                None,
+                "42",
             )
         finally:
             reset_turn(token)
@@ -433,7 +474,8 @@ class TestLoopIterationTrajectory:
         # Tool iteration is zero-based within the one-based outer loop iteration.
         for audit_call in (fake.audit.log_event, fake.audit.log_execution):
             assert audit_call.await_args.kwargs["attribution"] == {
-                "call_id": "t1", "iteration": 0,
+                "call_id": "t1",
+                "iteration": 0,
             }
         assert fake.audit.log_event.await_args.kwargs["event_type"] == "loop_tool_start"
         assert fake.audit.log_event.await_args.kwargs["count_as_tool"] is False
@@ -443,6 +485,7 @@ class TestLoopIterationTrajectory:
     @pytest.mark.asyncio
     async def test_results_respect_storage_cap(self):
         from types import SimpleNamespace
+
         fake = _LoopIterClient(
             [
                 _tool_call_response(calls=[("t1", "run_command", {"command": "x"})]),
@@ -451,11 +494,15 @@ class TestLoopIterationTrajectory:
             tool_output="y" * 5000,
             result_cap=100,
         )
-        token = set_turn(source="loop", loop_id="l1", loop_iteration=1,
-                         turn_id="loop:l1:1", channel_id="c1")
+        token = set_turn(
+            source="loop", loop_id="l1", loop_iteration=1, turn_id="loop:l1:1", channel_id="c1"
+        )
         try:
             await fake._run_loop_iteration(
-                "go", SimpleNamespace(id="c1"), None, "42",
+                "go",
+                SimpleNamespace(id="c1"),
+                None,
+                "42",
             )
         finally:
             reset_turn(token)
@@ -472,6 +519,7 @@ class TestLoopIterationTrajectory:
 # Loop manager correlation stamp — first iteration must be :1, not :2
 # ---------------------------------------------------------------------------
 
+
 class TestLoopManagerStamp:
     @pytest.mark.asyncio
     async def test_first_iteration_stamped_one_and_reset_after(self):
@@ -485,8 +533,10 @@ class TestLoopManagerStamp:
 
         class _Chan:
             id = "c9"
+
             def __init__(self):
                 self.send_stamps = []
+
             async def send(self, *a, **k):
                 self.send_stamps.append(get_turn())
 
@@ -498,9 +548,14 @@ class TestLoopManagerStamp:
             return "ok"
 
         lid = mgr.start_loop(
-            goal="g", channel=chan, requester_id="1", requester_name="n",
-            iteration_callback=callback, interval_seconds=10,
-            mode="silent", max_iterations=1,
+            goal="g",
+            channel=chan,
+            requester_id="1",
+            requester_name="n",
+            iteration_callback=callback,
+            interval_seconds=10,
+            mode="silent",
+            max_iterations=1,
         )
         assert not lid.startswith("Error")
         holder["lid"] = lid
@@ -518,6 +573,7 @@ class TestLoopManagerStamp:
 # Agent trajectory saver wiring — the production-orphaned saver
 # ---------------------------------------------------------------------------
 
+
 class TestAgentSaverWiring:
     def test_loop_bridge_forwards_saver(self):
         from src.agents.loop_bridge import LoopAgentBridge
@@ -525,6 +581,7 @@ class TestAgentSaverWiring:
         class RecordingManager:
             def __init__(self):
                 self.kwargs = None
+
             def spawn(self, **kwargs):
                 self.kwargs = kwargs
                 return "agent-1"
@@ -533,10 +590,15 @@ class TestAgentSaverWiring:
         sentinel = object()
         bridge = LoopAgentBridge(mgr, trajectory_saver=sentinel)
         bridge.spawn_agents_for_loop(
-            loop_id="l1", iteration=1, loop_goal="g",
+            loop_id="l1",
+            iteration=1,
+            loop_goal="g",
             tasks=[{"label": "a", "goal": "t"}],
-            channel_id="c", requester_id="u", requester_name="n",
-            iteration_callback=None, tool_executor_callback=None,
+            channel_id="c",
+            requester_id="u",
+            requester_name="n",
+            iteration_callback=None,
+            tool_executor_callback=None,
         )
         assert mgr.kwargs is not None
         assert mgr.kwargs.get("trajectory_saver") is sentinel
@@ -548,9 +610,8 @@ class TestAgentSaverWiring:
         # P5c: body moved to native_tools/agents_tasks.py (host-based)
         from src.discord.native_tools.agents_tasks import AgentTaskTools
 
-        assert (
-            "trajectory_saver=self._agent_trajectory_saver"
-            in inspect.getsource(AgentTaskTools._handle_spawn_agent)
+        assert "trajectory_saver=self._agent_trajectory_saver" in inspect.getsource(
+            AgentTaskTools._handle_spawn_agent
         )
 
 
@@ -559,12 +620,14 @@ def test_tool_iteration_serializes_frozen_context_budget_facts():
 
     from src.trajectories.saver import ToolIteration
 
-    row = asdict(ToolIteration(
-        iteration=1,
-        context_density_milli=609,
-        context_density_source="calibrated",
-        context_primary_chars=193_184,
-    ))
+    row = asdict(
+        ToolIteration(
+            iteration=1,
+            context_density_milli=609,
+            context_density_source="calibrated",
+            context_primary_chars=193_184,
+        )
+    )
     assert row["context_density_milli"] == 609
     assert row["context_density_source"] == "calibrated"
     assert row["context_primary_chars"] == 193_184
