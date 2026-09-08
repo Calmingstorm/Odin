@@ -589,6 +589,7 @@ class TestInvokeSkillTool:
         bot.skill_manager.has_skill = MagicMock(return_value=True)
         bot.skill_manager.execute = AsyncMock(return_value="skill-ran-ok")
         msg_proxy = MagicMock()
+        msg_proxy.allowed_tools = None  # Real loop proxy has no scope override.
         msg_proxy.channel = MagicMock()
         msg_proxy.channel.id = 123
         msg_proxy.channel.send = AsyncMock()
@@ -608,6 +609,7 @@ class TestInvokeSkillTool:
     async def test_dispatch_loop_tool_invoke_skill_missing_name(self):
         bot = _make_bot()
         msg_proxy = MagicMock()
+        msg_proxy.allowed_tools = None
         out = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {},
@@ -621,6 +623,7 @@ class TestInvokeSkillTool:
         bot = _make_bot()
         bot.skill_manager.has_skill = MagicMock(return_value=False)
         msg_proxy = MagicMock()
+        msg_proxy.allowed_tools = None
         out = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {"name": "nope"},
@@ -890,6 +893,7 @@ class TestInvokeSkillTool:
         }
         bot.skill_manager._skills = {"echo_test": fake_skill}
         msg_proxy = MagicMock()
+        msg_proxy.allowed_tools = None
         out = await bot.tool_loop.dispatch_loop_tool(
             "invoke_skill",
             {"name": "echo_test"},

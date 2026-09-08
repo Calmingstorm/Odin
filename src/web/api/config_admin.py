@@ -383,11 +383,28 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         if not isinstance(updates, dict):
             return web.json_response({"error": "expected JSON object"}, status=400)
 
+        # Provisioning is desired state only: ComputerLifecycle owns a deep
+        # startup snapshot, even across disable/enable cycles. Never let this
+        # route bypass the dedicated enable/revoke lifecycle transaction.
+        if "computer" in updates:
+            denied = admin_gate(bot)(request)
+            if denied is not None:
+                return denied
+            if not isinstance(updates["computer"], dict):
+                return web.json_response(
+                    {"error": "computer must be a provisioning object"}, status=400)
+            if "enabled" in updates["computer"]:
+                return web.json_response(
+                    {
+                        "error": "computer.enabled is read-only on this route",
+                        "detail": "Use POST /api/computer/enabled to activate or revoke. "
+                        "Other computer settings may be saved here and require a restart.",
+                    },
+                    status=409,
+                )
         # MCP has a dedicated transactional owner (/api/mcp/*) that keeps
         # disk, bot.config, manager generations, and catalog publication in
-        # one commit. Config Center is deliberately read-only for this section;
-        # accepting it here would persist desired state without reconciling the
-        # live manager.
+        # one commit. Accepting it here would split those truths.
         if "mcp" in updates:
             return web.json_response(
                 {

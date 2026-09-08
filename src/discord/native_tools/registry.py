@@ -33,7 +33,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from ...odin_log import get_logger
 from .skills_tools import (  # noqa: F401 — re-export (P0 pins import SKILL_CRUD_TOOLS from here)
@@ -42,6 +42,9 @@ from .skills_tools import (  # noqa: F401 — re-export (P0 pins import SKILL_CR
 )
 
 log = get_logger("discord")
+
+if TYPE_CHECKING:
+    from ...computer.integration import ComputerIntegration
 
 # How each handler is invoked. The shapes mirror the exact call forms the
 # two old chains used — do not "simplify" a shape without checking both.
@@ -103,6 +106,10 @@ class NativeToolDispatcher:
 
     def handles(self, tool_name: str) -> bool:
         """Native table + skill-domain tools (skill CRUD/meta + user skills)."""
+        if "computer" in self.owners:
+            register_computer_handlers(self)
+            if cast("ComputerIntegration", self.owners["computer"]).reserves_tool(tool_name):
+                return True
         if tool_name in self._handlers:
             return True
         return self.skills.handles(tool_name)
@@ -119,13 +126,33 @@ class NativeToolDispatcher:
         skill_file_delivery: Literal["send", "stage"],
     ) -> tuple[Any, NativeToolEffects]:
         effects = NativeToolEffects()
+        register_computer_handlers(self)
 
-        # Operator-disabled built-in: typed rejection BEFORE any handler —
-        # covers requests assembled before a live disable landed.
+        # Unconditional denial needs no owner/channel lookup. Preserve the
+        # disabled-built-in fast path even for a minimal transport envelope.
         if self.builtin_policy is not None and self.builtin_policy.is_disabled(tool_name):
             from ...tools.builtin_policy import disabled_rejection
 
             return disabled_rejection(tool_name), effects
+
+        # Offer-time filtering is not authority. Enforce inherited scopes for
+        # every native/indirect dispatch, not just the executor's handlers.
+        from ...tools.output_authorization import tool_scope_allows
+        from ...tools.result_validator import ToolResult
+
+        denied = not tool_scope_allows(tool_name)
+        owner = cast("ComputerIntegration | None", self.owners.get("computer"))
+        computer_tool = owner is not None and owner.reserves_tool(tool_name)
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        if computer_tool and channel_id is None:
+            denied = True
+        if computer_tool:
+            assert owner is not None  # computer_tool requires this exact owner.
+            denied = denied or not owner.enabled or not getattr(owner, "grant_allows")(
+                tool_name, user_id, str(channel_id))
+        if denied:
+            return ToolResult(output="Permission denied: restricted tool authority.",
+                              ok=False, error="permission_denied", tool_name=tool_name), effects
 
         # --- registered native handlers ---
         entry = self._handlers.get(tool_name)
@@ -214,3 +241,18 @@ def register_native_handlers(dispatcher: NativeToolDispatcher) -> None:
     d.register("ingest_document", "knowledge", "_handle_ingest_document", "author_input")
     d.register("bulk_ingest_knowledge", "knowledge", "_handle_bulk_ingest", "author_input")
     d.register("set_permission", "channel_ops", "_handle_set_permission", "user_input")
+    register_computer_handlers(d)
+
+
+def register_computer_handlers(dispatcher: NativeToolDispatcher) -> None:
+    """Optional late registration; default-off static handlers stay unchanged."""
+    owner = dispatcher.owners.get("computer")
+    names = ("computer_session", "computer_observe", "computer_act")
+    if owner is None or not getattr(owner, "enabled"):
+        for name in names:
+            if dispatcher._handlers.get(name, (None,))[0] == "computer":
+                del dispatcher._handlers[name]
+        return
+    for name in names:
+        if name not in dispatcher._handlers:
+            dispatcher.register(name, "computer", "_handle_" + name, "input")

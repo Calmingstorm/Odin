@@ -26,14 +26,21 @@ dependencies = [
 pdf = ["PyMuPDF>=1.24.0"]
 # Browser automation (browser_screenshot, browser_click, etc.)
 browser = ["playwright>=1.40.0"]
+# Lazy observation rendering and explicit Linux X11 capture. Neither enables input.
+computer = ["Pillow>=12.3,<13", "python-xlib>=0.33,<1; sys_platform == 'linux'", "dbus-next>=0.2.3,<1; sys_platform == 'linux'"]
 # All optional executor features
-all = ["odin-bot[pdf,browser]"]
+all = ["odin-bot[pdf,browser,computer]"]
 dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "pytest-cov",
     "ruff",
     "aioresponses>=0.7",
+    "Pillow>=12.3,<13",
+    # Computer contract tests import protocol clients, never a real desktop.
+    # Keep these aligned with the computer extra so clean CI .[dev] installs work.
+    "python-xlib>=0.33,<1; sys_platform == 'linux'",
+    "dbus-next>=0.2.3,<1; sys_platform == 'linux'",
     # Type gate (RFC-005): checker + stubs pinned so CI findings are
     # deterministic — upgrades are deliberate PRs, never ambient drift.
     "mypy==2.1.0",
@@ -72,3 +79,6 @@ build-backend = "setuptools.build_meta"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["src*"]
+
+[tool.setuptools.package-data]
+"src.computer.runtime" = ["assets/*", "assets/services/*"]

@@ -1,0 +1,28 @@
+# Build this optional companion against the target distribution's exact KWin
+# development package. KWIN_PLUGIN_PATH is the absolute target's Qt6 plugin
+# directory plus /kwin/plugins/odin-scope.so, never a guessed host path.
+# Invoke nfpm for one format with KWIN_DEPENDENCY set to the exact distro
+# dependency expression, e.g. kwin-wayland (= 4:6.3.6-1) for Debian or
+# kwin-libs = 6.7.4-1.fc43 for RPM. The main package never installs this itself.
+name: odin-kwin-scope
+arch: amd64
+platform: linux
+version: ${VERSION}
+version_schema: semver
+maintainer: Odin Maintainers <odin@localhost>
+description: |
+  Optional in-process KWin application-scope evidence provider for Odin.
+  Version-bound private compositor ABI; explicit operator loading required.
+license: GPL-2.0-or-later
+depends:
+  - odin
+  - ${KWIN_DEPENDENCY}
+contents:
+  - src: ./build/kwin-scope/odin-scope.so
+    dst: ${KWIN_PLUGIN_PATH}
+    file_info:
+      owner: root
+      group: root
+      mode: 0644
+  - src: ./assets/kwin-scope/README.md
+    dst: /usr/share/doc/odin-kwin-scope/README.md

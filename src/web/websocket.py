@@ -570,6 +570,9 @@ class WebSocketManager:
                 allowed_tools=allowed_tools, tier=tier,
                 token_allowed_hosts=token_hosts,
                 token_default_host=token_default_host,
+                computer_binding=(getattr(ws, "_odin_session_id", ""),
+                                  lambda: not ws.closed and self._policy_authorized(ws))
+                if getattr(ws, "_odin_session_managed", False) and tier == "admin" else None,
             )
             resp = {
                 "type": "chat_response",

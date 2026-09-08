@@ -1,0 +1,117 @@
+{
+  "production_admitted": false,
+  "public_fixture_note": "Ephemeral challenge and focus identities replaced with stable fixture markers, not live protocol values. Plugin mapping addresses omitted; permissions, offsets, results and source digests retained.",
+  "input_attempted": true,
+  "stage": "complete",
+  "kwin_pid": 27,
+  "kwin_owner": ":1.1",
+  "kwin_executable": "/usr/bin/kwin_wayland",
+  "load_return": true,
+  "scope_owner": ":1.1",
+  "scope_pid": 27,
+  "scope_uid": 0,
+  "identity": {
+    "backend": "native",
+    "backend_class": "KWinVirtualBackend",
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
+    "compositor_name": "kwin_wayland",
+    "compositor_version": "6.7.4",
+    "native_wayland": true
+  },
+  "receiver_pid": 30,
+  "source_note": "Synthetic protocol source binding for scope-only smoke, not a portal stream or input admission.",
+  "snapshot": {
+    "authoritative": "wl_client credentials",
+    "bounds": {
+      "height": 350,
+      "width": 500,
+      "x": 150,
+      "y": 139
+    },
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
+    "focus_serial": 3,
+    "focus_token": "FIXTURE_FOCUS_SNAPSHOT_NOT_LIVE",
+    "modal": false,
+    "native_wayland": true,
+    "pid": 30,
+    "protocol": 1,
+    "safe_focus": true,
+    "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "title": "Odin read-only native scope smoke",
+    "wm_class": "receiver.py"
+  },
+  "loaded_plugin_mapping": [
+    "FIXTURE_MAPPING r-xp 00000000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
+    "FIXTURE_MAPPING r--p 00005000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
+    "FIXTURE_MAPPING r--p 0000b000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
+    "FIXTURE_MAPPING rw-p 0000c000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so"
+  ],
+  "input_note": "Explicit scratch EI helper only in isolated lab; NOT production admission or EOF qualification.",
+  "menu_snapshot": {
+    "authoritative": "wl_client credentials",
+    "bounds": {
+      "height": 35,
+      "width": 241,
+      "x": 401,
+      "y": 315
+    },
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
+    "focus_serial": 4,
+    "focus_token": "FIXTURE_FOCUS_MENU_NOT_LIVE",
+    "modal": false,
+    "native_wayland": true,
+    "pid": 30,
+    "protocol": 1,
+    "safe_focus": true,
+    "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "title": "Odin read-only native scope smoke",
+    "wm_class": "receiver.py"
+  },
+  "menu_events": [
+    {
+      "event": "button_press",
+      "button": 3
+    },
+    {
+      "event": "menu_opened"
+    },
+    {
+      "event": "menu_button_release",
+      "button": 3
+    },
+    {
+      "event": "menu_button_release",
+      "button": 1
+    },
+    {
+      "event": "item_selected"
+    }
+  ],
+  "restored_snapshot": {
+    "authoritative": "wl_client credentials",
+    "bounds": {
+      "height": 350,
+      "width": 500,
+      "x": 150,
+      "y": 139
+    },
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
+    "focus_serial": 5,
+    "focus_token": "FIXTURE_FOCUS_RESTORED_NOT_LIVE",
+    "modal": false,
+    "native_wayland": true,
+    "pid": 30,
+    "protocol": 1,
+    "safe_focus": true,
+    "source_digest": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+    "title": "Odin read-only native scope smoke",
+    "wm_class": "receiver.py"
+  },
+  "native_menu_scope_pass": true,
+  "unload_return": [],
+  "scope_load_smoke_pass": true,
+  "child_exit_codes": [
+    15,
+    -15
+  ]
+}

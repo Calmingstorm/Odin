@@ -94,9 +94,7 @@ def test_rejects_uncreatable_directory(tmp_path: Path, fake_install: Path) -> No
     self-provisioned, so it fails closed. (A missing workspace with a writable
     parent is created instead — see the upgrade-seamlessness tests.)"""
     with pytest.raises(WorkspaceError, match="could not be created"):
-        resolve_workspace(
-            str(tmp_path / "no-parent" / "nope"), protected_roots=[str(fake_install)]
-        )
+        resolve_workspace(str(tmp_path / "no-parent" / "nope"), protected_roots=[str(fake_install)])
 
 
 def test_rejects_file_masquerading_as_directory(tmp_path: Path, fake_install: Path) -> None:
@@ -354,7 +352,9 @@ def test_discord_execution_path_excludes_the_legacy_dag_surfaces(
     )
     result = subprocess.run(
         [sys.executable, "-c", probe],
-        capture_output=True, text=True, timeout=120,
+        capture_output=True,
+        text=True,
+        timeout=120,
         cwd=str(Path(__file__).resolve().parents[1]),
     )
     assert result.returncode == 0, result.stderr[-500:]
@@ -363,7 +363,6 @@ def test_discord_execution_path_excludes_the_legacy_dag_surfaces(
         f"the Discord tool-loop path imports {leaked}; those surfaces inherit "
         "the application cwd and would reopen the wipe mechanism"
     )
-
 
 
 def _executor_with_workspace(workspace: Path, protected: Path):
@@ -711,7 +710,7 @@ def test_memory_path_directory_is_protected_when_other_paths_relocate(tmp_path: 
     live_data = tmp_path / "var-lib-odin"
     live_data.mkdir()
     (live_data / "memory.json").write_text("{}", encoding="utf-8")
-    workspace = live_data / "workspace"       # beside the live memory file
+    workspace = live_data / "workspace"  # beside the live memory file
     workspace.mkdir(mode=0o700)
 
     # audit + trajectories deliberately relocated away from the data root
@@ -742,8 +741,8 @@ def test_path_classification_is_declared_not_guessed(tmp_path: Path) -> None:
     audit_dir.mkdir()
     executor = ToolExecutor(
         config=ToolsConfig(
-            audit_log_path=str(audit_dir / "audit.jsonl"),   # declared FILE
-            trajectory_path=str(dotted_dir),                 # declared DIRECTORY
+            audit_log_path=str(audit_dir / "audit.jsonl"),  # declared FILE
+            trajectory_path=str(dotted_dir),  # declared DIRECTORY
         )
     )
     roots = [Path(r).resolve() for r in executor._protected_roots()]
@@ -786,16 +785,12 @@ async def test_mode_change_after_first_command_is_caught(
     workspace.chmod(0o755)
     try:
         with pytest.raises(WorkspaceError, match="mode"):
-            await executor._exec_command(
-                "localhost", "pwd", timeout=30, use_workspace=True
-            )
+            await executor._exec_command("localhost", "pwd", timeout=30, use_workspace=True)
     finally:
         workspace.chmod(0o700)
 
 
-async def test_background_spawn_revalidates_too(
-    fake_install: Path, workspace: Path
-) -> None:
+async def test_background_spawn_revalidates_too(fake_install: Path, workspace: Path) -> None:
     """Verification must bind to background spawns as well, or manage_process
     becomes the surviving route past a swapped workspace."""
     executor = _executor_with_workspace(workspace, fake_install)
@@ -825,7 +820,7 @@ def test_leaf_symlinked_data_paths_protect_the_target(tmp_path: Path) -> None:
     (aliases / "memory.json").symlink_to(live / "memory.json")
     (aliases / "audit.jsonl").symlink_to(live / "audit.jsonl")
 
-    workspace = live / "workspace"          # beside the REAL data
+    workspace = live / "workspace"  # beside the REAL data
     workspace.mkdir(mode=0o700)
 
     executor = ToolExecutor(
@@ -883,9 +878,7 @@ def test_workspace_metrics_never_raise_on_an_invalid_workspace(
     assert executor.get_workspace_metrics() == {}
 
 
-def test_workspace_gauges_render_for_prometheus(
-    workspace: Path, fake_install: Path
-) -> None:
+def test_workspace_gauges_render_for_prometheus(workspace: Path, fake_install: Path) -> None:
     from src.health.metrics import MetricsCollector
 
     executor = _executor_with_workspace(workspace, fake_install)
@@ -901,9 +894,9 @@ def test_workspace_gauges_render_for_prometheus(
         "odin_workspace_free_inodes",
     ):
         assert f"# TYPE {name} gauge" in rendered
-        assert any(
-            line.startswith(f"{name} ") for line in rendered.splitlines()
-        ), f"{name} value line missing"
+        assert any(line.startswith(f"{name} ") for line in rendered.splitlines()), (
+            f"{name} value line missing"
+        )
 
 
 def test_workspace_gauges_tolerate_partial_and_failing_sources() -> None:
@@ -995,9 +988,6 @@ def test_workspace_is_self_provisioned_when_the_parent_is_writable(
     assert stat.S_IMODE(target.stat().st_mode) == 0o700, "must not inherit a loose umask"
 
 
-
-
-
 def test_unwritable_parent_still_fails_closed_with_actionable_guidance(
     tmp_path: Path, fake_install: Path
 ) -> None:
@@ -1014,14 +1004,10 @@ def test_unwritable_parent_still_fails_closed_with_actionable_guidance(
     assert "install -d -m 0700" in message, "the error must be actionable"
 
 
-def test_creation_can_be_disabled_for_strict_callers(
-    tmp_path: Path, fake_install: Path
-) -> None:
+def test_creation_can_be_disabled_for_strict_callers(tmp_path: Path, fake_install: Path) -> None:
     target = tmp_path / "never-created"
     with pytest.raises(WorkspaceError, match="could not be created"):
-        resolve_workspace(
-            str(target), protected_roots=[str(fake_install)], create_if_missing=False
-        )
+        resolve_workspace(str(target), protected_roots=[str(fake_install)], create_if_missing=False)
     assert not target.exists()
 
 
@@ -1106,6 +1092,7 @@ def test_incus_deployment_path_provisions_the_workspace() -> None:
 
 def _fake_bot(workspace: Path, install: Path):
     """A bot-shaped object exposing only what the preflight reads."""
+
     class _Tools:
         local_working_dir = str(workspace)
         audit_log_path = str(install / "data" / "audit.jsonl")
@@ -1205,9 +1192,7 @@ def test_legacy_source_config_falls_back_when_var_lib_cannot_be_provisioned(
         return real_provision(configured, **kwargs)
 
     monkeypatch.setattr(ws_module, "provision_workspace", _default_unavailable)
-    result = ws_module.provision_startup_workspace(
-        tools, protected_roots=[str(fake_install)]
-    )
+    result = ws_module.provision_startup_workspace(tools, protected_roots=[str(fake_install)])
 
     assert result == (home / ".odin-workspace").resolve()
     assert stat.S_IMODE(result.stat().st_mode) == 0o700
@@ -1220,6 +1205,7 @@ def test_explicit_workspace_never_uses_the_legacy_source_fallback(
     """Only a missing pre-feature field migrates; an explicit operator value is
     authoritative even when unusable."""
     import src.tools.workspace as ws_module
+
     home = tmp_path / "home"
     home.mkdir()
     monkeypatch.setenv("HOME", str(home))
@@ -1234,9 +1220,7 @@ def test_explicit_workspace_never_uses_the_legacy_source_fallback(
 
     monkeypatch.setattr(ws_module, "provision_workspace", _unavailable)
     with pytest.raises(WorkspaceError, match="operator workspace unavailable"):
-        ws_module.provision_startup_workspace(
-            tools, protected_roots=[str(fake_install)]
-        )
+        ws_module.provision_startup_workspace(tools, protected_roots=[str(fake_install)])
     assert tools.local_working_dir == str(explicit)
     assert not (home / ".odin-workspace").exists()
 
@@ -1249,9 +1233,7 @@ def test_startup_migration_provisions_before_commands_are_served() -> None:
     startup migration in the incoming code can bootstrap the workspace, because
     that runs after re-exec however the update arrived.
     """
-    main_src = (Path(__file__).resolve().parents[1] / "src/__main__.py").read_text(
-        encoding="utf-8"
-    )
+    main_src = (Path(__file__).resolve().parents[1] / "src/__main__.py").read_text(encoding="utf-8")
     assert "provision_startup_workspace(" in main_src, "startup must provision the workspace"
     provision_at = main_src.index("provision_startup_workspace(")
     bot_at = main_src.index("bot = OdinBot(config)")
@@ -1601,8 +1583,11 @@ async def test_git_ops_with_omitted_repo_keeps_process_cwd_semantics(
     """
     repo = tmp_path / "a-real-repo"
     repo.mkdir()
-    for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
-                ["git", "config", "user.name", "t"]):
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+    ):
         subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
     (repo / "tracked.txt").write_text("x", encoding="utf-8")
     monkeypatch.chdir(repo)
@@ -1626,8 +1611,11 @@ async def test_an_unusable_workspace_does_not_disable_unrelated_tools(
     """
     repo = tmp_path / "repo"
     repo.mkdir()
-    for cmd in (["git", "init", "-q"], ["git", "config", "user.email", "t@t"],
-                ["git", "config", "user.name", "t"]):
+    for cmd in (
+        ["git", "init", "-q"],
+        ["git", "config", "user.email", "t@t"],
+        ["git", "config", "user.name", "t"],
+    ):
         subprocess.run(cmd, cwd=repo, check=True, capture_output=True)
     monkeypatch.chdir(repo)
 
@@ -1724,6 +1712,7 @@ def test_every_declared_state_path_is_covered(tmp_path: Path) -> None:
         "permissions.overrides_path": (tmp_path / "s-perm" / "p.json", tmp_path / "s-perm"),
         "openai_codex.credentials_path": (tmp_path / "s-codex" / "c.json", tmp_path / "s-codex"),
         "attachments.temp_directory": (tmp_path / "s-att", tmp_path / "s-att"),
+        "computer.storage_dir": (tmp_path / "s-computer", tmp_path / "s-computer"),
     }
     assert set(relocations) == {dotted for dotted, _ in _DECLARED_STATE_PATHS}, (
         "a declared state path has no relocation case — add one so protection "
@@ -1912,7 +1901,6 @@ def test_repeated_scrapes_inside_the_ttl_do_not_re_walk(
         assert walks == 1, "scrapes inside the TTL must reuse the cached walk"
 
 
-
 # --- The complete set of local-execution routes, held closed -----------------
 
 # Every module in src/ that spawns a local process, and why it does or does not
@@ -1940,7 +1928,8 @@ _SPAWN_PRIMITIVES = {
 _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     # --- uses the workspace -------------------------------------------------
     "src/tools/ssh.py": "run_local_command — takes cwd from the caller; THE seam",
-    "src/tools/process_manager.py": "background manage_process — resolves workspace per spawn",
+    "src/tools/local_supervisor.py": "fixed absolute -I helper; forwards validated cwd/env",
+    "src/tools/local_supervisor_worker.py": "shell owner inherits caller-validated cwd/env",
     # --- deliberately does not ----------------------------------------------
     "src/tools/ssh_pool.py": "argv-form ssh control-socket management, no user command text",
     "src/tools/hosts/control.py": (
@@ -1954,7 +1943,66 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
     ),
     "src/tools/skill_manager.py": "argv-form `pip install <specs>`, no user-supplied relative path",
     "src/tools/workspace.py": "`sudo -n install -d` provisioning the workspace itself",
+    # Fixed-profile experimental desktop runtime, not arbitrary command routes.
+    # This is cwd/argv accounting, NOT approval of desktop safety or API wiring.
+    "src/computer/runtime/backend.py": (
+        "enabled-only launch of an absolute supervisor.py via isolated Python (-I), "
+        "validated session/profile and clean env; inherits cwd but accepts no shell "
+        "or relative user path; input is confined by the owned private sandbox"
+    ),
+    "src/computer/accessibility_status.py": (
+        "read-only fixed loginctl and busctl property probes with bounded output/time, "
+        "minimal environment and operator UID binding; optional explicit sudo transport; "
+        "no shell, model command, desktop enumeration or relative workspace path"
+    ),
+    "src/computer/runtime/recovery.py": (
+        "read-only systemctl show with exact durable owned unit identity and fixed argv; "
+        "no model command, no relative path, no input or termination"
+    ),
+    "src/computer/runtime/x11_attached.py": (
+        "fixed absolute -I capture/guardian helper paths, operator-configured explicit "
+        "display/auth with clean env and optional explicit sudo; no shell or model cwd"
+    ),
+    "src/computer/runtime/x11_guardian.py": (
+        "fixed absolute -I injector helper with private socket, finite lease and "
+        "owned input ledger; no model command, arbitrary executable or relative path"
+    ),
+    "src/computer/runtime/supervisor.py": (
+        "fixed systemd-run/bwrap profile and systemctl control argv (optional sudo -n); "
+        "validated generated unit names, clean env, no user command; host control "
+        "processes inherit cwd, sandbox profile explicitly chdirs to /workspace"
+    ),
+    "src/computer/runtime/worker.py": (
+        "internal spawn helper called only for fixed dbus-daemon/Xvfb/openbox argv; "
+        "requires /runtime and uid 65534, inherits sandbox /workspace cwd and fixed "
+        "env; wire operations do not expose spawn or arbitrary command execution"
+    ),
+    "src/computer/runtime/primitives.py": (
+        "fixed absolute xdotool plus allowlisted drawing/xed launch argv, explicit "
+        "/workspace cwd and :77 env; input uses validated arguments and type -- text, "
+        "not a shell; containment depends on worker/profile, not this helper alone"
+    ),
     "src/web/api/self_update.py": "argv-form git/gh during self-update, inside the install",
+    "src/computer/runtime/wayland_guardian.py": (
+        "operator-pinned trusted native guardian and inherited EI FD; absolute argv, "
+        "sanitized environment, UID drop, no shell or arbitrary command; writes only IPC"
+    ),
+    "src/computer/runtime/wayland_portal.py": (
+        "fixed absolute system-Python helper, private socketpair, explicit bus/UID binding; "
+        "no arbitrary program or shell, reads source only and writes bounded IPC"
+    ),
+    "src/computer/runtime/wayland_probe.py": (
+        "fixed installed inert probe gate with generated private marker; absolute helper "
+        "argv, private tempdir and bwrap-owned cwd, no caller-provided commands"
+    ),
+    "src/computer/runtime/assets/wayland_probe_gate.py": (
+        "private parent-owned launch gate for fixed bwrap argv; subreaper and parent-death "
+        "fence; launched workload has private namespaces and /home/probe cwd"
+    ),
+    "src/computer/runtime/assets/wayland_probe_session.py": (
+        "only inside verified private bwrap namespace, fixed GNOME/Xvfb/GTK probe argv; "
+        "private /home/probe cwd, no host display/bus/devices or arbitrary command input"
+    ),
     "src/packaging/validate.py": "build-time packaging check, not a runtime path",
     "src/restart.py": "os.execve re-exec of Odin himself",
     # --- legacy CLI surface, unreachable from Discord (pinned separately) ----
@@ -2078,7 +2126,6 @@ _CLASSIFIED_COMMAND_CALLERS: dict[tuple[str, str], str] = {
     ("src/tools/handlers/browser_web.py", "_handle_http_probe"): "fixed curl argv",
     ("src/tools/handlers/files_docs.py", "_handle_read_file"): "reads a caller-given path",
     ("src/tools/handlers/files_docs.py", "_handle_apply_patch"): "explicit absolute root enforced",
-
     # analyze_pdf and analyze_image no longer appear here: they read host
     # binaries through ssh.read_binary_file, not the text command pipeline,
     # because base64 over that pipeline was truncated at MAX_OUTPUT_CHARS
@@ -2171,8 +2218,7 @@ def test_every_command_caller_is_classified() -> None:
             )
         elif expected == "CONDITIONAL":
             assert calls and all(c == "dynamic" for c in calls), (
-                f"{key[0]}::{key[1]}: every call must forward the upstream "
-                f"decision, got {calls}"
+                f"{key[0]}::{key[1]}: every call must forward the upstream decision, got {calls}"
             )
         else:
             assert all(c == "none" for c in calls), (
@@ -2190,10 +2236,13 @@ async def test_validate_action_command_check_runs_in_the_workspace(
     monkeypatch.chdir(fake_install)
     executor = _executor_with_workspace(workspace, fake_install)
 
-    await executor.execute("validate_action", {
-        "host": "localhost",
-        "checks": [{"type": "command", "target": "touch from-validate"}],
-    })
+    await executor.execute(
+        "validate_action",
+        {
+            "host": "localhost",
+            "checks": [{"type": "command", "target": "touch from-validate"}],
+        },
+    )
     assert (workspace / "from-validate").exists(), "the check ran in the workspace"
     assert not (fake_install / "from-validate").exists(), "and NOT in the install"
 
@@ -2205,10 +2254,13 @@ async def test_validate_action_fails_closed_on_an_invalid_workspace(
     monkeypatch.chdir(fake_install)
     executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
 
-    result = await executor.execute("validate_action", {
-        "host": "localhost",
-        "checks": [{"type": "command", "target": "touch should-not-run"}],
-    })
+    result = await executor.execute(
+        "validate_action",
+        {
+            "host": "localhost",
+            "checks": [{"type": "command", "target": "touch should-not-run"}],
+        },
+    )
     assert not (fake_install / "should-not-run").exists()
     assert not (workspace_leaked := (tmp_path / "should-not-run")).exists(), workspace_leaked
     assert result is not None
@@ -2305,6 +2357,7 @@ def test_usage_refresh_is_single_flight(fake_install: Path, workspace: Path) -> 
     executor._workspace_usage_refreshing = True  # a walk is already in flight
 
     started = []
+
     def _record(**kw):
         started.append(kw)
         return _NoThread()
@@ -2437,9 +2490,7 @@ def test_usage_refresh_survives_a_failing_walk(fake_install: Path, workspace: Pa
     assert _metrics_after_refresh(executor)["files"] == 1
 
 
-def test_usage_refresh_skips_files_it_cannot_stat(
-    fake_install: Path, workspace: Path
-) -> None:
+def test_usage_refresh_skips_files_it_cannot_stat(fake_install: Path, workspace: Path) -> None:
     """A file that vanishes mid-walk is counted but not sized, rather than
     aborting the whole scan."""
     executor = _executor_with_workspace(workspace, fake_install)
@@ -2476,9 +2527,7 @@ def test_startup_diagnostic_reports_an_unusable_workspace(tmp_path: Path) -> Non
     assert "install -d -m 0700" in result.recommendation, "must name the fix"
 
 
-def test_startup_diagnostic_passes_for_a_usable_workspace(
-    tmp_path: Path, workspace: Path
-) -> None:
+def test_startup_diagnostic_passes_for_a_usable_workspace(tmp_path: Path, workspace: Path) -> None:
     from src.config.schema import ToolsConfig
     from src.health.startup import check_local_workspace
 
@@ -2530,7 +2579,6 @@ def test_startup_report_includes_the_workspace_check() -> None:
     assert "local_workspace" in names, f"check not run; got {names}"
 
 
-
 def test_tracked_config_template_documents_the_workspace() -> None:
     """CONTRIBUTING is binding: config examples stay aligned with reality. An
     undocumented knob is undiscoverable precisely when an operator needs it —
@@ -2542,6 +2590,7 @@ def test_tracked_config_template_documents_the_workspace() -> None:
     import re as _re
 
     import yaml
+
     for name in set(_re.findall(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}", template)):
         os.environ.setdefault(name, "test-value")
     parsed = yaml.safe_load(template)
@@ -2569,16 +2618,19 @@ async def test_fixed_shape_validation_checks_survive_an_unusable_workspace(
     monkeypatch.chdir(fake_install)
     executor = _executor_with_workspace(tmp_path / "no-parent" / "ws", fake_install)
 
-    result = await executor.execute("validate_action", {
-        "host": "localhost",
-        "checks": [
-            # Fixed-shape probes: must EXECUTE despite the broken workspace.
-            {"type": "process", "target": "init", "severity": "warn"},
-            {"type": "port", "target": "1", "severity": "warn"},
-            # Raw user command text: must fail closed, visibly.
-            {"type": "command", "target": "touch should-not-run"},
-        ],
-    })
+    result = await executor.execute(
+        "validate_action",
+        {
+            "host": "localhost",
+            "checks": [
+                # Fixed-shape probes: must EXECUTE despite the broken workspace.
+                {"type": "process", "target": "init", "severity": "warn"},
+                {"type": "port", "target": "1", "severity": "warn"},
+                # Raw user command text: must fail closed, visibly.
+                {"type": "command", "target": "touch should-not-run"},
+            ],
+        },
+    )
     report = str(result.output)
     assert "local_working_dir" in report, "the command check must fail closed, visibly"
     # The probes produced real pass/fail verdicts rather than workspace errors:
@@ -2594,10 +2646,13 @@ async def test_command_checks_still_run_in_the_workspace_when_it_is_valid(
     never — type=command checks keep the round-10 behaviour."""
     monkeypatch.chdir(fake_install)
     executor = _executor_with_workspace(workspace, fake_install)
-    await executor.execute("validate_action", {
-        "host": "localhost",
-        "checks": [{"type": "command", "target": "touch from-conditional"}],
-    })
+    await executor.execute(
+        "validate_action",
+        {
+            "host": "localhost",
+            "checks": [{"type": "command", "target": "touch from-conditional"}],
+        },
+    )
     assert (workspace / "from-conditional").exists()
     assert not (fake_install / "from-conditional").exists()
 
@@ -2610,10 +2665,13 @@ async def test_port_probe_target_cannot_execute_in_the_inherited_cwd(
     """
     monkeypatch.chdir(fake_install)
     executor = _executor_with_workspace(workspace, fake_install)
-    await executor.execute("validate_action", {
-        "host": "localhost",
-        "checks": [{"type": "port", "target": "$(touch injected-by-port):1"}],
-    })
+    await executor.execute(
+        "validate_action",
+        {
+            "host": "localhost",
+            "checks": [{"type": "port", "target": "$(touch injected-by-port):1"}],
+        },
+    )
     assert not (fake_install / "injected-by-port").exists()
     assert not (workspace / "injected-by-port").exists()
 
@@ -2655,9 +2713,7 @@ def test_symlinked_ancestor_of_the_launch_config_is_protected(tmp_path: Path) ->
         set_active_config_path(previous)
 
 
-def test_usage_refresh_flag_never_survives_the_thread(
-    fake_install: Path, workspace: Path
-) -> None:
+def test_usage_refresh_flag_never_survives_the_thread(fake_install: Path, workspace: Path) -> None:
     """Cross-review of Odin's round-12 single-flight fix.
 
     Publishing the cache and clearing the flag as one locked transition is
@@ -2712,9 +2768,7 @@ def test_usage_refresh_flag_never_survives_the_thread(
     assert _metrics_after_refresh(executor)["files"] == 1
 
 
-def test_usage_cache_and_flag_are_published_atomically(
-    fake_install: Path, workspace: Path
-) -> None:
+def test_usage_cache_and_flag_are_published_atomically(fake_install: Path, workspace: Path) -> None:
     """Odin's finding: a scrape landing between 'flag cleared' and 'cache
     published' starts a redundant walk. The fresh cache must be visible to any
     observer that sees the flag cleared."""
@@ -2776,9 +2830,7 @@ def test_legacy_fallback_is_visible_not_silent(
     workspace = provision_startup_workspace(
         legacy,
         protected_roots=[str(tmp_path / "install")],
-        on_fallback=lambda path, configured, reason: seen.append(
-            (path, configured, str(reason))
-        ),
+        on_fallback=lambda path, configured, reason: seen.append((path, configured, str(reason))),
     )
 
     assert workspace == (home / ".odin-workspace").resolve()

@@ -1,0 +1,432 @@
+# Local deploy and operator testing (PR350)
+
+> Historical engineering handoff, not current operator instructions. Use
+> [OPERATOR.md](OPERATOR.md) for R11's implementation contract and setup.
+> App-specific refusals below describe the earlier revision only. Authorization
+> and machine measurements in this record do not apply to another user's desktop.
+
+This is a manual handoff, not a deployment record. The operator deploys the reviewed
+revision and authorizes any service restart externally. Nothing in this runbook
+automatically deploys, edits live configuration, enables input, or runs a pipeline.
+The development driver has passed a scratch Xed save on the actual main session
+with exact before/after restoration; see R5-MAIN-SESSION.md. This does not establish
+that the externally deployed service works. Deployment QA remains operator-owned.
+R6 additionally completed main-session Inkscape drawing/save, but both scratch
+CLI runs reported restoration failures; parent restored the complete baseline.
+Those historical failures remain recorded in MAIN-SESSION-R6.md. The operator confirmed
+the wake/topology incident was a longstanding Cinnamon issue on that test machine.
+R7 separates production owned-resource cleanup from the opt-in scratch harness's
+stricter exact-baseline restoration. See the R7 evidence before repeating a test.
+Final consolidation and the fresh validation limitations are recorded in
+[FINAL-CONSOLIDATION.md](FINAL-CONSOLIDATION.md). The ordinary suite and local
+lint/type/UI checks pass, but the coverage-instrumented run and coverage ratchet
+do not. This handoff is not an all-gates-green or merge/release approval.
+
+## Start here: first use without the build history
+
+For `.deb` installs, first read [PACKAGING.md](PACKAGING.md): the package provisions
+the Python extras, private state, matching guardian and inert system extension
+files. The manual source checklist below is not a second package-install recipe.
+APT recommendations supply available computer OS dependencies by default;
+headless installs can use `--no-install-recommends`. Target selection, desktop
+grants, extension activation and computer enablement remain explicit choices.
+
+For help on **your own screen**, use target **B, existing-session X11**, or
+**C, existing-session Wayland**, matching your actual desktop, below.
+Target A opens an isolated application, not your desktop. Choose and provision the
+target before your external deployment/restart, leave it disabled, then follow
+section 3. No developer feasibility script is part of ordinary operator setup.
+
+The safe first test is a new blank Xed document, a short unsaved note, and Stop.
+Keep **System > Computer** open under the same authenticated owner as the task.
+Check the displayed Owner and Session; this inspector selects that owner's latest
+local session, not another administrator's task. Using WebUI chat and its inspector
+under the same login avoids a Discord/WebUI identity mismatch. Keep the global
+administrator **Disable computer use** control available as well.
+
+First-deploy prerequisites are independent: installed runtime/assets and dependencies,
+private service-owned storage, explicit display/monitor access, foreground tool
+authorization, supported native-image transport, and a focused qualified application.
+An Enabled label proves none of the last three. The checklist below deliberately
+keeps these separate rather than treating a successful toggle as acceptance.
+
+## First increment and evidence boundary
+
+**Before service start or exposure, set a strong, private `web.api_token`.**
+With empty `web.api_token`, no `web.api_tokens` entries and no managed tokens,
+the general API authentication gate is disabled and routes relying on it are
+unauthenticated. Desktop observation and stored evidence are sensitive: computer
+routes separately require an authenticated admin identity, but that does not
+secure the rest of a tokenless installation. See [the installation security
+warning](PACKAGING.md) and restrict network exposure before testing.
+
+Computer use is **disabled by default**. It adds `computer_session`,
+`computer_observe`, and `computer_act` to ordinary authorized foreground turns.
+All usual tools remain available under their existing permissions, including
+during, after, or following failure of a computer task. This is not a chat mode.
+
+| Surface | Supported scope and limitations |
+| --- | --- |
+| Isolated X11 | Fixed Drawing and Xed profiles in an owned disposable desktop. Native-model Xed save/close/reopen was demonstrated; Drawing save/reopen and the 30-task corpus use deterministic native GUI drivers. |
+| Corpus | **27/30 distinct isolated tasks**: Xed 14/15, Drawing 13/15. Unicode/tab fidelity, text annotation and selection move failed. This is not a 90% general model success rate. |
+| Existing X11 | Explicitly granted monitor capture; input to focused, identity-verified installed native Xed, Inkscape, and Writer. The operator opens/focuses the app; Odin does not launch or close attached applications. Profile eligibility is not task qualification. |
+| Qualified work | Inkscape: actual model drew and GUI-saved a recognizable three-part house as vector SVG; independent shape, raster and visual review passed in R6. Writer: R7 deterministic GUI keyboard-only short note, paragraph break, bold formatting and ODT save passed. See application reports for exact fixture conditions and limits. |
+| Not offered | Calc/Draw and the old generic `libreoffice` profile are refused, not aliases. Writer open/new document, close/reopen and pointer/menu actions are refused. Browsers, terminals, games, arbitrary apps, macros and application extensions are not input targets. Inkscape disk-close/reopen is not qualified. |
+| Attached Drawing | Capture-only. Interpreter/script argv cannot establish trusted executed-script identity, so Drawing input is refused. Isolated Drawing is unaffected. |
+| Shared input | Pointer and focus are shared, not independent. The pointer stays where input moved it. Busy input is refused; same-key overlap and racing synthetic clients are not safely separable. Stop is not a hard real-time server-hang guarantee. |
+| Attached text | Printable ASCII using the existing keymap only. Send Return and Tab as separate key actions, not embedded text. No clipboard/keymap changes; do not promise Unicode fidelity. |
+| Application boundary | No arbitrary apps, terminals, security/password dialogs, or Odin WebUI control. Unknown focus/modal/source evidence denies input. |
+| Wayland | Production portal/PipeWire/libei adapter, with per-session behavioral release qualification. Stock Debian GNOME Shell 48.7 / Mutter 48.7 passed native-headless and nested lifecycle tests. Actual controller completed native Inkscape rectangle drawing and Ctrl+S into an operator-opened scratch SVG. Other Wayland apps and all dialogs are not offered. See the R8 runbook and evidence limits below. |
+
+Private cross-UID X11 testing demonstrated actual native Xed actions and owned
+release through a distinct sudo wrapper. Its root-controller fixture does not
+prove a particular unprivileged service's sudo/PAM policy or physical-input safety.
+Capture permission is monitor-wide, not an application-only privacy boundary.
+Use short typing chunks and short explicit file paths: the independently enforced
+native input lease is two seconds, not permission to finish arbitrarily long text.
+Pointer actions still require identical raster grounding before dispatch. Attached
+X11 typing/key actions instead require the same freshly verified native
+process/window/focus/modal/source binding, so a blinking caret alone does not
+prevent typing. This intentionally cannot guarantee that an internal widget,
+selection or document content remained unchanged; shared focus is an accepted
+limitation. Refresh observations and decide anew, never replay an unknown action. These
+limits are operationally significant, not just theoretical caveats.
+
+## 1. Manual source provisioning, before the authorized restart
+
+For a `.deb`, verify the package-provisioned items rather than manually duplicating
+them. Ordinary upgrades preserve configuration/enablement and prior service state;
+they do not start computer tasks or grant desktop access. No package success is
+established by this historical source-deployment handoff.
+
+1. Review the selected PR revision and its release evidence. Package the matching
+   Python runtime assets and WebUI through the normal externally owned deployment
+   process. Do not test inside the live install or treat a checkout SHA as proof
+   of the running version. Retain the previous release/configuration for rollback.
+   Include the whole `src/computer/runtime/assets/` tree (including
+   `services/org.a11y.Bus.service`) and the matching committed `ui/dist`, not just
+   Python files. Inspect the actual deployed artifact: installation of the Python
+   extra does not establish that non-Python assets or WebUI files were packaged.
+   `/opt/odin-computer-runtime` in the sandbox launcher is a transient-unit mount
+   alias for the installed runtime directory, not another directory to create.
+2. Provision `/var/lib/odin/computer` (or another absolute directory outside the
+   live install), owned by the **service UID**, mode **0700**, with no symlink
+   components. For a root-run service this means root-owned, not desktop-user-owned.
+   Enable does not create or sudo-repair this root. It contains durable session,
+   receipt and private evidence data; do not make it web-served or shared.
+3. Install the optional `computer` Python extra into the service environment:
+   current `pyproject.toml` specifies `Pillow>=12.3,<13` and Linux
+   `python-xlib>=0.33,<1` and `dbus-next>=0.2.3,<1`; `all` includes this extra. These packages alone neither
+   enable input nor install the system desktop dependencies.
+4. Provision system packages deliberately. Debian/Ubuntu names include `systemd`,
+   `sudo`, `bubblewrap`, `xvfb`, `dbus`, `xdotool`, `openbox`, `drawing`, `xed`,
+   `python3`, `python3-xlib`, `python3-gi`, `gir1.2-atspi-2.0`, `at-spi2-core`,
+   GTK 3/ATK bridge libraries, `fontconfig` and usable fonts. Attached X11 also
+   needs `libx11-6`, `libxi6`, `libxtst6`, an X server with XTEST/XInput/XRes 1.2,
+   and `x11-xserver-utils` for operator RandR measurement. Resolve package names
+   for the distribution; this list is not an installer or permission grant.
+5. Verify both interpreter environments. Isolated workers run fixed
+   `/usr/bin/python3 -I` under the sandbox's read-only `/usr`, **not the service
+   venv**; system Python must import Xlib and GI/Atspi for the tested native stack.
+   Attached workers use the service interpreter, which must import its installed
+   computer dependencies. Venv installation alone cannot repair system-worker
+   imports. Keep the installed runtime/interpreter trusted and non-user-writable.
+6. Verify authorization for fixed systemd transient units and bwrap namespaces,
+   resource limits and private mounts. Structural preflight checks executables;
+   actual session startup checks containment. `runtime_sudo: true` is an explicit
+   operator choice for noninteractive sudo, **never an automatic fallback**.
+   It may be needed for launch privileges or cross-UID `/proc` inspection. Review
+   least-privilege policy with the actual service UID; do not grant blanket sudo
+   or relax desktop, namespace, accessibility or security settings to force a pass.
+
+The isolated target checks **common dependencies** at Enable and the **selected
+application profile** at task start. Xed is unavailable on some distributions;
+missing Xed does not block an installed Drawing profile. The attached target does not require that
+isolated desktop stack; it needs the service's computer extra, X11 libraries and
+extensions, authorization, and the selected installed native application. Do not
+install or launch an isolated desktop just to help in an existing application.
+
+## 2. Choose exactly one restart-pinned target
+
+These are alternative `computer` blocks, not two selectable live profiles.
+Environment, platform, display, Xauthority, monitor grant, storage and sudo policy
+are snapshotted at process construction, even when disabled. Switching targets
+requires another explicitly authorized restart. Administrators can edit these
+desired settings in **Configuration center > Services > Computer**, then use the
+standard review/save and pending-restart flow. `PUT /api/config` accepts partial
+`computer` provisioning objects but rejects `computer.enabled`, even when supplied
+alongside provisioning fields. Enable/disable and session controls remain live in
+**System > Computer** through their dedicated lifecycle endpoints.
+
+Saving provisioning does not attach to a desktop, install dependencies, create or
+migrate storage, or grant OS/sudo permissions. Complete the OS prerequisites above
+separately. Disabling and re-enabling before restart still uses the old target.
+The optional Wayland UID accepts an empty field to unset; zero is a real UID, not
+an unset marker. Platform-specific fields may be prepared before switching targets;
+enable/session admission still validates the selected target's prerequisites.
+
+### A. Isolated first test
+
+```yaml
+computer:
+  enabled: false
+  storage_dir: /var/lib/odin/computer
+  runtime_sudo: false  # Set true only under an explicitly provisioned policy.
+  environment: isolated
+  platform: x11
+  display: ""         # Private display is fixed by the owned sandbox.
+  xauthority: ""
+  monitor_names: []
+```
+
+### B. Existing-session X11 test
+
+Before provisioning this alternative, the operator explicitly identifies the
+local X11 display and its authorized access mechanism. In that authorized session,
+measure topology with `xrandr --listmonitors` and `xrandr --query`; use exact
+monitor names from the measurement, not guessed connector names, hostnames or a
+desktop-wide bounding rectangle. Review which pixels each granted monitor exposes.
+No cookie contents belong in config, logs, chat or this document. Blank authority
+means `/dev/null`, not automatic ambient-cookie discovery.
+
+An existing explicit X-server access grant can work with `xauthority: ""`; verify
+read-only access as the actual service UID instead of creating or copying a cookie
+unnecessarily. Do not use `xhost +`. Historical read-only census measurements
+are not a new grant or a substitute for checking the current complete topology.
+The `:1` and `DP-1` values below are placeholders, **not a deployment configuration**.
+
+```yaml
+computer:
+  enabled: false
+  storage_dir: /var/lib/odin/computer
+  runtime_sudo: false  # Deliberately provision if cross-UID inspection requires it.
+  environment: existing_session
+  platform: x11
+  display: ":1"        # Illustrative only: replace with the measured local display.
+  xauthority: /run/desktop-grant/Xauthority  # Operator-provisioned private file.
+  monitor_names: [DP-1]  # Illustrative only: replace with exact granted RandR names.
+```
+
+Use the operator's new scratch document for initial deploy testing. A changed
+topology invalidates old action coordinates: Stop and start a fresh authorized task
+after the new layout settles. Cleanup must not depend on successfully capturing
+the changed display. Production Stop never rewrites the operator's display layout,
+moves the shared pointer back, wakes/sleeps monitors, or closes their applications.
+That is deliberately different from an explicitly exclusive developer scratch
+test which promises to restore its recorded baseline. Hotplug/replacement still
+requires new consent/start; the runtime must not guess a new input transform.
+
+### C. Existing-session Wayland
+
+Read [WAYLAND-OPERATOR-R8.md](WAYLAND-OPERATOR-R8.md) before provisioning. This is
+an actual portal-mediated input backend, not an X11 fallback or a version allowlist.
+It currently supplies trusted application scope for GNOME Shell/Mutter and native
+Inkscape. Other compositor families lack a qualified scope/identity adapter and
+are reported unsupported, not falsely diagnosed with Mutter's button defect.
+There is no automatically launched isolated Wayland target; a separately
+provisioned private GNOME session can be used for local testing.
+
+```yaml
+computer:
+  enabled: false
+  storage_dir: /var/lib/odin/computer
+  runtime_sudo: false
+  environment: existing_session
+  platform: wayland
+  wayland_bus_address: unix:path=/run/user/1000/bus  # Replace with the actual session bus.
+  wayland_uid: 1000                              # Replace with the desktop UID.
+  wayland_guardian_binary: /usr/libexec/odin-computer-wayland-input
+```
+
+No X11 display, monitor names or Xauthority are used for this target. The human
+selects a monitor and approves remote interaction in the real portal prompt for
+each task. Enable and status alone never open that prompt. Startup/resume allow
+up to 180 seconds for consent, capability negotiation and safe isolated probing;
+the independent active input lease remains two seconds. If consent is declined,
+scope is unavailable, source mapping changes or qualification fails, do not bypass
+the refusal with shell input.
+
+The release probe runs a separate disposable compositor using the active stack's
+identified installed executable and mapped libraries. It never intentionally
+abandons a held button on your desktop. It reports `same_stack_disposable`, not
+`active_session`: this measures the same input implementation, not the active
+instance's mutable state or physical-device coexistence. Mismatched vendor/render
+libraries, missing namespaces/dependencies or unverified scope remain refused.
+
+## 3. Manual deploy QA
+
+1. The operator performs the approved deployment/restart through the external process.
+   Independently check service health and running-version evidence. Keep computer
+   disabled initially; confirm ordinary chat and usual tools still work.
+2. Sign into the WebUI as an authorized administrator and open **System > Computer**.
+   Check **Configured**, **Runtime lifecycle**, generation and restart-required
+   settings separately. Configured=true is intent, runtime=true is lifecycle
+   adoption, and neither proves input readiness. With no session, input is Unknown.
+   The owner needs `localhost` host access and permission for all three computer
+   tools. Scoped web credentials must allow that host and all three tools too;
+   administrator status by itself does not bypass these checks. Computer actions
+   run in foreground chat, not agents, loops, schedules or background workflows.
+3. Select **Enable computer use**, then read status back. Resolve preflight failures
+   offline rather than repeatedly toggling. Enabling must not launch an application
+   or capture the desktop. Opening/refreshing the inspector fetches no screenshot.
+   The active foreground connection must pass native-image transport admission;
+   a configured model name is not proof. A rejected visual transport must remain
+   a refusal, never become blind input or a prose-only screenshot substitute.
+   No computer tools in the next new foreground turn means check lifecycle,
+   authorization and transport separately; do not bypass a refusal with shell input.
+4. Start a new foreground scratch task through authorized chat. For isolated mode,
+   request a new Xed profile. For attached mode, first explicitly authorize this
+   bounded task, manually open a **new blank native Xed, Inkscape or Writer window**, place it wholly
+   inside a granted monitor and focus its editor. Keep unrelated/private windows
+   off the captured monitor. Do not use an existing unsaved document.
+5. Example request: “Use only this new scratch Xed document. Type `Local QA note`,
+   then press Return separately and type `Second line`. Do not save, close other
+   windows, use other apps, or retry uncertain input. Stop after verifying.”
+   Ask for a fresh observation and inspect actual session/input capability before
+   acting. A capture-only result is not a failed action to bypass.
+6. Watch the scratch document and compare the exact text and line break. Request
+   **Observe / view frame** only when needed. A visual-change receipt proves pixels
+   changed, not correct text or a saved file. For isolated Xed save QA, explicitly
+   request GUI save to `/workspace/exports/local-qa.txt`, close the saved tab,
+   create blank and reopen that exact path. Ask Odin to prepare the export before
+   ending the task, or use **Prepare export** while it is alive. Enter only
+   `local-qa.txt` in the export form, then **Download** and independently compare
+   bytes. Files saved to the default home folder are not exportable; the export
+   root is `/workspace/exports`, not arbitrary workspace files. Attached workspace
+   export is unavailable even though the shared inspector still displays the form;
+   inspect the scratch document directly and save only to a new, explicitly
+   authorized filename. Keep attached paths short enough for the input lease.
+   The inspector does not list exports prepared by chat or rediscover them after
+   page reload. For the all-WebUI path, Prepare export and Download while the task
+   is alive. If chat already returned an `artifact_id`, retain that receipt and
+   use the authenticated `GET /api/computer/download/<artifact_id>` route with
+   the same owner credential before expiry/disable. This is an authenticated API
+   download, not a public link or an automatic Discord attachment. An unexported
+   isolated file is lost when its task ends; a later turn cannot reopen that sandbox.
+7. Inspect full tool-result/action receipts in the task conversation, not just the
+   inspector's last-action summary. Ask for `computer_session` status for the full
+   cleanup receipt after Stop. Distinguish executed, verified, not_satisfied,
+   unavailable and unknown; record failures without upgrading them to success.
+8. Exercise **Pause / revoke input**, confirm revocation, then explicitly request
+   owner-authorized resume with renewed generation and fresh observation **while
+   the originating foreground task is still alive**. Finishing that turn closes
+   paused sessions too; a later message starts a new task, not a cross-turn resume.
+   Attached applications remain open, but isolated work must be exported before
+   ending its task. This does not restrict ordinary tools in either turn. Use
+   **Stop** to finish or immediately on unexpected focus/input. Both controls are
+   independent of model/observation waits. Attached Stop must leave Xed and the
+   desktop alive; isolated Stop may remove its owned sandbox. Confirm cleanup,
+   then manually handle only the scratch document. Closing Writer is the operator's
+   job, not an unfinished runtime cleanup stage. Do not simulate crashes or
+   held-key faults in the operator's desktop as a routine QA step.
+
+## Recovery, privacy and rollback
+
+### What cleanup does automatically, and what it cannot reconstruct
+
+Normal attached Stop/cancellation owns its worker lifetime independently of the
+caller and screenshot. It closes input authority, drains release receipts and
+reaps workers without waiting for an awake/stable display. The input lease stays
+two seconds; attached cleanup has a nine-second drain inside a ten-second controller
+budget. A timeout is quarantined, not success. Unknown actions are never replayed.
+See [RUNTIME-CLEANUP-R7.md](RUNTIME-CLEANUP-R7.md).
+
+Shared-X11 cleanup is qualified only for the cooperative/acknowledged path with
+a surviving guardian. Injector/helper failure is not guardian failure: abrupt
+death of the sole guardian loses its shared-input ledger. The native consequence
+is untested; no universal server-side release guarantee is proven. Worker-fence
+evidence (`no_inflight_input`) certifies settled dispatch, not held-state release
+after ledger loss. Missing release evidence remains unknown/quarantined. Never
+run held-input crash or guardian-kill experiments on a user's desktop.
+
+The developer-only scratch harness now orders topology, windows, focus/pointer,
+power and exact verification after verified input/process teardown. Private actual
+RandR recovery passed; physical DPMS cannot be established by Xvfb or Xephyr.
+**The R7 main-session hardware wake check still required manual baseline recovery.**
+Production owned cleanup and power restoration passed, but changed output metadata
+and recreated desktop XIDs correctly blocked exact-baseline restoration. It is not
+an automatic Cinnamon repair and is not being claimed fully unattended.
+See [MAIN-SESSION-R7.md](MAIN-SESSION-R7.md) and
+[RECOVERY-QUALIFICATION-R7.md](RECOVERY-QUALIFICATION-R7.md).
+
+| Situation | Operator's required action |
+| --- | --- |
+| Normal completed/failed task with `cleanup.complete=true` | No resource cleanup needed. Keep intended document edits; handle document close/reopen yourself when that workflow is not offered. |
+| Monitor sleep, capture loss or changed layout but clean owned cleanup | Do not replay. Wake normally if needed, inspect the intended layout and start a freshly authorized task after it settles. |
+| This machine's wake incident changes output metadata or recreates desktop surfaces | Stop/Disable. Restore the intended layout through normal display controls; inspect displaced windows. Exact old native identities cannot be reconstructed. No Odin/Cinnamon restart or guessed topology command is required or authorized by this runbook. |
+| Cleanup still quarantined after its bounded drain | Leave automation disabled, retain receipts, inspect exact owned processes, then Stop/status again after owners settle. Reconcile recorded workload is read-only, not proof of input release. |
+| Permanently blocked X server, replaced input endpoint or uncatchable release-guardian death | There is no proven non-disruptive automated recovery. Protect unsaved work and seek separately authorized external maintenance. Never delete receipts, kill the graphical session or send global releases to manufacture success. |
+| Developer scratch worker lost or a restoration stage failed | Read its `handoff.json`, `supervisor.json`, `before.json` and `after.json`. Recover only verified baseline state; process absence does not prove desktop restoration. |
+
+- Lost response or unknown input: **never replay the action**, even if no visible
+  change is apparent. Pause/Stop and refresh status. For quarantined sessions use
+  **Reconcile recorded workload**; this inspects recorded identities only, sends
+  no input, kills no applications and does not replay work. Exact process absence
+  alone does not prove release after an input-enabled crash.
+- Modern identity-bearing unknown cleanup has **no override**. Keep it quarantined
+  and obtain external operator investigation. Legacy records without runtime
+  identity have a separate authenticated acknowledgment path; the explicit
+  `ACKNOWLEDGE UNVERIFIED CLEANUP <session_id>` attestation archives uncertainty as
+  `operator_acknowledged_unverified`, never verified cleanup or replay permission.
+- Evidence TTL is **24 hours**, distinct from short-lived action grounding. Reads
+  enforce expiry; the enabled janitor prunes on adoption and every second. Clean
+  disable/shutdown purges evidence bytes while retaining receipts/session records.
+  Unclean death can leave bytes: disabled boot intentionally does not inspect old
+  storage, so external retention cleanup is operator-owned until enabled startup.
+  Explicitly downloaded copies need their own retention policy. No auto-posting.
+- Roll back by **Disable computer use first**, then verify runtime revocation and
+  cleanup, not just the saved boolean. Persistence failure must not restore input;
+  configured/runtime divergence or cleanup failure requires investigation before
+  reenable. Only the authorized deployment process may restore release/config and restart.
+  Never restart the graphical session, broadly kill processes, or delete receipts
+  to manufacture a clean result. This runbook contains no destructive cleanup.
+
+## Authoritative review references
+
+Start with [REVIEW-CHECKPOINT-R7.md](REVIEW-CHECKPOINT-R7.md) and this handoff for
+current scope. R7 application/cleanup evidence supersedes earlier offering and
+restoration claims; R5/R6 reports retain the exact historical outcomes, not current
+instructions to run their developer harnesses. Architecture references:
+[PRODUCTION-WIRING-R5.md](PRODUCTION-WIRING-R5.md), [OPERATOR-R5.md](OPERATOR-R5.md)
+and [CONTRACT.md](CONTRACT.md). Historical evidence: [MODEL-GUI-R5.md](MODEL-GUI-R5.md),
+[R5-DRAWING-FINAL.md](R5-DRAWING-FINAL.md), [R5-ACCEPTANCE-30.md](R5-ACCEPTANCE-30.md),
+[R5-ACCEPTANCE-30-DRAWING.md](R5-ACCEPTANCE-30-DRAWING.md),
+[FEASIBILITY-X11-R5.md](FEASIBILITY-X11-R5.md),
+[FEASIBILITY-X11-R5-CROSSUID.md](FEASIBILITY-X11-R5-CROSSUID.md), and
+[FEASIBILITY-WAYLAND-R5.md](FEASIBILITY-WAYLAND-R5.md).
+Implementation authority: `src/config/schema.py`, `src/computer/manager.py`,
+`src/computer/runtime/profile.py`, `src/computer/store.py`, `src/web/api/computer.py`.
+Relevant regression files include `tests/test_computer_lifecycle_r5.py`,
+`tests/test_computer_recovery_r5.py`, `tests/test_computer_x11_app_scope_r5.py`,
+`tests/test_computer_model_gui_smoke_r5.py` and `tests/test_computer_corpus30_r5.py`.
+These are pointers to recorded evidence, not new test or full-suite pass claims.
+
+## R6 additions
+
+The operator page lists application profiles separately from actual input
+readiness, without probing processes or capturing a screen. For drawing, a useful
+scratch request is: “In this new blank Inkscape document, draw a simple blue house
+with an orange roof and white door. Save only to this new scratch filename. Do not
+modify another window or overwrite a file.” For Writer, request a short note and
+bold formatting, and inspect the document before saving. Use `app=writer`, not
+the removed generic `libreoffice`. Writer is intentionally keyboard-only, with
+Return, Escape, BackSpace, Delete, space, ctrl+a, ctrl+b, ctrl+s and ctrl+shift+s.
+No click/drag/menu navigation or open/new/close/reopen workflow is offered. Open
+and focus the intended new document yourself; close or reopen it yourself after
+Odin detaches. Keep commands within the disclosed vocabulary and short ASCII chunks.
+
+Read [APPLICATION-QUALIFICATION-R6.md](APPLICATION-QUALIFICATION-R6.md),
+[APPLICATION-QUALIFICATION-R7.md](APPLICATION-QUALIFICATION-R7.md),
+[MODEL-APPLICATION-R6.md](MODEL-APPLICATION-R6.md),
+[KEYBOARD-GROUNDING-R6.md](KEYBOARD-GROUNDING-R6.md), and
+[DEPENDENCIES-R6.md](DEPENDENCIES-R6.md). Native Inkscape and LibreOffice must be
+installed through the operator's package manager. Alternate package locations,
+Flatpak/Snap wrappers and interpreter launchers are not silently trusted.
+
+The branch also fixes the diagnosed local shell-command reaping path. Read
+[ZOMBIE-REAP-R6.md](ZOMBIE-REAP-R6.md): a dedicated subreaper owns each local
+command subtree, preserving shell status separately from descendant cleanup.
+Existing live zombies are not cleared by this source change. Direct browser/native
+launches outside that command path remain a distinct ownership boundary. No
+historical zombie should be manually reaped or the live service restarted merely
+to make a count look better.

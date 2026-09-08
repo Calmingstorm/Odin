@@ -1339,6 +1339,17 @@ async def _wait_leader_exit(
     True when the leader exited, False on deadline. Cancellation
     propagates (the sleep is the await point).
     """
+    from .local_supervisor import SupervisedShell
+
+    if isinstance(proc, SupervisedShell):
+        try:
+            if timeout is None:
+                await proc.wait()
+            else:
+                await asyncio.wait_for(proc.wait(), timeout=timeout)
+            return True
+        except TimeoutError:
+            return False
     deadline = None if timeout is None else time.monotonic() + timeout
     while proc.returncode is None:
         if deadline is not None and time.monotonic() >= deadline:
@@ -1607,7 +1618,9 @@ class ProcessRegistry:
             # process (PR #239 round-4 — the plain string was classified ok).
             return f"Error: cannot start background process — {e}"
         try:
-            proc = await asyncio.create_subprocess_shell(
+            from .local_supervisor import create_supervised_shell
+
+            proc = await create_supervised_shell(
                 command,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.STDOUT,
@@ -2407,6 +2420,14 @@ class ProcessRegistry:
         proc = info.process
         if proc is None:
             return True
+        from .local_supervisor import SupervisedShell
+
+        if isinstance(proc, SupervisedShell):
+            try:
+                info.session_confirmed_empty = await proc.terminate_tree(grace=.5)
+            except Exception:
+                info.session_confirmed_empty = False
+            return info.session_confirmed_empty
         gone = await _terminate_session_until_empty(
             proc.pid,
             timeout=timeout,
@@ -2545,6 +2566,11 @@ class ProcessRegistry:
         # signal now goes through pidfds pinned BEFORE membership
         # verification: TERM, bounded grace, then KILL for survivors.
         try:
+            from .local_supervisor import SupervisedShell
+
+            if isinstance(info.process, SupervisedShell):
+                info.session_confirmed_empty = await info.process.terminate_tree(grace=2.0)
+                return
             info.session_confirmed_empty = await _terminate_session_until_empty(
                 info.process.pid,
                 grace=2.0,

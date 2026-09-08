@@ -140,6 +140,14 @@ class SectionSpec:
 # --------------------------------------------------------------------------
 
 SECTIONS: dict[str, SectionSpec] = {
+    "computer": SectionSpec(
+        "restart",
+        "Operator-provisioned desktop target; disabled by default. "
+        "Existing-session input remains capability-gated independently of capture.",
+        owner="config",
+        restart_reason="Storage, platform, target and launcher policy are pinned at startup, "
+        "including off/on cycles.",
+    ),
     "timezone": SectionSpec("restart", "Locale and scheduling defaults used across Odin."),
     "discord": SectionSpec(
         "live_read",
@@ -420,6 +428,64 @@ _IDENTITY_CONSUMERS: tuple[Consumer, ...] = (
 )
 
 FIELDS: dict[str, FieldSpec] = {
+    "computer.enabled": FieldSpec(
+        apply_mode="live_apply",
+        owner="computer",
+        apply_handler="POST /api/computer/enabled",
+        description="Explicit opt-in. Disable revokes desktop sessions before removing the tools.",
+    ),
+    "computer.storage_dir": FieldSpec(
+        label="Private storage directory",
+        description="Absolute directory for computer state and evidence. Provision it outside "
+        "the live install, service-owned with mode 0700 and no symlink components. Saving "
+        "does not create the directory or migrate existing state.",
+    ),
+    "computer.runtime_sudo": FieldSpec(
+        label="Use provisioned sudo policy",
+        description="Use non-interactive sudo for supported runtime launch and cleanup paths. "
+        "Enable only after explicitly provisioning the required OS policy; saving grants "
+        "no sudo permissions.",
+    ),
+    "computer.environment": FieldSpec(
+        label="Desktop target",
+        description="Use a separate isolated application or an explicitly identified existing "
+        "desktop session. Changing this does not attach to a desktop.",
+    ),
+    "computer.platform": FieldSpec(
+        label="Display platform",
+        description="Choose X11 or Wayland. Wayland requires an existing session, an explicit "
+        "session bus and desktop UID. Input remains backend capability-gated.",
+    ),
+    "computer.display": FieldSpec(
+        label="X11 display",
+        description="Explicit local display such as :0. Required for an existing X11 session; "
+        "leave empty for an isolated application.",
+    ),
+    "computer.xauthority": FieldSpec(
+        label="X11 authority file",
+        description="Optional absolute path to the existing session's Xauthority file, not "
+        "its contents. OS access must be provisioned separately.",
+    ),
+    "computer.monitor_names": FieldSpec(
+        label="X11 monitors",
+        description="Explicit existing-session monitor names, such as DP-1. Add each name "
+        "separately. At least one is required for an existing X11 session.",
+    ),
+    "computer.wayland_bus_address": FieldSpec(
+        label="Wayland session bus",
+        description="Explicit local session bus, such as unix:path=/run/user/1000/bus. "
+        "Required for Wayland; not discovered from the service environment.",
+    ),
+    "computer.wayland_uid": FieldSpec(
+        label="Wayland desktop UID",
+        description="Numeric UID of the desktop session owner. Required for Wayland; "
+        "leave empty to unset. UID 0 is distinct from unset.",
+    ),
+    "computer.wayland_guardian_binary": FieldSpec(
+        label="Wayland input guardian",
+        description="Absolute path to the separately installed Wayland input guardian "
+        "executable. Saving does not install or qualify it.",
+    ),
     "timezone": FieldSpec(
         label="Timezone",
         description="Timezone used in prompts and scheduled-time parsing.",
@@ -1618,7 +1684,9 @@ def _annotation_facts(annotation: Any) -> dict[str, Any]:
         for arg in typing.get_args(annotation):
             if arg is type(None):
                 continue
-            return _annotation_facts(arg)
+            resolved = _annotation_facts(arg)
+            resolved["nullable"] = type(None) in typing.get_args(annotation)
+            return resolved
         return facts
     if origin is Literal:
         options = [a for a in typing.get_args(annotation) if a is not None]
@@ -2009,6 +2077,7 @@ def build_field_record(
         "unit": spec.unit,
         "examples": [],
         "type": resolved_type,
+        "nullable": bool(facts.get("nullable")),
         "structured_container": bool(facts.get("structured_container")),
         "structured_container_child": _is_structured_container_child(path),
         "enum": resolved_enum,

@@ -8,6 +8,7 @@ process-SIGTERM is patched to a no-op. Personality handlers run the real
 register_user_presets (2 trivial lines) with a snapshot/restore fixture around
 its system_prompt._USER_PRESETS global so registrations don't leak between tests.
 """
+
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -65,6 +66,7 @@ def _restore_user_presets():
     # each test so registrations don't leak — the real 2-line function still
     # runs (we exercise it rather than patch it out).
     from src.llm import system_prompt
+
     saved = dict(system_prompt._USER_PRESETS)
     yield
     system_prompt._USER_PRESETS.clear()
@@ -73,6 +75,7 @@ def _restore_user_presets():
 
 def _bot():
     import time
+
     bot = MagicMock()
     bot.config = Config(discord={"token": "fake"})
     bot.guilds = []
@@ -119,8 +122,11 @@ def _guild(gid=1, name="Guild", members=None, channels=None):
 
 def _member(mid, name, bot=False):
     return SimpleNamespace(
-        id=mid, name=name, display_name=name.title(),
-        display_avatar=SimpleNamespace(url=f"http://a/{mid}"), bot=bot,
+        id=mid,
+        name=name,
+        display_name=name.title(),
+        display_avatar=SimpleNamespace(url=f"http://a/{mid}"),
+        bot=bot,
     )
 
 
@@ -171,15 +177,21 @@ class TestSetupWizard:
         app, _ = _app(register_setup_wizard)
         # Patch the process-kill primitive to a no-op — the handler schedules a
         # SIGTERM to itself on success; it must never reach the test runner.
-        with patch("src.web.api.config_admin.validate_token_format", return_value=True), \
-             patch("os.kill") as kill:
+        with (
+            patch("src.web.api.config_admin.validate_token_format", return_value=True),
+            patch("os.kill") as kill,
+        ):
             async with TestClient(TestServer(app)) as c:
-                r = await c.post("/api/setup/complete", json={
-                    "discord_token": "fake-token",
-                    "hosts": {"srv": {"address": "10.0.0.1", "ssh_user": "root"}},
-                    "features": {"browser": True, "voice": False},
-                    "web_api_token": "tok", "timezone": "UTC",
-                })
+                r = await c.post(
+                    "/api/setup/complete",
+                    json={
+                        "discord_token": "fake-token",
+                        "hosts": {"srv": {"address": "10.0.0.1", "ssh_user": "root"}},
+                        "features": {"browser": True, "voice": False},
+                        "web_api_token": "tok",
+                        "timezone": "UTC",
+                    },
+                )
                 assert r.status == 200 and (await r.json())["restart_scheduled"] is True
             kill.assert_not_called()  # scheduled via call_later(2s), not fired in-test
         # In-place restart armed, carrying the fresh token as an exec-time env
@@ -193,8 +205,10 @@ class TestSetupWizard:
         from src import restart
 
         app, _ = _app(register_setup_wizard)
-        with patch("src.web.api.config_admin.validate_token_format", return_value=True), \
-             patch("src.web.api.config_admin._write_config", side_effect=OSError("disk full")):
+        with (
+            patch("src.web.api.config_admin.validate_token_format", return_value=True),
+            patch("src.web.api.config_admin._write_config", side_effect=OSError("disk full")),
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/setup/complete", json={"discord_token": "fake-token"})
                 assert r.status == 500
@@ -283,8 +297,9 @@ class TestDiscordConfig:
     async def test_guilds_with_channels(self):
         app, bot = _app(register_discord_config)
         bot.channel_config = _channel_config()
-        bot.guilds = [_guild(channels=[_channel(20, "general", 0, "Cat"),
-                                        _channel(21, "random", 1)])]
+        bot.guilds = [
+            _guild(channels=[_channel(20, "general", 0, "Cat"), _channel(21, "random", 1)])
+        ]
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/discord/guilds")).json()
             assert body[0]["name"] == "Guild" and len(body[0]["channels"]) == 2
@@ -329,21 +344,24 @@ class TestDiscordConfig:
         try:
             app, bot = _app(register_discord_config)
             async with TestClient(TestServer(app)) as c:
-                r = await c.put("/api/config", json={
-                    "context": {"max_system_prompt_tokens": 12345},
-                    "openai_codex": {
-                        "model_routing": {"enabled": True},
-                        "max_tokens": 98765,
+                r = await c.put(
+                    "/api/config",
+                    json={
+                        "context": {"max_system_prompt_tokens": 12345},
+                        "openai_codex": {
+                            "model_routing": {"enabled": True},
+                            "max_tokens": 98765,
+                        },
+                        "graceful_degradation": {
+                            "enabled": False,
+                            "degraded_threshold": 7,
+                        },
+                        "grafana_alerts": {
+                            "enabled": False,
+                            "cooldown_seconds": 612,
+                        },
                     },
-                    "graceful_degradation": {
-                        "enabled": False,
-                        "degraded_threshold": 7,
-                    },
-                    "grafana_alerts": {
-                        "enabled": False,
-                        "cooldown_seconds": 612,
-                    },
-                })
+                )
                 assert r.status == 200
         finally:
             set_active_config_path(previous)
@@ -386,9 +404,9 @@ class TestDiscordConfig:
                     },
                 )
                 assert r.status == 200
-                assert (await r.json())["openai_codex"][
-                    "context_budget_overrides"
-                ] == {"gpt-5.6-luna": 600_000}
+                assert (await r.json())["openai_codex"]["context_budget_overrides"] == {
+                    "gpt-5.6-luna": 600_000
+                }
         finally:
             set_active_config_path(previous)
 
@@ -463,9 +481,7 @@ class TestDiscordConfig:
         try:
             app, bot = _app(register_discord_config)
             async with TestClient(TestServer(app)) as c:
-                r = await c.put(
-                    "/api/config", json={"tools": {"local_working_dir": "/srv/ws"}}
-                )
+                r = await c.put("/api/config", json={"tools": {"local_working_dir": "/srv/ws"}})
                 assert r.status == 200
         finally:
             set_active_config_path(previous)
@@ -481,9 +497,12 @@ class TestDiscordConfig:
     async def test_health_and_resource_and_streams(self):
         app, bot = _app(register_discord_config)
         bot.tool_executor.output_streamer = SimpleNamespace(
-            enabled_tools={"run_command"}, get_active_streams=lambda: [])
-        with patch("src.health.checker.check_all", return_value={"ok": True}), \
-             patch("src.monitoring.resource_usage.collect_all", return_value={"cpu": 1}):
+            enabled_tools={"run_command"}, get_active_streams=lambda: []
+        )
+        with (
+            patch("src.health.checker.check_all", return_value={"ok": True}),
+            patch("src.monitoring.resource_usage.collect_all", return_value={"cpu": 1}),
+        ):
             async with TestClient(TestServer(app)) as c:
                 assert (await (await c.get("/api/health/components")).json())["ok"] is True
                 assert (await (await c.get("/api/resource-usage")).json())["cpu"] == 1
@@ -512,11 +531,11 @@ class TestDiscordConfig:
             assert (await c.put("/api/config", data="bad")).status == 400
             assert (await c.put("/api/config", json=[1, 2])).status == 400  # not an object
             # sensitive field blocked
-            assert (await c.put("/api/config",
-                                json={"discord": {"token": "new"}})).status == 403
+            assert (await c.put("/api/config", json={"discord": {"token": "new"}})).status == 403
             # invalid value → Config reconstruction fails
-            assert (await c.put("/api/config",
-                                json={"tools": {"max_tool_iterations_chat": "nope"}})).status == 400
+            assert (
+                await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": "nope"}})
+            ).status == 400
             # valid update applies
             r = await c.put("/api/config", json={"tools": {"max_tool_iterations_chat": 7}})
             assert r.status == 200
@@ -625,15 +644,19 @@ class TestPersonality:
         async with TestClient(TestServer(app)) as c:
             assert (await c.post("/api/personality/presets", data="bad")).status == 400
             assert (await c.post("/api/personality/presets", json={})).status == 400  # no name
-            assert (await c.post("/api/personality/presets",
-                                 json={"name": "bad name!"})).status == 400  # bad chars
+            assert (
+                await c.post("/api/personality/presets", json={"name": "bad name!"})
+            ).status == 400  # bad chars
             # cannot overwrite a built-in preset name
-            assert (await c.post("/api/personality/presets",
-                                 json={"name": "odin", "identity": "x"})).status == 400
-            assert (await c.post("/api/personality/presets",
-                                 json={"name": "custom1"})).status == 400  # no identity/voice
-            r = await c.post("/api/personality/presets",
-                             json={"name": "custom1", "identity": "witty"})
+            assert (
+                await c.post("/api/personality/presets", json={"name": "odin", "identity": "x"})
+            ).status == 400
+            assert (
+                await c.post("/api/personality/presets", json={"name": "custom1"})
+            ).status == 400  # no identity/voice
+            r = await c.post(
+                "/api/personality/presets", json={"name": "custom1", "identity": "witty"}
+            )
             assert r.status == 200 and (await r.json())["name"] == "custom1"
             assert "custom1" in bot.config.personality.user_presets
 
@@ -641,8 +664,10 @@ class TestPersonality:
     async def test_delete_preset(self):
         app, bot = _app(register_personality)
         from src.config.schema import PersonalityPreset
+
         bot.config.personality.user_presets["mine"] = PersonalityPreset(
-            name="Mine", identity="i", voice="v")
+            name="Mine", identity="i", voice="v"
+        )
         async with TestClient(TestServer(app)) as c:
             assert (await c.delete("/api/personality/presets/odin")).status == 400  # builtin
             assert (await c.delete("/api/personality/presets/ghost")).status == 404
@@ -654,8 +679,10 @@ class TestPersonality:
     async def test_delete_preset_resets_active(self):
         app, bot = _app(register_personality)
         from src.config.schema import PersonalityPreset
+
         bot.config.personality.user_presets["active"] = PersonalityPreset(
-            name="A", identity="i", voice="v")
+            name="A", identity="i", voice="v"
+        )
         bot.config.personality.preset = "active"
         async with TestClient(TestServer(app)) as c:
             assert (await c.delete("/api/personality/presets/active")).status == 200
@@ -694,8 +721,9 @@ class TestPersonalityPersistFirst:
     async def test_update_failure_leaves_runtime_untouched(self):
         app, bot = _app(register_personality)
         before = bot.config.personality.preset
-        with patch("src.config.persistence.patch_config_paths",
-                   side_effect=OSError("read-only fs")):
+        with patch(
+            "src.config.persistence.patch_config_paths", side_effect=OSError("read-only fs")
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.put("/api/personality", json={"preset": "pirate"})
                 assert r.status == 500
@@ -706,12 +734,17 @@ class TestPersonalityPersistFirst:
         from src.llm import system_prompt
 
         app, bot = _app(register_personality)
-        with patch("src.config.persistence.patch_config_paths",
-                   side_effect=OSError("read-only fs")):
+        with patch(
+            "src.config.persistence.patch_config_paths", side_effect=OSError("read-only fs")
+        ):
             async with TestClient(TestServer(app)) as c:
-                r = await c.post("/api/personality/presets", json={
-                    "name": "ghost", "identity": "spooky",
-                })
+                r = await c.post(
+                    "/api/personality/presets",
+                    json={
+                        "name": "ghost",
+                        "identity": "spooky",
+                    },
+                )
                 assert r.status == 500
         assert "ghost" not in bot.config.personality.user_presets
         assert "ghost" not in system_prompt._USER_PRESETS
@@ -722,10 +755,13 @@ class TestPersonalityPersistFirst:
 
         app, bot = _app(register_personality)
         bot.config.personality.user_presets["keeper"] = PersonalityPreset(
-            name="keeper", identity="stays", voice="",
+            name="keeper",
+            identity="stays",
+            voice="",
         )
-        with patch("src.config.persistence.patch_config_paths",
-                   side_effect=OSError("read-only fs")):
+        with patch(
+            "src.config.persistence.patch_config_paths", side_effect=OSError("read-only fs")
+        ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.delete("/api/personality/presets/keeper")
                 assert r.status == 500
@@ -737,9 +773,14 @@ class TestPersonalityPersistFirst:
 
         app, bot = _app(register_personality)
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/personality", json={
-                "preset": "custom", "custom_name": "Test", "custom_identity": "id",
-            })
+            r = await c.put(
+                "/api/personality",
+                json={
+                    "preset": "custom",
+                    "custom_name": "Test",
+                    "custom_identity": "id",
+                },
+            )
             assert r.status == 200
         assert bot.config.personality.preset == "custom"
         on_disk = YAML().load(_active_config.read_text())["personality"]
@@ -844,9 +885,7 @@ class TestCancellationCoherence:
 
         on_disk = YAML().load(_active_config.read_text())["logging"]["level"]
         assert on_disk == "DEBUG"
-        assert bot.config.logging.level == "DEBUG", (
-            "runtime must match what was committed to disk"
-        )
+        assert bot.config.logging.level == "DEBUG", "runtime must match what was committed to disk"
 
 
 class TestPersonalityTransaction:
@@ -863,9 +902,7 @@ class TestPersonalityTransaction:
         app, bot = _app(register_personality)
         async with TestClient(TestServer(app)) as c:
             async with config_transaction():
-                request = asyncio.create_task(
-                    c.put("/api/personality", json={"preset": "pirate"})
-                )
+                request = asyncio.create_task(c.put("/api/personality", json={"preset": "pirate"}))
                 await asyncio.sleep(0.05)
                 assert not request.done(), (
                     "the handler must wait for the lock before reading bot.config"
@@ -882,9 +919,14 @@ class TestPersonalityTransaction:
         monkeypatch.setenv("ODIN_NAME", "Odin")
         app, bot = _app(register_personality)
         async with TestClient(TestServer(app)) as c:
-            r = await c.put("/api/personality", json={
-                "preset": "custom", "custom_name": "Odin", "custom_identity": "id",
-            })
+            r = await c.put(
+                "/api/personality",
+                json={
+                    "preset": "custom",
+                    "custom_name": "Odin",
+                    "custom_identity": "id",
+                },
+            )
             assert r.status == 200
         text = _active_config.read_text()
         assert "custom_name: ${ODIN_NAME}" in text, (
@@ -962,9 +1004,7 @@ async def test_cancelled_failed_personality_write_does_not_publish(
     async def cancelled_failure(_changes):
         return OSError("disk full"), True
 
-    monkeypatch.setattr(
-        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
-    )
+    monkeypatch.setattr("src.web.api.config_admin.persist_config_paths_locked", cancelled_failure)
     app, bot = _app(register_personality)
     before = bot.config.personality.model_copy(deep=True)
 
@@ -987,9 +1027,15 @@ async def test_agent_limits_publication_invalidates_only_after_persistence(monke
     app, bot = _app(register_discord_config)
     before = bot.config.agents.model_copy(deep=True)
     async with TestClient(TestServer(app)) as client:
-        response = await client.put("/api/config", json={"agents": {
-            "max_concurrent_agents": 13, "max_lifetime_seconds": 12345,
-        }})
+        response = await client.put(
+            "/api/config",
+            json={
+                "agents": {
+                    "max_concurrent_agents": 13,
+                    "max_lifetime_seconds": 12345,
+                }
+            },
+        )
     assert response.status == (500 if failure else 200)
     if failure:
         assert bot.config.agents == before
@@ -1005,9 +1051,7 @@ async def test_cancelled_failed_generic_write_does_not_publish(monkeypatch):
     async def cancelled_failure(_changes):
         return OSError("disk full"), True
 
-    monkeypatch.setattr(
-        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
-    )
+    monkeypatch.setattr("src.web.api.config_admin.persist_config_paths_locked", cancelled_failure)
     app, bot = _app(register_discord_config)
     before = bot.config.tools.max_tool_iterations_chat
 
@@ -1026,9 +1070,7 @@ async def test_cancelled_successful_personality_update_publishes_before_escape(
     async def cancelled_success(_changes):
         return None, True
 
-    monkeypatch.setattr(
-        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
-    )
+    monkeypatch.setattr("src.web.api.config_admin.persist_config_paths_locked", cancelled_success)
     app, bot = _app(register_personality)
 
     async with TestClient(TestServer(app)) as c:
@@ -1046,9 +1088,7 @@ async def test_cancelled_successful_active_preset_save_publishes_derived_state(
     async def cancelled_success(_changes):
         return None, True
 
-    monkeypatch.setattr(
-        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
-    )
+    monkeypatch.setattr("src.web.api.config_admin.persist_config_paths_locked", cancelled_success)
     app, bot = _app(register_personality)
     bot.config.personality.preset = "active"
 
@@ -1072,9 +1112,7 @@ async def test_cancelled_failed_preset_delete_does_not_publish(monkeypatch):
     async def cancelled_failure(_changes):
         return OSError("disk full"), True
 
-    monkeypatch.setattr(
-        "src.web.api.config_admin.persist_config_paths_locked", cancelled_failure
-    )
+    monkeypatch.setattr("src.web.api.config_admin.persist_config_paths_locked", cancelled_failure)
     app, bot = _app(register_personality)
     bot.config.personality.user_presets["keep"] = PersonalityPreset(
         name="Keep", identity="still present"
@@ -1094,9 +1132,7 @@ async def test_cancelled_successful_preset_delete_publishes_before_escape(monkey
     async def cancelled_success(_changes):
         return None, True
 
-    monkeypatch.setattr(
-        "src.web.api.config_admin.persist_config_paths_locked", cancelled_success
-    )
+    monkeypatch.setattr("src.web.api.config_admin.persist_config_paths_locked", cancelled_success)
     app, bot = _app(register_personality)
     bot.config.personality.user_presets["gone"] = PersonalityPreset(
         name="Gone", identity="committed deletion"
@@ -1122,27 +1158,52 @@ class TestConfigMeta:
     #: reads this route directly; keeping the exact key set pinned makes schema
     #: additions and removals deliberate rather than silent UI drift.
     RECORD_KEYS = {
-        "path", "owner", "label", "description", "aliases", "unit", "examples",
-        "type", "structured_container", "structured_container_child", "enum",
-        "constraints", "default",
-        "sensitivity", "secret_route",
-        "apply_mode", "apply_handler", "consumers", "restart_reason",
-        "activation_policy", "group_description", "save_effect",
-        "runtime_effect", "action_available", "action_label",
-        "action_endpoint", "action_method", "action_body",
-        "desired", "effective", "configured", "provenance",
-        "valid", "validation_errors", "pending_restart", "drift", "last_apply",
+        "path",
+        "owner",
+        "label",
+        "description",
+        "aliases",
+        "unit",
+        "examples",
+        "type",
+        "structured_container",
+        "structured_container_child",
+        "enum",
+        "constraints",
+        "default",
+        "nullable",
+        "sensitivity",
+        "secret_route",
+        "apply_mode",
+        "apply_handler",
+        "consumers",
+        "restart_reason",
+        "activation_policy",
+        "group_description",
+        "save_effect",
+        "runtime_effect",
+        "action_available",
+        "action_label",
+        "action_endpoint",
+        "action_method",
+        "action_body",
+        "desired",
+        "effective",
+        "configured",
+        "provenance",
+        "valid",
+        "validation_errors",
+        "pending_restart",
+        "drift",
+        "last_apply",
         "apply_state",
     }
-
 
     @pytest.mark.asyncio
     async def test_an_ordinary_save_is_unaffected(self):
         app, bot = _app(register_discord_config)
         async with TestClient(TestServer(app)) as c:
-            resp = await c.put(
-                "/api/config", json={"discord": {"require_mention": False}}
-            )
+            resp = await c.put("/api/config", json={"discord": {"require_mention": False}})
 
         assert resp.status == 200
         assert bot.config.discord.require_mention is False
@@ -1153,9 +1214,7 @@ class TestConfigMeta:
         route being moved somewhere the gate does not cover."""
         from src.health.server import ADMIN_ONLY_PREFIXES
 
-        assert any(
-            "/api/config/meta".startswith(prefix) for prefix in ADMIN_ONLY_PREFIXES
-        )
+        assert any("/api/config/meta".startswith(prefix) for prefix in ADMIN_ONLY_PREFIXES)
 
     @pytest.mark.asyncio
     async def test_payload_is_the_envelope_the_page_consumes(self):
@@ -1168,7 +1227,12 @@ class TestConfigMeta:
         assert isinstance(body["fields"], list) and body["fields"]
         status = body["status"]
         assert set(status["counts"]) == {
-            "applied", "pending_restart", "dormant", "invalid", "drift", "unknown",
+            "applied",
+            "pending_restart",
+            "dormant",
+            "invalid",
+            "drift",
+            "unknown",
         }
         assert sum(status["counts"].values()) == len(body["fields"])
         assert status["desired_revision"] == body["revision"]
@@ -1256,8 +1320,13 @@ class TestConfigMeta:
         # Mirrors APPLY_MODE_LABELS in ui/js/pages/config.js — the page maps
         # anything else onto its Restart group.
         allowed = {
-            "live_read", "live_apply", "live_for_new_work", "restart",
-            "activation_required", "legacy_control", "dormant",
+            "live_read",
+            "live_apply",
+            "live_for_new_work",
+            "restart",
+            "activation_required",
+            "legacy_control",
+            "dormant",
         }
         for record in body["fields"]:
             assert record["apply_mode"] in allowed, (
@@ -1276,9 +1345,7 @@ class TestConfigMeta:
 
         for record in body["fields"]:
             if record["apply_mode"] == "restart":
-                assert record["restart_reason"], (
-                    f"{record['path']} claims restart without a reason"
-                )
+                assert record["restart_reason"], f"{record['path']} claims restart without a reason"
 
     @pytest.mark.asyncio
     async def test_live_apply_fields_name_their_handler(self):
@@ -1298,9 +1365,7 @@ class TestConfigMeta:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/config/meta")).json()
 
-        dormant = [
-            r for r in body["fields"] if r["apply_mode"] == "activation_required"
-        ]
+        dormant = [r for r in body["fields"] if r["apply_mode"] == "activation_required"]
         assert dormant, "no dormant fields — the vocabulary would be untested"
         for record in dormant:
             assert record["activation_policy"], f"{record['path']}"
@@ -1361,9 +1426,7 @@ class TestConfigMeta:
         bot.config.audit.hmac_key = "tok-audit-leak"
         bot.config.slack.default_webhook_url = "tok-slack-webhook-url-leak"
         raw_config = bot.config.model_dump()
-        raw_config["web"]["api_tokens"] = [
-            {"name": "ops", "token": "tok-in-a-list-leak"}
-        ]
+        raw_config["web"]["api_tokens"] = [{"name": "ops", "token": "tok-in-a-list-leak"}]
         raw_config["outbound_webhooks"]["targets"] = [
             {"name": "a", "url": "https://x", "secret": "tok-target-leak"}
         ]
@@ -1394,9 +1457,7 @@ class TestConfigMeta:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/config/meta")).json()
 
-        record = next(
-            r for r in body["fields"] if r["path"] == "sessions.max_history"
-        )
+        record = next(r for r in body["fields"] if r["path"] == "sessions.max_history")
         assert record["apply_mode"] == "restart"
         assert record["desired"] == bot.config.sessions.max_history
         assert record["effective"] == bot.boot_config_snapshot["sessions"]["max_history"]
@@ -1414,9 +1475,7 @@ class TestConfigMeta:
         async with TestClient(TestServer(app)) as c:
             body = await (await c.get("/api/config/meta")).json()
 
-        record = next(
-            r for r in body["fields"] if r["path"] == "discord.respond_to_bots"
-        )
+        record = next(r for r in body["fields"] if r["path"] == "discord.respond_to_bots")
         assert record["apply_mode"] == "live_read"
         assert record["pending_restart"] is False
         assert record["effective"] == record["desired"]
@@ -1438,9 +1497,11 @@ class TestRestartEndpoint:
         app, bot = _app(register_quick_actions)
         bot.api_token_manager = None  # dev mode: no auth configured → gate allows
         bot.config.web.api_token = ""
-        with patch.object(restart_mod, "request_restart") as req, \
-             patch.object(restart_mod, "restart_requested", return_value=False), \
-             patch("os.kill") as kill:
+        with (
+            patch.object(restart_mod, "request_restart") as req,
+            patch.object(restart_mod, "restart_requested", return_value=False),
+            patch("os.kill") as kill,
+        ):
             async with TestClient(TestServer(app)) as c:
                 resp = await c.post("/api/restart", json={})
                 body = await resp.json()
@@ -1456,8 +1517,10 @@ class TestRestartEndpoint:
         app, bot = _app(register_quick_actions)
         bot.api_token_manager = None
         bot.config.web.api_token = ""
-        with patch.object(restart_mod, "request_restart") as req, \
-             patch.object(restart_mod, "restart_requested", return_value=True):
+        with (
+            patch.object(restart_mod, "request_restart") as req,
+            patch.object(restart_mod, "restart_requested", return_value=True),
+        ):
             async with TestClient(TestServer(app)) as c:
                 resp = await c.post("/api/restart", json={})
         assert resp.status == 202
@@ -1467,7 +1530,6 @@ class TestRestartEndpoint:
         from src.health.server import _is_admin_only_path
 
         assert _is_admin_only_path("/api/restart")
-
 
     @pytest.mark.asyncio
     async def test_denied_without_admin_identity(self):
@@ -1538,9 +1600,7 @@ async def test_generic_config_rejects_disabled_tools_leaf(_active_config):
     app, bot = _app(register_discord_config, bot=bot)
     before_disk = _active_config.read_text()
     async with TestClient(TestServer(app)) as c:
-        response = await c.put(
-            "/api/config", json={"tools": {"disabled_tools": ["kubectl"]}}
-        )
+        response = await c.put("/api/config", json={"tools": {"disabled_tools": ["kubectl"]}})
         body = await response.json()
 
     assert response.status == 409

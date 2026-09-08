@@ -15,7 +15,9 @@ resume flow to combine with its reconstructed fields.
 
 Large base64 image blocks (vision injection, pending_image_blocks) are
 externalized to the store's content-addressed blob dir and re-inlined on
-restore, keeping the SQLite payload row small.
+restore, keeping the SQLite payload row small. Tagged desktop observations are
+the exception: their pixels belong only to expiring computer evidence storage.
+Checkpoints retire those images and require a fresh observation on resume.
 """
 
 from __future__ import annotations
@@ -120,6 +122,11 @@ RECONSTRUCTED_FIELDS: frozenset[str] = frozenset({
     "policy",
     "trace",
     "_generation_budget_snapshot",
+    "_computer_serving",  # Live client/serving identity, re-captured before each request.
+    # Native delivery authority is process-local. New/resumed turns start blocked
+    # for computer_act only until a freshly owned observation is delivered. Never
+    # restore a historical transcript's pixels as current action authority.
+    "_computer_frame_error",
     "durability",
 })
 
@@ -220,11 +227,19 @@ def _scrub_tool_use_inputs(obj: Any) -> Any:
 # ── image-block externalization ──────────────────────────────────────
 
 
+def _retired_desktop_frame() -> dict:
+    return {"type": "text", "text": (
+        "[Private desktop pixels not retained in checkpoint; obtain a fresh observation.]"
+    )}
+
+
 def _externalize_blocks(obj: Any, store_blob) -> Any:
-    """Recursively swap base64 image payloads for blob refs."""
+    """Externalize legacy images, never make unexpiring copies of desktop pixels."""
     if isinstance(obj, list):
         return [_externalize_blocks(x, store_blob) for x in obj]
     if isinstance(obj, dict):
+        if obj.get("type") == "image" and "__computer_frame__" in obj:
+            return _retired_desktop_frame()
         source = obj.get("source")
         if (
             obj.get("type") == "image"
@@ -242,10 +257,12 @@ def _externalize_blocks(obj: Any, store_blob) -> Any:
 
 
 def _inline_blocks(obj: Any, load_blob) -> Any:
-    """Inverse of :func:`_externalize_blocks`."""
+    """Restore legacy images; retire pre-R5 desktop refs without reading pixels."""
     if isinstance(obj, list):
         return [_inline_blocks(x, load_blob) for x in obj]
     if isinstance(obj, dict):
+        if obj.get("type") == "image" and "__computer_frame__" in obj:
+            return _retired_desktop_frame()
         source = obj.get("source")
         if (
             obj.get("type") == "image"

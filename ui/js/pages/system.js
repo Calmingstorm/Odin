@@ -11,6 +11,7 @@ import LLMConfigPage from './llm-config.js';
 import InternalsPage from './internals.js';
 import TurnStatePage from './turn-state.js';
 import UpdatePage from './update.js';
+import ComputerPage from './computer.js';
 
 // Exported so the command palette derives its destinations from the SAME
 // list the tab strip renders. Hand-mirroring them meant a renamed tab id
@@ -28,6 +29,7 @@ export const TABS = [
     { id: 'llm', label: 'LLM Config', component: LLMConfigPage },
     { id: 'internals', label: 'Internals', component: InternalsPage },
     { id: 'turn-state', label: 'Turn State', component: TurnStatePage },
+    { id: 'computer', label: 'Computer', component: ComputerPage },
     { id: 'update', label: 'Update', component: UpdatePage },
 ];
 

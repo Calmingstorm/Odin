@@ -27,6 +27,7 @@ characterization pin.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
 import unicodedata
 from collections.abc import Callable
@@ -139,7 +140,6 @@ def _serving_identity_for(gateway, config=None, fallback_client=None) -> LLMServ
             else None
         ),
     )
-
 
 
 def _clean_fragment(s: str) -> str:
@@ -395,6 +395,7 @@ class _ChatTurn:
     # from historical fingerprints).
     wait_judgment_pending: bool = False
     pending_image_blocks: list = field(default_factory=list)
+    _computer_frame_error: bool = True  # Only fresh owned delivery admits computer_act.
     _op_tool_details: list = field(default_factory=list)
     _pending_validations: list = field(default_factory=list)
     _validation_required: bool = False
@@ -417,6 +418,7 @@ class _ChatTurn:
     # Process-local, per-generation cache captured beside serving identity.
     # Rebuilt from durable _gen_identity on resume; never serialized directly.
     _generation_budget_snapshot: ContextBudgetSnapshot | None = None
+    _computer_serving: LLMServingIdentity | None = None
     # Process-local durability handle (write-invariant driver). Classified
     # RECONSTRUCTED in the checkpoint codec: a resumed turn gets a fresh
     # handle bound to the resume lease, never a deserialized one.
@@ -497,6 +499,7 @@ class ToolLoopDeps:
     mcp_manager: MCPManager | None = None
     # Exact cleanup target for agents spawned by a cancelled main turn.
     kill_agents_for_turn: Callable[[str], list[str]] = lambda _turn_id: []
+    get_computer: Callable = lambda: None
 
 
 class ToolLoopRunner:
@@ -525,6 +528,75 @@ class ToolLoopRunner:
         self._turn_store = deps.turn_store
         self._window_observer = deps.window_observer
         self._on_turn_suspended = deps.on_turn_suspended
+        self._get_computer = deps.get_computer
+
+    def _computer_service(self):
+        return getattr(self, "_get_computer", lambda: None)()
+
+    async def _stop_computer_turn(self, st):
+        computer = self._computer_service()
+        if computer is not None:
+            try:
+                await computer.finish_turn(st)
+            except Exception:
+                log.exception("Computer stop could not be confirmed")
+
+    def _computer_frames(self, st, *, capture=False):
+        if self._computer_service() is None:
+            return frozenset()
+        if not any(
+            isinstance(block, dict) and "__computer_frame__" in block
+            for message in st.messages
+            if isinstance(message.get("content"), list)
+            for block in message["content"]
+        ):
+            if getattr(st, "_computer_required_frames", frozenset()):
+                self._retire_computer_frames(st)
+            return frozenset()
+        from ..computer.vision import VisionError, plan_model_frames
+
+        try:
+            plan = plan_model_frames(st.messages)
+        except VisionError:
+            self._retire_computer_frames(st)
+            return frozenset()
+        st.messages = plan.messages
+        stamps = frozenset(
+            (b["__computer_frame__"]["observation_id"], b["__computer_frame__"]["sha256"])
+            for m in plan.messages
+            if isinstance(m.get("content"), list)
+            for b in m["content"]
+            if isinstance(b, dict) and b.get("type") == "image" and "__computer_frame__" in b
+        )
+        if capture:
+            st._computer_required_frames = stamps
+        elif not getattr(st, "_computer_required_frames", frozenset()).issubset(stamps):
+            self._retire_computer_frames(st)
+            return frozenset()
+        return stamps
+
+    @staticmethod
+    def _retire_computer_frames(st):
+        """Retire unusable desktop evidence without disabling ordinary work."""
+        st.messages = [
+            {
+                **message,
+                "content": [
+                    {
+                        "type": "text",
+                        "text": "[Computer frame unavailable; obtain fresh observation.]",
+                    }
+                    if isinstance(block, dict) and "__computer_frame__" in block
+                    else block
+                    for block in message["content"]
+                ],
+            }
+            if isinstance(message.get("content"), list)
+            else message
+            for message in st.messages
+        ]
+        st._computer_required_frames = frozenset()
+        st._computer_frame_error = True
 
     def _scoped_tools_for_request(
         self,
@@ -639,9 +711,7 @@ class ToolLoopRunner:
         same guard envelope as a fresh one. The iteration loop starts from
         ``st.iteration`` — the restored transcript already contains every
         earlier generation."""
-        st._cancel = self._channel_state.set_active_request(
-            st._ch_id, st._req_id, st._cancel
-        )
+        st._cancel = self._channel_state.set_active_request(st._ch_id, st._req_id, st._cancel)
         set_turn(
             turn_id=st._trajectory.message_id or None,
             source=st._trajectory.source,
@@ -651,6 +721,13 @@ class ToolLoopRunner:
         return await self._run_with_guards(st)
 
     async def _run_with_guards(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
+        async def observe_cancel():
+            await st._cancel.wait()
+            await self._stop_computer_turn(st)
+
+        computer_stop_observer = (
+            asyncio.create_task(observe_cancel()) if self._computer_service() is not None else None
+        )
         try:
             result = await self._run_chat_iterations(st)
             # Terminal bookkeeping (best-effort; a suspension already settled
@@ -665,9 +742,13 @@ class ToolLoopRunner:
                 # but the slash waiter must remain asleep until the durable
                 # TERMINAL_CANCELLED write has completed. On a write failure,
                 # report that failure instead of publishing a false success.
-                stop_result = result[0] if terminal_confirmed else (
-                    "The task stopped, but its durable cancellation record "
-                    "could not be confirmed."
+                stop_result = (
+                    result[0]
+                    if terminal_confirmed
+                    else (
+                        "The task stopped, but its durable cancellation record "
+                        "could not be confirmed."
+                    )
                 )
                 if terminal_confirmed:
                     self._channel_state.finish_stop(st._ch_id, st._req_id, stop_result)
@@ -720,6 +801,10 @@ class ToolLoopRunner:
             raise
         finally:
             # A suspended durable turn still owns its lineage and may resume.
+            await self._stop_computer_turn(st)
+            if computer_stop_observer is not None:
+                computer_stop_observer.cancel()
+                await asyncio.gather(computer_stop_observer, return_exceptions=True)
             # Every other exit is terminal for this process-local owner.
             if getattr(st.durability, "settled", False) and not getattr(
                 st.durability, "suspended", False
@@ -754,6 +839,7 @@ class ToolLoopRunner:
             # and rescue must never observe different clamp generations.
             config = self._get_config()
             serving = self._llm_gateway.capture_serving_identity(config)
+            self._computer_frames(st, capture=True)
             if st._gen_identity:
                 budget_snapshot = self._snapshot_from_generation_facts(st._gen_identity)
             else:
@@ -933,9 +1019,7 @@ class ToolLoopRunner:
 
         # Snapshot only the caller scope; the catalog itself is re-pulled at
         # each physical request assembly so same-turn publication changes land.
-        is_test_wh = bool(
-            message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS
-        )
+        is_test_wh = bool(message.webhook_id and str(message.webhook_id) in _ALLOWED_WEBHOOK_IDS)
         api_allowed = getattr(message, "allowed_tools", None)
         tools = self._scoped_tools_for_request(
             user_id=user_id,
@@ -1006,9 +1090,7 @@ class ToolLoopRunner:
         # Active ownership must be unique per turn. ``req_hash`` is only
         # content-derived debug provenance and collides for repeated messages.
         _req_id = str(_trajectory.message_id or req_hash)
-        _cancel = self._channel_state.set_active_request(
-            _ch_id, _req_id, asyncio.Event()
-        )
+        _cancel = self._channel_state.set_active_request(_ch_id, _req_id, asyncio.Event())
 
         # Durable-turn admission: Discord chat turns only, resolved the same
         # way the trajectory source is (web/API turns share this runner via
@@ -1306,9 +1388,7 @@ class ToolLoopRunner:
 
             while consumed < len(ladder):
                 if (
-                    self._believed_within_effective_budget(
-                        st.messages, snapshot, serving_identity
-                    )
+                    self._believed_within_effective_budget(st.messages, snapshot, serving_identity)
                     is not False
                 ):
                     break
@@ -1377,9 +1457,7 @@ class ToolLoopRunner:
             f" Tools used: {', '.join(st.tools_used_in_loop)}." if st.tools_used_in_loop else ""
         )
         agents_note = (
-            f" Sent cancellation to {len(killed)} agent(s) spawned by this turn."
-            if killed
-            else ""
+            f" Sent cancellation to {len(killed)} agent(s) spawned by this turn." if killed else ""
         )
         text = f"Task stopped by user.{tools_note}{agents_note}{suffix}"
         return (
@@ -1612,6 +1690,7 @@ class ToolLoopRunner:
                 self._llm_gateway, fallback_client=request_client
             )
         request_client = serving_identity.client
+        st._computer_serving = serving_identity
         # Pre-admission and breaker identity are frozen beside the client that
         # every physical attempt will invoke.
         preflight_incompatible_effort(
@@ -1647,13 +1726,20 @@ class ToolLoopRunner:
             st.tools = self._scoped_tools_for_request(
                 user_id=st.user_id,
                 api_allowed=getattr(st.message, "allowed_tools", None),
-                bypass_rbac=bool(
-                    webhook_id and str(webhook_id) in _ALLOWED_WEBHOOK_IDS
-                ),
+                bypass_rbac=bool(webhook_id and str(webhook_id) in _ALLOWED_WEBHOOK_IDS),
                 current_tools=st.tools,
                 cache_result=False,
                 request_config=request_config,
             )
+            # Frame integrity follows the evidence, not a conversation mode.
+            # Desktop admission is per call; it never narrows unrelated tools.
+            if self._computer_frames(st):
+                from ..computer.integration import require_vision
+
+                try:
+                    require_vision(serving_identity)
+                except PermissionError:
+                    self._retire_computer_frames(st)
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
@@ -1950,8 +2036,7 @@ class ToolLoopRunner:
         from ..trajectories.saver import ToolIteration
 
         iter_tool_calls = [
-            {"id": tc.id, "name": tc.name, "input": tc.input}
-            for tc in (llm_resp.tool_calls or [])
+            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in (llm_resp.tool_calls or [])
         ]
         stored_tool_calls = [
             {
@@ -2130,9 +2215,7 @@ class ToolLoopRunner:
 
         Returns True iff this was a wait-class iteration.
         """
-        iter_tool_calls = [
-            {"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls
-        ]
+        iter_tool_calls = [{"id": tc.id, "name": tc.name, "input": tc.input} for tc in tool_calls]
         if not is_wait_iteration(iter_tool_calls):
             return False
         tc = tool_calls[0]
@@ -2364,12 +2447,40 @@ class ToolLoopRunner:
         return ("done", (_final, False, False, st.tools_used_in_loop, False))
 
     async def _run_one_tool(self, st: _ChatTurn, block) -> dict:
+        from contextlib import ExitStack
+
         from ..tools.runtime_delivery import execution_delivery_scope
 
         with execution_delivery_scope(
-            st.user_id, str(st.message.channel.id),
+            st.user_id,
+            str(st.message.channel.id),
             allowed_tools=getattr(st.message, "allowed_tools", None),
         ):
+            computer = self._computer_service()
+            if computer is not None and computer.reserves_tool(block.name):
+                # The grant belongs only to this foreground task/call. Other
+                # members of a mixed batch retain their ordinary authority.
+                with ExitStack() as admission:
+                    try:
+                        if block.name == "computer_act" and getattr(
+                            st, "_computer_frame_error", False
+                        ):
+                            raise PermissionError("Computer action requires a fresh observation.")
+                        admission.enter_context(computer.foreground(st, block))
+                    except PermissionError as exc:
+                        denial = str(exc)
+                        await st.durability.after_tool(
+                            block,
+                            ok=False,
+                            uncertain=False,
+                            result_text=denial,
+                        )
+                        return {
+                            "type": "tool_result",
+                            "tool_use_id": block.id,
+                            "content": f"Permission denied: {denial}",
+                        }
+                    return await self._run_one_tool_captured(st, block)
             return await self._run_one_tool_captured(st, block)
 
     async def _run_one_tool_captured(self, st: _ChatTurn, block) -> dict:
@@ -2418,6 +2529,7 @@ class ToolLoopRunner:
                 action=tool_name,
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
+                count_as_tool=False,
                 metadata={
                     "tool_input_keys": list((tool_input or {}).keys()),
                     "iteration": st.iteration,
@@ -2506,6 +2618,54 @@ class ToolLoopRunner:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
+        # Only a newly issued, live-owned computer response may repair evidence.
+        # Historical transcript scans and legacy analyze_image never do so.
+        if (
+            tool_name in {"computer_session", "computer_observe", "computer_act"}
+            and isinstance(result, dict)
+            and ("__computer_frame__" in result or "__image_block__" in result)
+        ):
+            # The settled action outcome exists independently of whether its
+            # verification image can still be delivered. Preserve it before the
+            # delivery gate (which may reject an expired frame).
+            action_receipt = result.get("__computer_action_receipt__")
+            if isinstance(action_receipt, dict):
+                failed = action_receipt.get("status") in {
+                    "unavailable",
+                    "not_satisfied",
+                    "rejected",
+                    "failed",
+                    "unknown",
+                    "interrupted",
+                }
+                tool_result = ToolResult(
+                    json.dumps(action_receipt, ensure_ascii=True),
+                    ok=not failed,
+                    error="computer_not_satisfied" if failed else None,
+                    uncertain_outcome=action_receipt.get("status") in {"unknown", "interrupted"},
+                    tool_name=tool_name,
+                )
+            try:
+                computer = self._computer_service()
+                if computer is None:
+                    raise ValueError("Computer service unavailable")
+                await computer.validate_delivery(st, block, result)
+                st.pending_image_blocks.append(result["__image_block__"])
+                st._computer_frame_error = False
+                result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
+            except Exception:
+                st._computer_frame_error = True
+                error = "computer_observation_rejected"
+                action_receipt = result.get("__computer_action_receipt__")
+                if isinstance(action_receipt, dict):
+                    result = (
+                        "Computer post-action observation rejected; obtain a fresh observation. "
+                        "The action has already settled; do not replay it. Action receipt: "
+                        + json.dumps(action_receipt, ensure_ascii=True)
+                    )
+                else:
+                    result = "Computer observation rejected; obtain a fresh observation."
+
         # Handle special image block return from analyze_image
         if isinstance(result, dict) and "__image_block__" in result:
             st.pending_image_blocks.append(result["__image_block__"])
@@ -2524,8 +2684,12 @@ class ToolLoopRunner:
         from ..tools.runtime_delivery import deliver_runtime_output
 
         result = deliver_runtime_output(
-            self._tool_executor, result, tool_name=tool_name, tool_input=tool_input,
-            user_id=st.user_id, channel_id=str(st.message.channel.id),
+            self._tool_executor,
+            result,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            user_id=st.user_id,
+            channel_id=str(st.message.channel.id),
             status="outcome_unknown" if uncertain_outcome else "failed" if error else "succeeded",
         )
         await self._audit_tool_outcome(
@@ -2586,10 +2750,51 @@ class ToolLoopRunner:
         *,
         call_id: str | None = None,
     ) -> None:
-        """Write execution + tool_end audit records — never crash tool
-        execution on audit failure. (Inline block of the old `_run_tool`.)"""
+        """Write terminal audit evidence without letting audit failure crash a tool."""
         # Audit log — never crash tool execution on audit failure
         try:
+            # Every execution carries the exact model call identity, including
+            # ordinary/native/MCP tools. AuditLogger attaches the entry-point
+            # turn context; never infer identity from a tool name or timing.
+            terminal_event = (
+                "tool_end"
+                if tool_name in {"computer_session", "computer_observe", "computer_act"}
+                else None
+            )
+            if terminal_event:
+                # Native observations and settled receipts contain accessible
+                # document text, names and field readback. They belong in the
+                # model-facing evidence, not durable audit or its live fan-out.
+                # Do not parse/partially scrub that arbitrary desktop payload:
+                # retain only the tool-layer outcome, not a claim about pixels
+                # or application effects. Delivery failure remains a failure
+                # even when an action receipt independently settled as OK.
+                unknown = error == "outcome_unknown" or bool(
+                    tool_result and tool_result.uncertain_outcome
+                )
+                failed = bool(error or (tool_result is not None and not tool_result.ok))
+                status = "outcome_unknown" if unknown else "failed" if failed else "succeeded"
+                result = json.dumps(
+                    {
+                        "kind": "computer_audit",
+                        "tool_status": status,
+                        "output_omitted": "private desktop content",
+                    },
+                    separators=(",", ":"),
+                )
+                # Exception messages can also contain desktop text. Only these
+                # internal codes are permitted in the audit's error field.
+                if error not in {
+                    None,
+                    "computer_observation_rejected",
+                    "computer_rejected",
+                    "computer_not_satisfied",
+                    "outcome_unknown",
+                    "permission_denied",
+                }:
+                    error = "computer_rejected"
+                if not error and (unknown or failed):
+                    error = "outcome_unknown" if unknown else "computer_not_satisfied"
             scrubbed_input = _scrub_tool_input_for_storage(
                 tool_name,
                 {
@@ -2610,12 +2815,17 @@ class ToolLoopRunner:
                 risk_level=tool_result.risk_level if tool_result else None,
                 risk_reason=tool_result.risk_reason if tool_result else None,
                 audit_metadata=tool_result.audit_metadata if tool_result else None,
+                attribution={"call_id": call_id, "iteration": st.iteration},
+                event_type=terminal_event,
             )
+            if terminal_event:
+                return
             await self._audit.log_event(
                 event_type="tool_end",
                 action=tool_name,
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
+                count_as_tool=False,
                 detail=result,
                 metadata={
                     "elapsed_ms": elapsed_ms,
@@ -2702,6 +2912,8 @@ class ToolLoopRunner:
                     result_summary=error_msg,
                     execution_time_ms=int(t * 1000),
                     error=error_msg,
+                    attribution={"call_id": block.id, "iteration": st.iteration},
+                    event_type="tool_end",
                 )
             except Exception:
                 pass
@@ -3375,9 +3587,7 @@ class ToolLoopRunner:
                     server_input_tokens=getattr(response, "server_input_tokens", None),
                     server_output_tokens=getattr(response, "server_output_tokens", None),
                     estimated_input_tokens=getattr(response, "estimated_input_tokens", None),
-                    input_token_provenance=(
-                        getattr(response, "input_token_provenance", "") or ""
-                    ),
+                    input_token_provenance=(getattr(response, "input_token_provenance", "") or ""),
                     output_token_provenance=(
                         getattr(response, "output_token_provenance", "") or ""
                     ),
@@ -3426,6 +3636,21 @@ class ToolLoopRunner:
                 ),
             }
 
+        # This wrapper owns autonomous lifecycle evidence. The dispatch callback
+        # owns agent evidence instead, since agents have no outer audit writer.
+        attribution = {"call_id": block.id, "iteration": st._iteration_index}
+        try:
+            await self._audit.log_event(
+                event_type="loop_tool_start",
+                action=tool_name,
+                actor=st.user_id,
+                channel_id=st.channel_id_str,
+                attribution=attribution,
+                metadata={"status": "started"},
+                count_as_tool=False,
+            )
+        except Exception:
+            log.warning("Audit start failed for loop tool %s", tool_name)
         t0 = time.monotonic()
         error = None
         try:
@@ -3441,6 +3666,7 @@ class ToolLoopRunner:
                 tool_input,
                 st.msg_proxy,
                 st.user_id,
+                audit_owned_by_caller=True,
             )
             if self._native_tools.handles(tool_name):
                 # Do not bind across native tools such as spawn_agent: child
@@ -3498,9 +3724,12 @@ class ToolLoopRunner:
         from ..tools.runtime_delivery import deliver_runtime_output
 
         result = deliver_runtime_output(
-            getattr(self, "_tool_executor", None), raw,
-            tool_name=tool_name, tool_input=tool_input,
-            user_id=st.user_id, channel_id=st.channel_id_str,
+            getattr(self, "_tool_executor", None),
+            raw,
+            tool_name=tool_name,
+            tool_input=tool_input,
+            user_id=st.user_id,
+            channel_id=st.channel_id_str,
             status="failed" if error else "succeeded",
         )
 
@@ -3517,6 +3746,8 @@ class ToolLoopRunner:
                 execution_time_ms=elapsed_ms,
                 error=error,
                 audit_metadata=_audit_meta,
+                attribution=attribution,
+                event_type="loop_tool",
             )
         except OSError as audit_err:
             log.warning("Audit write failed (I/O): %s", audit_err)
@@ -3642,12 +3873,18 @@ class ToolLoopRunner:
         tool_input: dict,
         msg_proxy: _LoopMessageProxy,
         user_id: str,
+        *,
+        audit_owned_by_caller: bool = False,
     ) -> str | dict | ToolResult:
         """Dispatch a tool call to the correct handler within a loop iteration.
 
         Mirrors the Discord-native tool dispatch in the chat pipeline, using
         a lightweight message proxy instead of a real Discord message.
         """
+        if audit_owned_by_caller:
+            # Explicit ownership, not inherited ContextVars: native child tasks
+            # must not acquire their parent's call identity or suppress audits.
+            return await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
         t0 = time.monotonic()
         attribution = None
         try:
@@ -3662,13 +3899,18 @@ class ToolLoopRunner:
                 if attribution:
                     # A new audit append must never consume the agent's tool
                     # deadline or delay dispatch/stop when storage is stalled.
-                    start = start_observer(self._audit.log_event(
-                        event_type="loop_tool_start", action=tool_name, actor=user_id,
-                        channel_id=str(getattr(msg_proxy.channel, "id", "")),
-                        tool_input=_scrub_tool_input_for_storage(tool_name, tool_input),
-                        attribution=attribution,
-                        metadata={"status": "started"}, count_as_tool=False,
-                    ))
+                    start = start_observer(
+                        self._audit.log_event(
+                            event_type="loop_tool_start",
+                            action=tool_name,
+                            actor=user_id,
+                            channel_id=str(getattr(msg_proxy.channel, "id", "")),
+                            tool_input=_scrub_tool_input_for_storage(tool_name, tool_input),
+                            attribution=attribution,
+                            metadata={"status": "started"},
+                            count_as_tool=False,
+                        )
+                    )
             except Exception:
                 pass
             result = await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
@@ -3679,15 +3921,30 @@ class ToolLoopRunner:
         finally:
             await observe_terminal(
                 self._audit_loop_tool_outcome(
-                    tool_name, tool_input, msg_proxy, user_id, result, failure,
-                    int((time.monotonic() - t0) * 1000), attribution, start,
+                    tool_name,
+                    tool_input,
+                    msg_proxy,
+                    user_id,
+                    result,
+                    failure,
+                    int((time.monotonic() - t0) * 1000),
+                    attribution,
+                    start,
                 ),
                 wait=attribution is None,
             )
 
     async def _audit_loop_tool_outcome(
-        self, tool_name, tool_input, msg_proxy, user_id, result, failure,
-        elapsed_ms, attribution, start=None,
+        self,
+        tool_name,
+        tool_input,
+        msg_proxy,
+        user_id,
+        result,
+        failure,
+        elapsed_ms,
+        attribution,
+        start=None,
     ) -> None:
         """Best-effort observer; returns no execution or lifecycle decisions."""
         if start is not None:
@@ -3755,11 +4012,17 @@ class ToolLoopRunner:
                     await self._audit.log_execution(
                         user_id=user_id,
                         user_name=str(getattr(msg_proxy.author, "display_name", user_id)),
-                        channel_id=channel_id, tool_name=tool_name,
-                        tool_input=cleaned_input, approved=True,
-                        result_summary=detail, execution_time_ms=elapsed_ms,
-                        error=error, audit_metadata=audit_metadata,
-                        attribution=attribution, status=status, count_as_tool=False,
+                        channel_id=channel_id,
+                        tool_name=tool_name,
+                        tool_input=cleaned_input,
+                        approved=True,
+                        result_summary=detail,
+                        execution_time_ms=elapsed_ms,
+                        error=error,
+                        audit_metadata=audit_metadata,
+                        attribution=attribution,
+                        status=status,
+                        count_as_tool=False,
                     )
                 except asyncio.CancelledError:
                     caller = asyncio.current_task()
@@ -3795,13 +4058,20 @@ class ToolLoopRunner:
 
         channel_id = str(getattr(msg_proxy.channel, "id", ""))
         with execution_delivery_scope(
-            user_id, channel_id, allowed_tools=getattr(msg_proxy, "allowed_tools", None),
+            user_id,
+            channel_id,
+            allowed_tools=getattr(msg_proxy, "allowed_tools", None),
         ):
-            raw = await ToolLoopRunner._dispatch_loop_tool_captured(self,
-                tool_name, tool_input, msg_proxy, user_id)
+            raw = await ToolLoopRunner._dispatch_loop_tool_captured(
+                self, tool_name, tool_input, msg_proxy, user_id
+            )
             return deliver_runtime_result(
-                self._tool_executor, raw, tool_name=tool_name, tool_input=tool_input,
-                user_id=user_id, channel_id=channel_id,
+                self._tool_executor,
+                raw,
+                tool_name=tool_name,
+                tool_input=tool_input,
+                user_id=user_id,
+                channel_id=channel_id,
             )
 
     async def _dispatch_loop_tool_captured(

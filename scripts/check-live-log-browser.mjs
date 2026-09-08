@@ -219,6 +219,92 @@ try {
 
   await page.getByLabel('Group by turn / agent').uncheck();
   await page.setViewportSize({ width: 1400, height: 900 });
+  // Exercise the actual WebSocket -> Logs -> LogRecord/ToolOutput renderer.
+  // No source assertions and no mocked coalescing: identical-name parallel
+  // calls finish in reverse order and cross tool families use the same path.
+  for (const tool of ['run_command', 'read_file', 'computer_act', 'invoke_skill', 'mcp_fixture', 'future_tool']) {
+    await page.evaluate(tool => {
+      const base = { tool_name: tool, turn: { turn_id: 'lifecycle-turn' }, user_id: 'u', channel_id: 'c' };
+      window.callEvents = call => [
+        { ...base, type: 'tool_start', timestamp: '2026-09-06T16:00:00Z', metadata: { call_id: call, iteration: 1 } },
+        { ...base, call_id: call, iteration: 1, result_summary: `RESULT-${call}\nsecond line`, tool_input: { argument: `INPUT-${call}` }, execution_time_ms: 12, timestamp: '2026-09-06T16:00:01Z' },
+        { ...base, type: 'tool_end', detail: `TERMINAL-${call}`, metadata: { call_id: call, iteration: 1, elapsed_ms: 14 }, timestamp: '2026-09-06T16:00:02Z' },
+      ];
+      emitLog(callEvents('a')[0]); emitLog(callEvents('b')[0]);
+    }, tool);
+    assert.equal(await page.locator('.log-line').count(), 2, `${tool}: two running calls`);
+    assert.match(await page.locator('.log-line').first().innerText(), /started/);
+    const stableId = await page.locator('.log-line').first().getAttribute('data-log-id');
+    await page.locator('.log-line').first().locator('.output-expand').click();
+    await page.evaluate(() => {
+      emitLog(callEvents('b')[2]); emitLog(callEvents('a')[1]);
+      emitLog(callEvents('a')[2]); emitLog(callEvents('b')[1]);
+    });
+    assert.equal(await page.locator('.log-line').count(), 2, `${tool}: one displayed row per completed call`);
+    const row = page.locator(`[data-log-id="${stableId}"]`);
+    assert.match(await row.innerText(), /RESULT-a/);
+    assert.doesNotMatch(await row.innerText(), /RESULT-b|INPUT-b/);
+    assert.match(await row.innerText(), /INPUT-a/);
+    assert.match(await row.innerText(), /succeeded.*12ms/s);
+    assert.equal(await row.locator('.output-compact-detail').count(), 1, 'open inspector survives lifecycle updates');
+    assert.match(await row.locator('.log-compact-lifecycle').innerText(), /3 events.*tool_start.*execution.*tool_end/s);
+    if (tool === 'run_command') {
+      await row.getByRole('button', { name: 'Raw', exact: true }).click();
+      const rawEvidence = JSON.parse(await row.locator('.output-compact-preview').textContent());
+      assert.equal(rawEvidence.length, 3, 'raw inspector contains all original events');
+      assert.equal(rawEvidence[0].type, 'tool_start');
+      assert.equal(rawEvidence[1].result_summary, 'RESULT-a\nsecond line');
+      assert.equal(rawEvidence[2].detail, 'TERMINAL-a');
+      await page.context().grantPermissions(['clipboard-read', 'clipboard-write']);
+      await row.getByRole('button', { name: 'Copy', exact: true }).click();
+      assert.deepEqual(JSON.parse(await page.evaluate(() => navigator.clipboard.readText())), rawEvidence, 'raw copy retains all lifecycle events');
+      await row.getByRole('button', { name: 'Raw', exact: true }).click();
+    }
+    await page.getByPlaceholder('Filter logs...').fill('TERMINAL-a');
+    assert.equal(await page.locator('.log-line').count(), 1, 'noncanonical terminal evidence remains searchable');
+    await page.getByPlaceholder('Filter logs...').fill('');
+    await page.getByLabel('Group by turn / agent').check();
+    assert.equal(await page.locator('[data-log-group]').count(), 1);
+    assert.equal(await page.locator('.log-line').count(), 2, 'grouped mode counts calls rather than events');
+    await page.getByRole('button', { name: 'Clear', exact: true }).click();
+    await page.getByLabel('Group by turn / agent').uncheck();
+  }
+  await page.evaluate(() => emitLog(callEvents('paused')[0]));
+  const pausedId = await page.locator('.log-line').getAttribute('data-log-id');
+  await page.getByRole('button', { name: 'Pause', exact: true }).click();
+  await page.evaluate(() => { emitLog(callEvents('paused')[1]); emitLog(callEvents('paused')[2]); });
+  assert.match(await page.locator('.log-line').innerText(), /started/);
+  assert.doesNotMatch(await page.locator('.log-line').innerText(), /RESULT-paused/);
+  await page.getByRole('button', { name: 'Resume', exact: true }).click();
+  assert.equal(await page.locator('.log-line').count(), 1, 'resume merges buffered lifecycle into retained start');
+  assert.equal(await page.locator('.log-line').getAttribute('data-log-id'), pausedId);
+  assert.match(await page.locator('.log-line').innerText(), /RESULT-paused/);
+  await page.getByRole('button', { name: 'Clear', exact: true }).click();
+  await page.evaluate(() => {
+    // Agent observers use loop events and top-level attribution.
+    const base = { tool_name: 'read_file', agent_id: 'child', originating_turn_id: 'agent-turn', iteration: 2, call_id: 'shared' };
+    emitLog({ ...base, type: 'loop_tool_start', metadata: { status: 'started' } });
+    emitLog({ ...base, result_summary: 'agent evidence', tool_input: { argument: 'agent input' } });
+    emitLog({ ...base, type: 'loop_tool', metadata: { status: 'outcome_unknown', error: 'unverified effect' } });
+    emitLog({ ...base, agent_id: 'sibling', result_summary: 'sibling evidence' });
+    emitLog({ ...base, originating_turn_id: 'different-turn', result_summary: 'different turn' });
+    // Missing IDs must not be guessed from identical content or tool name.
+    emitLog({ tool_name: 'read_file', result_summary: 'legacy identical' });
+    emitLog({ tool_name: 'read_file', result_summary: 'legacy identical' });
+    // Unscoped provider IDs are not globally unique.
+    emitLog({ tool_name: 'read_file', call_id: 'unscoped', result_summary: 'unscoped' });
+    emitLog({ tool_name: 'read_file', call_id: 'unscoped', result_summary: 'unscoped' });
+  });
+  assert.equal(await page.locator('.log-line').count(), 7, 'agent scope isolation and legacy ambiguity are preserved');
+  assert.match(await page.locator('.log-line').first().innerText(), /ERROR.*outcome_unknown/s);
+  await page.locator('.log-line').first().locator('.output-expand').click();
+  assert.match(await page.locator('.log-line').first().innerText(), /unverified effect/);
+  await page.getByRole('button', { name: 'Clear', exact: true }).click();
+  await page.evaluate(() => emitLog(callEvents('paused')[2]));
+  assert.equal(await page.locator('.log-line').count(), 1, 'clear removes correlation history');
+  assert.doesNotMatch(await page.locator('.log-line').innerText(), /RESULT-paused/);
+  await page.getByRole('button', { name: 'Clear', exact: true }).click();
+  console.log('live log renderer: all tool families coalesce, reverse parallel completion, stable expanded rows, grouped counts, pause/resume, clear, errors and legacy ambiguity passed');
   // Full real page, compact vs inspector is not a mock render path.
   const login = { type: 'web_action', method: 'POST', path: '/api/auth/login', status: 200, success: true,
     ip: '192.0.2.1', execution_time_ms: 0, _hmac: 'a'.repeat(64), _prev_hmac: 'b'.repeat(64) };

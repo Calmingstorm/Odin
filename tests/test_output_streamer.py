@@ -1,4 +1,5 @@
 """Tests for src/tools/output_streamer.py — tool output streaming."""
+
 from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -23,9 +24,11 @@ def _session_workspace() -> str:
 
     return ToolsConfig().local_working_dir
 
+
 # ---------------------------------------------------------------------------
 # StreamChunk
 # ---------------------------------------------------------------------------
+
 
 class TestStreamChunk:
     def test_basic_fields(self):
@@ -43,15 +46,22 @@ class TestStreamChunk:
 
     def test_finished_flag(self):
         c = StreamChunk(
-            tool_name="x", chunk="", sequence=1,
-            timestamp="t", channel_id="c", finished=True,
+            tool_name="x",
+            chunk="",
+            sequence=1,
+            timestamp="t",
+            channel_id="c",
+            finished=True,
         )
         assert c.finished is True
 
     def test_to_dict(self):
         c = StreamChunk(
-            tool_name="run_command", chunk="data",
-            sequence=3, timestamp="ts", channel_id="ch",
+            tool_name="run_command",
+            chunk="data",
+            sequence=3,
+            timestamp="ts",
+            channel_id="ch",
         )
         d = c.to_dict()
         assert d["tool_name"] == "run_command"
@@ -63,15 +73,22 @@ class TestStreamChunk:
 
     def test_to_dict_finished(self):
         c = StreamChunk(
-            tool_name="t", chunk="", sequence=0,
-            timestamp="ts", channel_id="c", finished=True,
+            tool_name="t",
+            chunk="",
+            sequence=0,
+            timestamp="ts",
+            channel_id="c",
+            finished=True,
         )
         assert c.to_dict()["finished"] is True
 
     def test_to_dict_all_keys(self):
         d = StreamChunk(
-            tool_name="t", chunk="c", sequence=0,
-            timestamp="ts", channel_id="ch",
+            tool_name="t",
+            chunk="c",
+            sequence=0,
+            timestamp="ts",
+            channel_id="ch",
         ).to_dict()
         # call_id joined the wire payload so consumers can attribute streamed
         # output to ONE invocation: two concurrent calls to the same tool
@@ -79,20 +96,33 @@ class TestStreamChunk:
         # output and lets either completion clear both. Additive, so existing
         # consumers that ignore unknown keys are unaffected.
         expected_keys = {
-            "tool_name", "chunk", "sequence", "timestamp", "channel_id",
-            "finished", "call_id",
+            "tool_name",
+            "chunk",
+            "sequence",
+            "timestamp",
+            "channel_id",
+            "finished",
+            "call_id",
         }
         assert set(d.keys()) == expected_keys
 
     def test_call_id_defaults_to_none_for_untracked_invocations(self):
         d = StreamChunk(
-            tool_name="t", chunk="c", sequence=0, timestamp="ts", channel_id="ch",
+            tool_name="t",
+            chunk="c",
+            sequence=0,
+            timestamp="ts",
+            channel_id="ch",
         ).to_dict()
         assert d["call_id"] is None
 
     def test_call_id_round_trips(self):
         d = StreamChunk(
-            tool_name="t", chunk="c", sequence=0, timestamp="ts", channel_id="ch",
+            tool_name="t",
+            chunk="c",
+            sequence=0,
+            timestamp="ts",
+            channel_id="ch",
             call_id="call_xyz",
         ).to_dict()
         assert d["call_id"] == "call_xyz"
@@ -101,6 +131,7 @@ class TestStreamChunk:
 # ---------------------------------------------------------------------------
 # _ActiveStream
 # ---------------------------------------------------------------------------
+
 
 class TestActiveStream:
     def test_default_values(self):
@@ -123,6 +154,7 @@ class TestActiveStream:
 # ---------------------------------------------------------------------------
 # ToolOutputStreamer — construction & properties
 # ---------------------------------------------------------------------------
+
 
 class TestStreamerInit:
     def test_default_construction(self):
@@ -154,6 +186,7 @@ class TestStreamerInit:
 # ToolOutputStreamer — is_enabled
 # ---------------------------------------------------------------------------
 
+
 class TestIsEnabled:
     def test_enabled_tool(self):
         s = ToolOutputStreamer(enabled_tools={"run_command"})
@@ -175,6 +208,7 @@ class TestIsEnabled:
 # ---------------------------------------------------------------------------
 # ToolOutputStreamer — listeners
 # ---------------------------------------------------------------------------
+
 
 class TestListeners:
     def test_add_listener(self):
@@ -210,8 +244,11 @@ class TestListeners:
         s.add_listener(cb1)
         s.add_listener(cb2)
         chunk = StreamChunk(
-            tool_name="t", chunk="x", sequence=0,
-            timestamp="ts", channel_id="c",
+            tool_name="t",
+            chunk="x",
+            sequence=0,
+            timestamp="ts",
+            channel_id="c",
         )
         await s._emit(chunk)
         cb1.assert_awaited_once_with(chunk)
@@ -225,8 +262,11 @@ class TestListeners:
         s.add_listener(bad)
         s.add_listener(good)
         chunk = StreamChunk(
-            tool_name="t", chunk="x", sequence=0,
-            timestamp="ts", channel_id="c",
+            tool_name="t",
+            chunk="x",
+            sequence=0,
+            timestamp="ts",
+            channel_id="c",
         )
         await s._emit(chunk)
         good.assert_awaited_once_with(chunk)
@@ -235,8 +275,11 @@ class TestListeners:
     async def test_emit_no_listeners(self):
         s = ToolOutputStreamer()
         chunk = StreamChunk(
-            tool_name="t", chunk="x", sequence=0,
-            timestamp="ts", channel_id="c",
+            tool_name="t",
+            chunk="x",
+            sequence=0,
+            timestamp="ts",
+            channel_id="c",
         )
         await s._emit(chunk)  # should not raise
 
@@ -244,6 +287,7 @@ class TestListeners:
 # ---------------------------------------------------------------------------
 # ToolOutputStreamer — create_callback
 # ---------------------------------------------------------------------------
+
 
 class TestCreateCallback:
     def test_returns_three_tuple(self):
@@ -271,7 +315,8 @@ class TestCreateCallback:
     @pytest.mark.asyncio
     async def test_on_output_buffers_text(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=100.0,
+            enabled_tools={"run_command"},
+            chunk_interval=100.0,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -284,7 +329,8 @@ class TestCreateCallback:
     @pytest.mark.asyncio
     async def test_on_output_emits_after_interval(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=0.1,
+            enabled_tools={"run_command"},
+            chunk_interval=0.1,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -302,7 +348,8 @@ class TestCreateCallback:
     @pytest.mark.asyncio
     async def test_finish_flushes_buffer(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=100.0,
+            enabled_tools={"run_command"},
+            chunk_interval=100.0,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -322,7 +369,8 @@ class TestCreateCallback:
     @pytest.mark.asyncio
     async def test_finish_empty_buffer(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=0.1,
+            enabled_tools={"run_command"},
+            chunk_interval=0.1,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -337,7 +385,8 @@ class TestCreateCallback:
     @pytest.mark.asyncio
     async def test_total_chars_tracked(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=100.0,
+            enabled_tools={"run_command"},
+            chunk_interval=100.0,
         )
         s.add_listener(AsyncMock())
         stream_id, on_output, _ = s.create_callback("run_command")
@@ -365,7 +414,8 @@ class TestCreateCallback:
     @pytest.mark.asyncio
     async def test_channel_id_passed_through(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=0.1,
+            enabled_tools={"run_command"},
+            chunk_interval=0.1,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -379,7 +429,8 @@ class TestCreateCallback:
     @pytest.mark.asyncio
     async def test_sequence_increments(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=0.1,
+            enabled_tools={"run_command"},
+            chunk_interval=0.1,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -400,6 +451,7 @@ class TestCreateCallback:
 # ---------------------------------------------------------------------------
 # ToolOutputStreamer — get_active_streams
 # ---------------------------------------------------------------------------
+
 
 class TestGetActiveStreams:
     def test_empty(self):
@@ -438,10 +490,12 @@ class TestGetActiveStreams:
 # run_local_command with on_output
 # ---------------------------------------------------------------------------
 
+
 class TestRunLocalCommandStreaming:
     @pytest.mark.asyncio
     async def test_no_callback_returns_normally(self):
         from src.tools.ssh import run_local_command
+
         code, output = await run_local_command("echo hello", timeout=10)
         assert code == 0
         assert "hello" in output
@@ -449,13 +503,16 @@ class TestRunLocalCommandStreaming:
     @pytest.mark.asyncio
     async def test_callback_receives_lines(self):
         from src.tools.ssh import run_local_command
+
         lines: list[str] = []
 
         async def on_output(line: str) -> None:
             lines.append(line)
 
         code, output = await run_local_command(
-            "echo line1 && echo line2", timeout=10, on_output=on_output,
+            "echo line1 && echo line2",
+            timeout=10,
+            on_output=on_output,
         )
         assert code == 0
         assert len(lines) == 2
@@ -465,13 +522,16 @@ class TestRunLocalCommandStreaming:
     @pytest.mark.asyncio
     async def test_callback_output_matches_return(self):
         from src.tools.ssh import run_local_command
+
         lines: list[str] = []
 
         async def on_output(line: str) -> None:
             lines.append(line)
 
         code, output = await run_local_command(
-            "echo abc", timeout=10, on_output=on_output,
+            "echo abc",
+            timeout=10,
+            on_output=on_output,
         )
         assert code == 0
         assert "".join(lines).strip() == output.strip()
@@ -479,26 +539,32 @@ class TestRunLocalCommandStreaming:
     @pytest.mark.asyncio
     async def test_callback_with_stderr(self):
         from src.tools.ssh import run_local_command
+
         lines: list[str] = []
 
         async def on_output(line: str) -> None:
             lines.append(line)
 
         code, output = await run_local_command(
-            "echo out && echo err >&2", timeout=10, on_output=on_output,
+            "echo out && echo err >&2",
+            timeout=10,
+            on_output=on_output,
         )
         assert len(lines) >= 1  # stderr merged to stdout
 
     @pytest.mark.asyncio
     async def test_callback_with_failing_command(self):
         from src.tools.ssh import run_local_command
+
         lines: list[str] = []
 
         async def on_output(line: str) -> None:
             lines.append(line)
 
         code, output = await run_local_command(
-            "echo before && false", timeout=10, on_output=on_output,
+            "echo before && false",
+            timeout=10,
+            on_output=on_output,
         )
         assert code != 0
         assert len(lines) >= 1
@@ -506,13 +572,16 @@ class TestRunLocalCommandStreaming:
     @pytest.mark.asyncio
     async def test_callback_timeout(self):
         from src.tools.ssh import run_local_command
+
         lines: list[str] = []
 
         async def on_output(line: str) -> None:
             lines.append(line)
 
         code, output = await run_local_command(
-            "echo start && sleep 30", timeout=1, on_output=on_output,
+            "echo start && sleep 30",
+            timeout=1,
+            on_output=on_output,
         )
         assert code == 1
         assert "timed out" in output.lower()
@@ -525,7 +594,9 @@ class TestRunLocalCommandStreaming:
             raise RuntimeError("boom")
 
         code, output = await run_local_command(
-            "echo test", timeout=10, on_output=bad_callback,
+            "echo test",
+            timeout=10,
+            on_output=bad_callback,
         )
         assert code == 0
         assert "test" in output
@@ -533,13 +604,16 @@ class TestRunLocalCommandStreaming:
     @pytest.mark.asyncio
     async def test_callback_multiline(self):
         from src.tools.ssh import run_local_command
+
         lines: list[str] = []
 
         async def on_output(line: str) -> None:
             lines.append(line)
 
         code, output = await run_local_command(
-            "printf 'a\\nb\\nc\\n'", timeout=10, on_output=on_output,
+            "printf 'a\\nb\\nc\\n'",
+            timeout=10,
+            on_output=on_output,
         )
         assert code == 0
         assert len(lines) == 3
@@ -549,10 +623,12 @@ class TestRunLocalCommandStreaming:
 # run_ssh_command with on_output (mocked)
 # ---------------------------------------------------------------------------
 
+
 class TestRunSSHCommandStreaming:
     @pytest.mark.asyncio
     async def test_on_output_parameter_accepted(self):
         from src.tools.ssh import run_ssh_command
+
         lines: list[str] = []
 
         async def on_output(line: str) -> None:
@@ -604,6 +680,7 @@ class TestRunSSHCommandStreaming:
 # _exec_command passes on_output through
 # ---------------------------------------------------------------------------
 
+
 class TestExecCommandStreaming:
     @pytest.mark.asyncio
     async def test_local_passes_on_output(self):
@@ -619,12 +696,14 @@ class TestExecCommandStreaming:
         executor.ssh_pool = None
 
         cb = AsyncMock()
-        with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch(
-                 "src.tools.executor.run_local_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "ok"),
-             )as mock_run:
+        with (
+            patch("src.tools.executor.is_local_address", return_value=True),
+            patch(
+                "src.tools.executor.run_local_command",
+                new_callable=AsyncMock,
+                return_value=(0, "ok"),
+            ) as mock_run,
+        ):
             await executor._exec_command("127.0.0.1", "echo hi", on_output=cb)
             mock_run.assert_awaited_once()
             _, kwargs = mock_run.call_args
@@ -647,12 +726,14 @@ class TestExecCommandStreaming:
         executor.ssh_pool = None
 
         cb = AsyncMock()
-        with patch("src.tools.executor.is_local_address", return_value=False), \
-             patch(
-                 "src.tools.executor.run_ssh_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "ok"),
-             )as mock_run:
+        with (
+            patch("src.tools.executor.is_local_address", return_value=False),
+            patch(
+                "src.tools.executor.run_ssh_command",
+                new_callable=AsyncMock,
+                return_value=(0, "ok"),
+            ) as mock_run,
+        ):
             await executor._exec_command("10.0.0.1", "echo hi", on_output=cb)
             mock_run.assert_awaited_once()
             _, kwargs = mock_run.call_args
@@ -671,12 +752,14 @@ class TestExecCommandStreaming:
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
 
-        with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch(
-                 "src.tools.executor.run_local_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "ok"),
-             )as mock_run:
+        with (
+            patch("src.tools.executor.is_local_address", return_value=True),
+            patch(
+                "src.tools.executor.run_local_command",
+                new_callable=AsyncMock,
+                return_value=(0, "ok"),
+            ) as mock_run,
+        ):
             await executor._exec_command("127.0.0.1", "echo hi")
             _, kwargs = mock_run.call_args
             assert kwargs["on_output"] is None
@@ -685,6 +768,7 @@ class TestExecCommandStreaming:
 # ---------------------------------------------------------------------------
 # _handle_run_command streaming integration
 # ---------------------------------------------------------------------------
+
 
 class TestHandleRunCommandStreaming:
     @pytest.mark.asyncio
@@ -696,11 +780,13 @@ class TestHandleRunCommandStreaming:
         # Real path: the workspace is validated fail-closed (no cwd fallback).
         executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(
-            address="127.0.0.1",
-            ssh_user="root",
-            os="linux",
-        )}
+        executor.config.hosts = {
+            "myhost": MagicMock(
+                address="127.0.0.1",
+                ssh_user="root",
+                os="linux",
+            )
+        }
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -713,12 +799,14 @@ class TestHandleRunCommandStreaming:
         streamer.create_callback.return_value = ("sid", AsyncMock(), finish)
         executor.output_streamer = streamer
 
-        with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch(
-                 "src.tools.executor.run_local_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "output"),
-             ):
+        with (
+            patch("src.tools.executor.is_local_address", return_value=True),
+            patch(
+                "src.tools.executor.run_local_command",
+                new_callable=AsyncMock,
+                return_value=(0, "output"),
+            ),
+        ):
             result = await executor.system_tools._handle_run_command(
                 {"host": "myhost", "command": "ls"}
             )
@@ -736,11 +824,13 @@ class TestHandleRunCommandStreaming:
         # Real path: the workspace is validated fail-closed (no cwd fallback).
         executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(
-            address="127.0.0.1",
-            ssh_user="root",
-            os="linux",
-        )}
+        executor.config.hosts = {
+            "myhost": MagicMock(
+                address="127.0.0.1",
+                ssh_user="root",
+                os="linux",
+            )
+        }
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -751,12 +841,14 @@ class TestHandleRunCommandStreaming:
         streamer.is_enabled.return_value = False
         executor.output_streamer = streamer
 
-        with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch(
-                 "src.tools.executor.run_local_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "output"),
-             )as mock_run:
+        with (
+            patch("src.tools.executor.is_local_address", return_value=True),
+            patch(
+                "src.tools.executor.run_local_command",
+                new_callable=AsyncMock,
+                return_value=(0, "output"),
+            ) as mock_run,
+        ):
             await executor.system_tools._handle_run_command({"host": "myhost", "command": "ls"})
 
         streamer.create_callback.assert_not_called()
@@ -772,11 +864,13 @@ class TestHandleRunCommandStreaming:
         # Real path: the workspace is validated fail-closed (no cwd fallback).
         executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(
-            address="127.0.0.1",
-            ssh_user="root",
-            os="linux",
-        )}
+        executor.config.hosts = {
+            "myhost": MagicMock(
+                address="127.0.0.1",
+                ssh_user="root",
+                os="linux",
+            )
+        }
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -784,12 +878,14 @@ class TestHandleRunCommandStreaming:
         executor._host_access = None
         executor.output_streamer = None
 
-        with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch(
-                 "src.tools.executor.run_local_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "output"),
-             ):
+        with (
+            patch("src.tools.executor.is_local_address", return_value=True),
+            patch(
+                "src.tools.executor.run_local_command",
+                new_callable=AsyncMock,
+                return_value=(0, "output"),
+            ),
+        ):
             result = await executor.system_tools._handle_run_command(
                 {"host": "myhost", "command": "ls"}
             )
@@ -824,6 +920,7 @@ class TestHandleRunCommandStreaming:
 # _handle_run_script streaming integration
 # ---------------------------------------------------------------------------
 
+
 class TestHandleRunScriptStreaming:
     @pytest.mark.asyncio
     async def test_streaming_enabled(self):
@@ -834,11 +931,13 @@ class TestHandleRunScriptStreaming:
         # Real path: the workspace is validated fail-closed (no cwd fallback).
         executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(
-            address="127.0.0.1",
-            ssh_user="root",
-            os="linux",
-        )}
+        executor.config.hosts = {
+            "myhost": MagicMock(
+                address="127.0.0.1",
+                ssh_user="root",
+                os="linux",
+            )
+        }
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -851,15 +950,21 @@ class TestHandleRunScriptStreaming:
         streamer.create_callback.return_value = ("sid", AsyncMock(), finish)
         executor.output_streamer = streamer
 
-        with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch(
-                 "src.tools.executor.run_local_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "output"),
-             ):
-            await executor.system_tools._handle_run_script({
-                "host": "myhost", "script": "echo hi", "interpreter": "bash",
-            })
+        with (
+            patch("src.tools.executor.is_local_address", return_value=True),
+            patch(
+                "src.tools.executor.run_local_command",
+                new_callable=AsyncMock,
+                return_value=(0, "output"),
+            ),
+        ):
+            await executor.system_tools._handle_run_script(
+                {
+                    "host": "myhost",
+                    "script": "echo hi",
+                    "interpreter": "bash",
+                }
+            )
 
         streamer.create_callback.assert_called_once_with("run_script", channel_id="myhost")
         finish.assert_awaited_once()
@@ -873,11 +978,13 @@ class TestHandleRunScriptStreaming:
         # Real path: the workspace is validated fail-closed (no cwd fallback).
         executor.config.local_working_dir = _session_workspace()
         executor.config.command_timeout_seconds = 30
-        executor.config.hosts = {"myhost": MagicMock(
-            address="127.0.0.1",
-            ssh_user="root",
-            os="linux",
-        )}
+        executor.config.hosts = {
+            "myhost": MagicMock(
+                address="127.0.0.1",
+                ssh_user="root",
+                os="linux",
+            )
+        }
         executor.bulkheads = MagicMock()
         executor.bulkheads.get.return_value = None
         executor.ssh_pool = None
@@ -885,15 +992,21 @@ class TestHandleRunScriptStreaming:
         executor._host_access = None
         executor.output_streamer = None
 
-        with patch("src.tools.executor.is_local_address", return_value=True), \
-             patch(
-                 "src.tools.executor.run_local_command",
-                 new_callable=AsyncMock,
-                 return_value=(0, "output"),
-             ):
-            result = await executor.system_tools._handle_run_script({
-                "host": "myhost", "script": "echo hi", "interpreter": "bash",
-            })
+        with (
+            patch("src.tools.executor.is_local_address", return_value=True),
+            patch(
+                "src.tools.executor.run_local_command",
+                new_callable=AsyncMock,
+                return_value=(0, "output"),
+            ),
+        ):
+            result = await executor.system_tools._handle_run_script(
+                {
+                    "host": "myhost",
+                    "script": "echo hi",
+                    "interpreter": "bash",
+                }
+            )
             assert "output" in result
 
 
@@ -901,9 +1014,11 @@ class TestHandleRunScriptStreaming:
 # Config — StreamingConfig
 # ---------------------------------------------------------------------------
 
+
 class TestStreamingConfig:
     def test_default_values(self):
         from src.config.schema import StreamingConfig
+
         cfg = StreamingConfig()
         assert cfg.enabled is False
         assert cfg.tools == []
@@ -912,6 +1027,7 @@ class TestStreamingConfig:
 
     def test_custom_values(self):
         from src.config.schema import StreamingConfig
+
         cfg = StreamingConfig(
             enabled=True,
             tools=["run_command", "run_script"],
@@ -925,12 +1041,14 @@ class TestStreamingConfig:
 
     def test_tools_config_has_streaming(self):
         from src.config.schema import ToolsConfig
+
         cfg = ToolsConfig()
         assert hasattr(cfg, "streaming")
         assert cfg.streaming.enabled is False
 
     def test_tools_config_streaming_custom(self):
         from src.config.schema import ToolsConfig
+
         cfg = ToolsConfig(streaming={"enabled": True, "tools": ["run_command"]})
         assert cfg.streaming.enabled is True
         assert cfg.streaming.tools == ["run_command"]
@@ -939,6 +1057,7 @@ class TestStreamingConfig:
 # ---------------------------------------------------------------------------
 # REST API endpoint
 # ---------------------------------------------------------------------------
+
 
 class TestAPIEndpoint:
     @pytest.mark.asyncio
@@ -1018,9 +1137,11 @@ class TestAPIEndpoint:
 # Exports
 # ---------------------------------------------------------------------------
 
+
 class TestExports:
     def test_tools_init_exports(self):
         from src.tools import StreamChunk, ToolOutputStreamer
+
         assert StreamChunk is not None
         assert ToolOutputStreamer is not None
 
@@ -1030,12 +1151,14 @@ class TestExports:
             ToolOutputStreamer,
             _ActiveStream,
         )
+
         assert StreamChunk is not None
         assert ToolOutputStreamer is not None
         assert _ActiveStream is not None
 
     def test_ssh_output_callback_type(self):
         from src.tools.ssh import OutputCallback
+
         assert OutputCallback is not None
 
 
@@ -1043,11 +1166,13 @@ class TestExports:
 # Edge cases
 # ---------------------------------------------------------------------------
 
+
 class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_concurrent_streams(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command", "run_script"}, chunk_interval=0.1,
+            enabled_tools={"run_command", "run_script"},
+            chunk_interval=0.1,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -1080,7 +1205,8 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_on_output_empty_string(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=0.1,
+            enabled_tools={"run_command"},
+            chunk_interval=0.1,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -1092,7 +1218,8 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_rate_limiting_prevents_flood(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=100.0,
+            enabled_tools={"run_command"},
+            chunk_interval=100.0,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -1105,6 +1232,7 @@ class TestEdgeCases:
 
     def test_streamer_from_config(self):
         from src.config.schema import StreamingConfig
+
         cfg = StreamingConfig(
             enabled=True,
             tools=["run_command", "run_script"],
@@ -1146,6 +1274,7 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_executor_init_with_streamer(self):
         from src.tools.executor import ToolExecutor
+
         streamer = ToolOutputStreamer(enabled_tools={"run_command"})
         executor = ToolExecutor(output_streamer=streamer)
         assert executor.output_streamer is streamer
@@ -1153,13 +1282,15 @@ class TestEdgeCases:
     @pytest.mark.asyncio
     async def test_executor_init_without_streamer(self):
         from src.tools.executor import ToolExecutor
+
         executor = ToolExecutor()
         assert executor.output_streamer is None
 
     @pytest.mark.asyncio
     async def test_chunk_timestamp_is_iso(self):
         s = ToolOutputStreamer(
-            enabled_tools={"run_command"}, chunk_interval=0.1,
+            enabled_tools={"run_command"},
+            chunk_interval=0.1,
         )
         listener = AsyncMock()
         s.add_listener(listener)
@@ -1169,6 +1300,7 @@ class TestEdgeCases:
         await on_output("data")
         chunk = listener.call_args[0][0]
         from datetime import datetime
+
         # Should parse as valid ISO timestamp
         datetime.fromisoformat(chunk.timestamp)
 
@@ -1262,14 +1394,15 @@ class TestCallIdAttribution:
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._native_tools = SimpleNamespace(handles=lambda _name: False)
 
-        async def dispatch(*_args):
+        async def dispatch(*_args, audit_owned_by_caller=False):
+            assert audit_owned_by_caller is True
             _, on_output, finish = streamer.create_callback("run_command", channel_id="h")
             await on_output("loop output\n")
             await finish()
             return "ok"
 
         runner.dispatch_loop_tool = dispatch
-        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        runner._audit = SimpleNamespace(log_event=AsyncMock(), log_execution=AsyncMock())
         st = SimpleNamespace(
             tool_timeout=5,
             msg_proxy=object(),
@@ -1278,6 +1411,7 @@ class TestCallIdAttribution:
             channel=object(),
             requester_name="u",
             channel_id_str="c",
+            _iteration_index=1,
         )
         block = SimpleNamespace(
             id="loop_call_alpha",
@@ -1289,8 +1423,16 @@ class TestCallIdAttribution:
         result = await runner._run_one_loop_tool(st, block)
 
         assert result["tool_use_id"] == "loop_call_alpha"
+        assert result["content"] == "ok"
         assert seen
         assert {chunk.call_id for chunk in seen} == {"loop_call_alpha"}
+        runner._audit.log_event.assert_awaited_once()
+        runner._audit.log_execution.assert_awaited_once()
+        for audit_call in (runner._audit.log_event, runner._audit.log_execution):
+            assert audit_call.await_args.kwargs["attribution"] == {
+                "call_id": "loop_call_alpha",
+                "iteration": 1,
+            }
 
     async def test_autonomous_loop_does_not_leak_parent_id_into_native_child(self):
         """A native spawn can create a long-lived child task.
@@ -1308,12 +1450,13 @@ class TestCallIdAttribution:
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._native_tools = SimpleNamespace(handles=lambda _name: True)
 
-        async def dispatch(*_args):
+        async def dispatch(*_args, audit_owned_by_caller=False):
+            assert audit_owned_by_caller is True
             observed.append(current_call_id.get())
             return "ok"
 
         runner.dispatch_loop_tool = dispatch
-        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        runner._audit = SimpleNamespace(log_event=AsyncMock(), log_execution=AsyncMock())
         st = SimpleNamespace(
             tool_timeout=5,
             msg_proxy=object(),
@@ -1322,6 +1465,7 @@ class TestCallIdAttribution:
             channel=object(),
             requester_name="u",
             channel_id_str="c",
+            _iteration_index=1,
         )
         block = SimpleNamespace(
             id="spawn_parent",
@@ -1330,9 +1474,18 @@ class TestCallIdAttribution:
             parse_error=None,
         )
 
-        await runner._run_one_loop_tool(st, block)
+        result = await runner._run_one_loop_tool(st, block)
 
+        assert result["tool_use_id"] == "spawn_parent"
+        assert result["content"] == "ok"
         assert observed == [None]
+        runner._audit.log_event.assert_awaited_once()
+        runner._audit.log_execution.assert_awaited_once()
+        for audit_call in (runner._audit.log_event, runner._audit.log_execution):
+            assert audit_call.await_args.kwargs["attribution"] == {
+                "call_id": "spawn_parent",
+                "iteration": 1,
+            }
 
 
 async def _noop():

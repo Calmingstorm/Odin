@@ -32,7 +32,8 @@ export function logDisplay(entry) {
     const remainder = Object.fromEntries(Object.entries(r).filter(([key]) => !rowFields.has(key)));
     body = Object.keys(remainder).length ? displayText(remainder) : '';
   }
-  const status = r.status ?? r.metadata?.status ?? (r.error || r.success === false ? 'failed' : r.success === true ? 'success' : '');
+  const status = r.status ?? r.metadata?.status ?? (r.error || r.success === false ? 'failed' : r.success === true ? 'success'
+    : ['tool_start', 'loop_tool_start'].includes(r.type) ? 'started' : '');
   return { body, action: r.tool_name || r.action || (r.method ? `${r.method} ${r.path || ''}`.trim() : r.type || ''),
-    status, duration: r.execution_time_ms ?? r.duration_ms ?? r.metadata?.duration_ms ?? null };
+    status, duration: r.execution_time_ms ?? r.duration_ms ?? r.metadata?.duration_ms ?? r.metadata?.elapsed_ms ?? null };
 }

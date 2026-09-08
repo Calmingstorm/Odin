@@ -1,0 +1,10 @@
+Installing in /usr/local. Run /evidence/build/prefix.sh to set the environment for odin-kwin-scope.
+-- Configuring done (0.4s)
+-- Generating done (0.0s)
+-- Build files have been written to: /evidence/build
+[  0%] Built target odin-scope_autogen_timestamp_deps
+[ 25%] Automatic MOC for target odin-scope
+[ 25%] Built target odin-scope_autogen
+[ 50%] Building CXX object CMakeFiles/odin-scope.dir/odinscope.cpp.o
+[ 75%] Linking CXX shared module odin-scope.so
+[100%] Built target odin-scope

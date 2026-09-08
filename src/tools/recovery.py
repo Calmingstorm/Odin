@@ -92,6 +92,8 @@ UNSAFE_TO_RETRY: frozenset[str] = frozenset(
         "install_skill",
         "send_to_agent",
         "cancel_task",
+        "computer_session",
+        "computer_act",
     }
 )
 

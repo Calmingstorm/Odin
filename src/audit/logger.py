@@ -488,6 +488,7 @@ class AuditLogger:
         attribution: dict | None = None,
         status: str | None = None,
         count_as_tool: bool = True,
+        event_type: str | None = None,
     ) -> None:
         entry = {
             "timestamp": datetime.now(UTC).isoformat(),
@@ -501,6 +502,10 @@ class AuditLogger:
             "execution_time_ms": execution_time_ms,
             "error": error,
         }
+        if event_type:
+            # A canonical execution can also close a lifecycle card, without a
+            # second persisted terminal record. Keep the full execution schema.
+            entry.update(type=event_type, action=tool_name, actor=user_id)
         if attribution:
             entry.update(attribution)
         if status:

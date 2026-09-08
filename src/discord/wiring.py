@@ -23,6 +23,7 @@ import asyncio
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..agents import AgentManager, LoopAgentBridge
 from ..agents.trajectory import AgentTrajectorySaver
@@ -88,6 +89,9 @@ from .tool_loop import ToolLoopDeps, ToolLoopRunner
 from .turn_recorder import TurnRecorder
 
 log = get_logger("discord")
+
+if TYPE_CHECKING:
+    from ..computer.manager import ComputerLifecycle
 
 
 @dataclass
@@ -645,6 +649,7 @@ class BotComponents:
     tool_catalog: ToolCatalog
     builtin_tool_policy: BuiltinToolPolicy
     native_tools: NativeToolDispatcher
+    computer: ComputerLifecycle
     scheduling_tools: SchedulingTools
     knowledge_tools: KnowledgeTools
     channel_ops_tools: ChannelOpsTools
@@ -738,10 +743,15 @@ def build_components(bot, services: BotServices) -> BotComponents:
         host_registry=services.host_registry,
         host_access_manager=services.host_access_manager,
     )
+    from ..computer.manager import ComputerLifecycle
+
+    computer = ComputerLifecycle(bot)
+    services.tool_executor.computer_reserved = computer.reserves_tool
     tool_catalog = ToolCatalog(
         get_config=lambda: bot.config,
         skill_manager=services.skill_manager,
         get_mcp_definitions=services.mcp_manager.get_tool_definitions,
+        computer_available=lambda: computer.enabled,
     )
     # A live provider switch must rebuild the tool registry so provider-gated
     # tools (native image gen is Codex-only) reappear/disappear immediately.
@@ -815,6 +825,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             "knowledge": knowledge_tools,
             "channel_ops": channel_ops_tools,
             "media": media_tools,
+            "computer": computer,
         },
         skill_manager=services.skill_manager,
         tool_catalog=tool_catalog,
@@ -867,6 +878,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
             window_observer=services.window_observer,
             mcp_manager=services.mcp_manager,
             kill_agents_for_turn=services.agent_manager.kill_for_turn,
+            get_computer=lambda: computer if computer.enabled else None,
         )
     )
     agent_task_tools = AgentTaskTools(
@@ -1015,6 +1027,7 @@ def build_components(bot, services: BotServices) -> BotComponents:
         tool_catalog=tool_catalog,
         builtin_tool_policy=builtin_tool_policy,
         native_tools=native_tools,
+        computer=computer,
         scheduling_tools=scheduling_tools,
         knowledge_tools=knowledge_tools,
         channel_ops_tools=channel_ops_tools,
@@ -1062,6 +1075,16 @@ async def shutdown_services(bot) -> None:
     work-producers before consumers, and persist user-visible state
     (sessions) last.
     """
+    computer = getattr(bot, "computer", None)
+    if computer is not None:
+        try:
+            await computer.close()
+        except Exception:
+            log.exception("Computer cleanup unverified")
+            from ..restart import block_reexec
+
+            block_reexec("computer cleanup unverified")
+
     loop_manager = getattr(bot, "loop_manager", None)
     if loop_manager is not None:
         try:

@@ -41,7 +41,7 @@ async def test_real_registry_retains_command_but_scrubs_every_operator_copy(
     else:
         proc = SimpleNamespace(pid=12345)
         spawn = AsyncMock(return_value=proc)
-        monkeypatch.setattr("src.tools.process_manager.asyncio.create_subprocess_shell", spawn)
+        monkeypatch.setattr("src.tools.local_supervisor.create_supervised_shell", spawn)
         monkeypatch.setattr(registry, "_read_output", AsyncMock())
         monkeypatch.setattr(registry, "_watch_exit", AsyncMock())
         result = await registry.start("localhost", command)

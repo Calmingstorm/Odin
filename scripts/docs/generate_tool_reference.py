@@ -140,6 +140,12 @@ def generate() -> str:
         "limits and model/effort fields are conditioned on configuration at catalog build time.",
         "No installed extensions or externally published tools are enumerated.",
         "",
+        "**Dynamic native tools are outside this static catalog:** `computer_session`, "
+        "`computer_observe`, and `computer_act` are registered separately. See the "
+        "[computer-use operator reference](../computer-use/OPERATOR.md) for their "
+        "workflow, capability limits and consent requirements. The count above does "
+        "not describe their availability in a configured running installation.",
+        "",
         "**Core** marks `is_core` (not a permission grant). **Required** means the property "
         "appears in its containing object's `required` list; nested rows do not make an "
         "optional parent required. Constraints show enums, defaults and numeric bounds.",
@@ -155,18 +161,25 @@ def generate() -> str:
         lines.extend([f"## {module}", "", f"Source: [`{path}`]({source_link(path)}).", ""])
         for definition in tools:
             tool = by_name[definition["name"]]
-            lines.extend([
-                f"### {tool['name']}", "",
-                f"**Core:** {'Yes' if tool.get('is_core', False) else 'No'}", "",
-                description_html(tool["description"]), "",
-            ])
+            lines.extend(
+                [
+                    f"### {tool['name']}",
+                    "",
+                    f"**Core:** {'Yes' if tool.get('is_core', False) else 'No'}",
+                    "",
+                    description_html(tool["description"]),
+                    "",
+                ]
+            )
             rows = property_rows(tool["input_schema"])
             if rows:
-                lines.extend([
-                    "| Name | Type | Required | Description |",
-                    "| --- | --- | --- | --- |",
-                    *rows,
-                ])
+                lines.extend(
+                    [
+                        "| Name | Type | Required | Description |",
+                        "| --- | --- | --- | --- |",
+                        *rows,
+                    ]
+                )
             else:
                 lines.append("No input properties.")
             lines.append("")

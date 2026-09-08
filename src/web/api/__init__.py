@@ -45,6 +45,7 @@ from .agents_loops import (
     register_processes,
 )
 from .codex_admin import register_codex_oauth
+from .computer import register_computer
 from .config_admin import (
     register_discord_config,
     register_personality,
@@ -132,6 +133,8 @@ def create_api_routes(bot: OdinBot) -> web.RouteTableDef:
     register_self_update(routes, bot)
 
     register_chat(routes, bot)
+
+    register_computer(routes, bot)
 
     register_sessions(routes, bot)
 

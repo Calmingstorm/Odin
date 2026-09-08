@@ -4,6 +4,7 @@ No package operation, service operation, account change or live path is used.
 Only absolute filesystem roots are relocated; shell control flow is unchanged.
 """
 import os
+import stat
 import subprocess
 from pathlib import Path
 
@@ -147,3 +148,63 @@ def test_removal_after_failed_upgrade_cannot_replay_restart_intent(sandbox):
     assert invoke("postinstall", "configure").returncode == 0
     assert not state.exists()
     assert "systemctl restart" not in trace.read_text()
+
+
+@pytest.mark.parametrize("upgrade", [False, True])
+def test_computer_runtime_and_private_state_provisioned_without_enabling(sandbox, upgrade):
+    root, trace, _, invoke = sandbox
+    data = root / "var/lib/odin/computer"
+    if upgrade:
+        configured(root)
+        data.mkdir(parents=True)
+        data.chmod(0o755)
+        (data / "receipt").write_text("retained evidence")
+    result = invoke("postinstall", "configure")
+    assert result.returncode == 0, result.stderr
+    assert data.is_dir() and not data.is_symlink()
+    assert stat.S_IMODE(data.stat().st_mode) == 0o700
+    calls = trace.read_text()
+    assert f"pip install --quiet {root}/opt/odin[pdf,computer]" in calls
+    assert "import PIL; import Xlib; import dbus_next" in calls
+    assert f"chown -R odin:odin {root}/opt/odin {root}/var/lib/odin" in calls
+    assert "gnome-extensions" not in calls
+    assert "gsettings" not in calls
+    if upgrade:
+        assert (data / "receipt").read_text() == "retained evidence"
+        assert (root / "etc/odin/config.yml").read_text() == "existing config\n"
+    else:
+        assert (root / "etc/odin/config.yml").read_text() == "web: {}\n"
+    assert "Screen access" in result.stdout
+
+
+@pytest.mark.parametrize("component", ["computer", "data"])
+def test_computer_state_symlink_is_refused_before_ownership_changes(sandbox, component):
+    root, trace, _, invoke = sandbox
+    target = root / "unrelated"
+    target.mkdir()
+    (target / "keep").write_text("untouched")
+    path = root / "var/lib/odin"
+    path.parent.mkdir(parents=True)
+    if component == "computer":
+        path.mkdir()
+        path /= "computer"
+    path.symlink_to(target, target_is_directory=True)
+    before = target.stat()
+    result = invoke("postinstall", "configure")
+    assert result.returncode != 0
+    assert "unsafe computer state directory" in result.stderr
+    assert "chown" not in trace.read_text()
+    assert "systemctl" not in trace.read_text()
+    assert "pip" not in trace.read_text()
+    assert (target / "keep").read_text() == "untouched"
+    assert target.stat().st_mode == before.st_mode
+
+
+def test_computer_state_file_is_not_replaced(sandbox):
+    root, _, _, invoke = sandbox
+    path = root / "var/lib/odin/computer"
+    path.parent.mkdir(parents=True)
+    path.write_text("do not replace")
+    result = invoke("postinstall", "configure")
+    assert result.returncode != 0
+    assert path.read_text() == "do not replace"

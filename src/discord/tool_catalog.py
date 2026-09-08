@@ -23,9 +23,11 @@ log = get_logger("tools")
 
 class ToolCatalog:
     def __init__(
-        self, *, get_config: Callable, skill_manager, get_mcp_definitions: Callable | None = None
+        self, *, get_config: Callable, skill_manager, get_mcp_definitions: Callable | None = None,
+        computer_available: Callable | None = None,
     ) -> None:
         self.get_config = get_config
+        self.computer_available = computer_available
         self.skill_manager = skill_manager
         # Published MCP tool definitions (MCP campaign P3). None keeps the
         # catalog MCP-free; the provider returns ONLY tools satisfying the
@@ -46,11 +48,23 @@ class ToolCatalog:
             return self.cached
         config = self.get_config()
         builtin = get_tool_definitions()
+        computer_cfg = getattr(config, "computer", None)
+        if (computer_cfg is not None and computer_cfg.enabled
+                and (self.computer_available is None or self.computer_available())):
+            from ..tools.defs.computer import assert_no_computer_collisions, computer_definitions
+
+            assert_no_computer_collisions(
+                self.skill_manager.get_tool_definitions(),
+                self.get_mcp_definitions() if self.get_mcp_definitions else [],
+            )
+            builtin = [*builtin, *computer_definitions()]
         # ALL static built-in names stay reserved even when a tool is
         # disabled or backend-hidden — skills and MCP tools must never
         # shadow one (collision checks below use this set, not post-filter
         # visibility).
         static_names = {t["name"] for t in builtin}
+        if computer_cfg is not None and computer_cfg.enabled:
+            static_names.update({"computer_session", "computer_observe", "computer_act"})
         # Operator-disabled built-ins (tools.disabled_tools) leave first:
         # a disabled tool does not exist for the model on any surface. The
         # dispatch-time policy guard is the backstop for requests assembled

@@ -1,0 +1,15 @@
+From 4ae305f19e391edda1aab0f9a9c47b01062f6330 (upstream GNOME/mutter MR3809)
+Subject: backends/eis-client: Release buttons on device remove
+
+One-line causal correction for Ubuntu 46.2-1ubuntu0.24.04.16. Fixture source only.
+This does not change the separate EIS_EVENT_DEVICE_CLOSED/remove_device path.
+
+--- a/src/backends/meta-eis-client.c
++++ b/src/backends/meta-eis-client.c
+@@ -154,5 +154,5 @@ drop_device (gpointer htkey,
+   for (button = 0; button < MAX_BUTTON; button++)
+     {
+-      if (bit_is_set (device->button_state, key))
++      if (bit_is_set (device->button_state, button))
+         notify_button (device, button, FALSE);
+     }

@@ -26,6 +26,7 @@ WORKSPACE_PROTECTED_CONFIG_PATHS: tuple[tuple[str, bool], ...] = (
     ("permissions.overrides_path", True),
     ("openai_codex.credentials_path", True),
     ("attachments.temp_directory", False),
+    ("computer.storage_dir", False),
 )
 
 WORKSPACE_PROTECTED_CONFIG_PATH_NAMES: frozenset[str] = frozenset(

@@ -2,6 +2,19 @@
 
 Odin ships as an amd64 Debian package and as a source checkout. The package path is the one to use for a long-running service; the source path is for development.
 
+::: warning Configure API authentication before starting or exposing Odin
+With no API token configured (empty `web.api_token`, no `web.api_tokens` entries,
+and no managed tokens), the general API authentication gate is disabled. Routes
+relying on that gate are unauthenticated. The operator must set a strong, private
+`web.api_token` to secure the installation. Bind `web.host` to `127.0.0.1` unless
+deliberately exposing it behind TLS and access controls. This applies to both
+package and source setup, especially before enabling desktop observation and
+stored evidence. Computer routes additionally require an authenticated admin
+identity; those separate checks do not secure the rest of a tokenless installation.
+The template also defaults permissions to `admin`, and the package grants the
+`odin` account passwordless sudo. Review these before starting the service.
+:::
+
 ## Debian or Ubuntu package
 
 ```bash
@@ -53,9 +66,7 @@ The package installs a dedicated `odin` system user, a Python virtual environmen
 
 The WebUI listens on `web.port`, which defaults to `3000`. Register the hosts Odin may reach under **System → Hosts**, then ask it for something harmless in a channel it can see.
 
-::: warning Review before exposing
-The tracked configuration template sets the default permission tier to `admin`, binds the WebUI to all interfaces, and leaves API authentication off until an API token is configured. The package also grants the `odin` account passwordless sudo. Read the [security model](/security) and adjust these before the service is reachable from anywhere you do not control.
-:::
+Read the [security model](/security) for the remaining deployment controls.
 
 ## From source
 
@@ -69,7 +80,7 @@ pip install -e ".[dev]"
 # optional browser tools
 pip install -e ".[browser]" && python -m playwright install chromium
 cp .env.example .env
-# set DISCORD_TOKEN in .env, review config.yml
+# set DISCORD_TOKEN in .env; set web.api_token and web.host in config.yml before starting
 mkdir -p ~/.local/share/odin-workspace && chmod 0700 ~/.local/share/odin-workspace
 # set tools.local_working_dir to that absolute path in config.yml
 python -m src

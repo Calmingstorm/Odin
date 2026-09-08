@@ -85,7 +85,7 @@ async def test_shell_execution_payload_unchanged_but_never_logged(caplog):
         communicate=AsyncMock(return_value=(b"synthetic-command-body", None)),
     )
     with patch(
-        "src.tools.ssh.asyncio.create_subprocess_shell", AsyncMock(return_value=proc),
+        "src.tools.local_supervisor.create_supervised_shell", AsyncMock(return_value=proc),
     ) as run:
         code, output = await run_local_command(command)
     assert run.call_args.args[0] == command

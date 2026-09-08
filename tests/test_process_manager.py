@@ -2055,11 +2055,13 @@ class TestSelectiveProvenanceErasure:
         """
         import src.tools.process_manager as pm
 
-        previously = pm.child_subreaper_active()
-        pm.set_child_subreaper(True)
+        # The session fixture establishes real containment in this disposable
+        # test process. Do not redundantly mutate its process-wide setting.
+        assert pm.child_subreaper_active() is True
         reg = ProcessRegistry()
         pidfile = None
         escaped = None
+        escaped_start = None
         try:
             import tempfile
 
@@ -2069,22 +2071,31 @@ class TestSelectiveProvenanceErasure:
             # the shell is how earlier attempts silently produced a dead
             # escapee (repr picks double quotes when the body contains
             # single ones, and the shell then breaks on the parens).
+            # Publish readiness only AFTER exec has installed the forged
+            # environment in /proc and the TERM handler is active. A pre-exec
+            # pidfile races both transitions, especially under coverage.
+            ready_code = (
+                'import os,signal,time\n'
+                'signal.signal(signal.SIGTERM, signal.SIG_IGN)\n'
+                f'with open({pidfile!r}, "w") as fh: fh.write(str(os.getpid()))\n'
+                'time.sleep(45)\n'
+            )
             script = f"""
 import os, signal, sys, time
 if os.fork() == 0:
     os.setsid()
+    if os.fork() != 0:
+        os._exit(0)
     os.environ['ODIN_BG_JOB'] = 'forged-not-a-real-job'
-    with open({pidfile!r}, 'w') as fh:
-        fh.write(str(os.getpid()))
     os.execve(
         sys.executable,
-        [sys.executable, '-c',
-         'import signal,time\\n'
-         'signal.signal(signal.SIGTERM, signal.SIG_IGN)\\n'
-         'time.sleep(45)\\n'],
+        [sys.executable, '-c', {ready_code!r}],
         os.environ,
     )
-sys.exit(0)
+# Keep the command leader alive until explicit teardown. Otherwise the exit
+# watcher correctly cleans descendants before the test can inspect readiness.
+# The intermediate child exits, so the grandchild is still an adopted orphan.
+time.sleep(45)
 """
             script_path = pidfile + ".py"
             with open(script_path, "w") as fh:
@@ -2100,9 +2111,30 @@ sys.exit(0)
                 await asyncio.sleep(0.1)
             assert escaped is not None, "escapee never reported its pid"
             assert pm._read_job_token(escaped) == "forged-not-a-real-job"
-            assert pm._proc_starttime(escaped) is not None  # alive
+            escaped_start = pm._proc_starttime(escaped)
+            assert escaped_start is not None
 
             info = reg._processes[pid]
+            # ProcessRegistry owns a SupervisedShell; its dedicated worker,
+            # not pytest or the outer test supervisor, adopts this orphan.
+            from src.tools.local_supervisor import SupervisedShell
+
+            assert isinstance(info.process, SupervisedShell)
+            expected_owner = info.process._worker.pid
+            assert expected_owner != os.getpid()
+            owner_start = pm._proc_starttime(expected_owner)
+            assert owner_start is not None
+            deadline = asyncio.get_running_loop().time() + 6.0
+            while asyncio.get_running_loop().time() < deadline:
+                assert pm._proc_starttime(escaped) == escaped_start
+                ids = pm._proc_ids(escaped)
+                if ids is not None and ids[0] == expected_owner:
+                    break
+                await asyncio.sleep(0.05)
+            ids = pm._proc_ids(escaped)
+            assert ids is not None and ids[0] == expected_owner, "escapee was not adopted"
+            assert pm._proc_starttime(escaped) == escaped_start
+            assert pm._proc_starttime(expected_owner) == owner_start
             gone = await reg._kill_group_until_gone(info, timeout=15.0)
 
             assert gone is True  # teardown resolves adoption as ours…
@@ -2114,7 +2146,8 @@ sys.exit(0)
                 await asyncio.sleep(0.25)
             assert pm._proc_ids(escaped) is None, "forged escapee survived teardown"
         finally:
-            if escaped is not None:
+            if (escaped is not None and escaped_start is not None
+                    and pm._proc_starttime(escaped) == escaped_start):
                 try:
                     os.kill(escaped, 9)
                 except ProcessLookupError:
@@ -2126,7 +2159,6 @@ sys.exit(0)
                     except OSError:
                         pass
             await reg.shutdown()
-            pm.set_child_subreaper(previously)
 
     def test_live_cleanup_still_refuses_to_guess(self, monkeypatch):
         """Outside teardown the rule is unchanged: a forged/absent token

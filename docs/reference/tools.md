@@ -9,6 +9,8 @@ Descriptions are the complete affordance-decorated output of `get_tool_definitio
 This is the static catalog, not a snapshot of a running installation: backend availability, permissions and disabled-tool policy can reduce visibility. Agent limits and model/effort fields are conditioned on configuration at catalog build time.
 No installed extensions or externally published tools are enumerated.
 
+**Dynamic native tools are outside this static catalog:** `computer_session`, `computer_observe`, and `computer_act` are registered separately. See the [computer-use operator reference](../computer-use/OPERATOR.md) for their workflow, capability limits and consent requirements. The count above does not describe their availability in a configured running installation.
+
 **Core** marks `is_core` (not a permission grant). **Required** means the property appears in its containing object's `required` list; nested rows do not make an optional parent required. Constraints show enums, defaults and numeric bounds.
 
 Regenerate from the repository checkout with `python scripts/docs/generate_tool_reference.py`; add `--check` for a read-only drift check. The explicit source baseline is stable across docs-only commits; advance it when documenting a new source baseline.

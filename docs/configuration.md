@@ -19,8 +19,8 @@ discord:
 ```yaml
 tools:
   enabled: true
-  ssh_key_path: /home/odin/.ssh/id_ed25519
-  ssh_known_hosts_path: /home/odin/.ssh/known_hosts
+  ssh_key_path: /home/service-user/.ssh/id_ed25519
+  ssh_known_hosts_path: /home/service-user/.ssh/known_hosts
   command_timeout_seconds: 300   # Default per-command timeout
   tool_timeouts:                 # Per-tool overrides
   hosts:
@@ -225,6 +225,15 @@ is recorded in the audit log — queryable via `search_audit`, not shown in the
 tool's reply.
 
 ## Web Management UI
+
+**Set a strong, private `web.api_token` before starting or exposing the service.**
+If it is empty and both `web.api_tokens` and the managed-token store have no
+entries, the general API authentication gate is disabled: routes relying on it
+are unauthenticated. A blank legacy token alone does not disable authentication
+when other token entries exist. Computer observation/evidence routes additionally
+require an authenticated admin identity; those checks do not protect the rest of
+a tokenless installation. Restrict `web.host` to loopback unless deliberately
+exposing it behind TLS and access controls.
 
 ```yaml
 web:

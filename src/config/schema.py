@@ -1188,6 +1188,74 @@ class MCPConfig(BaseModel):
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
+class ComputerUseConfig(BaseModel):
+    """Opt-in desktop target. These fields are operator-only, not tool input."""
+
+    model_config = ConfigDict(extra="forbid")
+    enabled: bool = False
+    storage_dir: str = "/var/lib/odin/computer"
+    # Explicit operator provisioning, never inferred from root/sudo availability.
+    runtime_sudo: bool = False
+    environment: Literal["isolated", "existing_session"] = "isolated"
+    platform: Literal["x11", "wayland"] = "x11"
+    display: str = ""
+    xauthority: str = ""
+    monitor_names: list[str] = Field(default_factory=list)
+    # Explicit operator binding, not ambient desktop discovery or a tool argument.
+    wayland_bus_address: str = ""
+    wayland_uid: int | None = Field(default=None, strict=True, ge=0, le=4294967294)
+    wayland_guardian_binary: str = "/usr/libexec/odin-computer-wayland-input"
+
+    @field_validator("wayland_bus_address")
+    @classmethod
+    def validate_wayland_bus_address(cls, value: str) -> str:
+        if value and (len(value) > 512 or not re.fullmatch(r"unix:path=/[^,;\s\x00]+", value)):
+            raise ValueError(
+                "computer.wayland_bus_address must name one explicit local session bus")
+        return value
+
+    @field_validator("wayland_guardian_binary")
+    @classmethod
+    def validate_wayland_guardian_binary(cls, value: str) -> str:
+        if (not value or len(value) > 4096 or not Path(value).is_absolute()
+                or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("computer.wayland_guardian_binary must be an absolute executable path")
+        return value
+
+    @field_validator("display")
+    @classmethod
+    def validate_display(cls, value: str) -> str:
+        if value and not re.fullmatch(r":[0-9]{1,5}", value):
+            raise ValueError("computer.display must be an explicit local :N display")
+        return value
+
+    @field_validator("xauthority")
+    @classmethod
+    def validate_xauthority(cls, value: str) -> str:
+        if value and (not Path(value).is_absolute() or any(ord(c) < 32 for c in value)):
+            raise ValueError("computer.xauthority must be an absolute path")
+        return value
+
+    @field_validator("monitor_names", mode="before")
+    @classmethod
+    def validate_monitors(cls, value):
+        if (not isinstance(value, list) or len(value) > 16
+                or any(not isinstance(i, str) or not re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", i)
+                       for i in value) or len(set(value)) != len(value)):
+            raise ValueError("computer.monitor_names must be unique bounded monitor names")
+        return value
+
+    @field_validator("storage_dir")
+    @classmethod
+    def validate_storage_dir(cls, value: str) -> str:
+        value = value.strip()
+        if not value or any(ord(char) < 32 for char in value):
+            raise ValueError("computer.storage_dir must be a nonempty private directory")
+        if not Path(value).is_absolute():
+            raise ValueError("computer.storage_dir must be absolute")
+        return value
+
+
 class Config(BaseModel):
     # ``model``/``agent_model`` and other ``model_*`` fields would otherwise
     # collide with pydantic v2's protected ``model_*`` namespace. Disable it.
@@ -1210,6 +1278,7 @@ class Config(BaseModel):
     email: EmailConfig = EmailConfig()
     search: SearchConfig = SearchConfig()
     browser: BrowserConfig = BrowserConfig()
+    computer: ComputerUseConfig = Field(default_factory=ComputerUseConfig)
     permissions: PermissionsConfig = PermissionsConfig()
     comfyui: ComfyUIConfig = ComfyUIConfig()
     image: ImageConfig = ImageConfig()

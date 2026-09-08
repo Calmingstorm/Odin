@@ -1,0 +1,7 @@
+{
+  "uuid": "odin-scope@calmingstorm.net",
+  "name": "Odin explicit Wayland scope provider",
+  "description": "Opt-in private native application focus and portal-source bounds evidence. Does not inject input or enable Shell Eval.",
+  "shell-version": ["46", "47", "48"],
+  "version": 1
+}

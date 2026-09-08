@@ -1,0 +1,3 @@
+Defaults !use_pty, !pam_session, !pam_setcred
+Defaults command_timeout=15
+root ALL=(root) NOPASSWD: ALL

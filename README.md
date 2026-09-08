@@ -50,7 +50,19 @@ The WebUI shows every tool Odin can reach, how often each has run, and lets you 
 
 ## Quick start
 
-Debian or Ubuntu. The package installs its dependencies during setup, which can take a few minutes:
+> **Security warning: configure API authentication before starting or exposing Odin.**
+> With no API token configured (empty `web.api_token`, no `web.api_tokens`
+> entries, and no managed tokens), the general API authentication gate is
+> disabled: API routes relying on that gate are unauthenticated. Set a strong,
+> private `web.api_token` to secure the installation, and restrict `web.host`
+> to loopback unless deliberately exposing it behind TLS and access controls.
+> This matters especially when enabling desktop observation and stored evidence.
+> Computer routes additionally require an authenticated admin identity; their
+> separate checks do not secure the rest of a tokenless installation.
+
+Debian or Ubuntu. APT resolves dependencies and the package installs Python extras
+during setup, which can take a few minutes. Optional computer-use support has
+distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
 
 ```bash
 curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.95.0_amd64.deb
@@ -218,10 +230,47 @@ The package installs:
 | Local command workspace | `/var/lib/odin-workspace` |
 | Logs | `/var/log/odin` |
 | Systemd unit | `/usr/lib/systemd/system/odin.service` |
+| Private computer evidence (service-owned, 0700) | `/var/lib/odin/computer` |
+| Precompiled root-owned Wayland guardian | `/usr/libexec/odin-computer-wayland-input` |
+| Inert GNOME scope extension (not enabled) | `/usr/share/gnome-shell/extensions/odin-scope@calmingstorm.net/` |
+| Computer-use installation handoff | `/usr/share/doc/odin/computer-use/PACKAGING.md` |
+| Computer-use setup and recovery | `/usr/share/doc/odin/computer-use/OPERATOR.md`, `RECOVERY.md` |
 
 The package installs the application files and systemd unit. Its post-install script creates the `odin` service account, virtual environment, SSH key, data directories, configuration links, and local command workspace. A new installation is enabled but is not started until credentials are configured. Upgrades preserve configuration and data and restart the service only if it was already running.
 
+Fresh installs and upgrades install the `pdf` and `computer` Python extras and
+provision private computer state with symlink rejection. Computer enablement is
+preserved on upgrade; installing the package does not authorize a computer task.
+Base dependencies are Python/venv, SSH, systemd and sudo. Computer OS tools,
+libraries and applications are APT **Recommends**; headless operators can install
+with `sudo apt install --no-install-recommends ./odin_VERSION_amd64.deb`.
+Direct `dpkg -i` does not resolve dependencies, so APT is recommended.
+Compositor/portal packages are **Suggests**, never an implicit new desktop.
+
+Desktop target configuration, grants, Wayland UID/session bus, GNOME extension
+activation and portal consent remain explicit operator choices. Historical Wayland
+qualification used specific Debian 13 GNOME fixtures, not every desktop or app.
+Stock Ubuntu 24.04's older libei does not meet the
+guardian's `libei >= 1.3.901` requirement; this is a dependency limitation, not a
+compositor diagnosis. Missing Xed on a distribution does not block isolated
+Drawing: common dependencies are checked at Enable, the selected app at start.
+See [PACKAGING.md](docs/computer-use/PACKAGING.md) for source versus package setup
+and exact evidence limits. R9 exercised local package install/upgrade in disposable
+containers, not a release pipeline or zero-click desktop setup.
+
+For supervised use on your own screen, start with the
+[operator guide](docs/computer-use/OPERATOR.md) and
+[recovery guide](docs/computer-use/RECOVERY.md). The R11 general attached-app/action
+and compositor expansion is an implementation contract pending its own validation,
+not a new qualification claim. Only the three operator handoffs ship in the package;
+engineering history stays in the repository. Remote worker transport is assessment
+only and is not implemented.
+
 ### First-time setup
+
+**Before starting the service:** follow the [Quick start security warning](#quick-start).
+Set `web.api_token` and review the listening address before exposing the WebUI/API,
+including installations intended for desktop observation and evidence access.
 
 1. Create a Discord application and bot in the [Discord developer portal](https://discord.com/developers/applications). Enable **Message Content Intent**.
 2. Set the Discord token:

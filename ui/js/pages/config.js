@@ -32,7 +32,7 @@ const APPLY_MODE_LABELS = {
 };
 
 const CONFIG_EXCLUDED_SECTIONS = new Set([
-  'llm_provider', 'openai_codex', 'ollama', 'kimi', 'personality', 'discord',
+  'llm_provider', 'openai_codex', 'ollama', 'kimi', 'personality', 'discord', 'computer',
 ]);
 
 const CONFIG_EXCLUDED_PATH_PREFIXES = Object.freeze([
@@ -1017,6 +1017,7 @@ export default {
     }
 
     function setFieldValue(field, value, options = {}) {
+      if (CONFIG_EXCLUDED_SECTIONS.has(field.path.split('.')[0])) return;
       const [section, ...segments] = field.path.split('.');
       recordUndoForField(field.path, Boolean(options.coalesce));
       const current = ensureSectionDraft(section);
@@ -1049,6 +1050,11 @@ export default {
       const raw = inputDrafts.value[field.path];
       lastUndoEdit = { path: null, at: 0 };
       if (raw === '') {
+        if (field.nullable) {
+          endTextInputEdit(field.path);
+          setFieldValue(field, null, { coalesce: true });
+          return;
+        }
         jsonErrors.value = { ...jsonErrors.value, [field.path]: 'Enter a number.' };
         return;
       }
@@ -1070,6 +1076,10 @@ export default {
     function setNumberFieldValue(field, raw) {
       inputDrafts.value = { ...inputDrafts.value, [field.path]: raw };
       if (raw === '') {
+        if (field.nullable) {
+          setFieldValue(field, null, { coalesce: true });
+          return;
+        }
         jsonErrors.value = { ...jsonErrors.value, [field.path]: 'Enter a number.' };
         return;
       }
