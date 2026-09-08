@@ -9,8 +9,10 @@ import os
 import re
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
+from typing import Any, cast
 
 from ..admission import CompositorIdentity, InputAdmission, InputAdmissionError
 from ..geometry import AffineTransform, SourceGeometry
@@ -18,8 +20,17 @@ from ..models import BackendCapabilities, BackendObservation, CaptureScope, Comp
 from ..provenance import canonical_application_provenance
 from ..render import render_frame, source_allocation_bytes
 from ..vision import FrameCrop
-from .hyprland_capture import ExplicitOutput, ScopeProof, capture_explicit_output
-from .hyprland_identity import ExecutableTrust, connect_peer, pin_connections, revalidate
+from .hyprland_capture import ExplicitOutput, NativeFrame, ScopeProof, capture_explicit_output
+from .hyprland_guardian import HyprlandGuardian
+from .hyprland_identity import (
+    ExecutableTrust,
+    HyprlandIdentity,
+    connect_peer,
+    pin_connections,
+    revalidate,
+)
+from .hyprland_scope import HyprlandScopeProvider
+from .profile import validate_session
 from .wayland_backend import WaylandRuntimeBackend, _digest, _scope_binding
 from .wayland_guardian import trusted_binary
 
@@ -44,7 +55,7 @@ class HyprlandSessionConfig:
     scope_socket: str | None = None
 
     def __post_init__(self):
-        paths = (self.runtime_dir, self.guardian_binary, self.capture_binary)
+        paths: tuple[str, ...] = (self.runtime_dir, self.guardian_binary, self.capture_binary)
         if self.scope_socket is not None:
             paths += (self.scope_socket,)
         if (
@@ -61,16 +72,16 @@ class HyprlandSessionConfig:
         if self.scope_socket is None:
             object.__setattr__(self, "scope_socket", self.runtime_dir + "/odin-hyprland-scope.sock")
         if any(len(os.fsencode(p)) > 107 for p in (
-            self.wayland_path, self.ipc_path, self.scope_socket,
+            self.wayland_path, self.ipc_path, cast(str, self.scope_socket),
         )):
             raise ComputerError("hyprland_explicit_socket_required")
 
     @property
-    def wayland_path(self):
+    def wayland_path(self) -> str:
         return self.runtime_dir + "/" + self.wayland_display
 
     @property
-    def ipc_path(self):
+    def ipc_path(self) -> str:
         return self.runtime_dir + "/hypr/" + self.instance_signature + "/.socket.sock"
 
 
@@ -116,10 +127,20 @@ def _render_native(frame, crop):
         image.close()
 
 
+class _GroundedCommandEncoder(WaylandRuntimeBackend):
+    """Reuse only the synchronous encoder with its sole dependency supplied.
+
+    This object is never started and owns no portal or runtime lifecycle.
+    """
+
+    def __init__(self, guardian: HyprlandGuardian | None):
+        self._guardian = guardian
+
+
 class HyprlandRuntimeBackend:
     startup_timeout_seconds = 30
     input_supported = False
-    input_blocker = "hyprland_session_not_ready"
+    input_blocker: str | None = "hyprland_session_not_ready"
     input_limits = {
         **WaylandRuntimeBackend.input_limits,
         "scope": "authenticated_hyprland_explicit_output_app",
@@ -128,9 +149,8 @@ class HyprlandRuntimeBackend:
         "residuals": list(RESIDUALS),
     }
     # Transport-neutral helpers: no portal access or compositor qualification.
-    _command = WaylandRuntimeBackend._command
-    _action_scope = WaylandRuntimeBackend._action_scope
-    _record_spawn = WaylandRuntimeBackend._record_spawn
+    def _command(self, action, frame, scope):
+        return _GroundedCommandEncoder(self._guardian)._command(action, frame, scope)
 
     def __init__(self, *, config: HyprlandSessionConfig, enabled=False,
                  environment="existing_session", app_profile=None):
@@ -140,30 +160,94 @@ class HyprlandRuntimeBackend:
         self.config, self.enabled = config, enabled
         self.capabilities = BackendCapabilities("wayland", environment)
         self.input_admission = InputAdmission(
-            "pending", self.input_blocker, "Native session safety evidence is unmeasured.",
+            "pending", cast(str, self.input_blocker),
+            "Native session safety evidence is unmeasured.",
             "Explicitly configure the pinned Hyprland build and provisioned native companion.")
         self._generation, self._revision = 1, 0
         self._started = self._closed = self._paused = False
-        self._frame = self._scope = self._fingerprint = self._crop = None
+        self._frame: BackendObservation | None = None
+        self._scope: dict[str, Any] | None = None
+        self._fingerprint: str | None = None
+        self._crop: dict[str, int] | None = None
         self._captured_at = 0.0
-        self._guardian = self._scope_provider = self._identity = self._output = None
-        self._descriptor = None
-        self.runtime_identity_callback = None
+        self._guardian: HyprlandGuardian | None = None
+        self._scope_provider: HyprlandScopeProvider | None = None
+        self._identity: HyprlandIdentity | None = None
+        self._output: ExplicitOutput | None = None
+        self._descriptor: dict[str, Any] | None = None
+        self.runtime_identity_callback: Callable[[dict[str, Any]], None] | None = None
         self._selected = uuid.uuid4().hex
         self._lock, self._stop_lock = asyncio.Lock(), asyncio.Lock()
-        self._scope_jobs, self._jobs = set(), set()
-        self._capture_jobs = set()
+        self._scope_jobs: set[asyncio.Task[dict[str, Any]]] = set()
+        self._jobs: set[asyncio.Task[None]] = set()
+        self._capture_jobs: set[asyncio.Task[NativeFrame]] = set()
         self._release_failed = False
-        self._cleanup_task = None
-        self._cleanup_evidence = {}
-        self.lifecycle_reason = None
+        self._cleanup_task: asyncio.Task[bool] | None = None
+        self._cleanup_evidence: dict[str, bool | list[str]] = {}
+        self.lifecycle_reason: str | None = None
 
     def startup_descriptor(self, session_id):
-        descriptor = WaylandRuntimeBackend.startup_descriptor(self, session_id)
+        from .recovery import boot_id
+
+        validate_session(session_id)
+        if self._descriptor is None:
+            self._descriptor = {
+                "version": 1, "kind": "processes", "session_id": session_id,
+                "boot_id": boot_id(), "no_persistent_devices": True,
+                "input_was_enabled": True, "launch_pending": True, "processes": [],
+            }
+        if self._descriptor["session_id"] != session_id:
+            raise ComputerError("wayland_session_identity_changed")
+        descriptor = copy.deepcopy(self._descriptor)
         # The companion may retain pending input after guardian death.
         self._descriptor["no_persistent_devices"] = False
         descriptor["no_persistent_devices"] = False
         return descriptor
+
+    def _record_spawn(self, identity):
+        if self._descriptor is None:
+            raise ComputerError("wayland_runtime_identity_missing")
+        descriptor = copy.deepcopy(self._descriptor)
+        if identity is not None:
+            if len(descriptor["processes"]) >= 2048:
+                raise ComputerError("wayland_runtime_process_limit")
+            descriptor["processes"].append({k: identity[k] for k in ("pid", "start_ticks")})
+        descriptor["launch_pending"] = identity is None
+        if self.runtime_identity_callback:
+            self.runtime_identity_callback(copy.deepcopy(descriptor))
+        self._descriptor = descriptor
+
+    async def _action_scope(self, metadata, *, deadline_ns=None):
+        """Transport-neutral bounded acquisition, owned by this backend."""
+        if self._scope_provider is None:
+            raise ComputerError("wayland_session_revoked")
+        started = time.monotonic_ns()
+        expires = started + 250_000_000
+        deadline = min(expires, deadline_ns) if deadline_ns is not None else expires
+        if deadline <= started:
+            raise ComputerError("wayland_scope_evidence_expired")
+        pending = asyncio.create_task(self._scope_provider.snapshot(metadata))
+        self._scope_jobs.add(pending)
+
+        def finished(task):
+            self._scope_jobs.discard(task)
+            if not task.cancelled():
+                task.exception()
+
+        pending.add_done_callback(finished)
+        try:
+            done, _ = await asyncio.wait({pending}, timeout=(deadline - started) / 1e9)
+            now = time.monotonic_ns()
+            if not done or now >= deadline:
+                raise ComputerError("wayland_scope_evidence_expired")
+            scope = pending.result()
+            observed = scope.get("observed_monotonic_ns")
+            if type(observed) is not int or not started <= observed <= now:
+                raise ComputerError("wayland_scope_evidence_stale")
+            return scope, expires
+        finally:
+            if not pending.done():
+                pending.cancel()
 
     def _new_provider(self):
         from .hyprland_scope import HyprlandScopeProvider
@@ -173,7 +257,7 @@ class HyprlandRuntimeBackend:
             expected_compositor_pid=self.config.compositor_pid)
 
     def _metadata(self):
-        data = {"mapping_id": self.config.output_name}
+        data: dict[str, str | list[int]] = {"mapping_id": self.config.output_name}
         if self._output:
             data["size"] = [self._output.logical_width, self._output.logical_height]
         return data
@@ -226,6 +310,7 @@ class HyprlandRuntimeBackend:
             await self._guardian.bind_scope(scope)
             self._check_ready(await self._guardian.select(self.config.output_name))
             await revalidate(self._identity, time.monotonic() + 3)
+            assert self._descriptor is not None  # Established by startup_descriptor.
             descriptor = copy.deepcopy(self._descriptor)
             descriptor["launch_pending"] = False
             if self.runtime_identity_callback:
@@ -270,6 +355,7 @@ class HyprlandRuntimeBackend:
             raise ComputerError("hyprland_scope_unknown_locked_or_stale")
 
     def _check_ready(self, ready):
+        assert self._guardian is not None and self._output is not None
         if (not self._guardian.alive or ready.get("width") != self._output.logical_width
                 or ready.get("height") != self._output.logical_height):
             raise ComputerError("hyprland_input_extent_mismatch")
@@ -299,12 +385,14 @@ class HyprlandRuntimeBackend:
 
     async def _capture(self, crop=None):
         self._active()
+        assert self._identity is not None and self._output is not None
         generation = self._generation
         last_scope = None
 
         async def proof():
             nonlocal last_scope
             self._active()
+            assert self._identity is not None and self._output is not None
             if generation != self._generation:
                 raise ComputerError("hyprland_generation_revoked")
             scope, _ = await self._action_scope(self._metadata())
@@ -344,11 +432,12 @@ class HyprlandRuntimeBackend:
             if fingerprint != self._fingerprint:
                 self._revision += 1
                 self._fingerprint = fingerprint
+            assert self._output is not None
             width, height = self._output.oriented_size
             source = SourceGeometry(
                 self._selected, self._revision, self._generation, width, height,
-                input_region_id=self._selected, input_width=self._output.logical_width,
-                input_height=self._output.logical_height,
+                input_region_id=self._selected, input_width=Fraction(self._output.logical_width),
+                input_height=Fraction(self._output.logical_height),
                 pixel_to_input=AffineTransform(a=Fraction(self._output.logical_width, width),
                                               e=Fraction(self._output.logical_height, height)))
             fm = rendered.metadata
@@ -366,7 +455,8 @@ class HyprlandRuntimeBackend:
 
     capture = observe
 
-    async def _watch_action(self, original, generation, lease):
+    async def _watch_action(self, original, generation, lease) -> None:
+        assert self._guardian is not None
         try:
             while True:
                 await asyncio.sleep(min(0.05, max(0, (lease[0] - time.monotonic_ns()) / 1e9)))
@@ -390,6 +480,7 @@ class HyprlandRuntimeBackend:
     async def act(self, action):
         async with self._lock:
             self._active()
+            assert self._guardian is not None and self._identity is not None
             frame, scope = self._frame, self._scope
             if (not self.input_supported or self.input_admission.state != "eligible"
                     or self._release_failed or frame is None or scope is None
@@ -500,17 +591,17 @@ class HyprlandRuntimeBackend:
         self._frame = self._scope = self._fingerprint = None
         self._revision += 1
 
-    async def _cleanup_all(self):
+    async def _cleanup_all(self) -> bool:
         captures = tuple(self._capture_jobs)
         for job in captures:
             job.cancel()
         if captures:
             await asyncio.gather(*captures, return_exceptions=True)
-        for job in tuple(self._scope_jobs):
-            job.cancel()
+        for scope_job in tuple(self._scope_jobs):
+            scope_job.cancel()
         jobs = tuple(self._jobs)
-        for job in jobs:
-            job.cancel()
+        for action_job in jobs:
+            action_job.cancel()
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
         released = reaped = self._guardian is None
