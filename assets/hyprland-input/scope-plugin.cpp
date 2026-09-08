@@ -13,6 +13,7 @@
 #include <hyprland/src/protocols/VirtualPointer.hpp>
 #include <hyprland/src/protocols/SessionLock.hpp>
 #include <hyprland/src/protocols/XDGShell.hpp>
+#include <hyprland/src/protocols/core/Compositor.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <json-c/json.h>
 #include <wayland-server-core.h>
@@ -34,6 +35,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include <array>
 #include "scope-deadline.hpp"
 
 namespace {
@@ -137,8 +139,85 @@ struct State {
     int listener = -1;
     wl_event_source *listenerSource = nullptr, *timer = nullptr;
     std::string socketPath, reason = "idle";
+    struct WireEvent {
+        uint32_t opcode = 0, time = 0, button = 0, state = 0, resource = 0;
+        int64_t monotonic = 0, dispatch = 0;
+        double x = 0, y = 0;
+        bool warp = false;
+    };
+    wl_protocol_logger* protocolLogger = nullptr;
+    std::array<WireEvent, 256> wire{};
+    size_t wireCount = 0;
+    bool wireOverflow = false, ownedDispatch = false, warpDispatch = false;
+    int64_t dispatchNumber = 0;
+    std::string diagnosticToken;
+
+    // This callback sees all protocol traffic, but must inspect arguments ONLY
+    // after direction/interface/client/owned-invocation admission. No requests,
+    // keyboard data, titles, global coordinates, or other clients are retained.
+    static void protocolEvent(void* raw, wl_protocol_logger_type direction,
+                              const wl_protocol_logger_message* message) noexcept {
+        auto& s = *static_cast<State*>(raw);
+        if (direction != WL_PROTOCOL_LOGGER_EVENT || !s.ownedDispatch || !s.armed ||
+            s.diagnosticToken.empty() || s.diagnosticToken != s.bound.token ||
+            !message || !message->resource || s.bound.surface.expired()) return;
+        if (std::strcmp(wl_resource_get_class(message->resource), "wl_pointer") != 0 ||
+            wl_resource_get_client(message->resource) != s.bound.surface->client() ||
+            g_pSeatManager->m_state.pointerFocus != s.bound.surface) return;
+        const auto opcode = message->message_opcode;
+        if (!((opcode == 2 && message->arguments_count == 3) ||
+              (opcode == 3 && message->arguments_count == 4) ||
+              (opcode == 5 && message->arguments_count == 0))) return;
+        if (s.wireCount == s.wire.size()) { s.wireOverflow = true; return; }
+        WireEvent e;
+        e.opcode = opcode; e.monotonic = ns(); e.dispatch = s.dispatchNumber;
+        e.warp = s.warpDispatch; e.resource = wl_resource_get_id(message->resource);
+        if (opcode == 2) {
+            e.time = message->arguments[0].u;
+            e.x = wl_fixed_to_double(message->arguments[1].f);
+            e.y = wl_fixed_to_double(message->arguments[2].f);
+        } else if (opcode == 3) {
+            e.time = message->arguments[1].u;
+            e.button = message->arguments[2].u; e.state = message->arguments[3].u;
+        }
+        s.wire[s.wireCount++] = e;
+    }
+    struct OwnedDispatch {
+        State& s;
+        OwnedDispatch(State& state, bool warp) : s(state) {
+            s.ownedDispatch = s.scope() && s.diagnosticToken == s.bound.token;
+            s.warpDispatch = warp;
+            if (s.ownedDispatch) ++s.dispatchNumber;
+        }
+        ~OwnedDispatch() { s.ownedDispatch = false; s.warpDispatch = false; }
+    };
+    J diagnostics(const std::string& token) {
+        if (token.empty() || token != diagnosticToken) return status(false, "diagnostic-token-refused");
+        auto j = obj(); put(j.get(), "ok", true);
+        put(j.get(), "receiver_proven", false);
+        put(j.get(), "coordinates", std::string("surface-local"));
+        put(j.get(), "overflow", wireOverflow);
+        put(j.get(), "dispatches", dispatchNumber);
+        auto* events = json_object_new_array();
+        for (size_t i = 0; i < wireCount; ++i) {
+            const auto& e = wire[i]; auto item = obj();
+            put(item.get(), "event", std::string(e.opcode == 2 ? "motion" : e.opcode == 3 ? "button" : "frame"));
+            put(item.get(), "source", std::string(e.warp ? "owned-warp" : "owned-button"));
+            put(item.get(), "dispatch", e.dispatch); put(item.get(), "monotonic_ns", e.monotonic);
+            put(item.get(), "resource", int64_t(e.resource));
+            if (e.opcode != 5) put(item.get(), "time_ms", int64_t(e.time));
+            if (e.opcode == 2) { put(item.get(), "x", e.x); put(item.get(), "y", e.y); }
+            if (e.opcode == 3) { put(item.get(), "button", int64_t(e.button)); put(item.get(), "state", int64_t(e.state)); }
+            json_object_array_add(events, item.release());
+        }
+        json_object_object_add(j.get(), "events", events); return j;
+    }
 
     ~State() noexcept {
+        // First teardown action, before revoke can dispatch or destroy clients.
+        // Also covers failed init and dispatcher-owned automatic ejection.
+        if (protocolLogger) { wl_protocol_logger_destroy(protocolLogger); protocolLogger = nullptr; }
+        ownedDispatch = false;
         revoke("plugin-unload");
         if (timer) wl_event_source_remove(timer);
         if (listenerSource) wl_event_source_remove(listenerSource);
@@ -299,6 +378,20 @@ struct State {
         const auto op = text(j, "op");
         if (op == "snapshot") return snapshot(text(j, "output_name"));
         if (op == "status") return status();
+        if (op == "diagnostics_begin") {
+            const auto token = text(j, "token");
+            auto it = snapshots.find(token);
+            if (armed || it == snapshots.end() || !same(it->second) || ns() - it->second.measured >= 250000000)
+                return status(false, "diagnostic-snapshot-refused");
+            diagnosticToken = token; wireCount = 0; wireOverflow = false; dispatchNumber = 0;
+            return status();
+        }
+        if (op == "diagnostics_read") return diagnostics(text(j, "token"));
+        if (op == "diagnostics_clear") {
+            if (text(j, "token").empty() || text(j, "token") != diagnosticToken) return status(false, "diagnostic-token-refused");
+            diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0;
+            return status();
+        }
         if (op == "release_all" || op == "stop") { revoke("operator-recovery"); return status(!failed); }
         if (op != "arm" && op != "renew") return status(false, "unknown-operation");
         const int lease = integer(j, "lease_ms"); const auto token = text(j, "token");
@@ -322,6 +415,7 @@ struct State {
         if (!p || p->resource->m_boundOutput != it->second.monitor || p->device->m_boundOutput != it->second.monitor->m_name) return status(false, "missing-or-wrong-output-pointer");
         if (!g_pInputManager->getKeysFromAllKBs().empty() || g_pInputManager->hasHeldButtons()) return status(false, "human-input-held");
         keyboard = k; pointer = p; guardianFD = peer.fd; bound = it->second; snapshots.erase(it);
+        if (diagnosticToken != bound.token) { diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0; }
         deadline = expiry; armed = true; reason = "armed";
         return status();
     }
@@ -429,10 +523,13 @@ void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer>
     auto& s = *live; auto original = reinterpret_cast<ButtonFn>(s.buttonHook->m_original);
     if (s.draining) { original(manager, event, device); return; }
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
-    if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.erase(event.button)) { original(manager, event, device); return; }
+    if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.erase(event.button)) {
+        State::OwnedDispatch trace(s, false); original(manager, event, device); return;
+    }
     if (p != s.pointer || !s.allow()) { if (p != s.pointer) ++s.rejected; return; }
     if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || !s.point(g_pPointerManager->position())) { ++s.rejected; s.revoke("button-destination-refused"); return; }
-    s.buttons.insert(event.button); original(manager, event, device);
+    s.buttons.insert(event.button);
+    State::OwnedDispatch trace(s, false); original(manager, event, device);
 }
 void onAxis(CInputManager* manager, IPointer::SAxisEvent event, SP<IPointer> device) {
     auto& s = *live; auto original = reinterpret_cast<AxisFn>(s.axisHook->m_original);
@@ -460,12 +557,13 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
     if (!s.allow()) return;
     const Vector2D pos = s.bound.outputPos + event.absolute * s.bound.outputSize;
     if (!s.point(pos)) { ++s.rejected; s.revoke("warp-destination-refused"); return; }
+    State::OwnedDispatch trace(s, true);
     original(manager, event);
     // Pinned Hyprland 0.55.2 onMouseWarp sends motion but no seat frame.
     // Its onPointerFrame ignores virtual-pointer frames unless an axis is
-    // pending. GTK therefore batches absolute vertices until a button frame,
-    // collapsing a stroke to its endpoint. Match onMouseMoved's completion,
-    // only for this authenticated, scope-validated owned absolute event.
+    // pending. This is source evidence only, NOT proof of GTK batching or
+    // the endpoint-only cause: explicit framing did not resolve that symptom.
+    // Retain the owned completion while measuring downstream protocol events.
     g_pSeatManager->sendPointerFrame();
 }
 void onFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface) {
@@ -537,6 +635,8 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE pluginHandle) {
         return SDispatchResult{.success = !owner->failed, .error = owner->failed ? "owned release failed" : "owned input released"};
     })) throw std::runtime_error("Odin state owner registration failed");
     auto* s = live;
+    s->protocolLogger = wl_display_add_protocol_logger(g_pCompositor->m_wlDisplay, State::protocolEvent, s);
+    if (!s->protocolLogger) throw std::runtime_error("Odin private protocol logger registration failed");
     s->keyHook = hook("onKeyboardKey", "CInputManager::onKeyboardKey(", reinterpret_cast<void*>(onKey));
     s->modHook = hook("onKeyboardMod", "CInputManager::onKeyboardMod(", reinterpret_cast<void*>(onMod));
     s->buttonHook = hook("onMouseButton", "CInputManager::onMouseButton(", reinterpret_cast<void*>(onButton));

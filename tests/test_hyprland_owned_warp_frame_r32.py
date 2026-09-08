@@ -42,6 +42,7 @@ using WarpFn = void (*)(CInputManager*, IPointer::SMotionAbsoluteEvent);
 struct Hook { WarpFn m_original; };
 struct Pointer { std::shared_ptr<Device> device; };
 struct State {
+    struct OwnedDispatch { OwnedDispatch(State&, bool) {} };
     Hook* warpHook;
     std::vector<std::unique_ptr<Pointer>> pointers;
     Pointer* pointer;
