@@ -154,7 +154,7 @@ class ComputerController:
         def persist(descriptor):
             nonlocal launch_grant
             live = self._live.get(grant.session_id)
-            if live is None or live.backend is not backend:
+            if live is None or live.revoked or live.backend is not backend:
                 raise ComputerError("grant_revoked")
             if descriptor.get("launch_pending") is True:
                 # A new spawn after an authorized resume may use its new grant;
@@ -319,14 +319,11 @@ class ComputerController:
         return grant
 
     def _active(self, grant):
-        current = self.store.get_session(grant.session_id)
         live = self._live.get(grant.session_id)
-        if (
-            not self.enabled
-            or current.generation != grant.generation
-            or current.state != "active"
-            or live is None
-        ):
+        if live is None or live.revoked:
+            raise ComputerError("grant_revoked")
+        current = self.store.get_session(grant.session_id)
+        if not self.enabled or current.generation != grant.generation or current.state != "active":
             raise ComputerError("grant_revoked")
         if self.monotonic() >= live.deadline or self.store.clock() >= grant.expires_at:
             raise ComputerError("task_expired")
@@ -340,13 +337,27 @@ class ComputerController:
             self._watchdogs.pop(sid)
         await self._stop(sid, "cancelled")
 
+    def _fence(self, sid):
+        """Revoke live input/capture before any persistence or awaited cleanup."""
+        self._delivered_observations.pop(sid, None)
+        live = self._live.get(sid)
+        if live is not None:
+            live.revoked = True
+            live.observations.clear()
+
     async def _stop(self, sid, state):
+        self._fence(sid)
         # Transport/turn cancellation must not cancel cleanup or its durable
         # receipt. A distinct request still gets its serialized retry after an
         # earlier failure; joining the same failed receipt would regress Close.
         task = self._stops.get(sid)
         if task is not None and not task.done():
-            await asyncio.shield(task)
+            try:
+                await asyncio.shield(task)
+            except Exception:
+                # A distinct explicit request still owns a cleanup retry after
+                # the previous worker's failure. Caller cancellation propagates.
+                pass
         task = _own_task(asyncio.create_task(self._stop_serialized(sid, state)))
         self._stops[sid] = task
 
@@ -365,22 +376,35 @@ class ComputerController:
 
     async def _stop_serialized(self, sid, state):
         async with self._stop_locks.setdefault(sid, asyncio.Lock()):
-            current = self.store.get_session(sid)
+            try:
+                current = self.store.get_session(sid)
+            except Exception:
+                if sid in self._live:
+                    return await self._stop_owned(sid, state)
+                raise ComputerError("cleanup_persistence_failed") from None
             if current.state in {"closed", "cancelled"} and sid not in self._live:
                 return self._public_session(current)
             return await self._stop_owned(sid, state)
 
     async def _stop_owned(self, sid, state):
-        grant = self.store.set_state(sid, "quarantined", revoke=True)
-        self._delivered_observations.pop(sid, None)
+        self._fence(sid)
+        persistence_failed = False
+        try:
+            grant = self.store.set_state(sid, "quarantined", revoke=True)
+        except Exception:
+            # Disk/SQLite failure is not permission to leave native authority
+            # attached. Keep the fenced adapter for a later explicit cleanup retry.
+            persistence_failed = True
+            grant = None
         timer = self._watchdogs.pop(sid, None)
         if timer and timer is not asyncio.current_task():
             _cancel_owned(timer)
             await _settle_owned(timer)
         live = self._live.get(sid)
         if live is None:
+            if persistence_failed:
+                raise ComputerError("cleanup_persistence_failed") from None
             return self._public_session(grant)
-        live.observations.clear()
         result = None
         try:
             # Attached adapters revoke their own devices only, never stop session apps.
@@ -441,12 +465,19 @@ class ComputerController:
             clean = False
         # Commit the cleanup evidence BEFORE dropping the live adapter. Inactive
         # retained devices must not become indistinguishable from actual removal.
-        self.store.record_cleanup(sid, result, clean=clean)
-        certificate = self.store.cleanup(sid)
-        clean = clean and certificate is not None and certificate["complete"] is True
-        if clean:
-            self._live.pop(sid, None)
-            grant = self.store.set_state(sid, state)
+        try:
+            self.store.record_cleanup(sid, result, clean=clean)
+            certificate = self.store.cleanup(sid)
+            clean = clean and certificate is not None and certificate["complete"] is True
+            if clean and not persistence_failed:
+                grant = self.store.set_state(sid, state)
+                self._live.pop(sid, None)
+        except Exception:
+            persistence_failed = True
+        if persistence_failed:
+            # No fabricated durable state/cleanup success. Live authority stays
+            # fenced even when the stored row still says active or paused.
+            raise ComputerError("cleanup_persistence_failed") from None
         return self._public_session(grant)
 
     async def set_enabled(self, enabled: bool):
@@ -511,6 +542,13 @@ class ComputerController:
 
     def _input_status(self, live, grant):
         limits = getattr(live.backend, "input_limits", {})
+        if live.revoked:
+            return {
+                "input_supported": False,
+                "input_readiness": "inactive",
+                "input_blocker": "grant_revoked",
+                "input_limits": deepcopy(limits),
+            }
         readiness = getattr(live.backend, "input_readiness", None)
         if not isinstance(readiness, str):
             return {"input_limits": deepcopy(limits)}
@@ -587,10 +625,17 @@ class ComputerController:
                     raise ComputerError("backend_capabilities_changed")
                 if getattr(backend, "input_supported", False) is True:
                     input_eligible(measured)
-                self._live[grant.session_id].capabilities = measured
+                live = self._live.get(grant.session_id)
+                if live is None or live.revoked:
+                    raise ComputerError("grant_revoked")
+                live.capabilities = measured
                 await self._auth(context)
                 current = self.store.get_session(grant.session_id)
-                if current.generation != grant.generation or current.state != "starting":
+                if (
+                    current.generation != grant.generation
+                    or current.state != "starting"
+                    or live.revoked
+                ):
                     raise ComputerError("grant_revoked")
                 grant = self.store.set_state(grant.session_id, "active")
                 self._watchdogs[grant.session_id] = _own_task(
@@ -630,7 +675,7 @@ class ComputerController:
         if operation == "status":
             return self._public_session(grant)
         if operation in {"stop", "cancel", "close"}:
-            if grant.state in {"cancelled", "closed"}:
+            if grant.state in {"cancelled", "closed"} and grant.session_id not in self._live:
                 return self._public_session(grant)
             return await self._stop(
                 grant.session_id, "closed" if operation == "close" else "cancelled"
@@ -641,11 +686,17 @@ class ComputerController:
             if grant.state != "paused" or grant.session_id not in self._live:
                 raise ComputerError("resume_unavailable")
             live = self._live[grant.session_id]
+            if live.revoked:
+                raise ComputerError("resume_unavailable")
             if self.monotonic() >= live.deadline or self.store.clock() >= grant.expires_at:
                 raise ComputerError("task_expired")
             async with self._actions:
                 current = self.store.get_session(grant.session_id)
-                if current.generation != grant.generation or current.state != "paused":
+                if (
+                    current.generation != grant.generation
+                    or current.state != "paused"
+                    or live.revoked
+                ):
                     raise ComputerError("grant_revoked")
                 grant = self.store.set_state(
                     grant.session_id, "paused", revoke=True, turn_id=context.turn_id
@@ -672,7 +723,11 @@ class ComputerController:
                     live.capabilities = measured
                     await self._auth(context)
                     current = self.store.get_session(grant.session_id)
-                    if current.generation != grant.generation or current.state != "paused":
+                    if (
+                        current.generation != grant.generation
+                        or current.state != "paused"
+                        or live.revoked
+                    ):
                         raise ComputerError("grant_revoked")
                     grant = self.store.set_state(grant.session_id, "active")
                     obs, _ = await self._capture(grant, acknowledge_modal=True)
@@ -702,7 +757,13 @@ class ComputerController:
         current = self.store.get_session(sid)
         if current.state not in {"active", "starting", "paused"}:
             raise ComputerError("grant_revoked")
-        self.store.set_state(sid, "paused", revoke=True)
+        try:
+            self.store.set_state(sid, "paused", revoke=True)
+        except Exception:
+            # Pause is revocation too. A failed durable pause must still release
+            # native authority rather than leave the old active grant usable.
+            await self._stop(sid, "cancelled")
+            raise ComputerError("cleanup_persistence_failed") from None
         live = self._live.get(sid)
         if live is None:
             return self._public_session(self.store.set_state(sid, "quarantined"))

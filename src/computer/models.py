@@ -252,3 +252,4 @@ class LiveSession:
     modal_identity: Any = None
     capabilities: BackendCapabilities | None = None
     task_context: Any = None  # Descriptive only; never used by authorization.
+    revoked: bool = False  # Process-local fence; persistence cannot restore authority.
