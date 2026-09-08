@@ -12,6 +12,7 @@ from src.computer.runtime.wayland_backend import WaylandRuntimeBackend
 async def test_cleanup_requires_portal_transport_close(connection_closed):
     backend = WaylandRuntimeBackend.__new__(WaylandRuntimeBackend)
     backend._jobs = set()
+    backend._scope_jobs = set()
     backend._guardian = SimpleNamespace(
         close=AsyncMock(return_value={"process_reaped": True, "release_submitted": True})
     )

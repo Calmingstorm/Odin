@@ -1,4 +1,5 @@
 """No desktop required: source contract, action mapping and revoke lifecycle."""
+
 import asyncio
 import threading
 from types import SimpleNamespace
@@ -28,13 +29,16 @@ async def test_stable_capture_and_crop_do_not_change_source_revision(adapter):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("kind,args,prefix", [
-    ("double_click", {"x": 10, "y": 10}, "Q 272"),
-    ("middle_click", {"x": 10, "y": 10}, "P 274"),
-    ("scroll", {"x": 10, "y": 10, "direction": "left", "count": 20}, "W left 20"),
-    ("type", {"text": "héλ"}, "T 68c3a9cebb"),
-    ("key", {"chord": "super+shift+F12"}, "J super+shift+F12"),
-])
+@pytest.mark.parametrize(
+    "kind,args,prefix",
+    [
+        ("double_click", {"x": 10, "y": 10}, "Q 272"),
+        ("middle_click", {"x": 10, "y": 10}, "P 274"),
+        ("scroll", {"x": 10, "y": 10, "direction": "left", "count": 20}, "W left 20"),
+        ("type", {"text": "héλ"}, "T 68c3a9cebb"),
+        ("key", {"chord": "super+shift+F12"}, "J super+shift+F12"),
+    ],
+)
 async def test_generic_actions(adapter, kind, args, prefix):
     await adapter.start("session1")
     frame = await adapter.observe()
@@ -80,8 +84,9 @@ def test_pipewire_parameter_change_fences_but_identical_caps_do_not():
     assert not events and worker.generation == 1
     assert not worker.stream_parameters(1, "RGB 3840x2160")
     assert worker.cancel.is_set() and not worker.alive
-    assert events == [{"event": "fence", "generation": 2,
-                       "reason": "pipewire_stream_parameters_changed"}]
+    assert events == [
+        {"event": "fence", "generation": 2, "reason": "pipewire_stream_parameters_changed"}
+    ]
 
 
 @pytest.mark.asyncio
@@ -90,19 +95,29 @@ async def test_native_preflight_report_is_not_unknown_outcome(adapter):
 
     await adapter.start("session1")
     frame = await adapter.observe()
-    details = {"event": "action_rejected", "reason": "unsupported_character",
-               "input_was_sent": False, "characters": [{"index": 0, "codepoint": 128512}]}
+    details = {
+        "event": "action_rejected",
+        "reason": "unsupported_character",
+        "input_was_sent": False,
+        "characters": [{"index": 0, "codepoint": 128512}],
+    }
 
-    async def reject(command):
+    async def reject(command, *, scope_deadline_ns=None):
         error = WaylandGuardianError("unsupported_character")
         error.details = details
         raise error
 
     adapter._guardian.act = reject
     receipt = await adapter.act(action(frame, "type", text="😀"))
-    assert receipt == {"status": "unavailable", "injected": False, "released": True,
-                       "reason": "unsupported_character", "unsupported_characters": [
-                           {"index": 0, "codepoint": 128512, "reason": "unsupported_character"}]}
+    assert receipt == {
+        "status": "unavailable",
+        "injected": False,
+        "released": True,
+        "reason": "unsupported_character",
+        "unsupported_characters": [
+            {"index": 0, "codepoint": 128512, "reason": "unsupported_character"}
+        ],
+    }
     assert adapter._guardian.alive and not adapter._paused
     assert adapter._frame is None
     await adapter.stop()

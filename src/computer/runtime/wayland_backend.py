@@ -29,6 +29,10 @@ from .wayland_identity import CompositorRuntimeIdentity, capture_identity, reval
 from .wayland_portal import WaylandPortalSession
 from .wayland_scope import GNOMEWaylandScopeProvider
 
+# The provider's longer discovery timeout is not an input safety lease.
+_SCOPE_LEASE_NS = 250_000_000
+_SCOPE_REFRESH_SECONDS = 0.05
+
 
 @dataclass(frozen=True)
 class WaylandSessionConfig:
@@ -202,6 +206,7 @@ class WaylandRuntimeBackend:
         self._stop_lock = asyncio.Lock()
         self._release_failed = False
         self._jobs: set[asyncio.Task[None]] = set()
+        self._scope_jobs: set[asyncio.Task] = set()
         self._cleanup_task: asyncio.Task[bool] | None = None
         self._cleanup_evidence: dict[str, bool] = {}
         self._lifecycle_task: asyncio.Task | None = None
@@ -720,18 +725,63 @@ class WaylandRuntimeBackend:
             point(p) for p in points
         )
 
-    async def _watch_action(self, metadata, original_scope, generation) -> None:
+    async def _action_scope(self, metadata, *, deadline_ns=None):
+        """Acquire scope without letting hung/cancel-slow acquisition delay a fence."""
+        if self._scope_provider is None:
+            raise ComputerError("wayland_session_revoked")
+        started = time.monotonic_ns()
+        expires = started + _SCOPE_LEASE_NS
+        deadline = min(expires, deadline_ns) if deadline_ns is not None else expires
+        if deadline <= started:
+            raise ComputerError("wayland_scope_evidence_expired")
+        pending = asyncio.create_task(self._scope_provider.snapshot(metadata))
+        self._scope_jobs.add(pending)
+
+        def finished(task):
+            self._scope_jobs.discard(task)
+            if not task.cancelled():
+                task.exception()  # Late failures are retrieved, never used as authority.
+
+        pending.add_done_callback(finished)
+        try:
+            # wait_for waits for cancellation acknowledgement. A stuck provider
+            # must not keep dispatch alive while acknowledging cancellation.
+            done, _ = await asyncio.wait({pending}, timeout=(deadline - started) / 1e9)
+            now = time.monotonic_ns()
+            if not done or now >= deadline:
+                raise ComputerError("wayland_scope_evidence_expired")
+            scope = pending.result()
+            observed = scope.get("observed_monotonic_ns")
+            if type(observed) is not int or not started <= observed <= now:
+                raise ComputerError("wayland_scope_evidence_stale")
+            # Start the lease at acquisition, not completion: authentication
+            # latency must not launder old evidence into a fresh lease.
+            return scope, expires
+        finally:
+            if not pending.done():
+                pending.cancel()
+
+    async def _watch_action(self, metadata, original_scope, generation, lease) -> None:
         try:
             if self._scope_provider is None:
                 raise ComputerError("wayland_session_revoked")
             while True:
-                await asyncio.sleep(0.05)
+                remaining = (lease[0] - time.monotonic_ns()) / 1e9
+                if remaining <= 0:
+                    raise ComputerError("wayland_scope_evidence_expired")
+                await asyncio.sleep(min(_SCOPE_REFRESH_SECONDS, remaining))
                 self._active()
                 if generation != self._generation:
                     raise ComputerError("wayland_generation_revoked")
-                fresh = await self._scope_provider.snapshot(metadata)
+                fresh, deadline = await self._action_scope(metadata, deadline_ns=lease[0])
+                self._active()
+                if generation != self._generation:
+                    raise ComputerError("wayland_generation_revoked")
                 if _scope_binding(fresh) != _scope_binding(original_scope):
                     raise ComputerError("wayland_focus_changed")
+                if self._guardian:
+                    await self._guardian.refresh_scope(deadline)
+                lease[0] = deadline
         except asyncio.CancelledError:
             raise
         except Exception:
@@ -762,7 +812,7 @@ class WaylandRuntimeBackend:
             command = self._command(action, frame, scope)
             _, metadata, rendered = await self._capture(self._crop)
             image, width, height = rendered.png, rendered.metadata.width, rendered.metadata.height
-            fresh_scope = await self._scope_provider.snapshot(metadata)
+            fresh_scope, _ = await self._action_scope(metadata)
             stable_pixels = image == frame.image_bytes
             if not stable_pixels and action["type"] in {
                 "click",
@@ -799,7 +849,7 @@ class WaylandRuntimeBackend:
                 raise ComputerError("wayland_input_extent_mismatch")
             # Identity hashing and region negotiation are awaited. Recheck focus
             # after both, rather than letting their latency widen the input race.
-            fresh_scope = await self._scope_provider.snapshot(metadata)
+            fresh_scope, scope_deadline = await self._action_scope(metadata)
             if _scope_binding(scope) != _scope_binding(fresh_scope):
                 self._frame = None
                 raise ComputerError("wayland_focus_changed_before_dispatch")
@@ -807,8 +857,9 @@ class WaylandRuntimeBackend:
             if not 0 <= time.monotonic() - self._captured_at <= 5:
                 raise ComputerError("wayland_observation_expired")
             self._frame = None
+            lease = [scope_deadline]
             watchdog = asyncio.create_task(
-                self._watch_action(metadata, fresh_scope, self._generation)
+                self._watch_action(metadata, fresh_scope, self._generation, lease)
             )
             self._jobs.add(watchdog)
             generation = self._generation
@@ -821,7 +872,7 @@ class WaylandRuntimeBackend:
                     or not 0 <= time.monotonic() - self._captured_at <= 5
                 ):
                     raise ComputerError("wayland_generation_revoked")
-                current_scope = await self._scope_provider.snapshot(metadata)
+                current_scope, _ = await self._action_scope(metadata, deadline_ns=lease[0])
                 self._active()
                 if generation != self._generation or _scope_binding(
                     current_scope
@@ -829,12 +880,21 @@ class WaylandRuntimeBackend:
                     raise ComputerError("wayland_focus_changed")
 
             try:
+                if time.monotonic_ns() >= lease[0]:
+                    raise ComputerError("wayland_scope_evidence_expired")
                 delivered = (
-                    await self._guardian.act(command, pixel_guard=pixel_guard)
+                    await self._guardian.act(
+                        command, pixel_guard=pixel_guard, scope_deadline_ns=scope_deadline
+                    )
                     if action["type"] == "replace_field_pixels"
-                    else await self._guardian.act(command)
+                    else await self._guardian.act(command, scope_deadline_ns=scope_deadline)
                 )
-                if self._paused or self._closed or delivered.get("event") != "action_done":
+                if (
+                    self._paused
+                    or self._closed
+                    or time.monotonic_ns() >= lease[0]
+                    or delivered.get("event") != "action_done"
+                ):
                     raise ComputerError("wayland_action_revoked_outcome_unknown")
                 receipt: dict[str, Any] = {
                     "status": "executed",
@@ -941,6 +1001,10 @@ class WaylandRuntimeBackend:
         return await asyncio.shield(self._cleanup_task)
 
     async def _cleanup_all(self) -> bool:
+        # Scope calls cannot dispatch. Cancel them without waiting for a hung
+        # provider to acknowledge before we release native input/portal authority.
+        for job in tuple(self._scope_jobs):
+            job.cancel()
         for job in tuple(self._jobs):
             job.cancel()
         if self._jobs:

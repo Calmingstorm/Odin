@@ -189,7 +189,9 @@ async def test_r10_watchdog_revokes(adapter, fault):
     if fault == "provider":
         adapter._scope_provider = None
     generation = adapter._generation + (fault == "generation")
-    await asyncio.wait_for(adapter._watch_action({}, SCOPE, generation), 1)
+    await asyncio.wait_for(
+        adapter._watch_action({}, SCOPE, generation, [m.time.monotonic_ns() + m._SCOPE_LEASE_NS]), 1
+    )
     assert adapter._paused and not adapter._guardian.alive
     adapter._scope_provider = scope_provider
     await adapter.stop()

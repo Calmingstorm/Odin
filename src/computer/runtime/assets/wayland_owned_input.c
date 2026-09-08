@@ -28,6 +28,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 static volatile sig_atomic_t cancelled;
 static void on_signal(int sig) { (void)sig; cancelled = 1; }
@@ -63,10 +64,25 @@ struct guardian {
   uint64_t next_step;
   char kind;
   uint64_t lease,idle,finish,settle;
+  uint64_t scope_deadline;
   const char *reason;
   int status;
 };
 static void fail(struct guardian *g,const char *r,int s) { if(!g->reason){g->reason=r;g->status=s;} }
+/* CLOCK_MONOTONIC matches Python monotonic_ns and is independent of its loop. */
+static uint64_t scope_now(void) {
+  struct timespec now;
+  if(clock_gettime(CLOCK_MONOTONIC,&now))return UINT64_MAX;
+  return (uint64_t)now.tv_sec*1000000+(uint64_t)now.tv_nsec/1000;
+}
+static bool scope_expiry(char *word,uint64_t *out) {
+  if(!word||!*word)return false;
+  for(char *p=word;*p;p++)if(*p<'0'||*p>'9')return false;
+  errno=0;unsigned long long value=strtoull(word,NULL,10);
+  uint64_t now=scope_now();
+  if(errno||value<=now||value-now>250000)return false;
+  *out=value;return true;
+}
 static bool valid_mapping(const char *s) {
   size_t n=strlen(s); if(!n || n>128)return false;
   for(size_t i=0;i<n;i++)if((unsigned char)s[i]<33 || (unsigned char)s[i]>126)return false;
@@ -115,7 +131,7 @@ static void ready_receipt(struct guardian *g,const char *event) {
   int n=snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"single-ei-owner\",\"protocol\":1,\"bounded_clicks\":true,\"timed_polyline\":true,\"pointer_modifiers_v1\":true,\"width\":%.17g,\"height\":%.17g,\"pointer\":true,\"keyboard\":%s,\"text\":%s,\"keymap_format\":\"%s\",\"keymap_layouts\":%u,\"monotonic_us\":%llu}\n",event,g->width,g->height,g->keyboard?"true":"false",g->keymap?"true":"false",g->keymap?"xkb_v1":"none",g->keymap?xkb_keymap_num_layouts(g->keymap):0,(unsigned long long)ei_now(g->ctx));
   if(n>0 && n<(int)sizeof line){
     /* Insert before the closing brace while preserving one atomic record. */
-    int extra=snprintf(line+n-2,sizeof line-(size_t)n+2,",\"pixel_fields_v1\":true}\n");
+    int extra=snprintf(line+n-2,sizeof line-(size_t)n+2,",\"pixel_fields_v1\":true,\"scope_lease_v1\":true}\n");
     if(extra>0 && n-2+extra<(int)sizeof line)(void)write(1,line,(size_t)(n-2+extra));
   }
 }
@@ -314,7 +330,17 @@ static bool command(struct guardian *g,char *line) {
     if(!g->begun)g->idle=ei_now(g->ctx)+2000000;
     receipt("idle",g->begun?"active-no-renewal":"controller-heartbeat",ei_now(g->ctx));return true;
   }
+  if(!strncmp(line,"O ",2)){
+    char *rest=line+2,*word=token(&rest);uint64_t deadline;
+    if(rest||!scope_expiry(word,&deadline))return false;
+    /* An idle renewal cannot grant authority to the next action. Absolute,
+     * increasing deadlines cannot be replayed to extend authority. */
+    if(!g->begun)return true;
+    if(!g->scope_deadline||deadline<=g->scope_deadline)return false;
+    g->scope_deadline=deadline;return true;
+  }
   if(g->action){
+    /* No commands except single-use pixel permits may enter the action here. */
     /* A permit is single-use, tied to this native request, never pipelined. */
     char *rest=line,*verb=token(&rest);unsigned serial;
     if(!verb||strcmp(verb,"G")||g->kind!='E'||!g->gate_waiting||g->gate_allowed
@@ -330,7 +356,9 @@ static bool command(struct guardian *g,char *line) {
     ready_receipt(g,"selected");return true;
   }
   if(*verb=='B'){
-    if(g->begun||!number(&rest,&ms,1,2000)||rest)return false;
+    if(g->begun||!number(&rest,&ms,1,2000))return false;
+    g->scope_deadline=0;
+    if(rest){char *word=token(&rest);if(rest||!scope_expiry(word,&g->scope_deadline))return false;}
     g->begun=true;g->lease=ei_now(g->ctx)+(uint64_t)ms*1000;
     g->planned=g->completed=g->nmodifiers=0;g->point_interval=0;
     g->input_sent=g->release_unknown=false;
@@ -530,6 +558,7 @@ static void step(struct guardian *g) {
 }
 static void check_deadline(struct guardian *g) {
   uint64_t now=ei_now(g->ctx);if(cancelled)fail(g,"signal-cancel",0);
+  if(g->begun&&g->scope_deadline&&scope_now()>=g->scope_deadline)fail(g,"scope-evidence-expired",2);
   if(g->lease&&now>=g->lease)fail(g,"lease-expired",2);
   if(!g->begun&&now>=g->idle)fail(g,"controller-timeout",2);
 }

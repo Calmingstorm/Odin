@@ -1,4 +1,5 @@
 """Production adapter contracts with explicit fakes, never a desktop connection."""
+
 import io
 import os
 import sys
@@ -22,9 +23,14 @@ def png(color="white"):
 
 
 PUBLIC = CompositorIdentity("gnome-shell", "48.7", "native", "a" * 64)
-SCOPE = {"source_digest": "s", "focus_digest": "f", "bounds_digest": "b",
-         "application": {"pid": 456}, "compositor": {"pid": 123},
-         "bounds": {"x": 5, "y": 5, "width": 60, "height": 45}}
+SCOPE = {
+    "source_digest": "s",
+    "focus_digest": "f",
+    "bounds_digest": "b",
+    "application": {"pid": 456},
+    "compositor": {"pid": 123},
+    "bounds": {"x": 5, "y": 5, "width": 60, "height": 45},
+}
 
 
 class Portal:
@@ -32,8 +38,14 @@ class Portal:
         self.alive = True
         self.current_generation = 1
         self.eis_peer = {"pid": 123, "uid": os.geteuid()}
-        self.source = {"node_id": 1, "mapping_id": "mapping", "source_type": 1,
-                       "position": [0, 0], "size": [80, 60], "session_handle": "/test/session"}
+        self.source = {
+            "node_id": 1,
+            "mapping_id": "mapping",
+            "source_type": 1,
+            "position": [0, 0],
+            "size": [80, 60],
+            "session_handle": "/test/session",
+        }
         self.color = "white"
         self.clock_verified = True
         self.callback = runtime_identity_callback
@@ -46,14 +58,24 @@ class Portal:
         return os.open("/dev/null", os.O_RDONLY)
 
     async def capture(self, node_id):
-        return {"source_metadata": dict(self.source), "image": png(self.color),
-                "width": 80, "height": 60, "captured_at": time.monotonic(),
-                "clock_verified": self.clock_verified, "generation": self.current_generation}
+        return {
+            "source_metadata": dict(self.source),
+            "image": png(self.color),
+            "width": 80,
+            "height": 60,
+            "captured_at": time.monotonic(),
+            "clock_verified": self.clock_verified,
+            "generation": self.current_generation,
+        }
 
     async def close(self):
         self.alive = False
-        return {"process_reaped": True, "session_close_acknowledged": True,
-                "connection_closed": True, "cleanup_errors": []}
+        return {
+            "process_reaped": True,
+            "session_close_acknowledged": True,
+            "connection_closed": True,
+            "cleanup_errors": [],
+        }
 
 
 class Scope:
@@ -64,7 +86,7 @@ class Scope:
         return {"pid": 123, "uid": os.geteuid()}
 
     async def snapshot(self, metadata):
-        return self.scope
+        return {**self.scope, "observed_monotonic_ns": time.monotonic_ns()}
 
     async def close(self):
         pass
@@ -82,7 +104,10 @@ class Guardian:
     async def select(self, mapping_id):
         return {"width": 80, "height": 60}
 
-    async def act(self, command):
+    async def refresh_scope(self, deadline_ns):
+        pass
+
+    async def act(self, command, *, scope_deadline_ns=None):
         self.commands.append(command)
         return {"event": "action_done", "release_submitted": True}
 
@@ -95,27 +120,43 @@ class Guardian:
 def adapter(monkeypatch):
     async def identity(*args):
         return SimpleNamespace(public=lambda: PUBLIC)
+
     async def revalidate(*args):
         return True
+
     async def qualify(identity):
-        return InputAdmission("eligible", "qualified", "Private behavioral probe passed.",
-                              "Start a new session after stack changes.", PUBLIC,
-                              "same_stack_disposable", ("held_button_owner_eof",))
+        return InputAdmission(
+            "eligible",
+            "qualified",
+            "Private behavioral probe passed.",
+            "Start a new session after stack changes.",
+            PUBLIC,
+            "same_stack_disposable",
+            ("held_button_owner_eof",),
+        )
+
     monkeypatch.setattr(backend, "WaylandPortalSession", Portal)
     monkeypatch.setattr(backend, "GNOMEWaylandScopeProvider", Scope)
     monkeypatch.setattr(backend, "WaylandGuardian", Guardian)
     monkeypatch.setattr(backend, "capture_identity", identity)
     monkeypatch.setattr(backend, "revalidate_identity", revalidate)
-    return backend.WaylandRuntimeBackend(enabled=True, app_profile="xed",
+    return backend.WaylandRuntimeBackend(
+        enabled=True,
+        app_profile="xed",
         config=backend.WaylandSessionConfig("unix:path=/private/bus", os.geteuid()),
-        qualify=qualify)
+        qualify=qualify,
+    )
 
 
 def action(frame, kind="type", **extra):
-    return {"type": kind, "source_id": frame.source.source_id,
-            "source_revision": frame.source.source_revision,
-            "consent_generation": frame.source.consent_generation,
-            "expected": {"type": "visual_change"}, **(extra or {"text": "test"})}
+    return {
+        "type": kind,
+        "source_id": frame.source.source_id,
+        "source_revision": frame.source.source_revision,
+        "consent_generation": frame.source.consent_generation,
+        "expected": {"type": "visual_change"},
+        **(extra or {"text": "test"}),
+    }
 
 
 @pytest.mark.asyncio
@@ -159,9 +200,14 @@ async def test_changed_or_unmapped_evidence_refuses(adapter, fault):
 @pytest.mark.asyncio
 async def test_precise_capture_only_probe_refusal(adapter):
     async def refuse(identity):
-        return InputAdmission("refused", "mutter_eis_drop_device_button_index_bug",
-                              "Held button did not release.",
-                              "Install a corrected compositor.", PUBLIC)
+        return InputAdmission(
+            "refused",
+            "mutter_eis_drop_device_button_index_bug",
+            "Held button did not release.",
+            "Install a corrected compositor.",
+            PUBLIC,
+        )
+
     adapter._qualify = refuse
     result = await adapter.start("session1")
     assert result["capture_only"]
@@ -174,7 +220,9 @@ async def test_precise_capture_only_probe_refusal(adapter):
 async def test_actual_owned_subprocess_protocol_and_reap(tmp_path, monkeypatch):
     # Explicit fake primitive; this is a transport test, not libei delivery proof.
     executable = tmp_path / "fake-guardian"
-    executable.write_text(f"#!{sys.executable}\n" + '''import json,sys,os
+    executable.write_text(
+        f"#!{sys.executable}\n"
+        + """import json,sys,os
 os.close(int(sys.argv[1]))
 def emit(event): print(json.dumps({'event':event,'width':80,'height':60}),flush=True)
 emit('ready')
@@ -184,7 +232,8 @@ for line in sys.stdin:
  elif line.startswith(('T ','J ','P ')): emit('release_sent'); emit('action_done')
  elif line.strip() in ('C','R'): break
 emit('closed')
-''')
+"""
+    )
     executable.chmod(0o700)
     monkeypatch.setattr(guardian, "trusted_binary", lambda path: None)
     identities = []

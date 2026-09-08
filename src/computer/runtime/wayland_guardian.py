@@ -36,6 +36,7 @@ _ACTION_REASONS = frozenset(
         "modifier_state_active",
         "scroll_capability_unavailable",
         "lease-expired",
+        "scope-evidence-expired",
         "signal-cancel",
         "controller-timeout",
         "controller-eof",
@@ -261,7 +262,11 @@ class WaylandGuardian:
             self._ready = await self._receive("selected", timeout=2)
             return self.ready
 
-    async def act(self, command: str, *, pixel_guard=None):
+    async def refresh_scope(self, deadline_ns: int):
+        if self._active:
+            await self._send(f"O {deadline_ns // 1000}\n")
+
+    async def act(self, command: str, *, pixel_guard=None, scope_deadline_ns=None):
         if (
             type(command) is not str
             or not command
@@ -277,10 +282,16 @@ class WaylandGuardian:
             if not self.alive:
                 raise WaylandGuardianError("wayland_guardian_not_active")
             self._active = True
+            if scope_deadline_ns is not None and (
+                type(scope_deadline_ns) is not int or self._ready.get("scope_lease_v1") is not True
+            ):
+                self._active = False
+                raise WaylandGuardianError("wayland_guardian_scope_lease_unavailable")
             self._release_submitted = False
             self._last_terminal = {}
             try:
-                await self._send("B 2000\n" + command + "\n")
+                scope = f" {scope_deadline_ns // 1000}" if scope_deadline_ns is not None else ""
+                await self._send(f"B 2000{scope}\n" + command + "\n")
                 receipt = await self._receive("action_done", timeout=3, pixel_guard=pixel_guard)
                 self._active = False
             except BaseException as exc:

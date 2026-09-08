@@ -157,7 +157,7 @@ async def test_controller_unicode_preflight_and_ordinary_modal(tmp_path, adapter
             }
         calls = []
 
-        async def reject(command):
+        async def reject(command, *, scope_deadline_ns=None):
             calls.append(command)
             error = WaylandGuardianError("unsupported_character")
             error.details = {
