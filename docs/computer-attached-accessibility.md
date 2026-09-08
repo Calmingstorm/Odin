@@ -36,11 +36,21 @@ synthetic keystrokes. Its dispatch intent is recorded before the potentially
 effectful native RPC; uncertain outcomes are not replayed.
 
 After the helper is fenced and owned input released, readback queries the same
-GI node, not a fresh search result. Only full text equality establishes the
-requested effect. Missing or late readback leaves effect verification unavailable
-without erasing the acknowledged input. Post-action pixels continue through the
-controller's ordinary capture/delivery path; a semantic receipt is not permission
-to act on an unseen view.
+GI node, not a fresh search result. Full text equality establishes only the
+widget's text, **not application adoption**. A matching readback returns `executed`
+with verification `unavailable`, `text_matches: true` and
+`application_adoption: unproven`, never `verified`. A differing value returns
+`not_satisfied`. Missing or late readback leaves verification unavailable without
+erasing acknowledged input. Post-action pixels continue through the ordinary
+capture/delivery path; a semantic receipt is not permission to act on an unseen view.
+
+AT-SPI EditableText has no generic application commit contract. Implicit Enter,
+default-button invocation or moving focus to an unobserved sibling can submit or
+close a dialog, so replacement does none of these. When needed, explicitly inspect
+and operate the application's commit control, then independently verify its adopted
+value (for example by reopening the dialog). Do not automatically replay replacement
+because its adoption is unproven. This restriction also stops a sequence at an
+unverified replacement rather than allowing it to build on a text-only success.
 
 ## Explicit limits
 

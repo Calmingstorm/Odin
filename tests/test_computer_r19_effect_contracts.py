@@ -68,7 +68,7 @@ def test_native_window_state_contract(state, satisfied):
     assert result["verification"]["target_disappeared"] is satisfied
 
 
-@pytest.mark.parametrize("actual,status", [("blue", "verified"), ("red", "not_satisfied")])
+@pytest.mark.parametrize("actual,status", [("blue", "executed"), ("red", "not_satisfied")])
 def test_field_exact_native_readback(actual, status):
     raw, obs = receipt(None)
     raw["postcondition"].update(
@@ -81,6 +81,8 @@ def test_field_exact_native_readback(actual, status):
         raw, obs, {"type": "field_text_equals", "target": "handle", "text": "blue"}
     )
     assert result["status"] == status
+    assert result["verification"]["text_matches"] is (actual == "blue")
+    assert result["verification"]["application_adoption"] == "unproven"
 
 
 def test_field_refusal_stays_unavailable():

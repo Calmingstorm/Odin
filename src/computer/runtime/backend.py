@@ -50,7 +50,7 @@ class LinuxDesktopBackend:
         "replace_field": "available_nodes_only",
         "replace_field_max_chars": 512,
         "replace_field_requires": ["replace_field", "text_readable", "text_complete"],
-        "field_text_equals": "independent_same_native_node_after_release",
+        "field_text_equals": "same_native_node_text_only_application_adoption_unproven",
         "replace_field_pixels": "explicit_region_click_select_all_native_keycodes",
         "pixel_field_requires": [
             "fresh_observed_complete_region",

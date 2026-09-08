@@ -504,6 +504,10 @@ class Accessibility:
                 effect = ref.node.get_component_iface().grab_focus
             elif kind in {"set_text", "replace_field"}:
                 text = bounded_text(action.get("text"))
+                # AT-SPI has no generic commit contract. Do not implicitly send
+                # Enter, invoke a default button or focus an unobserved sibling:
+                # these can submit/close a dialog rather than commit this field.
+                # The caller must not equate buffer readback with app adoption.
                 effect = partial(ref.node.get_editable_text_iface().set_text_contents, text)
             elif kind == "select":
                 index = action.get("index")
@@ -534,7 +538,7 @@ class Accessibility:
             raise PrimitiveError("unsupported", "AT-SPI interface failed") from exc
 
     def read_field(self, target, window, guard):
-        """Read the original native node after release; never resolve another field."""
+        """Read the original node's text, not proof of application value adoption."""
         ref = self.references.get(target)
         if ref is None or ref.window != window:
             raise PrimitiveError("rejected", "Field readback lost its window binding")

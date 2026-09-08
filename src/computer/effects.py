@@ -227,7 +227,16 @@ def effect_receipt(raw, observation, expected, target=None):
             and type(actual.get("text")) is str
             and len(actual["text"]) <= 512
         ):
-            satisfied = actual["text"] == expected["text"]
+            text_matches = actual["text"] == expected["text"]
+            # EditableText can update a widget's buffer without emitting its
+            # application's commit/change signal. Even exact same-node readback
+            # does not prove adoption (for example a Qt colour-dialog hex field).
+            # A mismatch disproves the request; a match leaves adoption unknown.
+            satisfied = None if text_matches else False
+            result["verification"].update(
+                text_matches=text_matches,
+                application_adoption="unproven",
+            )
             same_app = True
             method = "accessibility_text_after_release"
     if result["status"] != "interrupted":

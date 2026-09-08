@@ -768,7 +768,7 @@ class NativeDesktop:
                         action["target"], self._expected, self._assert_field_window
                     )
                     self._assert_field_window()
-                    satisfied = (
+                    text_matches = (
                         actual["text_complete"] is True and actual["text"] == expected["text"]
                     )
                     receipt["postcondition"] = {
@@ -777,9 +777,11 @@ class NativeDesktop:
                         "method": "accessibility_text_after_release",
                         "target_application_matches": True,
                         "actual": actual,
-                        "status": "satisfied" if satisfied else "not_satisfied",
+                        "text_matches": text_matches,
+                        "application_adoption": "unproven",
+                        "status": "unavailable" if text_matches else "not_satisfied",
                     }
-                    receipt["status"] = "verified" if satisfied else "not_satisfied"
+                    receipt["status"] = "executed" if text_matches else "not_satisfied"
                     return receipt
                 if visual:
                     # Allow a dialog/title transition only in the same process,
