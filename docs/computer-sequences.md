@@ -25,14 +25,26 @@ every pair of steps, including strokes. No connecting line is synthesized.
   any step is sent. Runtime-dependent native keymap support, exact native window
   bounds and device readiness are still checked by each backend before its input.
 - A step proceeds only while its original binding and original pointer-start
-  neighborhood still match. Keyboard steps require the original full raster to
-  match. Earlier raster changes cannot authorize a new field, dialog or target.
-  This intentionally rejects some otherwise useful click-then-type plans and
-  strokes whose start neighborhood overlaps a previous stroke. Use a new delivered
-  view and explicitly plan another call, rather than relaxing the check.
-- Each input result must have verified postconditions before another step runs.
-  Raster change proves raster change, and pointer position proves pointer position,
-  not semantic task completion.
+  neighborhood still match. Attached X11 keyboard steps retain exact native
+  source/focus binding without requiring unrelated pixels to stay unchanged.
+  Other keyboard paths require the original raster or the same focused native
+  field. Earlier raster changes never authorize a new field, dialog or target.
+  Strokes whose start neighborhood overlaps a previous stroke may still yield.
+- Native `replace_field` is accepted inside a sequence. Each original handle is
+  reconciled to exactly one fresh node with identical native identity, root,
+  ancestry and metadata, including text, focus, role and bounds. Unrelated raster
+  changes do not reject an unchanged native field. Changed or ambiguous fields
+  still interrupt without substitution. Pixel field replacement remains a
+  single-action operation.
+- Matching native text readback is not application adoption. Such replacements
+  report `executed` with adoption unproven, so the sequence stops before another
+  step. Explicit application commit and fresh evidence are required; there is no
+  implicit Enter, default-button activation or automatic continuation.
+- Each input result must have verified postconditions before another step runs,
+  except a completely dispatched/released stroke with independently measured
+  distributed path evidence can continue to an unchanged original next anchor.
+  These batches still require final visual review. Raster change proves raster
+  change, and pointer position proves pointer position, not semantic completion.
 - X11 sequence captures disable the ordinary capture path's brief focus-settling
   retry. Any sampled changed binding interrupts rather than waiting for it to
   return. Native in-action focus/geometry/release guards remain unchanged. This is
@@ -57,11 +69,11 @@ When capture fails or cleanup revokes capture, the aggregate explicitly reports
 the frame unavailable rather than inventing an interruption screenshot. A replay
 contains receipt/evidence metadata, never a newly actionable image.
 
-## Verification status
+## Verification boundary
 
-Implementation checkpoint only. Import, lint and diff checks do not qualify a
-backend or prove live GUI task completion. No desktop interaction, deployment,
-service restart, pytest run or new tests were performed for this increment.
-End-phase verification must cover no-replay after partial dispatch, cancellation
-at each await, storage failure cleanup, unexpected focus/dialog changes, schema
-parity, and ordinary single-action regression behavior.
+Behavioral regressions exercise original-view native reconciliation, changed and
+ambiguous identities, unseen/stale frames, unknown injection, no replay, partial
+dispatch and undispatched later steps. Native Xvfb event tests exercise bounded
+stroke delivery and release. These do not certify application value adoption or
+semantic drawing success on an operator's desktop. See the campaign review report
+for exact-source quality and native qualification evidence.

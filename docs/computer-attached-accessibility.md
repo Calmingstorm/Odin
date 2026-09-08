@@ -1,7 +1,8 @@
-# Attached X11 native field targeting checkpoint
+# Attached X11 native field targeting
 
-Implementation only, statically checked. No live display, native action, pytest,
-new test suite, deployment or restart was used to validate this checkpoint.
+Native field text and application-adopted values are different evidence. The
+current contract deliberately reports that distinction rather than certifying
+application state from an editable-text buffer.
 
 ## Native path
 
@@ -59,13 +60,15 @@ unverified replacement rather than allowing it to build on a text-only success.
   is supported. Generic native invoke/select/value actions are not advertised.
 - No accessibility-bus property fallback or automatic desktop provisioning.
   Applications not exporting an unambiguous active-window root are unavailable.
-- The initial field action retains existing raster freshness requirements;
-  changing text, ancestry, focus, scope or geometry before dispatch rejects it.
+- Unrelated raster changes do not invalidate native field identity. Exact text,
+  ancestry, focus, scope and geometry still must match before dispatch, including
+  within sequences. Only already-delivered original targets can be reconciled.
 - Slow accessibility providers can exhaust the bounded lease before any write;
   an RPC whose reply is lost is uncertain, not safely retryable.
 - X11/AT-SPI are cooperative protocols. They do not provide isolation from a
   malicious same-session client, atomic focus-and-write transactions, or proof
   against a provider deliberately recycling the exact same D-Bus object path.
-- This checkpoint is not runtime certification. GUI validation and the deferred
-  full test gate remain necessary before claiming attached native support works
-  on any particular desktop/application.
+- Behavioral tests cover discovery, restoration, readback, deferred application
+  adoption and sequence interruption. No generic application commit is certified;
+  an application-specific native reopen/adoption test remains necessary before
+  claiming adopted field values on any particular desktop/application.

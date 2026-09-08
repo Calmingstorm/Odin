@@ -127,7 +127,7 @@ _DEFINITIONS = [
         "or operation=sequence with steps[] for a finite plan against ONE delivered view. "
         "Each step has its own unique action_id and releases input before the next step. "
         "Maximum 8 steps, 256 total points, 512 total text characters, 4 seconds of requested "
-        "stroke duration and 30 seconds wall time. No nested sequences or rebinding. "
+        "stroke duration and 30 seconds wall time. No nested sequences or new-target rebinding. "
         "Unexpected target/dialog changes or failed expectations interrupt immediately; "
         "inspect the final/interruption view. Never replay partial work. A sequence cannot "
         "open a new dialog then operate it without a new model-visible view. Choose a duration "
@@ -147,7 +147,11 @@ _DEFINITIONS = [
         "not geometric snapping by this tool. Consult input_limits for native support. "
         "replace_field "
         "requires an observed accessible target and text, with field_text_equals matching "
-        "target/text; unsupported accessibility never falls back to Ctrl+A. "
+        "target/text; unsupported accessibility never falls back to Ctrl+A. Native identity "
+        "replacement is accepted inside sequences, but text readback alone does not prove "
+        "the application adopted the value: a match reports executed with adoption unproven, "
+        "not verified, and stops sequence continuation. Explicitly commit through the "
+        "application and verify the adopted value from fresh evidence. "
         "For explicit less-reliable pixel fallback use replace_field_pixels with a freshly "
         "observed editable field region and single-line text (empty clears). This clicks, "
         "selects all and types under native focus/geometry guards, with visual_change or "
@@ -264,7 +268,8 @@ _DEFINITIONS = [
                 "pointer location only. region_changed needs x,y,width,height in delivered pixels. "
                 "dialog_appeared/menu_appeared require a measured same-app native transition. "
                 "window_gone explicitly checks the old native window; disappearance is not "
-                "generic visual success. field_text_equals needs target,text and AT-SPI evidence. "
+                "generic visual success. field_text_equals needs target,text and AT-SPI evidence; "
+                "matching widget text reports executed, not verified application adoption. "
                 "Consult input_limits for backend support. Fresh evidence decides the result.",
                 "properties": {
                     "type": {
