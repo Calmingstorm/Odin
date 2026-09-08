@@ -7,7 +7,6 @@ import pytest
 
 from src.computer.runtime import hyprland_scope as scope
 
-
 NOW = 1_000_000_000
 START = NOW - 10
 
@@ -206,7 +205,9 @@ async def test_negative_cannot_bypass_peer_authentication(parser, monkeypatch, e
     ("release_all", False, "window-geometry-unsettled", False),
     ("unknown", False, "window-geometry-unsettled", False),
 ])
-async def test_authenticated_request_whitelists_only_snapshot_negative(tmp_path, op, ok, error, accepted):
+async def test_authenticated_request_whitelists_only_snapshot_negative(
+    tmp_path, op, ok, error, accepted
+):
     path = str(tmp_path / "scope.sock")
     row = {"ok": ok, "error": error}
     finished = asyncio.Event()
@@ -230,7 +231,9 @@ async def test_authenticated_request_whitelists_only_snapshot_negative(tmp_path,
             if accepted:
                 assert await provider._request({"op": op}) == row
             else:
-                with pytest.raises(scope.HyprlandScopeFailure, match="^hyprland_scope_unavailable$"):
+                with pytest.raises(
+                    scope.HyprlandScopeFailure, match="^hyprland_scope_unavailable$"
+                ):
                     await provider._request({"op": op})
             await asyncio.wait_for(finished.wait(), 1)
         finally:
