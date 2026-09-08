@@ -1205,6 +1205,60 @@ class ComputerUseConfig(BaseModel):
     wayland_bus_address: str = ""
     wayland_uid: int | None = Field(default=None, strict=True, ge=0, le=4294967294)
     wayland_guardian_binary: str = "/usr/libexec/odin-computer-wayland-input"
+    # Portal defaults remain unchanged. Hyprland is explicit, never a fallback.
+    wayland_backend: Literal["portal", "hyprland"] = "portal"
+    hyprland_runtime_dir: str = ""
+    hyprland_wayland_display: str = ""
+    hyprland_instance_signature: str = ""
+    hyprland_output_name: str = ""
+    hyprland_compositor_pid: int | None = Field(default=None, strict=True, ge=2, le=2147483647)
+    hyprland_compositor_executable: str = ""
+    hyprland_compositor_sha256: str = ""
+    hyprland_compositor_version: str = ""
+    hyprland_compositor_commit: str = ""
+    hyprland_compositor_owner_uid: int = Field(default=0, strict=True, ge=0, le=4294967294)
+    hyprland_guardian_binary: str = "/usr/local/libexec/odin-hyprland-input"
+    hyprland_capture_binary: str = "/usr/local/libexec/odin-hyprland-capture"
+    hyprland_scope_socket: str = ""
+
+    @field_validator("hyprland_runtime_dir", "hyprland_compositor_executable",
+                     "hyprland_scope_socket", "hyprland_guardian_binary", "hyprland_capture_binary")
+    @classmethod
+    def validate_hyprland_path(cls, value: str) -> str:
+        if value and (len(value) > 4096 or not Path(value).is_absolute()
+                      or ".." in Path(value).parts
+                      or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+            raise ValueError("Hyprland paths must be explicit absolute local paths")
+        return value
+
+    @field_validator("hyprland_wayland_display", "hyprland_instance_signature",
+                     "hyprland_output_name")
+    @classmethod
+    def validate_hyprland_name(cls, value: str) -> str:
+        if value and (not re.fullmatch(r"[A-Za-z0-9_.-]{1,128}", value) or value in {".", ".."}):
+            raise ValueError("Hyprland target names must be bounded local identifiers")
+        return value
+
+    @field_validator("hyprland_compositor_sha256")
+    @classmethod
+    def validate_hyprland_hash(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[0-9a-f]{64}", value):
+            raise ValueError("Hyprland executable SHA-256 must be 64 lowercase hex digits")
+        return value
+
+    @field_validator("hyprland_compositor_commit")
+    @classmethod
+    def validate_hyprland_commit(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[0-9a-f]{40,64}", value):
+            raise ValueError("Hyprland build commit must be 40-64 lowercase hex digits")
+        return value
+
+    @field_validator("hyprland_compositor_version")
+    @classmethod
+    def validate_hyprland_version(cls, value: str) -> str:
+        if value and not re.fullmatch(r"[A-Za-z0-9.+_~-]{1,128}", value):
+            raise ValueError("Hyprland version must identify an explicitly approved build")
+        return value
 
     @field_validator("wayland_bus_address")
     @classmethod

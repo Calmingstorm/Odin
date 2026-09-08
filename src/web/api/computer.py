@@ -45,6 +45,9 @@ _PUBLIC_ERRORS = {
         "followed by a space and the selected session ID.", "correct_acknowledgment"),
     "disabled": (503, "Computer use is disabled. Status and recovery remain available.",
                  "refresh_status"),
+    "hyprland_recovery_unavailable": (409, "Native release recovery requires the retained "
+                                    "Hyprland session. Use the operator setup recovery command "
+                                    "if the controller is gone.", "inspect_recorded_workload"),
     "grant_revoked": (409, "Input authority was revoked. Refresh status before continuing.",
                       "refresh_status"),
     "runtime_identity_required": (
@@ -129,7 +132,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
 
     async def call(request, method, **kwargs):
         service, actor = context(request, emergency=method in {
-            "status", "stop", "pause", "recover", "acknowledge_legacy", "reconcile"})
+            "status", "stop", "pause", "recover", "acknowledge_legacy", "reconcile",
+            "release_owned_input"})
         adapter = getattr(service, f"operator_{method}", None)
         if adapter is None:
             raise web.HTTPServiceUnavailable(headers=_PRIVATE)
@@ -222,6 +226,9 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                 "readiness": str(backend.get("readiness", "not_checked"))[:64],
             }
             from ...computer.runtime.x11_app_scope import SCOPE_REASONS
+            if backend.get("native_backend") == "hyprland":
+                result["backend"]["native_backend"] = "hyprland"
+                result["backend"]["input_guarantee"] = "hyprland_best_effort"
             blocker = backend.get("input_blocker")
             if isinstance(blocker, str) and blocker in SCOPE_REASONS | {
                     "fresh_observation_required", "session_not_active"}:
@@ -323,6 +330,14 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             }
         if accessibility is not None:
             result["accessibility"] = accessibility
+        owned_recovery = value.get("owned_input_recovery")
+        if isinstance(owned_recovery, dict):
+            result["owned_input_recovery"] = {
+                key: owned_recovery.get(key) is True for key in (
+                    "released", "receiver_release_verified", "input_revoked",
+                    "capture_revoked", "renewed_consent_required",
+                )
+            }
         return web.json_response(result, headers=_PRIVATE)
 
     async def status(request):
@@ -446,7 +461,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         authenticate(request)
         return web.json_response({"enabled": bool(bot.config.computer.enabled)}, headers=_PRIVATE)
 
-    async def recovery(request, *, acknowledge=False, reconcile=False):
+    async def recovery(request, *, acknowledge=False, reconcile=False, release_owned=False):
         authenticate(request)
         if request.content_length is None or request.content_length > 512:
             raise ValueError
@@ -461,6 +476,8 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                 "ACKNOWLEDGE UNVERIFIED CLEANUP " + body["session_id"]):
             raise ComputerError("explicit_acknowledgment_required")
         method = "reconcile" if reconcile else "acknowledge_legacy" if acknowledge else "recover"
+        if release_owned:
+            method = "release_owned_input"
         value, actor = await call(request, method, **body)
         return status_json(value, actor)
 
@@ -469,6 +486,9 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
 
     async def reconcile(request):
         return await recovery(request, acknowledge=True, reconcile=True)
+
+    async def release_owned_input(request):
+        return await recovery(request, release_owned=True)
 
     for method, path, handler in (
         ("GET", "/api/computer", status),
@@ -480,6 +500,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         ("GET", "/api/computer/download/{id}", download),
         ("POST", "/api/computer/enabled", enabled),
         ("POST", "/api/computer/recover", recovery),
+        ("POST", "/api/computer/release_owned_input", release_owned_input),
         ("POST", "/api/computer/acknowledge_legacy", acknowledge_legacy),
         ("POST", "/api/computer/reconcile", reconcile),
     ):

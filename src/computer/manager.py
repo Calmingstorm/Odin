@@ -56,11 +56,21 @@ class ComputerLifecycle:
             mcp.get_tool_definitions() if mcp is not None else [],
         )
         settings = self.settings
+        hyprland = settings.platform == "wayland" and settings.wayland_backend == "hyprland"
         if settings.platform == "wayland" and (
             settings.environment != "existing_session"
-            or not settings.wayland_bus_address
+            or (not hyprland and not settings.wayland_bus_address)
             or settings.wayland_uid is None
         ):
+            raise ComputerProvisioningError("computer_target_incomplete")
+        if hyprland and not all((
+            settings.hyprland_runtime_dir, settings.hyprland_wayland_display,
+            settings.hyprland_instance_signature, settings.hyprland_output_name,
+            settings.hyprland_compositor_pid, settings.hyprland_compositor_executable,
+            settings.hyprland_compositor_sha256, settings.hyprland_compositor_version,
+            settings.hyprland_compositor_commit, settings.hyprland_guardian_binary,
+            settings.hyprland_capture_binary,
+        )):
             raise ComputerProvisioningError("computer_target_incomplete")
         if (
             settings.platform == "x11"
@@ -77,7 +87,11 @@ class ComputerLifecycle:
             raise ComputerProvisioningError("storage_selection_required")
         factory = self._factory
         if factory is None:
-            if settings.platform == "wayland":
+            if hyprland:
+                # Native helpers are checked at session start. Enabling neither
+                # loads the plugin nor connects to the user's compositor.
+                pass
+            elif settings.platform == "wayland":
                 import importlib.util
 
                 if importlib.util.find_spec("dbus_next") is None:
@@ -349,6 +363,8 @@ class ComputerLifecycle:
                 "environment": self.settings.environment,
                 "input_supported": None,
                 "readiness": "not_checked",
+                **({"native_backend": "hyprland"} if self.settings.platform == "wayland"
+                   and self.settings.wayland_backend == "hyprland" else {}),
             },
         }
 
@@ -506,6 +522,7 @@ class ComputerLifecycle:
             "stop",
             "pause",
             "recover",
+            "release_owned_input",
             "reconcile",
             "acknowledge_legacy",
         }:
@@ -525,7 +542,8 @@ class ComputerLifecycle:
             ):
                 return self.snapshot()
             raise
-        if method in {"status", "stop", "pause", "recover", "reconcile", "acknowledge_legacy"}:
+        if method in {"status", "stop", "pause", "recover", "reconcile",
+                      "acknowledge_legacy", "release_owned_input"}:
             result = {**self.snapshot(), **value}
             result["session_generation"] = value.get("generation")
             result["generation"] = self.generation
@@ -540,10 +558,12 @@ class ComputerLifecycle:
                     if capabilities.get("environment") == "existing_session":
                         input_supported = bool(
                             input_supported
-                            and all(
-                                capabilities.get(k) == "verified"
-                                for k in ("owned_input_release", "application_preserving_detach")
-                            )
+                            and capabilities.get("application_preserving_detach") == "verified"
+                            and (capabilities.get("owned_input_release") == "verified" or (
+                                capabilities.get("platform") == "wayland"
+                                and capabilities.get("backend") == "hyprland"
+                                and capabilities.get("owned_input_release")
+                                == "hyprland_best_effort"))
                         )
                 result["backend"] = {
                     "platform": capabilities.get("platform"),
@@ -551,6 +571,7 @@ class ComputerLifecycle:
                     "input_supported": input_supported,
                     "readiness": value.get("input_readiness", "session_capabilities"),
                     "input_blocker": value.get("input_blocker"),
+                    "native_backend": capabilities.get("backend"),
                 }
             if value.get("state") == "quarantined":
                 result["backend"] = {
@@ -617,6 +638,9 @@ class ComputerLifecycle:
 
     async def operator_recover(self, **identity):
         return await self._operator("recover", **identity)
+
+    async def operator_release_owned_input(self, **identity):
+        return await self._operator("release_owned_input", **identity)
 
     async def operator_reconcile(self, **identity):
         return await self._operator("reconcile", **identity)

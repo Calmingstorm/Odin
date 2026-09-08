@@ -439,6 +439,13 @@ class ComputerController:
                     and result.get("portal_session_closed") is True
                     and result.get("ei_connection_closed") is True
                 )
+                hyprland_devices = (
+                    live.capabilities.platform == "wayland"
+                    and live.capabilities.backend == "hyprland"
+                    and device_state == "hyprland_owned_connections_closed"
+                    and result.get("hyprland_owned_connections_closed") is True
+                    and result.get("receiver_release_verified") is False
+                )
                 clean = (
                     result.get("released") is True
                     and result.get("applications_preserved") is True
@@ -459,6 +466,7 @@ class ComputerController:
                         )
                         or no_devices
                         or portal_devices
+                        or hyprland_devices
                     )
                 )
         except (Exception, asyncio.CancelledError):
@@ -1010,6 +1018,53 @@ class ComputerController:
         if operation == "pause":
             return await self._pause(grant.session_id)
         return await self._stop(grant.session_id, "closed" if operation == "close" else "cancelled")
+
+    async def operator_release_owned_input(self, context, session_id, generation):
+        """Emergency Hyprland release, never an action or generic tool operation."""
+        await self._auth(context, emergency=True)
+        grant = self._operator_grant(context)
+        if grant.session_id != session_id:
+            raise ComputerError("not_found")
+        if grant.generation != generation:
+            raise ComputerError("stale_generation")
+        live = self._live.get(session_id)
+        if (live is None or live.capabilities is None
+                or live.capabilities.backend != "hyprland"
+                or live.capabilities.platform != "wayland"):
+            raise ComputerError("hyprland_recovery_unavailable")
+        recovery = getattr(live.backend, "recover_owned_input", None)
+        if not callable(recovery):
+            raise ComputerError("hyprland_recovery_unavailable")
+        # Revoke before awaiting recovery, even with an action in flight. Never
+        # acquire the action lock first: the native recovery closes input.
+        self._fence(session_id)
+        try:
+            self.store.set_state(session_id, "paused", revoke=True)
+        except BaseException:
+            await self._stop(session_id, "cancelled")
+            raise
+        live.observations.clear()
+        self._delivered_observations.pop(session_id, None)
+        if live.task_context is not None:
+            live.task_context.invalidate("operator_release_owned_input")
+        try:
+            receipt = await _bounded(recovery(), ATTACHED_STOP_TIMEOUT_SECONDS)
+            if (not isinstance(receipt, dict) or receipt.get("input_revoked") is not True
+                    or receipt.get("capture_revoked") is not True):
+                raise ComputerError("hyprland_recovery_unavailable")
+        except BaseException:
+            await self._stop(session_id, "cancelled")
+            raise
+        await self._auth(context, emergency=True)
+        if receipt.get("released") is not True:
+            self.store.set_state(session_id, "quarantined")
+        return {**self._public_session(self.store.get_session(session_id)),
+                "owned_input_recovery": {
+                    "released": receipt.get("released") is True,
+                    "receiver_release_verified": False,
+                    "input_revoked": True, "capture_revoked": True,
+                    "renewed_consent_required": True,
+                }}
 
     async def operator_observe(self, context):
         await self._auth(context)

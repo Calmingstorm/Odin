@@ -328,6 +328,8 @@ class ComputerStore:
                 "input_was_enabled",
                 "portal_session_closed",
                 "ei_connection_closed",
+                "hyprland_owned_connections_closed",
+                "receiver_release_verified",
                 "portal_connection_closed",
                 "physical_slaves_restored",
                 "no_inflight_input",
@@ -340,7 +342,8 @@ class ComputerStore:
             devices
             if type(devices) is str
             and devices
-            in {"removed", "retained_inactive", "not_created", "portal_owned_connections_closed"}
+            in {"removed", "retained_inactive", "not_created", "portal_owned_connections_closed",
+                "hyprland_owned_connections_closed"}
             else "unknown"
         )
         # Only persist documented reason codes, never backend prose or paths.
@@ -382,6 +385,16 @@ class ComputerStore:
             ):
                 clean = False
             if devices == "retained_inactive":
+                clean = False
+            if devices == "hyprland_owned_connections_closed" and not (
+                grant.platform == "wayland"
+                and receipt["hyprland_owned_connections_closed"] is True
+                and receipt["receiver_release_verified"] is False
+                and all(receipt[key] is True for key in (
+                    "stopped", "released", "applications_preserved",
+                    "input_revoked", "capture_revoked"
+                ))
+            ):
                 clean = False
             if devices == "removed" and not all(
                 receipt[key] is True

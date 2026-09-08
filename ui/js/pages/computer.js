@@ -10,7 +10,7 @@ export default {
       <header class="page-header mb-4">
         <div class="page-header-copy">
           <h1 id="computer-title" class="text-xl font-semibold">Computer operator</h1>
-          <p class="page-lede">Private session inspection. This page does not send mouse or keyboard input.</p>
+          <p class="page-lede">Private session inspection. This page never presses keys or buttons; emergency recovery may explicitly release held input.</p>
         </div>
         <div class="page-header-actions" aria-label="Emergency session controls">
           <button class="btn btn-ghost btn-touch" @click="control('pause')" :disabled="pausing" aria-label="Pause and revoke agent input">
@@ -66,6 +66,13 @@ export default {
         <p class="text-xs text-gray-500 mt-3">Runtime settings are generation-pinned. Pending restart-required settings are not live; this page does not restart Odin.</p>
       </section>
       <computer-provisioning v-if="adminReady" @saved="refresh" />
+      <section v-if="status.backend?.native_backend === 'hyprland'" class="hm-card" aria-labelledby="hyprland-input-title">
+        <h2 id="hyprland-input-title" class="text-sm font-semibold text-amber-300">Hyprland native input: best-effort</h2>
+        <p class="page-lede">A hard guardian SIGKILL can leave owned input held. Releasing Odin's button may clobber the physical user's simultaneous same-button hold. Cooperative release acknowledgments are not receiver-side proof. These accepted residuals apply only to Hyprland.</p>
+        <p class="page-lede">Native capture is limited to the explicitly consented output. There is no portal fallback. Recovery revokes input and capture, leaves the session paused, and requires renewed consent and a fresh observation.</p>
+        <button class="btn btn-danger btn-touch mt-3" @click="releaseOwnedInput" :disabled="!adminReady || recovering || !status.session_id">{{ recovering ? 'Requesting owned release…' : 'Release owned input' }}</button>
+        <p v-if="status.owned_input_recovery" class="page-lede" role="status">{{ status.owned_input_recovery.released ? 'Cooperative release acknowledged; receiver-side release is not verified.' : 'Release not confirmed. Inspect the desktop and use documented operator recovery; do not resume input.' }}</p>
+      </section>
       <section class="hm-card" aria-labelledby="computer-accessibility-title">
         <div class="section-card-header">
           <h2 id="computer-accessibility-title" class="text-sm font-semibold text-gray-300">Desktop accessibility (AT-SPI)</h2>
@@ -90,7 +97,7 @@ export default {
           <p>Probe scope: {{ status.input_admission.probe_scope }}.</p>
         </div>
         <p v-if="status.input_admission.probe_scope === 'same_stack_disposable'" class="page-lede">Behavior was tested in a separate disposable compositor with the matched stack, not by abandoning held input on your desktop.</p>
-        <p class="page-lede">Eligibility evidence does not replace current portal consent, source mapping or application checks. Opening this page runs no input probe.</p>
+        <p class="page-lede">Eligibility evidence does not replace current backend consent, source mapping or application checks. Opening this page runs no input probe.</p>
       </section>
       <section v-if="!attached" class="hm-card" aria-labelledby="computer-apps-title">
         <div class="section-card-header">
@@ -351,6 +358,17 @@ export default {
       } catch (e) { if (current(g, t)) fail(e, acknowledged ? 'acknowledged' : 'mutation'); }
       finally { busy.value = false; }
     }
+    async function releaseOwnedInput() {
+      if (!authorized() || recovering.value || status.value.backend?.native_backend !== 'hyprland') return;
+      const selected = { session_id: status.value.session_id, generation: status.value.session_generation };
+      if (!selected.session_id || !Number.isInteger(selected.generation)) return;
+      invalidate(); const g = generation, t = api.token; recovering.value = true;
+      try {
+        const value = await api.post('/api/computer/release_owned_input', selected);
+        if (current(g, t)) acceptStatus(value, 'recovery');
+      } catch (e) { if (current(g, t)) fail(e, 'mutation'); }
+      finally { recovering.value = false; }
+    }
     async function recover() {
       return recoveryRequest(false);
     }
@@ -431,6 +449,6 @@ export default {
     }
     function cleanup() { active = false; clearInterval(timer); timer = null; invalidate(); adminReady.value = false; }
     onMounted(start); onActivated(start); onDeactivated(cleanup); onUnmounted(cleanup);
-    return { status, checkedAt, remedy, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, reconcile, reconciliationAck, applicationProfiles, attached, scriptIdentity, inputLimits, accessibilityLabel, accessibilityDetail };
+    return { status, checkedAt, remedy, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, reconcile, releaseOwnedInput, reconciliationAck, applicationProfiles, attached, scriptIdentity, inputLimits, accessibilityLabel, accessibilityDetail };
   },
 };
