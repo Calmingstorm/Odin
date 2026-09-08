@@ -40,6 +40,7 @@ class WirePeer:
         self.armed = False
         self.bad_scope = False
         self.ack_release = True
+        self.delay_op = None
         for path, handler in ((self.wayland, self._wayland), (self.scope, self._scope)):
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(path)
@@ -86,6 +87,8 @@ class WirePeer:
                 self.requests.append(request)
                 op = request["op"]
                 assert op in {"status", "arm", "renew", "release_all"}, request
+                if op == self.delay_op:
+                    time.sleep(0.12)
                 if op == "arm":
                     self.armed = True
                 if op == "release_all":

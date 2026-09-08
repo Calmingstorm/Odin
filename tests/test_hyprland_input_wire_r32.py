@@ -171,6 +171,21 @@ def test_native_scope_release_refusal_is_not_acknowledged(client, peer):
     assert not any(r["event"] == "action_done" for r in client.receipts)
 
 
+def test_native_delayed_scope_reply_cannot_acknowledge_cleanup(client, peer):
+    client.receipt("ready")
+    peer.delay_op = "arm"
+    client.begin()
+    closed = client.receipt("closed")
+    assert closed["release_acknowledged"] is False
+    assert closed["input_was_sent"] is False
+    assert not peer.buttons()
+    client.proc.wait(3)
+    time.sleep(0.15)
+    # The ambiguous exchange poisons and closes the socket. Its late successful
+    # arm reply must never be read as the acknowledgement for release_all.
+    assert [r["op"] for r in peer.requests] == ["status", "arm"]
+
+
 def test_native_refuses_wrong_kernel_peer(binary, peer):
     proc = subprocess.run(
         [binary, peer.wayland, str(os.getpid() + 100000), str(os.getuid()),
