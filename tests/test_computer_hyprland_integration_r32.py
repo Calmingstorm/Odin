@@ -83,6 +83,21 @@ def test_best_effort_is_hyprland_only():
         input_eligible(BackendCapabilities("wayland", "existing_session"))
 
 
+def test_actual_factory_config_abi_without_starting_desktop():
+    from src.computer.runtime.hyprland_backend import HyprlandRuntimeBackend
+
+    s = settings()
+    facade = ComputerIntegration(SimpleNamespace(config=SimpleNamespace(computer=s)),
+                                 controller=object(), settings=s)
+    backend = facade._backend()
+    assert type(backend) is HyprlandRuntimeBackend
+    assert backend.config.output_name == "DP-1"
+    assert backend.config.compositor_trust.path == "/usr/bin/Hyprland"
+    # Construction proves ABI compatibility, not native startup qualification.
+    assert backend.capabilities.platform == "wayland"
+    assert backend.capabilities.owned_input_release == "unknown"
+
+
 class Native(Attached):
     capabilities = BackendCapabilities("wayland", "existing_session", "shared", "shared",
                                        "hyprland_best_effort", "verified", backend="hyprland")
