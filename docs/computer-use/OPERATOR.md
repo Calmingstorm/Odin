@@ -79,9 +79,24 @@ remote computer control.
 ## Provision one local target
 
 For packages follow [PACKAGING.md](PACKAGING.md). For source installs, provision
-the `computer` Python extra, matching runtime assets/native helpers, and a
-service-owned private evidence directory (default `/var/lib/odin/computer`, 0700,
-no symlink components). Verify both service and worker interpreters. Isolated
+the `computer` Python extra and matching runtime assets/native helpers. Enable
+and enabled startup safely create missing private state directories; a separate
+manual `mkdir` is not required. Existing directories and receipts are never
+repaired, replaced, or migrated. The selected root must be service-owned, mode
+0700, outside the **running installation**, and contain no symlink components.
+Unsafe ownership, modes, ancestors, or paths produce a typed provisioning error
+with an operator remedy, rather than enabling an unsafe store.
+
+The package default remains `/var/lib/odin/computer`. An unprivileged source
+installation with an **implicit** default and no existing default store selects
+`$XDG_STATE_HOME/odin/computer`, or `~/.local/state/odin/computer` when
+`XDG_STATE_HOME` is unset. That selection is saved before the runtime is enabled,
+so a restart uses the same receipts. Explicit configuration, including an
+explicit `/var/lib/odin/computer`, is respected. An existing or inaccessible
+default store is not silently bypassed. Disabled startup and status inspection
+do not provision storage or start desktop helpers.
+
+Verify both service and worker interpreters. Isolated
 workers use system Python; installing extras only in a venv is insufficient.
 
 Configure the target in **System > Computer > Computer provisioning** before an
@@ -93,6 +108,14 @@ values before another attempt, not automatically replaying the save.
 Display, environment, platform, storage and privilege settings are restart-pinned.
 Only computer enablement toggles are live. Retain rollback configuration. Do not
 restart a user's graphical session to test setup.
+
+After a failed enable or status refresh, System > Computer preserves the last
+successful status as **historical, not current**. A typed provisioning rejection
+is reported as **not applied**; a lost mutation response remains **outcome
+unknown**. Preserved fields never preserve input authority, frame access, or
+consent. Refresh status independently before another operation. No failed or
+partially completed action is automatically replayed. Emergency Pause and Stop
+remain separate, server-authenticated revocation requests.
 
 * **Isolated X11:** an owned disposable desktop launches a fixed Drawing or Xed
   profile. Provision systemd/bubblewrap/Xvfb/Openbox/D-Bus and native application

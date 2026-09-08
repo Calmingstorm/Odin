@@ -61,13 +61,13 @@ class ComputerLifecycle:
             or not settings.wayland_bus_address
             or settings.wayland_uid is None
         ):
-            raise ValueError("Wayland needs an explicit existing session bus and desktop UID")
+            raise ComputerProvisioningError("computer_target_incomplete")
         if (
             settings.platform == "x11"
             and settings.environment == "existing_session"
             and (not settings.display or not settings.monitor_names)
         ):
-            raise ValueError("Existing-session capture needs explicit display and monitor names")
+            raise ComputerProvisioningError("computer_target_incomplete")
         root = provision_storage(settings)
         self._selected_storage = str(root)
         if (self._selected_storage != settings.storage_dir
@@ -81,18 +81,21 @@ class ComputerLifecycle:
                 import importlib.util
 
                 if importlib.util.find_spec("dbus_next") is None:
-                    raise ValueError("Wayland session-bus dependency unavailable")
+                    raise ComputerProvisioningError("computer_dependency_unavailable")
                 # No bus connection, capture, consent prompt or input probe at
                 # Enable. Per-session qualification belongs to backend.start().
             elif settings.environment == "isolated":
                 from .runtime.profile import preflight
 
-                preflight()
+                try:
+                    preflight()
+                except RuntimeError as exc:
+                    raise ComputerProvisioningError("computer_dependency_unavailable") from exc
             else:
                 import importlib.util
 
                 if importlib.util.find_spec("Xlib") is None:
-                    raise ValueError("X11 capture dependency unavailable")
+                    raise ComputerProvisioningError("computer_dependency_unavailable")
             from .integration import ComputerIntegration
 
             factory = ComputerIntegration

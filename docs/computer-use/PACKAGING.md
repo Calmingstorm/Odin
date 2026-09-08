@@ -62,8 +62,9 @@ On both fresh installation and upgrade, postinstall installs the application wit
 the `pdf` and `computer` Python extras into the service venv, then checks imports.
 It provisions `/var/lib/odin/computer` owned by the service account, mode **0700**,
 rejecting symlink or non-directory components before provisioning. Existing
-receipts are retained. The computer Enable control does not create or repair this
-private evidence root. System Python dependencies remain distinct from the venv.
+receipts are retained. Enable and enabled startup also provision missing private
+storage safely, including for source installs; they never repair existing unsafe
+objects or move receipts. System Python dependencies remain distinct from the venv.
 
 Fresh installation leaves computer use disabled by default. The base Odin service
 is enabled but not started until the operator completes setup. Ordinary upgrades
@@ -125,9 +126,14 @@ tier, not to the general attached-application product contract.
 
 ## Source deployments and release builds
 
-A source checkout or wheel install does not run `.deb` maintainer hooks. Manually
-provision the service environment, state root, OS dependencies and matching trusted
-helper/extension assets using [OPERATOR.md](OPERATOR.md). The wheel explicitly
+A source checkout or wheel install does not run `.deb` maintainer hooks. Provision
+the service environment, OS dependencies and matching trusted helper/extension
+assets using [OPERATOR.md](OPERATOR.md). Missing private storage is created on
+Enable or enabled startup, not on ordinary disabled boot. An unprivileged source
+install with an absent implicit default can select the XDG state root, saved
+before enabling; explicitly configured or existing stores are never silently
+migrated. The running installation root, not a hardcoded package location, is
+excluded from computer state. The wheel explicitly
 includes `src.computer.runtime` assets and `assets/services/*`; this is not a claim
 that pip installs `/usr/libexec` or activates GNOME extensions.
 

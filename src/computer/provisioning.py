@@ -17,6 +17,16 @@ from .models import ComputerError
 
 DEFAULT_STORAGE = Path("/var/lib/odin/computer")
 _ERRORS = {
+    "computer_target_incomplete": (
+        "The configured computer target is incomplete.",
+        "Complete the explicit display and monitors, or Wayland session bus and desktop UID, "
+        "in System > Computer. Target changes require an operator-authorized Odin restart.",
+    ),
+    "computer_dependency_unavailable": (
+        "A dependency required by the configured computer backend is unavailable.",
+        "Provision the computer Python extra and the selected backend's operating-system "
+        "dependencies using the operator installation guide, then retry Enable.",
+    ),
     "unsafe_storage_path": (
         "Computer storage path is unsafe.",
         "Choose an absolute private directory outside the running installation, without symlinks.",

@@ -68,6 +68,39 @@ async def test_failed_provisioning_does_not_save_or_publish_authority(tmp_path):
     assert not manager.grant_allows("computer_act", "a", "c")
 
 
+@pytest.mark.parametrize("platform", ["x11", "wayland"])
+async def test_incomplete_target_is_a_typed_non_applied_preflight(tmp_path, platform):
+    manager = lifecycle(tmp_path / "state")
+    manager.settings.platform = platform
+    manager.settings.environment = "existing_session"
+    with pytest.raises(ComputerProvisioningError) as error:
+        await manager.set_enabled(True)
+    assert error.value.code == "computer_target_incomplete"
+    assert error.value.outcome == "not_applied"
+    manager._persist.assert_not_called()
+    assert not manager.enabled and manager._service is None
+    assert not (tmp_path / "state").exists()
+
+
+async def test_missing_native_dependencies_are_typed_before_enable(tmp_path, monkeypatch):
+    from src.computer.runtime import profile
+
+    manager = lifecycle(tmp_path / "state")
+    manager._factory = None
+
+    def missing():
+        raise RuntimeError("private dependency diagnostics")
+
+    monkeypatch.setattr(profile, "preflight", missing)
+    with pytest.raises(ComputerProvisioningError) as error:
+        await manager.set_enabled(True)
+    assert error.value.code == "computer_dependency_unavailable"
+    assert "private dependency" not in error.value.message
+    assert error.value.outcome == "not_applied"
+    manager._persist.assert_not_called()
+    assert not manager.enabled and manager._service is None
+
+
 @pytest.mark.parametrize("location", ["leaf", "ancestor"])
 def test_symlinks_rejected_without_creating_target(tmp_path, location):
     target = tmp_path / "outside"

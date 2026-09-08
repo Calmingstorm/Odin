@@ -161,7 +161,7 @@ async def test_collision_and_missing_wayland_session_never_persist_or_construct(
         await manager.set_enabled(True)
     bot.skill_manager.get_tool_definitions = lambda: []
     manager.settings.platform = "wayland"
-    with pytest.raises(ValueError, match="Wayland"):
+    with pytest.raises(ValueError, match="computer target is incomplete"):
         await manager.set_enabled(True)
     persist.assert_not_called()
     factory.assert_not_called()
