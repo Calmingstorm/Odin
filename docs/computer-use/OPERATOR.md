@@ -163,3 +163,43 @@ permissions, uncertain input release or the user's task boundaries.
 Use short bounded input chunks. Refresh evidence after topology/scale/power changes
 and obtain fresh consent where required. Never act using an old transform or replay
 unknown input. For cleanup failure, privacy and rollback, use [RECOVERY.md](RECOVERY.md).
+
+## Reading action and cleanup evidence
+
+Native editable-field handles bind the actual accessibility node, root and ancestry
+to the observed window. A visible field is not sufficient: discovery must retain
+that identity, and replacement must return exact text readback. An Offscreen or
+nonvisual toolkit node need not expose a Component interface. Unsupported toolkits
+still use the explicitly selected pixel-region replacement path, which does not
+claim native identity or semantic text readback. Accessibility enablement alone
+does not certify either field availability or a successful edit.
+
+For a connected shape, send one bounded multi-point polyline. For disconnected
+details, a strokes batch keeps separate action IDs and releases input between
+strokes. Full native dispatch and distributed local path changes may support the
+next preplanned stroke, provided its original start anchor and native binding
+remain valid. Missing path evidence, partial dispatch or an unexpected target
+transition stops the remainder. The result stays **executed, visual review
+required**, not a claim that the intended brush, color or artwork is correct.
+Inspect the final delivered pixels. Cursor movement, toolbar repaint and general
+raster changes are not semantic proof of a painted mark.
+
+A measured new same-application dialog at the end of a sequence can complete that
+step and return its image. No later step may operate inside the newly opened dialog
+until a new view is delivered and inspected. Reusing any parent or child action ID
+returns evidence only; it does not resume a partial sequence. Compact tool receipts
+retain per-step status and uncertainty; detailed durable measurements remain in the
+private evidence store.
+
+Cleanup uses three-valued measurements. In shared X11 mode, an owned-worker fence
+can establish `no_inflight_input`, while master restoration/removal are not
+applicable because no owned masters were created. A global shared-server grab
+probe is unsupported. These fields are `null` with explicit `cleanup_checks`
+reasons, never invented `false` measurements or a claim that another client's
+input was inspected. A reported negative measurement prevents a complete cleanup
+certificate. Operator reconciliation preserves prior uncertainty rather than
+rewriting an interrupted action as successful.
+
+The current session deadline remains 20 minutes. Longer lifetime and explicit
+operator-approved renewal are proposals, not shipped functionality. An action
+must not renew its own authority merely by continuing to send input.
