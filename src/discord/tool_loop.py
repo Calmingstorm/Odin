@@ -2522,6 +2522,7 @@ class ToolLoopRunner:
                 action=tool_name,
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
+                count_as_tool=False,
                 metadata={
                     "tool_input_keys": list((tool_input or {}).keys()),
                     "iteration": st.iteration,
@@ -2733,15 +2734,14 @@ class ToolLoopRunner:
         """Write terminal audit evidence without letting audit failure crash a tool."""
         # Audit log — never crash tool execution on audit failure
         try:
-            # Computer executions are their own tool_end event. Persist one
-            # complete result, retaining the call identity used by tool_start.
-            # Other tools keep their existing event contract for now.
-            terminal_fields = {}
-            if tool_name in {"computer_session", "computer_observe", "computer_act"}:
-                terminal_fields = {
-                    "event_type": "tool_end",
-                    "attribution": {"call_id": call_id, "iteration": st.iteration},
-                }
+            # Every execution carries the exact model call identity, including
+            # ordinary/native/MCP tools. AuditLogger attaches the entry-point
+            # turn context; never infer identity from a tool name or timing.
+            terminal_event = (
+                "tool_end"
+                if tool_name in {"computer_session", "computer_observe", "computer_act"}
+                else None
+            )
             scrubbed_input = _scrub_tool_input_for_storage(
                 tool_name,
                 {
@@ -2762,15 +2762,17 @@ class ToolLoopRunner:
                 risk_level=tool_result.risk_level if tool_result else None,
                 risk_reason=tool_result.risk_reason if tool_result else None,
                 audit_metadata=tool_result.audit_metadata if tool_result else None,
-                **terminal_fields,
+                attribution={"call_id": call_id, "iteration": st.iteration},
+                event_type=terminal_event,
             )
-            if terminal_fields:
+            if terminal_event:
                 return
             await self._audit.log_event(
                 event_type="tool_end",
                 action=tool_name,
                 actor=str(st.message.author.id),
                 channel_id=str(st.message.channel.id),
+                count_as_tool=False,
                 detail=result,
                 metadata={
                     "elapsed_ms": elapsed_ms,
@@ -2857,6 +2859,8 @@ class ToolLoopRunner:
                     result_summary=error_msg,
                     execution_time_ms=int(t * 1000),
                     error=error_msg,
+                    attribution={"call_id": block.id, "iteration": st.iteration},
+                    event_type="tool_end",
                 )
             except Exception:
                 pass
@@ -3581,6 +3585,17 @@ class ToolLoopRunner:
                 ),
             }
 
+        # This wrapper owns autonomous lifecycle evidence. The dispatch callback
+        # owns agent evidence instead, since agents have no outer audit writer.
+        attribution = {"call_id": block.id, "iteration": st._iteration_index}
+        try:
+            await self._audit.log_event(
+                event_type="loop_tool_start", action=tool_name, actor=st.user_id,
+                channel_id=st.channel_id_str, attribution=attribution,
+                metadata={"status": "started"}, count_as_tool=False,
+            )
+        except Exception:
+            log.warning("Audit start failed for loop tool %s", tool_name)
         t0 = time.monotonic()
         error = None
         try:
@@ -3596,6 +3611,7 @@ class ToolLoopRunner:
                 tool_input,
                 st.msg_proxy,
                 st.user_id,
+                audit_owned_by_caller=True,
             )
             if self._native_tools.handles(tool_name):
                 # Do not bind across native tools such as spawn_agent: child
@@ -3672,6 +3688,8 @@ class ToolLoopRunner:
                 execution_time_ms=elapsed_ms,
                 error=error,
                 audit_metadata=_audit_meta,
+                attribution=attribution,
+                event_type="loop_tool",
             )
         except OSError as audit_err:
             log.warning("Audit write failed (I/O): %s", audit_err)
@@ -3797,12 +3815,18 @@ class ToolLoopRunner:
         tool_input: dict,
         msg_proxy: _LoopMessageProxy,
         user_id: str,
+        *,
+        audit_owned_by_caller: bool = False,
     ) -> str | dict | ToolResult:
         """Dispatch a tool call to the correct handler within a loop iteration.
 
         Mirrors the Discord-native tool dispatch in the chat pipeline, using
         a lightweight message proxy instead of a real Discord message.
         """
+        if audit_owned_by_caller:
+            # Explicit ownership, not inherited ContextVars: native child tasks
+            # must not acquire their parent's call identity or suppress audits.
+            return await self.dispatch_loop_tool_inner(tool_name, tool_input, msg_proxy, user_id)
         t0 = time.monotonic()
         attribution = None
         try:

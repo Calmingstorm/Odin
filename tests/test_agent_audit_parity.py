@@ -341,9 +341,11 @@ async def test_full_autonomous_iteration_has_exactly_one_execution(tmp_path, mon
     bot.tool_loop._audit = audit
     assert await run_iteration(bot) == "complete"
     entries = await audit.search(tool_name="parse_time")
-    assert sum("type" not in entry for entry in entries) == 1
+    assert sum("result_summary" in entry for entry in entries) == 1
     assert sum(entry.get("type") == "loop_tool" for entry in entries) == 1
-    assert not any(entry.get("type") == "loop_tool_start" for entry in entries)
+    assert sum(entry.get("type") == "loop_tool_start" for entry in entries) == 1
+    assert len({(entry["call_id"], entry["iteration"]) for entry in entries}) == 1
+    assert await audit.count_by_tool() == {"parse_time": 1}
 
 
 async def test_concurrent_same_name_calls_preserve_identity_and_raw_payload(tmp_path):

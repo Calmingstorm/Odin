@@ -241,6 +241,7 @@ class TestWaitForAgentsWrapperGrace:
         )
         st = SimpleNamespace(
             tool_timeout=300,
+            _iteration_index=0,
             msg_proxy=object(),
             user_id="u",
             system_prompt="",
@@ -284,6 +285,7 @@ class TestInflightStopWrapperEdgeCoverage:
         runner._audit = SimpleNamespace(log_execution=AsyncMock())
         durability = SimpleNamespace(after_tool_interrupted=AsyncMock())
         st = SimpleNamespace(
+            iteration=0,
             _cancel=asyncio.Event(),
             durability=durability,
             message=SimpleNamespace(
