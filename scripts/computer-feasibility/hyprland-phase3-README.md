@@ -1,5 +1,11 @@
 # Hyprland Phase 3: native qualification work, not a backend
 
+**R30 live-session preflight:** real outputs are available, but the mandatory
+independent owned-only cleanup prerequisite is not met. Plugin load/unload also
+implicitly reloads compositor configuration. **Do not repoint this isolated
+harness or its lock fixture at a real desktop.** See the
+[R30 preflight report](../../docs/computer-use/HYPRLAND-PHASE3-R30.md).
+
 **Gate: INCOMPLETE / NO-GO for live input.** These are isolated research assets.
 They are not installed, packaged, enabled, or called by Odin runtime. No Pinta
 draw test is authorized by these results. No claim that a Hyprland core patch is
