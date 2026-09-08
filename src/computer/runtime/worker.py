@@ -40,7 +40,9 @@ def containment_report() -> dict:
         "no_new_privs": fields.get("NoNewPrivs", "").strip(),
         "effective_capabilities": fields.get("CapEff", "").strip(),
         "workspace_capacity": fs.f_blocks * fs.f_frsize,
-        "host_home_visible": Path("/home/odin").exists(),
+        # The sandbox creates an empty /home. Any entry is a containment defect,
+        # independent of the host's account names (including hidden entries).
+        "host_home_visible": any(Path("/home").iterdir()),
         "host_root_home_visible": Path("/root").exists(),
         "host_machine_id_visible": Path("/etc/machine-id").exists(),
         "physical_input_visible": Path("/dev/input").exists(),

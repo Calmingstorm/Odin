@@ -10,6 +10,7 @@ The identity tuple cannot detect XID reuse by the *same* still-running process;
 X11 exposes no per-resource creation generation. Concurrent human/window changes
 therefore still require the caller's exclusive, explicitly authorized test scope.
 """
+
 from __future__ import annotations
 
 import os
@@ -21,17 +22,30 @@ from Xlib.ext import res
 from Xlib.protocol import event
 
 LIMIT = 4096
-MUTABLE = frozenset({"_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ",
-                     "_NET_WM_STATE_FULLSCREEN", "_NET_WM_STATE_ABOVE",
-                     "_NET_WM_STATE_BELOW", "_NET_WM_STATE_SKIP_TASKBAR",
-                     "_NET_WM_STATE_SKIP_PAGER"})
+MUTABLE = frozenset(
+    {
+        "_NET_WM_STATE_MAXIMIZED_VERT",
+        "_NET_WM_STATE_MAXIMIZED_HORZ",
+        "_NET_WM_STATE_FULLSCREEN",
+        "_NET_WM_STATE_ABOVE",
+        "_NET_WM_STATE_BELOW",
+        "_NET_WM_STATE_SKIP_TASKBAR",
+        "_NET_WM_STATE_SKIP_PAGER",
+    }
+)
 COMPUTED = frozenset({"_NET_WM_STATE_FOCUSED"})
 IMMUTABLE = frozenset({"_NET_WM_STATE_HIDDEN", "_NET_WM_STATE_STICKY"})
 SURFACE_TYPES = frozenset({"_NET_WM_WINDOW_TYPE_DESKTOP", "_NET_WM_WINDOW_TYPE_DOCK"})
-CONSTRAINED = frozenset({"_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ",
-                         "_NET_WM_STATE_FULLSCREEN"})
-REQUIRED = ("_NET_MOVERESIZE_WINDOW", "_NET_WM_STATE", "_NET_WM_DESKTOP",
-            "_NET_CURRENT_DESKTOP", "_NET_ACTIVE_WINDOW")
+CONSTRAINED = frozenset(
+    {"_NET_WM_STATE_MAXIMIZED_VERT", "_NET_WM_STATE_MAXIMIZED_HORZ", "_NET_WM_STATE_FULLSCREEN"}
+)
+REQUIRED = (
+    "_NET_MOVERESIZE_WINDOW",
+    "_NET_WM_STATE",
+    "_NET_WM_DESKTOP",
+    "_NET_CURRENT_DESKTOP",
+    "_NET_ACTIVE_WINDOW",
+)
 
 
 class PreflightError(RuntimeError):
@@ -88,8 +102,9 @@ def _prop(d, w, name, kind=Xatom.CARDINAL, limit=LIMIT):
 
 
 def _atoms(d):
-    return {name: d.intern_atom(name)
-            for name in sorted(MUTABLE | COMPUTED | IMMUTABLE | SURFACE_TYPES)}
+    return {
+        name: d.intern_atom(name) for name in sorted(MUTABLE | COMPUTED | IMMUTABLE | SURFACE_TYPES)
+    }
 
 
 def _record(d, wid, atoms):
@@ -98,15 +113,17 @@ def _record(d, wid, atoms):
     g = w.get_geometry()
     translated = root.translate_coords(w, 0, 0)
     states = _prop(d, w, "_NET_WM_STATE", Xatom.ATOM, 64)
-    value = {"identity": ident,
-             "geometry": (int(translated.x), int(translated.y), int(g.width), int(g.height)),
-             "border": int(g.border_width),
-             "extents": _prop(d, w, "_NET_FRAME_EXTENTS", limit=4),
-             "states": states,
-             "window_types": _prop(d, w, "_NET_WM_WINDOW_TYPE", Xatom.ATOM, 16),
-             "state_names": tuple(name for name, atom in atoms.items() if atom in states),
-             "workspace": _prop(d, w, "_NET_WM_DESKTOP", limit=1),
-             "map_state": int(w.get_attributes().map_state)}
+    value = {
+        "identity": ident,
+        "geometry": (int(translated.x), int(translated.y), int(g.width), int(g.height)),
+        "border": int(g.border_width),
+        "extents": _prop(d, w, "_NET_FRAME_EXTENTS", limit=4),
+        "states": states,
+        "window_types": _prop(d, w, "_NET_WM_WINDOW_TYPE", Xatom.ATOM, 16),
+        "state_names": tuple(name for name, atom in atoms.items() if atom in states),
+        "workspace": _prop(d, w, "_NET_WM_DESKTOP", limit=1),
+        "map_state": int(w.get_attributes().map_state),
+    }
     if identity(d, wid) != ident:
         raise PreflightError("window identity changed during snapshot")
     return value
@@ -132,18 +149,21 @@ def snapshot(d):
         focus = d.get_input_focus()
         fid = int(getattr(focus.focus, "id", focus.focus))
         active = _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
-        return {"clients": clients,
-                "stacking": _prop(d, root, "_NET_CLIENT_LIST_STACKING", Xatom.WINDOW),
-                "windows": {wid: _record(d, wid, atoms) for wid in clients},
-                "atoms": atoms,
-                "supported": _prop(d, root, "_NET_SUPPORTED", Xatom.ATOM),
-                "required": {name: d.intern_atom(name) for name in REQUIRED},
-                "workspace": _prop(d, root, "_NET_CURRENT_DESKTOP", limit=1),
-                "pointer": [int(pointer.root_x), int(pointer.root_y), int(pointer.mask)],
-                "keymap": list(d.query_keymap()), "focus": fid,
-                "focus_revert": int(focus.revert_to),
-                "focus_identity": identity(d, fid) if fid > 1 else None,
-                "active": active}
+        return {
+            "clients": clients,
+            "stacking": _prop(d, root, "_NET_CLIENT_LIST_STACKING", Xatom.WINDOW),
+            "windows": {wid: _record(d, wid, atoms) for wid in clients},
+            "atoms": atoms,
+            "supported": _prop(d, root, "_NET_SUPPORTED", Xatom.ATOM),
+            "required": {name: d.intern_atom(name) for name in REQUIRED},
+            "workspace": _prop(d, root, "_NET_CURRENT_DESKTOP", limit=1),
+            "pointer": [int(pointer.root_x), int(pointer.root_y), int(pointer.mask)],
+            "keymap": list(d.query_keymap()),
+            "focus": fid,
+            "focus_revert": int(focus.revert_to),
+            "focus_identity": identity(d, fid) if fid > 1 else None,
+            "active": active,
+        }
 
 
 def validate(before):
@@ -153,9 +173,12 @@ def validate(before):
     if len(before["keymap"]) != 32:
         raise PreflightError("invalid keymap")
     clients = before["clients"]
-    if (len(set(clients)) != len(clients) or set(clients) != set(before["stacking"])
-            or len(before["stacking"]) != len(clients)
-            or set(before["windows"]) != set(clients)):
+    if (
+        len(set(clients)) != len(clients)
+        or set(clients) != set(before["stacking"])
+        or len(before["stacking"]) != len(clients)
+        or set(before["windows"]) != set(clients)
+    ):
         raise PreflightError("incomplete client/stacking baseline")
     for wid in clients:
         _validate_identity(before["windows"][wid]["identity"], wid)
@@ -167,16 +190,26 @@ def validate(before):
         # A known idle baseline is admissible, not a promise that every WM can
         # restore it. Cleanup must observe the real WM-owned active property.
         ident = before["focus_identity"]
-        if (not clients or not all(_idle_window(before["windows"][w], before) for w in clients)
-                or before["focus"] <= 1 or before["focus"] in clients
-                or not ident or ident.get("xid") != before["focus"]
-                or ident.get("pid", 0) <= 0 or ident.get("start_ticks", 0) <= 0):
+        if (
+            not clients
+            or not all(_idle_window(before["windows"][w], before) for w in clients)
+            or before["focus"] <= 1
+            or before["focus"] in clients
+            or not ident
+            or ident.get("xid") != before["focus"]
+            or ident.get("pid", 0) <= 0
+            or ident.get("start_ticks", 0) <= 0
+        ):
             raise PreflightError(
-                "absent active requires hidden clients/typed idle surfaces and nonclient focus")
+                "absent active requires hidden clients/typed idle surfaces and nonclient focus"
+            )
     if before["active"][0] and before["active"][0] not in clients:
         raise PreflightError("active window is not a baseline client")
-    if before["active"][0] and before["atoms"]["_NET_WM_STATE_HIDDEN"] in before[
-            "windows"][before["active"][0]]["states"]:
+    if (
+        before["active"][0]
+        and before["atoms"]["_NET_WM_STATE_HIDDEN"]
+        in before["windows"][before["active"][0]]["states"]
+    ):
         raise PreflightError("hidden active baseline is not restorable")
     if not set(before["required"].values()) <= set(before["supported"]):
         raise PreflightError("required EWMH restoration unsupported")
@@ -185,14 +218,15 @@ def validate(before):
         w = before["windows"][wid]
         if not set(w["states"]) <= known:
             raise PreflightError(
-                f"unsupported state on window {wid}; unknown/shaded are not restorable")
+                f"unsupported state on window {wid}; unknown/shaded are not restorable"
+            )
         hidden = before["atoms"]["_NET_WM_STATE_HIDDEN"] in w["states"]
-        if (w["map_state"] not in (X.IsUnmapped, X.IsUnviewable, X.IsViewable)
-                or (not hidden and w["map_state"] != X.IsViewable)):
+        if w["map_state"] not in (X.IsUnmapped, X.IsUnviewable, X.IsViewable) or (
+            not hidden and w["map_state"] != X.IsViewable
+        ):
             raise PreflightError(f"non-viewable window {wid}; hidden restore unsupported")
         immutable = bool(set(w["states"]) & {before["atoms"][name] for name in IMMUTABLE})
-        if (not immutable and
-                (w["border"] or len(w["extents"]) != 4 or len(w["workspace"]) != 1)):
+        if not immutable and (w["border"] or len(w["extents"]) != 4 or len(w["workspace"]) != 1):
             raise PreflightError(f"unsupported geometry/workspace metadata on {wid}")
         if not set(w["states"]) <= set(before["supported"]):
             raise PreflightError(f"unsupported WM state capability on {wid}")
@@ -201,10 +235,16 @@ def validate(before):
 
 
 def _validate_identity(ident, wid):
-    if (not isinstance(ident, dict) or set(ident) != {"xid", "pid", "uid", "start_ticks"}
-            or any(type(v) is not int for v in ident.values())
-            or ident["xid"] != wid or wid <= 1 or ident["pid"] <= 0
-            or ident["uid"] < 0 or ident["start_ticks"] <= 0):
+    if (
+        not isinstance(ident, dict)
+        or set(ident) != {"xid", "pid", "uid", "start_ticks"}
+        or any(type(v) is not int for v in ident.values())
+        or ident["xid"] != wid
+        or wid <= 1
+        or ident["pid"] <= 0
+        or ident["uid"] < 0
+        or ident["start_ticks"] <= 0
+    ):
         raise PreflightError("invalid baseline window/focus identity")
 
 
@@ -221,11 +261,16 @@ def assert_input_idle(d):
 
 def _send(d, wid, name, values):
     errors = []
-    message = event.ClientMessage(window=wid, client_type=d.intern_atom(name),
-                                  data=(32, [int(v) & 0xFFFFFFFF for v in values]))
+    message = event.ClientMessage(
+        window=wid,
+        client_type=d.intern_atom(name),
+        data=(32, [int(v) & 0xFFFFFFFF for v in values]),
+    )
     d.screen().root.send_event(
-        message, event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask,
-                               onerror=lambda error, request: errors.append(type(error).__name__))
+        message,
+        event_mask=X.SubstructureRedirectMask | X.SubstructureNotifyMask,
+        onerror=lambda error, request: errors.append(type(error).__name__),
+    )
     d.sync()
     if errors:
         raise RuntimeError("X request failed: " + ",".join(errors))
@@ -243,7 +288,7 @@ def _wait(check):
     for _ in range(20):
         if check():
             return
-        time.sleep(.025)
+        time.sleep(0.025)
     raise RuntimeError("restoration not acknowledged within 500ms")
 
 
@@ -254,11 +299,16 @@ def _states(w, before):
 def _same(a, b, before):
     if _immutable(a, before) or _immutable(b, before):
         return a == b
-    return (a["identity"] == b["identity"] and a.get("window_types") == b.get("window_types")
-            and a["geometry"] == b["geometry"] and a["workspace"] == b["workspace"]
-            and a["border"] == b["border"] and a["extents"] == b["extents"]
-            and a["map_state"] == b["map_state"]
-            and _states(a, before) == _states(b, before))
+    return (
+        a["identity"] == b["identity"]
+        and a.get("window_types") == b.get("window_types")
+        and a["geometry"] == b["geometry"]
+        and a["workspace"] == b["workspace"]
+        and a["border"] == b["border"]
+        and a["extents"] == b["extents"]
+        and a["map_state"] == b["map_state"]
+        and _states(a, before) == _states(b, before)
+    )
 
 
 def _immutable(w, before):
@@ -271,11 +321,16 @@ def _idle_window(w, before):
         return True
     # Panels/desktops are visible but immutable idle surfaces, not applications.
     # Require both skip flags, STICKY, and an exact single typed surface.
-    flags = {atoms[n] for n in ("_NET_WM_STATE_STICKY", "_NET_WM_STATE_SKIP_TASKBAR",
-                               "_NET_WM_STATE_SKIP_PAGER")}
+    flags = {
+        atoms[n]
+        for n in ("_NET_WM_STATE_STICKY", "_NET_WM_STATE_SKIP_TASKBAR", "_NET_WM_STATE_SKIP_PAGER")
+    }
     types = w.get("window_types", ())
-    return (flags <= set(w["states"]) and len(types) == 1
-            and types[0] in {atoms[n] for n in SURFACE_TYPES})
+    return (
+        flags <= set(w["states"])
+        and len(types) == 1
+        and types[0] in {atoms[n] for n in SURFACE_TYPES}
+    )
 
 
 def restore_windows(d, before, *, restore_hidden_position=False):
@@ -310,34 +365,56 @@ def restore_windows(d, before, *, restore_hidden_position=False):
                 hidden = before["atoms"]["_NET_WM_STATE_HIDDEN"]
                 old_meta = {k: v for k, v in old.items() if k != "geometry"}
                 new_meta = {k: v for k, v in current.items() if k != "geometry"}
-                if (hidden not in old["states"] or hidden not in current["states"]
-                        or old_meta != new_meta or current["geometry"][2:] != old["geometry"][2:]
-                        or old["border"] or len(old["extents"]) != 4):
+                if (
+                    hidden not in old["states"]
+                    or hidden not in current["states"]
+                    or old_meta != new_meta
+                    or current["geometry"][2:] != old["geometry"][2:]
+                    or old["border"]
+                    or len(old["extents"]) != 4
+                ):
                     raise RuntimeError("hidden baseline changed beyond position; untouched")
+
                 def position_only():
                     if _record(d, wid, before["atoms"]) != current:
                         raise RuntimeError("hidden client changed during recovery; untouched")
-                    _send(d, wid, "_NET_MOVERESIZE_WINDOW",
-                          [10 | (0x3 << 8) | (2 << 12), *old["geometry"][:2], 0, 0])
+                    _send(
+                        d,
+                        wid,
+                        "_NET_MOVERESIZE_WINDOW",
+                        [10 | (0x3 << 8) | (2 << 12), *old["geometry"][:2], 0, 0],
+                    )
+
                 _owned(d, old["identity"], position_only)
-                _wait(lambda: identity(d, wid) == old["identity"]
-                      and _record(d, wid, before["atoms"]) == old)
+                _wait(
+                    lambda: (
+                        identity(d, wid) == old["identity"]
+                        and _record(d, wid, before["atoms"]) == old
+                    )
+                )
                 result["restored"].append(wid)
                 continue
+
             def mutable_now():
                 now = _record(d, wid, before["atoms"])
                 known = {before["atoms"][n] for n in MUTABLE | COMPUTED}
-                if (now["identity"] != old["identity"] or not set(now["states"]) <= known
-                        or now["map_state"] != X.IsViewable
-                        or now.get("window_types") != old.get("window_types")):
+                if (
+                    now["identity"] != old["identity"]
+                    or not set(now["states"]) <= known
+                    or now["map_state"] != X.IsViewable
+                    or now.get("window_types") != old.get("window_types")
+                ):
                     raise RuntimeError("current state unsupported; window untouched")
 
             mutable_now()
+
             def send(name, values):
                 def guarded():
                     mutable_now()
                     _send(d, wid, name, values)
+
                 _owned(d, old["identity"], guarded)
+
             # Change only flags which differ. In particular do not unmaximize an
             # unchanged maximized window and overwrite its WM-private normal size.
             wanted, present = _states(old, before), _states(current, before)
@@ -357,14 +434,20 @@ def restore_windows(d, before, *, restore_hidden_position=False):
                     _wait(lambda: _record(d, wid, before["atoms"])["geometry"] == old["geometry"])
                 else:
                     x, y, width, height = old["geometry"]
-                    send("_NET_MOVERESIZE_WINDOW",
-                         [10 | (0xF << 8) | (2 << 12), x, y, width, height])
-            _wait(lambda: identity(d, wid) == old["identity"]
-                  and _same(_record(d, wid, before["atoms"]), old, before))
+                    send(
+                        "_NET_MOVERESIZE_WINDOW", [10 | (0xF << 8) | (2 << 12), x, y, width, height]
+                    )
+            _wait(
+                lambda: (
+                    identity(d, wid) == old["identity"]
+                    and _same(_record(d, wid, before["atoms"]), old, before)
+                )
+            )
             result["restored"].append(wid)
         except Exception as exc:
             result["errors"].append(
-                {"xid": wid, "error": type(exc).__name__, "detail": str(exc)[:180]})
+                {"xid": wid, "error": type(exc).__name__, "detail": str(exc)[:180]}
+            )
     return result
 
 
@@ -385,10 +468,17 @@ def restore_focus_pointer(d, before):
                 if _prop(d, root, "_NET_CURRENT_DESKTOP", limit=1) != before["workspace"]:
                     with _grab(d):
                         assert_input_idle(d)
-                        _send(d, root.id, "_NET_CURRENT_DESKTOP",
-                              [before["workspace"][0], X.CurrentTime, 0, 0, 0])
-                    _wait(lambda: _prop(d, root, "_NET_CURRENT_DESKTOP", limit=1)
-                          == before["workspace"])
+                        _send(
+                            d,
+                            root.id,
+                            "_NET_CURRENT_DESKTOP",
+                            [before["workspace"][0], X.CurrentTime, 0, 0, 0],
+                        )
+                    _wait(
+                        lambda: (
+                            _prop(d, root, "_NET_CURRENT_DESKTOP", limit=1) == before["workspace"]
+                        )
+                    )
             elif stage == "active":
                 active = before["active"][0]
                 if not active:
@@ -400,47 +490,75 @@ def restore_focus_pointer(d, before):
                     focus_id = int(getattr(actual_focus.focus, "id", actual_focus.focus))
                     if ident and identity(d, before["focus"]) != ident:
                         raise RuntimeError("idle focus identity changed; untouched")
-                    if ident and (focus_id != before["focus"]
-                                  or actual_focus.revert_to != before["focus_revert"]):
+                    if ident and (
+                        focus_id != before["focus"]
+                        or actual_focus.revert_to != before["focus_revert"]
+                    ):
+
                         def idle_focus():
                             _window(d, before["focus"]).set_input_focus(
-                                before["focus_revert"], X.CurrentTime)
+                                before["focus_revert"], X.CurrentTime
+                            )
                             d.sync()
+
                         _owned(d, ident, idle_focus)
-                if (not active and _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
-                        != before["active"]):
+                if (
+                    not active
+                    and _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1) != before["active"]
+                ):
                     # Only wait for the WM after scratch termination. Never
                     # forge _NET_ACTIVE_WINDOW or activate a hidden old client.
-                    _wait(lambda: _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
-                          == before["active"])
-                if (active and _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
-                        != before["active"]):
-                    if (_immutable(before["windows"][active], before)
-                            or _immutable(_record(d, active, before["atoms"]), before)):
+                    _wait(
+                        lambda: (
+                            _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
+                            == before["active"]
+                        )
+                    )
+                if (
+                    active
+                    and _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1) != before["active"]
+                ):
+                    if _immutable(before["windows"][active], before) or _immutable(
+                        _record(d, active, before["atoms"]), before
+                    ):
                         raise RuntimeError("immutable active baseline changed; window untouched")
                     ident = before["windows"][active]["identity"]
+
                     def activate():
                         _focus_client_safe(d, before)
                         _send(d, active, "_NET_ACTIVE_WINDOW", [2, X.CurrentTime, 0, 0, 0])
+
                     _owned(d, ident, activate)
-                    _wait(lambda: _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
-                          == before["active"])
+                    _wait(
+                        lambda: (
+                            _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1)
+                            == before["active"]
+                        )
+                    )
             elif stage == "focus":
                 if any(e["stage"] in {"workspace", "active"} for e in result["errors"]):
                     raise RuntimeError("workspace/active restoration failed; focus untouched")
-                if not before["active"][0] and _prop(
-                        d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1) != before["active"]:
+                if (
+                    not before["active"][0]
+                    and _prop(d, root, "_NET_ACTIVE_WINDOW", Xatom.WINDOW, 1) != before["active"]
+                ):
                     raise RuntimeError("WM has not restored idle active state; focus untouched")
                 ident = before["focus_identity"]
+
                 def focus():
                     _focus_client_safe(d, before)
                     _window(d, before["focus"]).set_input_focus(
-                        before["focus_revert"], X.CurrentTime)
+                        before["focus_revert"], X.CurrentTime
+                    )
                     d.sync()
+
                 def focused():
                     f = d.get_input_focus()
-                    return (int(getattr(f.focus, "id", f.focus)) == before["focus"]
-                            and int(f.revert_to) == before["focus_revert"])
+                    return (
+                        int(getattr(f.focus, "id", f.focus)) == before["focus"]
+                        and int(f.revert_to) == before["focus_revert"]
+                    )
+
                 if ident and identity(d, ident["xid"]) != ident:
                     raise RuntimeError("focus identity changed; untouched")
                 if not focused():
@@ -473,6 +591,9 @@ def _focus_client_safe(d, before):
     if active:
         old = before["windows"][active]
         now = _record(d, active, before["atoms"])
-        if (now["identity"] != old["identity"] or _immutable(now, before)
-                or now["map_state"] != X.IsViewable):
+        if (
+            now["identity"] != old["identity"]
+            or _immutable(now, before)
+            or now["map_state"] != X.IsViewable
+        ):
             raise RuntimeError("active baseline identity/state changed; focus untouched")

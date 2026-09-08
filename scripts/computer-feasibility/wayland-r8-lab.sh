@@ -7,8 +7,8 @@ backend=${2:?}
 image=${3:?}
 [[ $image == localhost/odin-wayland-*:* ]] || exit 64
 evidence=${4:?}
-[[ $evidence == /home/odin/tmp/wayland-r8-* && $evidence != *'/../'* && ! -e $evidence ]] || exit 64
-[[ $(dirname -- "$evidence") == /home/odin/tmp ]] || exit 64
+source "$here/evidence-path.sh"
+new_evidence_path "$evidence" wayland-r8- || exit 64
 mkdir -m 700 -- "$evidence"
 if [[ $(id -u) == 0 ]]; then chown 1003:1003 "$evidence"; fi
 [[ $(stat -c %u "$evidence") == 1003 ]] || exit 64

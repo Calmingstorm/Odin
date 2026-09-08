@@ -1,7 +1,9 @@
 #!/bin/bash
 set -euo pipefail
 [[ ${XI2_PRIVATE_SANDBOX:-} == 1 && ${DISPLAY:-} == :177 && $UID != 0 ]]
-[[ ! -e /proc/self && ! -e /home/odin && ! -e /opt/odin ]]
+[[ ! -e /proc/self && ! -e /opt/odin ]]
+# /home is an empty sandbox directory; reject every account, including dotfiles.
+(shopt -s nullglob dotglob; entries=(/home/*); [[ -d /home && -r /home && -x /home ]] && (( ${#entries[@]} == 0 )))
 echo "ISOLATION uid=$UID display=$DISPLAY bus=$DBUS_SESSION_BUS_ADDRESS"
 echo 'ISOLATION procfs intentionally absent; bwrap --unshare-all --unshare-user mandatory'
 pkg-config --modversion x11 xi xtst gtk+-3.0

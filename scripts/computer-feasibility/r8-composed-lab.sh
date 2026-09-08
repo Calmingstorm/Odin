@@ -6,8 +6,8 @@ here=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
 image=${2:?}
 [[ $image == localhost/odin-wayland-composed:* ]] || exit 64
 evidence=${3:?}
-[[ $evidence == /home/odin/tmp/r8-composed-* && $evidence != *'/../'* && ! -e $evidence ]] || exit 64
-[[ $(dirname -- "$evidence") == /home/odin/tmp ]] || exit 64
+source "$here/evidence-path.sh"
+new_evidence_path "$evidence" r8-composed- || exit 64
 mkdir -m 700 -- "$evidence"
 if [[ $(id -u) == 0 ]]; then chown 1003:1003 "$evidence"; fi
 [[ $(stat -c %u "$evidence") == 1003 ]] || exit 64

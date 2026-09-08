@@ -12,13 +12,12 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import select
 import subprocess
 import tempfile
 import time
 import unittest
-
+from pathlib import Path
 
 HEADER = r"""
 #ifndef FAKE_LIBEI_H
@@ -205,8 +204,11 @@ class Guardian:
         try:
             self.proc = subprocess.Popen(
                 [str(binary), str(self.backend_r), "source-1"],
-                stdin=subprocess.PIPE, stdout=stdout, stderr=subprocess.PIPE,
-                pass_fds=(self.backend_r, trace_w), env=env,
+                stdin=subprocess.PIPE,
+                stdout=stdout,
+                stderr=subprocess.PIPE,
+                pass_fds=(self.backend_r, trace_w),
+                env=env,
             )
         finally:
             os.close(trace_w)
@@ -295,12 +297,38 @@ class OwnedInputTests(unittest.TestCase):
         cls.binary = root / "guardian"
         source = Path(__file__).with_name("wayland-owned-input.c")
         flags = ["gcc", "-std=c11", "-Wall", "-Wextra", "-Werror"]
-        subprocess.run(flags + ["-fPIC", "-shared", "-I", str(root),
-                       str(root / "fake-ei.c"), "-o", str(root / "libei.so")],
-                       check=True, text=True, timeout=30)
-        subprocess.run(flags + ["-I", str(root), str(source), "-L", str(root),
-                       f"-Wl,-rpath,{root}", "-lei", "-o", str(cls.binary)],
-                       check=True, text=True, timeout=30)
+        subprocess.run(
+            flags
+            + [
+                "-fPIC",
+                "-shared",
+                "-I",
+                str(root),
+                str(root / "fake-ei.c"),
+                "-o",
+                str(root / "libei.so"),
+            ],
+            check=True,
+            text=True,
+            timeout=30,
+        )
+        subprocess.run(
+            flags
+            + [
+                "-I",
+                str(root),
+                str(source),
+                "-L",
+                str(root),
+                f"-Wl,-rpath,{root}",
+                "-lei",
+                "-o",
+                str(cls.binary),
+            ],
+            check=True,
+            text=True,
+            timeout=30,
+        )
 
     def guardian(self, **kwargs):
         guardian = Guardian(self.binary, **kwargs)
@@ -310,18 +338,27 @@ class OwnedInputTests(unittest.TestCase):
     def assert_release(self, guardian, reason=None, status=0):
         actual_status, receipts = guardian.finish()
         self.assertEqual(actual_status, status, receipts)
-        self.assertEqual(guardian.inputs(), [
-            ["BUTTON", "272", "1"], ["KEY", "30", "1"],
-            ["KEY", "30", "0"], ["BUTTON", "272", "0"],
-        ])
-        release_index = next(i for i, s in enumerate(guardian.lines) if s.startswith("BUTTON 272 0 "))
+        self.assertEqual(
+            guardian.inputs(),
+            [
+                ["BUTTON", "272", "1"],
+                ["KEY", "30", "1"],
+                ["KEY", "30", "0"],
+                ["BUTTON", "272", "0"],
+            ],
+        )
+        release_index = next(
+            i for i, s in enumerate(guardian.lines) if s.startswith("BUTTON 272 0 ")
+        )
         stops = [i for i, s in enumerate(guardian.lines) if s.startswith("STOP ")]
         self.assertEqual(len(stops), 2)
         self.assertTrue(all(i > release_index for i in stops), guardian.lines)
         self.assertTrue(guardian.lines[-1].startswith("DESTROY "))
         if reason is not None:
-            self.assertEqual([r["event"] for r in receipts],
-                             ["ready", "held", "release_begin", "release_sent", "closed"])
+            self.assertEqual(
+                [r["event"] for r in receipts],
+                ["ready", "held", "release_begin", "release_sent", "closed"],
+            )
             self.assertEqual(receipts[-1]["reason"], reason)
         return receipts
 
@@ -378,8 +415,7 @@ class OwnedInputTests(unittest.TestCase):
         self.assertLessEqual(receipts[2]["monotonic_us"] - receipts[1]["monotonic_us"], 80000)
 
     def test_second_holds_cannot_overwrite_original_ledger(self):
-        for command in (b"H 31 273 160 260 2000\n", b"H 99 279 broken\n",
-                        b"H 247 279 150 250 0\n"):
+        for command in (b"H 31 273 160 260 2000\n", b"H 99 279 broken\n", b"H 247 279 150 250 0\n"):
             with self.subTest(command=command):
                 guardian = self.guardian()
                 guardian.hold()
@@ -395,12 +431,19 @@ class OwnedInputTests(unittest.TestCase):
                 self.assert_release(guardian, "invalid-command", status=2)
 
     def test_invalid_first_holds_never_inject(self):
-        commands = [b"H 0 272 150 250 100\n", b"H 248 272 150 250 100\n",
-                    b"H 30 271 150 250 100\n", b"H 30 280 150 250 100\n",
-                    b"H 30 272 nan 250 100\n", b"H 30 272 150 inf 100\n",
-                    b"H 30 272 150 250 0\n", b"H 30 272 150 250 2001\n",
-                    b"H 30 272 150 250 100 trailing\n", b"H 30\x00272\n",
-                    b"H " + b"9" * 260]
+        commands = [
+            b"H 0 272 150 250 100\n",
+            b"H 248 272 150 250 100\n",
+            b"H 30 271 150 250 100\n",
+            b"H 30 280 150 250 100\n",
+            b"H 30 272 nan 250 100\n",
+            b"H 30 272 150 inf 100\n",
+            b"H 30 272 150 250 0\n",
+            b"H 30 272 150 250 2001\n",
+            b"H 30 272 150 250 100 trailing\n",
+            b"H 30\x00272\n",
+            b"H " + b"9" * 260,
+        ]
         for command in commands:
             with self.subTest(command=command[:40]):
                 guardian = self.guardian()

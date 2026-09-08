@@ -3,6 +3,7 @@
 Run with the intended worker UID and explicit DISPLAY/XAUTHORITY. Output contains
 only bounded counts and static reasons, never window text, argv or credentials.
 """
+
 import json
 import os
 import sys
@@ -22,9 +23,9 @@ def main():
         scope = AppScope(connection)
         rows = []
         for entry in connection.screen().root.xrandr_get_monitors(True).monitors:
-            monitor = SimpleNamespace(x=entry.x, y=entry.y,
-                                      width=entry.width_in_pixels,
-                                      height=entry.height_in_pixels)
+            monitor = SimpleNamespace(
+                x=entry.x, y=entry.y, width=entry.width_in_pixels, height=entry.height_in_pixels
+            )
             try:
                 binding = scope._snapshot(monitor)
                 result = {"eligible": bool(binding), "reason": None}

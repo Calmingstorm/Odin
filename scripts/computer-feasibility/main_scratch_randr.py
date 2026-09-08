@@ -51,8 +51,10 @@ def _once(d):
     info = root.xrandr_get_screen_info()
     geo = root.get_geometry()
     size = info.sizes[info.size_id]
-    screen = _fields(size, ["width_in_pixels", "height_in_pixels",
-                            "width_in_millimeters", "height_in_millimeters"])
+    screen = _fields(
+        size,
+        ["width_in_pixels", "height_in_pixels", "width_in_millimeters", "height_in_millimeters"],
+    )
     if info.rotation in (2, 8):
         for unit in ("pixels", "millimeters"):
             a, b = f"width_in_{unit}", f"height_in_{unit}"
@@ -63,7 +65,7 @@ def _once(d):
     names = _text(resources.names)
     for mode in resources.modes:
         item = _fields(mode, MODE_FIELDS)
-        item["name"] = names[offset:offset + item["name_length"]]
+        item["name"] = names[offset : offset + item["name_length"]]
         offset += item["name_length"]
         modes.append(item)
     if offset != len(names):
@@ -73,46 +75,83 @@ def _once(d):
         c = _ok(d.xrandr_get_crtc_info(cid, stamp))
         t = d.xrandr_get_crtc_transform(cid)
         p = _ok(d.xrandr_get_panning(cid))
-        item = {"id": int(cid), **_fields(c, ["x", "y", "width", "height", "mode",
-                                            "rotation", "possible_rotations"]),
-                "outputs": sorted(map(int, c.outputs)),
-                "possible_outputs": sorted(map(int, c.possible_outputs)),
-                "panning": _fields(p, PAN_FIELDS),
-                "has_transforms": bool(t.has_transforms)}
+        item = {
+            "id": int(cid),
+            **_fields(c, ["x", "y", "width", "height", "mode", "rotation", "possible_rotations"]),
+            "outputs": sorted(map(int, c.outputs)),
+            "possible_outputs": sorted(map(int, c.possible_outputs)),
+            "panning": _fields(p, PAN_FIELDS),
+            "has_transforms": bool(t.has_transforms),
+        }
         for kind in ("current", "pending"):
             matrix = getattr(t, kind + "_transform")
-            item[kind + "_transform"] = [int(getattr(matrix, f"matrix{i}{j}"))
-                                          for i in range(1, 4) for j in range(1, 4)]
+            item[kind + "_transform"] = [
+                int(getattr(matrix, f"matrix{i}{j}")) for i in range(1, 4) for j in range(1, 4)
+            ]
             item[kind + "_filter_name"] = _text(getattr(t, kind + "_filter_name"))
             item[kind + "_filter_params"] = list(getattr(t, kind + "_filter_params"))
         crtcs.append(item)
     outputs = []
     for oid in resources.outputs:
         o = _ok(d.xrandr_get_output_info(oid, stamp))
-        outputs.append({"id": int(oid), "name": _text(o.name),
-                        **_fields(o, ["crtc", "mm_width", "mm_height", "connection",
-                                     "subpixel_order", "num_preferred"]),
-                        **{key: sorted(map(int, getattr(o, key)))
-                           for key in ("crtcs", "modes", "clones")}})
+        outputs.append(
+            {
+                "id": int(oid),
+                "name": _text(o.name),
+                **_fields(
+                    o,
+                    [
+                        "crtc",
+                        "mm_width",
+                        "mm_height",
+                        "connection",
+                        "subpixel_order",
+                        "num_preferred",
+                    ],
+                ),
+                **{key: sorted(map(int, getattr(o, key))) for key in ("crtcs", "modes", "clones")},
+            }
+        )
     monitors = []
     for m in root.xrandr_get_monitors(False).monitors:
-        monitors.append({"name": d.get_atom_name(m.name), "atom": int(m.name),
-                         "primary": bool(m.primary), "automatic": bool(m.automatic),
-                         **_fields(m, ["x", "y", "width_in_pixels", "height_in_pixels",
-                                       "width_in_millimeters", "height_in_millimeters"]),
-                         # python-xlib calls the protocol's OUTPUT list 'crtcs'.
-                         "outputs": sorted(map(int, m.crtcs))})
+        monitors.append(
+            {
+                "name": d.get_atom_name(m.name),
+                "atom": int(m.name),
+                "primary": bool(m.primary),
+                "automatic": bool(m.automatic),
+                **_fields(
+                    m,
+                    [
+                        "x",
+                        "y",
+                        "width_in_pixels",
+                        "height_in_pixels",
+                        "width_in_millimeters",
+                        "height_in_millimeters",
+                    ],
+                ),
+                # python-xlib calls the protocol's OUTPUT list 'crtcs'.
+                "outputs": sorted(map(int, m.crtcs)),
+            }
+        )
     end = root.xrandr_get_screen_resources_current()
     if (resources.timestamp, stamp) != (end.timestamp, end.config_timestamp):
         raise UnsupportedTopology("RandR changed during capture")
-    return {"schema": 1, "root": int(root.id), "screen": screen,
-            "range": _fields(root.xrandr_get_screen_size_range(),
-                              ["min_width", "min_height", "max_width", "max_height"]),
-            "primary": int(root.xrandr_get_output_primary().output),
-            "modes": sorted(modes, key=lambda v: v["id"]),
-            "outputs": sorted(outputs, key=lambda v: v["id"]),
-            "crtcs": sorted(crtcs, key=lambda v: v["id"]),
-            "monitors": sorted(monitors, key=lambda v: v["atom"])}
+    return {
+        "schema": 1,
+        "root": int(root.id),
+        "screen": screen,
+        "range": _fields(
+            root.xrandr_get_screen_size_range(),
+            ["min_width", "min_height", "max_width", "max_height"],
+        ),
+        "primary": int(root.xrandr_get_output_primary().output),
+        "modes": sorted(modes, key=lambda v: v["id"]),
+        "outputs": sorted(outputs, key=lambda v: v["id"]),
+        "crtcs": sorted(crtcs, key=lambda v: v["id"]),
+        "monitors": sorted(monitors, key=lambda v: v["atom"]),
+    }
 
 
 def capture(d):
@@ -147,8 +186,10 @@ def _validate(s):
     modes = {m["id"]: m for m in s["modes"]}
     outputs = {o["id"]: o for o in s["outputs"]}
     crtcs = {c["id"]: c for c in s["crtcs"]}
-    if any(len(rows) != len(ids) for rows, ids in ((s["modes"], modes),
-           (s["outputs"], outputs), (s["crtcs"], crtcs))):
+    if any(
+        len(rows) != len(ids)
+        for rows, ids in ((s["modes"], modes), (s["outputs"], outputs), (s["crtcs"], crtcs))
+    ):
         raise UnsupportedTopology("Duplicate resource identities")
     if s["primary"] and s["primary"] not in outputs:
         raise UnsupportedTopology("Unknown primary output")
@@ -157,26 +198,37 @@ def _validate(s):
     assigned = set()
     for c in s["crtcs"]:
         for kind in ("current", "pending"):
-            if (c[kind + "_transform"] != IDENTITY
-                    or c[kind + "_filter_params"]
-                    or c[kind + "_filter_name"] not in ("", "nearest", "bilinear")):
+            if (
+                c[kind + "_transform"] != IDENTITY
+                or c[kind + "_filter_params"]
+                or c[kind + "_filter_name"] not in ("", "nearest", "bilinear")
+            ):
                 raise UnsupportedTopology(
-                    "Only identity transforms without filter parameters are supported")
-        if (c["current_filter_name"] != c["pending_filter_name"]
-                and {c["current_filter_name"], c["pending_filter_name"]} != {"", "nearest"}):
+                    "Only identity transforms without filter parameters are supported"
+                )
+        if c["current_filter_name"] != c["pending_filter_name"] and {
+            c["current_filter_name"],
+            c["pending_filter_name"],
+        } != {"", "nearest"}:
             raise UnsupportedTopology("Pending filter change is unsupported")
         if any(c["panning"].values()):
             raise UnsupportedTopology("Panning is unsupported")
         if not c["mode"]:
-            if (c["outputs"] or any(c[k] for k in ("x", "y", "width", "height"))
-                    or c["rotation"] != 1):
+            if (
+                c["outputs"]
+                or any(c[k] for k in ("x", "y", "width", "height"))
+                or c["rotation"] != 1
+            ):
                 raise UnsupportedTopology("Noncanonical disabled CRTC")
             continue
         if c["mode"] not in modes or not c["outputs"]:
             raise UnsupportedTopology("Missing active mode/output")
         rotation = c["rotation"]
-        if ((rotation & 15) not in (1, 2, 4, 8) or rotation & ~63
-                or rotation & ~c["possible_rotations"]):
+        if (
+            (rotation & 15) not in (1, 2, 4, 8)
+            or rotation & ~63
+            or rotation & ~c["possible_rotations"]
+        ):
             raise UnsupportedTopology("Invalid CRTC rotation")
         mode = modes[c["mode"]]
         w, h = mode["width"], mode["height"]
@@ -188,9 +240,14 @@ def _validate(s):
             raise UnsupportedTopology("CRTC outside framebuffer")
         for oid in c["outputs"]:
             o = outputs[oid]
-            if (oid in assigned or o["crtc"] != c["id"] or o["connection"] != 0
-                    or c["id"] not in o["crtcs"] or oid not in c["possible_outputs"]
-                    or c["mode"] not in o["modes"]):
+            if (
+                oid in assigned
+                or o["crtc"] != c["id"]
+                or o["connection"] != 0
+                or c["id"] not in o["crtcs"]
+                or oid not in c["possible_outputs"]
+                or c["mode"] not in o["modes"]
+            ):
                 raise UnsupportedTopology("Inconsistent output assignment")
             assigned.add(oid)
     if any(o["crtc"] and o["id"] not in assigned for o in s["outputs"]):
@@ -198,11 +255,20 @@ def _validate(s):
 
 
 def _inventory(s):
-    return {"root": s["root"], "range": s["range"], "modes": s["modes"],
-            "outputs": [{k: v for k, v in o.items() if k != "crtc"} for o in s["outputs"]],
-            "crtcs": [{k: v for k, v in c.items()
-                       if k not in ("x", "y", "width", "height", "mode", "rotation", "outputs")}
-                      for c in s["crtcs"]]}
+    return {
+        "root": s["root"],
+        "range": s["range"],
+        "modes": s["modes"],
+        "outputs": [{k: v for k, v in o.items() if k != "crtc"} for o in s["outputs"]],
+        "crtcs": [
+            {
+                k: v
+                for k, v in c.items()
+                if k not in ("x", "y", "width", "height", "mode", "rotation", "outputs")
+            }
+            for c in s["crtcs"]
+        ],
+    }
 
 
 def restore(d, snapshot):
@@ -253,14 +319,26 @@ def _restore_locked(d, snapshot):
 
     def set_crtc(c, disabled=False):
         stamp = root.xrandr_get_screen_resources_current().config_timestamp
-        _ok(d.xrandr_set_crtc_config(c["id"], stamp,
-                                    0 if disabled else c["x"], 0 if disabled else c["y"],
-                                    0 if disabled else c["mode"], 1 if disabled else c["rotation"],
-                                    [] if disabled else c["outputs"], timestamp=X.CurrentTime))
+        _ok(
+            d.xrandr_set_crtc_config(
+                c["id"],
+                stamp,
+                0 if disabled else c["x"],
+                0 if disabled else c["y"],
+                0 if disabled else c["mode"],
+                1 if disabled else c["rotation"],
+                [] if disabled else c["outputs"],
+                timestamp=X.CurrentTime,
+            )
+        )
 
     def set_screen(screen):
-        root.xrandr_set_screen_size(screen["width_in_pixels"], screen["height_in_pixels"],
-                                    screen["width_in_millimeters"], screen["height_in_millimeters"])
+        root.xrandr_set_screen_size(
+            screen["width_in_pixels"],
+            screen["height_in_pixels"],
+            screen["width_in_millimeters"],
+            screen["height_in_millimeters"],
+        )
         sync()
 
     try:

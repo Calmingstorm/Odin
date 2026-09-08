@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Bounded real-model acceptance; external disposable fixture owns desktop children."""
+
 from __future__ import annotations
 
 import argparse
@@ -51,44 +52,77 @@ async def main(args):
         raise ValueError("live_evidence_forbidden")
     out.mkdir(mode=0o700, parents=True, exist_ok=False)
     auth = sibling("vision_smoke_r6", "vision-smoke.py")
-    client = r5.CodexChatClient(auth.ReadOnlyAuth(args.credentials), model=args.model,
-        reasoning_effort="medium", max_retries=0, request_timeout=90, stream_stall_timeout=60)
+    client = r5.CodexChatClient(
+        auth.ReadOnlyAuth(args.credentials),
+        model=args.model,
+        reasoning_effort="medium",
+        max_retries=0,
+        request_timeout=90,
+        stream_stall_timeout=60,
+    )
     principal, channel = "fixture-authenticated-model-app-r6", "fixture-private-app-r6"
-    permissions = r5.PermissionManager({principal: "admin"}, default_tier="guest",
-        overrides_path=str(out / "permissions.json"))
+    permissions = r5.PermissionManager(
+        {principal: "admin"}, default_tier="guest", overrides_path=str(out / "permissions.json")
+    )
     hosts = r5.HostAccessManager(path=str(out / "hosts.json"), available_hosts=["localhost"])
-    executor = r5.ToolExecutor(config=r5.ToolsConfig(), memory_path=str(out / "memory.json"),
-        permission_manager=permissions, host_access_manager=hosts)
-    settings = SimpleNamespace(enabled=True, storage_dir=str(out / "computer"),
-        platform="x11", environment="existing_session", runtime_sudo=True,
-        display=args.display, xauthority=args.xauthority, monitor_names=[args.monitor])
-    bot = SimpleNamespace(config=SimpleNamespace(computer=settings),
-        host_access_manager=hosts, tool_executor=executor)
+    executor = r5.ToolExecutor(
+        config=r5.ToolsConfig(),
+        memory_path=str(out / "memory.json"),
+        permission_manager=permissions,
+        host_access_manager=hosts,
+    )
+    settings = SimpleNamespace(
+        enabled=True,
+        storage_dir=str(out / "computer"),
+        platform="x11",
+        environment="existing_session",
+        runtime_sudo=True,
+        display=args.display,
+        xauthority=args.xauthority,
+        monitor_names=[args.monitor],
+    )
+    bot = SimpleNamespace(
+        config=SimpleNamespace(computer=settings), host_access_manager=hosts, tool_executor=executor
+    )
     service = r5.ComputerIntegration(bot)
-    dispatcher = r5.NativeToolDispatcher(owners={"computer": service}, skill_manager=None,
-        tool_catalog=None, prompt_builder=None, channel_state=None)
-    state = SimpleNamespace(user_id=principal, _req_id=uuid.uuid4().hex,
-        message=SimpleNamespace(author=SimpleNamespace(id=principal),
-                                channel=SimpleNamespace(id=channel)),
+    dispatcher = r5.NativeToolDispatcher(
+        owners={"computer": service},
+        skill_manager=None,
+        tool_catalog=None,
+        prompt_builder=None,
+        channel_state=None,
+    )
+    state = SimpleNamespace(
+        user_id=principal,
+        _req_id=uuid.uuid4().hex,
+        message=SimpleNamespace(
+            author=SimpleNamespace(id=principal), channel=SimpleNamespace(id=channel)
+        ),
         policy=SimpleNamespace(trajectory_source="discord"),
-        _computer_serving=SimpleNamespace(provider="codex", client=client, model=args.model))
+        _computer_serving=SimpleNamespace(provider="codex", client=client, model=args.model),
+    )
     token = r5.request_tool_scope.set(r5.COMPUTER_TOOLS)
     saved = home / ("home-icon-" + uuid.uuid4().hex[:10] + ".svg")
-    messages = [{"role": "user", "content":
-        "Create a useful HOME icon in attached native Inkscape: blue rectangular house body, "
-        "orange triangular roof drawn as a real closed Bezier path, white rectangular door. "
-        "Make it recognizable, aligned, centered on the white page with substantial shapes. "
-        "Use GUI shape/path tools and palette fills only, never XML/source code/terminal/API. "
-        "Save SVG through the GUI at " + str(saved) + ". Inspect final native pixels after "
-        "saving, then finish with SAVED_AND_VERIFIED. Session already started. No attached "
-        "export granted. Choose actions from observed pixels, never assumed coordinates. "
-        "One tool call per response, fresh native pixels follow known actions, use their "
-        "current provenance. Never retry unknown outcomes. Optional properties must be "
-        "OMITTED, never blank/dummy. type uses only text; key only key; click only x,y; drag "
-        "only points,duration. expect visual_change is exactly {\"type\":\"visual_change\"}. "
-        "Copy observed safe modal into expected_modal, omit when null. Do not start/stop "
-        "sessions. Typing is printable ASCII; use Return key separately. ctrl+l and function "
-        "keys are NOT supported; use visible GUI controls instead. At most48 calls."}]
+    messages = [
+        {
+            "role": "user",
+            "content": "Create a useful HOME icon in attached native Inkscape: "
+            "blue rectangular house body, "
+            "orange triangular roof drawn as a real closed Bezier path, white rectangular door. "
+            "Make it recognizable, aligned, centered on the white page with substantial shapes. "
+            "Use GUI shape/path tools and palette fills only, never XML/source code/terminal/API. "
+            "Save SVG through the GUI at " + str(saved) + ". Inspect final native pixels after "
+            "saving, then finish with SAVED_AND_VERIFIED. Session already started. No attached "
+            "export granted. Choose actions from observed pixels, never assumed coordinates. "
+            "One tool call per response, fresh native pixels follow known actions, use their "
+            "current provenance. Never retry unknown outcomes. Optional properties must be "
+            "OMITTED, never blank/dummy. type uses only text; key only key; click only x,y; drag "
+            'only points,duration. expect visual_change is exactly {"type":"visual_change"}. '
+            "Copy observed safe modal into expected_modal, omit when null. Do not start/stop "
+            "sessions. Typing is printable ASCII; use Return key separately. ctrl+l and function "
+            "keys are NOT supported; use visible GUI controls instead. At most48 calls.",
+        }
+    ]
 
     def record(event):
         with (out / "events.jsonl").open("a") as file:
@@ -105,13 +139,22 @@ async def main(args):
             raise PermissionError("tool_not_offered")
         block = SimpleNamespace(name=name, input=values, id=call_id or uuid.uuid4().hex)
         with service.foreground(state, block):
-            result, _ = await dispatcher.dispatch(name, values, message=state.message,
-                user_id=principal, skill_file_delivery="stage")
+            result, _ = await dispatcher.dispatch(
+                name, values, message=state.message, user_id=principal, skill_file_delivery="stage"
+            )
             if isinstance(result, dict) and "__image_block__" in result:
                 await service.validate_delivery(state, block, result)
                 return result
-        record({"event": "tool", "name": name, "input": values, "ok": result.ok,
-                "uncertain": result.uncertain_outcome, "output": result.output})
+        record(
+            {
+                "event": "tool",
+                "name": name,
+                "input": values,
+                "ok": result.ok,
+                "uncertain": result.uncertain_outcome,
+                "output": result.output,
+            }
+        )
         if result.uncertain_outcome:
             raise RuntimeError("uncertain_outcome_no_replay")
         return result
@@ -120,17 +163,26 @@ async def main(args):
         nonlocal latest_digest
         latest_digest = image["__computer_frame__"]["sha256"]
         r5.without_old_pixels(messages)
-        text = ({"type": "tool_result", "tool_use_id": call_id, "content": image["__prompt__"]}
-                if call_id else {"type": "text", "text": image["__prompt__"]})
+        text = (
+            {"type": "tool_result", "tool_use_id": call_id, "content": image["__prompt__"]}
+            if call_id
+            else {"type": "text", "text": image["__prompt__"]}
+        )
         messages.append({"role": "user", "content": [text, image["__image_block__"]]})
-        record({"event": "native_observation", "sha256": latest_digest,
-                "observation_id": image["__computer_frame__"]["observation_id"]})
+        record(
+            {
+                "event": "native_observation",
+                "sha256": latest_digest,
+                "observation_id": image["__computer_frame__"]["observation_id"],
+            }
+        )
 
     async def observe():
-        await asyncio.sleep(.5)
+        await asyncio.sleep(0.5)
         current = service.controller.store.get_session(grant["session_id"])
-        image = await dispatch("computer_observe", {"session_id": current.session_id,
-                                                    "generation": current.generation})
+        image = await dispatch(
+            "computer_observe", {"session_id": current.session_id, "generation": current.generation}
+        )
         if not isinstance(image, dict):
             raise RuntimeError("native_observation_unavailable")
         append_image(image)
@@ -138,8 +190,13 @@ async def main(args):
     trace = aiohttp.TraceConfig()
 
     async def sent(_session, _context, params):
-        record({"event": "serialized_request", "request": calls,
-                **r5.wire_summary(params.chunk, latest_digest)})
+        record(
+            {
+                "event": "serialized_request",
+                "request": calls,
+                **r5.wire_summary(params.chunk, latest_digest),
+            }
+        )
 
     trace.on_request_chunk_sent.append(sent)
     try:
@@ -150,21 +207,39 @@ async def main(args):
             grant = json.loads(first.output)
             record({"event": "attached_started", "display": args.display, "basename": saved.name})
             await observe()
-            async with aiohttp.ClientSession(trace_configs=[trace], auto_decompress=False,
-                    headers={"Accept-Encoding": "identity"}) as session:
+            async with aiohttp.ClientSession(
+                trace_configs=[trace],
+                auto_decompress=False,
+                headers={"Accept-Encoding": "identity"},
+            ) as session:
                 client._session = session
                 for calls in range(1, 49):
-                    response = await asyncio.wait_for(client.chat_with_tools(messages,
-                        "Complete attached native GUI task from actual pixels. A visual-change "
-                        "receipt is not saved-artifact proof. Harness owns cleanup.",
-                        r5.computer_definitions()), 90)
-                    record({"event": "model_response", "request": calls, "text": response.text,
-                        "tools": [{"name": c.name, "input": c.input} for c in response.tool_calls]})
+                    response = await asyncio.wait_for(
+                        client.chat_with_tools(
+                            messages,
+                            "Complete attached native GUI task from actual pixels. A visual-change "
+                            "receipt is not saved-artifact proof. Harness owns cleanup.",
+                            r5.computer_definitions(),
+                        ),
+                        90,
+                    )
+                    record(
+                        {
+                            "event": "model_response",
+                            "request": calls,
+                            "text": response.text,
+                            "tools": [
+                                {"name": c.name, "input": c.input} for c in response.tool_calls
+                            ],
+                        }
+                    )
                     if len(response.tool_calls) > 1:
                         raise RuntimeError("multiple_actions_without_pixels")
                     blocks = [{"type": "text", "text": response.text}] if response.text else []
-                    blocks.extend({"type": "tool_use", "id": c.id, "name": c.name,
-                                   "input": c.input} for c in response.tool_calls)
+                    blocks.extend(
+                        {"type": "tool_use", "id": c.id, "name": c.name, "input": c.input}
+                        for c in response.tool_calls
+                    )
                     messages.append({"role": "assistant", "content": blocks})
                     if not response.tool_calls:
                         completed = "SAVED_AND_VERIFIED" in response.text
@@ -181,19 +256,39 @@ async def main(args):
                     if isinstance(result, dict):
                         append_image(result, call.id)
                         continue
-                    messages.append({"role": "user", "content": [{"type": "tool_result",
-                        "tool_use_id": call.id, "content": result.output,
-                        "is_error": not result.ok}]})
+                    messages.append(
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "tool_result",
+                                    "tool_use_id": call.id,
+                                    "content": result.output,
+                                    "is_error": not result.ok,
+                                }
+                            ],
+                        }
+                    )
                     if not result.ok:
                         rejections += 1
                         if rejections > 2 or "visual_target_changed" not in result.output:
                             raise RuntimeError("known_rejection_bounded_stop")
                     await observe()
     except Exception as exc:
-        record({"event": "failed", "error_type": type(exc).__name__,
-                "trace": [{"file": Path(frame.filename).name, "line": frame.lineno,
-                           "function": frame.name}
-                          for frame in traceback.extract_tb(exc.__traceback__)]})
+        record(
+            {
+                "event": "failed",
+                "error_type": type(exc).__name__,
+                "trace": [
+                    {
+                        "file": Path(frame.filename).name,
+                        "line": frame.lineno,
+                        "function": frame.name,
+                    }
+                    for frame in traceback.extract_tb(exc.__traceback__)
+                ],
+            }
+        )
     finally:
         await client.close()
         cleanup_error = None
@@ -203,12 +298,19 @@ async def main(args):
             cleanup_error = type(exc).__name__
         r5.request_tool_scope.reset(token)
         clean = cleanup_error is None and not service.controller._live
-        summary = {"event": "summary", "passed": completed and verification is not None and clean,
-            "model_completed": completed, "verified_saved_svg": verification,
-            "requests": calls, "rejections": rejections,
-            "elapsed_seconds": round(time.monotonic() - started, 3), "cleanup": clean,
-            "cleanup_error": cleanup_error, "fixture_cleanup": "external_owner_must_verify",
-            "credential_writes": False}
+        summary = {
+            "event": "summary",
+            "passed": completed and verification is not None and clean,
+            "model_completed": completed,
+            "verified_saved_svg": verification,
+            "requests": calls,
+            "rejections": rejections,
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "cleanup": clean,
+            "cleanup_error": cleanup_error,
+            "fixture_cleanup": "external_owner_must_verify",
+            "credential_writes": False,
+        }
         (out / "summary.json").write_text(json.dumps(summary, indent=2))
         record(summary)
     return 0 if summary["passed"] else 1

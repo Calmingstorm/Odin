@@ -11,12 +11,12 @@ case ${1:-} in
     echo 'Podman paths suspended: host-helper cleanup must be resolved explicitly.' >&2
     exit 64 ;;
   experiment-docker|experiment-operator|experiment-lifecycle|experiment-guardian|experiment-baseline|experiment-fixed|experiment-guardian-fixed) ;;
-  *) echo 'Usage: wayland-lab.sh prepare-operator|experiment-{docker,operator,lifecycle,guardian,baseline,fixed,guardian-fixed} --parent-authorized-after-contract-correction /home/odin/tmp/wayland-NEW' >&2; exit 64 ;;
+  *) echo 'Usage: set EVIDENCE_ROOT, then wayland-lab.sh prepare-operator|experiment-{docker,operator,lifecycle,guardian,baseline,fixed,guardian-fixed} --parent-authorized-after-contract-correction "$EVIDENCE_ROOT/wayland-NEW"' >&2; exit 64 ;;
 esac
 [[ ${2:-} == --parent-authorized-after-contract-correction ]] || exit 64
-evidence=${3:?Provide new absolute evidence directory below /home/odin/tmp}
-[[ $evidence == /home/odin/tmp/wayland-* && $evidence != *'/../'* && ! -e $evidence ]] || exit 64
-[[ $(dirname -- "$evidence") == /home/odin/tmp ]] || exit 64
+evidence=${3:?Provide new absolute evidence directory below EVIDENCE_ROOT}
+source "$here/evidence-path.sh"
+new_evidence_path "$evidence" wayland- || exit 64
 mkdir -m 700 -- "$evidence"
 if [[ $(id -u) == 0 ]]; then chown 1003:1003 "$evidence"; fi
 [[ $(stat -c %u "$evidence") == 1003 ]] || { echo 'Evidence must be owned/writable by fixture UID1003' >&2; exit 64; }
