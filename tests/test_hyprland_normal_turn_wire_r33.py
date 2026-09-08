@@ -39,7 +39,9 @@ async def joined(tmp_path, monkeypatch, native):
             assert kwargs["socket_path"] == peer.scope
 
         async def snapshot(self, metadata):
-            return scope(output)
+            value = scope(output)
+            value["application"]["uid"] = os.getuid()
+            return value
 
         async def close(self):
             pass
