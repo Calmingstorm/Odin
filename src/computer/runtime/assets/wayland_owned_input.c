@@ -620,6 +620,9 @@ int main(int argc,char **argv) {
         if(g.reason)break;
       }
     }
+    /* Whole-command/keymap preflight can consume the remaining scope lease.
+     * Recheck after that work and honor failure before the first input step. */
+    check_deadline(&g);
     if(!g.fenced&&!g.reason)step(&g);
   }
   stop_emulating(&g);ei_dispatch(g.ctx);

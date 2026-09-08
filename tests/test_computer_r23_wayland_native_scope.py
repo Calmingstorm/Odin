@@ -1,16 +1,85 @@
 """Production C dispatcher and inert libei pipe stub, never real desktop input."""
 
+import subprocess
 import time
 from unittest.mock import AsyncMock, Mock
 
 import pytest
 
 from src.computer.runtime.wayland_guardian import WaylandGuardian, WaylandGuardianError
-from tests.test_computer_wayland_guardian_r8 import binaries, guardian  # noqa: F401
+from tests.test_computer_wayland_guardian_r8 import (  # noqa: F401
+    HEADER,
+    LIBRARY,
+    SOURCE,
+    Guardian,
+    binaries,
+    guardian,
+)
 
 
 def expiry():
     return time.monotonic_ns() // 1000 + 240_000
+
+
+@pytest.fixture(scope="module")
+def preflight_binary(tmp_path_factory):
+    root = tmp_path_factory.mktemp("wayland-scope-preflight")
+    (root / "libei.h").write_text(HEADER)
+    # Inert transport only. Delay the first real keymap lookup during command
+    # preflight, not scope acquisition or dispatch. No production fault hook.
+    (root / "fake.c").write_text(
+        LIBRARY
+        + r"""
+#include <time.h>
+#include <errno.h>
+uint32_t __real_xkb_state_key_get_utf32(struct xkb_state *, xkb_keycode_t);
+uint32_t __wrap_xkb_state_key_get_utf32(struct xkb_state *state, xkb_keycode_t key) {
+ static int delayed;
+ if(!delayed++){
+  struct timespec remaining={.tv_sec=0,.tv_nsec=300000000};
+  emit("PREFLIGHT_BEGIN\n");
+  while(nanosleep(&remaining,&remaining)<0 && errno==EINTR){}
+  emit("PREFLIGHT_END\n");
+ }
+ return __real_xkb_state_key_get_utf32(state,key);
+}
+"""
+    )
+    libraries = subprocess.check_output(
+        ["pkg-config", "--cflags", "--libs", "xkbcommon"], text=True
+    ).split()
+    binary = root / "preflight"
+    subprocess.run(
+        ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", "-I", str(root)]
+        + [str(SOURCE), str(root / "fake.c"), "-Wl,--wrap=xkb_state_key_get_utf32"]
+        + libraries
+        + ["-lm", "-o", str(binary)],
+        check=True,
+        timeout=30,
+    )
+    return binary
+
+
+@pytest.mark.parametrize("command", ["T 61", "J a"])
+def test_native_scope_expiring_during_preflight_sends_no_input(preflight_binary, command):
+    g = Guardian(preflight_binary)
+    try:
+        g.send(f"B 2000 {expiry()}\n{command}\n".encode())
+        code, receipts = g.finish()
+        assert "PREFLIGHT_BEGIN" in g.lines
+        assert "PREFLIGHT_END" in g.lines
+        assert code == 2
+        assert not g.inputs()
+        assert not any(line.startswith(("MOVE ", "SCROLL ")) for line in g.lines)
+        assert not any(r["event"] == "action_done" for r in receipts)
+        closed = next(r for r in receipts if r["event"] == "closed")
+        assert closed["reason"] == "scope-evidence-expired"
+        assert closed["input_was_sent"] is False
+        assert closed["diagnostics"]["phase"] == "preflight"
+        assert closed["diagnostics"]["steps_completed"] == 0
+        assert closed["diagnostics"]["release"] == "confirmed"
+    finally:
+        g.close()
 
 
 def test_native_scope_expires_while_python_is_blocked(guardian):  # noqa: F811
