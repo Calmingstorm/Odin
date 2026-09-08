@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import inspect
+import logging
 import time
 import uuid
 from copy import deepcopy
@@ -50,23 +51,69 @@ def _text(value, maximum=4096) -> str:
     return value
 
 
+_TASK_LOG = logging.getLogger(__name__)
+_OWNED_TASKS: set[asyncio.Future] = set()
+_CANCELLATION_CHECKS: dict[asyncio.Future, asyncio.TimerHandle] = {}
+_CANCEL_SETTLE_SECONDS = 0.1
+
+
+def _own_task(task):
+    # asyncio's task inventory is weak. A done callback on a task is not an
+    # external owner of that task (nor of its otherwise-unreferenced waiter).
+    if task not in _OWNED_TASKS:
+        _OWNED_TASKS.add(task)
+        task.add_done_callback(_consume)
+    return task
+
+
+def _cancellation_pending(task):
+    _CANCELLATION_CHECKS.pop(task, None)
+    if not task.done():
+        operation = task.get_coro() if isinstance(task, asyncio.Task) else task
+        _TASK_LOG.warning(
+            "Computer task cancellation did not settle within %.3fs; "
+            "retaining ownership until completion (operation=%s, owned_tasks=%d)",
+            _CANCEL_SETTLE_SECONDS,
+            getattr(operation, "__qualname__", type(operation).__name__),
+            len(_OWNED_TASKS),
+        )
+
+
+def _cancel_owned(task):
+    _own_task(task)
+    if not task.done():
+        task.cancel()
+        if task not in _CANCELLATION_CHECKS:
+            _CANCELLATION_CHECKS[task] = task.get_loop().call_later(
+                _CANCEL_SETTLE_SECONDS, _cancellation_pending, task
+            )
+
+
+async def _settle_owned(task):
+    """Drain cooperative cancellation, never wait indefinitely for resistance."""
+    _own_task(task)
+    await asyncio.wait({task}, timeout=_CANCEL_SETTLE_SECONDS)
+
+
 async def _bounded(awaitable, timeout: float):
-    """A cancellation-resistant primitive must not extend this deadline."""
-    task = asyncio.ensure_future(awaitable)
+    """Meet the deadline; retain unfinished cancellation until actual settlement."""
+    task = _own_task(asyncio.ensure_future(awaitable))
     try:
         done, _ = await asyncio.wait({task}, timeout=timeout)
         if task not in done:
-            task.cancel()
-            task.add_done_callback(_consume)
+            _cancel_owned(task)
             raise TimeoutError
         return task.result()
     except asyncio.CancelledError:
-        task.cancel()
-        task.add_done_callback(_consume)
+        _cancel_owned(task)
         raise
 
 
 def _consume(task):
+    _OWNED_TASKS.discard(task)
+    check = _CANCELLATION_CHECKS.pop(task, None)
+    if check is not None:
+        check.cancel()
     if not task.cancelled():
         task.exception()
 
@@ -242,6 +289,10 @@ class ComputerController:
 
     async def _deadline(self, sid, seconds):
         await asyncio.sleep(seconds)
+        # A firing watchdog must not be cancelled/drained by the stop worker it
+        # is about to await. Otherwise stop and timer join each other.
+        if self._watchdogs.get(sid) is asyncio.current_task():
+            self._watchdogs.pop(sid)
         await self._stop(sid, "cancelled")
 
     async def _stop(self, sid, state):
@@ -251,13 +302,20 @@ class ComputerController:
         task = self._stops.get(sid)
         if task is not None and not task.done():
             await asyncio.shield(task)
-        task = asyncio.create_task(self._stop_serialized(sid, state))
+        task = _own_task(asyncio.create_task(self._stop_serialized(sid, state)))
         self._stops[sid] = task
-        task.add_done_callback(_consume)
+
+        def forget(completed):
+            if self._stops.get(sid) is completed:
+                self._stops.pop(sid)
+
+        task.add_done_callback(forget)
         try:
             return await asyncio.shield(task)
         except asyncio.CancelledError:
-            await asyncio.shield(task)
+            # Cleanup keeps its strong owner even if this caller is cancelled
+            # again, or the worker cannot finish inside the settlement budget.
+            await _settle_owned(task)
             raise
 
     async def _stop_serialized(self, sid, state):
@@ -270,13 +328,14 @@ class ComputerController:
     async def _stop_owned(self, sid, state):
         grant = self.store.set_state(sid, "quarantined", revoke=True)
         self._delivered_observations.pop(sid, None)
+        timer = self._watchdogs.pop(sid, None)
+        if timer and timer is not asyncio.current_task():
+            _cancel_owned(timer)
+            await _settle_owned(timer)
         live = self._live.get(sid)
         if live is None:
             return self._public_session(grant)
         live.observations.clear()
-        timer = self._watchdogs.pop(sid, None)
-        if timer and timer is not asyncio.current_task():
-            timer.cancel()
         result = None
         try:
             # Attached adapters revoke their own devices only, never stop session apps.
@@ -442,8 +501,9 @@ class ComputerController:
                     raise ComputerError("grant_revoked")
                 await self._auth(context)
                 grant = self.store.set_state(grant.session_id, "active")
-                self._watchdogs[grant.session_id] = asyncio.create_task(
-                    self._deadline(grant.session_id, MAX_TASK_SECONDS))
+                self._watchdogs[grant.session_id] = _own_task(
+                    asyncio.create_task(self._deadline(grant.session_id, MAX_TASK_SECONDS))
+                )
                 async with self._actions:
                     await self._capture(grant)
             except (Exception, asyncio.CancelledError) as exc:
