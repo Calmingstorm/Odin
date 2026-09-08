@@ -156,6 +156,7 @@ async def capture_explicit_output(
     *, helper: str, wayland: socket.socket, identity: HyprlandIdentity,
     output: ExplicitOutput, scope: Callable[[], Awaitable[ScopeProof]],
     timeout_seconds: float = 3.0,
+    on_spawn: Callable[[dict | None], None] | None = None,
 ) -> NativeFrame:
     """Consume a pinned unused socket; return only a post-fenced native frame.
 
@@ -187,6 +188,8 @@ async def capture_explicit_output(
             output.name, str(output.width), str(output.height), str(output.transform),
             str(max(1, int(remaining(deadline) * 1000))),
         )
+        if on_spawn is not None:
+            on_spawn(None)
         spawning = asyncio.create_task(asyncio.create_subprocess_exec(
             *args, pass_fds=(wayland.fileno(),), stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
@@ -197,7 +200,15 @@ async def capture_explicit_output(
         except asyncio.CancelledError:
             # Preserve ownership if cancellation races fork/exec completion.
             process = await spawning
+            if on_spawn is not None:
+                from .recovery import process_identity
+
+                on_spawn(process_identity(process.pid))
             raise
+        if on_spawn is not None:
+            from .recovery import process_identity
+
+            on_spawn(process_identity(process.pid))
         wayland.close()
         if process.stdout is None:
             raise HyprlandCaptureError("hyprland_capture_transport_failed")
