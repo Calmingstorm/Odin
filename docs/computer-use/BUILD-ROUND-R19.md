@@ -112,6 +112,36 @@ found by the bounded hygiene checks. Broad async shutdown warnings observed in t
 full suite are not equivalent to the demonstrated computer-task ownership defect;
 no global zero-warning claim is made.
 
-Final full-suite/coverage results and real-session qualification remain pending
-until explicitly recorded. Do not treat branch availability as deployment or
-product qualification.
+## Final local quality gate
+
+Frozen runtime commit `fb7eb0b45e4b8bc57857d7a2baae84e53afcccd7` passed all twelve
+local gates. Subsequent changes to this report are documentation only.
+
+| Check | Recorded result |
+| --- | --- |
+| Full pytest with coverage | 15,350 passed, six skipped, zero failures/errors; 736.48 seconds |
+| Coverage ratchet | Zero findings; 92.6% total reported; committed baseline unchanged |
+| Lint gate / whole-repo Ruff check | Passed, zero lint findings |
+| Type gate | Two baseline findings, two head findings, zero new findings |
+| Round-scoped Ruff format | Passed, 190 files checked |
+| Apply-registry and diff checks | Passed |
+| Generated reference drift | 43 tests passed |
+| UI check/build and distribution reproduction | Passed; rebuilt assets match the committed distribution |
+| Owned-process supervision | Twelve completed reports, complete census, zero residual processes, no deadline exceeded |
+
+The suite emitted 999 warnings, including unclassified async test-teardown warnings
+for unawaited coroutines and two `shutdown_asyncgens` pending-task destructions.
+Those warnings are retained in evidence. They neither establish a live runtime
+leak nor justify a claim of globally clean async teardown. The separate bounded
+computer-task ownership regressions passed.
+
+The gate runner initially marked its aggregate status nonzero solely because its
+own temporary dependency symlink appeared untracked. Every gate command exited
+zero. Removing only that verified runner-owned symlink restored the clean frozen
+worktree; original and reconciled status records are both retained. No test or
+coverage finding was dismissed to obtain the pass.
+
+Hosted CI was intentionally not launched because the binding brief prohibits
+pipelines. These are **local CI-equivalent results**, not a hosted-CI green badge.
+Real-session qualification still requires the operator's gated deployment. Do not
+treat branch availability as deployment or complete product qualification.
