@@ -474,7 +474,11 @@ class HyprlandRuntimeBackend:
         application = copy.deepcopy(self._application_pin)
         output = self._output_pin
         compositor = copy.deepcopy((self._scope or {}).get("compositor"))
-        deadline = time.monotonic() + 1.0
+        # One second controls whether to begin another settling attempt, not
+        # whether a valid raster may finish. Normal capture includes a 3-second
+        # native transfer plus rendering; keep its separate bounded allowance.
+        retry_deadline = time.monotonic() + 1.0
+        deadline = retry_deadline + 4.0
         # A failed capture must not leave an older frame usable for input.
         self._frame = None
         try:
@@ -499,7 +503,7 @@ class HyprlandRuntimeBackend:
                         if (str(exc) != "hyprland_capture_scope_changed"
                                 or application is None or output is None):
                             raise
-                    if attempt == 50:
+                    if attempt == 50 or time.monotonic() >= retry_deadline:
                         break
                     await asyncio.sleep(0.02)
         except TimeoutError:

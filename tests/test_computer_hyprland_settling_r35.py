@@ -1,5 +1,6 @@
 """Observation-only animation settling through real controllers, synthetic IO only."""
 
+import asyncio
 from copy import deepcopy
 
 import pytest
@@ -172,4 +173,20 @@ async def test_capture_scope_changed_retries_new_native_capture_and_proof(normal
     assert len(captures) == 2
     assert len(proofs) == 4
     assert backend._scope["native_scope_serial"] == 2
+    assert not normal.transports[0].commands
+
+
+async def test_slow_stable_capture_is_not_cancelled_by_retry_budget(normal, monkeypatch):
+    grant = await start(normal)
+    await observe(normal, grant)
+    backend = backend_for(normal, grant)
+    original = backend._capture
+
+    async def slow(crop=None):
+        await asyncio.sleep(1.05)
+        return await original(crop)
+
+    monkeypatch.setattr(backend, "_capture", slow)
+    frame = await backend.observe()
+    assert frame.image_bytes and backend._frame is frame
     assert not normal.transports[0].commands
