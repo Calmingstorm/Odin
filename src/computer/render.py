@@ -3,6 +3,7 @@
 Only owned packed RGB/RGBA bytes are accepted. Lazy Pillow sees only the bounded
 DELIVERED raster, never a source-sized image or an arbitrary encoded file.
 """
+
 from __future__ import annotations
 
 from dataclasses import dataclass, field
@@ -29,6 +30,64 @@ def _image_module():
     return Image
 
 
+def compact_sequence_receipt(receipt: dict) -> dict:
+    """Bound presentation duplication, never rewrite stored per-action evidence.
+
+    The store retains complete execution, provenance and measured postconditions
+    for every reserved action. A sequence's tool response needs each step's
+    outcome and evidence reference, not eight repeated session/provenance trees.
+    Non-sequence receipts remain structurally unchanged.
+    """
+    verification = receipt.get("verification", {})
+    if verification.get("type") != "sequence" or "steps" not in verification:
+        return receipt
+    summaries = []
+    for step in verification["steps"]:
+        if step.get("status") != "verified":
+            # Failures are uncommon and safety-critical: retain diagnostics and
+            # uncertainty fields, dropping only duplicated session/provenance.
+            summaries.append(
+                {
+                    key: value
+                    for key, value in step.items()
+                    if key not in {"session_id", "application_provenance"}
+                }
+            )
+            continue
+        summary = {
+            key: step[key]
+            for key in ("action_id", "status", "reason", "execution", "observation_id")
+            if key in step
+        }
+        measured = step.get("verification", {})
+        summary["verification"] = (
+            dict(measured)
+            if step.get("status") != "verified"
+            else {
+                key: measured[key]
+                for key in (
+                    "type",
+                    "status",
+                    "scope",
+                    "evidence_id",
+                    "reason",
+                    "next_action",
+                    "semantic_mark_verified",
+                )
+                if key in measured
+            }
+        )
+        summaries.append(summary)
+    return {
+        **receipt,
+        "verification": {
+            **verification,
+            "steps": summaries,
+            "step_detail": "summary_only_full_evidence_retained",
+        },
+    }
+
+
 def renderer_available() -> bool:
     """Explicit dependency probe; importing this module does not probe."""
     try:
@@ -44,8 +103,7 @@ def source_allocation_bytes(width: int, height: int, mode: str) -> int:
     Limit covers the owned packed raster, not total process RSS. Backends must
     separately bound capture buffers and account for native format and stride.
     """
-    if any(type(v) is not int or not 1 <= v <= MAX_SOURCE_DIMENSION
-           for v in (width, height)):
+    if any(type(v) is not int or not 1 <= v <= MAX_SOURCE_DIMENSION for v in (width, height)):
         raise RenderError("invalid_source_dimensions")
     if type(mode) is not str or mode not in ("RGB", "RGBA"):
         raise RenderError("unsupported_raster_mode")
@@ -75,14 +133,15 @@ class _CappedPNG(BytesIO):
 
 def _dimensions(width, height, numerator, denominator):
     # Exactly FrameMetadata's half-up uniform resize, not Python round().
-    return tuple((2 * d * numerator + denominator) // (2 * denominator)
-                 for d in (width, height))
+    return tuple((2 * d * numerator + denominator) // (2 * denominator) for d in (width, height))
 
 
 def _scale(width, height, max_size):
-    if (type(max_size) is not tuple or len(max_size) != 2
-            or any(type(v) is not int or not 1 <= v <= MAX_SOURCE_DIMENSION
-                   for v in max_size)):
+    if (
+        type(max_size) is not tuple
+        or len(max_size) != 2
+        or any(type(v) is not int or not 1 <= v <= MAX_SOURCE_DIMENSION for v in max_size)
+    ):
         raise RenderError("invalid_delivered_bounds")
     denominator = max(width, height)
     lo, hi = 0, denominator
@@ -114,15 +173,14 @@ def _sample(pixels, mode, frame):
         return [(2 * i + 1) * extent // (2 * count) for i in range(count)]
 
     def reverse(count, extent):
-        return [(2 * count * extent - (2 * i + 1) * extent) // (2 * count)
-                for i in range(count)]
+        return [(2 * count * extent - (2 * i + 1) * extent) // (2 * count) for i in range(count)]
 
     if frame.rotation in (0, 180):
         axis = forward if frame.rotation == 0 else reverse
         columns = [x * channels for x in axis(dw, r.width)]
         rows = [y * stride for y in axis(dh, r.height)]
     else:
-        xaxis, yaxis = ((reverse, forward) if frame.rotation == 90 else (forward, reverse))
+        xaxis, yaxis = (reverse, forward) if frame.rotation == 90 else (forward, reverse)
         columns = [y * stride for y in xaxis(dw, r.height)]
         rows = [x * channels for x in yaxis(dh, r.width)]
     origin = r.y * stride + r.x * channels
@@ -131,15 +189,22 @@ def _sample(pixels, mode, frame):
     for row in rows:
         for column in columns:
             offset = origin + row + column
-            delivered[target:target + channels] = pixels[offset:offset + channels]
+            delivered[target : target + channels] = pixels[offset : offset + channels]
             target += channels
     return delivered
 
 
 def render_frame(
-    pixels: bytes, source: SourceGeometry, *, mode: str,
-    observation_id: str, session_id: str, generation: int, captured_monotonic_ns: int,
-    crop: FrameCrop | None = None, rotation: int = 0,
+    pixels: bytes,
+    source: SourceGeometry,
+    *,
+    mode: str,
+    observation_id: str,
+    session_id: str,
+    generation: int,
+    captured_monotonic_ns: int,
+    crop: FrameCrop | None = None,
+    rotation: int = 0,
     max_size: tuple[int, int] = DEFAULT_SIZE,
 ) -> RenderedFrame:
     """Render one source overview or local detail, crop then rotate clockwise.
@@ -154,9 +219,11 @@ def render_frame(
     expected = source_allocation_bytes(source.pixel_width, source.pixel_height, mode)
     if type(pixels) is not bytes or len(pixels) != expected:
         raise RenderError("invalid_packed_raster")
-    if crop is not None and (type(crop) is not FrameCrop
-                            or crop.x + crop.width > source.pixel_width
-                            or crop.y + crop.height > source.pixel_height):
+    if crop is not None and (
+        type(crop) is not FrameCrop
+        or crop.x + crop.width > source.pixel_width
+        or crop.y + crop.height > source.pixel_height
+    ):
         raise RenderError("invalid_source_crop")
     if type(rotation) is not int or rotation not in (0, 90, 180, 270):
         raise RenderError("invalid_render_rotation")
@@ -171,13 +238,22 @@ def render_frame(
             raise RenderError("aspect_ratio_cannot_fit_png_budget")
         # Validate provenance and delivered geometry BEFORE image allocations.
         frame = FrameMetadata(
-            observation_id=observation_id, session_id=session_id, generation=generation,
-            captured_monotonic_ns=captured_monotonic_ns, source_id=source.source_id,
-            source_revision=source.source_revision, consent_generation=source.consent_generation,
-            source_width=source.pixel_width, source_height=source.pixel_height,
-            width=dw, height=dh, kind="full" if crop is None else "crop", crop=crop,
+            observation_id=observation_id,
+            session_id=session_id,
+            generation=generation,
+            captured_monotonic_ns=captured_monotonic_ns,
+            source_id=source.source_id,
+            source_revision=source.source_revision,
+            consent_generation=source.consent_generation,
+            source_width=source.pixel_width,
+            source_height=source.pixel_height,
+            width=dw,
+            height=dh,
+            kind="full" if crop is None else "crop",
+            crop=crop,
             rotation=cast(Literal[0, 90, 180, 270], rotation),
-            resize_scale=(numerator, denominator), resize_rounding="nearest",
+            resize_scale=(numerator, denominator),
+            resize_rounding="nearest",
         )
         image_module = _image_module()
         try:

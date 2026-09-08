@@ -1,4 +1,5 @@
 """Lazy foreground authority facade; no desktop imports until session start."""
+
 from __future__ import annotations
 
 import asyncio
@@ -30,7 +31,8 @@ class ForegroundGrant:
 
 
 _grant: contextvars.ContextVar[ForegroundGrant | None] = contextvars.ContextVar(
-    "computer_foreground_grant", default=None)
+    "computer_foreground_grant", default=None
+)
 
 
 def require_vision(serving) -> None:
@@ -74,14 +76,18 @@ class ComputerIntegration:
         from .app_profiles import validate_profile
         from .models import ComputerError
 
-        if (getattr(self.settings, "environment", "isolated") == "existing_session"
-                and app is not None):
+        if (
+            getattr(self.settings, "environment", "isolated") == "existing_session"
+            and app is not None
+        ):
             raise ComputerError(
                 "isolated_request_conflicts_with_existing_session: app requests an isolated "
-                "launch; select the isolated environment, or omit app to explicitly attach")
+                "launch; select the isolated environment, or omit app to explicitly attach"
+            )
         if getattr(self.settings, "environment", "isolated") == "isolated":
-            validate_profile(app, platform=getattr(self.settings, "platform", "x11"),
-                             environment="isolated")
+            validate_profile(
+                app, platform=getattr(self.settings, "platform", "x11"), environment="isolated"
+            )
         if getattr(self.settings, "platform", "x11") == "wayland":
             from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
             from .runtime.wayland_probe import SameStackQualifier
@@ -92,21 +98,26 @@ class ComputerIntegration:
                 config=WaylandSessionConfig(
                     bus_address=self.settings.wayland_bus_address,
                     expected_uid=self.settings.wayland_uid,
-                    guardian_binary=self.settings.wayland_guardian_binary),
-                qualify=SameStackQualifier())
+                    guardian_binary=self.settings.wayland_guardian_binary,
+                ),
+                qualify=SameStackQualifier(),
+            )
         if getattr(self.settings, "environment", "isolated") == "existing_session":
             from .runtime.x11_attached import X11AttachedBackend
 
             return X11AttachedBackend(
                 enabled=self.enabled,
-                display_name=self.settings.display, xauthority=self.settings.xauthority,
+                display_name=self.settings.display,
+                xauthority=self.settings.xauthority,
                 monitor_names=self.settings.monitor_names,
                 input_enabled=True,
-                runtime_sudo=bool(self.settings.runtime_sudo))
+                runtime_sudo=bool(self.settings.runtime_sudo),
+            )
         from .runtime.backend import LinuxDesktopBackend
 
-        return LinuxDesktopBackend(enabled=self.enabled, app_profile=app,
-                                   runtime_sudo=bool(self.settings.runtime_sudo))
+        return LinuxDesktopBackend(
+            enabled=self.enabled, app_profile=app, runtime_sudo=bool(self.settings.runtime_sudo)
+        )
 
     def _authorize(self, context):
         if context.turn_id == "web-operator":
@@ -120,8 +131,10 @@ class ComputerIntegration:
         authorize_context = getattr(self.bot, "computer_authorize_context", None)
         if callable(authorize_context) and authorize_context(context) is not True:
             return False
-        return all(not self.bot.tool_executor.check_permission(name, context.owner_id)
-                   for name in COMPUTER_TOOLS)
+        return all(
+            not self.bot.tool_executor.check_permission(name, context.owner_id)
+            for name in COMPUTER_TOOLS
+        )
 
     def _context(self, st):
         from .models import RequestContext
@@ -148,13 +161,21 @@ class ComputerIntegration:
         context = self._context(st)
         values = getattr(block, "input", None)
         operation = values.get("operation") if isinstance(values, dict) else None
-        nonvisual = (block.name == "computer_session" and isinstance(operation, str)
-                     and operation in NONVISUAL_OPERATIONS)
+        nonvisual = (
+            block.name == "computer_session"
+            and isinstance(operation, str)
+            and operation in NONVISUAL_OPERATIONS
+        )
         if not nonvisual:
             require_vision(getattr(st, "_computer_serving", None))
-        grant = ForegroundGrant(context, str(st.message.channel.id), str(block.id),
-                                block.name, asyncio.current_task(),
-                                operation if nonvisual else None)
+        grant = ForegroundGrant(
+            context,
+            str(st.message.channel.id),
+            str(block.id),
+            block.name,
+            asyncio.current_task(),
+            operation if nonvisual else None,
+        )
         token = _grant.set(grant)
         try:
             yield
@@ -163,28 +184,47 @@ class ComputerIntegration:
 
     def grant_allows(self, name, owner, channel):
         grant = _grant.get()
-        return bool(grant is not None and grant.task is asyncio.current_task()
-                    and grant.tool_name == name and grant.context.owner_id == str(owner)
-                    and grant.conversation == str(channel) and tool_scope_allows(name)
-                    and self.enabled and self._authorize(grant.context))
+        return bool(
+            grant is not None
+            and grant.task is asyncio.current_task()
+            and grant.tool_name == name
+            and grant.context.owner_id == str(owner)
+            and grant.conversation == str(channel)
+            and tool_scope_allows(name)
+            and self.enabled
+            and self._authorize(grant.context)
+        )
 
     async def _tool(self, name, values):
         grant = _grant.get()
         if grant is None or not self.grant_allows(name, grant.context.owner_id, grant.conversation):
-            return ToolResult("Permission denied: no foreground computer grant.", ok=False,
-                              error="permission_denied", tool_name=name)
-        if (grant.nonvisual_operation is not None
-                and (not isinstance(values, dict)
-                     or values.get("operation") != grant.nonvisual_operation)):
-            return ToolResult("Permission denied: computer operation changed.", ok=False,
-                              error="permission_denied", tool_name=name)
-        method = {"computer_session": self.controller.session,
-                  "computer_observe": self.controller.observe,
-                  "computer_act": self.controller.act}[name]
+            return ToolResult(
+                "Permission denied: no foreground computer grant.",
+                ok=False,
+                error="permission_denied",
+                tool_name=name,
+            )
+        if grant.nonvisual_operation is not None and (
+            not isinstance(values, dict) or values.get("operation") != grant.nonvisual_operation
+        ):
+            return ToolResult(
+                "Permission denied: computer operation changed.",
+                ok=False,
+                error="permission_denied",
+                tool_name=name,
+            )
+        method = {
+            "computer_session": self.controller.session,
+            "computer_observe": self.controller.observe,
+            "computer_act": self.controller.act,
+        }[name]
         try:
             result = await method(grant.context, values)
-            if (name == "computer_act" and isinstance(result, dict)
-                    and isinstance(result.get("next_observation"), dict)):
+            if (
+                name == "computer_act"
+                and isinstance(result, dict)
+                and isinstance(result.get("next_observation"), dict)
+            ):
                 # Only the controller's newly captured frame enters this path.
                 # A stored receipt replay has no next_observation and cannot
                 # reissue pixels or authorize a subsequent action.
@@ -200,7 +240,7 @@ class ComputerIntegration:
                     image["__computer_action_receipt__"] = receipt
                     image["__prompt__"] += (
                         "\nAction receipt (effect status is independent of image delivery): "
-                        + json.dumps(receipt, ensure_ascii=True)
+                        + json.dumps(receipt, ensure_ascii=True, separators=(",", ":"))
                         + "\nThis is the post-action view. Use its observation_id and binding "
                         "for the next action only after inspecting these pixels. Do not replay "
                         "the previous action. Obtain a fresh observation if this view is stale."
@@ -219,18 +259,31 @@ class ComputerIntegration:
             unknown = isinstance(result, dict) and (
                 result.get("status") in {"unknown", "interrupted"}
                 or result.get("state") in {"unknown", "quarantined"}
-                or (isinstance(result.get("cleanup"), dict)
-                    and result["cleanup"].get("complete") is not True)
-                or result.get("uncertain_outcome") is True)
+                or (
+                    isinstance(result.get("cleanup"), dict)
+                    and result["cleanup"].get("complete") is not True
+                )
+                or result.get("uncertain_outcome") is True
+            )
             rejected = isinstance(result, dict) and result.get("status") in {
-                "unavailable", "not_satisfied", "rejected", "failed",
+                "unavailable",
+                "not_satisfied",
+                "rejected",
+                "failed",
             }
-            return ToolResult(json.dumps(result, ensure_ascii=True), ok=not (unknown or rejected),
-                              error=("outcome_unknown" if unknown else
-                                     "computer_not_satisfied" if rejected else None),
-                              uncertain_outcome=unknown, tool_name=name,
-                              audit_metadata={"computer_call_id": grant.call_id,
-                                              "computer_turn_id": grant.context.turn_id})
+            return ToolResult(
+                json.dumps(result, ensure_ascii=True, separators=(",", ":")),
+                ok=not (unknown or rejected),
+                error=(
+                    "outcome_unknown" if unknown else "computer_not_satisfied" if rejected else None
+                ),
+                uncertain_outcome=unknown,
+                tool_name=name,
+                audit_metadata={
+                    "computer_call_id": grant.call_id,
+                    "computer_turn_id": grant.context.turn_id,
+                },
+            )
         except asyncio.CancelledError:
             await self.stop_context(grant.context)
             raise
@@ -238,13 +291,20 @@ class ComputerIntegration:
             from .models import ComputerError
 
             if isinstance(exc, (ComputerError, PermissionError)):
-                return ToolResult("Computer request rejected: " + str(exc), ok=False,
-                                  error="computer_rejected", tool_name=name)
+                return ToolResult(
+                    "Computer request rejected: " + str(exc),
+                    ok=False,
+                    error="computer_rejected",
+                    tool_name=name,
+                )
             await self.stop_context(grant.context)
-            return ToolResult("Computer outcome unknown; reconcile with fresh evidence. "
-                              "Do not replay.",
-                              ok=False, error="outcome_unknown", uncertain_outcome=True,
-                              tool_name=name)
+            return ToolResult(
+                "Computer outcome unknown; reconcile with fresh evidence. Do not replay.",
+                ok=False,
+                error="outcome_unknown",
+                uncertain_outcome=True,
+                tool_name=name,
+            )
 
     async def _handle_computer_session(self, values):
         return await self._tool("computer_session", values)
@@ -260,22 +320,29 @@ class ComputerIntegration:
         from .vision import VisionError, _validate_native_frame
 
         grant = _grant.get()
-        if (grant is None or grant.nonvisual_operation is not None
-                or grant.call_id != str(block.id)
-                or grant.context != self._context(st)
-                or not self.grant_allows(block.name, st.user_id, str(st.message.channel.id))
-                or not any(image is issued for issued in grant.images)):
+        if (
+            grant is None
+            or grant.nonvisual_operation is not None
+            or grant.call_id != str(block.id)
+            or grant.context != self._context(st)
+            or not self.grant_allows(block.name, st.user_id, str(st.message.channel.id))
+            or not any(image is issued for issued in grant.images)
+        ):
             raise VisionError("Computer observation delivery is not authorized")
         grant.images.clear()
         native = image.get("__image_block__")
-        if (not isinstance(native, dict) or native.get("type") != "image"
-                or "__computer_frame__" not in native
-                or not isinstance(image.get("__prompt__"), str)
-                or image.get("__computer_frame__") != native["__computer_frame__"]):
+        if (
+            not isinstance(native, dict)
+            or native.get("type") != "image"
+            or "__computer_frame__" not in native
+            or not isinstance(image.get("__prompt__"), str)
+            or image.get("__computer_frame__") != native["__computer_frame__"]
+        ):
             raise VisionError("Invalid computer observation response")
         metadata = _validate_native_frame(native)
         await self.controller.validate_observation_delivery(
-            grant.context, metadata, native["__computer_frame__"]["sha256"])
+            grant.context, metadata, native["__computer_frame__"]["sha256"]
+        )
 
     @staticmethod
     def output_image(result):
@@ -290,19 +357,32 @@ class ComputerIntegration:
         values["resize_scale"] = tuple(values["resize_scale"])
         metadata = FrameMetadata(**values)
         source = result["source"]
-        if (transform != metadata.delivered_to_source.public()
-                or transform != result["delivered_to_source"]
-                or any(getattr(metadata, key) != result[key] for key in (
-                    "observation_id", "session_id", "generation", "captured_monotonic_ns",
-                    "consent_generation", "width", "height"))
-                or any(getattr(metadata, key) != source[key] for key in (
-                    "source_id", "source_revision", "consent_generation"))
-                or (metadata.source_width, metadata.source_height) != (
-                    source["pixel_width"], source["pixel_height"])):
+        if (
+            transform != metadata.delivered_to_source.public()
+            or transform != result["delivered_to_source"]
+            or any(
+                getattr(metadata, key) != result[key]
+                for key in (
+                    "observation_id",
+                    "session_id",
+                    "generation",
+                    "captured_monotonic_ns",
+                    "consent_generation",
+                    "width",
+                    "height",
+                )
+            )
+            or any(
+                getattr(metadata, key) != source[key]
+                for key in ("source_id", "source_revision", "consent_generation")
+            )
+            or (metadata.source_width, metadata.source_height)
+            != (source["pixel_width"], source["pixel_height"])
+        ):
             raise VisionError("Observation render binding mismatch")
         image = observation_image(result["image_bytes"], metadata)
         public = {k: v for k, v in result.items() if k != "image_bytes"}
-        image["__prompt__"] += "\n" + json.dumps(public, ensure_ascii=True)
+        image["__prompt__"] += "\n" + json.dumps(public, ensure_ascii=True, separators=(",", ":"))
         return image
 
     async def stop_context(self, context):
@@ -314,8 +394,9 @@ class ComputerIntegration:
     async def stop_channel(self, owner_id, channel_id):
         from .models import RequestContext
 
-        await self.stop_context(RequestContext(str(owner_id), str(channel_id),
-                                               "operator-stop", "localhost"))
+        await self.stop_context(
+            RequestContext(str(owner_id), str(channel_id), "operator-stop", "localhost")
+        )
 
     async def set_enabled(self, enabled):
         await self.controller.set_enabled(bool(enabled))
@@ -335,18 +416,27 @@ class ComputerIntegration:
     def _operator_context(self, owner_id, web_session_id, *, emergency=False):
         from .models import RequestContext
 
-        if ((not self.bot.config.computer.enabled and not emergency)
-                or not owner_id or not web_session_id):
+        if (
+            (not self.bot.config.computer.enabled and not emergency)
+            or not owner_id
+            or not web_session_id
+        ):
             raise PermissionError("Computer unavailable")
-        context = RequestContext(str(owner_id), self.web_binding(web_session_id),
-                                 "web-operator", "localhost", surface="webui")
+        context = RequestContext(
+            str(owner_id),
+            self.web_binding(web_session_id),
+            "web-operator",
+            "localhost",
+            surface="webui",
+        )
         if not self._authorize(context):
             raise PermissionError("Computer unavailable")
         return context
 
     async def _operator_session(self, operation, *, owner_id, web_session_id):
-        context = self._operator_context(owner_id, web_session_id,
-                                         emergency=operation in {"status", "stop"})
+        context = self._operator_context(
+            owner_id, web_session_id, emergency=operation in {"status", "stop"}
+        )
         result = await self.controller.operator_session(context, operation)
         return {**result, "available": True, "owner_id": owner_id}
 
@@ -367,28 +457,34 @@ class ComputerIntegration:
 
     async def operator_evidence(self, *, owner_id, web_session_id, evidence_id):
         return await self.controller.read_evidence(
-            self._operator_context(owner_id, web_session_id), evidence_id)
+            self._operator_context(owner_id, web_session_id), evidence_id
+        )
 
     async def operator_export(self, *, owner_id, web_session_id, name):
         context = self._operator_context(owner_id, web_session_id)
         return await self.controller.operator_export(context, name)
 
     async def operator_download(self, *, owner_id, web_session_id, artifact_id):
-        return await self.operator_evidence(owner_id=owner_id, web_session_id=web_session_id,
-                                            evidence_id=artifact_id)
+        return await self.operator_evidence(
+            owner_id=owner_id, web_session_id=web_session_id, evidence_id=artifact_id
+        )
 
     async def operator_recover(self, *, owner_id, web_session_id, session_id, generation):
         context = self._operator_context(owner_id, web_session_id, emergency=True)
         return await self.controller.reconcile_recovery(context, session_id, generation)
 
-    async def operator_reconcile(self, *, owner_id, web_session_id, session_id,
-                                 generation, acknowledgment):
+    async def operator_reconcile(
+        self, *, owner_id, web_session_id, session_id, generation, acknowledgment
+    ):
         context = self._operator_context(owner_id, web_session_id, emergency=True)
         return await self.controller.operator_reconcile(
-            context, session_id, generation, acknowledgment)
+            context, session_id, generation, acknowledgment
+        )
 
-    async def operator_acknowledge_legacy(self, *, owner_id, web_session_id, session_id,
-                                          generation, acknowledgment):
+    async def operator_acknowledge_legacy(
+        self, *, owner_id, web_session_id, session_id, generation, acknowledgment
+    ):
         context = self._operator_context(owner_id, web_session_id, emergency=True)
         return await self.controller.acknowledge_legacy_recovery(
-            context, session_id, generation, acknowledgment)
+            context, session_id, generation, acknowledgment
+        )

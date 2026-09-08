@@ -10,7 +10,7 @@ from copy import deepcopy
 from dataclasses import asdict
 
 from .actions import _REQUIRED
-from .effects import effect_receipt, region_effect
+from .effects import effect_receipt, measured_appearance, region_effect, stroke_effect
 from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
 from .gui_actions import action_arguments, action_payload
 from .models import ComputerError
@@ -23,6 +23,7 @@ from .policy import (
     input_eligible,
     observation_input,
 )
+from .render import compact_sequence_receipt
 from .store import canonical_hash
 
 MAX_SEQUENCE_STEPS = 8
@@ -48,14 +49,33 @@ def sequence_arguments(inp):
     steps, ids = [], set()
     for item in items:
         if operation == "strokes":
-            exact_keys(item, {"action_id", "points", "duration", "modifiers"},
-                       {"action_id", "points", "duration"})
+            exact_keys(
+                item,
+                {"action_id", "points", "duration", "modifiers"},
+                {"action_id", "points", "duration"},
+            )
             item = {**item, "operation": "polyline", "expect": {"type": "visual_change"}}
         else:
-            exact_keys(item, {"action_id", "operation", "expect", "x", "y", "text", "key",
-                              "direction", "count", "duration", "points", "modifiers",
-                              "region", "target"},
-                       {"action_id", "operation", "expect"})
+            exact_keys(
+                item,
+                {
+                    "action_id",
+                    "operation",
+                    "expect",
+                    "x",
+                    "y",
+                    "text",
+                    "key",
+                    "direction",
+                    "count",
+                    "duration",
+                    "points",
+                    "modifiers",
+                    "region",
+                    "target",
+                },
+                {"action_id", "operation", "expect"},
+            )
         step = {**shared, **item}
         action_arguments(step)
         action_arguments({**step, "action_id": inp["action_id"]})
@@ -65,14 +85,16 @@ def sequence_arguments(inp):
             raise ComputerError("action_id_conflict")
         ids.add(step["action_id"])
         steps.append(step)
-    if (sum(len(s.get("points", [])) for s in steps) > MAX_SEQUENCE_POINTS
-            or sum(len(s.get("text", "")) for s in steps) > MAX_SEQUENCE_TEXT
-            or sum(s.get("duration", 0) for s in steps) > MAX_SEQUENCE_STROKE_SECONDS):
+    if (
+        sum(len(s.get("points", [])) for s in steps) > MAX_SEQUENCE_POINTS
+        or sum(len(s.get("text", "")) for s in steps) > MAX_SEQUENCE_TEXT
+        or sum(s.get("duration", 0) for s in steps) > MAX_SEQUENCE_STROKE_SECONDS
+    ):
         raise ComputerError("sequence_budget_exceeded")
     return steps
 
 
-def _stable_target(controller, context, original, current, step):
+def _stable_target(controller, context, original, current, step, *, attached_keyboard=False):
     """Exact original binding plus original target pixels, never new authority."""
     if current.geometry != original.geometry:
         raise ComputerError("sequence_target_changed")
@@ -80,7 +102,9 @@ def _stable_target(controller, context, original, current, step):
         return
     # A native focused editable node can tolerate selection/text changes without
     # accepting a different widget. No name-only or bounds-only rebinding.
-    if step["operation"] in {"type", "key"} and _same_focused_field(original, current):
+    if step["operation"] in {"type", "key"} and (
+        attached_keyboard or _same_focused_field(original, current)
+    ):
         return
     if step["operation"] not in POINTER_OPERATIONS:
         raise ComputerError("sequence_visual_target_changed")
@@ -92,28 +116,36 @@ def _stable_target(controller, context, original, current, step):
 
 def _same_focused_field(original, current):
     def focused(observation):
-        return [node for node in observation.accessibility
-                if node.get("focused") is True and node.get("text_readable") is True
-                and "replace_field" in node.get("capabilities", [])]
+        return [
+            node
+            for node in observation.accessibility
+            if node.get("focused") is True
+            and node.get("text_readable") is True
+            and "replace_field" in node.get("capabilities", [])
+        ]
 
     before, after = focused(original), focused(current)
     if len(before) != 1 or len(after) != 1:
         return False
     old, new = before[0], after[0]
     identities = ("node_identity", "root_identity", "ancestor_identity")
-    if any(not isinstance(old.get(key), str) or not old[key]
-           or old[key] != new.get(key) for key in identities):
+    if any(
+        not isinstance(old.get(key), str) or not old[key] or old[key] != new.get(key)
+        for key in identities
+    ):
         return False
-    return all(old.get(key) == new.get(key) for key in
-               ("role", "bounds", "bounds_space", "capabilities"))
+    return all(
+        old.get(key) == new.get(key) for key in ("role", "bounds", "bounds_space", "capabilities")
+    )
 
 
 def _preflight_backend(grant, steps):
     # Static backend limits reject the WHOLE plan; actual native keymap
     # availability remains checked immediately before input by each guardian.
     for step in steps:
-        if grant.platform == "wayland" and (step["expect"] != {"type": "visual_change"}
-                or len(step.get("text", "")) > 256):
+        if grant.platform == "wayland" and (
+            step["expect"] != {"type": "visual_change"} or len(step.get("text", "")) > 256
+        ):
             raise ComputerError("sequence_backend_limit")
         if any(127 <= ord(c) <= 159 for c in step.get("text", "")):
             raise ComputerError("invalid_text")
@@ -131,7 +163,7 @@ async def execute_sequence(controller, context, inp):
         grant = controller._grant(context, inp, generation=False)
         existing = controller.store.receipt(grant.session_id, inp["action_id"], payload_hash)
         if existing is not None:
-            return existing
+            return compact_sequence_receipt(existing)
         grant = controller._grant(context, inp)
         live = controller._active(grant)
         if live.capabilities is None or live.capabilities.environment != grant.environment:
@@ -164,21 +196,34 @@ async def execute_sequence(controller, context, inp):
                 raise
         if not callable(getattr(live.backend, "act", None)):
             raise ComputerError("grounded_actions_unavailable")
-        reserved = [(s["action_id"], canonical_hash({"sequence": inp["action_id"], "step": s}))
-                    for s in steps]
+        reserved = [
+            (s["action_id"], canonical_hash({"sequence": inp["action_id"], "step": s}))
+            for s in steps
+        ]
         existing = controller.store.begin_sequence(
-            grant, inp["action_id"], payload_hash, reserved, MAX_ACTIONS,
-            provenance=getattr(live.backend, "application_provenance", None))
+            grant,
+            inp["action_id"],
+            payload_hash,
+            reserved,
+            MAX_ACTIONS,
+            provenance=getattr(live.backend, "application_provenance", None),
+        )
         if existing is not None:
-            return existing
+            return compact_sequence_receipt(existing)
         controller._delivered_observations.pop(grant.session_id, None)
         live.observations.clear()
         if live.task_context is not None:
             live.task_context.invalidate("sequence_dispatched")
-        deadline = min(controller.monotonic() + MAX_SEQUENCE_SECONDS, live.deadline,
-                       original.captured_at + DELIVERED_GROUNDING_SECONDS)
-        crop = (asdict(original.frame_metadata.crop) if original.frame_metadata is not None
-                and original.frame_metadata.crop is not None else None)
+        deadline = min(
+            controller.monotonic() + MAX_SEQUENCE_SECONDS,
+            live.deadline,
+            original.captured_at + DELIVERED_GROUNDING_SECONDS,
+        )
+        crop = (
+            asdict(original.frame_metadata.crop)
+            if original.frame_metadata is not None and original.frame_metadata.crop is not None
+            else None
+        )
         settled, attempted = [], None
         latest, latest_image = None, None
         reason, cancelled, stop_required, effect_uncertain = None, False, False, False
@@ -192,20 +237,36 @@ async def execute_sequence(controller, context, inp):
 
         async def capture():
             budget = min(5.0, remaining())
-            return await _bounded(controller._capture(grant, crop=crop, strict_binding=True),
-                                  budget)
+            return await _bounded(
+                controller._capture(grant, crop=crop, strict_binding=True), budget
+            )
 
         async def authorize():
             budget = min(5.0, remaining())
             await _bounded(controller._auth(context), budget)
             remaining()
 
+        def stable_target(step):
+            # Match single-action X11 attached keyboard policy: exact native
+            # source/focus geometry, not unrelated canvas/caret raster changes.
+            # Pointer anchors still compare against the MODEL's original view.
+            _stable_target(
+                controller,
+                context,
+                original,
+                latest,
+                step,
+                attached_keyboard=(
+                    grant.platform == "x11" and grant.environment == "existing_session"
+                ),
+            )
+
         try:
             for index, step in enumerate(steps):
                 await authorize()
                 if latest is None:
                     latest, latest_image = await capture()
-                _stable_target(controller, context, original, latest, step)
+                stable_target(step)
                 observation_input(grant, live, latest)
                 payload, target = action_payload(step, latest)
                 await authorize()
@@ -217,6 +278,9 @@ async def execute_sequence(controller, context, inp):
                 attempted = index
                 raw = await _bounded(live.backend.act(payload), budget)
                 result = effect_receipt(raw, current, step["expect"], target)
+                # Never persist raster-only stroke success as semantic proof,
+                # even if cancellation arrives before the checkpoint capture.
+                stroke_effect(result, step, None, None, binding_matches=False)
                 # Commit injection/release facts BEFORE any capture/auth await.
                 controller.store.finish_action(grant.session_id, step["action_id"], result)
                 settled.append(result)
@@ -228,44 +292,86 @@ async def execute_sequence(controller, context, inp):
                     effect_uncertain = True
                 await authorize()
                 latest, latest_image = await capture()
-                if step["expect"]["type"] == "region_changed" and not effect_uncertain:
+                if (
+                    step["expect"]["type"] == "region_changed"
+                    or step["operation"] in {"polyline", "drag"}
+                ) and not effect_uncertain:
                     before_image = controller.store.read_evidence(context, current.evidence_id)[0]
-                    region_effect(result, step["expect"], before_image, latest_image,
-                                  binding_matches=latest.geometry == current.geometry)
+                    region_effect(
+                        result,
+                        step["expect"],
+                        before_image,
+                        latest_image,
+                        binding_matches=latest.geometry == current.geometry,
+                    )
+                    stroke_effect(
+                        result,
+                        step,
+                        before_image,
+                        latest_image,
+                        binding_matches=latest.geometry == current.geometry,
+                    )
+                if (
+                    latest.modal is not None
+                    and latest.modal != current.modal
+                    and not (
+                        latest.modal_kind == "safe_application" and measured_appearance(result)
+                    )
+                ):
+                    if result["status"] not in {"unknown", "interrupted"}:
+                        result["status"] = "not_satisfied"
+                    result.setdefault("verification", {}).update(
+                        status="not_satisfied", reason="unexpected_dialog_transition"
+                    )
                 result.setdefault("verification", {}).update(evidence_id=latest.evidence_id)
                 result["observation_id"] = latest.observation_id
                 controller.store.finish_action(grant.session_id, step["action_id"], result)
-                if isinstance(raw, dict) and raw.get("sampled_target_changed") is True:
-                    raise ComputerError("sequence_sampled_target_changed")
-                if latest.geometry != original.geometry:
-                    raise ComputerError("sequence_target_changed")
                 if result["status"] != "verified":
                     raise ComputerError("sequence_step_not_verified")
                 if index + 1 < len(steps):
-                    _stable_target(controller, context, original, latest, steps[index + 1])
+                    # These are NEXT-input vetoes, not retroactive failures of
+                    # a verified final step. A new dialog must be delivered and
+                    # inspected by the model before any action inside it.
+                    if isinstance(raw, dict) and raw.get("sampled_target_changed") is True:
+                        raise ComputerError("sequence_sampled_target_changed")
+                    stable_target(steps[index + 1])
         except (Exception, asyncio.CancelledError) as exc:
             cancelled = isinstance(exc, asyncio.CancelledError)
-            reason = ("sequence_cancelled" if cancelled else exc.code
-                      if isinstance(exc, ComputerError) else "sequence_interrupted")
+            reason = (
+                "sequence_cancelled"
+                if cancelled
+                else exc.code
+                if isinstance(exc, ComputerError)
+                else "sequence_interrupted"
+            )
             stop_required |= cancelled or attempted is not None
             if attempted is not None:
                 # Set the cleanup requirement before a possibly failing write.
                 result = {"status": "unknown", "reason": "input_outcome_unknown"}
                 settled.append(result)
                 controller.store.finish_action(
-                    grant.session_id, steps[attempted]["action_id"], result)
+                    grant.session_id, steps[attempted]["action_id"], result
+                )
         finally:
             # Cleanup cannot be skipped if durable settlement itself fails.
             try:
-                for step in steps[len(settled):]:
-                    controller.store.finish_action(grant.session_id, step["action_id"], {
-                        "status": "unavailable", "reason": "sequence_not_dispatched",
-                        "execution": {"injected": False, "released": True}})
+                for step in steps[len(settled) :]:
+                    controller.store.finish_action(
+                        grant.session_id,
+                        step["action_id"],
+                        {
+                            "status": "unavailable",
+                            "reason": "sequence_not_dispatched",
+                            "execution": {"injected": False, "released": True},
+                        },
+                    )
                 verification = {
-                    "type": "sequence", "status": "satisfied" if reason is None else "interrupted",
+                    "type": "sequence",
+                    "status": "satisfied" if reason is None else "interrupted",
                     "scope": "individual_postconditions_only",
                     "step_action_ids": [s[0] for s in reserved],
-                    "settled_steps": len(settled), "total_steps": len(steps),
+                    "settled_steps": len(settled),
+                    "total_steps": len(steps),
                     "grounding_observation_id": original.observation_id,
                     "automatic_replay": False,
                     "frame_status": "available" if latest is not None else "unavailable",
@@ -276,19 +382,27 @@ async def execute_sequence(controller, context, inp):
                     verification["next_action"] = "inspect_interruption_then_plan_new_action_ids"
                     if live.task_context is not None:
                         live.task_context.invalidate(reason)
-                result = {"status": "verified" if reason is None else
-                          "unknown" if stop_required else
-                          "interrupted" if effect_uncertain else "not_satisfied",
-                          "verification": verification,
-                          "execution": {
-                              "injected": any(s.get("execution", {}).get("injected") is True
-                                              or s.get("status") == "unknown" for s in settled),
-                              "released": not stop_required and all(
-                                  s.get("execution", {}).get("released") is True for s in settled),
-                              "completed_steps": sum(s.get("status") == "verified"
-                                                     for s in settled),
-                              "planned_steps": len(steps),
-                          }}
+                result = {
+                    "status": "verified"
+                    if reason is None
+                    else "unknown"
+                    if stop_required
+                    else "interrupted"
+                    if effect_uncertain
+                    else "not_satisfied",
+                    "verification": verification,
+                    "execution": {
+                        "injected": any(
+                            s.get("execution", {}).get("injected") is True
+                            or s.get("status") == "unknown"
+                            for s in settled
+                        ),
+                        "released": not stop_required
+                        and all(s.get("execution", {}).get("released") is True for s in settled),
+                        "completed_steps": sum(s.get("status") == "verified" for s in settled),
+                        "planned_steps": len(steps),
+                    },
+                }
                 if reason is not None:
                     result["reason"] = reason
                 controller.store.finish_action(grant.session_id, inp["action_id"], result)
@@ -301,9 +415,16 @@ async def execute_sequence(controller, context, inp):
                     await controller._stop(grant.session_id, "cancelled")
         if cancelled:
             raise asyncio.CancelledError
-        receipt = controller.store.receipt(grant.session_id, inp["action_id"], payload_hash)
-        if (reason is not None and latest is not None and latest.modal is not None
-                and latest.modal != original.modal and not stop_required):
+        receipt = compact_sequence_receipt(
+            controller.store.receipt(grant.session_id, inp["action_id"], payload_hash)
+        )
+        if (
+            reason is not None
+            and latest is not None
+            and latest.modal is not None
+            and latest.modal != original.modal
+            and not stop_required
+        ):
             # Preserve ordinary-action unexpected-modal policy. Pausing revokes
             # the old generation, so do not publish its frame as actionable.
             await controller._pause(grant.session_id)
@@ -311,13 +432,21 @@ async def execute_sequence(controller, context, inp):
         if latest is not None and latest_image is not None and not stop_required:
             # A known interruption yields its new view to the MODEL, not another
             # step. Only actual final/interruption delivery grants later authority.
-            return {**receipt, "next_observation": {
-                **latest.public(), "image_bytes": latest_image,
-                "task_context": controller._task_context(live),
-                **controller._input_status(live, grant),
-                "sources": (live.backend.sources()
-                            if callable(getattr(live.backend, "sources", None)) else []),
-                "backend_capabilities": (live.capabilities.public()
-                                         if live.capabilities is not None else None),
-            }}
+            return {
+                **receipt,
+                "next_observation": {
+                    **latest.public(),
+                    "image_bytes": latest_image,
+                    "task_context": controller._task_context(live),
+                    **controller._input_status(live, grant),
+                    "sources": (
+                        live.backend.sources()
+                        if callable(getattr(live.backend, "sources", None))
+                        else []
+                    ),
+                    "backend_capabilities": (
+                        live.capabilities.public() if live.capabilities is not None else None
+                    ),
+                },
+            }
         return receipt
