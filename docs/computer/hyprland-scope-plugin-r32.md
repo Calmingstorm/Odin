@@ -33,14 +33,18 @@ consented output, then Wayland roundtrip. This makes pre-arm events denyable.
 - `focus`: `token,serial,pid,wm_class,title,x,y,width,height,modal:false`.
   Geometry except scale is integer logical global coordinates or pixel sizes.
   Fractional animated geometry refuses, never rounds. Parented/modal toplevels,
-  nonnative surfaces and Xwayland refuse. Application allowlisting is enforced
-  additionally by the Python backend; native scope is not application consent.
+  nonnative surfaces and Xwayland refuse. Native scope is provenance and geometry
+  evidence, not application or task consent from the authenticated operator.
 - `{"op":"arm","token":"...","lease_ms":250}` consumes a snapshot less
   than 250ms old; validates target/output, same-client guardian devices, and
   refuses while human keys/buttons are held.
 - `{"op":"renew","token":"...","lease_ms":250}` uses the original arm
   token on the same guardian connection while the old lease remains valid.
   Fresh Python snapshot tokens do not replace the active guardian arm token.
+  Both arm and renew also require `deadline_monotonic_ns`: an actual absolute
+  monotonic nanosecond deadline, future and within 250ms of dispatch. The
+  companion clamps the relative lease to that absolute deadline. Transport delay
+  cannot create fresh authority from an expired permit.
 - `{"op":"status"}`, `{"op":"release_all"}`, `{"op":"stop"}`.
 
 Replies: `ok,version,armed,keys,buttons,accepted,rejected,failed,reason,revision,
