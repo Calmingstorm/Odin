@@ -46,9 +46,15 @@ class AffineTransform:
     e: Fraction = Fraction(1)
     f: Fraction = Fraction(0)
 
-    def __init__(self, a: int | float | Fraction = 1, b: int | float | Fraction = 0,
-                 c: int | float | Fraction = 0, d: int | float | Fraction = 0,
-                 e: int | float | Fraction = 1, f: int | float | Fraction = 0) -> None:
+    def __init__(
+        self,
+        a: int | float | Fraction = 1,
+        b: int | float | Fraction = 0,
+        c: int | float | Fraction = 0,
+        d: int | float | Fraction = 0,
+        e: int | float | Fraction = 1,
+        f: int | float | Fraction = 0,
+    ) -> None:
         for name, value in zip("abcdef", (a, b, c, d, e, f), strict=True):
             object.__setattr__(self, name, rational(value))
         if not self.a * self.e - self.b * self.d:
@@ -56,24 +62,35 @@ class AffineTransform:
 
     def map_point(self, x, y):
         x, y = rational(x), rational(y)
-        return (self.a*x + self.b*y + self.c, self.d*x + self.e*y + self.f)
+        return (self.a * x + self.b * y + self.c, self.d * x + self.e * y + self.f)
 
     def compose(self, other):
         """Return self(other(point))."""
         return AffineTransform(
-            self.a*other.a + self.b*other.d, self.a*other.b + self.b*other.e,
-            self.a*other.c + self.b*other.f + self.c,
-            self.d*other.a + self.e*other.d, self.d*other.b + self.e*other.e,
-            self.d*other.c + self.e*other.f + self.f)
+            self.a * other.a + self.b * other.d,
+            self.a * other.b + self.b * other.e,
+            self.a * other.c + self.b * other.f + self.c,
+            self.d * other.a + self.e * other.d,
+            self.d * other.b + self.e * other.e,
+            self.d * other.c + self.e * other.f + self.f,
+        )
 
     def inverse(self):
-        det = self.a*self.e - self.b*self.d
-        return AffineTransform(self.e/det, -self.b/det, (self.b*self.f-self.e*self.c)/det,
-                               -self.d/det, self.a/det, (self.d*self.c-self.a*self.f)/det)
+        det = self.a * self.e - self.b * self.d
+        return AffineTransform(
+            self.e / det,
+            -self.b / det,
+            (self.b * self.f - self.e * self.c) / det,
+            -self.d / det,
+            self.a / det,
+            (self.d * self.c - self.a * self.f) / det,
+        )
 
     def public(self):
-        return {name: [getattr(self, name).numerator, getattr(self, name).denominator]
-                for name in "abcdef"}
+        return {
+            name: [getattr(self, name).numerator, getattr(self, name).denominator]
+            for name in "abcdef"
+        }
 
 
 def crop_transform(x, y, width, height, delivered_width, delivered_height, rotation=0):
@@ -88,11 +105,11 @@ def crop_transform(x, y, width, height, delivered_width, delivered_height, rotat
     if rotation == 0:
         return AffineTransform(sx, 0, x, 0, sy, y)
     if rotation == 180:
-        return AffineTransform(-sx, 0, x+width, 0, -sy, y+height)
+        return AffineTransform(-sx, 0, x + width, 0, -sy, y + height)
     sx, sy = Fraction(width, delivered_height), Fraction(height, delivered_width)
     if rotation == 90:
-        return AffineTransform(0, sx, x, -sy, 0, y+height)
-    return AffineTransform(0, -sx, x+width, sy, 0, y)
+        return AffineTransform(0, sx, x, -sy, 0, y + height)
+    return AffineTransform(0, -sx, x + width, sy, 0, y)
 
 
 @dataclass(frozen=True)
@@ -142,7 +159,7 @@ class SourceGeometry:
             raise GeometryError("pixel_index_required")
         if not (0 <= x < delivered_width and 0 <= y < delivered_height):
             raise GeometryError("outside_delivered_image")
-        sx, sy = delivered_to_source.map_point(Fraction(2*x+1, 2), Fraction(2*y+1, 2))
+        sx, sy = delivered_to_source.map_point(Fraction(2 * x + 1, 2), Fraction(2 * y + 1, 2))
         if not (0 <= sx < self.pixel_width and 0 <= sy < self.pixel_height):
             raise GeometryError("outside_source")
         ix, iy = self.pixel_to_input.map_point(sx, sy)
@@ -153,12 +170,18 @@ class SourceGeometry:
     def public(self):
         def pair(v):
             return None if v is None else [v.numerator, v.denominator]
-        return {"source_id": self.source_id, "source_revision": self.source_revision,
-                "consent_generation": self.consent_generation,
-                "pixel_width": self.pixel_width, "pixel_height": self.pixel_height,
-                "input_region_id": self.input_region_id,
-                "input_width": pair(self.input_width), "input_height": pair(self.input_height),
-                "pixel_to_input": (
-                    None if self.pixel_to_input is None else self.pixel_to_input.public()
-                ),
-                "rotation": self.rotation}
+
+        return {
+            "source_id": self.source_id,
+            "source_revision": self.source_revision,
+            "consent_generation": self.consent_generation,
+            "pixel_width": self.pixel_width,
+            "pixel_height": self.pixel_height,
+            "input_region_id": self.input_region_id,
+            "input_width": pair(self.input_width),
+            "input_height": pair(self.input_height),
+            "pixel_to_input": (
+                None if self.pixel_to_input is None else self.pixel_to_input.public()
+            ),
+            "rotation": self.rotation,
+        }

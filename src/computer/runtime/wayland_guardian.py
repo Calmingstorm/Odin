@@ -1,4 +1,5 @@
 """Owned transport for the persistent independently leased libei guardian."""
+
 from __future__ import annotations
 
 import asyncio
@@ -24,14 +25,31 @@ class _Credentials(TypedDict, total=False):
     extra_groups: list[int]
 
 
-_ACTION_REASONS = frozenset({
-    "completed", "cancelled", "orderly", "unsupported_character", "unsupported_key",
-    "keymap_unavailable", "modifier_state_active", "scroll_capability_unavailable",
-    "lease-expired", "signal-cancel", "controller-timeout", "controller-eof",
-    "input-path-lost", "mapping-changed", "topology-changed", "too-many-devices",
-    "modifier-state-changed", "invalid-command", "transport-error", "poll-error",
-    "wayland_guardian_input_path_lost",
-})
+_ACTION_REASONS = frozenset(
+    {
+        "completed",
+        "cancelled",
+        "orderly",
+        "unsupported_character",
+        "unsupported_key",
+        "keymap_unavailable",
+        "modifier_state_active",
+        "scroll_capability_unavailable",
+        "lease-expired",
+        "signal-cancel",
+        "controller-timeout",
+        "controller-eof",
+        "input-path-lost",
+        "mapping-changed",
+        "topology-changed",
+        "too-many-devices",
+        "modifier-state-changed",
+        "invalid-command",
+        "transport-error",
+        "poll-error",
+        "wayland_guardian_input_path_lost",
+    }
+)
 
 
 def _action_diagnostics(row):
@@ -39,15 +57,20 @@ def _action_diagnostics(row):
     raw = row.get("diagnostics")
     if not isinstance(raw, dict):
         return None
-    if (raw.get("phase") not in {"preflight", "dispatch", "release", "verification", "complete"}
-            or any(type(raw.get(k)) is not int or not 0 <= raw[k] <= 4096
-                   for k in ("steps_planned", "steps_completed"))
-            or raw["steps_completed"] > raw["steps_planned"]
-            or raw.get("release") not in {"confirmed", "unknown"}
-            or raw.get("reason") not in _ACTION_REASONS):
+    if (
+        raw.get("phase") not in {"preflight", "dispatch", "release", "verification", "complete"}
+        or any(
+            type(raw.get(k)) is not int or not 0 <= raw[k] <= 4096
+            for k in ("steps_planned", "steps_completed")
+        )
+        or raw["steps_completed"] > raw["steps_planned"]
+        or raw.get("release") not in {"confirmed", "unknown"}
+        or raw.get("reason") not in _ACTION_REASONS
+    ):
         return None
-    return {key: raw[key] for key in
-            ("phase", "steps_planned", "steps_completed", "release", "reason")}
+    return {
+        key: raw[key] for key in ("phase", "steps_planned", "steps_completed", "release", "reason")
+    }
 
 
 def trusted_binary(path: str) -> None:
@@ -64,8 +87,11 @@ def trusted_binary(path: str) -> None:
 
 
 def _mapping(value):
-    if (type(value) is not str or not 1 <= len(value) <= 128
-            or any(not 33 <= ord(c) <= 126 for c in value)):
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 128
+        or any(not 33 <= ord(c) <= 126 for c in value)
+    ):
         raise WaylandGuardianError("wayland_mapping_identifier_invalid")
 
 
@@ -91,8 +117,12 @@ class WaylandGuardian:
 
     @property
     def alive(self):
-        return bool(self._child and self._child.returncode is None
-                    and not self._closing and not self._failed)
+        return bool(
+            self._child
+            and self._child.returncode is None
+            and not self._closing
+            and not self._failed
+        )
 
     async def _identity(self, value):
         if self.on_spawn is not None:
@@ -110,21 +140,31 @@ class WaylandGuardian:
             if self.expected_uid != os.geteuid():
                 if os.geteuid() != 0:
                     raise WaylandGuardianError("wayland_guardian_uid_unavailable")
-                credentials = {"user": self.expected_uid,
-                               "group": pwd.getpwuid(self.expected_uid).pw_gid,
-                               "extra_groups": []}
+                credentials = {
+                    "user": self.expected_uid,
+                    "group": pwd.getpwuid(self.expected_uid).pw_gid,
+                    "extra_groups": [],
+                }
             await self._identity(None)
             self._child = await asyncio.create_subprocess_exec(
-                self.binary, str(fd), mapping_id, pass_fds=(fd,),
-                stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
+                self.binary,
+                str(fd),
+                mapping_id,
+                pass_fds=(fd,),
+                stdin=asyncio.subprocess.PIPE,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.DEVNULL,
+                start_new_session=True,
                 env={"PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"},
-                limit=65536, **credentials)
+                limit=65536,
+                **credentials,
+            )
             self._waiter = asyncio.create_task(self._child.wait())
         finally:
             os.close(fd)
         try:
             from .recovery import process_identity
+
             await self._identity(process_identity(self._child.pid))
             self._reader = asyncio.create_task(self._read())
             self._ready = await self._receive("ready", timeout=8)
@@ -162,9 +202,12 @@ class WaylandGuardian:
         async with self._write_lock:
             if self._closing and data != "C\n":
                 raise WaylandGuardianError("wayland_guardian_revoked")
-            if (self._child is None or self._child.returncode is not None
-                    or self._child.stdin is None
-                    or self._child.stdin.is_closing()):
+            if (
+                self._child is None
+                or self._child.returncode is not None
+                or self._child.stdin is None
+                or self._child.stdin.is_closing()
+            ):
                 raise WaylandGuardianError("wayland_guardian_disconnected")
             self._child.stdin.write(data.encode("ascii"))
             await self._child.stdin.drain()
@@ -176,8 +219,12 @@ class WaylandGuardian:
                 row = await self._events.get()
                 if row.get("event") == "pixel_gate":
                     step = row.get("step")
-                    if (pixel_guard is None or set(row) != {"event", "step"}
-                            or type(step) is not int or not previous_step < step <= 1_000_000):
+                    if (
+                        pixel_guard is None
+                        or set(row) != {"event", "step"}
+                        or type(step) is not int
+                        or not previous_step < step <= 1_000_000
+                    ):
                         raise WaylandGuardianError("wayland_guardian_unexpected_receipt")
                     # One fresh authenticated focus check per native dispatch.
                     await asyncio.wait_for(pixel_guard(), 0.45)
@@ -194,6 +241,7 @@ class WaylandGuardian:
                     raise error
                 if row.get("event") not in {"begun", "begin", "selected", "held"}:
                     raise WaylandGuardianError("wayland_guardian_unexpected_receipt")
+
         return await asyncio.wait_for(receive(), timeout)
 
     async def _heartbeats(self) -> None:
@@ -214,10 +262,16 @@ class WaylandGuardian:
             return self.ready
 
     async def act(self, command: str, *, pixel_guard=None):
-        if (type(command) is not str or not command or len(command) > 32000
-                or command[0] not in "MPDKTJQWVLYZE" or "\n" in command or "\r" in command
-                or "\x00" in command
-                or (command.startswith("E ") != (pixel_guard is not None))):
+        if (
+            type(command) is not str
+            or not command
+            or len(command) > 32000
+            or command[0] not in "MPDKTJQWVLYZE"
+            or "\n" in command
+            or "\r" in command
+            or "\x00" in command
+            or (command.startswith("E ") != (pixel_guard is not None))
+        ):
             raise WaylandGuardianError("wayland_guardian_invalid_action")
         async with self._action_lock:
             if not self.alive:
@@ -234,10 +288,17 @@ class WaylandGuardian:
                 if isinstance(exc, Exception):
                     detail = _action_diagnostics(self._last_terminal)
                     error = WaylandGuardianError("wayland_guardian_input_path_lost")
-                    error.details = {"input_was_sent": self._last_terminal.get("input_was_sent"),
-                                     "diagnostics": detail or {
-                        "phase": "dispatch", "steps_planned": 0, "steps_completed": 0,
-                        "release": "unknown", "reason": "wayland_guardian_input_path_lost"}}
+                    error.details = {
+                        "input_was_sent": self._last_terminal.get("input_was_sent"),
+                        "diagnostics": detail
+                        or {
+                            "phase": "dispatch",
+                            "steps_planned": 0,
+                            "steps_completed": 0,
+                            "release": "unknown",
+                            "reason": "wayland_guardian_input_path_lost",
+                        },
+                    }
                     raise error from None
                 raise
             if receipt.get("event") == "action_rejected":
@@ -245,14 +306,25 @@ class WaylandGuardian:
                 if reason not in _ACTION_REASONS:
                     reason = "wayland_guardian_input_path_lost"
                 error = WaylandGuardianError(reason)
-                error.details = {**receipt, "reason": reason, "diagnostics": {
-                    "phase": "preflight", "steps_planned": 0, "steps_completed": 0,
-                    "release": "confirmed", "reason": reason}}
+                error.details = {
+                    **receipt,
+                    "reason": reason,
+                    "diagnostics": {
+                        "phase": "preflight",
+                        "steps_planned": 0,
+                        "steps_completed": 0,
+                        "release": "confirmed",
+                        "reason": reason,
+                    },
+                }
                 raise error
             detail = _action_diagnostics(receipt)
             receipt.pop("diagnostics", None)
-            return {**receipt, "release_submitted": self._release_submitted,
-                    **({"diagnostics": detail} if detail is not None else {})}
+            return {
+                **receipt,
+                "release_submitted": self._release_submitted,
+                **({"diagnostics": detail} if detail is not None else {}),
+            }
 
     async def _close(self) -> dict[str, bool]:
         self._closing = True
@@ -260,8 +332,7 @@ class WaylandGuardian:
             self._heartbeat.cancel()
             await asyncio.gather(self._heartbeat, return_exceptions=True)
         if self._child is None:
-            return {"process_reaped": True, "release_submitted": True,
-                    "input_was_sent": False}
+            return {"process_reaped": True, "release_submitted": True, "input_was_sent": False}
         try:
             await asyncio.wait_for(self._send("C\n"), 0.2)
         except Exception:
@@ -270,28 +341,41 @@ class WaylandGuardian:
             self._child.stdin.close()
         if self._waiter is None:
             # A missing owner waiter cannot establish reaping or release.
-            return {"process_reaped": False, "release_submitted": False,
-                    "input_was_sent": self._active}
+            return {
+                "process_reaped": False,
+                "release_submitted": False,
+                "input_was_sent": self._active,
+            }
         try:
             await asyncio.wait_for(asyncio.shield(self._waiter), 3)
         except TimeoutError:
             # Keep exact native ownership; never kill a release supervisor to
             # manufacture cleanup. The native lease remains independent.
-            return {"process_reaped": False, "release_submitted": False,
-                    "input_was_sent": self._active}
+            return {
+                "process_reaped": False,
+                "release_submitted": False,
+                "input_was_sent": self._active,
+            }
         if self._reader:
             await asyncio.gather(self._reader, return_exceptions=True)
-        released = (not self._failed and self._closed_receipt
-                    and self._child.returncode == 0
-                    and (not self._active or self._release_submitted))
-        return {"process_reaped": True, "release_submitted": released,
-                "input_was_sent": self._active}
+        released = (
+            not self._failed
+            and self._closed_receipt
+            and self._child.returncode == 0
+            and (not self._active or self._release_submitted)
+        )
+        return {
+            "process_reaped": True,
+            "release_submitted": released,
+            "input_was_sent": self._active,
+        }
 
     async def close(self):
         # Fence before scheduling cleanup, including writers already queued on
         # the transport lock. Only the exact cancel message may cross this fence.
         self._closing = True
-        if self._cleanup is None or (self._cleanup.done() and self._child is not None
-                                     and self._child.returncode is None):
+        if self._cleanup is None or (
+            self._cleanup.done() and self._child is not None and self._child.returncode is None
+        ):
             self._cleanup = asyncio.create_task(self._close())
         return await asyncio.shield(self._cleanup)

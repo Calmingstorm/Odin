@@ -4,6 +4,7 @@ The owner must keep this connection alive for the attachment lifetime. A fresh
 connection cannot certify that no transient topology changes happened earlier.
 No wake, mode-setting, input or display discovery is performed here.
 """
+
 from __future__ import annotations
 
 
@@ -22,8 +23,11 @@ class RandRRevision:
             raise TopologyUnavailable("randr_events_unavailable")
         self.event_types = {extension.first_event, extension.first_event + 1}
         root.xrandr_select_input(
-            randr.RRScreenChangeNotifyMask | randr.RRCrtcChangeNotifyMask
-            | randr.RROutputChangeNotifyMask | randr.RROutputPropertyNotifyMask)
+            randr.RRScreenChangeNotifyMask
+            | randr.RRCrtcChangeNotifyMask
+            | randr.RROutputChangeNotifyMask
+            | randr.RROutputPropertyNotifyMask
+        )
         display.sync()
         self.drain()
 
@@ -33,7 +37,7 @@ class RandRRevision:
         self.display.sync()
         while self.display.pending_events():
             event = self.display.next_event()
-            if (event.type & 0x7f) in self.event_types:
+            if (event.type & 0x7F) in self.event_types:
                 self.revision += 1
         return self.revision
 

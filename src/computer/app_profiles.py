@@ -7,8 +7,12 @@ def application_profile(app, *, platform, environment):
     """Describe isolated launches only. Attached sessions have no app profile."""
     if platform != "x11" or environment != "isolated" or app not in ISOLATED_PROFILES:
         return None
-    return {"id": app, "label": {"drawing": "Drawing", "xed": "Xed"}[app],
-            "input": "supported", "reason": None}
+    return {
+        "id": app,
+        "label": {"drawing": "Drawing", "xed": "Xed"}[app],
+        "input": "supported",
+        "reason": None,
+    }
 
 
 def validate_profile(app, *, platform, environment):

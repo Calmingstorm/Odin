@@ -18,11 +18,25 @@ import zlib
 from .accessibility import Accessibility, PrimitiveError, bounded_text, finite
 
 XDOTOOL = "/usr/bin/xdotool"
-PROFILES = {"drawing": ("/usr/bin/drawing", "--new-window"),
-            "xed": ("/usr/bin/xed", "--standalone", "--new-window")}
+PROFILES = {
+    "drawing": ("/usr/bin/drawing", "--new-window"),
+    "xed": ("/usr/bin/xed", "--standalone", "--new-window"),
+}
 KEY_PATTERN = r"(?:(?:ctrl|alt|shift|super)\+){0,4}[A-Za-z0-9_]+"
-PHYSICAL = frozenset({"move", "click", "double_click", "right_click", "middle_click",
-                      "scroll", "key", "type", "polyline", "replace_field_pixels"})
+PHYSICAL = frozenset(
+    {
+        "move",
+        "click",
+        "double_click",
+        "right_click",
+        "middle_click",
+        "scroll",
+        "key",
+        "type",
+        "polyline",
+        "replace_field_pixels",
+    }
+)
 SEMANTIC = frozenset({"invoke", "focus", "set_text", "replace_field", "select", "value"})
 CLICKS = frozenset({"click", "double_click", "right_click", "middle_click"})
 MODIFIED_POINTER = CLICKS | {"scroll", "polyline"}
@@ -31,9 +45,15 @@ MODIFIED_POINTER = CLICKS | {"scroll", "polyline"}
 def pointer_modifiers(action):
     """Validate pointer modifiers without touching a keymap or issuing input."""
     modifiers = action.get("modifiers", [])
-    if (type(modifiers) is not list or len(modifiers) > 4
-            or any(type(item) is not str or item not in {"ctrl", "alt", "shift", "super"}
-                   for item in modifiers) or len(set(modifiers)) != len(modifiers)):
+    if (
+        type(modifiers) is not list
+        or len(modifiers) > 4
+        or any(
+            type(item) is not str or item not in {"ctrl", "alt", "shift", "super"}
+            for item in modifiers
+        )
+        or len(set(modifiers)) != len(modifiers)
+    ):
         raise PrimitiveError("rejected", "Invalid pointer modifiers")
     return modifiers
 
@@ -48,18 +68,26 @@ def click_options(action):
 
 def field_expectation(action):
     expected = action.get("expected")
-    return (action.get("type") == "replace_field" and type(expected) is dict
-            and set(expected) == {"type", "target", "text"}
-            and expected["type"] == "field_text_equals"
-            and type(action.get("target")) is str and 1 <= len(action["target"]) <= 128
-            and expected["target"] == action["target"]
-            and type(action.get("text")) is str and expected["text"] == action["text"])
+    return (
+        action.get("type") == "replace_field"
+        and type(expected) is dict
+        and set(expected) == {"type", "target", "text"}
+        and expected["type"] == "field_text_equals"
+        and type(action.get("target")) is str
+        and 1 <= len(action["target"]) <= 128
+        and expected["target"] == action["target"]
+        and type(action.get("text")) is str
+        and expected["text"] == action["text"]
+    )
 
 
 def parse_key_chord(value):
     """Parse a bounded keysym chord; native resolution decides availability."""
-    if (type(value) is not str or not 1 <= len(value) <= 128
-            or re.fullmatch(KEY_PATTERN, value) is None):
+    if (
+        type(value) is not str
+        or not 1 <= len(value) <= 128
+        or re.fullmatch(KEY_PATTERN, value) is None
+    ):
         raise ValueError("unsupported_key")
     *modifiers, keysym = value.split("+")
     if len(modifiers) != len(set(modifiers)):
@@ -82,7 +110,7 @@ def sanitize_png(data):
         end = offset + length + 12
         if end > len(data):
             raise PrimitiveError("failed", "Truncated PNG payload")
-        payload = data[offset + 8:end - 4]
+        payload = data[offset + 8 : end - 4]
         crc = struct.unpack_from(">I", data, end - 4)[0]
         if zlib.crc32(kind + payload) & 0xFFFFFFFF != crc:
             raise PrimitiveError("failed", "PNG checksum mismatch")
@@ -91,8 +119,13 @@ def sanitize_png(data):
                 raise PrimitiveError("failed", "Missing PNG header")
             header = struct.unpack(">IIBBBBB", payload)
             w, h, depth, color, compression, filtering, interlace = header
-            if (not 0 < w <= 4096 or not 0 < h <= 4096 or depth != 8
-                    or color not in (2, 6) or (compression, filtering, interlace) != (0, 0, 0)):
+            if (
+                not 0 < w <= 4096
+                or not 0 < h <= 4096
+                or depth != 8
+                or color not in (2, 6)
+                or (compression, filtering, interlace) != (0, 0, 0)
+            ):
                 raise PrimitiveError("failed", "Unsupported native PNG format")
         elif kind == b"IHDR" or (kind[0] & 32 == 0 and kind not in (b"IDAT", b"IEND")):
             raise PrimitiveError("failed", "Unsupported critical PNG chunk")
@@ -115,8 +148,13 @@ def sanitize_png(data):
     try:
         decoder = zlib.decompressobj()
         raw = decoder.decompress(b"".join(compressed), expected + 1)
-        if (len(raw) != expected or not decoder.eof or decoder.unused_data
-                or decoder.unconsumed_tail or any(raw[i] > 4 for i in range(0, len(raw), stride))):
+        if (
+            len(raw) != expected
+            or not decoder.eof
+            or decoder.unused_data
+            or decoder.unconsumed_tail
+            or any(raw[i] > 4 for i in range(0, len(raw), stride))
+        ):
             raise ValueError
     except (ValueError, zlib.error) as exc:
         raise PrimitiveError("failed", "Invalid PNG scanlines") from exc
@@ -124,17 +162,38 @@ def sanitize_png(data):
 
 
 class NativeDesktop:
-    def __init__(self, *, display=":77", workspace="/workspace", clock=time.monotonic,
-                 command_runner=None, capture_backend=None, accessibility_backend=None):
+    def __init__(
+        self,
+        *,
+        display=":77",
+        workspace="/workspace",
+        clock=time.monotonic,
+        command_runner=None,
+        capture_backend=None,
+        accessibility_backend=None,
+    ):
         if display != ":77" or workspace != "/workspace":
             raise ValueError("NativeDesktop only operates the isolated :77 /workspace desktop")
         self._clock, self._runner, self._capture_backend = clock, command_runner, capture_backend
         self._a11y = accessibility_backend or Accessibility(display=display)
-        self._env = {"DISPLAY": display, "HOME": workspace, "PATH": "/usr/bin:/bin",
-                     "LANG": "C.UTF-8", "NO_AT_BRIDGE": "0"}
-        for name in ("DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR", "XDG_DATA_DIRS",
-                     "XDG_CONFIG_HOME", "GTK_MODULES", "GTK_A11Y", "GSETTINGS_BACKEND",
-                     "GDK_BACKEND", "LIBGL_ALWAYS_SOFTWARE"):
+        self._env = {
+            "DISPLAY": display,
+            "HOME": workspace,
+            "PATH": "/usr/bin:/bin",
+            "LANG": "C.UTF-8",
+            "NO_AT_BRIDGE": "0",
+        }
+        for name in (
+            "DBUS_SESSION_BUS_ADDRESS",
+            "XDG_RUNTIME_DIR",
+            "XDG_DATA_DIRS",
+            "XDG_CONFIG_HOME",
+            "GTK_MODULES",
+            "GTK_A11Y",
+            "GSETTINGS_BACKEND",
+            "GDK_BACKEND",
+            "LIBGL_ALWAYS_SOFTWARE",
+        ):
             if name in os.environ:
                 self._env[name] = os.environ[name]
         self._apps, self._processes = {}, set()
@@ -161,12 +220,16 @@ class NativeDesktop:
 
     def _same_app_transient(self, window):
         from Xlib import display as xdisplay  # type: ignore[import-untyped]
+
         display = xdisplay.Display(":77")
         try:
             node = display.create_resource_object("window", window["id"])
             parent = node.get_wm_transient_for()
-            return bool(parent and parent.id != window["id"]
-                        and int(self._run("getwindowpid", parent.id)) == window["pid"])
+            return bool(
+                parent
+                and parent.id != window["id"]
+                and int(self._run("getwindowpid", parent.id)) == window["pid"]
+            )
         finally:
             display.close()
 
@@ -175,32 +238,48 @@ class NativeDesktop:
             self._startup_approval = None
             self._startup_modal = None
             return None
-        if (self._profile not in PROFILES or not nodes
-                or not self._same_app_transient(window)):
+        if self._profile not in PROFILES or not nodes or not self._same_app_transient(window):
             return "unknown"
         buttons = {n.get("name") for n in nodes if n.get("role") == "push button"}
-        startup = (self._profile == "drawing" and nodes[0].get("role") == "alert"
-                   and nodes[0].get("name") == "Information" and buttons == {"No", "Yes"})
+        startup = (
+            self._profile == "drawing"
+            and nodes[0].get("role") == "alert"
+            and nodes[0].get("name") == "Information"
+            and buttons == {"No", "Yes"}
+        )
         identity = (window["id"], window["pid"], self._identity(window["pid"]))
         if startup and self._source_fingerprint is None:
             self._startup_modal = identity
         startup = startup and self._startup_modal == identity
-        signature = frozenset((str(n.get("role", "")), str(n.get("name", "")),
-                               str(n.get("text", ""))) for n in nodes)
+        signature = frozenset(
+            (str(n.get("role", "")), str(n.get("name", "")), str(n.get("text", ""))) for n in nodes
+        )
         if startup and raster_digest is not None:
             self._startup_approval = (identity, raster_digest, signature)
-        elif (raster_digest is not None and self._startup_approval is not None
-              and nodes[0].get("role") == "alert"
-              and nodes[0].get("name") == "Information"):
+        elif (
+            raster_digest is not None
+            and self._startup_approval is not None
+            and nodes[0].get("role") == "alert"
+            and nodes[0].get("name") == "Information"
+        ):
             # Retain proven startup approval across incomplete AT-SPI traversal
             # only with identical pixels/identity and no new accessible labels.
             approved_identity, approved_raster, approved_nodes = self._startup_approval
-            startup = (identity == approved_identity and raster_digest == approved_raster
-                       and signature <= approved_nodes)
-        file_dialog = (nodes[0].get("role") in ("dialog", "file chooser")
-                       and window["title"] in {
-                           "Save As", "Save As…", "Save Image", "Save", "Open", "Open Image",
-                           "Save picture as…", "Open a picture"})
+            startup = (
+                identity == approved_identity
+                and raster_digest == approved_raster
+                and signature <= approved_nodes
+            )
+        file_dialog = nodes[0].get("role") in ("dialog", "file chooser") and window["title"] in {
+            "Save As",
+            "Save As…",
+            "Save Image",
+            "Save",
+            "Open",
+            "Open Image",
+            "Save picture as…",
+            "Open a picture",
+        }
         return "safe_application" if startup or file_dialog else "unknown"
 
     def _window_descendant(self, candidate, expected):
@@ -210,6 +289,7 @@ class NativeDesktop:
         if self._runner is not None:
             return False  # Synthetic transport has no native X resource authority.
         from Xlib import display as xdisplay  # type: ignore[import-untyped]
+
         display = xdisplay.Display(":77")
         try:
             visited = set()
@@ -233,6 +313,7 @@ class NativeDesktop:
         if self._runner is not None:
             return False
         from Xlib import display as xdisplay  # type: ignore[import-untyped]
+
         display = xdisplay.Display(":77")
         try:
             current = display.screen().root
@@ -264,16 +345,23 @@ class NativeDesktop:
         remaining = min(2.0, self._deadline - self._clock())
         if self._runner is not None:
             return self._runner(argv, timeout=remaining, env=dict(self._env), cwd="/workspace")
-        process = subprocess.Popen(argv, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
-                                   stdin=subprocess.DEVNULL, env=self._env, cwd="/workspace",
-                                   start_new_session=True)
+        process = subprocess.Popen(
+            argv,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            stdin=subprocess.DEVNULL,
+            env=self._env,
+            cwd="/workspace",
+            start_new_session=True,
+        )
         self._processes.add(process)
         try:
             while True:
                 self._guard()
                 try:
-                    stdout, _ = process.communicate(timeout=min(
-                        0.05, max(0.0, self._deadline - self._clock())))
+                    stdout, _ = process.communicate(
+                        timeout=min(0.05, max(0.0, self._deadline - self._clock()))
+                    )
                     break
                 except subprocess.TimeoutExpired:
                     continue
@@ -321,13 +409,20 @@ class NativeDesktop:
         lib.XOpenDisplay.argtypes, lib.XOpenDisplay.restype = [ctypes.c_char_p], ctypes.c_void_p
         lib.XInternAtom.argtypes = [ctypes.c_void_p, ctypes.c_char_p, ctypes.c_int]
         lib.XInternAtom.restype = ctypes.c_ulong
-        lib.XGetWindowProperty.argtypes = [ctypes.c_void_p, ctypes.c_ulong, ctypes.c_ulong,
-                                          ctypes.c_long, ctypes.c_long, ctypes.c_int,
-                                          ctypes.c_ulong, ctypes.POINTER(ctypes.c_ulong),
-                                          ctypes.POINTER(ctypes.c_int),
-                                          ctypes.POINTER(ctypes.c_ulong),
-                                          ctypes.POINTER(ctypes.c_ulong),
-                                          ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte))]
+        lib.XGetWindowProperty.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_ulong,
+            ctypes.c_ulong,
+            ctypes.c_long,
+            ctypes.c_long,
+            ctypes.c_int,
+            ctypes.c_ulong,
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_int),
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.c_ulong),
+            ctypes.POINTER(ctypes.POINTER(ctypes.c_ubyte)),
+        ]
         lib.XGetWindowProperty.restype = ctypes.c_int
         lib.XFree.argtypes, lib.XCloseDisplay.argtypes = [ctypes.c_void_p], [ctypes.c_void_p]
         display = lib.XOpenDisplay(b":77")
@@ -339,10 +434,20 @@ class NativeDesktop:
             modal = lib.XInternAtom(display, b"_NET_WM_STATE_MODAL", 0)
             actual, count, after = ctypes.c_ulong(), ctypes.c_ulong(), ctypes.c_ulong()
             bits = ctypes.c_int()
-            result = lib.XGetWindowProperty(display, window_id, atom, 0, 128, 0, 4,
-                                           ctypes.byref(actual), ctypes.byref(bits),
-                                           ctypes.byref(count), ctypes.byref(after),
-                                           ctypes.byref(data))
+            result = lib.XGetWindowProperty(
+                display,
+                window_id,
+                atom,
+                0,
+                128,
+                0,
+                4,
+                ctypes.byref(actual),
+                ctypes.byref(bits),
+                ctypes.byref(count),
+                ctypes.byref(after),
+                ctypes.byref(data),
+            )
             if result or after.value or (actual.value and (actual.value != 4 or bits.value != 32)):
                 raise PrimitiveError("failed", "Cannot establish native window modal state")
             values = ctypes.cast(data, ctypes.POINTER(ctypes.c_ulong))
@@ -360,14 +465,24 @@ class NativeDesktop:
         if not self._owned(pid):
             raise PrimitiveError("rejected", "Focused window is not owned by an approved app")
         title = bounded_text(self._run("getwindowname", window_id))
-        geometry = dict(line.split("=", 1) for line in self._run(
-            "getwindowgeometry", "--shell", window_id).splitlines() if "=" in line)
-        window = {"id": window_id, "pid": pid, "title": title,
-                  **{key: int(geometry[key.upper()]) for key in ("x", "y", "width", "height")},
-                  "modal": self._modal(window_id)}
-        if (not 0 < window["width"] <= 4096 or not 0 < window["height"] <= 4096
-                or int(geometry["WINDOW"]) != window_id
-                or int(self._run("getactivewindow")) != window_id):
+        geometry = dict(
+            line.split("=", 1)
+            for line in self._run("getwindowgeometry", "--shell", window_id).splitlines()
+            if "=" in line
+        )
+        window = {
+            "id": window_id,
+            "pid": pid,
+            "title": title,
+            **{key: int(geometry[key.upper()]) for key in ("x", "y", "width", "height")},
+            "modal": self._modal(window_id),
+        }
+        if (
+            not 0 < window["width"] <= 4096
+            or not 0 < window["height"] <= 4096
+            or int(geometry["WINDOW"]) != window_id
+            or int(self._run("getactivewindow")) != window_id
+        ):
             raise PrimitiveError("rejected", "Active window changed or has invalid geometry")
         return window
 
@@ -378,8 +493,7 @@ class NativeDesktop:
             if extent != self._root_extent:
                 raise PrimitiveError("rejected", "Private source geometry changed")
         window = self._window()
-        if (window != self._expected
-                or self._identity(window["pid"]) != self._observed_identity):
+        if window != self._expected or self._identity(window["pid"]) != self._observed_identity:
             raise PrimitiveError("rejected", "Window changed since observation")
         return window
 
@@ -400,15 +514,24 @@ class NativeDesktop:
             finite(width, 1, 4096)
             finite(height, 1, 4096)
             # Fixed private Xvfb profile: reject other native layouts, never guess.
-            fmt = next(f for f in display.display.info.pixmap_formats
-                       if f.depth == screen.root_depth)
-            visual = next(v for d in screen.allowed_depths for v in d.visuals
-                          if v.visual_id == screen.root_visual)
-            if (screen.root_depth != 24 or fmt.bits_per_pixel != 32 or fmt.scanline_pad != 32
-                    or display.display.info.image_byte_order != 0
-                    or visual.visual_class != X.TrueColor
-                    or (visual.red_mask, visual.green_mask, visual.blue_mask)
-                    != (0xFF0000, 0xFF00, 0xFF)):
+            fmt = next(
+                f for f in display.display.info.pixmap_formats if f.depth == screen.root_depth
+            )
+            visual = next(
+                v
+                for d in screen.allowed_depths
+                for v in d.visuals
+                if v.visual_id == screen.root_visual
+            )
+            if (
+                screen.root_depth != 24
+                or fmt.bits_per_pixel != 32
+                or fmt.scanline_pad != 32
+                or display.display.info.image_byte_order != 0
+                or visual.visual_class != X.TrueColor
+                or (visual.red_mask, visual.green_mask, visual.blue_mask)
+                != (0xFF0000, 0xFF00, 0xFF)
+            ):
                 raise PrimitiveError("unsupported", "Unsupported private Xvfb pixel layout")
             if width * height * 4 > 16 * 1024 * 1024:
                 raise PrimitiveError("unsupported", "Private capture allocation limit")
@@ -417,7 +540,10 @@ class NativeDesktop:
                 raise PrimitiveError("failed", "Native capture returned no pixels")
             packed = bytearray(width * height * 3)
             packed[0::3], packed[1::3], packed[2::3] = (
-                reply.data[2::4], reply.data[1::4], reply.data[0::4])
+                reply.data[2::4],
+                reply.data[1::4],
+                reply.data[0::4],
+            )
             self._root_extent = (width, height)
             return bytes(packed), width, height, "RGB"
         finally:
@@ -431,10 +557,12 @@ class NativeDesktop:
             if extent != self._root_extent:
                 raise PrimitiveError("rejected", "Private source geometry changed")
         window = self._window()
-        if (self._expected is None
-                or {k: v for k, v in window.items() if k != "title"}
-                != {k: v for k, v in self._expected.items() if k != "title"}
-                or self._identity(window["pid"]) != self._observed_identity):
+        if (
+            self._expected is None
+            or {k: v for k, v in window.items() if k != "title"}
+            != {k: v for k, v in self._expected.items() if k != "title"}
+            or self._identity(window["pid"]) != self._observed_identity
+        ):
             raise PrimitiveError("rejected", "Field native window changed after input")
         return window
 
@@ -444,8 +572,7 @@ class NativeDesktop:
             self._observation, self._window_at_observation = None, None
             window = self._window()
             identity = self._identity(window["pid"])
-            raw_focus = (int(self._run("getwindowfocus", "-f"))
-                         if self._runner is None else None)
+            raw_focus = int(self._run("getwindowfocus", "-f")) if self._runner is None else None
             if identity is None:
                 raise PrimitiveError("rejected", "Observed app process disappeared")
             captured_at = self._clock()
@@ -458,8 +585,12 @@ class NativeDesktop:
                 image, width, height = sanitize_png(capture)
                 mode = "PNG"
             observation = secrets.token_urlsafe(18)
-            if (self._source_fingerprint is None and self._profile == "drawing"
-                    and window["modal"] and self._same_app_transient(window)):
+            if (
+                self._source_fingerprint is None
+                and self._profile == "drawing"
+                and window["modal"]
+                and self._same_app_transient(window)
+            ):
                 self._startup_modal = (window["id"], window["pid"], identity)
             nodes, status = self._a11y.snapshot(window, observation, self._guard)
             modal_kind = self._classify_modal(window, nodes, hashlib.sha256(image).digest())
@@ -467,9 +598,11 @@ class NativeDesktop:
                 extent = tuple(int(v) for v in self._run("getdisplaygeometry").split())
                 if extent != (width, height):
                     raise PrimitiveError("rejected", "Private source changed during capture")
-            if (self._window() != window or self._identity(window["pid"]) != identity
-                    or (raw_focus is not None
-                        and int(self._run("getwindowfocus", "-f")) != raw_focus)):
+            if (
+                self._window() != window
+                or self._identity(window["pid"]) != identity
+                or (raw_focus is not None and int(self._run("getwindowfocus", "-f")) != raw_focus)
+            ):
                 raise PrimitiveError("rejected", "Window changed during observation")
             self._guard()
             self._observation, self._window_at_observation = observation, dict(window)
@@ -483,61 +616,92 @@ class NativeDesktop:
             self._captured_at = captured_at
             self._modal_kind = modal_kind
             self._raster_digest = hashlib.sha256(image).digest() if packed else None
-            return {"image_bytes": image, "width": width, "height": height, "window": window,
-                    "accessibility": nodes, "accessibility_status": status,
-                    "accessibility_detail": getattr(self._a11y, "status_detail", status),
-                    "accessibility_roots": getattr(self._a11y, "root_diagnostics", []),
-                    "observation_id": observation, "modal": window["modal"],
-                    "source_revision": self._source_revision, "raster_mode": mode,
-                    "modal_id": self._modal_id, "modal_kind": modal_kind, "focused": True}
+            return {
+                "image_bytes": image,
+                "width": width,
+                "height": height,
+                "window": window,
+                "accessibility": nodes,
+                "accessibility_status": status,
+                "accessibility_detail": getattr(self._a11y, "status_detail", status),
+                "accessibility_roots": getattr(self._a11y, "root_diagnostics", []),
+                "observation_id": observation,
+                "modal": window["modal"],
+                "source_revision": self._source_revision,
+                "raster_mode": mode,
+                "modal_id": self._modal_id,
+                "modal_kind": modal_kind,
+                "focused": True,
+            }
 
     def grounded_execute(self, action, cancelled):
         """Worker entry point. Pointer proof does not establish widget activation."""
         with self._lock:
-            fields = {"click": {"x", "y"}, "type": {"text"}, "key": {"chord"},
-                      "double_click": {"x", "y"}, "right_click": {"x", "y"},
-                      "middle_click": {"x", "y"},
-                      "scroll": {"x", "y", "direction", "count"},
-                      "polyline": {"points", "duration"},
-                      "replace_field": {"target", "text"},
-                      "replace_field_pixels": {"region", "text"}}
+            fields = {
+                "click": {"x", "y"},
+                "type": {"text"},
+                "key": {"chord"},
+                "double_click": {"x", "y"},
+                "right_click": {"x", "y"},
+                "middle_click": {"x", "y"},
+                "scroll": {"x", "y", "direction", "count"},
+                "polyline": {"points", "duration"},
+                "replace_field": {"target", "text"},
+                "replace_field_pixels": {"region", "text"},
+            }
             required = {"type", "source_revision", "expected_window", "observation_id", "expected"}
             optional = {"expected_modal"}
             if type(action) is dict and action.get("type") in CLICKS:
                 optional.add("count")
             if type(action) is dict and action.get("type") in MODIFIED_POINTER:
                 optional.add("modifiers")
-            if (type(action) is not dict or not isinstance(action.get("type"), str)
-                    or action["type"] not in fields
-                    or set(action) - optional != required | fields[action["type"]]
-                    or self._input_quarantined
-                    or self._observation is None
-                    or action["observation_id"] != self._observation
-                    or type(action["source_revision"]) is not int
-                    or action["source_revision"] != self._source_revision
-                    or not 0 <= self._clock() - self._captured_at <= 5
-                    or self._window_at_observation is None
-                    or action["expected_window"] != self._window_at_observation):
+            if (
+                type(action) is not dict
+                or not isinstance(action.get("type"), str)
+                or action["type"] not in fields
+                or set(action) - optional != required | fields[action["type"]]
+                or self._input_quarantined
+                or self._observation is None
+                or action["observation_id"] != self._observation
+                or type(action["source_revision"]) is not int
+                or action["source_revision"] != self._source_revision
+                or not 0 <= self._clock() - self._captured_at <= 5
+                or self._window_at_observation is None
+                or action["expected_window"] != self._window_at_observation
+            ):
                 raise PrimitiveError("rejected", "Stale or unsupported grounded action")
             if self._window_at_observation["modal"]:
-                if (self._modal_kind != "safe_application" or self._modal_id is None
-                        or action.get("expected_modal") != self._modal_id):
+                if (
+                    self._modal_kind != "safe_application"
+                    or self._modal_id is None
+                    or action.get("expected_modal") != self._modal_id
+                ):
                     raise PrimitiveError("rejected", "Unexpected or denied application modal")
             elif "expected_modal" in action:
                 raise PrimitiveError("rejected", "Expected modal is not present")
             expected = action["expected"]
             visual = type(expected) is dict and expected == {"type": "visual_change"}
-            pointer = (action["type"] == "click" and type(expected) is dict
-                       and set(expected) == {"type", "x", "y"}
-                       and expected["type"] == "pointer_at"
-                       and all(type(action[k]) is int and type(expected[k]) is int
-                               and action[k] == expected[k] for k in ("x", "y")))
+            pointer = (
+                action["type"] == "click"
+                and type(expected) is dict
+                and set(expected) == {"type", "x", "y"}
+                and expected["type"] == "pointer_at"
+                and all(
+                    type(action[k]) is int and type(expected[k]) is int and action[k] == expected[k]
+                    for k in ("x", "y")
+                )
+            )
             field = field_expectation(action)
-            if ((action["type"] == "replace_field" and not field)
-                    or not visual and not pointer and not field):
+            if (
+                (action["type"] == "replace_field" and not field)
+                or not visual
+                and not pointer
+                and not field
+            ):
                 raise PrimitiveError("rejected", "Unsupported independently measured postcondition")
             if action["type"] == "replace_field_pixels":
                 from .isolated_pixels import validate_field
+
                 validate_field(action)
             elif action["type"] in {"type", "replace_field"}:
                 bounded_text(action["text"])
@@ -548,9 +712,14 @@ class NativeDesktop:
                     raise PrimitiveError("rejected", "unsupported_key") from None
             elif action["type"] == "polyline":
                 points = action["points"]
-                if (type(points) is not list or not 2 <= len(points) <= 256
-                        or any(type(p) is not list or len(p) != 2
-                               or any(type(v) is not int for v in p) for p in points)):
+                if (
+                    type(points) is not list
+                    or not 2 <= len(points) <= 256
+                    or any(
+                        type(p) is not list or len(p) != 2 or any(type(v) is not int for v in p)
+                        for p in points
+                    )
+                ):
                     raise PrimitiveError("rejected", "Invalid grounded polyline")
                 finite(action["duration"], 0, 1.0)
             elif any(type(action[k]) is not int for k in ("x", "y")):
@@ -567,9 +736,12 @@ class NativeDesktop:
             self._deadline, self._cancelled = self._clock() + 1.75, cancelled
             observed_extent = self._root_extent
             current = self._capture()
-            if (self._raster_digest is None or not isinstance(current, tuple)
-                    or current[1:3] != observed_extent
-                    or hashlib.sha256(current[0]).digest() != self._raster_digest):
+            if (
+                self._raster_digest is None
+                or not isinstance(current, tuple)
+                or current[1:3] != observed_extent
+                or hashlib.sha256(current[0]).digest() != self._raster_digest
+            ):
                 self._observation = None
                 raise PrimitiveError("rejected", "Private pixels changed before input")
             self._guard()
@@ -590,15 +762,20 @@ class NativeDesktop:
                 if field:
                     self._assert_field_window()
                     actual = self._a11y.read_field(
-                        action["target"], self._expected, self._assert_field_window)
+                        action["target"], self._expected, self._assert_field_window
+                    )
                     self._assert_field_window()
-                    satisfied = (actual["text_complete"] is True
-                                 and actual["text"] == expected["text"])
+                    satisfied = (
+                        actual["text_complete"] is True and actual["text"] == expected["text"]
+                    )
                     receipt["postcondition"] = {
-                        "type": "field_text_equals", "target": action["target"],
+                        "type": "field_text_equals",
+                        "target": action["target"],
                         "method": "accessibility_text_after_release",
-                        "target_application_matches": True, "actual": actual,
-                        "status": "satisfied" if satisfied else "not_satisfied"}
+                        "target_application_matches": True,
+                        "actual": actual,
+                        "status": "satisfied" if satisfied else "not_satisfied",
+                    }
                     receipt["status"] = "verified" if satisfied else "not_satisfied"
                     return receipt
                 if visual:
@@ -607,41 +784,54 @@ class NativeDesktop:
                     self._guard()
                     cancelled.wait(0.08)
                     window = self._window()
-                    same_app = (window["pid"] == self._expected["pid"]
-                                and self._identity(window["pid"]) == self._observed_identity)
+                    same_app = (
+                        window["pid"] == self._expected["pid"]
+                        and self._identity(window["pid"]) == self._observed_identity
+                    )
                     after = self._capture()
-                    same_app = (same_app and self._window() == window
-                                and after[1:3] == observed_extent)
+                    same_app = (
+                        same_app and self._window() == window and after[1:3] == observed_extent
+                    )
                     self._guard()
                     after_digest = hashlib.sha256(after[0]).hexdigest()
                     satisfied = same_app and before_digest != after_digest
                     receipt["postcondition"] = {
-                        "type": "visual_change", "method": "raster_digest_after_release",
+                        "type": "visual_change",
+                        "method": "raster_digest_after_release",
                         "status": "satisfied" if satisfied else "not_satisfied",
                         "target_application_matches": same_app,
-                        "actual": {"before_sha256": before_digest, "after_sha256": after_digest}}
+                        "actual": {"before_sha256": before_digest, "after_sha256": after_digest},
+                    }
                     receipt["status"] = "verified" if satisfied else "not_satisfied"
                     return receipt
                 self._assert_window()
-                values = dict(line.split("=", 1) for line in self._run(
-                    "getmouselocation", "--shell").splitlines() if "=" in line)
+                values = dict(
+                    line.split("=", 1)
+                    for line in self._run("getmouselocation", "--shell").splitlines()
+                    if "=" in line
+                )
                 actual = {"x": int(values["X"]), "y": int(values["Y"])}
                 self._assert_window()
-                target_matches = (self._window_descendant(
-                    int(values["WINDOW"]), self._expected["id"])
-                                  or self._pointer_target(self._expected["id"]))
+                target_matches = self._window_descendant(
+                    int(values["WINDOW"]), self._expected["id"]
+                ) or self._pointer_target(self._expected["id"])
                 satisfied = actual == {"x": action["x"], "y": action["y"]} and target_matches
                 receipt["postcondition"] = {
-                    "type": "pointer_at", "status": "satisfied" if satisfied else "not_satisfied",
+                    "type": "pointer_at",
+                    "status": "satisfied" if satisfied else "not_satisfied",
                     "target_window_matches": target_matches,
-                    "method": "pointer_query_after_release", "actual": actual}
+                    "method": "pointer_query_after_release",
+                    "actual": actual,
+                }
                 receipt["status"] = "verified" if satisfied else "not_satisfied"
             except Exception:
                 receipt["status"] = "executed"
                 if field:
                     receipt["postcondition"].update(
-                        target=action["target"], method="accessibility_text_after_release",
-                        target_application_matches=False)
+                        target=action["target"],
+                        method="accessibility_text_after_release",
+                        target_application_matches=False,
+                    )
             finally:
                 self._expected = None
                 self._cancelled = None
@@ -659,8 +849,10 @@ class NativeDesktop:
     def _point(self, x, y):
         window = self._expected
         assert window is not None  # execute establishes the observed target.
-        for value, origin, span in ((x, window["x"], window["width"]),
-                                    (y, window["y"], window["height"])):
+        for value, origin, span in (
+            (x, window["x"], window["width"]),
+            (y, window["y"], window["height"]),
+        ):
             finite(value, max(0, origin), min(4095, origin + span - 1))
             if type(value) is not int:
                 raise PrimitiveError("rejected", "Pixel coordinates must be integers")
@@ -669,23 +861,41 @@ class NativeDesktop:
     def _pointer(self, x, y):
         self._assert_window()
         assert self._expected is not None  # execute establishes the observed target.
-        values = dict(line.split("=", 1) for line in self._run(
-            "getmouselocation", "--shell").splitlines() if "=" in line)
+        values = dict(
+            line.split("=", 1)
+            for line in self._run("getmouselocation", "--shell").splitlines()
+            if "=" in line
+        )
         if (int(values.get("X", -1)), int(values.get("Y", -1))) != (x, y):
             raise PrimitiveError("rejected", "Pointer did not reach the observed target")
-        if not (self._window_descendant(int(values.get("WINDOW", 0)), self._expected["id"])
-                or self._pointer_target(self._expected["id"])):
+        if not (
+            self._window_descendant(int(values.get("WINDOW", 0)), self._expected["id"])
+            or self._pointer_target(self._expected["id"])
+        ):
             raise PrimitiveError("unsupported", "Pointer window is not the exact observed target")
 
     def _physical(self, action):
         kind = action["type"]
-        fields = {"move": {"x", "y"}, "click": {"x", "y"},
-                  "double_click": {"x", "y"}, "right_click": {"x", "y"},
-                  "middle_click": {"x", "y"}, "scroll": {"x", "y", "direction", "count"},
-                  "key": {"chord"}, "type": {"text"}, "polyline": {"points", "duration"},
-                  "replace_field_pixels": {"region", "text"}}
-        binding = {"type", "expected_window", "observation_id", "source_revision",
-                   "expected", "expected_modal"}
+        fields = {
+            "move": {"x", "y"},
+            "click": {"x", "y"},
+            "double_click": {"x", "y"},
+            "right_click": {"x", "y"},
+            "middle_click": {"x", "y"},
+            "scroll": {"x", "y", "direction", "count"},
+            "key": {"chord"},
+            "type": {"text"},
+            "polyline": {"points", "duration"},
+            "replace_field_pixels": {"region", "text"},
+        }
+        binding = {
+            "type",
+            "expected_window",
+            "observation_id",
+            "source_revision",
+            "expected",
+            "expected_modal",
+        }
         if kind in CLICKS:
             binding.add("count")
         if kind in MODIFIED_POINTER:
@@ -695,6 +905,7 @@ class NativeDesktop:
         if kind == "replace_field_pixels":
             from .isolated_pixels import IsolatedPixelInput
             from .x11_owned_device import X11DeviceError
+
             try:
                 self._pixel_input = IsolatedPixelInput(self)
                 self._pixel_input.execute(action)
@@ -741,8 +952,10 @@ class NativeDesktop:
             probe_started = self._clock()
             self._assert_window()
             vertex_cost = max(0.02, 3 * (self._clock() - probe_started) + 0.01)
-            if (duration + (len(points) + 2 * len(modifiers)) * vertex_cost + 0.15
-                    > self._deadline - self._clock()):
+            if (
+                duration + (len(points) + 2 * len(modifiers)) * vertex_cost + 0.15
+                > self._deadline - self._clock()
+            ):
                 raise PrimitiveError("rejected", "Polyline exceeds private dispatch budget")
             self._input("mousemove", *points[0])
             self._pointer(*points[0])
@@ -775,8 +988,9 @@ class NativeDesktop:
                 self._assert_window()
                 step_cost = max(0.02, 3 * (self._clock() - probe_started) + 0.01)
                 delay = 0.08 if kind == "double_click" else 0.03
-                if ((3 + 3 * count + 2 * len(modifiers)) * step_cost
-                        + (count - 1) * delay + 0.15 > self._deadline - self._clock()):
+                if (3 + 3 * count + 2 * len(modifiers)) * step_cost + (
+                    count - 1
+                ) * delay + 0.15 > self._deadline - self._clock():
                     raise PrimitiveError("rejected", "Pointer action exceeds dispatch budget")
             self._input("mousemove", *point)
             self._pointer(*point)
@@ -809,6 +1023,7 @@ class NativeDesktop:
         if not modifiers and symbol is None:
             return []
         from .x11_owned_device import X11DeviceError, _load_native, resolve_key_plan
+
         names = {"ctrl": "Control_L", "alt": "Alt_L", "shift": "Shift_L", "super": "Super_L"}
         self._guard()
         lib, _, _ = _load_native()
@@ -827,8 +1042,12 @@ class NativeDesktop:
     @staticmethod
     def _scroll(action):
         direction, count = action.get("direction"), action.get("count")
-        if (type(direction) is not str or direction not in {"up", "down", "left", "right"}
-                or type(count) is not int or not 1 <= count <= 20):
+        if (
+            type(direction) is not str
+            or direction not in {"up", "down", "left", "right"}
+            or type(count) is not int
+            or not 1 <= count <= 20
+        ):
             raise PrimitiveError("rejected", "Invalid scroll direction/count")
         return {"up": 4, "down": 5, "left": 6, "right": 7}[direction], count
 
@@ -843,16 +1062,22 @@ class NativeDesktop:
                 if not isinstance(action, dict) or action.get("type") not in PHYSICAL | SEMANTIC:
                     raise PrimitiveError("unsupported", "Unsupported native action")
                 kind = action["type"]
-                if (self._window_at_observation is None
-                        or action.get("expected_window") != self._window_at_observation):
+                if (
+                    self._window_at_observation is None
+                    or action.get("expected_window") != self._window_at_observation
+                ):
                     raise PrimitiveError("rejected", "Exact observed window target is required")
                 self._expected = dict(self._window_at_observation)
                 self._assert_window()
                 if kind in PHYSICAL:
                     self._physical(action)
                 elif kind == "replace_field":
-                    self._a11y.execute(action, self._expected, self._assert_window,
-                                       before_effect=self._semantic_attempt)
+                    self._a11y.execute(
+                        action,
+                        self._expected,
+                        self._assert_window,
+                        before_effect=self._semantic_attempt,
+                    )
                     self._injected = True
                 else:
                     self._attempted = True
@@ -868,10 +1093,11 @@ class NativeDesktop:
                 self._deadline, self._cancelled = started + 2.0, None
                 cleanup = self._release()
                 self._expected = None
-                receipt.update(injected=self._injected,
-                               effect_uncertain=self._attempted and (
-                                   not receipt["ok"] or not cleanup),
-                               released=cleanup)
+                receipt.update(
+                    injected=self._injected,
+                    effect_uncertain=self._attempted and (not receipt["ok"] or not cleanup),
+                    released=cleanup,
+                )
                 if not cleanup:
                     self._input_quarantined = True
                     receipt.update(ok=False, status="failed", error="Input release not confirmed")
@@ -886,8 +1112,12 @@ class NativeDesktop:
         lib.XQueryKeymap.argtypes = [ctypes.c_void_p, ctypes.c_void_p]
         lib.XSync.argtypes = [ctypes.c_void_p, ctypes.c_int]
         lib.XCloseDisplay.argtypes = [ctypes.c_void_p]
-        xtest.XTestFakeKeyEvent.argtypes = [ctypes.c_void_p, ctypes.c_uint,
-                                          ctypes.c_int, ctypes.c_ulong]
+        xtest.XTestFakeKeyEvent.argtypes = [
+            ctypes.c_void_p,
+            ctypes.c_uint,
+            ctypes.c_int,
+            ctypes.c_ulong,
+        ]
         display = lib.XOpenDisplay(b":77")
         if not display:
             raise PrimitiveError("failed", "Cannot release private-display typed keys")
@@ -916,8 +1146,9 @@ class NativeDesktop:
             except Exception:
                 clean = False
         for command, held in (("mouseup", self._buttons), ("keyup", self._keys)):
-            items = (list(dict.fromkeys(reversed(self._key_order))) if command == "keyup"
-                     else list(held))
+            items = (
+                list(dict.fromkeys(reversed(self._key_order))) if command == "keyup" else list(held)
+            )
             items.extend(item for item in held if item not in items)
             for item in items:
                 try:
@@ -944,9 +1175,15 @@ class NativeDesktop:
             if not isinstance(profile, str) or profile not in PROFILES:
                 return {"ok": False, "status": "unsupported", "error": "Unknown app profile"}
             try:
-                child = subprocess.Popen(PROFILES[profile], env=self._env, cwd="/workspace",
-                                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                         stderr=subprocess.DEVNULL, start_new_session=True)
+                child = subprocess.Popen(
+                    PROFILES[profile],
+                    env=self._env,
+                    cwd="/workspace",
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                    start_new_session=True,
+                )
                 identity = self._identity(child.pid)
                 if identity is None or child.poll() is not None:
                     if child.poll() is None:

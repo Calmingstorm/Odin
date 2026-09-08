@@ -30,7 +30,9 @@ def containment_report() -> dict:
     fields = dict(line.split(":", 1) for line in status.splitlines() if ":" in line)
     fs = os.statvfs("/workspace")
     return {
-        "uid": os.getuid(), "gid": os.getgid(), "display": os.environ.get("DISPLAY"),
+        "uid": os.getuid(),
+        "gid": os.getgid(),
+        "display": os.environ.get("DISPLAY"),
         "network_namespace": os.readlink("/proc/self/ns/net"),
         "pid_namespace": os.readlink("/proc/self/ns/pid"),
         "mount_namespace": os.readlink("/proc/self/ns/mnt"),
@@ -62,8 +64,14 @@ class Worker:
         self.paused = False
 
     def spawn(self, argv: list[str]):
-        child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                 stderr=subprocess.DEVNULL, env=dict(ENVIRONMENT), close_fds=True)
+        child = subprocess.Popen(
+            argv,
+            stdin=subprocess.DEVNULL,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            env=dict(ENVIRONMENT),
+            close_fds=True,
+        )
         self.children.append(child)
         return child
 
@@ -71,23 +79,45 @@ class Worker:
         os.umask(0o077)
         os.environ.clear()
         os.environ.update(ENVIRONMENT)
-        for folder in ("home/.config", "home/.cache", "home/.local/share", "run", "exports",
-                       "tmp/.X11-unix"):
+        for folder in (
+            "home/.config",
+            "home/.cache",
+            "home/.local/share",
+            "run",
+            "exports",
+            "tmp/.X11-unix",
+        ):
             Path("/workspace", folder).mkdir(parents=True, exist_ok=True, mode=0o700)
         # Private ephemeral GTK settings only, never operator-session settings.
         # Blinking carets otherwise invalidate exact-raster grounding during render.
         gtk_settings = Path("/workspace/home/.config/gtk-3.0")
         gtk_settings.mkdir(mode=0o700)
         (gtk_settings / "settings.ini").write_text(
-            "[Settings]\ngtk-cursor-blink=false\ngtk-enable-animations=false\n")
-        self.spawn([
-            "/usr/bin/dbus-daemon", "--nofork", "--nopidfile",
-            "--config-file=/runtime/assets/session.conf",
-        ])
-        self.spawn([
-            "/usr/bin/Xvfb", DISPLAY, "-screen", "0", f"{WIDTH}x{HEIGHT}x24",
-            "-nolisten", "tcp", "-noreset", "-ac", "-extension", "GLX",
-        ])
+            "[Settings]\ngtk-cursor-blink=false\ngtk-enable-animations=false\n"
+        )
+        self.spawn(
+            [
+                "/usr/bin/dbus-daemon",
+                "--nofork",
+                "--nopidfile",
+                "--config-file=/runtime/assets/session.conf",
+            ]
+        )
+        self.spawn(
+            [
+                "/usr/bin/Xvfb",
+                DISPLAY,
+                "-screen",
+                "0",
+                f"{WIDTH}x{HEIGHT}x24",
+                "-nolisten",
+                "tcp",
+                "-noreset",
+                "-ac",
+                "-extension",
+                "GLX",
+            ]
+        )
         end = time.monotonic() + 5.0
         while not (
             Path("/tmp/.X11-unix/X77").is_socket() and Path("/workspace/run/bus").is_socket()
@@ -95,9 +125,9 @@ class Worker:
             if time.monotonic() > end or any(child.poll() is not None for child in self.children):
                 raise RuntimeError("private desktop primitives failed to start")
             time.sleep(0.05)
-        self.spawn([
-            "/usr/bin/openbox", "--sm-disable", "--config-file", "/runtime/assets/openbox.xml"
-        ])
+        self.spawn(
+            ["/usr/bin/openbox", "--sm-disable", "--config-file", "/runtime/assets/openbox.xml"]
+        )
         if TYPE_CHECKING or __package__:
             from .primitives import NativeDesktop
         else:
@@ -111,8 +141,14 @@ class Worker:
             try:
                 observation = self.desktop.snapshot(packed=True)
                 if observation["window"]["pid"] > 0:
-                    return {"ok": True, "event": "ready", "profile": self.profile,
-                            "width": WIDTH, "height": HEIGHT, "containment": containment_report()}
+                    return {
+                        "ok": True,
+                        "event": "ready",
+                        "profile": self.profile,
+                        "width": WIDTH,
+                        "height": HEIGHT,
+                        "containment": containment_report(),
+                    }
             except Exception:
                 time.sleep(0.1)
         raise RuntimeError("approved application window did not become observable")
@@ -141,8 +177,11 @@ class Worker:
             name = message.get("name")
             if not isinstance(name, str):
                 raise ValueError("export name must be a string")
-            return {"ok": True, "id": request_id,
-                    "blob": pack_blob(read_export(name, directory_fd=directory_fd))}
+            return {
+                "ok": True,
+                "id": request_id,
+                "blob": pack_blob(read_export(name, directory_fd=directory_fd)),
+            }
         raise ValueError("unsupported worker operation")
 
     def emit(self, message: dict):
@@ -159,11 +198,12 @@ class Worker:
                 from .accessibility import PrimitiveError
             else:
                 from runtime.accessibility import PrimitiveError
-            reason = (str(exc)[:160] if isinstance(exc, PrimitiveError)
-                      else "desktop operation unavailable")
-            self.emit({
-                "ok": False, "id": message.get("id"), "error": reason
-            })
+            reason = (
+                str(exc)[:160]
+                if isinstance(exc, PrimitiveError)
+                else "desktop operation unavailable"
+            )
+            self.emit({"ok": False, "id": message.get("id"), "error": reason})
         finally:
             self.operation_lock.release()
 
@@ -176,8 +216,14 @@ class Worker:
         try:
             assert self.desktop is not None  # Pause follows successful startup.
             released = self.desktop.release_all()
-            self.emit({"ok": bool(released.get("ok")), "released": released.get("ok") is True,
-                       "id": message.get("id"), "state": "paused"})
+            self.emit(
+                {
+                    "ok": bool(released.get("ok")),
+                    "released": released.get("ok") is True,
+                    "id": message.get("id"),
+                    "state": "paused",
+                }
+            )
         finally:
             self.operation_lock.release()
 
@@ -198,9 +244,13 @@ class Worker:
                     if safe:
                         self.paused = False
                         self.cancelled.clear()
-                    self.emit({
-                        "ok": safe, "id": message.get("id"), "state": "active" if safe else "paused"
-                    })
+                    self.emit(
+                        {
+                            "ok": safe,
+                            "id": message.get("id"),
+                            "state": "active" if safe else "paused",
+                        }
+                    )
                     continue
                 if self.paused and message.get("op") == "act":
                     self.emit({"ok": False, "id": message.get("id"), "error": "desktop paused"})
@@ -224,8 +274,8 @@ if __name__ == "__main__":
             raise ValueError("invalid worker invocation")
         Worker(sys.argv[1]).run()
     except Exception:
-        sys.stdout.buffer.write(encode({
-            "ok": False, "event": "ready", "error": "isolated worker failed"
-        }))
+        sys.stdout.buffer.write(
+            encode({"ok": False, "event": "ready", "error": "isolated worker failed"})
+        )
         sys.stdout.buffer.flush()
         raise SystemExit(1) from None

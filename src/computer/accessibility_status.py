@@ -3,6 +3,7 @@
 This does not activate AT-SPI, enumerate applications, capture pixels, or certify
 editable nodes. No ambient root D-Bus address or process environment is consulted.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -16,9 +17,14 @@ from pathlib import Path
 async def _loginctl(*arguments):
     """Read logind's bounded session metadata, never process environments."""
     process = await asyncio.create_subprocess_exec(
-        "/usr/bin/loginctl", *arguments, stdin=asyncio.subprocess.DEVNULL,
-        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-        env={"PATH": "/usr/bin:/bin", "LANG": "C"}, limit=16384)
+        "/usr/bin/loginctl",
+        *arguments,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+        limit=16384,
+    )
     try:
         assert process.stdout is not None
         output = await asyncio.wait_for(process.stdout.read(16385), 1)
@@ -51,11 +57,32 @@ async def _x11_uid(settings):
         parts = row.split()
         if not parts:
             continue
-        info = dict(line.split("=", 1) for line in (await _loginctl(
-            "show-session", parts[0], "-p", "User", "-p", "Display", "-p", "Type",
-            "-p", "Remote", "-p", "Active")).splitlines() if "=" in line)
-        if (info.get("Display") == display and info.get("Type") == "x11"
-                and info.get("Remote") == "no" and info.get("Active") == "yes"):
+        info = dict(
+            line.split("=", 1)
+            for line in (
+                await _loginctl(
+                    "show-session",
+                    parts[0],
+                    "-p",
+                    "User",
+                    "-p",
+                    "Display",
+                    "-p",
+                    "Type",
+                    "-p",
+                    "Remote",
+                    "-p",
+                    "Active",
+                )
+            ).splitlines()
+            if "=" in line
+        )
+        if (
+            info.get("Display") == display
+            and info.get("Type") == "x11"
+            and info.get("Remote") == "no"
+            and info.get("Active") == "yes"
+        ):
             uid = int(info.get("User", "0"))
             if uid > 0:
                 matches.add(uid)
@@ -73,8 +100,11 @@ async def _target(settings):
         # otherwise needs an unambiguous logind binding to this exact display.
         authority = Path(settings.xauthority)
         info = authority.stat() if settings.xauthority and authority.is_absolute() else None
-        uid = (info.st_uid if info and stat.S_ISREG(info.st_mode) and info.st_uid > 0
-               else await _x11_uid(settings))
+        uid = (
+            info.st_uid
+            if info and stat.S_ISREG(info.st_mode) and info.st_uid > 0
+            else await _x11_uid(settings)
+        )
         if uid is None:
             return None
         address = f"unix:path=/run/user/{uid}/bus"
@@ -91,8 +121,10 @@ async def _target(settings):
         # /run/user/UID is deliberately private. The explicit sudo transport
         # authenticates as that UID; only its canonical runtime bus is allowed
         # without the service account's own stat access.
-        if (not getattr(settings, "runtime_sudo", False)
-                or address != f"unix:path=/run/user/{uid}/bus"):
+        if (
+            not getattr(settings, "runtime_sudo", False)
+            or address != f"unix:path=/run/user/{uid}/bus"
+        ):
             return None
     return uid, pwd.getpwuid(uid).pw_gid, address
 
@@ -106,9 +138,17 @@ async def read_accessibility_status(settings):
         if target is None:
             return result
         uid, gid, address = target
-        argv = ["/usr/bin/busctl", "--auto-start=no", "--timeout=1s",
-                f"--address={address}", "get-property", "org.a11y.Bus",
-                "/org/a11y/bus", "org.a11y.Status", "IsEnabled"]
+        argv = [
+            "/usr/bin/busctl",
+            "--auto-start=no",
+            "--timeout=1s",
+            f"--address={address}",
+            "get-property",
+            "org.a11y.Bus",
+            "/org/a11y/bus",
+            "org.a11y.Status",
+            "IsEnabled",
+        ]
         identity = {}
         if os.geteuid() == 0:
             identity = {"user": uid, "group": gid, "extra_groups": []}
@@ -116,14 +156,29 @@ async def read_accessibility_status(settings):
             if not getattr(settings, "runtime_sudo", False):
                 result["reason"] = "operator_identity_unavailable"
                 return result
-            argv = ["/usr/bin/sudo", "-n", "-u", f"#{uid}", "--",
-                    "/usr/bin/env", "-i", "PATH=/usr/bin:/bin", "LANG=C", *argv]
+            argv = [
+                "/usr/bin/sudo",
+                "-n",
+                "-u",
+                f"#{uid}",
+                "--",
+                "/usr/bin/env",
+                "-i",
+                "PATH=/usr/bin:/bin",
+                "LANG=C",
+                *argv,
+            ]
         # Minimal environment: never copy credentials, root's bus, or desktop
         # process environments. No shell and no session-wide setting mutations.
         process = await asyncio.create_subprocess_exec(
-            *argv, stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, env={"PATH": "/usr/bin:/bin", "LANG": "C"},
-            limit=256, **identity)
+            *argv,
+            stdin=asyncio.subprocess.DEVNULL,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env={"PATH": "/usr/bin:/bin", "LANG": "C"},
+            limit=256,
+            **identity,
+        )
 
         async def bounded_read():
             assert process.stdout is not None
@@ -137,8 +192,9 @@ async def read_accessibility_status(settings):
         output = await asyncio.wait_for(bounded_read(), timeout=1.5)
         if output in (b"b true", b"b false"):
             enabled = output == b"b true"
-            result.update(enabled=enabled, state="enabled" if enabled else "disabled",
-                          reason="property_read")
+            result.update(
+                enabled=enabled, state="enabled" if enabled else "disabled", reason="property_read"
+            )
     except TimeoutError:
         result["reason"] = "read_timeout"
     except (OSError, ValueError, KeyError):

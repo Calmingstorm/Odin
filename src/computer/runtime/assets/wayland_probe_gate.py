@@ -1,5 +1,6 @@
 #!/usr/bin/python3
 """Gated parent-death-bound exec; no desktop access before durable PID recording."""
+
 import ctypes
 import json
 import os
@@ -36,21 +37,23 @@ def reap_owned(child):
                 pid = 0
             if pid == 0:
                 break
-        time.sleep(.025)
+        time.sleep(0.025)
     raise RuntimeError("probe_outer_cleanup_failed")
 
 
 def supervise(argv):
     stopping = False
+
     def stop(_signal, _frame):
         nonlocal stopping
         stopping = True
+
     signal.signal(signal.SIGTERM, stop)
     child = subprocess.Popen(argv, stdin=subprocess.DEVNULL)
     try:
         deadline = time.monotonic() + 78
         while child.poll() is None and not stopping and time.monotonic() < deadline:
-            time.sleep(.025)
+            time.sleep(0.025)
         return child.returncode if child.returncode is not None else 124
     finally:
         reap_owned(child)
@@ -59,9 +62,11 @@ def supervise(argv):
 def main():
     parent = int(sys.argv[1])
     libc = ctypes.CDLL(None, use_errno=True)
-    if (libc.prctl(36, 1, 0, 0, 0)
-            or libc.prctl(1, signal.SIGTERM, 0, 0, 0)
-            or os.getppid() != parent):
+    if (
+        libc.prctl(36, 1, 0, 0, 0)
+        or libc.prctl(1, signal.SIGTERM, 0, 0, 0)
+        or os.getppid() != parent
+    ):
         return 2
     os.write(1, b"PROBE_GATE_READY\n")
     deadline = time.monotonic() + 10
@@ -75,8 +80,11 @@ def main():
         data.extend(chunk)
         if b"\n" in data:
             argv = json.loads(data)
-            if (not isinstance(argv, list) or not all(type(x) is str for x in argv)
-                    or argv[:2] != ["/usr/bin/bwrap", "--unshare-all"]):
+            if (
+                not isinstance(argv, list)
+                or not all(type(x) is str for x in argv)
+                or argv[:2] != ["/usr/bin/bwrap", "--unshare-all"]
+            ):
                 return 2
             if os.getppid() != parent:
                 return 2

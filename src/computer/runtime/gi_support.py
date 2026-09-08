@@ -4,6 +4,7 @@ Debian installs python3-gi outside the application venv. Only the fixed,
 root-owned distro path is considered, and only in the native desktop worker.
 No .pth files, environment paths, package installation or bus activation.
 """
+
 from __future__ import annotations
 
 import importlib
@@ -23,7 +24,7 @@ def load_gi():
     directory = Path("/usr/lib/python3/dist-packages")
     for path in (directory, *directory.parents):
         info = path.lstat()
-        if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022):
+        if not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or info.st_mode & 0o022:
             raise ImportError("untrusted_distro_gi_path")
     # Load only gi from the trusted directory. Do not expose unrelated distro
     # modules to the venv; extension ABI compatibility is checked by the loader.

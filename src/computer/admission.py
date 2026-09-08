@@ -4,6 +4,7 @@ These records describe the adapter's measurement. Constructing one does not gran
 input: source consent, application grounding and lifecycle policy still apply.
 Native IDs, socket paths and screenshot contents do not belong in this record.
 """
+
 from __future__ import annotations
 
 import re
@@ -13,8 +14,12 @@ from .models import ComputerError
 
 
 def _label(value: str, limit: int) -> None:
-    if (type(value) is not str or not value or len(value) > limit
-            or any(ord(c) < 32 or ord(c) == 127 for c in value)):
+    if (
+        type(value) is not str
+        or not value
+        or len(value) > limit
+        or any(ord(c) < 32 or ord(c) == 127 for c in value)
+    ):
         raise ValueError("invalid input admission label")
     try:
         value.encode("utf-8")
@@ -34,8 +39,12 @@ class CompositorIdentity:
             _label(value, 160)
 
     def public(self) -> dict:
-        return {"name": self.name, "version": self.version,
-                "backend": self.backend, "build_id": self.build_id}
+        return {
+            "name": self.name,
+            "version": self.version,
+            "backend": self.backend,
+            "build_id": self.build_id,
+        }
 
 
 @dataclass(frozen=True)
@@ -64,14 +73,20 @@ class InputAdmission:
         for check in self.checks:
             _label(check, 128)
         if self.state == "eligible" and (
-                self.compositor is None or self.probe_scope == "unmeasured" or not self.checks):
+            self.compositor is None or self.probe_scope == "unmeasured" or not self.checks
+        ):
             raise ValueError("eligible input requires identified measured evidence")
 
     def public(self) -> dict:
-        return {"state": self.state, "code": self.code, "reason": self.reason,
-                "remedy": self.remedy, "probe_scope": self.probe_scope,
-                "compositor": None if self.compositor is None else self.compositor.public(),
-                "checks": list(self.checks)}
+        return {
+            "state": self.state,
+            "code": self.code,
+            "reason": self.reason,
+            "remedy": self.remedy,
+            "probe_scope": self.probe_scope,
+            "compositor": None if self.compositor is None else self.compositor.public(),
+            "checks": list(self.checks),
+        }
 
 
 class InputAdmissionError(ComputerError):
@@ -82,8 +97,11 @@ class InputAdmissionError(ComputerError):
             raise ValueError("refused admission evidence required")
         self.admission = admission
         identity = admission.compositor
-        target = (f"{identity.name} {identity.version} ({identity.backend})"
-                  if identity else "Unidentified compositor")
+        target = (
+            f"{identity.name} {identity.version} ({identity.backend})"
+            if identity
+            else "Unidentified compositor"
+        )
         super().__init__(f"{admission.code}: {target}. {admission.reason} {admission.remedy}")
 
 
@@ -96,13 +114,16 @@ def public_admission(value) -> dict | None:
         if compositor is not None:
             if not isinstance(compositor, dict):
                 return None
-            compositor = CompositorIdentity(**{
-                key: compositor[key] for key in ("name", "version", "backend", "build_id")})
+            compositor = CompositorIdentity(
+                **{key: compositor[key] for key in ("name", "version", "backend", "build_id")}
+            )
         checks = value.get("checks", [])
         if not isinstance(checks, list) or len(checks) > 16:
             return None
         return InputAdmission(
             **{key: value[key] for key in ("state", "code", "reason", "remedy", "probe_scope")},
-            compositor=compositor, checks=tuple(checks)).public()
+            compositor=compositor,
+            checks=tuple(checks),
+        ).public()
     except (KeyError, TypeError, ValueError):
         return None

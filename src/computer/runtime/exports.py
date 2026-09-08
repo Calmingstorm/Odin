@@ -29,11 +29,17 @@ def read_export(name: str, *, directory_fd: int) -> bytes:
             remaining -= len(data)
         after = os.fstat(fd)
         named = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+
         def signature(value):
             return (
-                value.st_dev, value.st_ino, value.st_size,
-                value.st_mtime_ns, value.st_ctime_ns, value.st_nlink,
+                value.st_dev,
+                value.st_ino,
+                value.st_size,
+                value.st_mtime_ns,
+                value.st_ctime_ns,
+                value.st_nlink,
             )
+
         if signature(before) != signature(after) or signature(after) != signature(named):
             raise ValueError("export changed while reading")
         return b"".join(chunks)

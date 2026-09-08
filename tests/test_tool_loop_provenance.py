@@ -5,6 +5,7 @@ from the RESPONSE's provenance fields — the only source that survives
 gateway routing, retries, and live reloads. A response without provenance
 is recorded as UNKNOWN (empty/None), never replaced by a call-site guess.
 """
+
 import asyncio
 from types import SimpleNamespace
 
@@ -16,14 +17,19 @@ from src.trajectories.saver import TrajectoryTurn
 
 def _turn():
     return TrajectoryTurn(
-        message_id="m1", channel_id="c1", user_id="u1",
-        user_name="u", source="discord",
+        message_id="m1",
+        channel_id="c1",
+        user_id="u1",
+        user_name="u",
+        source="discord",
     )
 
 
 def _chat_st():
     return SimpleNamespace(
-        iteration=1, _trajectory=_turn(), stuck_tracker=StuckLoopTracker(),
+        iteration=1,
+        _trajectory=_turn(),
+        stuck_tracker=StuckLoopTracker(),
     )
 
 
@@ -48,8 +54,11 @@ class TestChatIterationProvenance:
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         st = _chat_st()
         resp = SimpleNamespace(
-            text="hi", tool_calls=[], stop_reason="end_turn",
-            input_tokens=0, output_tokens=0,
+            text="hi",
+            tool_calls=[],
+            stop_reason="end_turn",
+            input_tokens=0,
+            output_tokens=0,
         )
         assert await runner._check_stuck_and_record(st, resp) is None
         it = st._trajectory.iterations[0]
@@ -109,9 +118,7 @@ def test_chat_iteration_stamps_frozen_context_budget_snapshot():
 
     runner = ToolLoopRunner.__new__(ToolLoopRunner)
     st = _chat_st()
-    st._generation_budget_snapshot = resolve_context_budget(
-        "gpt-5.6-sol", density_milli=609
-    )
+    st._generation_budget_snapshot = resolve_context_budget("gpt-5.6-sol", density_milli=609)
     resp = LLMResponse(text="hi")
     asyncio.run(runner._check_stuck_and_record(st, resp))
     row = st._trajectory.iterations[-1]
@@ -166,7 +173,7 @@ def test_usage_capture_failure_is_declared_nonfatal_at_both_generation_sites():
     import inspect
 
     source = inspect.getsource(ToolLoopRunner)
-    assert source.count('apply_accepted_usage(') == 2
+    assert source.count("apply_accepted_usage(") == 2
 
 
 class TestWaitForAgentsWrapperGrace:
@@ -326,9 +333,7 @@ class TestInflightStopWrapperEdgeCoverage:
 
         runner._run_one_tool = block
         st = SimpleNamespace(_cancel=asyncio.Event())
-        block_info = SimpleNamespace(
-            name="wait_for_agents", input={"agent_ids": ["a"]}, id="call"
-        )
+        block_info = SimpleNamespace(name="wait_for_agents", input={"agent_ids": ["a"]}, id="call")
         task = asyncio.create_task(runner._run_one_tool_with_timeout(st, block_info, 30))
         await asyncio.wait_for(started.wait(), timeout=1)
         task.cancel()
@@ -357,9 +362,7 @@ class TestInflightStopWrapperEdgeCoverage:
             after_tool_interrupted=AsyncMock(side_effect=RuntimeError("ledger down"))
         )
         st = SimpleNamespace(_cancel=asyncio.Event(), durability=durability)
-        block_info = SimpleNamespace(
-            name="wait_for_agents", input={"agent_ids": ["a"]}, id="call"
-        )
+        block_info = SimpleNamespace(name="wait_for_agents", input={"agent_ids": ["a"]}, id="call")
         task = asyncio.create_task(runner._run_one_tool_with_timeout(st, block_info, 30))
         await asyncio.wait_for(started.wait(), timeout=1)
         st._cancel.set()

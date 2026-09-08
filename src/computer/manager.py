@@ -1,4 +1,5 @@
 """Lazy process lifecycle. Disabled boot opens no desktop state."""
+
 from __future__ import annotations
 
 import asyncio
@@ -13,7 +14,8 @@ from ..config.persistence import config_transaction, persist_config_paths_locked
 
 _TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 _binding: contextvars.ContextVar[tuple | None] = contextvars.ContextVar(
-    "computer_lifecycle_binding", default=None)
+    "computer_lifecycle_binding", default=None
+)
 
 
 class ComputerLifecycle:
@@ -51,19 +53,28 @@ class ComputerLifecycle:
         mcp = getattr(self.bot, "mcp_manager", None)
         assert_no_computer_collisions(
             skills.get_tool_definitions() if skills is not None else [],
-            mcp.get_tool_definitions() if mcp is not None else [])
+            mcp.get_tool_definitions() if mcp is not None else [],
+        )
         settings = self.settings
         if settings.platform == "wayland" and (
-                settings.environment != "existing_session" or not settings.wayland_bus_address
-                or settings.wayland_uid is None):
+            settings.environment != "existing_session"
+            or not settings.wayland_bus_address
+            or settings.wayland_uid is None
+        ):
             raise ValueError("Wayland needs an explicit existing session bus and desktop UID")
-        if settings.platform == "x11" and settings.environment == "existing_session" and (
-                not settings.display or not settings.monitor_names):
+        if (
+            settings.platform == "x11"
+            and settings.environment == "existing_session"
+            and (not settings.display or not settings.monitor_names)
+        ):
             raise ValueError("Existing-session capture needs explicit display and monitor names")
         root = Path(settings.storage_dir)
-        if (not root.is_absolute() or not root.is_dir()
-                or any(p.is_symlink() for p in (root, *root.parents))
-                or Path("/opt/odin") in (root, *root.parents)):
+        if (
+            not root.is_absolute()
+            or not root.is_dir()
+            or any(p.is_symlink() for p in (root, *root.parents))
+            or Path("/opt/odin") in (root, *root.parents)
+        ):
             raise ValueError("Computer storage must be provisioned outside the live install")
         mode = root.stat()
         if mode.st_uid != os.geteuid() or mode.st_mode & 0o077:
@@ -279,8 +290,11 @@ class ComputerLifecycle:
         from .app_profiles import ISOLATED_PROFILES, application_profile
 
         desired = self.bot.config.computer
-        restart = [name for name, value in self.settings.model_dump().items()
-                   if name != "enabled" and getattr(desired, name) != value]
+        restart = [
+            name
+            for name, value in self.settings.model_dump().items()
+            if name != "enabled" and getattr(desired, name) != value
+        ]
         # Pure declarations: do not open a display or probe application processes
         # from operator status, including disabled startup. Eligibility is not
         # installation, focus, task authorization or measured input readiness.
@@ -289,19 +303,26 @@ class ComputerLifecycle:
         applications = []
         for app in sorted(profiles):
             profile = application_profile(
-                app, platform=self.settings.platform, environment=self.settings.environment)
+                app, platform=self.settings.platform, environment=self.settings.environment
+            )
             if profile is not None:
                 applications.append(profile)
         return {
-            "enabled": self.enabled, "configured_enabled": bool(desired.enabled),
-            "runtime_enabled": self.enabled, "generation": self.generation,
-            "restart_required": restart, "error": self.error,
+            "enabled": self.enabled,
+            "configured_enabled": bool(desired.enabled),
+            "runtime_enabled": self.enabled,
+            "generation": self.generation,
+            "restart_required": restart,
+            "error": self.error,
             "available": self.enabled,
             "application_profiles": applications,
             "state": "quarantined" if self._service is not None and self.error else "unavailable",
-            "backend": {"platform": self.settings.platform,
-                        "environment": self.settings.environment,
-                        "input_supported": None, "readiness": "not_checked"},
+            "backend": {
+                "platform": self.settings.platform,
+                "environment": self.settings.environment,
+                "input_supported": None,
+                "readiness": "not_checked",
+            },
         }
 
     @contextmanager
@@ -318,7 +339,8 @@ class ComputerLifecycle:
             self._web_grants[key] = check
         if key not in self._watchers:
             self._watchers[key] = asyncio.create_task(
-                self._watch_authority(service, st, key, context))
+                self._watch_authority(service, st, key, context)
+            )
         token = _binding.set((self, service, self.generation))
         try:
             with service.foreground(st, block):
@@ -328,8 +350,13 @@ class ComputerLifecycle:
 
     def _bound(self):
         binding = _binding.get()
-        if (not self.enabled or binding is None or binding[0] is not self
-                or binding[1] is not self._service or binding[2] != self.generation):
+        if (
+            not self.enabled
+            or binding is None
+            or binding[0] is not self
+            or binding[1] is not self._service
+            or binding[2] != self.generation
+        ):
             raise PermissionError("Computer lifecycle generation revoked")
         return binding[1]
 
@@ -401,9 +428,12 @@ class ComputerLifecycle:
                     self._web_grants.pop(key, None)
                     result = await service.finish_turn(st)
                     if isinstance(result, dict) and (
-                            result.get("state") == "quarantined"
-                            or (isinstance(result.get("cleanup"), dict)
-                                and result["cleanup"].get("complete") is not True)):
+                        result.get("state") == "quarantined"
+                        or (
+                            isinstance(result.get("cleanup"), dict)
+                            and result["cleanup"].get("complete") is not True
+                        )
+                    ):
                         self.error = "authority_cleanup_unverified"
                         self._active = False
                         self._invalidate()
@@ -439,7 +469,13 @@ class ComputerLifecycle:
                 return self.snapshot()
             raise PermissionError("Computer unavailable")
         if not self.enabled and method not in {
-                "status", "stop", "pause", "recover", "reconcile", "acknowledge_legacy"}:
+            "status",
+            "stop",
+            "pause",
+            "recover",
+            "reconcile",
+            "acknowledge_legacy",
+        }:
             raise PermissionError("Computer unavailable")
         if not self.enabled and method == "pause":
             # Failed cleanup stays inspectable without reviving input authority.
@@ -449,8 +485,11 @@ class ComputerLifecycle:
         except Exception as error:
             from .models import ComputerError
 
-            if isinstance(error, ComputerError) and str(error) == "not_found" and method in {
-                    "status", "stop", "pause"}:
+            if (
+                isinstance(error, ComputerError)
+                and str(error) == "not_found"
+                and method in {"status", "stop", "pause"}
+            ):
                 return self.snapshot()
             raise
         if method in {"status", "stop", "pause", "recover", "reconcile", "acknowledge_legacy"}:
@@ -466,9 +505,13 @@ class ComputerLifecycle:
                     latest = next(reversed(live.observations.values()))
                     input_supported = bool(latest.scope.input_sources)
                     if capabilities.get("environment") == "existing_session":
-                        input_supported = bool(input_supported and all(
-                            capabilities.get(k) == "verified" for k in (
-                                "owned_input_release", "application_preserving_detach")))
+                        input_supported = bool(
+                            input_supported
+                            and all(
+                                capabilities.get(k) == "verified"
+                                for k in ("owned_input_release", "application_preserving_detach")
+                            )
+                        )
                 result["backend"] = {
                     "platform": capabilities.get("platform"),
                     "environment": capabilities.get("environment"),
@@ -477,24 +520,37 @@ class ComputerLifecycle:
                     "input_blocker": value.get("input_blocker"),
                 }
             if value.get("state") == "quarantined":
-                result["backend"] = {**result["backend"], "input_supported": False,
-                                     "readiness": "inactive",
-                                     "input_blocker": "session_not_active"}
+                result["backend"] = {
+                    **result["backend"],
+                    "input_supported": False,
+                    "readiness": "inactive",
+                    "input_blocker": "session_not_active",
+                }
             return result
         if method == "observe" and "image_bytes" in value:
             _, metadata = await service.controller.read_evidence(
-                service._operator_context(**identity), value["evidence_id"])
-            return {"frame": {"evidence_id": value["evidence_id"],
-                              "captured_at": request_started,
-                              "timestamp_basis": "request_start_lower_bound",
-                              "expires_at": self._iso(metadata["expires_at"]),
-                              "fresh_for_ms": 5000}}
+                service._operator_context(**identity), value["evidence_id"]
+            )
+            return {
+                "frame": {
+                    "evidence_id": value["evidence_id"],
+                    "captured_at": request_started,
+                    "timestamp_basis": "request_start_lower_bound",
+                    "expires_at": self._iso(metadata["expires_at"]),
+                    "fresh_for_ms": 5000,
+                }
+            }
         if method in {"evidence", "download"} and isinstance(value, tuple):
             data, metadata = value
-            return {"data": data, "expires_at": self._iso(metadata["expires_at"]),
-                    "content_type": "image/png" if data.startswith(b"\x89PNG") else
-                    "image/jpeg" if data.startswith(b"\xff\xd8\xff") else
-                    "application/octet-stream"}
+            return {
+                "data": data,
+                "expires_at": self._iso(metadata["expires_at"]),
+                "content_type": "image/png"
+                if data.startswith(b"\x89PNG")
+                else "image/jpeg"
+                if data.startswith(b"\xff\xd8\xff")
+                else "application/octet-stream",
+            }
         if method == "export" and isinstance(value, dict):
             return {**value, "expires_at": self._iso(value["expires_at"])}
         return value

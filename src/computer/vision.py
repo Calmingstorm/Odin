@@ -6,6 +6,7 @@ dictionary. ``frame_summary`` is the explicit pixel-free audit representation.
 Only static, 8-bit RGB/RGBA, non-interlaced screenshot PNGs are accepted. Rejecting
 ancillary chunks avoids passing embedded text, profiles, or extra frames onward.
 """
+
 from __future__ import annotations
 
 import base64
@@ -79,10 +80,19 @@ class FrameMetadata:
         for identity in (self.observation_id, self.session_id, self.source_id):
             if type(identity) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", identity):
                 raise VisionError("Invalid observation or source identity")
-        if not all(_integer(v) for v in (
-            self.generation, self.captured_monotonic_ns, self.width, self.height,
-            self.source_revision, self.consent_generation, self.source_width, self.source_height,
-        )):
+        if not all(
+            _integer(v)
+            for v in (
+                self.generation,
+                self.captured_monotonic_ns,
+                self.width,
+                self.height,
+                self.source_revision,
+                self.consent_generation,
+                self.source_width,
+                self.source_height,
+            )
+        ):
             raise VisionError("Invalid frame dimensions or generation")
         if self.width * self.height > MAX_FRAME_PIXELS:
             raise VisionError("Frame exceeds pixel limit")
@@ -96,14 +106,19 @@ class FrameMetadata:
         else:
             if type(self.crop) is not FrameCrop:
                 raise VisionError("Crop frame requires crop geometry")
-            if (self.crop.x + self.crop.width > self.source_width
-                    or self.crop.y + self.crop.height > self.source_height):
+            if (
+                self.crop.x + self.crop.width > self.source_width
+                or self.crop.y + self.crop.height > self.source_height
+            ):
                 raise VisionError("Crop outside source")
         if type(self.rotation) is not int or self.rotation not in (0, 90, 180, 270):
             raise VisionError("Invalid frame rotation")
-        if (type(self.resize_scale) is not tuple or len(self.resize_scale) != 2
-                or not all(_integer(v) for v in self.resize_scale)
-                or self.resize_scale[0] > self.resize_scale[1]):
+        if (
+            type(self.resize_scale) is not tuple
+            or len(self.resize_scale) != 2
+            or not all(_integer(v) for v in self.resize_scale)
+            or self.resize_scale[0] > self.resize_scale[1]
+        ):
             raise VisionError("Invalid frame resize scale")
         if self.resize_rounding not in ("nearest", "floor"):
             raise VisionError("Invalid frame resize rounding")
@@ -141,13 +156,25 @@ class FrameMetadata:
     @property
     def binding(self) -> tuple:
         """One capture/source binding; a crop cannot silently retarget it."""
-        return (self.observation_id, self.session_id, self.generation, self.captured_monotonic_ns,
-                self.source_id, self.source_revision, self.consent_generation,
-                self.source_width, self.source_height, self.rotation)
+        return (
+            self.observation_id,
+            self.session_id,
+            self.generation,
+            self.captured_monotonic_ns,
+            self.source_id,
+            self.source_revision,
+            self.consent_generation,
+            self.source_width,
+            self.source_height,
+            self.rotation,
+        )
 
     def public(self) -> dict:
-        return {**asdict(self), "resize_scale": list(self.resize_scale),
-                "delivered_to_source": self.delivered_to_source.public()}
+        return {
+            **asdict(self),
+            "resize_scale": list(self.resize_scale),
+            "delivered_to_source": self.delivered_to_source.public(),
+        }
 
 
 class ObservationImage(TypedDict):
@@ -172,7 +199,7 @@ def _validate_png(png: bytes, metadata: FrameMetadata) -> None:
         end = pos + 12 + length
         if end > len(png):
             raise VisionError("Truncated PNG chunk")
-        data = png[pos + 8:end - 4]
+        data = png[pos + 8 : end - 4]
         checksum = struct.unpack_from(">I", png, end - 4)[0]
         if zlib.crc32(kind + data) & 0xFFFFFFFF != checksum:
             raise VisionError("Invalid PNG checksum")
@@ -184,8 +211,11 @@ def _validate_png(png: bytes, metadata: FrameMetadata) -> None:
             )
             if (width, height) != (metadata.width, metadata.height):
                 raise VisionError("PNG geometry does not match metadata")
-            if (depth != 8 or color not in (2, 6)
-                    or (compression, filtering, interlace) != (0, 0, 0)):
+            if (
+                depth != 8
+                or color not in (2, 6)
+                or (compression, filtering, interlace) != (0, 0, 0)
+            ):
                 raise VisionError("Unsupported screenshot PNG encoding")
             channels = 3 if color == 2 else 4
         elif kind == b"IDAT":
@@ -202,8 +232,12 @@ def _validate_png(png: bytes, metadata: FrameMetadata) -> None:
     try:
         decoder = zlib.decompressobj()
         pixels = decoder.decompress(compressed, expected + 1)
-        if (len(pixels) != expected or not decoder.eof
-                or decoder.unused_data or decoder.unconsumed_tail):
+        if (
+            len(pixels) != expected
+            or not decoder.eof
+            or decoder.unused_data
+            or decoder.unconsumed_tail
+        ):
             raise VisionError("Invalid PNG decoded size")
     except zlib.error:
         raise VisionError("Invalid PNG compressed pixels") from None
@@ -220,13 +254,19 @@ def observation_image(png: bytes, metadata: FrameMetadata) -> ObservationImage:
     if type(metadata) is not FrameMetadata:
         raise VisionError("FrameMetadata required")
     _validate_png(png, metadata)
-    summary = {**metadata.public(), "png_bytes": len(png),
-               "sha256": hashlib.sha256(png).hexdigest()}
+    summary = {
+        **metadata.public(),
+        "png_bytes": len(png),
+        "sha256": hashlib.sha256(png).hexdigest(),
+    }
     return {
         "__image_block__": {
             "type": "image",
-            "source": {"type": "base64", "media_type": "image/png",
-                       "data": base64.b64encode(png).decode("ascii")},
+            "source": {
+                "type": "base64",
+                "media_type": "image/png",
+                "data": base64.b64encode(png).decode("ascii"),
+            },
             _TAG: dict(summary),
         },
         "__prompt__": (
@@ -250,16 +290,24 @@ def _parse_summary(value: object) -> FrameMetadata:
     try:
         values = dict(value)
         size, digest = values.pop("png_bytes"), values.pop("sha256")
-        if (not _integer(size) or size > MAX_PNG_BYTES or type(digest) is not str
-                or not re.fullmatch(r"[0-9a-f]{64}", digest)):
+        if (
+            not _integer(size)
+            or size > MAX_PNG_BYTES
+            or type(digest) is not str
+            or not re.fullmatch(r"[0-9a-f]{64}", digest)
+        ):
             raise VisionError("Invalid computer frame summary")
         if values.get("crop") is not None:
             values["crop"] = FrameCrop(**values["crop"])
         transform = values.pop("delivered_to_source")
-        if (type(transform) is not dict or set(transform) != set("abcdef")
-                or any(type(pair) is not list or len(pair) != 2
-                       or not all(type(v) is int for v in pair)
-                       for pair in transform.values())):
+        if (
+            type(transform) is not dict
+            or set(transform) != set("abcdef")
+            or any(
+                type(pair) is not list or len(pair) != 2 or not all(type(v) is int for v in pair)
+                for pair in transform.values()
+            )
+        ):
             raise VisionError("Invalid frame transform")
         if type(values.get("resize_scale")) is list:
             values["resize_scale"] = tuple(values["resize_scale"])
@@ -274,8 +322,12 @@ def _parse_summary(value: object) -> FrameMetadata:
 def _validate_native_frame(block: dict) -> FrameMetadata:
     metadata = _parse_summary(block[_TAG])
     source = block.get("source")
-    if (type(source) is not dict or set(source) != {"type", "media_type", "data"}
-            or source["type"] != "base64" or source["media_type"] != "image/png"):
+    if (
+        type(source) is not dict
+        or set(source) != {"type", "media_type", "data"}
+        or source["type"] != "base64"
+        or source["media_type"] != "image/png"
+    ):
         raise VisionError("Invalid native computer image")
     encoded = source["data"]
     if type(encoded) is not str or len(encoded) > 4 * ((MAX_PNG_BYTES + 2) // 3):
@@ -285,8 +337,10 @@ def _validate_native_frame(block: dict) -> FrameMetadata:
     except (ValueError, binascii.Error):
         raise VisionError("Invalid native computer image encoding") from None
     _validate_png(png, metadata)
-    if (len(png) != block[_TAG]["png_bytes"]
-            or hashlib.sha256(png).hexdigest() != block[_TAG]["sha256"]):
+    if (
+        len(png) != block[_TAG]["png_bytes"]
+        or hashlib.sha256(png).hexdigest() != block[_TAG]["sha256"]
+    ):
         raise VisionError("Native computer image does not match summary")
     return metadata
 
@@ -338,6 +392,7 @@ def plan_model_frames(messages: list[dict]) -> ModelFramePlan:
             if planned[i] is messages[i]:
                 planned[i] = {**messages[i], "content": list(messages[i]["content"])}
             planned[i]["content"][j] = {
-                "type": "text", "text": "[Retired computer frame; obtain current observation.]"
+                "type": "text",
+                "text": "[Retired computer frame; obtain current observation.]",
             }
     return ModelFramePlan(planned, tuple(sorted({i for i, _j in keep})), len(keep))

@@ -1,4 +1,5 @@
 """Private pipe launch gates. No input before durable identity acknowledgement."""
+
 from __future__ import annotations
 
 import ctypes
@@ -38,7 +39,7 @@ def read_gate(fd=0, timeout=2.0):
     while len(line) <= 65536:
         if REVOKED or time.monotonic() >= deadline:
             raise RuntimeError("launch_gate_revoked")
-        if not select.select([fd], [], [], min(.05, max(0, deadline-time.monotonic())))[0]:
+        if not select.select([fd], [], [], min(0.05, max(0, deadline - time.monotonic())))[0]:
             continue
         char = os.read(fd, 1)
         if char == b"\n":

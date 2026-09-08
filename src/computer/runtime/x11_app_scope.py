@@ -4,6 +4,7 @@ Snapshots are native-private evidence, never API/public diagnostics. Queries are
 bounded revalidation, NOT an atomic focus/input security boundary. X11 clients
 in one server remain mutually untrusted; this does not isolate hostile peers.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -20,13 +21,19 @@ MAX_PROPERTY = 4096
 MAX_INVENTORY_WINDOWS = 2048
 INVENTORY_SECONDS = 0.25
 # Only these pixel-free reasons may leave the private scope adapter.
-SCOPE_REASONS = frozenset({
-    "application_identity_unavailable", "application_identity_changed",
-    "application_scope_unavailable", "application_scope_changed",
-    "source_scope_unavailable", "application_uid_mismatch",
-    "application_process_unreadable",
-    "no_focused_application", "focused_application_outside_source",
-})
+SCOPE_REASONS = frozenset(
+    {
+        "application_identity_unavailable",
+        "application_identity_changed",
+        "application_scope_unavailable",
+        "application_scope_changed",
+        "source_scope_unavailable",
+        "application_uid_mismatch",
+        "application_process_unreadable",
+        "no_focused_application",
+        "focused_application_outside_source",
+    }
+)
 
 
 class ScopeFailure(RuntimeError):  # noqa: N818 - Scope adapter failure API.
@@ -62,7 +69,7 @@ def _process_identity(pid):
 
     def read_identity():
         data = (proc / "stat").read_text()
-        fields = data[data.rfind(")") + 2:].split()
+        fields = data[data.rfind(")") + 2 :].split()
         if len(fields) < 20 or fields[0] in {"Z", "X", "x"}:
             raise ScopeFailure("application_identity_unavailable")
         start = int(fields[19])  # field 22; comm can contain spaces and ')'.
@@ -79,24 +86,37 @@ def _process_identity(pid):
             cmdline = stream.read(16385)
         if not cmdline or len(cmdline) > 16384 or not cmdline.endswith(b"\0"):
             raise ScopeFailure("application_identity_unavailable")
-        return (start, uids, executable, (info.st_dev, info.st_ino), cmdline,
-                _trusted_file(executable))
+        return (
+            start,
+            uids,
+            executable,
+            (info.st_dev, info.st_ino),
+            cmdline,
+            _trusted_file(executable),
+        )
 
     first = read_identity()
     start, uids, executable, inode, cmdline, trusted = first
     script_identity = None
     if re.match(r"^(?:python|pypy|ruby|perl|node|bash|dash|sh)[0-9.]*$", executable.name):
         # Process-reported argv is evidence, not proof of the script executed.
-        script_identity = {"interpreter": str(executable),
-                           "argv_digest": hashlib.sha256(cmdline).hexdigest(),
-                           "verified": False}
+        script_identity = {
+            "interpreter": str(executable),
+            "argv_digest": hashlib.sha256(cmdline).hexdigest(),
+            "verified": False,
+        }
     if first != read_identity():
         raise ScopeFailure("application_identity_changed")
-    return {"pid": pid, "uid": uids[0], "start_ticks": start,
-            "exe": str(executable), "exe_identity": list(inode),
-            "script_identity": script_identity,
-            "trusted_executable": trusted,
-            "cmdline_digest": hashlib.sha256(cmdline).hexdigest()}
+    return {
+        "pid": pid,
+        "uid": uids[0],
+        "start_ticks": start,
+        "exe": str(executable),
+        "exe_identity": list(inode),
+        "script_identity": script_identity,
+        "trusted_executable": trusted,
+        "cmdline_digest": hashlib.sha256(cmdline).hexdigest(),
+    }
 
 
 class AppScope:
@@ -183,8 +203,9 @@ class AppScope:
     def _target(self, focused, root):
         ancestors = self._ancestors(focused, root)
         # Hints locate client top-level beneath possible WM reparenting frames.
-        candidates = [w for w in ancestors if self._values(w, "WM_STATE")
-                      or self._values(w, "_NET_WM_PID")]
+        candidates = [
+            w for w in ancestors if self._values(w, "WM_STATE") or self._values(w, "_NET_WM_PID")
+        ]
         if not candidates:
             raise ScopeFailure("application_scope_unavailable")
         return candidates[-1], ancestors
@@ -193,14 +214,17 @@ class AppScope:
         # Imports are lazy: importing this module needs no X11 dependency.
         from Xlib.ext import res  # type: ignore[import-untyped]
 
-        reply = self.connection.res_query_client_ids([
-            {"client": _xid(window), "mask": res.LocalClientPIDMask}])
+        reply = self.connection.res_query_client_ids(
+            [{"client": _xid(window), "mask": res.LocalClientPIDMask}]
+        )
         ids = reply.ids
         if len(ids) != 1:
             raise ScopeFailure("application_identity_unavailable")
         value = ids[0]
-        if (_field(_field(value, "spec"), "mask") != res.LocalClientPIDMask
-                or len(_field(value, "value")) != 1):
+        if (
+            _field(_field(value, "spec"), "mask") != res.LocalClientPIDMask
+            or len(_field(value, "value")) != 1
+        ):
             raise ScopeFailure("application_identity_unavailable")
         pid = int(_field(value, "value")[0])
         if pid <= 1:
@@ -216,14 +240,21 @@ class AppScope:
         if not 1 <= len(reply.monitors) <= 32:
             raise ScopeFailure("source_scope_unavailable")
         for entry in reply.monitors:
-            monitors.append([int(_field(entry, k)) for k in (
-                "name", "x", "y", "width_in_pixels", "height_in_pixels")]
-                + [list(map(int, _field(entry, "crtcs")))])
+            monitors.append(
+                [
+                    int(_field(entry, k))
+                    for k in ("name", "x", "y", "width_in_pixels", "height_in_pixels")
+                ]
+                + [list(map(int, _field(entry, "crtcs")))]
+            )
         if not any(m[1:5] == values for m in monitors):
             raise ScopeFailure("source_scope_unavailable")
         geometry = root.get_geometry()
-        return values, {"root": _xid(root), "size": [geometry.width, geometry.height],
-                        "monitors": sorted(monitors)}
+        return values, {
+            "root": _xid(root),
+            "size": [geometry.width, geometry.height],
+            "monitors": sorted(monitors),
+        }
 
     def _snapshot(self, monitor, *, candidate=None):
         from Xlib import X  # type: ignore[import-untyped]
@@ -268,17 +299,29 @@ class AppScope:
             raise ScopeFailure("focused_application_outside_source")
         states = self._values(target, "_NET_WM_STATE")
         types = self._values(target, "_NET_WM_WINDOW_TYPE")
-        allowed_types = {self._atom("_NET_WM_WINDOW_TYPE_" + kind) for kind in
-                         ("NORMAL", "DIALOG", "MENU", "DROPDOWN_MENU", "POPUP_MENU", "UTILITY")}
+        allowed_types = {
+            self._atom("_NET_WM_WINDOW_TYPE_" + kind)
+            for kind in ("NORMAL", "DIALOG", "MENU", "DROPDOWN_MENU", "POPUP_MENU", "UTILITY")
+        }
         if any(value not in allowed_types for value in types):
             raise ScopeFailure("application_scope_unavailable")
         transient = self._values(target, "WM_TRANSIENT_FOR")
-        window_kind = ("menu" if any(self._atom("_NET_WM_WINDOW_TYPE_" + kind) in types
-                                    for kind in ("MENU", "DROPDOWN_MENU", "POPUP_MENU"))
-                       else "dialog" if self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types
-                       or self._atom("_NET_WM_STATE_MODAL") in states else "normal")
-        modal = bool(transient or self._atom("_NET_WM_STATE_MODAL") in states
-                     or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types)
+        window_kind = (
+            "menu"
+            if any(
+                self._atom("_NET_WM_WINDOW_TYPE_" + kind) in types
+                for kind in ("MENU", "DROPDOWN_MENU", "POPUP_MENU")
+            )
+            else "dialog"
+            if self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types
+            or self._atom("_NET_WM_STATE_MODAL") in states
+            else "normal"
+        )
+        modal = bool(
+            transient
+            or self._atom("_NET_WM_STATE_MODAL") in states
+            or self._atom("_NET_WM_WINDOW_TYPE_DIALOG") in types
+        )
         chain, chain_metadata, seen = [], [], {_xid(target)}
         chain_processes = []
         cursor = target
@@ -297,39 +340,60 @@ class AppScope:
             parent_title, parent_class, parent_digest = self._metadata(cursor)
             parent_types = self._values(cursor, "_NET_WM_WINDOW_TYPE")
             parent_states = self._values(cursor, "_NET_WM_STATE")
-            if (cursor.get_attributes().map_state != X.IsViewable
-                    or any(value not in allowed_types for value in parent_types)):
+            if cursor.get_attributes().map_state != X.IsViewable or any(
+                value not in allowed_types for value in parent_types
+            ):
                 raise ScopeFailure("application_scope_unavailable")
-            parent_digest = hashlib.sha256(json.dumps(
-                [parent_digest, parent_title, parent_types, parent_states],
-                separators=(",", ":")).encode()).hexdigest()
+            parent_digest = hashlib.sha256(
+                json.dumps(
+                    [parent_digest, parent_title, parent_types, parent_states],
+                    separators=(",", ":"),
+                ).encode()
+            ).hexdigest()
             chain_metadata.append(parent_digest)
             chain.append(_xid(cursor))
         else:
             raise ScopeFailure("application_scope_unavailable")
-        evidence = {"topology": topology, "source_rect": source,
-                    "source_origin": source[:2],
-                    "window": _xid(target), "focus_window": _xid(focused),
-                    "focus_path": path, "ancestor_path": [_xid(w) for w in ancestors],
-                    "focus_metadata": focus_metadata, "transient_metadata": chain_metadata,
-                    "window_rect": rect, "rect": [left, top, right-left, bottom-top],
-                    "focused": True, "modal": modal, "window_kind": window_kind,
-                    "modal_kind": (None if not modal else
-                                   "safe_application"),
-                    "modal_title_digest": (hashlib.sha256(title.encode()).hexdigest()
-                                           if modal else None),
-                    "transient_chain": chain, "process": process,
-                    "transient_processes": chain_processes, "wm_class": wm_class,
-                    "metadata_digest": metadata_digest, "states": states, "types": types}
+        evidence = {
+            "topology": topology,
+            "source_rect": source,
+            "source_origin": source[:2],
+            "window": _xid(target),
+            "focus_window": _xid(focused),
+            "focus_path": path,
+            "ancestor_path": [_xid(w) for w in ancestors],
+            "focus_metadata": focus_metadata,
+            "transient_metadata": chain_metadata,
+            "window_rect": rect,
+            "rect": [left, top, right - left, bottom - top],
+            "focused": True,
+            "modal": modal,
+            "window_kind": window_kind,
+            "modal_kind": (None if not modal else "safe_application"),
+            "modal_title_digest": (hashlib.sha256(title.encode()).hexdigest() if modal else None),
+            "transient_chain": chain,
+            "process": process,
+            "transient_processes": chain_processes,
+            "wm_class": wm_class,
+            "metadata_digest": metadata_digest,
+            "states": states,
+            "types": types,
+        }
         # Bound TOCTOU detection; there is no claim of an atomic X11 transaction.
-        if (_xid(self.connection.get_input_focus().focus) != actual_focus
-                or self._pid(target) != pid or _process_identity(pid) != process
-                or any(_process_identity(self._pid(self._window(wid))) != identity
-                       for wid, identity in zip(chain, chain_processes, strict=True))
-                or self._topology(root, monitor)[1] != topology):
+        if (
+            _xid(self.connection.get_input_focus().focus) != actual_focus
+            or self._pid(target) != pid
+            or _process_identity(pid) != process
+            or any(
+                _process_identity(self._pid(self._window(wid))) != identity
+                for wid, identity in zip(chain, chain_processes, strict=True)
+            )
+            or self._topology(root, monitor)[1] != topology
+        ):
             raise ScopeFailure("application_scope_changed")
         evidence["fingerprint"] = hashlib.sha256(
-            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+            json.dumps(evidence, sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
         return evidence
 
     def snapshot(self, monitor):
@@ -352,8 +416,10 @@ class AppScope:
         deadline = time.monotonic() + INVENTORY_SECONDS
 
         def guard():
-            if (_process_identity(self._pid(target)) != expected["process"]
-                    or target.get_attributes().map_state != X.IsViewable):
+            if (
+                _process_identity(self._pid(target)) != expected["process"]
+                or target.get_attributes().map_state != X.IsViewable
+            ):
                 raise ScopeFailure("application_identity_changed")
 
         guard()
@@ -371,17 +437,21 @@ class AppScope:
                 raise ScopeFailure("application_scope_unavailable")
             states[identity] = state
             children = window.query_tree().children
-            if (len(states) + len(pending) + len(children) > MAX_INVENTORY_WINDOWS
-                    or (children and depth >= MAX_DEPTH)):
+            if len(states) + len(pending) + len(children) > MAX_INVENTORY_WINDOWS or (
+                children and depth >= MAX_DEPTH
+            ):
                 raise ScopeFailure("application_scope_unavailable")
             pending.extend((child, depth + 1) for child in children)
         guard()
-        if (time.monotonic() >= deadline
-                or states.get(expected["window"]) != X.IsViewable):
+        if time.monotonic() >= deadline or states.get(expected["window"]) != X.IsViewable:
             raise ScopeFailure("application_scope_changed")
-        return {"complete": True, "root": _xid(root),
-                "process": expected["process"], "target": expected["window"],
-                "windows": sorted(states.items())}
+        return {
+            "complete": True,
+            "root": _xid(root),
+            "process": expected["process"],
+            "target": expected["window"],
+            "windows": sorted(states.items()),
+        }
 
     def target_state(self, expected, monitor):
         """Measure the prior native target, not absence from the CURRENT focus.
@@ -418,11 +488,16 @@ class AppScope:
         except Exception:
             return None, "application_scope_unavailable"
 
-    def assert_snapshot(self, expected, monitor, point=None, *, pointer_query=None,
-                        require_focused_window=False):
+    def assert_snapshot(
+        self, expected, monitor, point=None, *, pointer_query=None, require_focused_window=False
+    ):
         current = self.snapshot(monitor)
-        if (current is None or current != expected or not current["focused"]
-                or current["modal_kind"] == "unrecognized"):
+        if (
+            current is None
+            or current != expected
+            or not current["focused"]
+            or current["modal_kind"] == "unrecognized"
+        ):
             raise ScopeFailure("application_scope_changed")
         if point is not None:
             try:
@@ -440,8 +515,9 @@ class AppScope:
                         raise ValueError
                     seen.add(identity)
                     # Native injection's client is bound to the owned master.
-                    query = (window.query_pointer() if pointer_query is None
-                             else pointer_query(identity))
+                    query = (
+                        window.query_pointer() if pointer_query is None else pointer_query(identity)
+                    )
                     if not query.same_screen or (query.root_x, query.root_y) != (x, y):
                         raise ValueError
                     if not _xid(query.child):
@@ -455,9 +531,11 @@ class AppScope:
                 if require_focused_window and target["window"] != current["window"]:
                     raise ValueError
                 family = {current["window"], *current["transient_chain"]}
-                related = (target["window"] in family
-                           or bool(family.intersection(target["transient_chain"]))
-                           or target["process"] == current["process"])
+                related = (
+                    target["window"] in family
+                    or bool(family.intersection(target["transient_chain"]))
+                    or target["process"] == current["process"]
+                )
                 if not related:
                     raise ValueError
                 # Bounds and provenance checks apply to the actual hit,

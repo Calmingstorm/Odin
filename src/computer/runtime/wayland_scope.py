@@ -6,6 +6,7 @@ The caller supplies metadata only from its authenticated portal Start response.
 These are fresh observations, not an atomic focus/input or hostile-peer boundary.
 Native IDs/process evidence stay private; bounds are source-local logical units.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -39,8 +40,9 @@ def _fail(reason="wayland_scope_unavailable"):
 
 
 def _digest(value):
-    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":"),
-                                     allow_nan=False).encode()).hexdigest()
+    return hashlib.sha256(
+        json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+    ).hexdigest()
 
 
 def _trusted_executable(path):
@@ -76,8 +78,7 @@ def _process_identity(pid, uid, profile=None):
             _fail("wayland_process_identity_unavailable")
         start = int(fields[19])
         status = (proc / "status").read_text()
-        uids = next(line.split()[1:] for line in status.splitlines()
-                    if line.startswith("Uid:"))
+        uids = next(line.split()[1:] for line in status.splitlines() if line.startswith("Uid:"))
         if len(uids) != 4 or any(int(value) != uid for value in uids):
             _fail("wayland_process_identity_untrusted")
         if proc.stat().st_uid != uid:
@@ -88,12 +89,18 @@ def _process_identity(pid, uid, profile=None):
 
     try:
         first = read()
-        approved = [_trusted_executable(path) for path in _EXECUTABLES[profile]
-                    if Path(path).exists()]
+        approved = [
+            _trusted_executable(path) for path in _EXECUTABLES[profile] if Path(path).exists()
+        ]
         if (first[1], first[2]) not in approved or first != read():
             _fail("wayland_process_identity_untrusted")
-        return {"pid": pid, "uid": uid, "start_ticks": first[0],
-                "exe": first[1], "exe_identity": list(first[2])}
+        return {
+            "pid": pid,
+            "uid": uid,
+            "start_ticks": first[0],
+            "exe": first[1],
+            "exe_identity": list(first[2]),
+        }
     except (OSError, ValueError, IndexError, StopIteration):
         _fail("wayland_process_identity_unavailable")
 
@@ -104,54 +111,89 @@ def _source(source):
         _fail("wayland_source_unavailable")
     node = source.get("node_id")
     handle = source.get("session_handle")
-    if (type(node) is not int or not 0 < node < 2**32
-            or type(source.get("source_type")) is not int or source["source_type"] != 1
-            or not isinstance(handle, str) or len(handle) > 512
-            or not _OBJECT.fullmatch(handle)):
+    if (
+        type(node) is not int
+        or not 0 < node < 2**32
+        or type(source.get("source_type")) is not int
+        or source["source_type"] != 1
+        or not isinstance(handle, str)
+        or len(handle) > 512
+        or not _OBJECT.fullmatch(handle)
+    ):
         _fail("wayland_source_unavailable")
     position, size = source.get("position"), source.get("size")
-    if (not isinstance(position, (list, tuple)) or len(position) != 2
-            or not isinstance(size, (list, tuple)) or len(size) != 2
-            or any(type(v) is not int for v in (*position, *size))
-            or any(abs(v) > 131072 for v in position)
-            or any(not 0 < v <= 32768 for v in size)):
+    if (
+        not isinstance(position, (list, tuple))
+        or len(position) != 2
+        or not isinstance(size, (list, tuple))
+        or len(size) != 2
+        or any(type(v) is not int for v in (*position, *size))
+        or any(abs(v) > 131072 for v in position)
+        or any(not 0 < v <= 32768 for v in size)
+    ):
         _fail("wayland_source_geometry_unavailable")
     mapping = source.get("mapping_id", "")
     if not isinstance(mapping, str) or len(mapping) > 512 or "\x00" in mapping:
         _fail("wayland_source_unavailable")
-    return {"node_id": node, "session_handle": handle, "source_type": 1,
-            "position": list(position), "size": list(size), "mapping_id": mapping}
+    return {
+        "node_id": node,
+        "session_handle": handle,
+        "source_type": 1,
+        "position": list(position),
+        "size": list(size),
+        "mapping_id": mapping,
+    }
 
 
 def _validate_observation(result, challenge, source, source_digest):
-    if (not isinstance(result, dict) or result.get("protocol") != 1
-            or result.get("challenge") != challenge
-            or result.get("source_digest") != source_digest
-            or result.get("native_wayland") is not True
-            or result.get("safe_focus") is not True
-            or type(result.get("modal")) is not bool):
+    if (
+        not isinstance(result, dict)
+        or result.get("protocol") != 1
+        or result.get("challenge") != challenge
+        or result.get("source_digest") != source_digest
+        or result.get("native_wayland") is not True
+        or result.get("safe_focus") is not True
+        or type(result.get("modal")) is not bool
+    ):
         _fail("wayland_focus_unavailable")
     for field in ("title", "wm_class"):
         text = result.get(field)
-        if (not isinstance(text, str) or len(text) > 4096 or "\x00" in text
-                or any(0xD800 <= ord(c) <= 0xDFFF for c in text)):
+        if (
+            not isinstance(text, str)
+            or len(text) > 4096
+            or "\x00" in text
+            or any(0xD800 <= ord(c) <= 0xDFFF for c in text)
+        ):
             _fail("wayland_focus_unavailable")
-    if (type(result.get("pid")) is not int or result["pid"] <= 1
-            or type(result.get("focus_serial")) is not int or result["focus_serial"] < 1
-            or not isinstance(result.get("focus_token"), str)
-            or not re.fullmatch(r"[0-9]+", result["focus_token"])):
+    if (
+        type(result.get("pid")) is not int
+        or result["pid"] <= 1
+        or type(result.get("focus_serial")) is not int
+        or result["focus_serial"] < 1
+        or not isinstance(result.get("focus_token"), str)
+        or not re.fullmatch(r"[0-9]+", result["focus_token"])
+    ):
         _fail("wayland_focus_unavailable")
     bounds = result.get("bounds")
-    if (not isinstance(bounds, dict) or set(bounds) != {"x", "y", "width", "height"}
-            or any(type(v) is not int for v in bounds.values())):
+    if (
+        not isinstance(bounds, dict)
+        or set(bounds) != {"x", "y", "width", "height"}
+        or any(type(v) is not int for v in bounds.values())
+    ):
         _fail("wayland_bounds_unavailable")
     x, y, width, height = (bounds[k] for k in ("x", "y", "width", "height"))
-    if (min(x, y) < 0 or min(width, height) <= 0
-            or x + width > source["size"][0] or y + height > source["size"][1]):
+    if (
+        min(x, y) < 0
+        or min(width, height) <= 0
+        or x + width > source["size"][0]
+        or y + height > source["size"][1]
+    ):
         _fail("wayland_bounds_unavailable")
     # Discard all extra reply fields so titles/native geometry cannot propagate.
-    return {key: result[key] for key in
-            ("pid", "focus_serial", "focus_token", "bounds", "title", "wm_class", "modal")}
+    return {
+        key: result[key]
+        for key in ("pid", "focus_serial", "focus_token", "bounds", "title", "wm_class", "modal")
+    }
 
 
 class GNOMEWaylandScopeProvider:
@@ -167,12 +209,17 @@ class GNOMEWaylandScopeProvider:
     interface = INTERFACE
 
     def __init__(self, *, bus_address, expected_uid, expected_compositor_pid=None):
-        if (not isinstance(bus_address, str)
-                or not re.fullmatch(r"unix:path=/[^,;\s\x00]+", bus_address)
-                or type(expected_uid) is not int or expected_uid < 0
-                or os.geteuid() not in {0, expected_uid}
-                or (expected_compositor_pid is not None and
-                    (type(expected_compositor_pid) is not int or expected_compositor_pid <= 1))):
+        if (
+            not isinstance(bus_address, str)
+            or not re.fullmatch(r"unix:path=/[^,;\s\x00]+", bus_address)
+            or type(expected_uid) is not int
+            or expected_uid < 0
+            or os.geteuid() not in {0, expected_uid}
+            or (
+                expected_compositor_pid is not None
+                and (type(expected_compositor_pid) is not int or expected_compositor_pid <= 1)
+            )
+        ):
             _fail("wayland_explicit_session_required")
         self.bus_address = bus_address
         self.expected_uid = expected_uid
@@ -188,12 +235,23 @@ class GNOMEWaylandScopeProvider:
 
             if self._bus is None:
                 self._bus = await asyncio.wait_for(
-                    MessageBus(bus_address=self.bus_address).connect(), 2)
+                    MessageBus(bus_address=self.bus_address).connect(), 2
+                )
             if self._bus is None:
                 raise WaylandScopeFailure("wayland_scope_unavailable")
-            reply = await asyncio.wait_for(self._bus.call(Message(
-                destination=destination, path=path, interface=interface, member=member,
-                signature=signature, body=body or [])), 2)
+            reply = await asyncio.wait_for(
+                self._bus.call(
+                    Message(
+                        destination=destination,
+                        path=path,
+                        interface=interface,
+                        member=member,
+                        signature=signature,
+                        body=body or [],
+                    )
+                ),
+                2,
+            )
             if reply.message_type != MessageType.METHOD_RETURN:
                 _fail()
             if destination.startswith(":") and reply.sender != destination:
@@ -205,8 +263,14 @@ class GNOMEWaylandScopeProvider:
             _fail()
 
     async def _daemon(self, member, name):
-        body = await self._call("org.freedesktop.DBus", "/org/freedesktop/DBus",
-                                "org.freedesktop.DBus", member, "s", [name])
+        body = await self._call(
+            "org.freedesktop.DBus",
+            "/org/freedesktop/DBus",
+            "org.freedesktop.DBus",
+            member,
+            "s",
+            [name],
+        )
         if len(body) != 1:
             _fail("wayland_provider_untrusted")
         return body[0]
@@ -220,9 +284,12 @@ class GNOMEWaylandScopeProvider:
             _fail("wayland_provider_untrusted")
         pid = await self._daemon("GetConnectionUnixProcessID", owner)
         uid = await self._daemon("GetConnectionUnixUser", owner)
-        if (type(pid) is not int or type(uid) is not int
-                or (self.expected_compositor_pid is not None and
-                    pid != self.expected_compositor_pid) or uid != self.expected_uid):
+        if (
+            type(pid) is not int
+            or type(uid) is not int
+            or (self.expected_compositor_pid is not None and pid != self.expected_compositor_pid)
+            or uid != self.expected_uid
+        ):
             _fail("wayland_provider_untrusted")
         identity = _process_identity(pid, uid, "gnome-shell") | {"owner": owner}
         if await self._daemon("GetNameOwner", BUS_NAME) != owner:
@@ -242,31 +309,42 @@ class GNOMEWaylandScopeProvider:
     async def _identity(self):
         compositor = await self._authenticate()
         challenge = secrets.token_hex(24)
-        body = await self._call(compositor["owner"], OBJECT_PATH, INTERFACE,
-                                "Identity", "s", [challenge])
+        body = await self._call(
+            compositor["owner"], OBJECT_PATH, INTERFACE, "Identity", "s", [challenge]
+        )
         if len(body) != 1 or not isinstance(body[0], str) or len(body[0]) > 4096:
             _fail("wayland_compositor_identity_unavailable")
         try:
             result = json.loads(body[0])
         except (ValueError, TypeError):
             _fail("wayland_compositor_identity_unavailable")
-        if (not isinstance(result, dict) or result.get("challenge") != challenge
-                or result.get("native_wayland") is not True
-                or result.get("compositor_name") != "gnome-shell"
-                or not isinstance(result.get("compositor_version"), str)
-                or not re.fullmatch(r"[0-9]+(?:\.[0-9]+)*(?:\.[A-Za-z0-9]+)?",
-                                    result["compositor_version"])):
+        if (
+            not isinstance(result, dict)
+            or result.get("challenge") != challenge
+            or result.get("native_wayland") is not True
+            or result.get("compositor_name") != "gnome-shell"
+            or not isinstance(result.get("compositor_version"), str)
+            or not re.fullmatch(
+                r"[0-9]+(?:\.[0-9]+)*(?:\.[A-Za-z0-9]+)?", result["compositor_version"]
+            )
+        ):
             _fail("wayland_compositor_identity_unavailable")
         backend_class = result.get("backend_class")
-        backends = {"MetaBackendNative": "native", "MetaBackendX11": "x11-nested",
-                    "MetaBackendX11Nested": "x11-nested"}
+        backends = {
+            "MetaBackendNative": "native",
+            "MetaBackendX11": "x11-nested",
+            "MetaBackendX11Nested": "x11-nested",
+        }
         if not isinstance(backend_class, str) or backend_class not in backends:
             _fail("wayland_compositor_backend_unavailable")
         if compositor != await self._authenticate():
             _fail("wayland_provider_owner_changed")
-        return compositor | {"compositor_name": "gnome-shell",
-                             "compositor_version": result["compositor_version"],
-                             "backend_class": backend_class, "backend": backends[backend_class]}
+        return compositor | {
+            "compositor_name": "gnome-shell",
+            "compositor_version": result["compositor_version"],
+            "backend_class": backend_class,
+            "backend": backends[backend_class],
+        }
 
     async def snapshot(self, source_metadata):
         source = _source(source_metadata)
@@ -283,10 +361,20 @@ class GNOMEWaylandScopeProvider:
 
         async def observe():
             challenge = secrets.token_hex(24)
-            request = {"protocol": 1, "challenge": challenge,
-                       "source_digest": source_digest, "source": source}
-            body = await self._call(compositor["owner"], self.object_path, self.interface,
-                                    "Snapshot", "s", [json.dumps(request)])
+            request = {
+                "protocol": 1,
+                "challenge": challenge,
+                "source_digest": source_digest,
+                "source": source,
+            }
+            body = await self._call(
+                compositor["owner"],
+                self.object_path,
+                self.interface,
+                "Snapshot",
+                "s",
+                [json.dumps(request)],
+            )
             if len(body) != 1 or not isinstance(body[0], str) or len(body[0]) > 8192:
                 _fail()
             try:
@@ -306,20 +394,35 @@ class GNOMEWaylandScopeProvider:
             _fail("wayland_provider_owner_changed")
         if time.monotonic_ns() - started > 500_000_000:
             _fail("wayland_focus_stale")
-        focus_digest = _digest({"application": application, "compositor": compositor,
-                                "serial": first["focus_serial"], "token": first["focus_token"],
-                                "wm_class": first["wm_class"]})
-        return {"authenticated": True, "native_wayland": True, "safe_focus": True,
-                "source_digest": source_digest, "focus_digest": focus_digest,
-                "bounds_digest": _digest({"source": source_digest, "focus": focus_digest,
-                                          "bounds": first["bounds"]}),
-                "bounds": first["bounds"], "application": application,
+        focus_digest = _digest(
+            {
+                "application": application,
+                "compositor": compositor,
+                "serial": first["focus_serial"],
+                "token": first["focus_token"],
                 "wm_class": first["wm_class"],
-                "modal": first["modal"],
-                "modal_kind": "safe_application" if first["modal"] else None,
-                "modal_title_digest": (hashlib.sha256(first["title"].encode()).hexdigest()
-                                       if first["modal"] else None),
-                "compositor": compositor, "observed_monotonic_ns": time.monotonic_ns()}
+            }
+        )
+        return {
+            "authenticated": True,
+            "native_wayland": True,
+            "safe_focus": True,
+            "source_digest": source_digest,
+            "focus_digest": focus_digest,
+            "bounds_digest": _digest(
+                {"source": source_digest, "focus": focus_digest, "bounds": first["bounds"]}
+            ),
+            "bounds": first["bounds"],
+            "application": application,
+            "wm_class": first["wm_class"],
+            "modal": first["modal"],
+            "modal_kind": "safe_application" if first["modal"] else None,
+            "modal_title_digest": (
+                hashlib.sha256(first["title"].encode()).hexdigest() if first["modal"] else None
+            ),
+            "compositor": compositor,
+            "observed_monotonic_ns": time.monotonic_ns(),
+        }
 
     async def close(self):
         async with self._lock:

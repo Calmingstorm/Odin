@@ -22,15 +22,21 @@ WAYLAND_START_TIMEOUT_SECONDS = 180.0
 
 
 def foreground(context: RequestContext) -> None:
-    if (not isinstance(context, RequestContext) or context.origin != "foreground"
-            or context.surface not in {"discord", "webui"}):
+    if (
+        not isinstance(context, RequestContext)
+        or context.origin != "foreground"
+        or context.surface not in {"discord", "webui"}
+    ):
         raise ComputerError("foreground_only")
 
 
 def owned(context: RequestContext, grant: SessionGrant, *, same_turn: bool = True) -> None:
-    if (context.owner_id != grant.owner_id or context.channel_id != grant.channel_id
-            or context.host_id != grant.host_id
-            or (same_turn and context.turn_id != grant.turn_id)):
+    if (
+        context.owner_id != grant.owner_id
+        or context.channel_id != grant.channel_id
+        or context.host_id != grant.host_id
+        or (same_turn and context.turn_id != grant.turn_id)
+    ):
         raise ComputerError("not_found")
 
 
@@ -58,8 +64,11 @@ def input_eligible(capabilities: BackendCapabilities) -> None:
 def observation_input(grant, live, observation) -> None:
     input_eligible(live.capabilities)
     source = observation.source
-    if (observation.session_id != grant.session_id or observation.generation != grant.generation
-            or source.consent_generation != grant.consent_generation):
+    if (
+        observation.session_id != grant.session_id
+        or observation.generation != grant.generation
+        or source.consent_generation != grant.consent_generation
+    ):
         raise ComputerError("stale_observation_binding")
     if source.source_id not in observation.scope.input_sources:
         raise ComputerError("input_not_granted")

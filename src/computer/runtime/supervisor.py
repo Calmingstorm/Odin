@@ -29,9 +29,14 @@ async def unit_command(
 ) -> tuple[int, bytes]:
     validate_unit(unit)
     proc = await asyncio.create_subprocess_exec(
-        *(["/usr/bin/sudo", "-n"] if runtime_sudo else []), "/usr/bin/systemctl", *args, unit,
-        stdin=asyncio.subprocess.DEVNULL, stdout=asyncio.subprocess.PIPE,
-        stderr=asyncio.subprocess.DEVNULL, env=clean_environment(),
+        *(["/usr/bin/sudo", "-n"] if runtime_sudo else []),
+        "/usr/bin/systemctl",
+        *args,
+        unit,
+        stdin=asyncio.subprocess.DEVNULL,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=clean_environment(),
     )
     try:
         output, _ = await asyncio.wait_for(proc.communicate(), timeout)
@@ -51,8 +56,12 @@ async def terminate_unit(unit: str, *, runtime_sudo: bool = False) -> bool:
     end = time.monotonic() + 0.7
     while time.monotonic() < end:
         code, output = await unit_command(
-            unit, "show", "--property=ActiveState", "--value",
-            timeout=0.3, runtime_sudo=runtime_sudo,
+            unit,
+            "show",
+            "--property=ActiveState",
+            "--value",
+            timeout=0.3,
+            runtime_sudo=runtime_sudo,
         )
         if code == 0 and output.strip() in (b"inactive", b"failed", b""):
             return True
@@ -108,8 +117,11 @@ class Supervisor:
             if operation not in {"observe", "act", "export", "pause", "resume"}:
                 raise ValueError("unsupported supervisor operation")
             request_id = message.get("id")
-            if (not isinstance(request_id, str) or len(request_id) > 64
-                    or request_id in self.forwarded):
+            if (
+                not isinstance(request_id, str)
+                or len(request_id) > 64
+                or request_id in self.forwarded
+            ):
                 raise ValueError("duplicate or invalid request; no replay permitted")
             if len(self.forwarded) >= 1024:
                 raise ValueError("desktop operation ceiling exceeded")
@@ -139,16 +151,21 @@ class Supervisor:
     async def run(self) -> None:
         reader = asyncio.StreamReader(limit=65536)
         await asyncio.get_running_loop().connect_read_pipe(
-            lambda: asyncio.StreamReaderProtocol(reader), sys.stdin.buffer,
+            lambda: asyncio.StreamReaderProtocol(reader),
+            sys.stdin.buffer,
         )
         # No systemd launch until the controller durably records this process.
         # A crash before that write closes stdin; never launch from EOF/timeout.
         line = await asyncio.wait_for(reader.readline(), 2.0)
-        if not line or decode(line, cap=65536) != {'op': 'launch'}:
+        if not line or decode(line, cap=65536) != {"op": "launch"}:
             return
         self.worker = await asyncio.create_subprocess_exec(
-            *self.argv, stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.DEVNULL, env=clean_environment(), limit=MAX_WIRE_BYTES,
+            *self.argv,
+            stdin=asyncio.subprocess.PIPE,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+            env=clean_environment(),
+            limit=MAX_WIRE_BYTES,
         )
         tasks = [
             asyncio.create_task(fn())

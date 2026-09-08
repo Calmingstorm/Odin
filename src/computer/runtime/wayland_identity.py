@@ -1,4 +1,5 @@
 """Compositor identity measured from authenticated scope, EIS peer and mapped files."""
+
 from __future__ import annotations
 
 import asyncio
@@ -75,17 +76,19 @@ class CompositorRuntimeIdentity:
 
     @property
     def binding_digest(self) -> str:
-        return hashlib.sha256(json.dumps(asdict(self), sort_keys=True,
-                                         separators=(",", ":")).encode()).hexdigest()
+        return hashlib.sha256(
+            json.dumps(asdict(self), sort_keys=True, separators=(",", ":")).encode()
+        ).hexdigest()
 
     def public(self) -> CompositorIdentity:
-        return CompositorIdentity(self.compositor_name, self.version, self.backend,
-                                  self.binding_digest)
+        return CompositorIdentity(
+            self.compositor_name, self.version, self.backend, self.binding_digest
+        )
 
 
 def _process(pid: int) -> tuple[int, int, int]:
     text = Path(f"/proc/{pid}/stat").read_text()
-    fields = text[text.rindex(")") + 2:].split()
+    fields = text[text.rindex(")") + 2 :].split()
     if fields[0] == "Z":
         raise WaylandIdentityError("wayland_compositor_exited")
     return int(fields[19]), int(fields[3]), os.stat(f"/proc/{pid}").st_uid
@@ -99,17 +102,26 @@ def _hash_object(path: str, device: str, inode: int, *, proc_path: str) -> Mappe
     fd = os.open(proc_path, os.O_RDONLY | os.O_CLOEXEC)
     try:
         before = os.fstat(fd)
-        if (not stat.S_ISREG(before.st_mode) or before.st_ino != inode
-                or _device(before.st_dev) != device or before.st_size > 256 * 1024 * 1024
-                or before.st_uid != 0 or before.st_mode & 0o022):
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_ino != inode
+            or _device(before.st_dev) != device
+            or before.st_size > 256 * 1024 * 1024
+            or before.st_uid != 0
+            or before.st_mode & 0o022
+        ):
             raise WaylandIdentityError("wayland_mapped_object_untrusted_or_replaced")
         digest = hashlib.sha256()
         while block := os.read(fd, 1024 * 1024):
             digest.update(block)
         after = os.fstat(fd)
-        if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns,
-                before.st_ctime_ns) != (after.st_dev, after.st_ino, after.st_size,
-                                        after.st_mtime_ns, after.st_ctime_ns):
+        if (
+            before.st_dev,
+            before.st_ino,
+            before.st_size,
+            before.st_mtime_ns,
+            before.st_ctime_ns,
+        ) != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns):
             raise WaylandIdentityError("wayland_mapped_object_changed")
         return MappedObject(path, device, inode, digest.hexdigest())
     finally:
@@ -119,10 +131,16 @@ def _hash_object(path: str, device: str, inode: int, *, proc_path: str) -> Mappe
 def _capture(scope: dict, eis_peer: dict) -> CompositorRuntimeIdentity:
     try:
         pid, uid = scope["pid"], scope["uid"]
-        if (type(pid) is not int or pid <= 1 or type(uid) is not int or uid < 0
-                or eis_peer.get("pid") != pid or eis_peer.get("uid") != uid
-                or not isinstance(scope.get("owner"), str)
-                or not scope["owner"].startswith(":")):
+        if (
+            type(pid) is not int
+            or pid <= 1
+            or type(uid) is not int
+            or uid < 0
+            or eis_peer.get("pid") != pid
+            or eis_peer.get("uid") != uid
+            or not isinstance(scope.get("owner"), str)
+            or not scope["owner"].startswith(":")
+        ):
             raise WaylandIdentityError("wayland_eis_compositor_peer_mismatch")
         before = _process(pid)
         if before[2] != uid:
@@ -132,17 +150,25 @@ def _capture(scope: dict, eis_peer: dict) -> CompositorRuntimeIdentity:
             raise WaylandIdentityError("wayland_compositor_start_changed")
         version = scope.get("compositor_version", scope.get("version"))
         backend = scope.get("backend")
-        if (backend not in {"native", "x11-nested"} or type(version) is not str
-                or not version or len(version) > 160
-                or any(ord(c) < 32 for c in version)):
+        if (
+            backend not in {"native", "x11-nested"}
+            or type(version) is not str
+            or not version
+            or len(version) > 160
+            or any(ord(c) < 32 for c in version)
+        ):
             raise WaylandIdentityError("wayland_compositor_backend_unidentified")
         executable_path = os.readlink(f"/proc/{pid}/exe")
         adapter = compositor_adapter(executable_path, version)
         if scope.get("compositor_name", adapter.name) != adapter.name:
             raise WaylandIdentityError("wayland_compositor_name_mismatch")
         executable_stat = os.stat(f"/proc/{pid}/exe")
-        executable = _hash_object(executable_path, _device(executable_stat.st_dev),
-                                  executable_stat.st_ino, proc_path=f"/proc/{pid}/exe")
+        executable = _hash_object(
+            executable_path,
+            _device(executable_stat.st_dev),
+            executable_stat.st_ino,
+            proc_path=f"/proc/{pid}/exe",
+        )
         mapped = {}
         for line in Path(f"/proc/{pid}/maps").read_text().splitlines():
             fields = line.split(None, 5)
@@ -150,10 +176,25 @@ def _capture(scope: dict, eis_peer: dict) -> CompositorRuntimeIdentity:
                 continue
             _address, _perms, _offset, device, inode_text, path = fields
             name = path.rsplit("/", 1)[-1]
-            if not (name.startswith(("libmutter", "libkwin", "libei", "libeis", "libxkbcommon",
-                                     "libinput", "libEGL", "libGL", "libgbm", "libdrm"))
-                    or path.endswith("/kwin/plugins/eis.so")
-                    or "_dri.so" in name or "nvidia" in name):
+            if not (
+                name.startswith(
+                    (
+                        "libmutter",
+                        "libkwin",
+                        "libei",
+                        "libeis",
+                        "libxkbcommon",
+                        "libinput",
+                        "libEGL",
+                        "libGL",
+                        "libgbm",
+                        "libdrm",
+                    )
+                )
+                or path.endswith("/kwin/plugins/eis.so")
+                or "_dri.so" in name
+                or "nvidia" in name
+            ):
                 continue
             if path.endswith(" (deleted)") or int(inode_text) <= 0:
                 raise WaylandIdentityError("wayland_mapped_object_deleted")
@@ -161,19 +202,35 @@ def _capture(scope: dict, eis_peer: dict) -> CompositorRuntimeIdentity:
             device = f"{int(major, 16):x}:{int(minor, 16):x}"
             key = (path, device, int(inode_text))
             if key not in mapped:
-                mapped[key] = _hash_object(path, device, int(inode_text),
-                                           proc_path=f"/proc/{pid}/root{path}")
+                mapped[key] = _hash_object(
+                    path, device, int(inode_text), proc_path=f"/proc/{pid}/root{path}"
+                )
         if not any(Path(x.path).name.startswith(adapter.library_prefix) for x in mapped.values()):
-            code = ("wayland_mutter_mapping_unavailable" if adapter.name == "gnome-shell"
-                    else "wayland_kwin_mapping_unavailable")
+            code = (
+                "wayland_mutter_mapping_unavailable"
+                if adapter.name == "gnome-shell"
+                else "wayland_kwin_mapping_unavailable"
+            )
             raise WaylandIdentityError(code)
         if _process(pid) != before:
             raise WaylandIdentityError("wayland_compositor_identity_changed")
         from .recovery import boot_id
-        return CompositorRuntimeIdentity(pid, before[0], uid, boot_id(), before[1],
-                                          adapter.name, version, backend, executable,
-                                          tuple(sorted(mapped.values(), key=lambda x: x.path)),
-                                          scope["owner"], pid, uid)
+
+        return CompositorRuntimeIdentity(
+            pid,
+            before[0],
+            uid,
+            boot_id(),
+            before[1],
+            adapter.name,
+            version,
+            backend,
+            executable,
+            tuple(sorted(mapped.values(), key=lambda x: x.path)),
+            scope["owner"],
+            pid,
+            uid,
+        )
     except WaylandIdentityError:
         raise
     except (OSError, ValueError, KeyError, IndexError, TypeError):
@@ -184,8 +241,9 @@ async def capture_identity(scope: dict, eis_peer: dict) -> CompositorRuntimeIden
     return await asyncio.to_thread(_capture, scope, eis_peer)
 
 
-async def revalidate_identity(identity: CompositorRuntimeIdentity, scope: dict,
-                              eis_peer: dict) -> bool:
+async def revalidate_identity(
+    identity: CompositorRuntimeIdentity, scope: dict, eis_peer: dict
+) -> bool:
     try:
         return (await capture_identity(scope, eis_peer)) == identity
     except WaylandIdentityError:

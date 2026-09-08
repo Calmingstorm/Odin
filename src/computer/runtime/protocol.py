@@ -18,6 +18,7 @@ def encode(message: dict) -> bytes:
 def decode(data: bytes, *, cap: int = MAX_WIRE_BYTES) -> dict:
     if len(data) > cap or not data.endswith(b"\n"):
         raise ValueError("invalid desktop wire frame")
+
     def pairs(items):
         value = {}
         for key, item in items:
@@ -25,8 +26,10 @@ def decode(data: bytes, *, cap: int = MAX_WIRE_BYTES) -> dict:
                 raise ValueError("duplicate desktop JSON key")
             value[key] = item
         return value
+
     def invalid_constant(_):
         raise ValueError("nonfinite JSON")
+
     value = json.loads(data, object_pairs_hook=pairs, parse_constant=invalid_constant)
     if not isinstance(value, dict):
         raise ValueError("desktop message must be an object")

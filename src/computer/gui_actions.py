@@ -19,19 +19,27 @@ def crop_arguments(crop, width=None, height=None):
         integer(crop[key], 0, 999_999)
     for key in ("width", "height"):
         integer(crop[key], 1, 1_000_000)
-    if ((width is not None and crop["x"] + crop["width"] > width)
-            or (height is not None and crop["y"] + crop["height"] > height)):
+    if (width is not None and crop["x"] + crop["width"] > width) or (
+        height is not None and crop["y"] + crop["height"] > height
+    ):
         raise ComputerError("invalid_bounds")
     return dict(crop)
 
 
 def action_arguments(inp):
-    fields = {"click": {"x", "y"}, "double_click": {"x", "y"},
-              "right_click": {"x", "y"}, "middle_click": {"x", "y"},
-              "scroll": {"x", "y", "direction", "count"},
-              "type": {"text"}, "key": {"key"}, "replace_field": {"text", "target"},
-              "replace_field_pixels": {"text", "region"},
-              "drag": {"points", "duration"}, "polyline": {"points", "duration"}}
+    fields = {
+        "click": {"x", "y"},
+        "double_click": {"x", "y"},
+        "right_click": {"x", "y"},
+        "middle_click": {"x", "y"},
+        "scroll": {"x", "y", "direction", "count"},
+        "type": {"text"},
+        "key": {"key"},
+        "replace_field": {"text", "target"},
+        "replace_field_pixels": {"text", "region"},
+        "drag": {"points", "duration"},
+        "polyline": {"points", "duration"},
+    }
     optional = {"expected_modal", "modifiers", "count", "region"}
     exact_keys(inp, _REQUIRED | set().union(*fields.values()) | optional, _REQUIRED)
     operation = inp["operation"]
@@ -39,7 +47,8 @@ def action_arguments(inp):
         raise ComputerError("unsupported_operation")
     clicks = {"click", "double_click", "right_click", "middle_click"}
     allowed = {"expected_modal"} | (
-        {"count", "modifiers", "region"} if operation in clicks else set())
+        {"count", "modifiers", "region"} if operation in clicks else set()
+    )
     if operation in {"scroll", "drag", "polyline"}:
         allowed.add("modifiers")
     required = fields[operation] - ({"x", "y"} if "region" in inp else set())
@@ -52,10 +61,14 @@ def action_arguments(inp):
         integer(inp.get("count", 2 if operation == "double_click" else 1), 1, 3)
     if operation in clicks | {"scroll", "drag", "polyline"}:
         modifiers = inp.get("modifiers", [])
-        if (type(modifiers) is not list or len(modifiers) > 4
-                or any(type(m) is not str or m not in {"ctrl", "alt", "shift", "super"}
-                       for m in modifiers)
-                or len(set(modifiers)) != len(modifiers)):
+        if (
+            type(modifiers) is not list
+            or len(modifiers) > 4
+            or any(
+                type(m) is not str or m not in {"ctrl", "alt", "shift", "super"} for m in modifiers
+            )
+            or len(set(modifiers)) != len(modifiers)
+        ):
             raise ComputerError("invalid_modifiers")
     for key in ("session_id", "source_id", "action_id", "observation_id", "expected_modal"):
         if key in inp:
@@ -70,8 +83,11 @@ def action_arguments(inp):
     if expected["type"] == "field_text_equals" and operation != "replace_field":
         raise ComputerError("field_text_verification_requires_replace_field")
     if expected["type"] == "pointer_at":
-        if (operation != "click" or "region" in inp
-                or any(expected[k] != inp[k] for k in ("x", "y"))):
+        if (
+            operation != "click"
+            or "region" in inp
+            or any(expected[k] != inp[k] for k in ("x", "y"))
+        ):
             raise ComputerError("postcondition_target_mismatch")
     if operation in {"click", "double_click", "right_click", "middle_click", "scroll"}:
         if "region" not in inp:
@@ -79,14 +95,21 @@ def action_arguments(inp):
                 integer(inp[key], 0, 999_999)
         if operation == "scroll":
             if type(inp["direction"]) is not str or inp["direction"] not in {
-                    "up", "down", "left", "right"}:
+                "up",
+                "down",
+                "left",
+                "right",
+            }:
                 raise ComputerError("invalid_arguments")
             integer(inp["count"], 1, 20)
     elif operation in {"type", "replace_field", "replace_field_pixels"}:
         text = inp["text"]
         minimum = 0 if operation in {"replace_field", "replace_field_pixels"} else 1
-        if (type(text) is not str or not minimum <= len(text) <= 512
-                or any(ord(c) < 32 and c not in "\n\t" for c in text)):
+        if (
+            type(text) is not str
+            or not minimum <= len(text) <= 512
+            or any(ord(c) < 32 and c not in "\n\t" for c in text)
+        ):
             raise ComputerError("invalid_text")
         try:
             text.encode("utf-8")
@@ -119,8 +142,11 @@ def action_arguments(inp):
                 raise ComputerError("invalid_target")
             for value in point:
                 integer(value, 0, 999_999)
-        if (type(duration) not in (int, float) or not math.isfinite(duration)
-                or not 0 <= duration <= 1):
+        if (
+            type(duration) not in (int, float)
+            or not math.isfinite(duration)
+            or not 0 <= duration <= 1
+        ):
             raise ComputerError("invalid_bounds")
 
 
@@ -132,22 +158,34 @@ def action_payload(inp, observation):
             inp["x"] = region["x"] + (region["width"] - 1) // 2
             inp["y"] = region["y"] + (region["height"] - 1) // 2
     if inp["expect"]["type"] == "region_changed":
-        crop_arguments({k: inp["expect"][k] for k in ("x", "y", "width", "height")},
-                       observation.width, observation.height)
+        crop_arguments(
+            {k: inp["expect"][k] for k in ("x", "y", "width", "height")},
+            observation.width,
+            observation.height,
+        )
     if inp["operation"] == "replace_field" or inp["expect"]["type"] == "field_text_equals":
         target_id = inp.get("target", inp["expect"].get("target"))
         matches = [node for node in observation.accessibility if node.get("handle") == target_id]
-        if (len(matches) != 1 or matches[0].get("text_readable") is not True
-                or (inp["operation"] == "replace_field"
-                    and "replace_field" not in matches[0].get("capabilities", []))):
+        if (
+            len(matches) != 1
+            or matches[0].get("text_readable") is not True
+            or (
+                inp["operation"] == "replace_field"
+                and "replace_field" not in matches[0].get("capabilities", [])
+            )
+        ):
             raise ComputerError("accessible_target_unavailable")
     source = observation.source
-    if any(inp[key] != getattr(source, key) for key in
-           ("source_id", "source_revision", "consent_generation")):
+    if any(
+        inp[key] != getattr(source, key)
+        for key in ("source_id", "source_revision", "consent_generation")
+    ):
         raise ComputerError("stale_source_binding")
     if observation.modal is not None:
-        if (observation.modal_kind != "safe_application"
-                or inp.get("expected_modal") != observation.modal):
+        if (
+            observation.modal_kind != "safe_application"
+            or inp.get("expected_modal") != observation.modal
+        ):
             raise ComputerError("unexpected_modal")
     elif "expected_modal" in inp:
         raise ComputerError("stale_modal_binding")
@@ -157,12 +195,22 @@ def action_payload(inp, observation):
             if key in inp:
                 payload[key] = inp[key]
     else:
-        payload = {key: inp[key] for key in
-                   ("source_id", "source_revision", "consent_generation")}
-        payload.update(type={"drag": "polyline"}.get(inp["operation"], inp["operation"]),
-                       expected=dict(inp["expect"]))
-        for key in ("text", "target", "points", "duration", "x", "y", "direction", "count",
-                    "modifiers"):
+        payload = {key: inp[key] for key in ("source_id", "source_revision", "consent_generation")}
+        payload.update(
+            type={"drag": "polyline"}.get(inp["operation"], inp["operation"]),
+            expected=dict(inp["expect"]),
+        )
+        for key in (
+            "text",
+            "target",
+            "points",
+            "duration",
+            "x",
+            "y",
+            "direction",
+            "count",
+            "modifiers",
+        ):
             if key in inp:
                 payload[key] = inp[key]
         if inp["operation"] == "key":
@@ -171,17 +219,25 @@ def action_payload(inp, observation):
             payload["region"] = dict(region)
         try:
             if inp["operation"] == "replace_field_pixels":
-                for x, y in ((region["x"], region["y"]),
-                             (region["x"] + region["width"] - 1,
-                              region["y"] + region["height"] - 1)):
-                    source.input_point(observation.delivered_to_source, x, y,
-                                       observation.width, observation.height)
+                for x, y in (
+                    (region["x"], region["y"]),
+                    (region["x"] + region["width"] - 1, region["y"] + region["height"] - 1),
+                ):
+                    source.input_point(
+                        observation.delivered_to_source, x, y, observation.width, observation.height
+                    )
             if "x" in inp:
-                source.input_point(observation.delivered_to_source, inp["x"], inp["y"],
-                                   observation.width, observation.height)
+                source.input_point(
+                    observation.delivered_to_source,
+                    inp["x"],
+                    inp["y"],
+                    observation.width,
+                    observation.height,
+                )
             for point in inp.get("points", []):
-                source.input_point(observation.delivered_to_source, *point,
-                                   observation.width, observation.height)
+                source.input_point(
+                    observation.delivered_to_source, *point, observation.width, observation.height
+                )
         except GeometryError:
             raise ComputerError("invalid_target") from None
         target = None
@@ -193,12 +249,18 @@ def action_payload(inp, observation):
 def visual_receipt(raw, observation):
     """Compare independent digests; never trust a supplied verdict."""
     unknown = {"status": "unknown", "reason": "input_outcome_unknown"}
-    if (type(raw) is not dict or raw.get("released") is not True
-            or type(raw.get("injected")) is not bool):
+    if (
+        type(raw) is not dict
+        or raw.get("released") is not True
+        or type(raw.get("injected")) is not bool
+    ):
         return unknown
     if raw.get("status") == "unavailable" and raw["injected"] is False:
-        refused: dict[str, Any] = {"status": "unavailable", "reason": "backend_refused",
-                                   "execution": {"injected": False, "released": True}}
+        refused: dict[str, Any] = {
+            "status": "unavailable",
+            "reason": "backend_refused",
+            "execution": {"injected": False, "released": True},
+        }
         reason = raw.get("reason")
         if isinstance(reason, str) and reason in {"unsupported_character", "unsupported_key"}:
             refused["reason"] = reason
@@ -215,40 +277,63 @@ def visual_receipt(raw, observation):
                     return unknown
                 if isinstance(codepoint, str) and re.fullmatch(r"U\+[0-9A-F]{4,6}", codepoint):
                     codepoint = int(codepoint[2:], 16)
-                if (type(codepoint) is not int or not 0 <= codepoint <= 0x10FFFF
-                        or 0xD800 <= codepoint <= 0xDFFF):
+                if (
+                    type(codepoint) is not int
+                    or not 0 <= codepoint <= 0x10FFFF
+                    or 0xD800 <= codepoint <= 0xDFFF
+                ):
                     return unknown
                 seen.add(index)
                 normalized.append({"index": index, "codepoint": f"U+{codepoint:04X}"})
             refused["unsupported_characters"] = normalized
         return refused
-    if (raw["injected"] is not True or raw.get("status") not in
-            {"executed", "verified", "not_satisfied"}):
+    if raw["injected"] is not True or raw.get("status") not in {
+        "executed",
+        "verified",
+        "not_satisfied",
+    }:
         return unknown
     result: dict[str, Any] = {
-        "status": "executed", "execution": {"injected": True, "released": True},
-        "verification": {"status": "unavailable", "type": "visual_change",
-                         "scope": "raster_change_only"}}
+        "status": "executed",
+        "execution": {"injected": True, "released": True},
+        "verification": {
+            "status": "unavailable",
+            "type": "visual_change",
+            "scope": "raster_change_only",
+        },
+    }
     evidence = raw.get("postcondition")
     if type(evidence) is not dict or evidence.get("status") == "unavailable":
         return result
     source = observation.source
-    if (evidence.get("type") != "visual_change"
-            or evidence.get("method") != "raster_digest_after_release"
-            or type(evidence.get("target_application_matches")) is not bool
-            or any(type(evidence.get(key)) is not type(getattr(source, key))
-                   or evidence.get(key) != getattr(source, key) for key in
-                   ("source_id", "source_revision", "consent_generation"))):
+    if (
+        evidence.get("type") != "visual_change"
+        or evidence.get("method") != "raster_digest_after_release"
+        or type(evidence.get("target_application_matches")) is not bool
+        or any(
+            type(evidence.get(key)) is not type(getattr(source, key))
+            or evidence.get(key) != getattr(source, key)
+            for key in ("source_id", "source_revision", "consent_generation")
+        )
+    ):
         return unknown
     actual = evidence.get("actual")
-    if (type(actual) is not dict or set(actual) != {"before_sha256", "after_sha256"}
-            or any(type(v) is not str or len(v) != 64
-                   or any(c not in "0123456789abcdef" for c in v) for v in actual.values())):
+    if (
+        type(actual) is not dict
+        or set(actual) != {"before_sha256", "after_sha256"}
+        or any(
+            type(v) is not str or len(v) != 64 or any(c not in "0123456789abcdef" for c in v)
+            for v in actual.values()
+        )
+    ):
         return unknown
     binding = evidence["target_application_matches"]
     satisfied = binding and actual["before_sha256"] != actual["after_sha256"]
     result["status"] = "verified" if satisfied else "not_satisfied"
     result["verification"].update(
-        status="satisfied" if satisfied else "not_satisfied", actual=dict(actual),
-        method="raster_digest_after_release", target_application_matches=binding)
+        status="satisfied" if satisfied else "not_satisfied",
+        actual=dict(actual),
+        method="raster_digest_after_release",
+        target_application_matches=binding,
+    )
     return result

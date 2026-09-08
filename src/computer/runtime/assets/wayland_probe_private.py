@@ -2,6 +2,7 @@
 
 The launcher-created read-only marker is not a permission grant or cached proof.
 """
+
 from __future__ import annotations
 
 import hashlib
@@ -24,10 +25,15 @@ def assert_private_environment() -> dict:
     nonce = os.environ.get("ODIN_WAYLAND_PROBE_NONCE", "")
     if not re.fullmatch(r"[0-9a-f]{64}", nonce):
         raise RuntimeError("private_probe_nonce_missing")
-    if any(os.environ.get(k) != v for k, v in {
-        "HOME": "/home/probe", "XDG_RUNTIME_DIR": "/run/probe",
-        "WAYLAND_DISPLAY": "wayland-probe", "GDK_BACKEND": "wayland",
-    }.items()):
+    if any(
+        os.environ.get(k) != v
+        for k, v in {
+            "HOME": "/home/probe",
+            "XDG_RUNTIME_DIR": "/run/probe",
+            "WAYLAND_DISPLAY": "wayland-probe",
+            "GDK_BACKEND": "wayland",
+        }.items()
+    ):
         raise RuntimeError("private_probe_environment_mismatch")
     marker = Path("/probe/private.json")
     metadata = marker.stat()
@@ -62,30 +68,45 @@ def measured_object(path: str) -> dict:
             # Inside, accept only read-only bytes matching the pinned manifest.
             assert_private_environment()
             owner_ok = bool(os.fstatvfs(stream.fileno()).f_flag & os.ST_RDONLY)
-        if (not stat.S_ISREG(info.st_mode) or not owner_ok or info.st_mode & 0o022
-                or info.st_size > 256 * 1024 * 1024):
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or not owner_ok
+            or info.st_mode & 0o022
+            or info.st_size > 256 * 1024 * 1024
+        ):
             raise RuntimeError("stack_object_not_root_owned_read_only")
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
         after = os.fstat(stream.fileno())
         if (info.st_size, info.st_mtime_ns, info.st_ctime_ns) != (
-                after.st_size, after.st_mtime_ns, after.st_ctime_ns):
+            after.st_size,
+            after.st_mtime_ns,
+            after.st_ctime_ns,
+        ):
             raise RuntimeError("stack_object_changed_during_hash")
-    return {"path": path, "device": f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}",
-            "inode": info.st_ino, "sha256": digest}
+    return {
+        "path": path,
+        "device": f"{os.major(info.st_dev):02x}:{os.minor(info.st_dev):02x}",
+        "inode": info.st_ino,
+        "sha256": digest,
+    }
 
 
 def device_equal(left: str, right: str) -> bool:
     try:
         return tuple(int(x, 16) for x in left.split(":")) == tuple(
-            int(x, 16) for x in right.split(":"))
+            int(x, 16) for x in right.split(":")
+        )
     except (TypeError, ValueError):
         return False
 
 
 def object_equal(left: dict, right: dict) -> bool:
-    return (left["path"] == right["path"] and left["inode"] == right["inode"]
-            and left["sha256"] == right["sha256"]
-            and device_equal(left["device"], right["device"]))
+    return (
+        left["path"] == right["path"]
+        and left["inode"] == right["inode"]
+        and left["sha256"] == right["sha256"]
+        and device_equal(left["device"], right["device"])
+    )
 
 
 def mapped_objects(pid: int) -> list[dict]:
@@ -109,12 +130,17 @@ def require_same_stack(expected: dict, pid: int) -> dict:
     actual = {item["path"]: item for item in mapped_objects(pid)}
     for item in expected["libraries"]:
         if item["path"] not in actual or not object_equal(item, actual[item["path"]]):
-            raise StackMismatchError({
-                "expected": item, "actual": actual.get(item["path"]),
-                "loaded_candidates": [
-                    value for path, value in actual.items()
-                    if Path(path).name == Path(item["path"]).name],
-            })
+            raise StackMismatchError(
+                {
+                    "expected": item,
+                    "actual": actual.get(item["path"]),
+                    "loaded_candidates": [
+                        value
+                        for path, value in actual.items()
+                        if Path(path).name == Path(item["path"]).name
+                    ],
+                }
+            )
     expected_paths = {item["path"] for item in expected["libraries"]}
     if any(relevant_library(p) and p not in expected_paths for p in actual):
         raise RuntimeError("private_compositor_vendor_stack_mismatch")
@@ -125,7 +151,22 @@ def relevant_library(path):
     # MUST match wayland_identity._capture exactly. Case-insensitive libGL would
     # accidentally select libglib, which is not the OpenGL vendor implementation.
     name = Path(path).name
-    return (name.startswith(("libmutter", "libkwin", "libei", "libeis", "libxkbcommon",
-                             "libinput", "libEGL", "libGL", "libgbm", "libdrm"))
-            or path.endswith("/kwin/plugins/eis.so")
-            or "_dri.so" in name or "nvidia" in name)
+    return (
+        name.startswith(
+            (
+                "libmutter",
+                "libkwin",
+                "libei",
+                "libeis",
+                "libxkbcommon",
+                "libinput",
+                "libEGL",
+                "libGL",
+                "libgbm",
+                "libdrm",
+            )
+        )
+        or path.endswith("/kwin/plugins/eis.so")
+        or "_dri.so" in name
+        or "nvidia" in name
+    )

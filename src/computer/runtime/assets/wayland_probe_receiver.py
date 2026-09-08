@@ -19,20 +19,25 @@ WATCHDOG_SECONDS = 60
 
 
 def emit(kind, **values):
-    print(json.dumps({"kind": kind, "pid": os.getpid(),
-                      "monotonic": time.monotonic(), **values}), flush=True)
+    print(
+        json.dumps({"kind": kind, "pid": os.getpid(), "monotonic": time.monotonic(), **values}),
+        flush=True,
+    )
 
 
 def typed_event(event, *, key_event=False, button_event=False):
     """Read GDK's typed union accessors, never event.button union attributes."""
+
     def scalar(method):
         ok, value = getattr(event, method)()
         if not ok:
             raise ValueError("missing typed event field: " + method)
         return int(value)
 
-    return {"key": scalar("get_keyval") if key_event else None,
-            "button": scalar("get_button") if button_event else None}
+    return {
+        "key": scalar("get_keyval") if key_event else None,
+        "button": scalar("get_button") if button_event else None,
+    }
 
 
 class Receiver:
@@ -55,9 +60,14 @@ class Receiver:
         self.area = gtk.DrawingArea()
         self.area.set_can_focus(True)
         self.area.set_size_request(800, 600)
-        masks = (gdk.EventMask.BUTTON_PRESS_MASK | gdk.EventMask.BUTTON_RELEASE_MASK
-                 | gdk.EventMask.KEY_PRESS_MASK | gdk.EventMask.KEY_RELEASE_MASK
-                 | gdk.EventMask.POINTER_MOTION_MASK | gdk.EventMask.FOCUS_CHANGE_MASK)
+        masks = (
+            gdk.EventMask.BUTTON_PRESS_MASK
+            | gdk.EventMask.BUTTON_RELEASE_MASK
+            | gdk.EventMask.KEY_PRESS_MASK
+            | gdk.EventMask.KEY_RELEASE_MASK
+            | gdk.EventMask.POINTER_MOTION_MASK
+            | gdk.EventMask.FOCUS_CHANGE_MASK
+        )
         self.area.add_events(masks)
         self.win.add_events(masks)
         self.win.add(self.area)
@@ -140,12 +150,17 @@ class Receiver:
             if len(result) != 4:
                 raise ValueError("unexpected GDK pointer telemetry shape")
             _child, x, y, state = result
-            self.output("sample", active=bool(self.win.is_active()),
-                        focused=bool(self.win.has_toplevel_focus() and self.area.has_focus()),
-                        toplevel_focus=bool(self.win.has_toplevel_focus()),
-                        pointer_x=int(x), pointer_y=int(y), state=int(state),
-                        state_source="Gdk.Window.get_device_position(default_seat.pointer)",
-                        **self.ledger())
+            self.output(
+                "sample",
+                active=bool(self.win.is_active()),
+                focused=bool(self.win.has_toplevel_focus() and self.area.has_focus()),
+                toplevel_focus=bool(self.win.has_toplevel_focus()),
+                pointer_x=int(x),
+                pointer_y=int(y),
+                state=int(state),
+                state_source="Gdk.Window.get_device_position(default_seat.pointer)",
+                **self.ledger(),
+            )
         except Exception as exc:
             self.fail("sample", exc)
             return False
@@ -164,8 +179,9 @@ class Receiver:
             self.area.grab_focus()
             self.win.present()
             self.ready = True
-            self.output("receiver_ready", backend="wayland",
-                        display_type=type(self.display).__name__)
+            self.output(
+                "receiver_ready", backend="wayland", display_type=type(self.display).__name__
+            )
             self.GLib.timeout_add(SAMPLE_INTERVAL_MS, self.sample)
         except Exception as exc:
             self.fail("ready", exc)
@@ -208,8 +224,10 @@ def initialize_gtk():
     display = gdk.Display.get_default()
     # GTK3 distributions need not ship a separate GdkWayland typelib. The
     # concrete GObject type is authoritative even without that optional typelib.
-    if (display is None
-            or getattr(getattr(display, "__gtype__", None), "name", None) != "GdkWaylandDisplay"):
+    if (
+        display is None
+        or getattr(getattr(display, "__gtype__", None), "name", None) != "GdkWaylandDisplay"
+    ):
         raise RuntimeError("native GDK Wayland display required; fallback refused")
     return gtk, gdk, glib, display
 
@@ -219,8 +237,13 @@ def watchdog(_signum, _frame):
         # Do not flush Python stdout here: a stalled parent may have filled its
         # pipe, and the signal may have interrupted that same stream's lock.
         os.set_blocking(1, False)
-        payload = {"kind": "error", "pid": os.getpid(), "monotonic": time.monotonic(),
-                   "where": "watchdog", "reason": "receiver exceeded 60-second lifetime"}
+        payload = {
+            "kind": "error",
+            "pid": os.getpid(),
+            "monotonic": time.monotonic(),
+            "where": "watchdog",
+            "reason": "receiver exceeded 60-second lifetime",
+        }
         os.write(1, (json.dumps(payload) + "\n").encode("utf-8"))
     finally:
         os._exit(124)
@@ -234,7 +257,8 @@ def main():
     signal.alarm(WATCHDOG_SECONDS)
     try:
         assert_private_environment = importlib.import_module(
-            "wayland_probe_private").assert_private_environment
+            "wayland_probe_private"
+        ).assert_private_environment
 
         assert_private_environment()
         return Receiver(*initialize_gtk()).run()

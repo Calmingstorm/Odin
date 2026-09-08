@@ -1,4 +1,5 @@
 """Audit-only agent parity: real persistence, unchanged execution outcomes."""
+
 import asyncio
 import json
 from types import SimpleNamespace
@@ -19,36 +20,69 @@ def harness(tmp_path, result="ok", error=None):
     runner = object.__new__(ToolLoopRunner)
     runner._audit = AuditLogger(str(tmp_path / "audit.jsonl"))
     runner.dispatch_loop_tool_inner = AsyncMock(return_value=result, side_effect=error)
-    proxy = SimpleNamespace(channel=SimpleNamespace(id="c"),
-                            author=SimpleNamespace(display_name="User"))
-    agent = AgentInfo(id="a", label="worker " + "x" * 300, goal="test", channel_id="c",
-                      requester_id="u", requester_name="User", parent_id="p",
-                      root_id="root", turn_id="origin")
+    proxy = SimpleNamespace(
+        channel=SimpleNamespace(id="c"), author=SimpleNamespace(display_name="User")
+    )
+    agent = AgentInfo(
+        id="a",
+        label="worker " + "x" * 300,
+        goal="test",
+        channel_id="c",
+        requester_id="u",
+        requester_name="User",
+        parent_id="p",
+        root_id="root",
+        turn_id="origin",
+    )
     agent.iteration_count = 3
     return runner, proxy, agent
 
 
 async def invoke(runner, proxy, agent, tool="run_script", arguments=None):
     results = []
+
     async def execute(name, arguments):
         return await runner.dispatch_loop_tool(name, arguments, proxy, "u")
-    await execute_cycle(agent, [{"id": "call-1", "name": tool, "input": arguments or {
-        "host": "localhost", "script": "private shell body", "nested": [{
-            "api_key": "never-store-me", "authorization": "Bearer never-store-either",
-        }],
-    }}], execute, results, timeouts={}, default_timeout=5)
+
+    await execute_cycle(
+        agent,
+        [
+            {
+                "id": "call-1",
+                "name": tool,
+                "input": arguments
+                or {
+                    "host": "localhost",
+                    "script": "private shell body",
+                    "nested": [
+                        {
+                            "api_key": "never-store-me",
+                            "authorization": "Bearer never-store-either",
+                        }
+                    ],
+                },
+            }
+        ],
+        execute,
+        results,
+        timeouts={},
+        default_timeout=5,
+    )
     if _pending_observers:
         await asyncio.shield(asyncio.gather(*list(_pending_observers), return_exceptions=True))
     return results
 
 
-@pytest.mark.parametrize("raw,error,expected", [
-    ("ok", None, "succeeded"),
-    ("Command failed (exit 1): nope", None, "failed"),
-    (ToolResult(output="nope", ok=False, error="denied"), None, "denied"),
-    (None, ValueError("bad input"), "failed"),
-    (None, asyncio.CancelledError(), "cancelled"),
-])
+@pytest.mark.parametrize(
+    "raw,error,expected",
+    [
+        ("ok", None, "succeeded"),
+        ("Command failed (exit 1): nope", None, "failed"),
+        (ToolResult(output="nope", ok=False, error="denied"), None, "denied"),
+        (None, ValueError("bad input"), "failed"),
+        (None, asyncio.CancelledError(), "cancelled"),
+    ],
+)
 async def test_agent_audit_parity(tmp_path, raw, error, expected):
     runner, proxy, agent = harness(tmp_path, raw, error)
     token = set_turn(turn_id="agent-turn", source="agent")
@@ -88,12 +122,20 @@ async def test_agent_audit_parity(tmp_path, raw, error, expected):
 
 async def test_email_input_uses_existing_storage_policy(tmp_path):
     runner, proxy, agent = harness(tmp_path)
-    await invoke(runner, proxy, agent, "email_send", {
-        "body": "private", "attachments": ["/tmp/a.txt"],
-    })
+    await invoke(
+        runner,
+        proxy,
+        agent,
+        "email_send",
+        {
+            "body": "private",
+            "attachments": ["/tmp/a.txt"],
+        },
+    )
     for record in await runner._audit.search():
         assert record["tool_input"] == {
-            "body": "[redacted email body: 7 chars]", "attachments": ["a.txt"],
+            "body": "[redacted email body: 7 chars]",
+            "attachments": ["a.txt"],
         }
 
 
@@ -108,8 +150,10 @@ async def test_loop_dispatch_does_not_add_execution(tmp_path):
 
 async def test_context_does_not_leak_to_child_tasks(tmp_path):
     _, _, agent = harness(tmp_path)
+
     async def child():
         return get_agent_tool_context()
+
     with agent_tool_context(agent, {"id": "parent-call"}):
         assert get_agent_tool_context()["call_id"] == "parent-call"
         assert await asyncio.create_task(child()) is None
@@ -129,9 +173,14 @@ async def test_observer_failure_does_not_change_return_or_execution(tmp_path, me
 @pytest.mark.parametrize("cap", [32, 100, 200, 4000])
 @pytest.mark.parametrize("body", ['"\\\n' * 5000, "é" * 9000])
 def test_json_clipping_complete_budget(cap, body):
-    raw = json.dumps({
-        "kind": "tool_output", "truncated": False, "retention": "failed", "head": body,
-    })
+    raw = json.dumps(
+        {
+            "kind": "tool_output",
+            "truncated": False,
+            "retention": "failed",
+            "head": body,
+        }
+    )
     clipped = _cap_audit_text(raw, cap)
     parsed = json.loads(clipped)
     assert len(clipped) <= cap
@@ -146,21 +195,40 @@ def test_json_clipping_complete_budget(cap, body):
 
 async def test_persisted_json_is_valid_and_scrubbed_after_all_passes(tmp_path):
     logger = AuditLogger(str(tmp_path / "audit.jsonl"), result_cap=800)
-    raw = json.dumps({"kind": "process_output", "truncated": False, "capture_loss": True,
-                      "retention": "retained", "api_key": "secretvalue", "head": "a\n" * 9000})
+    raw = json.dumps(
+        {
+            "kind": "process_output",
+            "truncated": False,
+            "capture_loss": True,
+            "retention": "retained",
+            "api_key": "secretvalue",
+            "head": "a\n" * 9000,
+        }
+    )
     await logger.log_event(event_type="test", action="tool", detail=raw)
-    await logger.log_execution(user_id="u", user_name="U", channel_id="c", tool_name="tool",
-                               tool_input={}, approved=True, result_summary=raw,
-                               execution_time_ms=1)
+    await logger.log_execution(
+        user_id="u",
+        user_name="U",
+        channel_id="c",
+        tool_name="tool",
+        tool_input={},
+        approved=True,
+        result_summary=raw,
+        execution_time_ms=1,
+    )
     for record in await logger.search():
         text = record.get("detail", record.get("result_summary"))
         parsed = json.loads(text)
         assert len(text) <= 800
         assert "secretvalue" not in text
         assert parsed["audit_clipped"] is True
-        assert parsed["source"] == {"kind": "process_output", "truncated": False,
-                                    "capture_loss": True, "retention": "retained",
-                                    "offset_unit": "utf8_bytes"}
+        assert parsed["source"] == {
+            "kind": "process_output",
+            "truncated": False,
+            "capture_loss": True,
+            "retention": "retained",
+            "offset_unit": "utf8_bytes",
+        }
     uncut = json.loads(_cap_audit_text('{"password":"opaque", "ok":true}', 800))
     assert uncut["password"] == "[REDACTED]"
 
@@ -169,9 +237,16 @@ async def test_uncut_json_secret_remains_valid_on_disk(tmp_path):
     logger = AuditLogger(str(tmp_path / "audit.jsonl"))
     raw = '{"password":"opaque", "nested":{"token":"hidden"}, "message":"é\\nline"}'
     await logger.log_event(event_type="test", action="t", detail=raw)
-    await logger.log_execution(user_id="u", user_name="U", channel_id="c", tool_name="t",
-                               tool_input={}, approved=True, result_summary=raw,
-                               execution_time_ms=0)
+    await logger.log_execution(
+        user_id="u",
+        user_name="U",
+        channel_id="c",
+        tool_name="t",
+        tool_input={},
+        approved=True,
+        result_summary=raw,
+        execution_time_ms=0,
+    )
     for entry in await logger.search():
         value = json.loads(entry.get("detail", entry.get("result_summary")))
         assert value["password"] == value["nested"]["token"] == "[REDACTED]"
@@ -183,6 +258,7 @@ async def test_cancellation_during_durable_audit_keeps_terminal_pair(tmp_path, b
     runner, proxy, agent = harness(tmp_path)
     original = runner._audit._append_durable
     entered, release = asyncio.Event(), asyncio.Event()
+
     async def append(line):
         entry = json.loads(line)
         kind = entry.get("type", "execution")
@@ -191,6 +267,7 @@ async def test_cancellation_during_durable_audit_keeps_terminal_pair(tmp_path, b
             entered.set()
             await release.wait()
         await original(line)
+
     runner._audit._append_durable = append
     task = asyncio.create_task(invoke(runner, proxy, agent))
     await asyncio.wait_for(entered.wait(), 2)
@@ -203,7 +280,9 @@ async def test_cancellation_during_durable_audit_keeps_terminal_pair(tmp_path, b
         await asyncio.wait_for(asyncio.gather(*list(_pending_observers)), 2)
     entries = list(reversed(await runner._audit.search()))
     assert [entry.get("type", "execution") for entry in entries] == [
-        "loop_tool_start", "execution", "loop_tool",
+        "loop_tool_start",
+        "execution",
+        "loop_tool",
     ]
     assert len({entry["call_id"] for entry in entries}) == 1
     assert runner.dispatch_loop_tool_inner.await_count == 1
@@ -235,15 +314,19 @@ async def test_dispatch_preserves_input_and_result_identity(tmp_path):
 async def test_timeout_is_dispatch_cancellation_not_invented_outer_cause(tmp_path, tool, uncertain):
     runner, proxy, agent = harness(tmp_path)
     entered = asyncio.Event()
+
     async def blocked(*args):
         entered.set()
         await asyncio.Event().wait()
+
     runner.dispatch_loop_tool_inner = blocked
+
     async def dispatch():
         with agent_tool_context(agent, {"id": "deadline"}):
             return await runner.dispatch_loop_tool(tool, {}, proxy, "u")
+
     with pytest.raises(TimeoutError):
-        await asyncio.wait_for(dispatch(), .05)
+        await asyncio.wait_for(dispatch(), 0.05)
     assert entered.is_set()
     if _pending_observers:
         await asyncio.gather(*list(_pending_observers))
@@ -257,17 +340,19 @@ async def test_stop_does_not_wait_for_hung_terminal_observer(tmp_path):
     runner, proxy, agent = harness(tmp_path)
     entered, release = asyncio.Event(), asyncio.Event()
     original = runner._audit.log_execution
+
     async def blocked(**kwargs):
         entered.set()
         await release.wait()
         await original(**kwargs)
+
     runner._audit.log_execution = blocked
     task = asyncio.create_task(invoke(runner, proxy, agent))
     await asyncio.wait_for(entered.wait(), 2)
     task.cancel()
     try:
         with pytest.raises(asyncio.CancelledError):
-            await asyncio.wait_for(task, .2)
+            await asyncio.wait_for(task, 0.2)
         assert _pending_observers
     finally:
         release.set()
@@ -295,15 +380,35 @@ async def test_search_audit_renders_rich_agent_execution_with_limit(tmp_path):
         assert UsageRollup._tool_fact(json.dumps(entry).encode()) is None
 
 
-@pytest.mark.parametrize("payload", [
-    {"kind": "tool_output", "status": "succeeded", "retention": "retained",
-     "head": "first\nsecond\n" * 1000, "truncated": True},
-    {"kind": "process_output", "pid": 123, "retained_bytes": 5000,
-     "output": "first\nsecond\n" * 1000, "capture_limit_loss_bytes": 200,
-     "not_retained_bytes": 200, "capture_error": None, "truncated": False},
-    {"id": "agent", "original_bytes": 5000, "result_bytes": 5000,
-     "preview": "first\nsecond\n" * 1000, "truncated": True},
-])
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {
+            "kind": "tool_output",
+            "status": "succeeded",
+            "retention": "retained",
+            "head": "first\nsecond\n" * 1000,
+            "truncated": True,
+        },
+        {
+            "kind": "process_output",
+            "pid": 123,
+            "retained_bytes": 5000,
+            "output": "first\nsecond\n" * 1000,
+            "capture_limit_loss_bytes": 200,
+            "not_retained_bytes": 200,
+            "capture_error": None,
+            "truncated": False,
+        },
+        {
+            "id": "agent",
+            "original_bytes": 5000,
+            "result_bytes": 5000,
+            "preview": "first\nsecond\n" * 1000,
+            "truncated": True,
+        },
+    ],
+)
 def test_real_envelopes_have_decoded_audit_previews(payload):
     result = json.loads(_cap_audit_text(json.dumps(payload), 900))
     assert result["preview"].startswith("first\nsecond\n")
@@ -313,11 +418,19 @@ def test_real_envelopes_have_decoded_audit_previews(payload):
 
 
 def test_process_preview_footer_survives_audit_clipping():
-    meta = {"kind": "process_output", "pid": 42, "status": "running",
-            "emitted_bytes": 9000, "retained_bytes": 8000, "shown_bytes": 7000,
-            "capture_limit_loss_bytes": 1000, "not_retained_bytes": 1000,
-            "capture_error": "retention quota exhausted", "truncated": True,
-            "cursor": "generation:0"}
+    meta = {
+        "kind": "process_output",
+        "pid": 42,
+        "status": "running",
+        "emitted_bytes": 9000,
+        "retained_bytes": 8000,
+        "shown_bytes": 7000,
+        "capture_limit_loss_bytes": 1000,
+        "not_retained_bytes": 1000,
+        "capture_error": "retention quota exhausted",
+        "truncated": True,
+        "cursor": "generation:0",
+    }
     raw = "Process 42 running\n" + "line\n" * 2000 + "\n[output retention] " + json.dumps(meta)
     clipped = json.loads(_cap_audit_text(raw, 1000))
     assert clipped["preview"].startswith("Process 42 running\nline\n")
@@ -333,10 +446,12 @@ async def test_full_autonomous_iteration_has_exactly_one_execution(tmp_path, mon
     from tests.fakes import text_response, tool_call_response
 
     monkeypatch.chdir(tmp_path)
-    bot, _ = build([
-        tool_call_response(("parse_time", {"expression": "now"})),
-        text_response("complete"),
-    ])
+    bot, _ = build(
+        [
+            tool_call_response(("parse_time", {"expression": "now"})),
+            text_response("complete"),
+        ]
+    )
     audit = AuditLogger(str(tmp_path / "audit.jsonl"))
     bot.tool_loop._audit = audit
     assert await run_iteration(bot) == "complete"
@@ -351,8 +466,15 @@ async def test_full_autonomous_iteration_has_exactly_one_execution(tmp_path, mon
 async def test_concurrent_same_name_calls_preserve_identity_and_raw_payload(tmp_path):
     runner, proxy, first = harness(tmp_path)
     second = AgentInfo(
-        id="sibling", label="Second", goal="test", channel_id="c", requester_id="u",
-        requester_name="User", parent_id="p", root_id="root", turn_id="origin",
+        id="sibling",
+        label="Second",
+        goal="test",
+        channel_id="c",
+        requester_id="u",
+        requester_name="User",
+        parent_id="p",
+        root_id="root",
+        turn_id="origin",
     )
     first_entered, second_done = asyncio.Event(), asyncio.Event()
     first_input = {"path": "/example/one", "nested": {"token": "first-private"}}
@@ -422,14 +544,14 @@ async def test_stalled_start_audit_never_blocks_dispatch_completion_or_stop(tmp_
 
     task = asyncio.create_task(dispatch())
     try:
-        await asyncio.wait_for(tool_entered.wait(), .2)
-        await asyncio.wait_for(audit_entered.wait(), .2)
+        await asyncio.wait_for(tool_entered.wait(), 0.2)
+        await asyncio.wait_for(audit_entered.wait(), 0.2)
         if stop:
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
-                await asyncio.wait_for(task, .2)
+                await asyncio.wait_for(task, 0.2)
         else:
-            assert await asyncio.wait_for(task, .2) == "unchanged result"
+            assert await asyncio.wait_for(task, 0.2) == "unchanged result"
         assert not release_audit.is_set()
         assert _pending_observers
     finally:
@@ -440,7 +562,9 @@ async def test_stalled_start_audit_never_blocks_dispatch_completion_or_stop(tmp_
             await asyncio.gather(task, return_exceptions=True)
     records = list(reversed(await runner._audit.search()))
     assert [entry.get("type", "execution") for entry in records] == [
-        "loop_tool_start", "execution", "loop_tool",
+        "loop_tool_start",
+        "execution",
+        "loop_tool",
     ]
     assert records[1]["status"] == ("cancelled" if stop else "succeeded")
 
@@ -449,8 +573,10 @@ async def test_stalled_start_audit_never_blocks_dispatch_completion_or_stop(tmp_
 async def test_broken_audit_adapter_cannot_prevent_dispatch(tmp_path, monkeypatch, boundary):
     runner, proxy, agent = harness(tmp_path)
     if boundary == "attribution":
+
         def broken_context():
             raise ValueError("bad diagnostic context")
+
         monkeypatch.setattr("src.discord.tool_loop.get_agent_tool_context", broken_context)
     else:
         original = runner._audit.log_event
@@ -469,12 +595,21 @@ async def test_broken_audit_adapter_cannot_prevent_dispatch(tmp_path, monkeypatc
     assert any(entry.get("type") == "loop_tool" for entry in entries)
 
 
-@pytest.mark.parametrize("raw,expected", [
-    (ToolResult(output="unknown", ok=False, uncertain_outcome=True), "outcome_unknown"),
-    (ToolResult(output="parent correction", ok=True,
-                audit_metadata={"wait_interrupted": "parent_message"}), "interrupted_effect_free"),
-    ("Permission denied for this tool", "denied"),
-])
+@pytest.mark.parametrize(
+    "raw,expected",
+    [
+        (ToolResult(output="unknown", ok=False, uncertain_outcome=True), "outcome_unknown"),
+        (
+            ToolResult(
+                output="parent correction",
+                ok=True,
+                audit_metadata={"wait_interrupted": "parent_message"},
+            ),
+            "interrupted_effect_free",
+        ),
+        ("Permission denied for this tool", "denied"),
+    ],
+)
 async def test_agent_audit_status_is_dispatch_evidence_only(tmp_path, raw, expected):
     runner, proxy, agent = harness(tmp_path, raw)
     await invoke(runner, proxy, agent)

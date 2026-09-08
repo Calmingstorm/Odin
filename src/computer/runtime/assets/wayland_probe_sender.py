@@ -111,7 +111,10 @@ class Sender:
                 elif kind == SEAT_ADDED:
                     lib.ei_seat_bind_capabilities(
                         lib.ei_event_get_seat(event),
-                        c.c_int(ABSOLUTE), c.c_int(BUTTON), c.c_int(KEYBOARD), c.c_void_p(),
+                        c.c_int(ABSOLUTE),
+                        c.c_int(BUTTON),
+                        c.c_int(KEYBOARD),
+                        c.c_void_p(),
                     )
                 elif kind in (DEVICE_ADDED, DEVICE_REMOVED, DEVICE_PAUSED, DEVICE_RESUMED):
                     device = lib.ei_event_get_device(event)
@@ -259,7 +262,7 @@ class Commands:
                 if newline > MAX_LINE:
                     raise ProbeError("command too large")
                 raw = bytes(self.buffer[:newline])
-                del self.buffer[:newline + 1]
+                del self.buffer[: newline + 1]
                 self.count += 1
                 if self.count > 64:
                     raise ProbeError("command budget exhausted")
@@ -270,7 +273,12 @@ class Commands:
                 if not isinstance(command, dict) or set(command) != {"op"}:
                     raise ProbeError("command must contain only op")
                 if command["op"] not in (
-                    "handoff", "hold", "release", "fresh", "escape", "eof",
+                    "handoff",
+                    "hold",
+                    "release",
+                    "fresh",
+                    "escape",
+                    "eof",
                 ):
                     raise ProbeError("unsupported command")
                 return command["op"]
@@ -301,7 +309,8 @@ def verify_socket_handoff(fd):
             raise ProbeError("EI fd must be a private Unix stream")
         wrapped.getpeername()
         peer_pid, _, _ = struct.unpack(
-            "3i", wrapped.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12),
+            "3i",
+            wrapped.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12),
         )
         if peer_pid <= 0:
             raise ProbeError("EI peer is outside the private PID namespace")
@@ -341,7 +350,8 @@ def main():
         # Shared asset checks nonce, fixed environment and independent private
         # mount/PID namespaces. Missing guard is deliberately a hard refusal.
         assert_private_environment = importlib.import_module(
-            "wayland_probe_private").assert_private_environment
+            "wayland_probe_private"
+        ).assert_private_environment
 
         assert_private_environment()
         lifetime = time.monotonic() + 120
@@ -353,8 +363,10 @@ def main():
         sender.handshake()
         emit("ready")
         responses = {
-            "hold": "held_sent", "release": "released",
-            "fresh": "fresh_sent", "escape": "escape_sent",
+            "hold": "held_sent",
+            "release": "released",
+            "fresh": "fresh_sent",
+            "escape": "escape_sent",
         }
         while True:
             op = commands.read(min(lifetime, time.monotonic() + 30), sender)
