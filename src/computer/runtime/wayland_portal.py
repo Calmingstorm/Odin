@@ -961,7 +961,11 @@ class _PortalWorker:
             raise PortalError("EIS transfer is one-shot")
         self.eis_used = True
         fd = self.descriptor(RD, "ConnectToEIS")
-        sock = socket.socket(fileno=fd)
+        try:
+            sock = socket.socket(fileno=fd)
+        except BaseException:
+            os.close(fd)
+            raise
         try:
             pid, uid, gid = struct.unpack(
                 "3i", sock.getsockopt(socket.SOL_SOCKET, socket.SO_PEERCRED, 12)
@@ -1102,7 +1106,8 @@ class _PortalWorker:
         finally:
             try:
                 if pipeline is not None:
-                    pipeline.set_state(gst.State.NULL)
+                    if pipeline.set_state(gst.State.NULL) == gst.StateChangeReturn.FAILURE:
+                        raise PortalError("PipeWire pipeline failed to stop")
             except Exception as exc:
                 self._cleanup_errors.append("pipeline_stop:" + type(exc).__name__)
                 raise

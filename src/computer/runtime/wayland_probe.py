@@ -272,6 +272,7 @@ class GnomeSameStackQualifier:
         public = None
         proc: asyncio.subprocess.Process | None = None
         pidfd: int | None = None
+        cancelled = False
         try:
             public = CompositorIdentity(
                 identity.compositor_name,
@@ -383,6 +384,7 @@ class GnomeSameStackQualifier:
                             + ("identity_sha256:" + manifest["binding_digest"],),
                         )
         except asyncio.CancelledError:
+            cancelled = True
             raise
         except Exception as exc:
             code = (
@@ -400,10 +402,24 @@ class GnomeSameStackQualifier:
                 public,
             )
         finally:
-            if proc is not None:
-                await asyncio.shield(_cleanup(proc, pidfd))
-            if pidfd is not None:
-                os.close(pidfd)
+            try:
+                if proc is not None:
+                    cleanup = asyncio.create_task(_cleanup(proc, pidfd))
+                    while not cleanup.done():
+                        try:
+                            await asyncio.shield(cleanup)
+                        except asyncio.CancelledError:
+                            if cleanup.cancelled():
+                                raise
+                            cancelled = True
+                    cleanup.result()
+            finally:
+                try:
+                    if pidfd is not None:
+                        os.close(pidfd)
+                finally:
+                    if cancelled:
+                        raise asyncio.CancelledError
 
 
 async def qualify(identity) -> InputAdmission:
