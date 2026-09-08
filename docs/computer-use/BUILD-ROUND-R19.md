@@ -126,12 +126,14 @@ no global zero-warning claim is made.
 
 ## Final local quality gate
 
-Frozen runtime commit `fb7eb0b45e4b8bc57857d7a2baae84e53afcccd7` passed all twelve
-local gates. Subsequent changes to this report are documentation only.
+Frozen runtime commit `215f95ca5e7802e795d0c720f0ffaead84d10a91`, including the
+modeless-dialog fix, passed all thirteen local gates. Subsequent changes to this
+report are documentation only. Earlier successful gates at `fb7eb0b4` remain
+separate historical evidence, not substituted for this final run.
 
 | Check | Recorded result |
 | --- | --- |
-| Full pytest with coverage | 15,350 passed, six skipped, zero failures/errors; 736.48 seconds |
+| Full pytest with coverage | 15,358 passed, six skipped, zero failures/errors; 737.63 seconds |
 | Coverage ratchet | Zero findings; 92.6% total reported; committed baseline unchanged |
 | Lint gate / whole-repo Ruff check | Passed, zero lint findings |
 | Type gate | Two baseline findings, two head findings, zero new findings |
@@ -139,7 +141,8 @@ local gates. Subsequent changes to this report are documentation only.
 | Apply-registry and diff checks | Passed |
 | Generated reference drift | 43 tests passed |
 | UI check/build and distribution reproduction | Passed; rebuilt assets match the committed distribution |
-| Owned-process supervision | Twelve completed reports, complete census, zero residual processes, no deadline exceeded |
+| Mandatory browser-network guard selection | Six passed, zero skipped, with both required-browser flags enabled |
+| Owned-process supervision | Thirteen completed reports, complete census, zero residual processes, no deadline exceeded |
 
 The suite emitted 999 warnings, including unclassified async test-teardown warnings
 for unawaited coroutines and two `shutdown_asyncgens` pending-task destructions.
@@ -147,11 +150,12 @@ Those warnings are retained in evidence. They neither establish a live runtime
 leak nor justify a claim of globally clean async teardown. The separate bounded
 computer-task ownership regressions passed.
 
-The gate runner initially marked its aggregate status nonzero solely because its
-own temporary dependency symlink appeared untracked. Every gate command exited
-zero. Removing only that verified runner-owned symlink restored the clean frozen
-worktree; original and reconciled status records are both retained. No test or
-coverage finding was dismissed to obtain the pass.
+The earlier gate runner marked its aggregate status nonzero solely because its
+own temporary dependency symlink appeared untracked, despite every gate passing.
+Original and reconciled records for that run remain retained. The final runner
+identity-checked and removed only its own temporary symlink before final status;
+both its original and complete machine reports passed with a clean frozen
+worktree. No test or coverage finding was dismissed to obtain the pass.
 
 Hosted CI was intentionally not launched because the binding brief prohibits
 pipelines. These are **local CI-equivalent results**, not a hosted-CI green badge.
