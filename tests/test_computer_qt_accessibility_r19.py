@@ -1,6 +1,7 @@
 """Qt-shaped discovery and observation-to-readback behavior contracts."""
 
 from types import SimpleNamespace
+from typing import Any
 
 import pytest
 
@@ -104,6 +105,7 @@ def setup(*, attached=False, fields=None, extra_roots=()):
     api = SimpleNamespace(
         StateType=STATE, CoordType=SimpleNamespace(SCREEN=0), get_desktop=lambda _: desktop
     )
+    access: Any
     if attached:
         connection = SimpleNamespace(get_display_name=lambda: ":99")
         scope = dict(
@@ -157,7 +159,7 @@ def test_attached_capture_restore_replace_and_exact_native_readback(name, initia
     target = next(n for n in nodes if n["name"] == name)
     saved = private[target["handle"]]
     access.stable(guard)
-    worker = AttachedAccessibility(access.connection, access.scope)
+    worker: Any = AttachedAccessibility(access.connection, access.scope)
     worker.api, worker.bus_id, worker.owners = access.api, access.bus_id, access.owners
     worker.window = access.window
     worker._native_frame_bounds = access._native_frame_bounds
@@ -217,6 +219,43 @@ def test_exact_title_and_native_frame_geometry():
     assert access.snapshot(WINDOW, "obs2", guard)[1] == "available"
 
 
+@pytest.mark.parametrize("location", ["application", "desktop", "later_application"])
+def test_root_prefix_cannot_authorize_identity_when_scan_is_incomplete(location):
+    access, _, fields, _, app = setup()
+    duplicate = Node("Document", "frame")
+    if location == "application":
+        # One app plus only 127 roots fit. The second identical frame is the
+        # 128th root, immediately outside the formerly accepted prefix.
+        app.children.extend(Node(component=False) for _ in range(125))
+        app.children.append(duplicate)
+    else:
+        desktop = access.api.get_desktop(0)
+        other_app = Node("krita", "application", children=[duplicate])
+        if location == "desktop":
+            siblings = [Node("other", "application") for _ in range(127)]
+            for sibling in siblings:
+                sibling.pid = 102
+            desktop.children.extend([*siblings, other_app])
+        else:
+            # Exhausting the first app's budget must not hide another app.
+            app.children.extend(Node(component=False) for _ in range(125))
+            desktop.children.append(other_app)
+    assert access.snapshot(WINDOW, "obs", guard) == ([], "unsupported")
+    assert access.references == {}
+    assert fields[0].calls == []
+
+
+def test_complete_root_scan_at_exact_budget_still_binds_real_root():
+    access, root, fields, _, app = setup()
+    app.children.extend(Node(component=False) for _ in range(125))
+    assert 1 + len(app.children) == 128
+    nodes, status = access.snapshot(WINDOW, "obs", guard)
+    assert status == "available"
+    target = next(n for n in nodes if n["name"] == "Size")
+    ref = access.references[target["handle"]]
+    assert ref.root is root and ref.node is fields[0]
+
+
 def test_broken_auxiliary_skipped_but_guard_cancellation_propagates():
     access, _, _, _, app = setup()
     app.children[0].get_name = lambda: (_ for _ in ()).throw(RuntimeError("gone"))
@@ -237,6 +276,70 @@ def test_shallow_fields_precede_large_menu_subtree():
     nodes, status = access.snapshot(WINDOW, "obs", guard)
     assert status == "available" and len(nodes) <= 128
     assert any(n["name"] == "Size" and "replace_field" in n["capabilities"] for n in nodes)
+
+
+def test_deferred_breadth_keeps_all_six_fields_in_27_node_tree():
+    fields = [Node(f"field {i}", "text", text=str(i)) for i in range(6)]
+    access, root, _, toolbar, _ = setup(fields=fields)
+    for i in range(19):
+        panel = Node(f"empty panel {i}")
+        panel.parent = root
+        root.children.append(panel)
+    nodes, status = access.snapshot(WINDOW, "obs", guard)
+    assert status == "available"
+    assert len(nodes) == 27
+    targets = [n for n in nodes if "replace_field" in n["capabilities"]]
+    assert [n["name"] for n in targets] == [field.name for field in fields]
+    assert [n["depth"] for n in nodes] == sorted(n["depth"] for n in nodes)
+    toolbar_handle = next(n["handle"] for n in nodes if n["name"] == toolbar.name)
+    assert [target["index"] for target in targets] == list(range(6))
+    assert all(target["parent"] == toolbar_handle for target in targets)
+    last = targets[-1]
+    access.execute(
+        dict(type="replace_field", target=last["handle"], observation_id="obs", text="42"),
+        WINDOW,
+        guard,
+    )
+    assert fields[-1].calls == ["42"]
+    assert access.read_field(last["handle"], WINDOW, guard) == {
+        "text": "42",
+        "text_complete": True,
+    }
+
+
+def test_deferred_expansion_is_fair_bounded_and_never_exceeds_depth_six():
+    fields = [Node(f"field {i}", "text", text=str(i)) for i in range(6)]
+    access, root, _, _, _ = setup(fields=fields)
+    menu = Node("menu", children=[Node(f"menu item {i}") for i in range(500)])
+    menu.parent = root
+    root.children.insert(0, menu)
+    accesses = []
+    original = menu.get_child_at_index
+
+    def tracked(index):
+        accesses.append(index)
+        return original(index)
+
+    setattr(menu, "get_child_at_index", tracked)
+    nodes, status = access.snapshot(WINDOW, "obs", guard)
+    assert status == "available" and len(nodes) == 128
+    assert [n["name"] for n in nodes if "replace_field" in n["capabilities"]] == [
+        field.name for field in fields
+    ]
+    assert len(accesses) == 119  # Root, menu, toolbar and six fields also consume slots.
+    assert [n["depth"] for n in nodes] == sorted(n["depth"] for n in nodes)
+
+    access, root, _, toolbar, _ = setup(fields=[])
+    parent = toolbar
+    for depth in range(2, 9):
+        child = Node(f"depth {depth}", "text", text=str(depth))
+        child.parent = parent
+        parent.children = [child]
+        parent = child
+    nodes, status = access.snapshot(WINDOW, "depth-obs", guard)
+    assert status == "available"
+    assert [n["depth"] for n in nodes] == list(range(7))
+    assert nodes[-1]["name"] == "depth 6"
 
 
 @pytest.mark.parametrize(
@@ -289,6 +392,46 @@ def test_readback_never_substitutes_or_accepts_partial_text(change):
         access.read_field(target["handle"], WINDOW, guard)
 
 
+def test_text_interface_dispatch_survives_accessible_get_text_shadowing():
+    access, _, fields, _, _ = setup()
+    calls: list[Any] = []
+    proxy = SimpleNamespace()
+
+    # Match GI's Accessible.get_text(): it is an interface accessor, not the
+    # Text.get_text(start, end) reader, and cannot accept the latter's arguments.
+    def get_text_accessor():
+        calls.append("wrong-accessor")
+        return proxy
+
+    proxy.get_text = get_text_accessor
+    fields[0].get_text_iface = lambda: proxy
+
+    def read(interface, start, end):
+        assert interface is proxy
+        calls.append((start, end))
+        return fields[0].text[start:end]
+
+    access.api.Text = SimpleNamespace(
+        get_character_count=lambda interface: len(fields[0].text), get_text=read
+    )
+    nodes, status = access.snapshot(WINDOW, "obs", guard)
+    assert status == "available"
+    target = next(n for n in nodes if n["name"] == "Size")
+    assert "replace_field" in target["capabilities"]
+    assert target["text"] == "40" and target["text_complete"]
+    access.execute(
+        dict(type="replace_field", target=target["handle"], observation_id="obs", text="10"),
+        WINDOW,
+        guard,
+    )
+    assert access.read_field(target["handle"], WINDOW, guard) == {
+        "text": "10",
+        "text_complete": True,
+    }
+    assert fields[0].calls == ["10"]
+    assert calls and "wrong-accessor" not in calls
+
+
 def test_toolkit_without_editable_nodes_retains_pixel_fallback_contract():
     access, _, _, _, _ = setup(attached=True, fields=[Node("GIMP color area", "panel")])
     nodes, status, _ = access.capture(guard)
@@ -310,7 +453,7 @@ def test_attached_bus_loading_is_existing_only_and_owner_bound(monkeypatch, fail
 
     from src.computer.runtime import gi_support
 
-    calls = []
+    calls: list[Any] = []
 
     def call(*args):
         calls.append(args)
@@ -408,6 +551,11 @@ def test_owned_native_interfaces_execute_only_observed_capabilities(kind):
     access, _, fields, _, _ = setup()
     field = fields[0]
     calls = []
+
+    def record(*args):
+        calls.append(args)
+        return True
+
     child = Node()
     child.parent = field
     field.children = [child]
@@ -415,19 +563,17 @@ def test_owned_native_interfaces_execute_only_observed_capabilities(kind):
     field.get_action_iface = lambda: SimpleNamespace(
         get_n_actions=lambda: 1,
         get_action_name=lambda _: "click",
-        do_action=lambda i: calls.append(("invoke", i)) or True,
+        do_action=lambda i: record("invoke", i),
     )
     field.get_component_iface = lambda: SimpleNamespace(
         get_extents=lambda _: SimpleNamespace(x=40, y=60, width=80, height=20),
-        grab_focus=lambda: calls.append(("focus",)) or True,
+        grab_focus=lambda: record("focus"),
     )
-    field.get_selection_iface = lambda: SimpleNamespace(
-        select_child=lambda i: calls.append(("select", i)) or True
-    )
+    field.get_selection_iface = lambda: SimpleNamespace(select_child=lambda i: record("select", i))
     field.get_value_iface = lambda: SimpleNamespace(
         get_minimum_value=lambda: 0,
         get_maximum_value=lambda: 100,
-        set_current_value=lambda n: calls.append(("value", n)) or True,
+        set_current_value=lambda n: record("value", n),
     )
     nodes, _ = access.snapshot(WINDOW, "obs", guard)
     target = next(n for n in nodes if n["name"] == "Size")

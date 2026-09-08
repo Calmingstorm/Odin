@@ -167,19 +167,32 @@ class Accessibility:
         }
         return fingerprint, public
 
-    @staticmethod
-    def _text(node, interfaces, role):
+    def _text(self, node, interfaces, role):
         """Never confuse an unreadable or truncated field with an empty/full value."""
         if "Text" not in interfaces or "password" in role.lower():
             return "", False, False
         try:
             interface = node.get_text_iface()
-            count = interface.get_character_count()
+            # GI may return Accessible here: its deprecated get_text() accessor
+            # shadows Text.get_text(start, end). Dispatch through the interface
+            # type rather than the ambiguous proxy method in real AT-SPI.
+            text_api = getattr(self.api, "Text", None)
+            get_count = (
+                partial(text_api.get_character_count, interface)
+                if text_api is not None
+                else interface.get_character_count
+            )
+            get_text = (
+                partial(text_api.get_text, interface)
+                if text_api is not None
+                else interface.get_text
+            )
+            count = get_count()
             if type(count) is not int or count < 0:
                 return "", False, False
-            text = interface.get_text(0, min(512, count))
+            text = get_text(0, min(512, count))
             bounded_text(text)
-            after_count = interface.get_character_count()
+            after_count = get_count()
             complete = count == after_count == len(text) and count <= 512
             return text, True, complete
         except Exception:
@@ -193,13 +206,23 @@ class Accessibility:
         candidates = []
         bounds = tuple(window[key] for key in ("x", "y", "width", "height"))
         frame_bounds = None
-        for i in range(min(desktop.get_child_count(), 128)):
+        app_count = desktop.get_child_count()
+        if type(app_count) is not int or not 0 <= app_count <= budget:
+            raise PrimitiveError("unsupported", "Incomplete AT-SPI root enumeration")
+        for i in range(app_count):
             guard()
+            if budget <= 0:
+                raise PrimitiveError("unsupported", "Incomplete AT-SPI root enumeration")
             app = desktop.get_child_at_index(i)
             budget -= 1
             if app is None or app.get_process_id() != window["pid"]:
                 continue
-            for j in range(min(app.get_child_count(), budget)):
+            root_count = app.get_child_count()
+            # A matching prefix is not evidence of uniqueness. Do not bind a
+            # native identity unless every relevant top-level root fits the scan.
+            if type(root_count) is not int or not 0 <= root_count <= budget:
+                raise PrimitiveError("unsupported", "Incomplete AT-SPI root enumeration")
+            for j in range(root_count):
                 guard()
                 budget -= 1
                 root = app.get_child_at_index(j)
@@ -248,8 +271,6 @@ class Accessibility:
                     )
                 if matches:
                     candidates.append((root, fingerprint))
-            if budget <= 0:
-                break
         if len(candidates) == 1:
             return candidates[0]
         raise PrimitiveError("unsupported", "No unambiguous active-window AT-SPI root")
@@ -280,10 +301,28 @@ class Accessibility:
             self.status_detail = "window_root_unavailable"
             root, root_fingerprint = self._window_root(window, guard)
             stack: deque[tuple[Any, int, str | None, int | None]] = deque([(root, 0, None, None)])
+            deferred: deque[tuple[Any, int, str, int, int]] = deque()
             nodes = []
             visited = set()
             examined = 0
-            while stack and examined < 128:
+            while (stack or deferred) and examined < 128:
+                if not stack:
+                    # Finish each breadth before expanding the next. Retain a
+                    # cursor per parent and round-robin their children so large
+                    # menus cannot consume all slots before toolbar fields. No
+                    # fair-share remainder is discarded while budget remains.
+                    while deferred and examined + len(stack) < 128:
+                        guard()
+                        ancestor, child_depth, owner, i, count = deferred.popleft()
+                        try:
+                            child = ancestor.get_child_at_index(i)
+                        except PrimitiveError:
+                            raise
+                        except Exception:
+                            child = None
+                        stack.append((child, child_depth, owner, i))
+                        if i + 1 < count:
+                            deferred.append((ancestor, child_depth, owner, i + 1, count))
                 guard()
                 # Visit shallow controls before menu/resource subtrees consume
                 # the bounded traversal. Krita's toolbar fields are shallow.
@@ -327,15 +366,9 @@ class Accessibility:
                     if parent is not None:
                         self.references[parent].children[index] = (node, fingerprint)
                     if depth < 6:
-                        # Reserve frontier capacity for already queued siblings;
-                        # a large menu must not starve a toolbar at the same depth.
-                        remaining = max(0, 128 - examined - len(stack))
-                        count = min(
-                            max(0, node.get_child_count()), remaining // max(1, len(stack) + 1)
-                        )
-                        for i in range(count):
-                            guard()
-                            stack.append((node.get_child_at_index(i), depth + 1, handle, i))
+                        count = min(max(0, node.get_child_count()), 128)
+                        if count:
+                            deferred.append((node, depth + 1, handle, 0, count))
                 except PrimitiveError:
                     raise
                 except Exception:
