@@ -39,6 +39,17 @@ Unicode does not imply every character exists in the active keyboard layout;
 unsupported characters must be reported, not silently replaced or resolved by
 changing the user's keymap.
 
+**Shared-X11 release boundary:** cooperative cancellation, controller EOF and
+injector/helper failure can be handled by a surviving guardian, which fences the
+injector and acknowledges ledger-owned release. Abrupt death of the guardian
+itself loses the sole shared-input ledger. Its native consequence is untested;
+there is **no proven universal server-side release guarantee** on this path.
+The two-second lease and a `verified` release capability describe the supported
+acknowledged path, not survival of every process failure. Missing/failed release
+evidence remains unknown/quarantined, never replay permission. A settled worker
+or an unchanged core-device hierarchy alone does not prove held input released.
+See [RECOVERY.md](RECOVERY.md). Never fault-test held input on a user's desktop.
+
 GNOME and KDE adapter registration is an implementation contract, not proof that
 every version passes. Wayland requires a successful same-stack disposable release
 probe, trusted application scope and portal capabilities for each session.
@@ -175,8 +186,8 @@ claim native identity or semantic text readback. Accessibility enablement alone
 does not certify either field availability or a successful edit.
 
 For a connected shape, send one bounded multi-point polyline. For disconnected
-details, a strokes batch keeps separate action IDs and releases input between
-strokes. Full native dispatch and distributed local path changes may support the
+details, a strokes batch keeps separate action IDs and requires confirmed release
+before the next stroke. Full native dispatch and distributed local path changes may support the
 next preplanned stroke, provided its original start anchor and native binding
 remain valid. Missing path evidence, partial dispatch or an unexpected target
 transition stops the remainder. The result stays **executed, visual review

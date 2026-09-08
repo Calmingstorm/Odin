@@ -31,8 +31,11 @@ _DEFINITIONS = [
         "Use the user's existing desktop applications, menus and documents with an explicit "
         "current request and supervised consent. Omit app for an existing session; isolated "
         "tasks launch fixed Drawing/Xed profiles. Check returned input limits and sharing "
-        "capabilities. Pause/cancel releases input, not applied effects; close detaches without "
-        "closing documents. Never operate terminals, credential/security prompts or Odin's "
+        "capabilities. Pause/cancel attempts owned-input release, not effect rollback; check "
+        "cleanup receipts. Shared-X11 release depends on a surviving guardian and acknowledged "
+        "cleanup: abrupt sole-guardian death loses its ledger, with no proven universal "
+        "server-side release guarantee. Close detaches without closing documents. "
+        "Never operate terminals, credential/security prompts or Odin's "
         "control plane.",
         {
             "operation": {
@@ -125,7 +128,9 @@ _DEFINITIONS = [
         "points, instead of separate acts/observations for every segment. Points are joined "
         "with the button held: use operation=strokes with strokes[] for disconnected shapes, "
         "or operation=sequence with steps[] for a finite plan against ONE delivered view. "
-        "Each step has its own unique action_id and releases input before the next step. "
+        "Each step has its own unique action_id; continuation requires confirmed input release. "
+        "Shared-X11 abrupt sole-guardian death has no proven universal server-side release "
+        "guarantee; unknown release stops continuation and must not be replayed. "
         "Maximum 8 steps, 256 total points, 512 total text characters, 4 seconds of requested "
         "stroke duration and 30 seconds wall time. No nested sequences or new-target rebinding. "
         "Unexpected target/dialog changes or failed expectations interrupt immediately; "
@@ -400,8 +405,8 @@ _ACTION_SCHEMA["properties"].update(
             "type": "array",
             "minItems": 1,
             "maxItems": 8,
-            "description": "Disconnected held-button polylines. Input is released between "
-            "strokes; 256 points and 4 seconds requested duration total. Each start anchor "
+            "description": "Disconnected held-button polylines. Confirmed release is required "
+            "between strokes; 256 points and 4 seconds requested duration total. Each start anchor "
             "must remain grounded in the ORIGINAL view; overlapping changed anchors yield.",
             "items": {
                 "type": "object",

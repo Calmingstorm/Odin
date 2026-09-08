@@ -5,8 +5,8 @@ service start or exposure. Authentication, consent and private storage are separ
 
 Use **Pause / revoke input** on unexpected input or focus, **Stop** to finish, and
 administrator **Disable computer use** as the global control. Read back runtime
-revocation and cleanup, not just the saved enablement boolean. Stop releases owned
-input and drains/reaps workers while preserving the user's applications. It does
+revocation and cleanup, not just the saved enablement boolean. Stop attempts owned
+input release and drains/reaps workers while preserving the user's applications. It does
 not undo edits, restore display layout or close documents. Export isolated files
 before ending the task and destroying its sandbox.
 
@@ -21,6 +21,17 @@ name-based device deletion or held-input crash experiments in a user's session.
 The isolated native-removal qualification path remains unqualified for preserving
 ordinary applications; its clean hierarchy result alone is not safe desktop
 detach. Quarantine is a failure report, not proof that human input is restored.
+
+On **shared X11**, release after cooperative cancellation/controller EOF or
+injector/helper failure requires a surviving guardian and acknowledged cleanup.
+Abrupt death of that guardian loses the sole shared-input ledger; the native
+consequence is untested and no universal server-side release guarantee is proven.
+`no_inflight_input=true` / `measured_owned_worker_fence` means owned dispatch has
+settled, not that a dead guardian's held keys/buttons were released by the server.
+The separate `released`/`complete` fields must still be checked. Missing or failed
+guardian release evidence is unknown/quarantined even if all processes are gone;
+neither an unchanged device census nor operator acknowledgment converts that into
+verified release. Do not test this failure with input or process kills on a desktop.
 
 | Observation | Operator response |
 | --- | --- |

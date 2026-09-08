@@ -100,6 +100,8 @@ class X11AttachedBackend:
         "lease_seconds": 2,
         "widget_focus": "shared_within_window",
         "keyboard_overlap": "uncertain_no_replay",
+        "shared_x11_release": "surviving_guardian_acknowledgment_required",
+        "shared_x11_abrupt_guardian_death": "sole_ledger_lost_server_release_unproven",
         "click_count": {"minimum": 1, "maximum": 3},
         "click_modifiers": ["ctrl", "alt", "shift", "super"],
         "scroll_modifiers": ["ctrl", "alt", "shift", "super"],
@@ -1690,7 +1692,10 @@ class X11AttachedBackend:
             shared = not self.creates_devices and self._device_state == "not_created"
             # Restoration certificates describe created XI2 seats only. Missing
             # certificate fields are not negative measurements of shared input.
-            # Worker settlement DOES prove absence of our inflight input. There
+            # Worker settlement proves no remaining owned dispatch, NOT that
+            # the server released held input after abrupt sole-guardian loss.
+            # `released` additionally requires acknowledged release evidence;
+            # a failed/missing guardian receipt keeps cleanup unverified. There
             # is no safe global-grab probe on another client's shared devices.
             evidence = (
                 {

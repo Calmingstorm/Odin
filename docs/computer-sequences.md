@@ -9,8 +9,12 @@ Each sequence step is an ordinary action's operation-specific fields, `expect`
 and a unique `action_id`. Each disconnected stroke contains `action_id`, `points`
 and `duration`; its expectation is visual change. Steps cannot override binding
 or modal identity and cannot contain another sequence. All coordinates must be
-planned against the same original delivered view. Input is released between
-every pair of steps, including strokes. No connecting line is synthesized.
+planned against the same original delivered view. Confirmed input release is
+required before the next step, including strokes. No connecting line is synthesized.
+On shared X11, cooperative cleanup requires a surviving guardian and acknowledged
+release. Abrupt death of its sole ledger owner has an untested native consequence
+and no proven universal server-side release guarantee. Unknown release interrupts
+the sequence; neither process absence nor a later observation permits replay.
 
 ## Limits and conservative behavior
 

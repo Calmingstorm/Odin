@@ -2,8 +2,11 @@
 
 Persistent XI2 masters are reused without removal. When unavailable the original
 shared core XTEST path remains. No physical slave or global key-up is injected.
-The controller pipe stays open while input is permitted. Its loss, cancellation,
-helper exit and the fixed lease all fence the helper before ledger-only release.
+The controller pipe stays open while input is permitted. While this guardian
+survives and native operations respond, its loss, cancellation, helper exit and
+the fixed lease fence the helper before ledger-only release. Abrupt death of this
+sole ledger owner on shared X11 has no proven universal server-side release
+guarantee; helper-death handling is not guardian-death qualification.
 """
 
 from __future__ import annotations

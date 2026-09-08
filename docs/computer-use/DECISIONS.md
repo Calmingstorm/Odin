@@ -146,8 +146,11 @@ unknown inspection results remain incomplete. The recovery code never calls unit
 stop, kill, reset-failed, restart or display APIs.
 
 A crash in the spawn-to-PID persistence gap remains `launch_identity_incomplete`.
-Attached XTEST input can remain held after a guardian crash; process absence alone
-does not prove owned-input release. Such input-enabled sessions remain quarantined
+Shared attached XTEST input may remain held after abrupt sole-guardian death:
+the ledger is lost, the native consequence is untested, and no universal
+server-side release guarantee is proven. Cooperative/acknowledged cleanup with
+a surviving guardian is a distinct path. Process absence alone does not prove
+owned-input release. Such input-enabled sessions remain quarantined
 with `owned_input_release_unproven`, not a fabricated release or app-survival claim.
 Capture-only sessions can be reconciled by exact process absence. Host restart
 invalidates prior-boot processes and input state. Failed/unknown reads do not close

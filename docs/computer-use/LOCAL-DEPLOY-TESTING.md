@@ -331,6 +331,14 @@ two seconds; attached cleanup has a nine-second drain inside a ten-second contro
 budget. A timeout is quarantined, not success. Unknown actions are never replayed.
 See [RUNTIME-CLEANUP-R7.md](RUNTIME-CLEANUP-R7.md).
 
+Shared-X11 cleanup is qualified only for the cooperative/acknowledged path with
+a surviving guardian. Injector/helper failure is not guardian failure: abrupt
+death of the sole guardian loses its shared-input ledger. The native consequence
+is untested; no universal server-side release guarantee is proven. Worker-fence
+evidence (`no_inflight_input`) certifies settled dispatch, not held-state release
+after ledger loss. Missing release evidence remains unknown/quarantined. Never
+run held-input crash or guardian-kill experiments on a user's desktop.
+
 The developer-only scratch harness now orders topology, windows, focus/pointer,
 power and exact verification after verified input/process teardown. Private actual
 RandR recovery passed; physical DPMS cannot be established by Xvfb or Xephyr.

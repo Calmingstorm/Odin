@@ -105,6 +105,19 @@ class BackendCapabilities:
         for kind in ("owned_input_release", "application_preserving_detach"):
             if getattr(self, kind) != "verified":
                 limitations.append(f"{kind}_{getattr(self, kind)}")
+        if (
+            self.platform == "x11"
+            and self.environment == "existing_session"
+            and "shared" in (self.pointer_separation, self.keyboard_separation)
+        ):
+            # A verified cooperative release path is not qualification of
+            # abrupt loss of the sole shared-input ledger owner.
+            limitations.extend(
+                [
+                    "shared_x11_release_requires_surviving_guardian_acknowledgment",
+                    "shared_x11_abrupt_guardian_death_server_release_unproven",
+                ]
+            )
         return {
             "platform": self.platform,
             "environment": self.environment,

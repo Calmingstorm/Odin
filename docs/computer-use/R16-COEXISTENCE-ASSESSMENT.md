@@ -96,7 +96,11 @@ The caller must recognize the intended application from fresh evidence, as in th
 existing observation contract. This patch deliberately refuses input when it
 cannot ensure the old target; it does not claim automatic same-app reacquisition
 or elimination of X11's shared focus/check-to-input race. Native per-action scope,
-hit checks and lease/release guarantees remain unchanged.
+hit checks and cooperative lease/release handling remain unchanged. These are
+not an unconditional shared-X11 worker-death guarantee: release requires a
+surviving guardian and acknowledged cleanup. Abrupt sole-guardian death loses
+the ledger; its native consequence is untested and no universal server-side
+release guarantee is proven. See [RECOVERY.md](RECOVERY.md).
 
 Validation for this phase is limited to static Python syntax parsing and
 `git diff --check`. No new tests or pytest were run; behavior needs later

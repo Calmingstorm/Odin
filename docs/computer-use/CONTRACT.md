@@ -27,8 +27,9 @@ separate from a successful capture-only experiment.
 
 States: starting → active → paused/cancelled/closed/quarantined. Resume requires
 a new generation, renewed authorization and a new observation. Stop fences the
-task and consent bindings first, disconnects capture/input, and releases only
-owned devices/input. Isolated backends may tear down their owned sandbox;
+task and consent bindings first, disconnects capture/input, and attempts release
+of only owned devices/input, reporting unverified cleanup rather than success.
+Isolated backends may tear down their owned sandbox;
 existing-session backends must leave applications and the desktop alive. A human
 does not have to stop using the machine for us to revoke agent authority.
 Private-display-wide key cleanup is never available to existing-session adapters.
@@ -41,11 +42,16 @@ No public display number, XID, desktop-global coordinate, bus address or cookie.
 Capture scope, input reach, task authority, pointer/keyboard separation, owned-input
 release and application-preserving detach are separate capabilities. Capture
 permission is not input confinement. R2 accepts shared or unknown separation when
-honestly exposed to the operator/model; it does not accept unknown cleanup safety.
+honestly exposed to the operator/model; unknown cleanup is not a clean result.
 Existing-session input requires verified owned-input release and application-safe
 detach regardless of separation. R5's bounded X11 guardian supplies these measured
 capabilities with shared-input and crash-recovery limitations documented in the
-handoff. R8 replaces blanket Wayland refusal with per-session compositor-specific
+handoff. For shared X11 these capabilities describe cooperative/acknowledged
+cleanup with a surviving guardian, including injector/helper failure. Abrupt death
+of the guardian itself loses its sole ledger; the native consequence is untested
+and no universal server-side release guarantee is proven. Process absence or
+worker-fence receipts alone do not establish release of held server-side input.
+R8 replaces blanket Wayland refusal with per-session compositor-specific
 admission. A laboratory patch or a version string is not production qualification.
 Run a real bounded release test in an isolated compositor using the same identified
 native virtual-input implementation, then revalidate the active stack/session
@@ -108,8 +114,9 @@ correlation. Typed text is not stored in ordinary audit.
   explicit successes/failures and comparison against a safe isolated baseline.
 * Private X11 XI2 and Wayland portal/PipeWire/libei feasibility: actual toolkit
   event receipt, concurrent simulated-human pointer/focus/modifiers, grabs and
-  cancellation. A second drawn cursor is not separation evidence. Revoke/disconnect
-  releases only agent-owned input and leaves pre-existing applications alive.
+  cancellation. A second drawn cursor is not separation evidence. Measure whether
+  cooperative revoke/disconnect releases only agent-owned input and leaves
+  pre-existing applications alive; this is not abrupt shared-X11 guardian-death proof.
   Report whether owned devices were removed or deliberately retained inactive;
   a stopped=true response alone does not establish either release or app survival.
 * Cleanup asserts host processes as well as container/unit inventory: record exact
