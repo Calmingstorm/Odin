@@ -112,9 +112,7 @@ def _reject_overlap(
         # the restart traverses (PR #239 round-11 review).
         for candidate in _path_spellings(root):
             if _overlaps(workspace, candidate):
-                raise WorkspaceError(
-                    f"local_working_dir must not overlap {candidate}: {workspace}"
-                )
+                raise WorkspaceError(f"local_working_dir must not overlap {candidate}: {workspace}")
 
 
 # Live-state paths declared by the FULL configuration, with their DECLARED
@@ -448,8 +446,8 @@ def provision_startup_workspace(
         #
         # It is NOT a safety boundary for packaged installs. The packaged unit
         # sets User= but no Environment=HOME, so HOME comes from the account
-        # record and is typically OUTSIDE the install (verified: /home/odin on
-        # a real deployment) — a broken packaged default therefore falls back
+        # record and can be OUTSIDE the install on an existing service account.
+        # A broken packaged default therefore falls back
         # here instead of rejecting. That is deliberate, because losing every
         # local command is worse; it is made VISIBLE instead, via the warning
         # below and the startup diagnostic, so a packaging failure is reported
@@ -481,10 +479,15 @@ def _sudo_create(target: Path, owner_uid: int | None) -> None:
     try:
         subprocess.run(
             [
-                "sudo", "-n", "install", "-d",
+                "sudo",
+                "-n",
+                "install",
+                "-d",
                 f"-m{REQUIRED_MODE:o}",
-                "-o", str(uid),
-                "-g", str(os.getgid()),
+                "-o",
+                str(uid),
+                "-g",
+                str(os.getgid()),
                 str(target),
             ],
             capture_output=True,
@@ -497,7 +500,4 @@ def _sudo_create(target: Path, owner_uid: int | None) -> None:
 
 def provisioning_hint(configured: str) -> str:
     """The operator-actionable instruction, in one place."""
-    return (
-        f"Create it as the service account: "
-        f"sudo install -d -m 0700 -o odin -g odin {configured}"
-    )
+    return f"Create it as the service account: sudo install -d -m 0700 -o odin -g odin {configured}"
