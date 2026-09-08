@@ -344,9 +344,11 @@ def test_unqualified_main_task_is_disabled(monkeypatch):
         module.validate_args(SimpleNamespace(confirm_scratch_only=True))
 
 
-def test_main_journal_cannot_target_existing_home_or_relative_path():
+def test_main_journal_cannot_target_existing_home_or_relative_path(tmp_path):
     module = harness_module()
-    for path in ("/home/odin", "/tmp", ".", "/tmp/cu-r6-other/../home"):
+    home = tmp_path / "home"
+    home.mkdir()
+    for path in (str(home), "/tmp", ".", "/tmp/cu-r6-other/../home"):
         with pytest.raises(RuntimeError, match="scratch_journal_required"):
             module.validate_journal(path)
 
