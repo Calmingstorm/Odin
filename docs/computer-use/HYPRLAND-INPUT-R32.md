@@ -204,13 +204,13 @@ original bytes. Pinta and the other original application processes remained
 alive. During the campaign the human also edited the same Pinta canvas and
 changed focus; those human marks were not attributed to Odin or removed.
 
-The target Odin service was restarted **twice deliberately** for the protected
+The target Odin service was restarted **three times deliberately** for the protected
 branch deployments. Its automatic restart count stayed zero; that is not a
 claim of zero service restarts. The compositor process remained unchanged.
 The local live Odin installation and service were not deployed or restarted.
 
-Live actuation accounting: five bounded stroke invocations (three earlier
-endpoint-only results and the final two successful shapes), one successful
+Live actuation accounting: six bounded stroke invocations (three earlier
+endpoint-only results and three final successful shapes), one successful
 tool-selection click, and three explicit shell focus selections of the requested
 Pinta window. Several pre-input attempts were refused after changed grounding
 or unavailable scope. Repeated captures and reconciliation were required; no
@@ -222,3 +222,17 @@ deliberately fault-tested on the live desktop.
 timed drawing, actual Pinta output, subsequent interaction, cooperative cleanup
 and standalone recovery. This is not arbitrary-app/modal/Unicode qualification,
 a proof of SIGKILL cleanup, or a complete live controller/WebUI workflow test.
+
+Final immutable-build hardening compiled with `-fno-gnu-unique`, embeds an
+executing `companion_build_id`, and installs content-addressed plugin filenames
+with manifest/ELF verification. The exact running build ID was checked through
+the live socket after protected deployment. A further seven-vertex ripple drew
+correctly on that final build; its own close again confirmed disarmed cleanup,
+reaping and no connecting mark. The final relevant computer/native regression
+matrix completed **3,732 passed, 176 warnings, exit 0** in 191.28 seconds.
+
+The final branch is installed on the target, with its original configuration
+unchanged. Because that configuration had no computer section, this campaign
+qualified the deployed backend through the explicit supervised native driver;
+it did not silently enable a different persistent desktop target in the service.
+Follow the operator provisioning guide for ordinary service-driven sessions.
