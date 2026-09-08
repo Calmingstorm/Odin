@@ -358,7 +358,7 @@ class AppScope:
 
         guard()
         pending = [(root, 0)]
-        states = {}
+        states: dict[int, int] = {}
         while pending:
             if time.monotonic() >= deadline:
                 raise ScopeFailure("application_scope_unavailable")

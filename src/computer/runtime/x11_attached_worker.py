@@ -104,7 +104,9 @@ def run(request, capture=None):
             from src.computer.runtime.x11_app_scope import AppScope
             app_scope = AppScope(capture._connection._display)
         monitor = topology.monitors[selected["index"]]
-        accessibility, accessibility_status, accessibility_private = [], "unavailable", {}
+        accessibility: list[dict] = []
+        accessibility_status = "unavailable"
+        accessibility_private: dict[str, dict] = {}
         # GUI save/close can settle focus and title in separate events. Discard
         # every raced raster and take a wholly new bounded observation, never
         # relax equality or replay the preceding input to obtain a stable frame.
@@ -134,6 +136,7 @@ def run(request, capture=None):
                     def guard():
                         if time.monotonic() >= accessibility_deadline:
                             raise TimeoutError("bounded accessibility observation expired")
+                        assert app_scope is not None
                         app_scope.assert_snapshot(binding, monitor)
                     try:
                         nodes, accessibility_status, private = native_accessibility.capture(guard)
