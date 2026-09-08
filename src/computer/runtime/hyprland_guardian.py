@@ -11,10 +11,11 @@ import os
 import pwd
 import re
 import time
+from typing import Any
 
 from .hyprland_identity import connect_peer
 from .hyprland_scope import _TOKEN, LEASE_NS
-from .wayland_guardian import WaylandGuardian, WaylandGuardianError, trusted_binary
+from .wayland_guardian import WaylandGuardian, WaylandGuardianError, _Credentials, trusted_binary
 
 
 class HyprlandGuardianError(WaylandGuardianError):
@@ -33,11 +34,11 @@ class HyprlandGuardian(WaylandGuardian):
     def __init__(self, binary: str, expected_uid: int, on_spawn=None):
         super().__init__(binary, expected_uid, on_spawn)
         self._scope_deadline = 0
-        self._scope_binding = None
-        self._mapping_id = None
-        self._spawning = None
+        self._scope_binding: tuple[Any, ...] | None = None
+        self._mapping_id: str | None = None
+        self._spawning: asyncio.Task[asyncio.subprocess.Process] | None = None
 
-    async def start(
+    async def start(  # type: ignore[override]  # Native connector intentionally owns its sockets.
         self, wayland_path, mapping_id, scope_path, compositor_pid, logical_width, logical_height,
     ):
         trusted_binary(self.binary)
@@ -51,7 +52,7 @@ class HyprlandGuardian(WaylandGuardian):
                 or type(mapping_id) is not str
                 or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", mapping_id)):
             raise HyprlandGuardianError("hyprland_guardian_configuration_invalid")
-        credentials = {}
+        credentials: _Credentials = {}
         if self.expected_uid != os.geteuid():
             if os.geteuid() != 0:
                 raise HyprlandGuardianError("hyprland_guardian_uid_unavailable")

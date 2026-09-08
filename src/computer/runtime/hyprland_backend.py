@@ -143,6 +143,9 @@ class HyprlandRuntimeBackend:
     input_blocker: str | None = "hyprland_session_not_ready"
     input_limits = {
         **WaylandRuntimeBackend.input_limits,
+        "text": "owned_virtual_us_keymap_representable_characters_only",
+        "key_chords": "owned_virtual_us_keymap",
+        "accessibility": "unavailable_pixel_targeting_only",
         "scope": "authenticated_hyprland_explicit_output_app",
         "release": "hyprland_best_effort_cooperative_ack",
         "receiver_release_verified": False,

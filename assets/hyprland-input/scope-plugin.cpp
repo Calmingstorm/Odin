@@ -34,6 +34,7 @@
 #include <stdexcept>
 #include <string>
 #include <vector>
+#include "scope-deadline.hpp"
 
 namespace {
 constexpr auto PIN = "39d7e209c79d451efab1b21151d5938289da838d";
@@ -301,10 +302,15 @@ struct State {
         if (op == "release_all" || op == "stop") { revoke("operator-recovery"); return status(!failed); }
         if (op != "arm" && op != "renew") return status(false, "unknown-operation");
         const int lease = integer(j, "lease_ms"); const auto token = text(j, "token");
-        if (lease < 1 || failed) return status(false, "invalid-lease-or-cleanup-failed");
+        json_object* absolute = nullptr;
+        if (!json_object_object_get_ex(j, "deadline_monotonic_ns", &absolute) ||
+            json_object_get_type(absolute) != json_type_int)
+            return status(false, "absolute-scope-deadline-required");
+        const auto expiry = odin_scope::bounded_deadline(ns(), json_object_get_int64(absolute), lease);
+        if (!expiry || failed) return status(false, "invalid-lease-or-cleanup-failed");
         if (op == "renew") {
             if (guardianFD != peer.fd || token != bound.token || !scope()) return status(false, "renew-binding-refused");
-            deadline = ns() + int64_t(lease) * 1000000; return status();
+            deadline = expiry; return status();
         }
         if (armed) return status(false, "already-armed");
         auto it = snapshots.find(token);
@@ -316,7 +322,7 @@ struct State {
         if (!p || p->resource->m_boundOutput != it->second.monitor || p->device->m_boundOutput != it->second.monitor->m_name) return status(false, "missing-or-wrong-output-pointer");
         if (!g_pInputManager->getKeysFromAllKBs().empty() || g_pInputManager->hasHeldButtons()) return status(false, "human-input-held");
         keyboard = k; pointer = p; guardianFD = peer.fd; bound = it->second; snapshots.erase(it);
-        deadline = ns() + int64_t(lease) * 1000000; armed = true; reason = "armed";
+        deadline = expiry; armed = true; reason = "armed";
         return status();
     }
     void drop(int fd) {
