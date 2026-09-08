@@ -335,7 +335,7 @@ class Accessibility:
             ]
             stacks[1].append((root, 0, None, None))
             deferred: list[deque[tuple[Any, int, str, int, int]]] = [deque() for _ in range(3)]
-            nodes = []
+            nodes: list[dict[str, Any]] = []
             visited = set()
             probes = 0
             # Cheap rejected frontier nodes do not consume public identity slots.
