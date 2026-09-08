@@ -1533,6 +1533,17 @@ class ComputerController:
                     failed = execution_receipt(
                         None, {"status": "unknown", "reason": "input_outcome_unknown"}
                     )
+                    if live.capabilities.backend == "hyprland":
+                        from .runtime.hyprland_guardian import native_failure
+
+                        # Label native facts separately. Execution/quarantine
+                        # policy remains conservative and unchanged.
+                        details = getattr(exc, "details", None)
+                        detail = details.get("native_failure") if type(details) is dict else None
+                        if type(detail) is dict:
+                            native = native_failure({**detail, "native_failure": detail})
+                            if native is not None:
+                                failed["native_failure"] = native
                 self._finish_action(live.capabilities, grant.session_id, inp["action_id"], failed)
                 if not known_release or isinstance(exc, asyncio.CancelledError):
                     await self._stop(grant.session_id, "cancelled")

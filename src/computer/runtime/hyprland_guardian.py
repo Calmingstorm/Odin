@@ -31,6 +31,45 @@ class HyprlandGuardianError(WaylandGuardianError):
     """Static failures, never native tokens or window information."""
 
 
+_SCOPE_ERRORS = frozenset({
+    "none", "absolute-scope-deadline-required", "invalid-lease-or-cleanup-failed",
+    "renew-binding-refused", "already-armed", "stale-snapshot", "ambiguous-keyboard",
+    "missing-guardian-keyboard", "ambiguous-pointer", "missing-or-wrong-output-pointer",
+    "human-input-held", "unknown-operation", "invalid-json", "unrecognized-scope-error",
+    "missing-scope-token", "local-deadline-invalid", "scope-exchange-failed",
+    "scope-operation-refused", "scope-ack-invalid", "scope-rejected-input", "scope-ack-expired",
+})
+
+
+def native_failure(row):
+    """Sanitize native evidence without promoting execution or cleanup state."""
+    if type(row) is not dict:
+        return None
+    raw = row.get("native_failure")
+    if type(raw) is not dict:
+        return None
+    command, operation, error = (raw.get(k) for k in ("command", "scope_operation", "scope_error"))
+    if (type(command) is not str or command not in {
+            "none", "begin", "renew", "bind", "select", "pixel-permit", "action"}
+            or type(operation) is not str or operation not in {"none", "arm", "renew"}
+            or type(error) is not str or error not in _SCOPE_ERRORS):
+        return None
+    result: dict[str, Any] = {
+        "command": command, "scope_operation": operation, "scope_error": error,
+    }
+    for key in ("input_was_sent", "release_sent", "release_acknowledged"):
+        if type(row.get(key)) is bool:
+            result[key] = row[key]
+    raw_diagnostics = row.get("diagnostics")
+    diagnostics = None
+    if (type(raw_diagnostics) is dict
+            and all(type(raw_diagnostics.get(k)) is str for k in ("phase", "release", "reason"))):
+        diagnostics = _action_diagnostics(row)
+    if diagnostics is not None:
+        result["diagnostics"] = diagnostics
+    return result
+
+
 def _path(value):
     if (type(value) is not str or not value.startswith("/")
             or len(os.fsencode(value)) > 107 or any(ord(c) < 32 for c in value)):
@@ -140,17 +179,21 @@ class HyprlandGuardian(WaylandGuardian):
         try:
             receipt = await super().act(
                 command, pixel_guard=pixel_guard, scope_deadline_ns=scope_deadline_ns)
-        except Exception:
+        except Exception as exc:
             # Controller receipts conservatively collapse dispatch exceptions.
             # Preserve bounded native facts in the journal, never commands,
             # coordinates, socket tokens, application text or raw exceptions.
+            failure = native_failure(self._last_terminal)
+            if isinstance(exc, WaylandGuardianError) and failure is not None:
+                exc.details = {**getattr(exc, "details", {}), "native_failure": failure}
             log.warning(
                 "Hyprland native action failed: diagnostics=%s input_was_sent=%s "
-                "release_sent=%s release_acknowledged=%s",
+                "release_sent=%s release_acknowledged=%s native_failure=%s",
                 _action_diagnostics(self._last_terminal),
                 *(self._last_terminal.get(key)
                   if type(self._last_terminal.get(key)) is bool else None
                   for key in ("input_was_sent", "release_sent", "release_acknowledged")),
+                failure,
             )
             raise
         receipt["release_ack"] = receipt.pop("release_acknowledged", False) is True

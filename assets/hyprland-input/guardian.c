@@ -74,6 +74,7 @@ struct guardian {
     uint64_t lease, scope_deadline, idle, start, rejected;
     char mapping[129], scope_token[129], arm_token[129];
     const char *reason;
+    const char *scope_operation, *scope_error, *command_name;
     struct event events[MAX_STEPS];
 };
 static void fail(struct guardian *g, const char *reason) { if (!g->reason) g->reason = reason; }
@@ -131,7 +132,20 @@ static bool synchronize(struct guardian *g, unsigned timeout_ms) {
 }
 /* Bounded flat JSON reply parser: no duplicate fields, nesting, escapes,
  * overflows, non-boolean ok/armed, or unframed bytes. */
-struct scope_reply { bool ok, armed, have_ok, have_armed, have_keys, have_buttons, have_rejected, release_acknowledged; uint64_t keys, buttons, rejected; };
+struct scope_reply { bool ok, armed, have_ok, have_armed, have_keys, have_buttons, have_rejected, release_acknowledged; uint64_t keys, buttons, rejected; const char *error; };
+/* Fixed vocabulary only: never copy tokens, peer prose or application data. */
+static const char *scope_error_code(const char *value) {
+    static const char *const codes[] = {
+        "absolute-scope-deadline-required", "invalid-lease-or-cleanup-failed",
+        "renew-binding-refused", "already-armed", "stale-snapshot",
+        "ambiguous-keyboard", "missing-guardian-keyboard", "ambiguous-pointer",
+        "missing-or-wrong-output-pointer", "human-input-held",
+        "unknown-operation", "invalid-json"
+    };
+    for (size_t i = 0; i < sizeof codes / sizeof *codes; ++i)
+        if (!strcmp(value, codes[i])) return codes[i];
+    return "unrecognized-scope-error";
+}
 static void whitespace(const char **p) { while (**p == ' ' || **p == '\t' || **p == '\r' || **p == '\n') ++*p; }
 static bool json_string(const char **p, char *out, size_t cap) {
     if (*(*p)++ != '"') return false;
@@ -155,14 +169,14 @@ static bool parse_reply(const char *p, struct scope_reply *r) {
         for (unsigned i = 0; i < count; ++i) if (!strcmp(seen[i], name)) return false;
         strcpy(seen[count++], name);
         whitespace(&p); if (*p++ != ':') return false; whitespace(&p);
-        bool boolean = false, truth = false, numeric = false; uint64_t number = 0;
+        bool boolean = false, truth = false, numeric = false, string = false; uint64_t number = 0;
         if (!strncmp(p, "true", 4)) { boolean = truth = true; p += 4; }
         else if (!strncmp(p, "false", 5)) { boolean = true; p += 5; }
         else if (*p >= '0' && *p <= '9') {
             numeric = true; const char *first = p;
             do { unsigned d = (unsigned)(*p++ - '0'); if (number > (UINT64_MAX - d) / 10) return false; number = number * 10 + d; } while (*p >= '0' && *p <= '9');
             if (*first == '0' && p - first > 1) return false;
-        } else if (*p == '"') { if (!json_string(&p, value, sizeof value)) return false; }
+        } else if (*p == '"') { if (!json_string(&p, value, sizeof value)) return false; string = true; }
         else return false;
         if (!strcmp(name, "ok")) { if (!boolean) return false; r->have_ok = true; r->ok = truth; }
         else if (!strcmp(name, "armed")) { if (!boolean) return false; r->have_armed = true; r->armed = truth; }
@@ -170,6 +184,7 @@ static bool parse_reply(const char *p, struct scope_reply *r) {
         else if (!strcmp(name, "keys")) { if (!numeric || number > 248) return false; r->have_keys = true; r->keys = number; }
         else if (!strcmp(name, "buttons")) { if (!numeric || number > 8) return false; r->have_buttons = true; r->buttons = number; }
         else if (!strcmp(name, "rejected")) { if (!numeric) return false; r->have_rejected = true; r->rejected = number; }
+        else if (!strcmp(name, "error")) { if (!string) return false; r->error = scope_error_code(value); }
         whitespace(&p);
         if (*p == '}') break;
         if (*p++ != ',') return false;
@@ -223,18 +238,28 @@ static bool scope_call(struct guardian *g, const char *request, struct scope_rep
     return false;
 }
 static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
-    if (!g->scope_token[0]) return false;
+    g->scope_operation = renew ? "renew" : "arm";
+    if (!g->scope_token[0]) { g->scope_error = "missing-scope-token"; return false; }
     uint64_t now = now_us();
-    if (deadline <= now || deadline - now > 250000) return false;
-    unsigned lease_ms = (unsigned)((deadline - now) / 1000); if (!lease_ms) return false;
+    if (deadline <= now || deadline - now > 250000) { g->scope_error = "local-deadline-invalid"; return false; }
+    unsigned lease_ms = (unsigned)((deadline - now) / 1000);
+    if (!lease_ms) { g->scope_error = "local-deadline-invalid"; return false; }
     char request[256];
     if (!renew) strcpy(g->arm_token, g->scope_token);
     snprintf(request, sizeof request, "{\"op\":\"%s\",\"token\":\"%s\",\"lease_ms\":%u,\"deadline_monotonic_ns\":%llu}\n", renew ? "renew" : "arm", g->arm_token, lease_ms, (unsigned long long)(deadline * 1000));
     g->scope_token[0] = 0;
-    struct scope_reply r;
-    if (!scope_call(g, request, &r) || !r.have_armed || !r.armed || !r.have_rejected) return false;
-    if (renew && r.rejected != g->rejected) return false;
-    g->rejected = r.rejected; return now_us() < deadline;
+    struct scope_reply r = {0};
+    if (!scope_call(g, request, &r)) {
+        g->scope_error = g->scope_fd < 0 ? "scope-exchange-failed" :
+            (r.error ? r.error : "scope-operation-refused");
+        return false;
+    }
+    if (!r.have_armed || !r.armed || !r.have_rejected) { g->scope_error = "scope-ack-invalid"; return false; }
+    if (renew && r.rejected != g->rejected) { g->scope_error = "scope-rejected-input"; return false; }
+    g->rejected = r.rejected;
+    if (now_us() >= deadline) { g->scope_error = "scope-ack-expired"; return false; }
+    g->scope_error = "none";
+    return true;
 }
 static bool path_socket(const char *path, uid_t uid, bool private) {
     struct stat st;
@@ -558,8 +583,8 @@ static bool release_all(struct guardian *g) {
     return g->release_acknowledged;
 }
 static void action_receipt(struct guardian *g,const char *event,const char *reason) {
-    char line[768];
-    snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"release_sent\":%s,\"release_acknowledged\":%s,\"receiver_proven\":false,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"}}\n",event,reason,g->input_sent?"true":"false",g->release_sent?"true":"false",g->release_acknowledged?"true":"false",!strcmp(event,"action_done")?"complete":"release",g->planned,g->completed,g->release_acknowledged?"confirmed":"unknown",reason);
+    char line[1024];
+    snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"release_sent\":%s,\"release_acknowledged\":%s,\"receiver_proven\":false,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"},\"native_failure\":{\"command\":\"%s\",\"scope_operation\":\"%s\",\"scope_error\":\"%s\"}}\n",event,reason,g->input_sent?"true":"false",g->release_sent?"true":"false",g->release_acknowledged?"true":"false",!strcmp(event,"action_done")?"complete":"release",g->planned,g->completed,g->release_acknowledged?"confirmed":"unknown",reason,g->command_name?g->command_name:"none",g->scope_operation?g->scope_operation:"none",g->scope_error?g->scope_error:"none");
     if (!emit(line)) fail(g,"transport-error");
 }
 static void step(struct guardian *g) {
@@ -604,6 +629,9 @@ static bool command(struct guardian *g,char *line) {
     if (!strcmp(line,"C")||!strcmp(line,"R")) { fail(g,"cancelled");return true; }
     if (!alive_scope(g)) return false;
     if (!strcmp(line,"N")) { if (!g->begun) g->idle=now_us()+2000000;receipt(g,"idle","heartbeat");return true; }
+    g->command_name = line[0] == 'B' ? "begin" : line[0] == 'O' ? "renew" :
+        line[0] == 'F' ? "bind" : line[0] == 'S' ? "select" :
+        line[0] == 'G' ? "pixel-permit" : "action";
     if (!strncmp(line,"F ",2)) {
         const char *value=line+2;size_t n=strlen(value);
         if (n<32||n>128) return false;
