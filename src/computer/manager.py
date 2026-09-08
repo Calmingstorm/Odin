@@ -445,6 +445,12 @@ class ComputerLifecycle:
             self.error = "authority_cleanup_unverified"
             self._active = False
             self._invalidate()
+            # Hiding the catalogue is not backend revocation. A failed turn
+            # cleanup must still fence the controller and stop its live owners.
+            try:
+                await service.set_enabled(False)
+            except Exception:
+                pass  # Retain the service and diagnostic for emergency retry.
         finally:
             self._watchers.pop(key, None)
 

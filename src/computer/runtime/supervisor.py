@@ -43,10 +43,13 @@ async def unit_command(
         assert proc.returncode is not None  # communicate() has reaped the process.
         return proc.returncode, output[:4096]
     except TimeoutError:
+        return 124, b""
+    finally:
+        # Cancellation and broken pipe reads own the same child as a timeout.
+        # Never leave a control helper running after its caller has unwound.
         if proc.returncode is None:
             proc.kill()
-        await proc.wait()
-        return 124, b""
+            await proc.wait()
 
 
 async def terminate_unit(unit: str, *, runtime_sudo: bool = False) -> bool:

@@ -59,7 +59,22 @@ class ComputerStore:
         fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
         os.close(fd)
         self.dir_fd = os.open(self.evidence_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
-        self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        try:
+            self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
+        except BaseException:
+            os.close(self.dir_fd)
+            raise
+        try:
+            self._initialize_database()
+        except BaseException:
+            try:
+                self.db.close()
+            finally:
+                os.close(self.dir_fd)
+            raise
+
+    def _initialize_database(self) -> None:
+        """Initialize only while the constructor owns failure cleanup."""
         self.db.row_factory = sqlite3.Row
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
