@@ -10,7 +10,13 @@ from copy import deepcopy
 from dataclasses import asdict
 
 from .app_profiles import application_profile
-from .effects import effect_receipt, execution_receipt, region_effect
+from .effects import (
+    effect_receipt,
+    execution_receipt,
+    measured_appearance,
+    region_effect,
+    stroke_effect,
+)
 from .gui_actions import action_arguments, action_payload, crop_arguments
 from .models import (
     BackendCapabilities,
@@ -983,7 +989,8 @@ class ComputerController:
                     dispatch_inp["target"] = matches[0]["handle"]
             payload, target = action_payload(dispatch_inp, current)
             before_image = (self.store.read_evidence(context, current.evidence_id)[0]
-                            if inp["expect"]["type"] == "region_changed" else None)
+                            if (inp["expect"]["type"] == "region_changed"
+                                or payload["type"] == "polyline") else None)
             await self._auth(context)
             self._active(grant)
             if (not 0 <= self.monotonic() - original.captured_at <= DELIVERED_GROUNDING_SECONDS
@@ -1010,6 +1017,8 @@ class ComputerController:
                 # Settle release before any later capture/auth/metadata failure.
                 settled_result = execution_receipt(raw, {"status": "unknown"})
                 settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
+                stroke_effect(settled_result, dispatch_inp, before_image, None,
+                              binding_matches=False)
                 self._active(grant)
                 await self._auth(context)
                 self._active(grant)
@@ -1074,8 +1083,9 @@ class ComputerController:
                     if not 0 <= age <= FRAME_FRESH_SECONDS:
                         raise ComputerError("postcondition_binding_changed")
                     expected_transition = (
-                        inp["expect"]["type"] in {"dialog_appeared", "menu_appeared"}
-                        and result["verification"].get("status") == "satisfied")
+                        inp["expect"]["type"] in {
+                            "visual_change", "dialog_appeared", "menu_appeared"}
+                        and measured_appearance(result))
                     if (expected_transition
                             and result["verification"].get("target_application_matches") is True
                             and provenance is not None
@@ -1106,6 +1116,8 @@ class ComputerController:
                     if before_image is not None and result["status"] != "interrupted":
                         region_effect(result, inp["expect"], before_image, after_image,
                                       binding_matches=after.geometry == current.geometry)
+                    stroke_effect(result, dispatch_inp, before_image, after_image,
+                                  binding_matches=after.geometry == current.geometry)
                     result["observation_id"] = after.observation_id
                     result["verification"]["evidence_id"] = after.evidence_id
                     # Reuse the verification capture, not a second screenshot.

@@ -709,7 +709,8 @@ class WaylandRuntimeBackend:
                                   "portal_connection_closed": (
                                       portal.get("connection_closed") is True),
                                   "ei_connection_closed": ei_closed}
-        return (ei_closed and portal_closed and scope_closed and not self._release_failed)
+        return (ei_closed and portal_closed and portal.get("connection_closed") is True
+                and scope_closed and not self._release_failed)
 
     async def pause(self):
         self._paused = True

@@ -1052,13 +1052,19 @@ class X11AttachedBackend:
                         actual={"before_sha256": hashlib.sha256(frame.image_bytes).hexdigest(),
                                 "after_sha256": hashlib.sha256(data).hexdigest()})
                     after_scope = after.get("input_scope")
-                    if (type(after_scope) is dict
-                            and same_application_scope(self._scope, after_scope)):
-                        from .x11_appearance import appearance_transition
+                    if type(after_scope) is dict:
+                        from .x11_appearance import (
+                            appearance_transition,
+                            same_application_appearance,
+                        )
                         transition = appearance_transition(
                             self._window_inventory, after.get("window_inventory"),
                             self._scope, after_scope)
-                        if transition is not None:
+                        same_app = (same_application_scope(self._scope, after_scope)
+                                    or same_application_appearance(
+                                        self._scope, after_scope, transition))
+                        evidence["target_application_matches"] = same_app
+                        if transition is not None and same_app:
                             evidence["transition"] = transition
                     if after.get("prior_target_state") in {"destroyed", "unmapped", "viewable"}:
                         evidence.update(target_state=after["prior_target_state"],
