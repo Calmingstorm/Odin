@@ -1,0 +1,137 @@
+"""Bounded native Hyprland owner. Native acknowledgement is not receiver proof.
+
+The native child opens Wayland itself: an inherited connection retains the
+Python connector's SO_PEERCRED PID. Plugin activation is never automatic here.
+Guardian SIGKILL and same-button physical/virtual overlap remain residuals.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import pwd
+import re
+import time
+
+from .hyprland_identity import connect_peer
+from .hyprland_scope import _TOKEN, LEASE_NS
+from .wayland_guardian import WaylandGuardian, WaylandGuardianError, trusted_binary
+
+
+class HyprlandGuardianError(WaylandGuardianError):
+    """Static failures, never native tokens or window information."""
+
+
+def _path(value):
+    if (type(value) is not str or not value.startswith("/")
+            or len(os.fsencode(value)) > 107 or any(ord(c) < 32 for c in value)):
+        raise HyprlandGuardianError("hyprland_explicit_socket_required")
+
+
+class HyprlandGuardian(WaylandGuardian):
+    """Compatible action/ready/close interface; native scope is mandatory."""
+
+    def __init__(self, binary: str, expected_uid: int, on_spawn=None):
+        super().__init__(binary, expected_uid, on_spawn)
+        self._scope_deadline = 0
+        self._scope_binding = None
+        self._mapping_id = None
+
+    async def start(
+        self, wayland_path, mapping_id, scope_path, compositor_pid, logical_width, logical_height,
+    ):
+        trusted_binary(self.binary)
+        _path(wayland_path)
+        _path(scope_path)
+        if (self._child is not None or self._closing
+                or type(self.expected_uid) is not int or self.expected_uid < 0
+                or type(compositor_pid) is not int or compositor_pid <= 1
+                or any(type(v) is not int or not 1 <= v <= 16384
+                       for v in (logical_width, logical_height))
+                or type(mapping_id) is not str
+                or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", mapping_id)):
+            raise HyprlandGuardianError("hyprland_guardian_configuration_invalid")
+        credentials = {}
+        if self.expected_uid != os.geteuid():
+            if os.geteuid() != 0:
+                raise HyprlandGuardianError("hyprland_guardian_uid_unavailable")
+            credentials = {"user": self.expected_uid,
+                           "group": pwd.getpwuid(self.expected_uid).pw_gid, "extra_groups": []}
+        for path in (wayland_path, scope_path):
+            peer = await connect_peer(path, compositor_pid, self.expected_uid, time.monotonic() + 1)
+            peer.close()
+        await self._identity(None)
+        spawning = asyncio.create_task(asyncio.create_subprocess_exec(
+            self.binary, wayland_path, str(compositor_pid), str(self.expected_uid),
+            mapping_id, scope_path, str(logical_width), str(logical_height),
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True, cwd="/",
+            env={"PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"},
+            limit=65536, **credentials,
+        ))
+        try:
+            try:
+                self._child = await asyncio.shield(spawning)
+            except asyncio.CancelledError:
+                self._child = await spawning
+                self._waiter = asyncio.create_task(self._child.wait())
+                self._reader = asyncio.create_task(self._read())
+                raise
+            self._waiter = asyncio.create_task(self._child.wait())
+            from .recovery import process_identity
+
+            await self._identity(process_identity(self._child.pid))
+            self._reader = asyncio.create_task(self._read())
+            self._ready = await self._receive("ready", timeout=8)
+            if (self._ready.get("scope_lease_v1") is not True
+                    or self._ready.get("peer_pid") != compositor_pid):
+                raise HyprlandGuardianError("hyprland_guardian_scope_unavailable")
+            self._mapping_id = mapping_id
+            self._heartbeat = asyncio.create_task(self._heartbeats())
+            return self.ready
+        except BaseException:
+            await self.close()
+            raise
+
+    async def select(self, mapping_id):
+        if mapping_id != self._mapping_id or not self.alive:
+            raise HyprlandGuardianError("hyprland_guardian_mapping_changed")
+        return self.ready
+
+    async def bind_scope(self, snapshot):
+        now = time.monotonic_ns()
+        if type(snapshot) is not dict:
+            raise HyprlandGuardianError("hyprland_guardian_scope_invalid")
+        measured, token = snapshot.get("observed_monotonic_ns"), snapshot.get("native_scope_token")
+        binding = tuple(snapshot.get(k) for k in ("source_digest", "focus_digest", "bounds_digest"))
+        if (snapshot.get("locked") is not False or snapshot.get("authenticated") is not True
+                or type(measured) is not int or not 0 <= now - measured < LEASE_NS
+                or type(token) is not str or not _TOKEN.fullmatch(token)
+                or any(type(v) is not str or not re.fullmatch(r"[0-9a-f]{64}", v) for v in binding)
+                or (self._active and binding != self._scope_binding)):
+            raise HyprlandGuardianError("hyprland_guardian_scope_invalid")
+        await self._send(f"F {token}\n")
+        self._scope_binding = binding
+        self._scope_deadline = measured + LEASE_NS
+
+    async def refresh_scope(self, deadline_ns: int):
+        if (type(deadline_ns) is not int or not time.monotonic_ns() < deadline_ns
+                or deadline_ns > self._scope_deadline):
+            raise HyprlandGuardianError("hyprland_guardian_scope_expired")
+        await super().refresh_scope(deadline_ns)
+
+    async def act(self, command: str, *, pixel_guard=None, scope_deadline_ns=None):
+        if (type(scope_deadline_ns) is not int
+                or not time.monotonic_ns() < scope_deadline_ns <= self._scope_deadline):
+            raise HyprlandGuardianError("hyprland_guardian_scope_expired")
+        receipt = await super().act(
+            command, pixel_guard=pixel_guard, scope_deadline_ns=scope_deadline_ns)
+        receipt["release_ack"] = receipt.pop("release_acknowledged", False) is True
+        receipt["receiver_release_verified"] = False
+        return receipt
+
+    async def close(self):
+        receipt = await super().close()
+        return {**receipt,
+                "release_ack": bool(receipt.get("release_submitted")
+                                    and self._last_terminal.get("release_acknowledged") is True),
+                "receiver_release_verified": False}
