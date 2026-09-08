@@ -462,3 +462,214 @@ async def test_unmeasured_final_modal_does_not_become_success(tmp_path, monkeypa
             result["verification"]["steps"][0]["verification"]["reason"]
             == "unexpected_dialog_transition"
         )
+
+
+def disconnected_strokes(binding, *, operation="strokes"):
+    strokes = [
+        {
+            "action_id": f"line-{n}",
+            "points": [[20, 20 + n * 28], [160, 20 + n * 28]],
+            "duration": 0.1,
+        }
+        for n in range(5)
+    ]
+    if operation == "sequence":
+        return plan(
+            binding,
+            *[{**s, "operation": "polyline", "expect": {"type": "visual_change"}} for s in strokes],
+        )
+    return {**binding, "action_id": "plan", "operation": "strokes", "strokes": strokes}
+
+
+def stroke_dispatch(payload, state, *, raster_change=True):
+    if raster_change:
+        with Image.open(BytesIO(state["image"])) as image:
+            ImageDraw.Draw(image).line([tuple(p) for p in payload["points"]], fill="black", width=3)
+            stream = BytesIO()
+            image.save(stream, "PNG")
+            state["image"] = stream.getvalue()
+    raw = changed(payload, change=raster_change)
+    raw.update(
+        status="executed",
+        reason="complete",
+        diagnostics={
+            "phase": "complete",
+            "release": "confirmed",
+            "reason": "complete",
+            "steps_planned": 5,
+            "steps_completed": 5,
+        },
+    )
+    return raw
+
+
+@pytest.mark.parametrize("operation", ["strokes", "sequence"])
+@pytest.mark.parametrize("platform", ["x11", "wayland"])
+async def test_five_strokes_complete_honestly_with_fresh_delivery_gate(
+    tmp_path, monkeypatch, operation, platform
+):
+    async with rig(tmp_path, monkeypatch, platform=platform) as (c, b, ctx, binding, state):
+
+        async def draw(payload):
+            return stroke_dispatch(payload, state)
+
+        b.hook = draw
+        writes = []
+        finish = c.store.finish_action
+
+        def record(session_id, action_id, result):
+            writes.append(copy.deepcopy(result))
+            return finish(session_id, action_id, result)
+
+        monkeypatch.setattr(c.store, "finish_action", record)
+        request = disconnected_strokes(binding, operation=operation)
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 5
+        with Image.open(BytesIO(result["next_observation"]["image_bytes"])) as final:
+            assert all(final.getpixel((80, 20 + n * 28)) == (0, 0, 0) for n in range(5))
+            assert final.getpixel((210, 145)) == (255, 255, 255)
+        assert result["status"] == "executed"
+        assert result["execution"]["completed_steps"] == 5
+        assert result["execution"]["verified_steps"] == 0
+        assert result["execution"]["released"] is True
+        assert result["verification"]["status"] == "visual_review_required"
+        assert result["verification"]["semantic_mark_verified"] is False
+        assert result["verification"]["automatic_replay"] is False
+        assert all(row["status"] != "verified" for row in writes)
+        assert all(s["status"] == "executed" for s in result["verification"]["steps"])
+        stored = c.store.receipt(binding["session_id"], "plan", canonical_hash(request))
+        assert (
+            stored["verification"]["steps"][0]["verification"]["path_evidence"][
+                "path_changed_pixels"
+            ]
+            > 0
+        )
+        compact = {k: v for k, v in result.items() if k != "next_observation"}
+        prompt = ComputerIntegration.output_image(result["next_observation"])["__prompt__"]
+        assert len((prompt + json.dumps(compact)).encode()) < 8000
+        assert await c.act(ctx, request) == compact and len(b.calls) == 5
+        frame = result["next_observation"]
+        followup = {**binding, **click("new", 210, 145), "observation_id": frame["observation_id"]}
+        with pytest.raises(ComputerError, match="observation_not_delivered"):
+            await c.act(ctx, followup)
+        obs = c._live[binding["session_id"]].observations[frame["observation_id"]]
+        await c.validate_observation_delivery(ctx, obs.frame_metadata, obs.image_sha256)
+        assert c._delivered_observations[binding["session_id"]] == obs.observation_id
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "no_pixels",
+        "no_local_pixels",
+        "endpoint_only",
+        "partial",
+        "missing_counts",
+        "bad_diagnostics",
+        "incomplete_phase",
+        "unconfirmed_diagnostic_release",
+        "boolean_counts",
+        "false_release",
+        "unknown_dispatch",
+        "failed_expected_raster",
+        "different_app",
+        "focus_change",
+        "unexpected_modal",
+        "changed_next_anchor",
+        "missing_path_flag",
+        "sampled_target_changed",
+    ],
+)
+async def test_stroke_batch_failure_stops_first_and_never_replays(tmp_path, monkeypatch, failure):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+
+        async def draw(payload):
+            raw = stroke_dispatch(
+                payload,
+                state,
+                raster_change=failure not in {"no_pixels", "no_local_pixels", "endpoint_only"},
+            )
+            if failure in {"no_local_pixels", "endpoint_only"}:
+                raw["postcondition"]["actual"]["after_sha256"] = "b" * 64
+            if failure == "endpoint_only":
+                state["image"] = raster((157, 17, 163, 23))
+            if failure == "partial":
+                raw["diagnostics"]["steps_completed"] = 1
+            elif failure == "missing_counts":
+                raw.pop("diagnostics")
+            elif failure == "bad_diagnostics":
+                raw["diagnostics"] = None
+            elif failure == "incomplete_phase":
+                raw["diagnostics"]["phase"] = "dispatch"
+            elif failure == "unconfirmed_diagnostic_release":
+                raw["diagnostics"]["release"] = "unknown"
+            elif failure == "boolean_counts":
+                raw["diagnostics"].update(steps_planned=True, steps_completed=True)
+            elif failure == "false_release":
+                raw["released"] = False
+            elif failure == "unknown_dispatch":
+                raw.update(status="unknown", reason="input_dispatch_expired")
+            elif failure == "failed_expected_raster":
+                raw["postcondition"]["actual"]["after_sha256"] = "a" * 64
+            elif failure == "different_app":
+                raw["postcondition"]["target_application_matches"] = False
+            elif failure == "focus_change":
+                b.source = replace(b.source, source_revision=2)
+            elif failure == "unexpected_modal":
+                state.update(modal="unexpected", modal_kind="safe_application")
+            elif failure == "changed_next_anchor":
+                with Image.open(BytesIO(state["image"])) as image:
+                    ImageDraw.Draw(image).rectangle((10, 38, 30, 58), fill="black")
+                    stream = BytesIO()
+                    image.save(stream, "PNG")
+                    state["image"] = stream.getvalue()
+            elif failure == "sampled_target_changed":
+                raw["sampled_target_changed"] = True
+            return raw
+
+        if failure == "missing_path_flag":
+            from src.computer.sequences import stroke_effect
+
+            def no_flag(*args, **kwargs):
+                stroke_effect(*args, **kwargs)
+                args[0].get("verification", {}).get("path_evidence", {}).pop(
+                    "continuation_supported", None
+                )
+
+            monkeypatch.setattr("src.computer.sequences.stroke_effect", no_flag)
+        b.hook = draw
+        request = disconnected_strokes(binding)
+        result = await c.act(ctx, request)
+        assert len(b.calls) == 1
+        assert result["status"] not in {"executed", "verified"}
+        assert result["verification"]["steps"][1]["status"] == "unavailable"
+        assert result["verification"]["automatic_replay"] is False
+        await c.act(ctx, request)
+        assert len(b.calls) == 1
+        assert binding["session_id"] not in c._delivered_observations
+
+
+@pytest.mark.parametrize("operation", ["click", "drag"])
+async def test_executed_unrelated_action_cannot_continue(tmp_path, monkeypatch, operation):
+    async with rig(tmp_path, monkeypatch) as (c, b, ctx, binding, state):
+
+        async def execute(payload):
+            if operation == "drag":
+                return stroke_dispatch(payload, state)
+            return {"status": "executed", "injected": True, "released": True}
+
+        b.hook = execute
+        first = (
+            click("first")
+            if operation == "click"
+            else {
+                "action_id": "first",
+                "operation": "drag",
+                "points": [[20, 20], [160, 20]],
+                "duration": 0.1,
+                "expect": {"type": "visual_change"},
+            }
+        )
+        result = await c.act(ctx, plan(binding, first, click("later", 210, 145)))
+        assert result["reason"] == "sequence_step_not_verified"
+        assert len(b.calls) == 1

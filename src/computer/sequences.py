@@ -151,6 +151,43 @@ def _preflight_backend(grant, steps):
             raise ComputerError("invalid_text")
 
 
+def _stroke_completed(step, raw, result, *, raster_satisfied, binding_matches):
+    """Acknowledge a preplanned line, not a semantic mark or generic execution.
+
+    Complete native dispatch/release and independently measured localized path
+    changes are conjunctive. Original-view anchors and lifecycle gates still
+    veto NEXT input. A helper flag alone never excuses a failed expectation.
+    """
+    if not isinstance(raw, dict):
+        return False
+    diagnostics = raw.get("diagnostics", {})
+    if not isinstance(diagnostics, dict):
+        return False
+    planned, completed = (diagnostics.get(k) for k in ("steps_planned", "steps_completed"))
+    verification = result.get("verification", {})
+    return (
+        step["operation"] == "polyline"
+        and step["expect"] == {"type": "visual_change"}
+        and result.get("status") == "executed"
+        and raw.get("status") in {"executed", "verified"}
+        and raw.get("injected") is True
+        and raw.get("released") is True
+        and raw.get("reason", "complete") == "complete"
+        and diagnostics.get("phase") == "complete"
+        and diagnostics.get("release") == "confirmed"
+        and diagnostics.get("reason") == "complete"
+        and type(planned) is int
+        and type(completed) is int
+        and planned > 0
+        and completed == planned
+        and raster_satisfied
+        and binding_matches
+        and verification.get("target_application_matches") is True
+        and verification.get("semantic_mark_verified") is False
+        and verification.get("path_evidence", {}).get("continuation_supported") is True
+    )
+
+
 async def execute_sequence(controller, context, inp):
     """Serialized finite plan. Uncertain input stops; known interruption yields."""
     from .controller import _bounded
@@ -225,6 +262,7 @@ async def execute_sequence(controller, context, inp):
             else None
         )
         settled, attempted = [], None
+        completed_steps, review_required = 0, False
         latest, latest_image = None, None
         reason, cancelled, stop_required, effect_uncertain = None, False, False, False
 
@@ -278,6 +316,7 @@ async def execute_sequence(controller, context, inp):
                 attempted = index
                 raw = await _bounded(live.backend.act(payload), budget)
                 result = effect_receipt(raw, current, step["expect"], target)
+                raster_satisfied = result.get("status") == "verified"
                 # Never persist raster-only stroke success as semantic proof,
                 # even if cancellation arrives before the checkpoint capture.
                 stroke_effect(result, step, None, None, binding_matches=False)
@@ -325,9 +364,25 @@ async def execute_sequence(controller, context, inp):
                     )
                 result.setdefault("verification", {}).update(evidence_id=latest.evidence_id)
                 result["observation_id"] = latest.observation_id
+                stroke_completed = _stroke_completed(
+                    step,
+                    raw,
+                    result,
+                    raster_satisfied=raster_satisfied,
+                    binding_matches=(
+                        latest.geometry == current.geometry and latest.modal == current.modal
+                    ),
+                )
+                if stroke_completed:
+                    result["verification"].update(
+                        continuation_accepted=True,
+                        visual_review_required=True,
+                    )
                 controller.store.finish_action(grant.session_id, step["action_id"], result)
-                if result["status"] != "verified":
+                if result["status"] != "verified" and not stroke_completed:
                     raise ComputerError("sequence_step_not_verified")
+                completed_steps += 1
+                review_required |= stroke_completed
                 if index + 1 < len(steps):
                     # These are NEXT-input vetoes, not retroactive failures of
                     # a verified final step. A new dialog must be delivered and
@@ -367,7 +422,13 @@ async def execute_sequence(controller, context, inp):
                     )
                 verification = {
                     "type": "sequence",
-                    "status": "satisfied" if reason is None else "interrupted",
+                    "status": (
+                        "interrupted"
+                        if reason is not None
+                        else "visual_review_required"
+                        if review_required
+                        else "satisfied"
+                    ),
                     "scope": "individual_postconditions_only",
                     "step_action_ids": [s[0] for s in reserved],
                     "settled_steps": len(settled),
@@ -378,12 +439,18 @@ async def execute_sequence(controller, context, inp):
                 }
                 if latest is not None:
                     verification["evidence_id"] = latest.evidence_id
+                if review_required:
+                    verification.update(
+                        visual_review_required=True,
+                        semantic_mark_verified=False,
+                        next_action="inspect_final_marks_before_new_input",
+                    )
                 if reason is not None:
                     verification["next_action"] = "inspect_interruption_then_plan_new_action_ids"
                     if live.task_context is not None:
                         live.task_context.invalidate(reason)
                 result = {
-                    "status": "verified"
+                    "status": ("executed" if review_required else "verified")
                     if reason is None
                     else "unknown"
                     if stop_required
@@ -399,7 +466,8 @@ async def execute_sequence(controller, context, inp):
                         ),
                         "released": not stop_required
                         and all(s.get("execution", {}).get("released") is True for s in settled),
-                        "completed_steps": sum(s.get("status") == "verified" for s in settled),
+                        "completed_steps": completed_steps,
+                        "verified_steps": sum(s.get("status") == "verified" for s in settled),
                         "planned_steps": len(steps),
                     },
                 }

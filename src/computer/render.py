@@ -43,7 +43,14 @@ def compact_sequence_receipt(receipt: dict) -> dict:
         return receipt
     summaries = []
     for step in verification["steps"]:
-        if step.get("status") != "verified":
+        measured = step.get("verification", {})
+        continued_stroke = (
+            step.get("status") == "executed"
+            and measured.get("continuation_accepted") is True
+            and measured.get("visual_review_required") is True
+            and measured.get("semantic_mark_verified") is False
+        )
+        if step.get("status") != "verified" and not continued_stroke:
             # Failures are uncommon and safety-critical: retain diagnostics and
             # uncertainty fields, dropping only duplicated session/provenance.
             summaries.append(
@@ -59,24 +66,31 @@ def compact_sequence_receipt(receipt: dict) -> dict:
             for key in ("action_id", "status", "reason", "execution", "observation_id")
             if key in step
         }
-        measured = step.get("verification", {})
-        summary["verification"] = (
-            dict(measured)
-            if step.get("status") != "verified"
-            else {
-                key: measured[key]
+        summary["verification"] = {
+            key: measured[key]
+            for key in (
+                "type",
+                "status",
+                "scope",
+                "evidence_id",
+                "reason",
+                "next_action",
+                "semantic_mark_verified",
+                "continuation_accepted",
+                "visual_review_required",
+            )
+            if key in measured
+        }
+        if continued_stroke:
+            summary["verification"]["path_evidence"] = {
+                key: measured["path_evidence"][key]
                 for key in (
-                    "type",
-                    "status",
-                    "scope",
-                    "evidence_id",
-                    "reason",
-                    "next_action",
-                    "semantic_mark_verified",
+                    "continuation_supported",
+                    "interior_samples_changed",
+                    "interior_samples",
                 )
-                if key in measured
+                if key in measured.get("path_evidence", {})
             }
-        )
         summaries.append(summary)
     return {
         **receipt,
