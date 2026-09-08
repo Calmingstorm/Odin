@@ -182,6 +182,12 @@ static bool scope_exchange(struct guardian *g, const char *request, struct scope
     if (g->scope_fd < 0) return false;
     size_t length = strlen(request), sent = 0, used = 0; char response[4096];
     uint64_t deadline = now_us() + 50000;
+    /* Renewal cannot stall the existing independent owned-release deadline.
+     * Cleanup retains its own bounded budget regardless of expired scope. */
+    if (strstr(request, "\"renew\"") && g->begun) {
+        if (g->scope_deadline < deadline) deadline = g->scope_deadline;
+        if (g->lease < deadline) deadline = g->lease;
+    }
     while (now_us() < deadline) {
         struct pollfd fd = {g->scope_fd, sent < length ? POLLOUT : POLLIN, 0};
         int rc = poll(&fd, 1, 2);
@@ -217,7 +223,7 @@ static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
     unsigned lease_ms = (unsigned)((deadline - now) / 1000); if (!lease_ms) return false;
     char request[256];
     if (!renew) strcpy(g->arm_token, g->scope_token);
-    snprintf(request, sizeof request, "{\"op\":\"%s\",\"token\":\"%s\",\"lease_ms\":%u}\n", renew ? "renew" : "arm", g->arm_token, lease_ms);
+    snprintf(request, sizeof request, "{\"op\":\"%s\",\"token\":\"%s\",\"lease_ms\":%u,\"deadline_monotonic_ns\":%llu}\n", renew ? "renew" : "arm", g->arm_token, lease_ms, (unsigned long long)(deadline * 1000));
     g->scope_token[0] = 0;
     struct scope_reply r;
     if (!scope_call(g, request, &r) || !r.have_armed || !r.armed || !r.have_rejected) return false;
@@ -622,7 +628,7 @@ static bool command(struct guardian *g,char *line) {
     if (!plan(g,line)) {
         if (!release_all(g)) { fail(g,"input-path-lost");return false; }
         g->begun=false;g->idle=now_us()+2000000;
-        receipt(g,"action_rejected","invalid-command");return true;
+        action_receipt(g,"action_rejected","invalid-command");return true;
     }
     g->action=true;g->gate_waiting=g->gate_allowed=false;g->start=now_us();return true;
 }
