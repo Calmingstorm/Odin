@@ -73,6 +73,11 @@ Real Krita exposed gaps that synthetic tree fixtures could not establish:
   The route is only a lookup hint: native identity, root identity, metadata,
   fingerprint, real ancestry, process and source bounds must still match before
   the effect. Tampered or equal-looking replacements are rejected.
+* The foreground color dialog is modeless in native window state and AT-SPI,
+  while the consent scope conservatively labels every dialog as a modal boundary.
+  Accessibility matching now uses literal native modality, not the consent flag.
+  The original dialog consent boundary remains unchanged. Exact root geometry,
+  native identity, unique complete enumeration and process checks still apply.
 
 ## Behavioral evidence recorded so far
 
@@ -83,10 +88,17 @@ Real Krita exposed gaps that synthetic tree fixtures could not establish:
 * An actual isolated GIMP color-dialog probe confirms the missing transient chain
   and successful new-map qualification. Controller integration is separately
   tested with inert native boundaries.
-* Real isolated Krita controller operations have verified size `40.00` to `4.00`
-  pixels and opacity `100` to `75` percent by identity with exact native readback.
-  Remaining end-to-end qualification and final integrated gate results are
-  recorded below when completed, not inferred from these partial checks.
+* One real isolated Krita run verified all requested identity field paths: size
+  `40.00` to `4.00` pixels, opacity `100` to `75` percent, and color-name hex
+  `#000000` to `#87dccc`. Each returned verified native-identity replacement,
+  confirmed release and exact text readback. A subsequent observation independently
+  read the same hex node and ancestry. The final image visibly contains all three
+  field values. This verifies field contents, not that the color dialog was
+  accepted, the paint color applied, or any document saved.
+* The foreground-dialog navigation click used a model-inspected image location
+  only after a fresh capture matched that image's exact digest. The dialog-open
+  receipt was verified. The disposable launch groups were reaped and checked
+  absent; no existing user's display, profile or application was changed.
 * Fresh-delivery tests reject copied, unseen, stale, mismatched and replayed
   post-action frames. Partial action receipts cannot reissue input or images.
 * Five-stroke receipt plus final image prompt remains below 8,000 UTF-8 bytes in
