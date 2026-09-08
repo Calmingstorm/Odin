@@ -588,10 +588,10 @@ class ComputerController:
                 if getattr(backend, "input_supported", False) is True:
                     input_eligible(measured)
                 self._live[grant.session_id].capabilities = measured
+                await self._auth(context)
                 current = self.store.get_session(grant.session_id)
                 if current.generation != grant.generation or current.state != "starting":
                     raise ComputerError("grant_revoked")
-                await self._auth(context)
                 grant = self.store.set_state(grant.session_id, "active")
                 self._watchdogs[grant.session_id] = _own_task(
                     asyncio.create_task(self._deadline(grant.session_id, MAX_TASK_SECONDS))
@@ -670,16 +670,16 @@ class ComputerController:
                     if getattr(live.backend, "input_supported", False) is True:
                         input_eligible(measured)
                     live.capabilities = measured
+                    await self._auth(context)
+                    current = self.store.get_session(grant.session_id)
+                    if current.generation != grant.generation or current.state != "paused":
+                        raise ComputerError("grant_revoked")
+                    grant = self.store.set_state(grant.session_id, "active")
+                    obs, _ = await self._capture(grant, acknowledge_modal=True)
+                    live.modal_identity = obs.modal
                 except (Exception, asyncio.CancelledError):
                     await self._stop(grant.session_id, "cancelled")
                     raise
-                await self._auth(context)
-                current = self.store.get_session(grant.session_id)
-                if current.generation != grant.generation or current.state != "paused":
-                    raise ComputerError("grant_revoked")
-                grant = self.store.set_state(grant.session_id, "active")
-                obs, _ = await self._capture(grant, acknowledge_modal=True)
-                live.modal_identity = obs.modal
                 return self._public_session(self.store.get_session(grant.session_id))
         if operation == "reconcile":
             return await self.observe(
@@ -702,7 +702,7 @@ class ComputerController:
         current = self.store.get_session(sid)
         if current.state not in {"active", "starting", "paused"}:
             raise ComputerError("grant_revoked")
-        grant = self.store.set_state(sid, "paused", revoke=True)
+        self.store.set_state(sid, "paused", revoke=True)
         live = self._live.get(sid)
         if live is None:
             return self._public_session(self.store.set_state(sid, "quarantined"))
@@ -724,7 +724,7 @@ class ComputerController:
                 return await self._stop(sid, "cancelled")
         except (Exception, asyncio.CancelledError):
             return await self._stop(sid, "cancelled")
-        return self._public_session(grant)
+        return self._public_session(self.store.get_session(sid))
 
     async def _capture(self, grant, *, acknowledge_modal=False, crop=None, strict_binding=False):
         from .vision import FrameCrop, FrameMetadata, _validate_png
