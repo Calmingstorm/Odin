@@ -85,19 +85,22 @@ def test_historical_harness_uses_current_production_tool_contract():
     assert "app" not in schema["required"]
 
 
-def test_fixture_refuses_live_evidence_and_unowned_launch(monkeypatch):
+def test_fixture_refuses_live_evidence_and_unowned_launch(tmp_path, monkeypatch):
     fixture = driver.sibling("fixture_r6", "model-application-fixture-r6.py")
     monkeypatch.setattr(fixture.os, "geteuid", lambda: 0)
+    monkeypatch.setenv("EVIDENCE_ROOT", str(tmp_path))
     args = SimpleNamespace(display=178, evidence="/opt/odin/model-evidence")
     with pytest.raises(RuntimeError, match="evidence"):
         fixture.validate_fixture_args(args)
-    args.evidence = "/home/odin/model-evidence-pure-test-not-created"
+    evidence = tmp_path / "model-evidence-not-created"
+    args.evidence = str(evidence)
     monkeypatch.setattr(fixture.Path, "read_bytes", lambda _: b"python\0unowned.py\0")
     with pytest.raises(RuntimeError, match="supervisor"):
         fixture.validate_fixture_args(args)
     args.display = 0
     with pytest.raises(RuntimeError, match="disposable"):
         fixture.validate_fixture_args(args)
+    assert not evidence.exists()
 
 
 def test_independent_svg_render_and_no_source_mutation(tmp_path):
