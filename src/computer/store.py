@@ -566,6 +566,7 @@ class ComputerStore:
             "unsupported_characters",
             "diagnostics",
             "targeting",
+            "input_safety",
         }
         if set(result) - allowed or result.get("status") not in {
             "executed",
