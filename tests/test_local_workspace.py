@@ -1991,6 +1991,12 @@ _CLASSIFIED_SPAWN_SITES: dict[str, str] = {
         "fixed absolute system-Python helper, private socketpair, explicit bus/UID binding; "
         "no arbitrary program or shell, reads source only and writes bounded IPC"
     ),
+    "src/computer/runtime/hyprland_capture.py": (
+        "unwired explicit trusted native capture helper with inherited authenticated "
+        "Wayland FD, bounded argv, empty display environment and explicit / cwd; "
+        "no shell or relative file output, only anonymous SHM and bounded stdout; "
+        "caller must establish qualified scope and helper trust before future admission"
+    ),
     "src/computer/runtime/wayland_probe.py": (
         "fixed installed inert probe gate with generated private marker; absolute helper "
         "argv, private tempdir and bwrap-owned cwd, no caller-provided commands"

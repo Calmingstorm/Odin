@@ -190,7 +190,7 @@ async def capture_explicit_output(
         spawning = asyncio.create_task(asyncio.create_subprocess_exec(
             *args, pass_fds=(wayland.fileno(),), stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
-            start_new_session=True, env={"LC_ALL": "C"}, limit=65536,
+            start_new_session=True, cwd="/", env={"LC_ALL": "C"}, limit=65536,
         ))
         try:
             process = await asyncio.shield(spawning)
