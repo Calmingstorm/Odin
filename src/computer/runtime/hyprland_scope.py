@@ -144,7 +144,8 @@ class HyprlandScopeProvider:
             return row
         except HyprlandScopeFailure:
             raise
-        except (OSError, RuntimeError, ValueError, TimeoutError, UnicodeError, RecursionError):
+        except (OSError, RuntimeError, ValueError, TimeoutError, UnicodeError, RecursionError,
+                IndexError, StopIteration):
             _fail()
         finally:
             if connection is not None:
@@ -162,7 +163,7 @@ class HyprlandScopeProvider:
                 await self._request({"op": "snapshot", "output_name": name}), name, started)
             try:
                 application = _process_identity(first["pid"], self.expected_uid)
-            except (OSError, RuntimeError, ValueError):
+            except (OSError, RuntimeError, ValueError, IndexError, StopIteration):
                 _fail("hyprland_application_identity_unavailable")
             compositor = self._identity()
             if time.monotonic_ns() - started >= LEASE_NS:

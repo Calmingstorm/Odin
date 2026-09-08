@@ -83,7 +83,9 @@ async def test_not_started_close_does_not_claim_native_ack():
     guardian = module.HyprlandGuardian("/not/executed", os.getuid())
     result = await guardian.close()
     assert result["process_reaped"]
-    assert not result["release_ack"]
+    assert result["release_ack"]
+    assert result["release_not_required"]
+    assert not result["native_release_acknowledged"]
     assert not result["receiver_release_verified"]
 
 

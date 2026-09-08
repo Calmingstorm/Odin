@@ -35,6 +35,7 @@ class HyprlandGuardian(WaylandGuardian):
         self._scope_deadline = 0
         self._scope_binding = None
         self._mapping_id = None
+        self._spawning = None
 
     async def start(
         self, wayland_path, mapping_id, scope_path, compositor_pid, logical_width, logical_height,
@@ -68,6 +69,7 @@ class HyprlandGuardian(WaylandGuardian):
             env={"PATH": "/usr/bin", "LANG": "C.UTF-8", "HOME": "/nonexistent"},
             limit=65536, **credentials,
         ))
+        self._spawning = spawning
         try:
             try:
                 self._child = await asyncio.shield(spawning)
@@ -77,6 +79,8 @@ class HyprlandGuardian(WaylandGuardian):
                 self._reader = asyncio.create_task(self._read())
                 raise
             self._waiter = asyncio.create_task(self._child.wait())
+            if self._closing:
+                raise HyprlandGuardianError("hyprland_guardian_revoked")
             from .recovery import process_identity
 
             await self._identity(process_identity(self._child.pid))
@@ -130,8 +134,28 @@ class HyprlandGuardian(WaylandGuardian):
         return receipt
 
     async def close(self):
+        self._closing = True
+        if self._child is None and self._spawning is not None:
+            try:
+                self._child = await asyncio.shield(self._spawning)
+            except Exception:
+                # Failed exec never owns input; cancellation must propagate.
+                pass
+            if self._child is not None:
+                if self._waiter is None:
+                    self._waiter = asyncio.create_task(self._child.wait())
+                if self._reader is None:
+                    self._reader = asyncio.create_task(self._read())
         receipt = await super().close()
+        if self._child is None:
+            # No owner was ever spawned, so cleanup is vacuous, not a native
+            # acknowledgement. Expose that distinction explicitly to admission.
+            return {**receipt, "release_ack": True, "release_not_required": True,
+                    "native_release_acknowledged": False, "receiver_release_verified": False}
         return {**receipt,
                 "release_ack": bool(receipt.get("release_submitted")
                                     and self._last_terminal.get("release_acknowledged") is True),
+                "native_release_acknowledged": bool(receipt.get("release_submitted")
+                    and self._last_terminal.get("release_acknowledged") is True),
+                "release_not_required": False,
                 "receiver_release_verified": False}
