@@ -380,6 +380,7 @@ class ComputerController:
         # Commit the cleanup evidence BEFORE dropping the live adapter. Inactive
         # retained devices must not become indistinguishable from actual removal.
         self.store.record_cleanup(sid, result, clean=clean)
+        clean = clean and self.store.cleanup(sid)["complete"] is True
         if clean:
             self._live.pop(sid, None)
             grant = self.store.set_state(sid, state)
