@@ -142,3 +142,20 @@ acceptance still requires its own explicitly authorized test. The scratch-only
 `packaging/smoke-computer-install.sh` records systemctl calls inside a disposable
 container; it must never run on a real install. Its opt-in and empty-root checks
 are safety guards, not permission to run it inside an arbitrary production container.
+
+The desktop-mode smoke also starts the installed Drawing worker in its unchanged
+bubblewrap sandbox, obtains a nonblank 1280×960 native capture and a populated
+AT-SPI tree, verifies private namespaces/identity, and measures input release.
+It runs both before and after reinstall. This exercises installed Xvfb, D-Bus,
+Openbox, Xlib and xdotool instead of only checking executable names/imports.
+The precompiled Wayland guardian is separately executed without a connection and
+must reject missing arguments with exit 64; this does not qualify portal input.
+
+For these disposable tests only, Docker needs nested-user-namespace/private-proc
+support: `--security-opt seccomp=unconfined --security-opt apparmor=unconfined
+--security-opt systempaths=unconfined`. Do not use `--privileged`, host display or
+bus sockets, host devices, or a production container. Default Docker restrictions
+can prevent namespace/proc creation despite correctly installed packages; that
+is a failed runtime gate, not a passing package test or an instruction to weaken
+the production sandbox. Service activation remains stubbed, so systemd transient
+unit lifecycle and a user's real desktop still require their own validation.

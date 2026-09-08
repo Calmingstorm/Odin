@@ -1,6 +1,10 @@
 #!/bin/bash
 # Run ONLY in a disposable Debian container with an empty writable rootfs.
 # Actual APT/dpkg/pip hooks run; systemd service calls are recorded, not executed.
+# Desktop smoke uses the real fixed bwrap profile, with a private Xvfb, not host
+# sockets. Docker must allow nested user namespaces and private proc mounts:
+# --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+# --security-opt systempaths=unconfined (no --privileged or host devices needed).
 set -euo pipefail
 trap 'echo "PACKAGE_SMOKE_FAILURE line=$LINENO command=$BASH_COMMAND" >&2' ERR
 test -f /.dockerenv
@@ -12,6 +16,13 @@ package=${1:?absolute path to a test .deb}
 mode=${2:-headless}
 case "$mode" in headless|desktop) ;; *) exit 64 ;; esac
 export DEBIAN_FRONTEND=noninteractive
+assert_unavailable() {
+    # `! command -v ...` is exempt from errexit; it does not assert absence.
+    if command -v "$1"; then
+        echo "Unexpected installed desktop command: $1" >&2
+        exit 1
+    fi
+}
 mkdir -p /usr/local/bin
 cat > /usr/local/bin/systemctl <<'EOF'
 #!/bin/sh
@@ -41,7 +52,7 @@ if [ -n "${ODIN_LEGACY_PACKAGE:-}" ]; then
     apt-get install -y --no-install-recommends sudo
     apt-get install -y --no-install-recommends "$ODIN_LEGACY_PACKAGE"
     test ! -e /var/lib/odin/computer
-    ! command -v Xvfb
+    assert_unavailable Xvfb
     legacy_config=$(sha256sum /etc/odin/config.yml | cut -d' ' -f1)
     touch /tmp/package-active
 fi
@@ -65,7 +76,7 @@ test -f /usr/share/doc/odin/computer-use/PACKAGING.md
     'import PIL, Xlib, dbus_next; from importlib.resources import files; assert files("src.computer.runtime").joinpath("assets/services/org.a11y.Bus.service").is_file()'
 if [ "$mode" = headless ]; then
     for tool in Xvfb bwrap xdotool openbox inkscape gnome-shell; do
-        ! command -v "$tool"
+        assert_unavailable "$tool"
     done
 else
     for tool in Xvfb bwrap xdotool openbox drawing inkscape libreoffice; do
@@ -75,7 +86,9 @@ else
     status=0
     /usr/libexec/odin-computer-wayland-input || status=$?
     test "$status" -eq 64
-    ! command -v gnome-shell
+    assert_unavailable gnome-shell
+    timeout 90 /opt/odin/.venv/bin/python -I \
+        "$(dirname "$0")/smoke-computer-runtime.py"
 fi
 # Reinstallation exercises the actual upgrade hook and prior running state.
 printf 'package smoke evidence\n' > /var/lib/odin/computer/receipt
@@ -88,4 +101,8 @@ test "$(cat /var/lib/odin/computer/receipt)" = 'package smoke evidence'
 test "$before" = "$(sha256sum /etc/odin/config.yml | cut -d' ' -f1)"
 test ! -e /var/lib/odin/.package-service-state
 grep '^restart odin.service$' /tmp/package-systemctl.trace
-printf 'PACKAGE_SMOKE_PASS mode=%s fresh+upgrade imports assets state ownership no-desktop-activation\n' "$mode"
+if [ "$mode" = desktop ]; then
+    timeout 90 /opt/odin/.venv/bin/python -I \
+        "$(dirname "$0")/smoke-computer-runtime.py"
+fi
+printf 'PACKAGE_SMOKE_PASS mode=%s install+reinstall imports assets state ownership no-host-desktop-activation\n' "$mode"
