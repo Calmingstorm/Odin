@@ -23,6 +23,16 @@ class HyprlandScopeFailure(WaylandScopeFailure):  # noqa: N818
     """Static failure vocabulary only."""
 
 
+class HyprlandGeometryUnsettled(HyprlandScopeFailure):  # noqa: N818
+    """Authenticated identity evidence, never observation or input authority."""
+
+    def __init__(self, *, application, compositor, output):
+        super().__init__("window-geometry-unsettled")
+        self.application = dict(application)
+        self.compositor = dict(compositor)
+        self.output = dict(output)
+
+
 def _fail(reason="hyprland_scope_unavailable"):
     raise HyprlandScopeFailure(reason)
 
@@ -146,10 +156,14 @@ class HyprlandScopeProvider:
                 if data.count(b"\n") != 1 or not data.endswith(b"\n"):
                     _fail("hyprland_scope_reply_invalid")
                 row = json.loads(data, object_pairs_hook=_unique_object)
-                if type(row) is not dict or row.get("ok") is not True:
+                if type(row) is not dict:
                     _fail()
             if self._identity() != before:
                 _fail("hyprland_provider_owner_changed")
+            if row.get("ok") is not True and not (
+                    request.get("op") == "snapshot" and row.get("ok") is False
+                    and row.get("error") == "window-geometry-unsettled"):
+                _fail()
             return row
         except HyprlandScopeFailure:
             raise
@@ -160,6 +174,51 @@ class HyprlandScopeProvider:
             if connection is not None:
                 connection.close()
 
+    def _unsettled(self, row, name, started):
+        """Validate a narrow negative result without manufacturing a scope token."""
+        now = time.monotonic_ns()
+        measured = row.get("measured_monotonic_ns")
+        if (row.get("ok") is not False or row.get("error") != "window-geometry-unsettled"
+                or type(row.get("version")) is not int or row["version"] != 1
+                or row.get("locked") is not False or row.get("native_wayland") is not True
+                or "token" in row or "safe_focus" in row
+                or type(measured) is not int or not started <= measured <= now
+                or now - measured >= LEASE_NS or now - started >= LEASE_NS):
+            _fail("hyprland_scope_unknown_locked_or_stale")
+        output, focus = row.get("output"), row.get("focus")
+        if (type(output) is not dict or set(output) != {
+                "name", "x", "y", "width", "height", "pixel_width", "pixel_height",
+                "scale", "transform"} or output.get("name") != name
+                or type(focus) is not dict or set(focus) != {
+                    "pid", "uid", "wm_class", "parent_chain_verified"}
+                or focus.get("parent_chain_verified") is not True):
+            _fail("hyprland_scope_reply_invalid")
+        scale = output.get("scale")
+        if type(scale) not in {int, float} or not math.isfinite(scale) or not 0 < scale <= 16:
+            _fail("hyprland_scope_reply_invalid")
+        explicit = ExplicitOutput(
+            name=name, width=_integer(output, "pixel_width", 1, 16384),
+            height=_integer(output, "pixel_height", 1, 16384),
+            transform=_integer(output, "transform", 0, 7),
+            logical_x=_integer(output, "x", -(2**30), 2**30),
+            logical_y=_integer(output, "y", -(2**30), 2**30),
+            logical_width=_integer(output, "width", 1, 16384),
+            logical_height=_integer(output, "height", 1, 16384),
+        )
+        pid = _integer(focus, "pid", 2, 2**31 - 1)
+        uid = _integer(focus, "uid", 0, 2**32 - 1)
+        if uid != self.expected_uid or not _text(focus.get("wm_class")):
+            _fail("hyprland_application_identity_unavailable")
+        try:
+            application = _process_identity(pid, uid)
+        except (OSError, RuntimeError, ValueError, IndexError, StopIteration):
+            _fail("hyprland_application_identity_unavailable")
+        compositor = self._identity()
+        if time.monotonic_ns() - started >= LEASE_NS:
+            _fail("hyprland_scope_unknown_locked_or_stale")
+        raise HyprlandGeometryUnsettled(
+            application=application, compositor=compositor, output=asdict(explicit))
+
     async def snapshot(self, source_metadata):
         if type(source_metadata) is not dict:
             _fail("hyprland_explicit_output_required")
@@ -168,8 +227,10 @@ class HyprlandScopeProvider:
             _fail("hyprland_explicit_output_required")
         async with self._lock:
             started = time.monotonic_ns()
-            first = _observation(
-                await self._request({"op": "snapshot", "output_name": name}), name, started)
+            row = await self._request({"op": "snapshot", "output_name": name})
+            if row.get("ok") is False:
+                self._unsettled(row, name, started)
+            first = _observation(row, name, started)
             if first["uid"] != self.expected_uid:
                 _fail("hyprland_application_identity_unavailable")
             try:

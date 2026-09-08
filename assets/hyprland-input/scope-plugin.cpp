@@ -392,12 +392,37 @@ struct State {
         b.pos = w->m_realPosition->value(); b.size = w->m_realSize->value();
         b.outputPos = m->m_position; b.outputSize = m->m_size; b.pixelSize = m->m_pixelSize;
         b.scale = m->m_scale; b.transform = int(m->m_transform); b.title = w->m_title; b.app = w->m_class; b.revision = revision;
-        for (double v : {b.pos.x, b.pos.y, b.size.x, b.size.y, b.outputPos.x, b.outputPos.y, b.outputSize.x, b.outputSize.y, b.pixelSize.x, b.pixelSize.y})
+        for (double v : {b.outputPos.x, b.outputPos.y, b.outputSize.x, b.outputSize.y, b.pixelSize.x, b.pixelSize.y})
             if (!std::isfinite(v) || std::floor(v) != v || std::abs(v) > 1000000) return status(false, "fractional-or-unknown-geometry");
+        bool unsettled = false;
+        for (double v : {b.pos.x, b.pos.y, b.size.x, b.size.y}) {
+            if (!std::isfinite(v) || std::abs(v) > 1000000) return status(false, "fractional-or-unknown-geometry");
+            unsettled |= std::floor(v) != v;
+        }
+        if (b.outputSize.x <= 0 || b.outputSize.y <= 0 || b.pixelSize.x <= 0 || b.pixelSize.y <= 0 ||
+            !std::isfinite(b.scale) || b.scale <= 0 || b.scale > 16 || b.transform < 0 || b.transform > 7)
+            return status(false, "fractional-or-unknown-geometry");
         if (!same(b) || b.pid <= 1 || b.app.empty() || b.size.x <= 0 || b.size.y <= 0 ||
             b.pos.x < b.outputPos.x || b.pos.y < b.outputPos.y ||
             b.pos.x + b.size.x > b.outputPos.x + b.outputSize.x || b.pos.y + b.size.y > b.outputPos.y + b.outputSize.y)
             return status(false, "focus-not-contained-or-ambiguous");
+        if (unsettled) {
+            if (b.uid != getuid()) return status(false, "foreign-or-unknown-toplevel-provenance");
+            // Authenticated observation-only negative: never create a scope token.
+            auto j = status(false, "window-geometry-unsettled");
+            put(j.get(), "measured_monotonic_ns", ns()); put(j.get(), "locked", false);
+            put(j.get(), "native_wayland", true);
+            auto o = obj(); put(o.get(), "name", m->m_name);
+            put(o.get(), "x", int64_t(b.outputPos.x)); put(o.get(), "y", int64_t(b.outputPos.y));
+            put(o.get(), "width", int64_t(b.outputSize.x)); put(o.get(), "height", int64_t(b.outputSize.y));
+            put(o.get(), "pixel_width", int64_t(b.pixelSize.x)); put(o.get(), "pixel_height", int64_t(b.pixelSize.y));
+            put(o.get(), "scale", double(b.scale)); put(o.get(), "transform", int64_t(b.transform));
+            json_object_object_add(j.get(), "output", o.release());
+            auto f = obj(); put(f.get(), "pid", int64_t(b.pid)); put(f.get(), "uid", int64_t(b.uid));
+            put(f.get(), "wm_class", b.app); put(f.get(), "parent_chain_verified", true);
+            json_object_object_add(j.get(), "focus", f.release());
+            return j;
+        }
         b.token = nonce(); b.measured = ns();
         std::erase_if(snapshots, [](const auto& entry) { return ns() - entry.second.measured >= 250000000; });
         if (snapshots.size() >= 64) return status(false, "snapshot-capacity");

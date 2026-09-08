@@ -29,7 +29,7 @@ from .hyprland_identity import (
     pin_connections,
     revalidate,
 )
-from .hyprland_scope import HyprlandScopeProvider
+from .hyprland_scope import HyprlandGeometryUnsettled, HyprlandScopeProvider
 from .profile import validate_session
 from .wayland_backend import WaylandRuntimeBackend, _digest, _scope_binding
 from .wayland_guardian import trusted_binary
@@ -467,9 +467,48 @@ class HyprlandRuntimeBackend:
             raise ComputerError("hyprland_capture_scope_changed")
         return rendered, last_scope, captured_at
 
+    async def _capture_observation(self, crop=None):
+        """Capture-only settling; never renew input authority or retry injection."""
+        self._active()
+        generation = self._generation
+        application = copy.deepcopy(self._application_pin)
+        output = self._output_pin
+        compositor = copy.deepcopy((self._scope or {}).get("compositor"))
+        deadline = time.monotonic() + 1.0
+        # A failed capture must not leave an older frame usable for input.
+        self._frame = None
+        try:
+            async with asyncio.timeout_at(deadline):
+                for attempt in range(51):
+                    self._active()
+                    if generation != self._generation:
+                        raise ComputerError("hyprland_generation_revoked")
+                    try:
+                        return await self._capture(crop)
+                    except HyprlandGeometryUnsettled as exc:
+                        if application is None or output is None or compositor is None:
+                            raise
+                        if exc.application != application:
+                            raise ComputerError("hyprland_original_application_changed") from None
+                        if exc.compositor != compositor:
+                            raise ComputerError("hyprland_provider_owner_changed") from None
+                        if self._checked_output({"output": exc.output}) != output:
+                            raise ComputerError("hyprland_explicit_output_changed") from None
+                    except ComputerError as exc:
+                        # This reason is emitted only after fresh before/after proofs.
+                        if (str(exc) != "hyprland_capture_scope_changed"
+                                or application is None or output is None):
+                            raise
+                    if attempt == 50:
+                        break
+                    await asyncio.sleep(0.02)
+        except TimeoutError:
+            raise ComputerError("hyprland_capture_settle_budget_exhausted") from None
+        raise ComputerError("hyprland_capture_settle_budget_exhausted")
+
     async def observe(self, crop=None):
         async with self._lock:
-            rendered, scope, captured_at = await self._capture(crop)
+            rendered, scope, captured_at = await self._capture_observation(crop)
             self._check_scope(scope)
             fingerprint = _digest([self._selected, self._generation, _binding(scope)])
             if fingerprint != self._fingerprint:
@@ -615,7 +654,7 @@ class HyprlandRuntimeBackend:
                 await asyncio.gather(watchdog, return_exceptions=True)
                 self._jobs.discard(watchdog)
             try:
-                after, after_scope, _ = await self._capture(self._crop)
+                after, after_scope, _ = await self._capture_observation(self._crop)
                 receipt["postcondition"].update(
                     status="observed", method="raster_digest_after_release",
                     target_application_matches=(scope["application"] == after_scope["application"]
@@ -630,8 +669,21 @@ class HyprlandRuntimeBackend:
                     receipt["postcondition"]["focused_dialog_transition"] = {
                         "method": "native_same_process_focused_dialog_transition",
                         "kind": "dialog_candidate", "newly_mapped": "unmeasured"}
-            except Exception:
-                pass
+            except Exception as exc:
+                # Keep static protocol diagnostics, never arbitrary exception text.
+                reason = str(exc)
+                safe_reasons = {
+                    "hyprland_capture_settle_budget_exhausted", "hyprland_capture_scope_changed",
+                    "hyprland_original_application_changed", "hyprland_explicit_output_changed",
+                    "hyprland_provider_owner_changed", "hyprland_session_revoked",
+                    "hyprland_generation_revoked", "hyprland_scope_unavailable",
+                    "hyprland_scope_reply_invalid", "hyprland_scope_unknown_locked_or_stale",
+                    "hyprland_application_identity_unavailable", "hyprland_capture_helper_failed",
+                    "hyprland_capture_transport_failed", "hyprland_parent_chain_unverified",
+                    "hyprland_focus_outside_source", "window-geometry-unsettled",
+                }
+                receipt["postcondition"]["reason"] = (
+                    reason if reason in safe_reasons else "hyprland_postcapture_unavailable")
             # Controller delivers the next observation and checks region/stroke effects.
             return receipt
 
