@@ -1,4 +1,5 @@
 """Harmless deterministic regressions for independent Wayland review findings."""
+
 import asyncio
 from types import SimpleNamespace
 
@@ -84,9 +85,12 @@ async def test_every_cleanup_resource_attempted_when_one_fails(adapter, failure)
         calls.append("portal")
         if failure == "portal":
             raise RuntimeError("fixture")
-        return {"process_reaped": True, "session_close_acknowledged": True,
-                "connection_closed": True,
-                "cleanup_errors": ["TimeoutError"] if failure == "portal_receipt" else []}
+        return {
+            "process_reaped": True,
+            "session_close_acknowledged": True,
+            "connection_closed": True,
+            "cleanup_errors": ["TimeoutError"] if failure == "portal_receipt" else [],
+        }
 
     async def close_scope():
         calls.append("scope")
@@ -117,8 +121,11 @@ async def test_cancelled_detach_continues_all_owned_cleanup(adapter):
 
     async def portal_close():
         calls.append("portal")
-        return {"process_reaped": True, "session_close_acknowledged": True,
-                "connection_closed": True}
+        return {
+            "process_reaped": True,
+            "session_close_acknowledged": True,
+            "connection_closed": True,
+        }
 
     async def scope_close():
         calls.append("scope")
@@ -150,30 +157,45 @@ async def test_backend_action_receipt_survives_controller_verification(tmp_path,
     try:
         session = await controller.session(ctx, {"operation": "start"})
         assert session["input_supported"], session.get("input_admission")
-        observation = await controller.observe(ctx, {"session_id": session["session_id"],
-                                                     "generation": session["generation"]})
+        observation = await controller.observe(
+            ctx, {"session_id": session["session_id"], "generation": session["generation"]}
+        )
         live = controller._live[session["session_id"]]
         private = live.observations[observation["observation_id"]]
         await controller.validate_observation_delivery(
-            ctx, private.frame_metadata, hashlib.sha256(observation["image_bytes"]).hexdigest())
-        result = await controller.act(ctx, {
-            "session_id": session["session_id"], "generation": session["generation"],
-            "observation_id": observation["observation_id"], "action_id": "fixture-action",
-            "consent_generation": private.source.consent_generation,
-            "source_id": private.source.source_id,
-            "source_revision": private.source.source_revision,
-            "operation": "type", "text": "fixture", "expect": {"type": "visual_change"},
-        })
+            ctx, private.frame_metadata, hashlib.sha256(observation["image_bytes"]).hexdigest()
+        )
+        result = await controller.act(
+            ctx,
+            {
+                "session_id": session["session_id"],
+                "generation": session["generation"],
+                "observation_id": observation["observation_id"],
+                "action_id": "fixture-action",
+                "consent_generation": private.source.consent_generation,
+                "source_id": private.source.source_id,
+                "source_revision": private.source.source_revision,
+                "operation": "type",
+                "text": "fixture",
+                "expect": {"type": "visual_change"},
+            },
+        )
         # Inert fake produces unchanged pixels: not_satisfied, not unknown or a
         # fabricated visual success. Execution evidence still survives transport.
         assert result["status"] == "not_satisfied"
-        assert result["execution"] == {"injected": True, "released": True}
-        paused = await controller.session(ctx, {"operation": "pause",
-                                                "session_id": session["session_id"]})
+        assert result["execution"] == {"sent": True, "injected": True, "released": True}
+        paused = await controller.session(
+            ctx, {"operation": "pause", "session_id": session["session_id"]}
+        )
         assert paused["state"] == "paused"
-        resumed = await controller.session(ctx, {"operation": "resume",
-                                                 "session_id": session["session_id"],
-                                                 "generation": paused["generation"]})
+        resumed = await controller.session(
+            ctx,
+            {
+                "operation": "resume",
+                "session_id": session["session_id"],
+                "generation": paused["generation"],
+            },
+        )
         assert resumed["state"] == "active"
         assert resumed["input_supported"] is True
         assert resumed["consent_generation"] > session["consent_generation"]

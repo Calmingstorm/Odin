@@ -1,4 +1,5 @@
 """Real guardian + real xkbcommon, fake EI only. Never opens a desktop."""
+
 import importlib.util
 from pathlib import Path
 
@@ -22,8 +23,9 @@ def test_double_click_release_order(guardian, button):
     assert g.inputs() == [["BUTTON", str(button), str(d)] for d in (1, 0, 1, 0)]
 
 
-@pytest.mark.parametrize("direction,axis", [("up", "0 -120"), ("down", "0 120"),
-                                           ("left", "-120 0"), ("right", "120 0")])
+@pytest.mark.parametrize(
+    "direction,axis", [("up", "0 -120"), ("down", "0 120"), ("left", "-120 0"), ("right", "120 0")]
+)
 def test_scroll(guardian, direction, axis):
     g = guardian()
     g.send(f"B 2000\nW {direction} 3 12 13\n".encode())
@@ -46,14 +48,26 @@ def test_unicode_active_german_layout(guardian, monkeypatch):
     g = guardian()
     g.send(f"B 2000\nT {'äÖ€'.encode().hex()}\n".encode())
     g.event("action_done")
-    assert g.inputs()[:6] == [["KEY", str(key), str(down)] for key, down in [
-        (40, 1), (40, 0), (42, 1), (39, 1), (39, 0), (42, 0),
-    ]]
+    assert g.inputs()[:6] == [
+        ["KEY", str(key), str(down)]
+        for key, down in [
+            (40, 1),
+            (40, 0),
+            (42, 1),
+            (39, 1),
+            (39, 0),
+            (42, 0),
+        ]
+    ]
     # XKB may expose Level3 via the synthetic LVL3 key or physical RALT.
     level3 = g.inputs()[6][1]
     assert level3 in {"84", "100"}
-    assert g.inputs()[6:] == [["KEY", level3, "1"], ["KEY", "18", "1"],
-                              ["KEY", "18", "0"], ["KEY", level3, "0"]]
+    assert g.inputs()[6:] == [
+        ["KEY", level3, "1"],
+        ["KEY", "18", "1"],
+        ["KEY", "18", "0"],
+        ["KEY", level3, "0"],
+    ]
 
 
 def test_unsupported_whole_chunk_no_partial_input(guardian):
@@ -85,8 +99,9 @@ def test_unsupported_key_is_precise_and_sends_nothing(guardian, chord):
     assert not g.inputs()
 
 
-@pytest.mark.parametrize("command", ["W up 0 12 13", "W up 21 12 13", "W diagonal 1 12 13",
-                                     "Q 272 -1 13", "Q 280 12 13"])
+@pytest.mark.parametrize(
+    "command", ["W up 0 12 13", "W up 21 12 13", "W diagonal 1 12 13", "Q 272 -1 13", "Q 280 12 13"]
+)
 def test_pointer_validation_prevents_partial_dispatch(guardian, command):
     g = guardian()
     g.send(f"B 2000\n{command}\n".encode())
@@ -113,12 +128,26 @@ async def test_transport_rejection_is_detailed_and_does_not_close():
     g._child = Mock(returncode=None)
     g._send = AsyncMock()
     g.close = AsyncMock()
-    row = {"event": "action_rejected", "reason": "unsupported_character",
-           "characters": [{"index": 0, "codepoint": 128578}], "input_was_sent": False}
+    row = {
+        "event": "action_rejected",
+        "reason": "unsupported_character",
+        "characters": [{"index": 0, "codepoint": 128578}],
+        "input_was_sent": False,
+    }
     g._events.put_nowait(row)
     with pytest.raises(WaylandGuardianError, match="unsupported_character") as error:
         await g.act("T f09f9982")
-    assert error.value.details == row
+    assert error.value.details == {
+        **row,
+        "diagnostics": {
+            "phase": "preflight",
+            "reason": "unsupported_character",
+            "release": "confirmed",
+            "steps_completed": 0,
+            "steps_planned": 0,
+        },
+    }
+    g._send.assert_awaited_once_with("B 2000\nT f09f9982\n")
     assert not g._active
     g.close.assert_not_awaited()
 

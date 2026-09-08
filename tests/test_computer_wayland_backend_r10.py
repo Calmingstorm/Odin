@@ -23,9 +23,7 @@ def test_r10_config_refuses(kwargs):
         m.WaylandSessionConfig(**kwargs)
 
 
-@pytest.mark.parametrize(
-    "kwargs", [dict(environment="owned"), dict(enabled=1)]
-)
+@pytest.mark.parametrize("kwargs", [dict(environment="owned"), dict(enabled=1)])
 def test_r10_backend_constructor_refuses(kwargs):
     with pytest.raises(ComputerError):
         m.WaylandRuntimeBackend(config=m.WaylandSessionConfig("unix:path=/x", 1), **kwargs)
@@ -144,22 +142,42 @@ async def test_r10_grounded_command_refusals(adapter, monkeypatch, kind, extra, 
 
 async def test_r10_commands_and_shape_validation(adapter, monkeypatch):
     await adapter.start("session1")
+    adapter._guardian.ready = {"timed_polyline": True}
     frame = await adapter.observe()
     assert adapter._command(action(frame, "key", chord="ctrl+a"), frame, SCOPE) == "J ctrl+a"
     assert adapter._command(action(frame, "click", x=10, y=10), frame, SCOPE).startswith(
         "P 272 10."
     )
-    assert adapter._command(
-        action(frame, "polyline", points=[[10, 10], [11, 11]], duration=0.1), frame, SCOPE
-    ).startswith("D 272 2 ")
+    assert (
+        adapter._command(
+            action(frame, "polyline", points=[[10, 10], [11, 11]], duration=0.1), frame, SCOPE
+        )
+        == "L 272 2 100 10.50000000 10.50000000 11.50000000 11.50000000"
+    )
     for request, error in [
         (action(frame) | {"extra": 1}, "unsupported"),
-        (action(frame) | {"expected": {}}, "postcondition"),
+        (action(frame) | {"expected": {}}, "invalid_arguments"),
+        (action(frame) | {"expected": {"type": "dialog_appeared"}}, "postcondition"),
         (action(frame, "key", chord="invalid+key"), "unsupported_key"),
     ]:
         with pytest.raises(ComputerError, match=error):
             adapter._command(request, frame, SCOPE)
     await adapter.stop()
+
+
+@pytest.mark.parametrize("ready", [{}, {"timed_polyline": False}])
+async def test_timed_polyline_requires_native_readiness(adapter, ready):
+    await adapter.start("session1")
+    try:
+        adapter._guardian.ready = ready
+        frame = await adapter.observe()
+        with pytest.raises(ComputerError, match="wayland_unsupported_grounded_action"):
+            adapter._command(
+                action(frame, "polyline", points=[[10, 10], [11, 11]], duration=0.1), frame, SCOPE
+            )
+        assert adapter._guardian.commands == []
+    finally:
+        await adapter.stop()
 
 
 @pytest.mark.parametrize("fault", ["scope", "generation", "provider"])

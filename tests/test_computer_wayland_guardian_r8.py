@@ -3,6 +3,7 @@
 No display/socket/session is opened. These tests are source safety regressions,
 not compositor/toolkit release qualification. Reuses the isolated pipe fixture.
 """
+
 from __future__ import annotations
 
 import importlib.util
@@ -25,9 +26,13 @@ assert spec and spec.loader
 fixture = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(fixture)
 
-HEADER = fixture.HEADER.replace(
-    "EI_EVENT_DEVICE_PAUSED };", "EI_EVENT_DEVICE_PAUSED, EI_EVENT_KEYBOARD_MODIFIERS };"
-).replace("#endif", """
+HEADER = (
+    fixture.HEADER.replace(
+        "EI_EVENT_DEVICE_PAUSED };", "EI_EVENT_DEVICE_PAUSED, EI_EVENT_KEYBOARD_MODIFIERS };"
+    )
+    .replace(
+        "#endif",
+        """
 struct ei_keymap;
 #define EI_DEVICE_CAP_SCROLL 4
 void ei_device_scroll_discrete(struct ei_device *, int32_t, int32_t);
@@ -41,39 +46,42 @@ uint32_t ei_event_keyboard_get_xkb_mods_latched(struct ei_event *);
 uint32_t ei_event_keyboard_get_xkb_mods_locked(struct ei_event *);
 uint32_t ei_event_keyboard_get_xkb_group(struct ei_event *);
 #endif
-""").replace("#include <stdint.h>", "#include <stdint.h>\n#include <stddef.h>")
+""",
+    )
+    .replace("#include <stdint.h>", "#include <stdint.h>\n#include <stddef.h>")
+)
 
-LIBRARY = fixture.LIBRARY.replace("cap==1 || cap==2", "cap==1 || cap==2 || cap==4").replace(
-    '#include "libei.h"', '#include "libei.h"\n#include <xkbcommon/xkbcommon.h>'
-).replace(
-    "static struct ei_region region;",
-    "static struct ei_region region, second; static int region_gone, changed;"
-).replace(
-    "static uint64_t clock_us=1000000;", "static uint64_t clock_us=1000000;"
-).replace(
-    "clock_us+=5000;", "clock_us+=1000;"
-).replace(
-    "(void)d;(void)x;(void)y;", '(void)d;emit("MOVE %.3f %.3f\\n",x,y);'
-).replace(
-    "(void)d; return n==0 ? &region : NULL;",
-    '(void)d; if(region_gone)return NULL; if(n==1 && getenv("FAKE_MULTI"))return &second; '
-    'return n==0 ? &region : NULL;'
-).replace(
-    '(void)r; const char *mode=getenv("FAKE_MAPPING");',
-    'if(r==&second){return getenv("FAKE_DUPLICATE")?"source-1":"source-2";} '
-    'const char *mode=getenv("FAKE_MAPPING");'
-).replace(
-    "(void)r;return 100;", "return r==&second?1000:100;"
-).replace(
-    "(void)r;return 800;", "(void)r;return changed?799:800;"
-).replace(
-    "if(signal=='D') add(EI_EVENT_DEVICE_REMOVED,&keyboard);",
-    """if(signal=='D') add(EI_EVENT_DEVICE_REMOVED,&keyboard);
+LIBRARY = (
+    fixture.LIBRARY.replace("cap==1 || cap==2", "cap==1 || cap==2 || cap==4")
+    .replace('#include "libei.h"', '#include "libei.h"\n#include <xkbcommon/xkbcommon.h>')
+    .replace(
+        "static struct ei_region region;",
+        "static struct ei_region region, second; static int region_gone, changed;",
+    )
+    .replace("static uint64_t clock_us=1000000;", "static uint64_t clock_us=1000000;")
+    .replace("clock_us+=5000;", "clock_us+=1000;")
+    .replace("(void)d;(void)x;(void)y;", '(void)d;emit("MOVE %.3f %.3f\\n",x,y);')
+    .replace(
+        "(void)d; return n==0 ? &region : NULL;",
+        '(void)d; if(region_gone)return NULL; if(n==1 && getenv("FAKE_MULTI"))return &second; '
+        "return n==0 ? &region : NULL;",
+    )
+    .replace(
+        '(void)r; const char *mode=getenv("FAKE_MAPPING");',
+        'if(r==&second){return getenv("FAKE_DUPLICATE")?"source-1":"source-2";} '
+        'const char *mode=getenv("FAKE_MAPPING");',
+    )
+    .replace("(void)r;return 100;", "return r==&second?1000:100;")
+    .replace("(void)r;return 800;", "(void)r;return changed?799:800;")
+    .replace(
+        "if(signal=='D') add(EI_EVENT_DEVICE_REMOVED,&keyboard);",
+        """if(signal=='D') add(EI_EVENT_DEVICE_REMOVED,&keyboard);
     if(signal=='G') region_gone=1;
     if(signal=='Z') changed=1;
     if(signal=='A') add(EI_EVENT_DEVICE_RESUMED,&pointer);
-    if(signal=='L') add(EI_EVENT_KEYBOARD_MODIFIERS,&keyboard);"""
-) + r"""
+    if(signal=='L') add(EI_EVENT_KEYBOARD_MODIFIERS,&keyboard);""",
+    )
+    + r"""
 struct ei_keymap { int fd; size_t size; };
 void ei_device_scroll_discrete(struct ei_device *d,int32_t x,int32_t y) {
  (void)d;emit("SCROLL %d %d\n",x,y);
@@ -101,6 +109,7 @@ uint32_t ei_event_keyboard_get_xkb_mods_latched(struct ei_event *e){(void)e;retu
 uint32_t ei_event_keyboard_get_xkb_mods_locked(struct ei_event *e){(void)e;return 0;}
 uint32_t ei_event_keyboard_get_xkb_group(struct ei_event *e){(void)e;return 0;}
 """
+)
 
 
 @pytest.fixture(scope="module")
@@ -115,9 +124,13 @@ def binaries(tmp_path_factory):
     result = []
     for faults in (False, True):
         binary = root / ("faults" if faults else "production")
-        subprocess.run(flags + (["-DWAYLAND_FIXTURE_FAULTS"] if faults else []) + [
-            str(SOURCE), str(root / "fake.c"), *libraries, "-lm", "-o", str(binary)
-        ], check=True, timeout=30)
+        subprocess.run(
+            flags
+            + (["-DWAYLAND_FIXTURE_FAULTS"] if faults else [])
+            + [str(SOURCE), str(root / "fake.c"), *libraries, "-lm", "-o", str(binary)],
+            check=True,
+            timeout=30,
+        )
         result.append(binary)
     return result
 
@@ -198,8 +211,10 @@ def test_readiness_and_single_fd_owner(guardian):
     assert g.finish()[0] == 0
 
 
-@pytest.mark.parametrize("ending", [
-    b"R\n", b"C\n", b"R\nH 31 273 160 260 2000\n", b"C\nH 31 273 160 260 2000\n", None, "signal"])
+@pytest.mark.parametrize(
+    "ending",
+    [b"R\n", b"C\n", b"R\nH 31 273 160 260 2000\n", b"C\nH 31 273 160 260 2000\n", None, "signal"],
+)
 def test_legacy_exact_ledger_and_fence(guardian, ending):
     g = guardian()
     g.hold()
@@ -211,8 +226,14 @@ def test_legacy_exact_ledger_and_fence(guardian, ending):
         g.send(ending)
     assert g.finish()[0] == 0
     assert g.inputs() == [
-        ["BUTTON", "272", "1"], ["KEY", "30", "1"], ["KEY", "30", "0"], ["BUTTON", "272", "0"]]
-    release = next(i for i, s in enumerate(g.lines) if s.startswith("BUTTON 272 0"))
+        ["BUTTON", "272", "1"],
+        ["KEY", "30", "1"],
+        ["BUTTON", "272", "0"],
+        ["KEY", "30", "0"],
+    ]
+    # End a constrained drag before releasing keyboard modifiers; both owned
+    # releases must precede every stop-emulating fence.
+    release = next(i for i, s in enumerate(g.lines) if s.startswith("KEY 30 0"))
     assert all(i > release for i, s in enumerate(g.lines) if s.startswith("STOP"))
 
 
@@ -226,11 +247,30 @@ def test_independent_lease_nonblocking_observer(guardian, output):
     assert 60000 <= int(keys[1][3]) - int(keys[0][3]) <= 65000
 
 
-@pytest.mark.parametrize("command", [
-    b"F\n", b"B 2001\n", b"B 0\n", b"B -1\n", b"B 9 extra\n", b"B 100\nB 100\n",
-    b"B 100\nM nan 0\n", b"B 100\nM 800 1\n", b"B 100\nM 1 600\n", b"B 100\nP 271 0 0\n",
-    b"B 100\nK 2 30 30\n", b"B 100\nD 272 257\n", b"B 100\nT 00\n", b"B 100\nT zz\n",
-    b"B 100\nT 7f\n", b"B 100\nT " + b"61" * 257 + b"\n", b"\x00", b"x" * 32768, b"\r\n"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        b"F\n",
+        b"B 2001\n",
+        b"B 0\n",
+        b"B -1\n",
+        b"B 9 extra\n",
+        b"B 100\nB 100\n",
+        b"B 100\nM nan 0\n",
+        b"B 100\nM 800 1\n",
+        b"B 100\nM 1 600\n",
+        b"B 100\nP 271 0 0\n",
+        b"B 100\nK 2 30 30\n",
+        b"B 100\nD 272 257\n",
+        b"B 100\nT 00\n",
+        b"B 100\nT zz\n",
+        b"B 100\nT 7f\n",
+        b"B 100\nT " + b"61" * 257 + b"\n",
+        b"\x00",
+        b"x" * 32768,
+        b"\r\n",
+    ],
+)
 def test_malformed_never_injects(guardian, command):
     g = guardian()
     g.send(command)
@@ -243,7 +283,12 @@ def test_bad_repeated_hold_releases_original(guardian):
     g.hold()
     g.send(b"H 31 273 150 250 100\n")
     assert g.finish()[0] == 2
-    assert g.inputs()[-2:] == [["KEY", "30", "0"], ["BUTTON", "272", "0"]]
+    assert g.inputs() == [
+        ["BUTTON", "272", "1"],
+        ["KEY", "30", "1"],
+        ["BUTTON", "272", "0"],
+        ["KEY", "30", "0"],
+    ]
 
 
 def test_multiaction_same_ei_context(guardian):
@@ -368,13 +413,32 @@ def test_idle_heartbeat_not_permanent_authority(guardian):
 
 
 @pytest.mark.parametrize(
-    "program", [b"D 272 256 " + b"10 20 " * 255 + b"30 40", b"T " + b"61" * 256])
+    "program", [b"D 272 256 " + b"10 20 " * 255 + b"30 40", b"T " + b"61" * 256]
+)
 def test_maximum_program_completes_within_nonrenewed_lease(guardian, program):
     g = guardian()
     g.send(b"B 2000\n" + program + b"\n")
     done = g.event("action_done")
     begun = next(r for r in g.receipts if r["event"] == "begun")
-    assert done["monotonic_us"] - begun["monotonic_us"] < 2000000
+    steps = 258 if program.startswith(b"D ") else 512
+    assert done == {
+        "event": "action_done",
+        "reason": "completed",
+        "input_was_sent": True,
+        "diagnostics": {
+            "phase": "complete",
+            "steps_planned": steps,
+            "steps_completed": steps,
+            "release": "confirmed",
+            "reason": "completed",
+        },
+    }
+    # action_done carries bounded progress, not a clock. The native fake logs
+    # stop-emulating after owned releases on the same nonrenewed EI clock.
+    stopped = [row.split() for row in g.lines if row.startswith("STOP ")]
+    assert len(stopped) == 1
+    assert stopped[0][1] == ("1" if program.startswith(b"D ") else "2")
+    assert 0 <= int(stopped[0][-1]) - begun["monotonic_us"] < 2000000
     g.send(b"R\n")
     assert g.finish()[0] == 0
 
@@ -418,7 +482,8 @@ def test_named_modifier_follows_current_caps_control_swap(guardian, monkeypatch)
 
 
 @pytest.mark.parametrize(
-    "chord", [b"ctrl+NotAKey", b"ctrl+ctrl+a", b"hyper+a", b"ctrl+", b"ctrl++a"])
+    "chord", [b"ctrl+NotAKey", b"ctrl+ctrl+a", b"hyper+a", b"ctrl+", b"ctrl++a"]
+)
 def test_named_chord_refuses_unknown_or_malformed(guardian, chord):
     g = guardian()
     g.send(b"B 1000\nJ " + chord + b"\n")

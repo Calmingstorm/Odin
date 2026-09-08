@@ -103,8 +103,18 @@ async def test_r10_inactive_and_failed_action_cleanup():
     guardian._child = NS(returncode=None)
     guardian._send = AsyncMock(side_effect=OSError("pipe"))
     guardian.close = AsyncMock()
-    with pytest.raises(OSError):
+    with pytest.raises(m.WaylandGuardianError, match="wayland_guardian_input_path_lost") as error:
         await guardian.act("M 1 2")
+    assert error.value.details == {
+        "input_was_sent": None,
+        "diagnostics": {
+            "phase": "dispatch",
+            "steps_planned": 0,
+            "steps_completed": 0,
+            "release": "unknown",
+            "reason": "wayland_guardian_input_path_lost",
+        },
+    }
     guardian.close.assert_awaited_once()
 
 
