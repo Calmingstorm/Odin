@@ -38,7 +38,7 @@ not recoverable from the generic stored receipt and is not claimed proven.
 
 ## Handoff boundary
 
-Candidate for Claudia's protected deployment and normal-turn draw. Rebuild and
+Candidate for the operator's protected deployment and normal-turn draw. Rebuild and
 install `odin-hyprland-input`; a Python-only checkout would leave the native fixes
 uninstalled. The scope plugin source/build identity is unchanged, so no plugin
 reload is needed. No deployment, service restart, input, capture, config/data

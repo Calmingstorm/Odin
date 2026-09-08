@@ -1102,22 +1102,34 @@ class TestRaceFreeHelperArms:
     async def test_pidfd_exited_true_after_exit(self):
         """The positive arm: a pidfd polls readable once its process is
         gone (the loop's completion signal)."""
+        import sys
+
         import src.tools.process_manager as pm
 
-        proc = await asyncio.create_subprocess_shell(
-            "true", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
+        # A child running `true` can exit and be reaped before pidfd_open.
+        # Pin a child blocked on our pipe, then explicitly permit its exit.
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-c", "import sys; sys.stdin.buffer.read()",
+            stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, start_new_session=True,
         )
-        fd = os.pidfd_open(proc.pid)
+        fd = None
         try:
-            await proc.wait()
+            fd = os.pidfd_open(proc.pid)
+            assert pm._pidfd_exited(fd) is False
+            proc.stdin.close()
+            await asyncio.wait_for(proc.wait(), timeout=5)
             for _ in range(30):
                 if pm._pidfd_exited(fd):
                     break
                 await asyncio.sleep(0.1)
             assert pm._pidfd_exited(fd) is True
         finally:
-            os.close(fd)
+            if proc.returncode is None:
+                proc.kill()
+            await proc.wait()
+            if fd is not None:
+                os.close(fd)
 
 
 class TestSessionFenceEscapes:

@@ -91,6 +91,7 @@ def test_sanitization_is_nonmutating_and_does_not_copy_private_fields():
 async def test_action_exception_identity_and_safe_journal(
     monkeypatch, caplog, error_kind, malformed,
 ):
+    monkeypatch.setattr(module.time, "monotonic_ns", lambda: 1_000_000_000)
     guardian = module.HyprlandGuardian("/never/executed", os.getuid())
     guardian._scope_deadline = time.monotonic_ns() + 250_000_000
     row = terminal()
@@ -145,6 +146,7 @@ async def test_native_receipt_roundtrip_does_not_promote_execution(normal, monke
 
 
 async def test_invalid_native_failure_is_not_attached_or_logged(monkeypatch, caplog):
+    monkeypatch.setattr(module.time, "monotonic_ns", lambda: 1_000_000_000)
     guardian = module.HyprlandGuardian("/never/executed", os.getuid())
     guardian._scope_deadline = time.monotonic_ns() + 250_000_000
     guardian._last_terminal = {

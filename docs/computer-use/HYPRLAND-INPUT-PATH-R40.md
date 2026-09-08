@@ -103,4 +103,4 @@ diagnosis; zero orphaned Odin devices remained.
 
 This report does not claim the original avatar drawing completed, arbitrary
 popup/application qualification, or a successful sustained live acceptance run.
-Claudia owns the post-deployment reconciliation and acceptance test.
+The deployment operator owns the post-deployment reconciliation and acceptance test.

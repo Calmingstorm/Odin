@@ -55,5 +55,5 @@ against a compositor. A read-only peer review checked the patch; its malformed
 diagnostic-type finding was corrected before push.
 
 No test suite or CI run this round, per the fast-loop brief. Live retest belongs
-to Claudia. No deployment, restart, desktop input, scope arming, config changes,
+to the deployment operator. No deployment, restart, desktop input, scope arming, config changes,
 or database writes performed by Odin.
