@@ -514,15 +514,35 @@ def test_attached_bus_loading_is_existing_only_and_owner_bound(monkeypatch, fail
         assert calls[-1] == "closed"
 
 
-def test_attached_window_maps_scoped_native_metadata(monkeypatch):
+@pytest.mark.parametrize(
+    "consent_modal,native_states,actual_modal",
+    [
+        (False, [], False),
+        (True, [], False),
+        (True, [42], True),
+        (True, [17], False),
+    ],
+)
+def test_attached_window_maps_scoped_native_metadata(
+    monkeypatch, consent_modal, native_states, actual_modal
+):
     from src.computer.runtime import x11_app_scope
 
     monkeypatch.setattr(x11_app_scope.AppScope, "_metadata", lambda *a: (WINDOW["title"],))
     connection = SimpleNamespace(
-        get_display_name=lambda: ":99", create_resource_object=lambda *a: object()
+        get_display_name=lambda: ":99",
+        create_resource_object=lambda *a: object(),
+        intern_atom=lambda name, **kw: 42,
     )
-    scope = dict(window=20, process=dict(pid=101), modal=False, window_rect=(10, 20, 800, 600))
-    assert AttachedAccessibility(connection, scope).window() == WINDOW
+    scope = dict(
+        window=20,
+        process=dict(pid=101),
+        modal=consent_modal,
+        states=native_states,
+        window_rect=(10, 20, 800, 600),
+    )
+    assert AttachedAccessibility(connection, scope).window() == {**WINDOW, "modal": actual_modal}
+    assert scope["modal"] is consent_modal
 
 
 def test_native_identity_rejects_nonunique_sender_and_invalid_path():
@@ -531,6 +551,43 @@ def test_native_identity_rejects_nonunique_sender_and_invalid_path():
         fields[0].app.bus_name, fields[0].path = sender, path
         with pytest.raises(PrimitiveError, match="identity unavailable"):
             access.native_identity(fields[0])
+
+
+@pytest.mark.parametrize("mismatch", [None, "modal", "ambiguous", "geometry", "pid"])
+def test_modeless_dialog_native_window_capture_keeps_root_guards(monkeypatch, mismatch):
+    from src.computer.runtime import x11_app_scope
+
+    access, root, fields, _, app = setup(
+        attached=True, fields=[Node("Color name", "text", text="#000000")]
+    )
+    root.name, root.role = "Select a Color", "dialog"
+    monkeypatch.setattr(x11_app_scope.AppScope, "_metadata", lambda *a: ("Select a Color - Krita",))
+    access.connection = SimpleNamespace(
+        get_display_name=lambda: ":99",
+        create_resource_object=lambda *a: object(),
+        intern_atom=lambda *a, **kw: 42,
+    )
+    access.scope.update(window=20, modal=True, states=[], window_rect=(10, 20, 800, 600))
+    del access.window  # Exercise the actual attached native modality mapping.
+    if mismatch == "modal":
+        root.states.add(STATE.MODAL)
+    elif mismatch == "ambiguous":
+        duplicate = Node("Select a Color", "dialog")
+        duplicate.bounds = root.bounds
+        app.children.append(duplicate)
+    elif mismatch == "geometry":
+        root.bounds = (10, 20, 799, 600)
+    elif mismatch == "pid":
+        root.pid = 102
+    nodes, status, private = access.capture(guard)
+    assert access.scope["modal"] is True
+    if mismatch:
+        assert status == "unsupported" and nodes == [] and private == {}
+    else:
+        assert status == "available"
+        field = next(n for n in nodes if n["text"] == "#000000")
+        ref = access.restore(private[field["handle"]], guard)
+        assert ref.node is fields[0] and ref.root is root
 
 
 def test_capture_changed_node_and_restore_outside_source_rejected():

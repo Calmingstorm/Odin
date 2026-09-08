@@ -131,11 +131,15 @@ class AttachedAccessibility(Accessibility):
         title = AppScope(self.connection)._metadata(
             self.connection.create_resource_object("window", window)
         )[0]
+        # Scope.modal conservatively gates every transient/dialog as a consent
+        # boundary. AT-SPI MODAL describes actual input modality instead: a
+        # modeless native dialog must not be matched as a modal accessible root.
+        modal_atom = self.connection.intern_atom("_NET_WM_STATE_MODAL", only_if_exists=True)
         return {
             "id": window,
             "pid": self.scope["process"]["pid"],
             "title": title,
-            "modal": bool(self.scope["modal"]),
+            "modal": bool(modal_atom and modal_atom in self.scope["states"]),
             **dict(zip(("x", "y", "width", "height"), self.scope["window_rect"], strict=True)),
         }
 
