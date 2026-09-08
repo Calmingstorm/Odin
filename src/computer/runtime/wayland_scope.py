@@ -234,9 +234,22 @@ class GNOMEWaylandScopeProvider:
             from dbus_next.aio import MessageBus
 
             if self._bus is None:
-                self._bus = await asyncio.wait_for(
-                    MessageBus(bus_address=self.bus_address).connect(), 2
-                )
+                # Construction already owns a socket. Retain it before either
+                # authentication or Hello can suspend, fail or be cancelled.
+                self._bus = MessageBus(bus_address=self.bus_address)
+                try:
+                    connected = await asyncio.wait_for(self._bus.connect(), 2)
+                    if connected is None:
+                        _fail()
+                    self._bus = connected
+                except BaseException:
+                    try:
+                        await self._close_bus()
+                    except Exception:
+                        # Keep ownership for close() to retry; preserve the
+                        # original connection failure/cancellation.
+                        pass
+                    raise
             if self._bus is None:
                 raise WaylandScopeFailure("wayland_scope_unavailable")
             reply = await asyncio.wait_for(
@@ -424,9 +437,33 @@ class GNOMEWaylandScopeProvider:
             "observed_monotonic_ns": time.monotonic_ns(),
         }
 
+    async def _close_bus(self):
+        bus = self._bus
+        if bus is None:
+            return
+        # dbus-next disconnect() only shuts down the socket. During auth it
+        # has not installed its reader, so wait_for_disconnect() alone hangs.
+        # Finalize the owned transport synchronously before any cancellation
+        # point, removing loop callbacks and closing both socket references.
+        try:
+            bus.disconnect()
+        finally:
+            try:
+                bus._finalize(EOFError())
+            finally:
+                try:
+                    bus._stream.close()
+                finally:
+                    bus._sock.close()
+        try:
+            await bus.wait_for_disconnect()
+        except Exception:
+            # A peer failure may already have completed this future with its
+            # original error. The owned transport above is nevertheless closed.
+            pass
+        self._bus = None
+
     async def close(self):
         async with self._lock:
-            if self._bus is not None:
-                self._bus.disconnect()
-                self._bus = None
+            await self._close_bus()
             # Do not clear identity pin: a restarted provider needs a new session.
