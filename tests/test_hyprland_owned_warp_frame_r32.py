@@ -4,12 +4,11 @@ This is a regression fixture, not live compositor or GTK qualification. The
 pinned compositor's absolute-motion path sends motion without a frame, while
 its virtual-pointer frame callback returns unless an axis is pending.
 """
-from pathlib import Path
 import shutil
 import subprocess
+from pathlib import Path
 
 import pytest
-
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -100,14 +99,16 @@ int main() {
     cpp = tmp_path / "warp-frame.cpp"
     cpp.write_text(harness)
     binary = tmp_path / "warp-frame"
-    subprocess.run([compiler, "-std=c++23", "-Wall", "-Wextra", "-Werror", str(cpp), "-o", str(binary)], check=True)
+    compile_command = [compiler, "-std=c++23", "-Wall", "-Wextra", "-Werror",
+                       str(cpp), "-o", str(binary)]
+    subprocess.run(compile_command, check=True)
     subprocess.run([str(binary)], check=True)
     # Mutation control: the identical production hook without its completion
     # frame must lose the path, as in the reported native Pinta failure.
     missing_frame = harness.replace("    g_pSeatManager->sendPointerFrame();", "")
     assert missing_frame != harness
     cpp.write_text(missing_frame)
-    subprocess.run([compiler, "-std=c++23", "-Wall", "-Wextra", "-Werror", str(cpp), "-o", str(binary)], check=True)
+    subprocess.run(compile_command, check=True)
     result = subprocess.run([str(binary)], capture_output=True)
     assert result.returncode != 0
     assert b"seat.delivered==path" in result.stderr

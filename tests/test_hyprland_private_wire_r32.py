@@ -1,13 +1,14 @@
 """Compile the shipping callback against a tiny hostile-traffic fixture."""
-from pathlib import Path
 import subprocess
+from pathlib import Path
 
 SOURCE = Path(__file__).resolve().parents[1] / "assets/hyprland-input/scope-plugin.cpp"
 
 
 def test_shipping_protocol_callback_filters_and_caps(tmp_path):
     source = SOURCE.read_text()
-    callback = source.split("    static void protocolEvent(", 1)[1].split("    struct OwnedDispatch", 1)[0]
+    callback = source.split("    static void protocolEvent(", 1)[1]
+    callback = callback.split("    struct OwnedDispatch", 1)[0]
     fields = source.split("    struct WireEvent {", 1)[1].split("    // This callback", 1)[0]
     harness = r'''
 #include <array>
@@ -20,14 +21,19 @@ struct wl_protocol_logger {};
 enum wl_protocol_logger_type {WL_PROTOCOL_LOGGER_REQUEST, WL_PROTOCOL_LOGGER_EVENT};
 union Arg { uint32_t u; int32_t f; };
 struct wl_resource { const char* cls; wl_client* client; uint32_t id; };
-struct wl_protocol_logger_message { wl_resource* resource; int message_opcode; int arguments_count; Arg* arguments; };
+struct wl_protocol_logger_message {
+    wl_resource* resource; int message_opcode; int arguments_count; Arg* arguments;
+};
 const char* wl_resource_get_class(wl_resource* r) {return r->cls;}
 wl_client* wl_resource_get_client(wl_resource* r) {return r->client;}
 uint32_t wl_resource_get_id(wl_resource* r) {return r->id;}
 double wl_fixed_to_double(int32_t f) {return f / 256.0;}
 int64_t ns() {return 123;}
 struct Surface {wl_client* c; wl_client* client() {return c;}};
-struct Weak {Surface* p; bool expired() const {return !p;} Surface* operator->() {return p;} bool operator!=(const Weak& b) const {return p != b.p;}};
+struct Weak {
+    Surface* p; bool expired() const {return !p;} Surface* operator->() {return p;}
+    bool operator!=(const Weak& b) const {return p != b.p;}
+};
 struct Seat { struct {Weak pointerFocus;} m_state;} seat;
 Seat* g_pSeatManager = &seat;
 struct State {
@@ -68,7 +74,10 @@ int main() {
     cpp = tmp_path / "fixture.cpp"
     cpp.write_text(harness)
     exe = tmp_path / "fixture"
-    subprocess.run(["c++", "-std=c++23", "-Wall", "-Wextra", "-Werror", str(cpp), "-o", str(exe)], check=True)
+    subprocess.run(
+        ["c++", "-std=c++23", "-Wall", "-Wextra", "-Werror", str(cpp), "-o", str(exe)],
+        check=True,
+    )
     subprocess.run([str(exe)], check=True)
 
 
@@ -77,6 +86,8 @@ def test_flat_status_and_teardown_contract():
     status = source.split("    J status(", 1)[1].split("    J snapshot(", 1)[0]
     assert "events" not in status and "diagnostic" not in status
     destructor = source.split("    ~State() noexcept {", 1)[1].split("    bool isPeer", 1)[0]
-    assert destructor.index("wl_protocol_logger_destroy") < destructor.index('revoke("plugin-unload")')
+    assert (destructor.index("wl_protocol_logger_destroy")
+            < destructor.index('revoke("plugin-unload")'))
     warp = source.split("void onWarp(", 1)[1].split("void onFocus(", 1)[0]
-    assert warp.index("State::OwnedDispatch trace") < warp.rindex("original(manager, event)") < warp.index("sendPointerFrame")
+    assert (warp.index("State::OwnedDispatch trace")
+            < warp.rindex("original(manager, event)") < warp.index("sendPointerFrame"))

@@ -170,3 +170,55 @@ statement coverage is 100% for the guardian wrapper and 95.57% for scope, with
 66 targeted tests passing. A later hosted run remains necessary for final CI
 status. **Do not interpret the earlier build-ready handoff as successful live
 qualification.**
+
+## Phase 4 final result: bounded Pinta draw and cleanup passed
+
+The receiver defect was resolved and **the actual supervised Pinta draw now
+passed**. The successful run rendered every vertex of a two-peak mountain in
+650 ms, then a separate closed eye/diamond in 450 ms. Inspection showed both
+complete shapes, no unwanted connecting line, and the surrounding existing
+marks preserved. The unsaved document remained open. A later independent stroke
+is evidence of usable released input, not merely a successful helper exit.
+
+The apparently ineffective frame fix had not actually replaced the running
+image. `/proc/<compositor>/maps` still referenced the old deleted plugin inode,
+while the on-disk hash was new and the expected diagnostic operation returned
+`unknown-operation`. GNU-unique symbols were present. Loading an immutable
+versioned pathname established the new image and diagnostic operation; only
+then did the complete mountain render. Thus disk-file hashes and an `ok` reload
+reply were insufficient to verify this plugin update. No compositor restart or
+core patch was required. The setup/update guidance must verify the loaded build,
+not overwrite an existing mapped pathname.
+
+A bounded target-only native protocol trace recorded the second shape's nine
+motion events, each followed by a frame, plus button press/release. It recorded
+surface-local coordinates only during owned dispatch. The trace is compositor
+emission evidence, not proof of application processing by itself; the inspected
+Pinta raster supplies the application-side evidence for these particular draws.
+
+Final native status: disarmed, zero owned keys, zero owned buttons, no failed
+release, cooperative ACK true. Guardian process reaped, owned virtual devices
+gone; the pre-existing virtual input devices remained. Explicit operator
+release-all was verified again. Both target configuration files retained their
+original bytes. Pinta and the other original application processes remained
+alive. During the campaign the human also edited the same Pinta canvas and
+changed focus; those human marks were not attributed to Odin or removed.
+
+The target Odin service was restarted **twice deliberately** for the protected
+branch deployments. Its automatic restart count stayed zero; that is not a
+claim of zero service restarts. The compositor process remained unchanged.
+The local live Odin installation and service were not deployed or restarted.
+
+Live actuation accounting: five bounded stroke invocations (three earlier
+endpoint-only results and the final two successful shapes), one successful
+tool-selection click, and three explicit shell focus selections of the requested
+Pinta window. Several pre-input attempts were refused after changed grounding
+or unavailable scope. Repeated captures and reconciliation were required; no
+claim of optimal observation efficiency is made. The accepted hard-guardian-
+kill and simultaneous same-button residuals remain unchanged and were not
+deliberately fault-tested on the live desktop.
+
+**Scope of this pass:** config-protected deployment, native backend capture,
+timed drawing, actual Pinta output, subsequent interaction, cooperative cleanup
+and standalone recovery. This is not arbitrary-app/modal/Unicode qualification,
+a proof of SIGKILL cleanup, or a complete live controller/WebUI workflow test.

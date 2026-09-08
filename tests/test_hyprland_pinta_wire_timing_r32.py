@@ -7,7 +7,7 @@ import time
 from tests.test_hyprland_input_wire_r32 import binary, client, peer  # noqa: F401
 
 
-def test_five_vertex_650ms_wire_timing(client, peer):
+def test_five_vertex_650ms_wire_timing(client, peer):  # noqa: F811 - imported pytest fixtures
     class TimedEvents(list):
         def append(self, event):
             arrival.append(time.monotonic_ns())
