@@ -377,12 +377,16 @@ struct State {
         b.popupWatch->listeners.emplace_back(b.window->m_xdgSurface->m_events.newPopup.listen([invalidate](SP<CXDGPopupResource>) { invalidate(); }));
         for (const auto& candidate : b.window->m_xdgSurface->m_owner->m_surfaces) {
             if (candidate.expired() || candidate->m_popup.expired()) continue;
-            std::vector<odin_scope::PopupAncestor> chain;
-            if (!popupChain(b, candidate->m_surface.lock(), chain)) continue;
+            // Observe lifecycle, not admission, for every existing popup in this
+            // bounded wm_base. An already-created UNMAPPED popup can map/unmap
+            // between checks without another newPopup event. Conservatively
+            // invalidate even unrelated popup changes; destination() still
+            // requires the exact mapped, observed root ancestry.
             auto popup = candidate->m_popup.lock();
             b.popupWatch->listeners.emplace_back(popup->m_events.reposition.listen(invalidate));
             b.popupWatch->listeners.emplace_back(popup->m_events.dismissed.listen(invalidate));
             b.popupWatch->listeners.emplace_back(popup->m_events.destroy.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(candidate->m_events.map.listen(invalidate));
             b.popupWatch->listeners.emplace_back(candidate->m_events.unmap.listen(invalidate));
             b.popupWatch->listeners.emplace_back(candidate->m_events.destroy.listen(invalidate));
             b.popupWatch->listeners.emplace_back(candidate->m_events.newPopup.listen([invalidate](SP<CXDGPopupResource>) { invalidate(); }));

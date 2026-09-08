@@ -49,8 +49,13 @@ def test_scope_contract():
     assert "g_pSeatManager->m_state.keyboardFocus == b.surface" in source
     assert "popupInventory(b) != b.popups" in source
     assert "!b.popupWatch->valid" in source
-    for event in ("reposition", "dismissed", "destroy", "unmap", "newPopup"):
+    for event in ("reposition", "dismissed", "destroy", "map", "unmap", "newPopup"):
         assert f"m_events.{event}.listen" in source
+    watcher = source.split("void watchPopups(", 1)[1].split("SP<CWLSurfaceResource> destinationAt", 1)[0]
+    # Existing unmapped popups must be watched before map->unmap restores the
+    # inventory. Lifecycle watching must not use the mapped admission predicate.
+    assert "popupChain(" not in watcher
+    assert "watch->valid = false; ++revision" in watcher
     button = source.split("void onButton(", 1)[1].split("void onAxis(", 1)[0]
     assert button.index("WL_POINTER_BUTTON_STATE_RELEASED") < button.index("!s.allow()")
     assert "s.destinationAt" in button
