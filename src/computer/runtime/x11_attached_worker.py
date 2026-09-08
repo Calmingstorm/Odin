@@ -166,11 +166,22 @@ def run(request, capture=None):
                     def guard():
                         if time.monotonic() >= accessibility_deadline:
                             raise TimeoutError("bounded accessibility observation expired")
+
+                    def scope_guard():
+                        guard()
                         assert app_scope is not None
                         app_scope.assert_snapshot(binding, monitor)
+                        guard()
 
                     try:
+                        # Discovery is read-only and its intermediate handles have
+                        # no authority. Bound every node by the same deadline,
+                        # but bracket the traversal with full native scope checks
+                        # rather than rereading the X window tree at every node.
+                        # Input/guardian guards remain independent and unchanged.
+                        scope_guard()
                         nodes, accessibility_status, private = native_accessibility.capture(guard)
+                        scope_guard()
                         rect = (
                             [monitor.x + crop.x, monitor.y + crop.y, crop.width, crop.height]
                             if crop
@@ -188,7 +199,11 @@ def run(request, capture=None):
                 after_inventory = inventory(binding)
                 if native_accessibility and accessibility:
                     try:
+                        # Do not publish identities unless both native scope and
+                        # every retained AT-SPI identity survived the raster read.
+                        scope_guard()
                         native_accessibility.stable(guard)
+                        scope_guard()
                     except Exception:
                         accessibility, accessibility_private = [], {}
                         accessibility_status = "unavailable"
