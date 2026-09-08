@@ -40,10 +40,17 @@ displays, buses and application profiles, never an operator's existing desktop.
    verbose; a new paging/filtering interface was not built in this bug-fix round.
 
 The first isolated Krita follow-up produced a native window but no AT-SPI
-application children. That attempt did not mutate a native field or establish
-reopen/adoption behavior. Its failure is not disguised as successful native
-qualification. A1's deferred-value regression is behavioral, not a new real-Krita
-adoption certificate.
+application children. A second isolated follow-up on the frozen integrated source
+registered correctly and exercised the actual production controller, attached
+backend and native identity replacement. Krita's Size widget text changed from
+`Size: 40.00 px` to `Size: 4.00 px`; a subsequent independent observation read the
+new text. The actual receipt reported executed, confirmed injection/release,
+matching text and **application adoption unproven**, never verified. This is
+native text-path qualification, not adopted brush-size proof. The hex dialog
+could not be cleanly opened/identified in that bounded run, so native hex reopen
+and explicit-commit/adoption remain unqualified. A1's deferred-value regression is
+behavioral, not a new real-Krita adoption certificate. Owned native processes,
+private display and accessibility sockets were removed and checked absent.
 
 ## Additional definitive defects and evidence
 
@@ -97,12 +104,57 @@ Starting-source empirical package evidence and limitations are recorded in
 native worker, not merely executable presence. Systemctl is a recording stub, so
 neither real service activation nor real Wayland portal input is certified by it.
 
-The frozen integrated runtime for the final gates is
-`67b764b5e0a6c407fae6b863d605b7ea6d81725c`. Full-suite coverage, local CI-equivalent
-checks and exact-source package reruns are pending at this report checkpoint.
-Focused tests are not substituted for those final results. The coverage baseline
-is unchanged. Both reference generators were run; their generated files were
-unchanged. UI changes include a rebuilt distribution in the same commit.
+The frozen integrated runtime for the complete quality gate is
+`67b764b5e0a6c407fae6b863d605b7ea6d81725c`:
+
+| Gate | Recorded result |
+| --- | --- |
+| Full pytest with coverage | **15,509 passed, six skipped, zero failures/errors**; JUnit 794.263 seconds |
+| Coverage no-drop ratchet | **Zero findings**, 92.7% reported total; baseline byte-identical |
+| Ruff lint and round-scoped format | Passed; whole-repository lint clean |
+| Lint/type/config classification gates | Passed; two baseline type findings, two head findings, zero new |
+| Generated-reference drift | 43 tests passed; both generators run, generated files unchanged |
+| Required real-browser selection | Six passed, zero skipped, required flags enabled |
+| UI checks/build and committed distribution reproduction | Passed, distribution byte-identical |
+| Owned-process supervision | All 13 gates completed successfully with cleanup confirmed |
+
+The machine-readable gate status is completed/pass, with clean frozen worktree
+and unchanged SHA. This is local CI-equivalent verification; no hosted pipeline
+ran. The suite still emitted unclassified asynchronous teardown warnings:
+two pending-task-destruction occurrences and eight unawaited-coroutine occurrences
+in the captured log. No global zero-warning or zero-async-leak claim is made.
+
+The package audit subsequently found one pre-existing deployment-specific comment
+in shipped workspace code. Commit `aeb918ec` removes that internal path and applies
+Ruff formatting to the file, without changing its parsed AST. Dedicated workspace
+tests passed **128/128** afterward, with whole-repository lint and changed-file
+format clean. Other changes after the frozen gate are this report only; no
+computer runtime code changed. Final package verification uses that later SHA.
+
+### Final empirical package verification
+
+Rebuilt package from exact `aeb918ec1d723030f530d0282c603c53f4e8b88b`, local test
+version `3.96.0~r21.final`, 2,209,688 bytes:
+
+`d70e283478991d6258fb5837098d98b6f6999fce06341c392a8fb1ff15e76a1d`
+
+All four independent fresh Debian 13 container paths passed with exit zero:
+desktop fresh/reinstall, desktop legacy-upgrade/reinstall, headless fresh/reinstall,
+and headless legacy-upgrade/reinstall. The legacy path used an actual retained
+pre-computer package through `ODIN_LEGACY_PACKAGE`, not a reinstall-only substitute.
+Four native Drawing receipts confirmed the installed fixed bubblewrap worker,
+3,686,400 raster bytes, nine accessible nodes and input release. Headless paths
+confirmed desktop tools absent after reinstall. Computer state mode/ownership,
+configuration and receipt preservation, guardian execution and ELF libraries all
+passed. Systemctl remains an inert stub: restart intent, not service activation.
+
+The package contains 467 regular files and no symlinks; packaged and installed
+source/UI match the frozen build. Declared payloads and hooks match build inputs.
+Bounded credential/internal-host-path signature scans found zero matches, with no
+VCS, virtualenv, caches, private-key filenames, real environment file or engineering
+report shipped. These scans are not a universal proof of absence. Guardian PIE,
+BIND_NOW, RELRO and non-executable stack checks passed. All four smoke containers
+and the builder were removed; final detached build worktree remained clean.
 
 ## Deliberately not built
 

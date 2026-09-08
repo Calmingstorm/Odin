@@ -80,3 +80,21 @@ The source package above precedes the review integrations and documentation/harn
 changes. A final frozen-source rebuild and both empirical paths remain required;
 these hashes must not be attributed to later source. No master merge, push,
 hosted pipeline, deployment, live service restart or operator-desktop action ran.
+
+## Final integrated verification
+
+The earlier pending-final statement is superseded by completed verification of
+`aeb918ec1d723030f530d0282c603c53f4e8b88b`. The final package SHA256 is
+`d70e283478991d6258fb5837098d98b6f6999fce06341c392a8fb1ff15e76a1d`,
+2,209,688 bytes, local test version `3.96.0~r21.final`. The guardian was rebuilt
+and retains the hash listed above.
+
+Desktop fresh/reinstall, desktop legacy-upgrade/reinstall, headless fresh/reinstall
+and headless legacy-upgrade/reinstall all passed with exit zero in independent
+empty Debian 13 containers. Both desktop paths produced two native receipts;
+both headless paths verified absence of desktop tools after reinstall. Package
+and installed source/UI matched the frozen commit. Bounded credential and
+internal host-path/address signature scans found zero matches. All owned smoke
+containers were removed. Systemctl remains stubbed, so service activation and
+real portal/compositor input remain outside this evidence. See
+[CAMPAIGN-REVIEW-R21.md](CAMPAIGN-REVIEW-R21.md) for full review and quality results.
