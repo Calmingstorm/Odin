@@ -125,3 +125,48 @@ and `data/` before the branch deploy. Load the exact-ABI companion once at setup
 verify the disclosed capabilities, then perform the bounded Pinta draw and check
 receiver behavior and input cleanup. No source/fake-wire result replaces that
 last stage. Keep the standalone recovery command available throughout.
+
+## Phase 4 execution update: qualification exposed a receiver defect
+
+The later continuation performed the protected branch deployment on the target,
+not on the local Odin installation. Both pre-deploy snapshots preserve the
+operator's exact configuration, live data and local changes. Data manifests were
+verified while the service was stopped before restart; runtime writes after
+restart are not misreported as data loss. The original configuration bytes were
+restored and verified, with no computer configuration silently persisted.
+
+The target needed `dbus-next`; it was installed into that install's virtual
+environment. Native helpers were installed inertly, then the exact companion was
+loaded explicitly. A later recovery unload/load applied a focused motion-frame
+fix. Both compositor configuration hashes remained unchanged and its process
+survived. These setup/recovery rereads are the R32-approved exception, not
+per-action activation.
+
+The native backend started with input support, captured the explicitly bound
+output and accepted bounded Pinta strokes. **The initial and repeat strokes
+painted only a straight start-to-end segment, not the intermediate mountain
+vertices. Live drawing qualification therefore did not pass at that point.**
+Receipts correctly described submission/cleanup, but were not proof of the
+intended shape. The delivered screenshots were inspected rather than treating
+changed raster hashes as semantic success.
+
+Pinned source has no seat frame at the end of `onMouseWarp`, while generic
+virtual-pointer frames are ignored without pending axis state. A narrowly owned
+frame completion was added and compiled, but the same live endpoint-only result
+persisted. That change alone did not solve the observed defect. An isolated
+real-wire timing test then confirmed all five coordinates arrived at the peer
+over 650 ms, each with a distinct timestamp and following frame. The remaining
+diagnostic boundary is downstream compositor-to-application delivery.
+
+Every probe was closed with a cooperative cleanup ACK; explicit standalone
+release recovery was also exercised successfully. The native ledger reported
+zero keys/buttons and no active lease. No guardian remained. Existing human
+marks and unsaved Pinta document were preserved. Human focus/tool changes caused
+several pre-input interruptions, not automatic replay or unsafe continuation.
+
+Hosted ordinary tests passed. Hosted coverage reported two new-file threshold
+failures, now addressed with meaningful cancellation/recovery tests: targeted
+statement coverage is 100% for the guardian wrapper and 95.57% for scope, with
+66 targeted tests passing. A later hosted run remains necessary for final CI
+status. **Do not interpret the earlier build-ready handoff as successful live
+qualification.**
