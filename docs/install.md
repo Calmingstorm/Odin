@@ -18,8 +18,8 @@ The template also defaults permissions to `admin`, and the package grants the
 ## Debian or Ubuntu package
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.95.0_amd64.deb
-sudo apt install ./odin_3.95.0_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.96.0_amd64.deb
+sudo apt install ./odin_3.96.0_amd64.deb
 ```
 
 The package installs a dedicated `odin` system user, a Python virtual environment with dependencies, the configuration files, and a systemd service. The service is enabled but left stopped until it is configured.
