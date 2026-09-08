@@ -1,5 +1,6 @@
 {
   "production_admitted": false,
+  "public_fixture_note": "Ephemeral challenge and focus identities replaced with stable fixture markers, not live protocol values. Plugin mapping addresses omitted; permissions, offsets, results and source digests retained.",
   "input_attempted": true,
   "stage": "complete",
   "kwin_pid": 27,
@@ -12,7 +13,7 @@
   "identity": {
     "backend": "native",
     "backend_class": "KWinVirtualBackend",
-    "challenge": "06830bdf9562cb3215be057fe9b3f3b5b8a44e37ee964855",
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
     "compositor_name": "kwin_wayland",
     "compositor_version": "6.7.4",
     "native_wayland": true
@@ -27,9 +28,9 @@
       "x": 150,
       "y": 139
     },
-    "challenge": "06830bdf9562cb3215be057fe9b3f3b5b8a44e37ee964855",
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
     "focus_serial": 3,
-    "focus_token": "12656020496377055895",
+    "focus_token": "FIXTURE_FOCUS_SNAPSHOT_NOT_LIVE",
     "modal": false,
     "native_wayland": true,
     "pid": 30,
@@ -40,10 +41,10 @@
     "wm_class": "receiver.py"
   },
   "loaded_plugin_mapping": [
-    "76dcf5143000-76dcf5148000 r-xp 00000000 00:62 17960715                   /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
-    "76dcf5148000-76dcf514e000 r--p 00005000 00:62 17960715                   /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
-    "76dcf514e000-76dcf514f000 r--p 0000b000 00:62 17960715                   /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
-    "76dcf514f000-76dcf5150000 rw-p 0000c000 00:62 17960715                   /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so"
+    "FIXTURE_MAPPING r-xp 00000000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
+    "FIXTURE_MAPPING r--p 00005000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
+    "FIXTURE_MAPPING r--p 0000b000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so",
+    "FIXTURE_MAPPING rw-p 0000c000 /usr/lib64/qt6/plugins/kwin/plugins/odin-scope.so"
   ],
   "input_note": "Explicit scratch EI helper only in isolated lab; NOT production admission or EOF qualification.",
   "menu_snapshot": {
@@ -54,9 +55,9 @@
       "x": 401,
       "y": 315
     },
-    "challenge": "06830bdf9562cb3215be057fe9b3f3b5b8a44e37ee964855",
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
     "focus_serial": 4,
-    "focus_token": "13512184771428133516",
+    "focus_token": "FIXTURE_FOCUS_MENU_NOT_LIVE",
     "modal": false,
     "native_wayland": true,
     "pid": 30,
@@ -94,9 +95,9 @@
       "x": 150,
       "y": 139
     },
-    "challenge": "06830bdf9562cb3215be057fe9b3f3b5b8a44e37ee964855",
+    "challenge": "FIXTURE_CHALLENGE_NOT_LIVE",
     "focus_serial": 5,
-    "focus_token": "12337816884074150768",
+    "focus_token": "FIXTURE_FOCUS_RESTORED_NOT_LIVE",
     "modal": false,
     "native_wayland": true,
     "pid": 30,

@@ -9,14 +9,14 @@ living in the parent service's cgroup. Shell exit 0 is not a semantic assertion.
 
 ## Exact initial state
 
-| PID | Name | State | Parent PID | Interpretation |
+| Recorded identity | Name | State | Parent | Interpretation |
 | --- | --- | --- | --- | --- |
-| 3326474 | catatonit -P | S | 3254906 | live rootless Podman pause namespace helper |
-| 3335865 | conmon | Zs | 3254906 | already exited; unreaped zombie |
-| 3336516 | conmon | Zs | 3254906 | already exited; unreaped zombie |
-| 3339721 | conmon | Zs | 3254906 | already exited; unreaped zombie |
+| pause-helper | catatonit -P | S | service | live rootless Podman pause namespace helper |
+| conmon-1 | conmon | Zs | service | already exited; unreaped zombie |
+| conmon-2 | conmon | Zs | service | already exited; unreaped zombie |
+| conmon-3 | conmon | Zs | service | already exited; unreaped zombie |
 
-All are UID1003 (`odin`), parented to the active Odin process. The pause helper
+All are service-owned, parented to the active Odin process. The pause helper
 was in `/system.slice/odin.service`, not an experiment unit. It had no children.
 Podman container and pod inventories were both empty. Docker had no owned
 Wayland fixture containers; unrelated Docker containers were left alone.
@@ -26,7 +26,7 @@ Wayland fixture containers; unrelated Docker containers were left alone.
 After preventing concurrent Podman use by the feasibility agents and checking
 the empty Podman inventories, ran its supported `podman --cgroup-manager=cgroupfs
 system migrate` cleanup. This stopped the namespace helper without deleting
-cached images or touching unrelated Docker workloads. PID3326474 became Z;
+cached images or touching unrelated Docker workloads. The pause helper became Z;
 the three conmon PIDs remained Zs. There are now **no live processes among these
 four identities, but all four zombie process-table entries remain**.
 
@@ -48,8 +48,8 @@ These entries remain a documented cleanup residual, not running containers.
 ### R3 recheck, 2026-09-07 00:49 UTC
 
 The four exact reported identities still exist, all in state `Z`/`Zs` under
-PID3254906 (the active Odin service), UID1003. They are not running containers or
-live helpers. An additional interrupted inventory command, Podman PID3389007,
+the active Odin service, owned by the service account. They are not running containers or
+live helpers. An additional interrupted inventory command, Podman,
 is also a zombie under that same parent. No signals were sent to the parent,
 no code was injected into it, and no restart was performed. A mistaken runtime
 directory on a read-only inventory attempt was rejected; it provided no inventory

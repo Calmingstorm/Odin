@@ -66,7 +66,7 @@ missing injected receipt field and renewed-generation launch persistence.
 
 * Final ordinary full suite: **13,508 passed,5 skipped**,550.31seconds, exit0.
   Standalone supervisor complete census, cleanup_ok=true, no residuals/signals.
-  Receipt: `/home/odin/tmp/computer-r8-fullsuite-final-20260907.json`.
+  Receipt: `${EVIDENCE_ROOT}/computer-r8-fullsuite-final-20260907.json`.
 * Earlier full run:13,505passed,5skipped,3failed. Failures were stale generated
   API line references and missing local spawn-site classifications. Corrected
   explicitly;161focused tests then passed, followed by the final full suite.
@@ -85,8 +85,8 @@ No R8 main-session capture or input, no settings changes and no compositor wake
 workaround. The known Cinnamon issue remains the operator's environment issue.
 All new graphical fixtures and final validation workloads were removed/reaped;
 only intentionally retained evidence/images and development worktrees remain.
-Live service stayed PID3254906,0restarts,active; independently discovered listener
-port3002 `/health` returned200 with statusok.
+Live service stayed active without restart; its independently discovered
+`/health` endpoint returned200 with statusok.
 
 **Eight new dead children remain parented to the unchanged live service**:
 seven from my initial browser/build checks that I failed to wrap in the standalone

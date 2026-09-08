@@ -86,7 +86,7 @@ Plugin activation and portal consent remain explicit.
 
 No real workstation display was accessed for this round's GUI work. Tests used
 owned isolated displays/containers; no Cinnamon workaround was added. Production
-service stayed active, PID 3254906, zero restarts. Final observed zombie census
+service stayed active without restart. Final observed zombie census
 was 631 system-wide / 543 odin-owned, versus initial 484 / 396: it grew during
 agent subprocess experiments. This is not reported as clean. Dead adopted
 children cannot be reaped from outside the live parent; no restart/injection was

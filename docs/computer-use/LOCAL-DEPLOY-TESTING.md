@@ -191,10 +191,8 @@ means `/dev/null`, not automatic ambient-cookie discovery.
 
 An existing explicit X-server access grant can work with `xauthority: ""`; verify
 read-only access as the actual service UID instead of creating or copying a cookie
-unnecessarily. Do not use `xhost +`. On the historical test machine the read-only census
-on 2026-09-07 measured `:0` with primary `DP-4` (3440x1440), `HDMI-0`
-(1920x1080), `DP-0` (2560x1440), and `DP-2` (1920x1080). Those are historical
-measurements, not a new grant or a substitute for checking the current topology.
+unnecessarily. Do not use `xhost +`. Historical read-only census measurements
+are not a new grant or a substitute for checking the current complete topology.
 The `:1` and `DP-1` values below are placeholders, **not a deployment configuration**.
 
 ```yaml

@@ -117,17 +117,15 @@ remain visible. No warning-free shutdown claim.
 
 ## Desktop and live service
 
-Read-only, title-free/pixel-free census verified the exact final R7 RandR metadata
-and eight window records, all owned by UID1000, with no Odin window. Focus, pointer
-and workspace matched; no held keys/buttons. Four monitors, including primary
-DP-4 3440x1440, are intact. Monitors were Off and left Off; no wake or input was
+Read-only, title-free/pixel-free census verified the final R7 desktop topology
+and window ownership, with no Odin window. Focus, pointer and workspace matched;
+no held keys/buttons. Monitor power state was preserved; no wake or input was
 sent. No computer/feasibility units or scratch HOME/pixels remained from R7.
 
-Live service stayed active with PID3254906 and NRestarts0; its actual listener
-127.0.0.1:3002 returned HTTP200 and `status=ok`. Historical service-owned zombies
-remained **424** across this consolidation; they were neither reaped nor cleared
-by restart. The source repair is not deployed. No immediate desktop cleanup or
-live-service intervention was indicated by these checks.
+Live service health was unchanged: active without restart, HTTP200 and `status=ok`.
+The historical service-owned zombie census was unchanged; it was neither reaped
+nor cleared by restart. The source repair is not deployed. No immediate desktop
+cleanup or live-service intervention was indicated by these checks.
 
 The test machine's longstanding Cinnamon wake/topology incident is an environment limitation,
 not a demonstrated Odin defect. Production owned cleanup passed during it; exact

@@ -6,10 +6,10 @@ One distinct Drawing task now passes end to end, reproduced in two fresh owned
 sandboxes. These are repeatability runs of the SAME task, not two task-denominator
 successes. No 27/30 or full30 corpus claim. Final evidence:
 
-- `/home/odin/drawing-final-r5-confirm/events.jsonl`, `ledger.json`
-- `/home/odin/drawing-final-r5-confirm/drawing-03.png`
+- `${EVIDENCE_ROOT}/drawing-final-r5-confirm/events.jsonl`, `ledger.json`
+- `${EVIDENCE_ROOT}/drawing-final-r5-confirm/drawing-03.png`
 - private `new-blank.png`, `closed-saved-tab.png`, `current.png`
-- first complete run `/home/odin/drawing-final-r5-final`
+- first complete run `${EVIDENCE_ROOT}/drawing-final-r5-final`
 - progress `/tmp/drawing-final-r5-status.txt`
 
 All task input passed through actual controller observe, native frame serialization,
@@ -34,7 +34,7 @@ run produced the identical PNG hash and pixel comparison.
 
 ## Actual failure diagnosis and narrowly scoped repair
 
-Historical `/home/odin/gui-corpus-r5-drawing-b/events.jsonl` has the SAME modal token,
+Historical `${EVIDENCE_ROOT}/gui-corpus-r5-drawing-b/events.jsonl` has the SAME modal token,
 source revision and native startup window across safe->unrecognized transition.
 Private AT-SPI descendants shrink from Information/No/Yes to Information/fillers,
 losing both buttons. This is an incomplete accessibility traversal, not a newly
@@ -63,7 +63,7 @@ The exact-raster partial-descendant path is additionally covered by synthetic te
   paused denied `grant_revoked`. Owner resume generation3, remaining task completed.
 - GUI Save chooser opened, Escape cancelled, canvas retained; subsequent Save and
   actual close/reopen succeeded. No replay of uncertain input.
-- `/home/odin/drawing-final-r5-recovery`: missing modal token denied
+- `${EVIDENCE_ROOT}/drawing-final-r5-recovery`: missing modal token denied
   `unexpected_modal` before native input; controller then revoked grant. This is a
   correct negative result, NOT a successful same-grant recovery. New approved
   sandbox was used for successful recovery task. `/complete` is an earlier harness

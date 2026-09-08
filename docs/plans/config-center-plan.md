@@ -23,7 +23,7 @@ persist dedicated-endpoint fields without dispatching their live apply handlers;
 so rather than reporting a reload that did not happen.
 
 Cross-validated defect inventory (IDs used throughout this plan): see
-`/home/odin/reviews/config-page-consolidated.md` §2 and the per-feature settlement in
+`${REVIEW_ROOT}/config-page-consolidated.md` §2 (private review, not shipped) and the per-feature settlement in
 `config-campaign-design-settlement.md`. Highlights:
 
 - **B1** generic save resolves `${VAR}` placeholders into config.yml (plaintext secrets on disk).

@@ -38,14 +38,14 @@ preseeding is permitted. Unknown input ends the attempt without replay.
 
 Result: **13/15 distinct Drawing tasks passed**, two failed. Script:
 `scripts/computer-feasibility/corpus30-drawing.py`.
-Evidence prefix: `/home/odin/corpus30-drawing-*`. Progress:
+Evidence prefix: `${EVIDENCE_ROOT}/corpus30-drawing-*`. Progress:
 `/tmp/corpus30-drawing-status.txt`. CLI: `--evidence PATH --cases 1,2,...,15`.
 Cases map to corpus IDs by adding15. Exact unit/driver/supervisor identities are
 recorded in each `events.jsonl`; cleanup is followed by exact validation.
 
 ### Accepted evidence
 
-Directory pattern: `/home/odin/corpus30-drawing-batch-LETTER/case-NN`, NN=ID-15.
+Directory pattern: `${EVIDENCE_ROOT}/corpus30-drawing-batch-LETTER/case-NN`, NN=ID-15.
 Each has `ledger.json`, `events.jsonl`, `drawing-ID.png`, `new-blank.png`,
 `closed-saved-tab.png`, and `reopened.png`.
 
@@ -58,7 +58,7 @@ Each has `ledger.json`, `events.jsonl`, `drawing-ID.png`, `new-blank.png`,
 |24,25|e|2 passes|
 |26,29|e latest|2 failures, not accepted|
 
-Aggregate exact ledger: `/home/odin/corpus30-drawing-audit.json`. It includes all34
+Aggregate exact ledger: `${EVIDENCE_ROOT}/corpus30-drawing-audit.json`. It includes all34
 fixture identities, every retained attempt, accepted artifacts' SHA256 and decoded
 RGB SHA256, and per-task paths. Independent audit passed for all13: PNG integrity,
 1000x600 dimensions, predefined semantics, blank intermediate, full decoded reopened
@@ -97,7 +97,7 @@ checks and passed. Exact identities are in the aggregate audit.
 
 Managed batch processes: a3571100,b3600635,c3627239,d3640217,e3652778. Each finished
 exit1 because its ledger retains real failures; row-level passes independently
-audited. Logs: `/home/odin/corpus30-drawing-batch-LETTER.log`. Discovery1..4 separate
+audited. Logs: `${EVIDENCE_ROOT}/corpus30-drawing-batch-LETTER.log`. Discovery1..4 separate
 non-counted probes. No further fixtures remain running.
 
 No dependencies installed. No runtime/controller changes, live configuration,

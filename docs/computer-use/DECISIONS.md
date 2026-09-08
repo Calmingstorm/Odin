@@ -187,8 +187,8 @@ selection, display/session binding and persistent settings are operator-owned,
 never model-provided. Runtime status must distinguish configured availability,
 capture capability, input eligibility and measured unsupported conditions.
 
-The actual main-session topology is FOUR monitors, including the 3440x1440 DP-4
-primary. R4's full measurements supersede the truncated earlier three-monitor list;
+The actual main-session topology included an additional primary monitor omitted
+by a truncated earlier list. R4's full measurements supersede that incomplete list;
 fresh source-local topology is authoritative, not a hardcoded fixture. R4's bounded
 overnight grant and leave-as-found constraints remain; workers have no implicit
 permission to access the main session. Historical service-owned zombies stay alone.

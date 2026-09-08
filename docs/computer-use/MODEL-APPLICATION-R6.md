@@ -41,7 +41,7 @@ checks and is required before claiming the finished icon looks correct.
 
 ## Execution evidence
 
-Final run **`/home/odin/model-application-r6-04` passed**, 2026-09-07.
+Final run **`${EVIDENCE_ROOT}/model-application-r6-04` passed**, 2026-09-07.
 Managed driver3736575 exited0; task168.055seconds,22 actual model requests,
 zero rejections,21 model-selected actions. Actual serialized requests each carried
 one native PNG matching the latest observation, strict=false production tools,

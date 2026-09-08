@@ -36,7 +36,7 @@ sender trials, and avoided spawning a replacement editor to manufacture survival
 ## Dependency ledger
 
 No host packages installed. Contained gedit/dependency layer was already cached;
-only sender recompiled with gcc -Wall, exit0. Log `/home/odin/tmp/wayland-r3-build.log`.
+only sender recompiled with gcc -Wall, exit0. Log `${EVIDENCE_ROOT}/wayland-r3-build.log`.
 Retained images:
 
 - Base unchanged: `sha256:71a3276a6b2f0d664c6c367e1926ac53849835aba1c5be2e5edcec2392ae2cd9`.
@@ -49,8 +49,8 @@ references, never prune. Evidence/images intentionally retained.
 
 ## Bounded runs
 
-Evidence: `/home/odin/tmp/wayland-r3-lifecycle{1,2,3}-20260907/`.
-Outer logs: `/home/odin/tmp/wayland-r3-lifecycle{1,2,3}-driver.log`.
+Evidence: `${EVIDENCE_ROOT}/wayland-r3-lifecycle{1,2,3}-20260907/`.
+Outer logs: `${EVIDENCE_ROOT}/wayland-r3-lifecycle{1,2,3}-driver.log`.
 All complete commands exited **1**. Each cleanup logged
 `original_exit=1 cleanup_failure=0` (see later inventory qualification).
 
@@ -110,7 +110,7 @@ fails verification for incomplete/legacy baseline, includes catatonit, reports
 current residual states, and marks global new helpers as unattributed possible
 parallel work rather than owned. Added three tests for permission/malformed
 records, vanished races, and catatonit. Final **9 tests passed**, log
-`/home/odin/tmp/wayland-r3-tests-final.log`. Shell syntax and owned diff whitespace
+`${EVIDENCE_ROOT}/wayland-r3-tests-final.log`. Shell syntax and owned diff whitespace
 checks passed. No repository full-suite or lifecycle matrix pass.
 
 Live private-runtime validate_action checks passed1/1 in run2 and run3 for
@@ -122,10 +122,10 @@ All three labelled containers absent. Recorded PID+start identities:11,11,21
 (run3 adds mid-run capture); old host-cleanup.json reports no owned residuals or
 new helpers. **Those old scans lacked completeness metadata**, so their clean
 verdict is limited, not retroactively upgraded by the ledger fix. New complete
-host snapshot `/home/odin/tmp/wayland-r3-final-host-inventory.json` taken after
+host snapshot `${EVIDENCE_ROOT}/wayland-r3-final-host-inventory.json` taken after
 fix. Startup/final snapshots are not exhaustive process lifetime event streams.
 Fresh complete-scan verification in
-`/home/odin/tmp/wayland-r3-final-identity-verification.json` found no remaining
+`${EVIDENCE_ROOT}/wayland-r3-final-identity-verification.json` found no remaining
 PID+start identities from any of the three runs, with zero scan errors.
 Final validate_action `wayland_r3_final_cleanup` was **DEGRADED:3/4**: container
 absence, complete scan/recorded identity absence, and artifact/whitespace passed;
@@ -176,7 +176,7 @@ merge, pipeline, host setting/device change, Podman or real-session access.
   triggers bounded orderly safety cleanup with exit3, not a successful EOF test.
 - Five telemetry tests and nine inherited Docker-stub/ledger tests passed.
   Python compilation, shell syntax, scoped tracked diff whitespace checks passed.
-  Logs `/home/odin/tmp/wayland-r3-corrected-{telemetry-tests,lab-tests,build}.log`.
+  Logs `${EVIDENCE_ROOT}/wayland-r3-corrected-{telemetry-tests,lab-tests,build}.log`.
   No host packages installed. Container apt dependency layer cached; gcc -Wall
   rebuilt the sender successfully. Operator image changed from
   `sha256:9cb7f0ee93587c58a16ad7ab8a369e15eb3fecccc3627ca91f01b57fa18ee48e`
@@ -186,8 +186,8 @@ merge, pipeline, host setting/device change, Podman or real-session access.
 
 ### Actual result, not wrapper success
 
-Evidence `/home/odin/tmp/wayland-r3-corrected-single-20260907/`; outer log
-`/home/odin/tmp/wayland-r3-corrected-single-driver.log`. Exact container
+Evidence `${EVIDENCE_ROOT}/wayland-r3-corrected-single-20260907/`; outer log
+`${EVIDENCE_ROOT}/wayland-r3-corrected-single-driver.log`. Exact container
 `odin-wayland-r2-20260907T010927-3406219`, ID
 `8553e4edab240cd52d1bc69ed408dd72275290223adfcfe803f0e9c4f150ec9d`.
 Container ran 01:09:27.900–01:09:51.925Z, exit1, OOMKilled=false. Supervising
@@ -271,7 +271,7 @@ identity absence passes. Final `wayland_corrected_single_cleanup` was
 evidence checks passed; no-new-global-helpers and historical-reaping warn checks
 failed. `host-cleanup.json` contains the later scan; original report is preserved
 as `original-host-cleanup.json` and in cleanup.log. Additional host snapshot:
-`/home/odin/tmp/wayland-r3-corrected-final-inventory.json`.
+`${EVIDENCE_ROOT}/wayland-r3-corrected-final-inventory.json`.
 
 `corrected-analysis.json` contains exact events, timestamps, counts and scan
 results. `artifact-inventory.json` lists36 retained evidence files with byte counts

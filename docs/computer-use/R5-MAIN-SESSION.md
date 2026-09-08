@@ -18,7 +18,7 @@ visual receipts, proves the saved text. No uncertain input was replayed.
 All cleanup stages passed. Serialized before/after metadata compares byte-for-byte:
 four-monitor RandR topology/modes/transforms, seven pre-existing clients and their
 geometry/states/stacking, focus, active client, workspace, pointer and keymap.
-DP-4 remains the3440x1440 primary and all monitors remain off. No wake was needed.
+Primary monitor identity and all monitor power states were preserved. No wake was needed.
 Only the newly gated scratch Xed and private bus were terminated; their private
 HOME and scratch artifact were removed, screenshots purged, controller closed.
 Independent validate_action verified the exact metadata files, absence of scratch
@@ -26,7 +26,7 @@ HOME/driver, four monitors, primary, off state and idle active-client state.
 
 ### Preserved later failures before the passing run
 
-- `/home/odin/assisted-session-r5-l5myxem8`: UID1000 could not traverse the service
+- `${EVIDENCE_ROOT}/assisted-session-r5-l5myxem8`: the desktop user could not traverse the service
   user's home, so private bus launch failed before desktop effects. The helper now
   creates a unique private /tmp directory and grants traversal only there.
 - `/tmp/assisted-session-r5-4wwfgwqq`: typing passed, Ctrl+S returned unknown. The

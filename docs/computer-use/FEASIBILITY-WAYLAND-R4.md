@@ -13,7 +13,7 @@ failed owned-input release gate. No production backend or eligibility is claimed
 
 Read R4 DECISIONS, the complete FEASIBILITY-WAYLAND-R2.md including its corrected
 run, and all eleven existing wayland-* files before changes. Existing checkout
-`/home/odin/odin-dev`, branch `feat/isolated-computer-use`. Own changes only:
+`${SOURCE_ROOT}`, branch `feat/isolated-computer-use`. Own changes only:
 
 - `scripts/computer-feasibility/wayland-portal.py`
 - `scripts/computer-feasibility/wayland-lifecycle.py`
@@ -87,11 +87,11 @@ WirePlumber0.4.17, GTK3.24.41. Exact Ubuntu revisions are recorded in session.lo
 Commands, from the development checkout:
 
 ```text
-bash scripts/computer-feasibility/wayland-lab.sh experiment-lifecycle --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r4-eof-1-20260907
-bash scripts/computer-feasibility/wayland-lab.sh experiment-lifecycle --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r4-eof-2-20260907
+bash scripts/computer-feasibility/wayland-lab.sh experiment-lifecycle --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r4-eof-1-20260907"
+bash scripts/computer-feasibility/wayland-lab.sh experiment-lifecycle --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r4-eof-2-20260907"
 ```
 
-Outer stdout/stderr retained as `/home/odin/tmp/wayland-r4-eof-{1,2}-driver.log`.
+Outer stdout/stderr retained as `${EVIDENCE_ROOT}/wayland-r4-eof-{1,2}-driver.log`.
 Both outer processes exited1; both cleanup logs say
 `original_exit=1 cleanup_failure=0`. OOMKilled=false in both inspect records.
 
@@ -180,7 +180,7 @@ by GTK/AT-SPI before actions, not inferred from a frame.
 Before experiment1:8 pure telemetry/ownership regressions and10 inherited
 Docker-stub/process-ledger tests passed. Before experiment2, same8+10 passed again.
 **Four suite commands,36 test executions,18 distinct tests.** Logs:
-`/home/odin/tmp/wayland-r4-{telemetry-tests,lab-tests}.log` and
+`${EVIDENCE_ROOT}/wayland-r4-{telemetry-tests,lab-tests}.log` and
 `wayland-r4-corrected-{telemetry-tests,lab-tests}.log`. Python imports exercised by
 pure tests, shell syntax check and owned scoped diff whitespace passed. No full
 repository test suite, CI, product-backend, compositor implementation or exhaustive

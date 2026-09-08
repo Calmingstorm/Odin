@@ -1,7 +1,7 @@
 # R5 GUI work in progress
 
 Controller/adapter integration is running actual isolated apps, not only stubs.
-Evidence `/home/odin/gui-r5-xed-02`: controller observe -> native image conversion
+Evidence `${EVIDENCE_ROOT}/gui-r5-xed-02`: controller observe -> native image conversion
 and delivery validation -> action. Typed note, GUI Save As (fresh safe modal token),
 authenticated export136bytes, GUI reopen, pause/resume generation1->3, appended
 recovery sentence through GUI, saved again. Native text typing dropped supplied
@@ -9,7 +9,7 @@ newlines, caught by independent exported file read. Child is fixing it; no exact
 multiline-content success claimed yet. First earlier attempt at save returned
 unknown, stopped cleanly; modal classifier fix is now working in the second run.
 
-Drawing actual controller session `/home/odin/gui-r5-drawing-01` now active,
+Drawing actual controller session `${EVIDENCE_ROOT}/gui-r5-drawing-01` now active,
 recognized startup modal safely dismissed, three polyline drawing inputs and Save
 requested. Artifact/reopen inspection pending. No27/30 claim yet.
 
@@ -24,7 +24,7 @@ fixture cleanup validated exact unit/cgroup/driver/supervisor gone.
 
 ## Final worker handoff
 
-Drawing02 `/home/odin/gui-r5-drawing-02` now produced actual GUI-created exported
+Drawing02 `${EVIDENCE_ROOT}/gui-r5-drawing-02` now produced actual GUI-created exported
 `acceptance-drawing.png`:1000x600PNG,17166bytes. Independent PIL verify/decode:
 5603dark pixels, bbox302,293..493,477. SHA256
 `692bb8a3383bc1984f4415ccb91d814f5bec0f05e01b268031eed2e535759544`.

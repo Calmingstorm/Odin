@@ -2,7 +2,7 @@
 
 Source/test work for PR350, not deployment, desktop repair or application
 qualification. Exclusive development cwd:
-`/home/odin/reviews/computer-use-r7-runtime`, branch `work/computer-r7-runtime`.
+`${REVIEW_ROOT}/computer-use-r7-runtime`, branch `work/computer-r7-runtime`.
 No active desktop, live install/config, Cinnamon change, restart, deployment,
 pipeline, merge or tag. No production topology, power, pointer or focus restoration
 was added. The confirmed external compositor issue is not a cleanup prerequisite.
@@ -47,7 +47,7 @@ on changed source/tests and `git diff --check` passed. No full-suite claim.
 
 Pytest ran from the development cwd via the fully reviewed
 `scripts/computer-feasibility/owned-test-supervisor-r6.py`, using
-`/home/odin/odin-dev/.venv/bin/python -B` for supervisor and pytest. The focused
+`${SOURCE_ROOT}/.venv/bin/python -B` for supervisor and pytest. The focused
 command is supervisor `--deadline 90 --grace 3 --report <report> --` followed by
 the interpreter and `-B -m pytest -q` with these files:
 

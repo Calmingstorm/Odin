@@ -68,7 +68,7 @@ without stringification while preserving tool/result correlation.
 
 ## Recorded validation
 
-From `/home/odin/odin-dev` only:
+From `${SOURCE_ROOT}` only:
 
 `pytest -q tests/test_computer_native_vision_r5.py tests/test_computer_vision.py
 tests/test_computer_render.py tests/test_agent_image_safety.py

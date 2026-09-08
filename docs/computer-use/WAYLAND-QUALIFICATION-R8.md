@@ -88,8 +88,8 @@ the ordinary EIS guardian. This test simulator must never ship as an input fallb
 
 ## Every graphical attempt and cleanup
 
-All evidence roots are `/home/odin/tmp/wayland-r8-<name>-20260907`; outer logs are
-`/home/odin/tmp/wayland-r8-<name>-driver.log`. The first five failures happened
+All evidence roots are `${EVIDENCE_ROOT}/wayland-r8-<name>-20260907`; outer logs are
+`${EVIDENCE_ROOT}/wayland-r8-<name>-driver.log`. The first five failures happened
 before the tested guardian held input and are not lifecycle successes.
 
 | Name | Result | Exact Docker ID |
@@ -145,10 +145,10 @@ scope + newest guardian and a genuinely supported application GUI task.
 
 Final focused suite: **26 passed,9 subtests passed,6.73s**, primary exit0,
 owned-supervisor cleanup true, complete census, no residuals/signals. Log
-`/home/odin/tmp/wayland-r8-final-tests.log`, ownership receipt
-`/home/odin/tmp/wayland-r8-final-tests-owned.json`. This ran the four new R8 pure
+`${EVIDENCE_ROOT}/wayland-r8-final-tests.log`, ownership receipt
+`${EVIDENCE_ROOT}/wayland-r8-final-tests-owned.json`. This ran the four new R8 pure
 evidence tests plus inherited census, telemetry and Docker-stub cleanup tests,
-using `/home/odin/odin-dev/.venv/bin/python -B` from the qualification worktree.
+using `${SOURCE_ROOT}/.venv/bin/python -B` from the qualification worktree.
 All R8 Python ASTs parsed, both shell scripts passed bash -n, committed diff
 whitespace and clean-worktree checks passed. Final validate_action
 `wayland_R8_final_stock_qualification` passed4/4, including current recorded
@@ -157,15 +157,15 @@ general GUI qualification claim.
 
 Build `wayland-r8-stock.Containerfile` as `localhost/odin-wayland-stock:r8`, then
 build `wayland-r8-input.Containerfile` with explicit named context
-`--build-context runtime=/home/odin/reviews/computer-use-r8-wayland` and the
+`--build-context runtime=${REVIEW_ROOT}/computer-use-r8-wayland` and the
 intended reviewed source revision. New builds can contain a newer guardian than
 the hashes above and must be labelled separately. Actual measured commands were:
 
 ```text
-bash scripts/computer-feasibility/wayland-r8-lab.sh --isolated-stock-qualification native-headless localhost/odin-wayland-input:r8b /home/odin/tmp/wayland-r8-native6-20260907
-bash scripts/computer-feasibility/wayland-r8-lab.sh --isolated-stock-qualification nested-x11 localhost/odin-wayland-input:r8b /home/odin/tmp/wayland-r8-nested1-20260907
-python3 scripts/computer-feasibility/wayland-r8-evidence.py /home/odin/tmp/wayland-r8-native6-20260907
-python3 scripts/computer-feasibility/wayland-r8-evidence.py /home/odin/tmp/wayland-r8-nested1-20260907
+bash scripts/computer-feasibility/wayland-r8-lab.sh --isolated-stock-qualification native-headless localhost/odin-wayland-input:r8b "${EVIDENCE_ROOT}/wayland-r8-native6-20260907"
+bash scripts/computer-feasibility/wayland-r8-lab.sh --isolated-stock-qualification nested-x11 localhost/odin-wayland-input:r8b "${EVIDENCE_ROOT}/wayland-r8-nested1-20260907"
+python3 scripts/computer-feasibility/wayland-r8-evidence.py "${EVIDENCE_ROOT}/wayland-r8-native6-20260907"
+python3 scripts/computer-feasibility/wayland-r8-evidence.py "${EVIDENCE_ROOT}/wayland-r8-nested1-20260907"
 ```
 
 Reproduction requires **new evidence directories**, not the retained ones. All

@@ -28,7 +28,7 @@ Private-only Xvfb/empty-baseline adapters do not relax main topology guards.
 
 ## First main run: task succeeded; power restoration required follow-up
 
-Evidence `/tmp/cu-r6-1wtyi61r`. On the actual DP-4 primary, ten actions verified:
+Evidence `/tmp/cu-r6-1wtyi61r`. On the actual primary monitor, ten actions verified:
 select rectangle, drag, deselect, select ellipse, drag, deselect, Save As, select
 filename, type a new scratch path, save. Independent SVG parse found exactly one
 positive-size rectangle and ellipse. Artifact SHA256
@@ -53,7 +53,7 @@ Evidence `/tmp/cu-r6-ke2bkzsh`. First keyboard shortcut verified; the drag retur
 unavailable. The task stopped without retrying uncertain input. No SVG was saved.
 Scratch processes and evidence were cleaned; the CLI returned **1**.
 
-During this run the desktop topology changed: DP-2 remained connected but became
+During this run the desktop topology changed: a secondary monitor remained connected but became
 disabled, the remaining monitors rearranged, and the window manager moved some
 hidden clients. This is observed state, **not a proven causal attribution** to
 the compositor, monitor sleep or the input operation. The harness correctly
@@ -73,8 +73,8 @@ Parent performed only baseline-directed recovery:
 **Final full JSON equality passed**: topology, all original windows and identities,
 states, stacking, workspace, pointer, held-key/button state, focus and power match
 the before snapshot. Canonical hashes independently matched. Final validation
-passed; scratch HOME/evidence absent, supervisor residuals empty, live Odin still
-PID3254906. No logout, restart, live code change or broad process cleanup occurred.
+passed; scratch HOME/evidence absent, supervisor residuals empty, live Odin process
+unchanged. No logout, restart, live code change or broad process cleanup occurred.
 
 ## Honest qualification boundary
 

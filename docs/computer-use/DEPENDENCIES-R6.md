@@ -19,7 +19,7 @@ Installation used noninteractive apt with `--no-install-recommends` and
 `NEEDRESTART_MODE=l`, so pending service upgrades were not restarted. Package
 triggers updated normal system desktop/menu/icon caches. No user desktop settings
 were changed. Post-install validation confirmed the executable, all seven package
-states, unchanged Odin MainPID 3254906 and all four monitors. This is dependency
+states, unchanged Odin service process and monitor topology. This is dependency
 validation, not a GUI task success claim.
 
 Reversal is operator-owned: simulate removal of these exact seven packages first,

@@ -12,7 +12,7 @@ Actions wait for two equal fresh captures to avoid transient pixels, not retry i
 
 Managed process **3526385**, driver **3526387**, supervisor **3526389**, unit
 `odin-cu-32cc92f825748c704243df1a5f1a636e.service` completed Xed tasks04..10.
-Evidence `/home/odin/gui-corpus-r5-xed-h`, stdout `/tmp/gui-corpus-xed-h.log`.
+Evidence `${EVIDENCE_ROOT}/gui-corpus-r5-xed-h`, stdout `/tmp/gui-corpus-xed-h.log`.
 Bounded timeout1100seconds; controller1200seconds/200actions. Tasks04..10 all
 passed exact saved and GUI-reselected content. Runtime271seconds, exit0.
 Operator pause task07 succeeded generation1->2->3, pause3.4ms, model observation
@@ -32,7 +32,7 @@ coordinate for arbitrary accumulated tabs. Parent owns independent model accepta
 
 ## Failures retained
 
-All evidence directories `/home/odin/gui-corpus-r5-*`, each events.jsonl and ledger.
+All evidence directories `${EVIDENCE_ROOT}/gui-corpus-r5-*`, each events.jsonl and ledger.
 Xed a/b: ctrl+shift+s accepted public schema but rejected native KEYS, unknown.
 Xed c: actual File-menu coordinate(18,29) refused by native finite app bounds.
 Xed d: harness incorrectly treated raster not_satisfied as task failure on already

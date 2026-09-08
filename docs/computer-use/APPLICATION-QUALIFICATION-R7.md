@@ -82,7 +82,7 @@ GUI disk-reopen claim is made.
 
 The single R7 execution used the narrowed harness
 `scripts/computer-feasibility/attached-apps-r6.py --execute-isolated --task writer`.
-It ran from `/home/odin/reviews/computer-use-r7-apps`, production code at
+It ran from `${REVIEW_ROOT}/computer-use-r7-apps`, production code at
 `bd814b072a682175e51687d164a02531a2fecbb8` plus the recorded R7 harness changes.
 This is the task-policy hook revision, **not the separate pending R7 runtime
 cleanup revision**. Native changes made later require their own regression

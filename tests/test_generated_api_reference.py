@@ -26,7 +26,7 @@ def test_committed_api_reference_is_byte_identical():
 def test_routes_exactly_match_characterization_method_path_name_and_order():
     rows = reference.collect_rest_routes()
     assert [(r.method, r.path, r.handler_name) for r in rows] == EXPECTED_ROUTES
-    assert len(rows) == 221
+    assert len(rows) == 222
     assert len({(r.method, r.path) for r in rows}) == len(rows)
     rendered = reference.render().split("## Other HTTP and WebSocket routes", 1)[0]
     table = [line.split(" | ") for line in rendered.splitlines() if line.startswith("| ")][2:]
@@ -57,25 +57,29 @@ def test_every_purpose_and_owner_come_from_the_registered_handler():
     assert "| — |" in text
 
 
-@pytest.mark.parametrize(("method", "path", "admin", "local"), [
-    ("POST", "/api/auth/login", False, False),
-    ("POST", "/api/auth/logout", False, False),
-    ("GET", "/api/auth/session", False, False),
-    ("POST", "/api/chat", False, False),
-    ("POST", "/api/execute", False, False),
-    ("GET", "/api/sessions", False, False),
-    ("DELETE", "/api/sessions/{channel_id}", False, False),
-    ("GET", "/api/status", True, False),
-    ("GET", "/api/subsystems/status", True, False),
-    ("GET", "/api/ollama/models", True, False),
-    ("POST", "/api/ollama/model", True, False),
-    ("GET", "/api/config", True, False),
-    ("GET", "/api/sessions/token-usage", True, True),
-    ("GET", "/api/host-access", True, True),
-    ("GET", "/api/hosts", True, True),
-    ("GET", "/api/memory", True, False),
-    ("GET", "/api/turn-state/turns", True, True),
-])
+@pytest.mark.parametrize(
+    ("method", "path", "admin", "local"),
+    [
+        ("POST", "/api/auth/login", False, False),
+        ("POST", "/api/auth/logout", False, False),
+        ("GET", "/api/auth/session", False, False),
+        ("POST", "/api/chat", False, False),
+        ("POST", "/api/execute", False, False),
+        ("GET", "/api/sessions", False, False),
+        ("DELETE", "/api/sessions/{channel_id}", False, False),
+        ("GET", "/api/status", True, False),
+        ("GET", "/api/subsystems/status", True, False),
+        ("GET", "/api/ollama/models", True, False),
+        ("POST", "/api/ollama/model", True, False),
+        ("GET", "/api/config", True, False),
+        ("POST", "/api/computer/reconcile", True, False),
+        ("GET", "/api/sessions/token-usage", True, True),
+        ("GET", "/api/host-access", True, True),
+        ("GET", "/api/hosts", True, True),
+        ("GET", "/api/memory", True, False),
+        ("GET", "/api/turn-state/turns", True, True),
+    ],
+)
 def test_authentication_policy_characterization(method, path, admin, local):
     rows = {(r.method, r.path): r for r in reference.collect_rest_routes()}
     assert rows[method, path].admin is admin
@@ -105,11 +109,11 @@ async def test_flags_match_actual_admin_middleware_without_dispatching_handlers(
     # Synthetic token presence, not a credential loaded from config or disk.
     policy = _make_admin_middleware(SimpleNamespace(api_token="", api_tokens=[object()]))
     for row in reference.collect_rest_routes():
-        resource = (
-            web.DynamicResource(row.path) if "{" in row.path else web.PlainResource(row.path)
-        )
+        resource = web.DynamicResource(row.path) if "{" in row.path else web.PlainResource(row.path)
         request = SimpleNamespace(
-            path=row.path, method=row.method, app={},
+            path=row.path,
+            method=row.method,
+            app={},
             match_info=SimpleNamespace(route=SimpleNamespace(resource=resource)),
             _api_identity=SimpleNamespace(tier="user"),
         )
@@ -157,15 +161,18 @@ WEBHOOKS = [f"/webhook/{name}" for name in ("gitea", "grafana", "generic", "gith
 UI = ["/", "/ui/{path:.*}", "/ui"]
 
 
-@pytest.mark.parametrize(("options", "paths"), [
-    ({}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
-    ({"web_enabled": False}, HEALTH + WEBHOOKS),
-    ({"webhooks_enabled": False}, HEALTH + UI + ["/api/ws"]),
-    ({"ui_exists": False}, HEALTH + WEBHOOKS + ["/api/ws"]),
-    ({"dist_exists": False}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
-    ({"wire_bot": False}, HEALTH + WEBHOOKS + UI),
-    ({"web_enabled": False, "webhooks_enabled": False}, HEALTH),
-])
+@pytest.mark.parametrize(
+    ("options", "paths"),
+    [
+        ({}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
+        ({"web_enabled": False}, HEALTH + WEBHOOKS),
+        ({"webhooks_enabled": False}, HEALTH + UI + ["/api/ws"]),
+        ({"ui_exists": False}, HEALTH + WEBHOOKS + ["/api/ws"]),
+        ({"dist_exists": False}, HEALTH + WEBHOOKS + UI + ["/api/ws"]),
+        ({"wire_bot": False}, HEALTH + WEBHOOKS + UI),
+        ({"web_enabled": False, "webhooks_enabled": False}, HEALTH),
+    ],
+)
 def test_non_rest_registration_conditions_and_order(options, paths):
     rows = reference.collect_server_routes(**options)
     assert [r.path for r in rows] == paths
@@ -193,14 +200,17 @@ def test_generation_does_not_load_config_start_services_or_read_ui(monkeypatch):
     # Constructors can register routes but must not inspect UI assets on disk.
     monkeypatch.setattr(reference.Path, "is_dir", forbidden)
     monkeypatch.setattr(reference.Path, "is_file", forbidden)
-    assert "**221 REST registrations**" in reference.render()
+    assert "**222 REST registrations**" in reference.render()
 
 
 def test_cli_is_offline_and_works_outside_repo_without_git(tmp_path):
     result = subprocess.run(
         [sys.executable, str(REPO_ROOT / "scripts/docs/generate_api_reference.py"), "--check"],
-        cwd=tmp_path, env={"PATH": "", "PYTHONHASHSEED": "97"},
-        text=True, capture_output=True, check=False,
+        cwd=tmp_path,
+        env={"PATH": "", "PYTHONHASHSEED": "97"},
+        text=True,
+        capture_output=True,
+        check=False,
     )
     assert result.returncode == 0, result.stdout + result.stderr
 

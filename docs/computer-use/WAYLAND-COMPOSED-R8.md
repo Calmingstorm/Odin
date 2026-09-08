@@ -38,9 +38,9 @@ inside each assembled image. No host package installation.
 
 ## Recorded attempts, without rewriting failures
 
-Evidence roots `/home/odin/tmp/r8-composed-<name>-20260907`; corresponding outer
-logs `/home/odin/tmp/r8-composed-<name>-driver.log`, ownership receipts
-`/home/odin/tmp/r8-composed-<name>-owned.json`.
+Evidence roots `${EVIDENCE_ROOT}/r8-composed-<name>-20260907`; corresponding outer
+logs `${EVIDENCE_ROOT}/r8-composed-<name>-driver.log`, ownership receipts
+`${EVIDENCE_ROOT}/r8-composed-<name>-owned.json`.
 
 | Attempt | Image | Actual outcome |
 |---|---|---|
@@ -55,7 +55,7 @@ logs `/home/odin/tmp/r8-composed-<name>-driver.log`, ownership receipts
 
 Native8 concrete blocker is absent guardian keymap, not an inferred portal timeout
 or modifier-change event. Full exception/event evidence lives in
-`/home/odin/tmp/r8-composed-native8-20260907/composition.jsonl`. The first
+`${EVIDENCE_ROOT}/r8-composed-native8-20260907/composition.jsonl`. The first
 `T 72` command is refused because `g.keymap` is absent. Do not replace the keymap
 with a fabricated US layout or waive the modifier/scope protections. Parent owns
 runtime fixes. Portal deadline followup f9df52b is ready for a final image rebuild.
@@ -69,7 +69,7 @@ container teardown. Native7 live checks passed2/2; native8 passed1/1.
 
 Diagnostic harness focused Ruff and diff-check passed. Evidence-verifier suite
 remains **10 passed**,0.44s, supervised exit0/cleanup true:
-`/home/odin/tmp/r8-composed-unit5.log` and `r8-composed-unit5-owned.json`.
+`${EVIDENCE_ROOT}/r8-composed-unit5.log` and `r8-composed-unit5-owned.json`.
 No SVG or post-save screenshot is claimed for these failed attempts.
 
 Each of these is an **exit1 application failure**, not a successful task. Native1
@@ -115,13 +115,13 @@ and no exact-owned process/cgroup or new helper residuals. It refuses any logged
 failure. Unit data are labelled fixtures and are never supplied to the qualifier.
 
 First verifier suite: **8 passed**, 0.42s, command exit0 and standalone supervisor
-cleanup true. Log `/home/odin/tmp/r8-composed-unit1.log`, receipt
-`/home/odin/tmp/r8-composed-unit1-owned.json`. This is verifier testing only,
+cleanup true. Log `${EVIDENCE_ROOT}/r8-composed-unit1.log`, receipt
+`${EVIDENCE_ROOT}/r8-composed-unit1-owned.json`. This is verifier testing only,
 not successful application proof.
 
 Latest controller-aware verifier suite: **10 passed**,0.41s, command exit0,
 cleanup true, no residuals or signals. Log `r8-composed-unit4.log`, receipt
-`r8-composed-unit4-owned.json` under `/home/odin/tmp`. Focused Ruff for all three
+`r8-composed-unit4-owned.json` under `${EVIDENCE_ROOT}`. Focused Ruff for all three
 new Python files and git diff-check passed. Full project tests were not run here.
 
 All native1-6 outer commands returned1. Each standalone receipt has
@@ -138,9 +138,9 @@ From the qualification worktree, build with these contexts (no deploy paths):
 
 ```sh
 docker buildx build --load --progress plain \
-  --build-context runtime=/home/odin/odin-dev \
-  --build-context probe=/home/odin/odin-dev \
-  --build-context portal=/home/odin/odin-dev \
+  --build-context runtime="${SOURCE_ROOT}" \
+  --build-context probe="${SOURCE_ROOT}" \
+  --build-context portal="${SOURCE_ROOT}" \
   -f scripts/computer-feasibility/r8-composed.Containerfile \
   -t localhost/odin-wayland-composed:r8-next .
 ```
@@ -151,10 +151,10 @@ unique names (existing outputs are not overwritten):
 
 ```sh
 python3 scripts/computer-feasibility/owned-test-supervisor-r6.py \
-  --deadline 420 --grace 5 --report /home/odin/tmp/r8-composed-next-owned.json -- \
+  --deadline 420 --grace 5 --report "${EVIDENCE_ROOT}/r8-composed-next-owned.json" -- \
   bash scripts/computer-feasibility/r8-composed-lab.sh \
   --isolated-production-composition localhost/odin-wayland-composed:r8-next \
-  /home/odin/tmp/r8-composed-next-20260907
+  "${EVIDENCE_ROOT}/r8-composed-next-20260907"
 ```
 
 Only after an actual successful run may `r8-composed-evidence.py EVIDENCE_DIR`
@@ -168,13 +168,13 @@ Both runs completed with standalone supervisor `primary_returncode=0`,
 `cleanup_ok=true`, no deadline, residuals or signals. Both pass the independent
 `r8-composed-evidence.py` verifier and exact process/cgroup cleanup recheck.
 
-* **native9/r8g:** all three producer contexts were `/home/odin/odin-dev`,
+* **native9/r8g:** all three producer contexts were `${SOURCE_ROOT}`,
   HEAD3c36322 plus pre-existing app-profile edits. Working source bytes and dirty
-  diff are captured in `/home/odin/tmp/r8-composed-native9-source-20260907`.
+  diff are captured in `${EVIDENCE_ROOT}/r8-composed-native9-source-20260907`.
   This is not a clean-SHA qualification claim.
 * **native10/r8h:** final repeat uses immutable `git archive` of clean parent
   **88c126a644e938bf5975def5fe59ef2598c6398a**, extracted to
-  `/home/odin/tmp/r8-composed-native10-source-20260907`. Runtime, probe and portal
+  `${EVIDENCE_ROOT}/r8-composed-native10-source-20260907`. Runtime, probe and portal
   contexts ALL use that frozen snapshot. Producer archive/hash and SHA are
   retained there. Independent comparison confirms all12 recorded `/work/src`
   Wayland source hashes match those exact producer bytes.
@@ -207,7 +207,7 @@ native10 launch-health assertion failed because the short task had already
 exited. Appropriate post-teardown verifier/container-absence/cleanup validation
 then passed **3/3**. Native9 live launch validation passed2/2.
 
-Final evidence under `/home/odin/tmp`:
+Final evidence under `${EVIDENCE_ROOT}`:
 
 * `r8-composed-native10-20260907/`: composition, screenshots, SVG, image/source
   manifests, process census and exact cleanup.

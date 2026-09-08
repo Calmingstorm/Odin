@@ -69,7 +69,7 @@ Python AST parsing, shell syntax and default invocation refusal passed before go
 ## Executed evidence
 
 Clean final run command: `python3 scripts/computer-feasibility/x11-run.py
---execute-isolated`, working directory `/home/odin/odin-dev`.
+--execute-isolated`, working directory `${SOURCE_ROOT}`.
 Run ended 2026-09-06 23:30:33 UTC, exit 0, no XERROR or Python tracebacks.
 Exact retained tool result ID: `a1975243f31f4545b6fe116fda616535`
 (39,602 bytes, read through EOF; retention expires 2026-09-07 23:30:33 UTC).

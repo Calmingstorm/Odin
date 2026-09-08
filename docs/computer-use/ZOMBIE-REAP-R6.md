@@ -4,10 +4,11 @@ Implemented on existing PR350 branch at `0ec10ff`. No live change or cure claime
 
 ## Observed diagnosis
 
-Read-only production checks: PID3254906, PPID1, SID3254906; activation September6
-16:48:03 EDT and journal Starting Odin16:48:04.405. Zombie census grew423 to424,
-including sudo/chrome/crashpad/cat/dbus.414 foreign-session nonleaders,10 session
-leaders. This classification is not permission to consume their statuses.
+Read-only production checks identified the same init-parented service session
+leader across activation and journal observations. The zombie census increased
+by one and included both foreign-session nonleaders and session leaders from
+sudo/chrome/crashpad/cat/dbus. This classification is not permission to consume
+their statuses.
 Live-disk and development process_manager.py were byte-identical before edits;
 dev metadata3.95.0, branch feat/isolated-computer-use HEAD b918189. Disk equality
 does not prove executing-module identity. Filtered journal showed no reaper

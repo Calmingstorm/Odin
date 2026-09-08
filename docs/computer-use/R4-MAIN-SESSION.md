@@ -88,7 +88,7 @@ Pillow; import remains lazy. No host package was installed. Initial real capture
 used the already-installed system python-xlib/Pillow, not the live bot environment.
 Development-venv installation/version evidence is recorded separately if used.
 
-Installed **python-xlib 0.33 only in `/home/odin/odin-dev/.venv`**, using the
+Installed **python-xlib 0.33 only in `${SOURCE_ROOT}/.venv`**, using the
 existing uv tool (this venv has no pip executable). No global, system or live-bot
 package changed. Reversal: `uv pip uninstall --python .venv/bin/python python-xlib`
 from the development clone, provided no later development work depends on it.

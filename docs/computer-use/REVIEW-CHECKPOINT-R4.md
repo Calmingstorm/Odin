@@ -71,7 +71,7 @@ watchdog-loss release safety. Main-session access is not a reason to ignore that
 - Full suite retains known unawaited coroutine/pending async-shutdown diagnostics;
   this is not warning-free teardown. No claim of a new root cause.
 - Final environment bundle5/5: no computer fixture cgroups, both exact Wayland
-  containers absent, live Odin remains PID3254906 with NRestarts0, real topology
+  containers absent, live Odin remains active without restart, real topology
   still four monitors, source clean/immutable. Each runtime probe also validated
   its exact unit/cgroup and recorded supervisors. Parent's later probe ledger is
   not an exhaustive process-birth census. Historical service-owned zombies remain

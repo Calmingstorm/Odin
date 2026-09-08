@@ -8,7 +8,7 @@ the actual controller and isolated Xed backend. Production service was not
 booted. Main desktop, live configuration, and deployment were not modified.
 No screenshot was posted. Credentials were not printed, refreshed, or copied.
 
-Final evidence: `/home/odin/model-gui-r5-xed-07/`. Managed job PID3529811 exited0
+Final evidence: `${EVIDENCE_ROOT}/model-gui-r5-xed-07/`. Managed job exited0
 after **84.687 seconds, 11 model requests**. This run uses **unchanged actual
 `computer_definitions()`**, including the parent's explicit `strict=False`
 production transport fix. The harness-only union schema used in earlier
@@ -64,7 +64,7 @@ ReadOnlyAuth comes from vision-smoke.py and forbids refresh/save.
 
 ## Preserved failures and exploratory runs
 
-Directories `/home/odin/model-gui-r5-xed-01` through `-07` remain intact:
+Directories `${EVIDENCE_ROOT}/model-gui-r5-xed-01` through `-07` remain intact:
 
 | Run | Requests | Outcome |
 | --- | ---: | --- |

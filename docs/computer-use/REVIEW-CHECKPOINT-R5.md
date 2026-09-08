@@ -103,7 +103,7 @@ release gates or erase corpus failures to change that conclusion.
 ## Environment and reversal
 
 No experiment units or containers remain running. Unrelated existing containers
-untouched. Live Odin still PID3254906,NRestarts0, health200. Historic service-owned
+untouched. Live Odin stayed active without restart, health200. Historic service-owned
 zombies left alone under the operator's ruling; no reaping injection/restart. No host
 compositor or package was installed in this R5 turn; contained Wayland builds and
 development dependency evidence remain in their reports, with exact reversal.

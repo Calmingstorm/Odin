@@ -70,7 +70,7 @@ containers with an inert recording stub; no service, desktop or input was starte
    runtime assets and `assets/services/org.a11y.Bus.service`. No host pip/setuptools
    install was needed and no host system package was installed for R9.
 
-Acceptance receipts are retained under `/home/odin/tmp/`:
+Acceptance receipts are retained under `${EVIDENCE_ROOT}/`:
 `computer-package-r9-headless4.json`, `computer-package-r9-desktop2.json`,
 `computer-package-r9-legacy-upgrade3.json`, `computer-package-r9-wheel.json` and
 `computer-package-r9-compile3.json`. Each reports cleanup_ok=true and no residuals.
@@ -113,14 +113,13 @@ permissions. No deploy, real service restart, merge, tag or pipeline occurred.
 No observation/input/settings operation targeted the operator's desktop.
 
 All test containers and supervised workloads were cleaned up. Live service remained
-PID3254906,NRestarts0,active. Census is consistently system-wide vs UID-specific:
-initial437total/350service/70root/17desktop-user; final440total/353service/70root/17desktop-user.
-Account labels are genericized; the recorded counts are unchanged.
-The three new dead odin-owned children are one `gh` and two `dpkg-deb`, parented to
+active without restart. The census distinguished system-wide and per-account
+ownership; only the service-owned count increased, by three.
+The three new dead service-owned children are one `gh` and two `dpkg-deb`, parented to
 the unchanged live service. The dpkg pair followed an unsupervised listing cut
 short by a pipe. They are reported, not cleared by restart/injection or attributed
 to other users. Container/test supervisors themselves report no residuals.
 
-Retained scratch tools/artifacts: `/home/odin/tmp/computer-r9-tools`, legacy fixture
+Retained scratch tools/artifacts: `${EVIDENCE_ROOT}/computer-r9-tools`, legacy fixture
 trees, local ignored `build/`/`dist/`, and Docker image
 `odin-computer-package-builder:r9`. No runtime/deploy files were modified.

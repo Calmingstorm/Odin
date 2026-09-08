@@ -6,7 +6,7 @@ install edit, Odin restart, merge, tag or release/CI pipeline was performed.
 
 ## Requested zombie diagnosis and repair
 
-Observed live PID3254906 with423 then424 zombie children. The shipped positive
+Observed the live service's unreaped-child census increase by one. The shipped positive
 adoption scanner misses descendants orphaned before its first observation. Two
 independent owned fixtures reproduced this:32/32 and64/64 zombies remained after
 three zero-grace scans. This is a demonstrated mechanism, not guessed attribution
@@ -47,7 +47,7 @@ Actual demonstrated work:
   with ordinary blinking caret also saved successfully. Close/reopen is NOT
   qualified: File > Close returned unknown, owned input released, driver stopped.
 - **Main desktop Inkscape:**10 verified actions completed rectangle/ellipse and
-  GUI save on DP-4. Both CLI runs reported restoration failures honestly. Parent
+  GUI save on the primary monitor. Both CLI runs reported restoration failures honestly. Parent
   restored exact full metadata after a power mismatch and later observed topology
   change; no further main input followed. MAIN-SESSION-R6.md has the full account.
 

@@ -8,7 +8,7 @@ pass, assisted-input eligibility or Stage 6 completion is made.
 ## Authority and isolation
 
 Read `DECISIONS.md` R1 and the full 109-line
-`/home/odin/reviews/computer-use/09-odin-replan.md` on 2026-09-06.
+`${REVIEW_ROOT}/computer-use/09-odin-replan.md` on 2026-09-06.
 Owned files: `scripts/computer-feasibility/wayland*` and this document only.
 No commits, host package installations, host service/config changes, deployment,
 live desktop access, privileged input, host devices, or user bus/socket access.
@@ -17,7 +17,7 @@ The harness builds dependencies into a **rootless Podman image**, not the host.
 Preparation can use the package network; experiments have `--network=none`,
 private PID/IPC/user namespaces, no capabilities, read-only image, private `/tmp`,
 1 GiB memory/one CPU/128-process limits. Only harness files (read-only) and a new
-evidence directory below `/home/odin/tmp/wayland-*` are bind mounted. No host home,
+evidence directory below `${EVIDENCE_ROOT}/wayland-*` are bind mounted. No host home,
 X11 socket, Wayland socket, desktop bus, clipboard, input or GPU device is mounted.
 Rendering is software. A fresh `dbus-run-session` and private PipeWire services are
 created only during the authorized experiment. There is no fallback to `:0`,
@@ -142,7 +142,7 @@ Bounded setup failures and fixes, all confined to the container/harness:
   allowed the real GNOME backend to initialize. Interface presence alone would
   have produced a false positive here.
 
-Best observed run: `/home/odin/tmp/wayland-r1-docker6-20260906/`.
+Best observed run: `${EVIDENCE_ROOT}/wayland-r1-docker6-20260906/`.
 
 | Observation | Actual result |
 | --- | --- |
@@ -205,7 +205,7 @@ Read all207 lines of DECISIONS.md and all211 then-current lines of this document
 Parent explicitly authorized the disposable simulated-operator channel; no product
 layers were changed. All additions are wayland* harness files and this document.
 
-**New demonstrated result:** run `/home/odin/tmp/wayland-operator8-20260906/`
+**New demonstrated result:** run `${EVIDENCE_ROOT}/wayland-operator8-20260906/`
 obtained real portal consent, one genuine PipeWire frame, a negotiated libei sender
 connection and actual native Wayland GTK motion/button delivery. It still exits24
 (incomplete), intentionally not an independence pass.

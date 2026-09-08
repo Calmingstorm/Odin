@@ -8,7 +8,7 @@ deterministic isolated corpus. This is not a claim of a model-driven general GUI
 agent, attached live-desktop acceptance, or deployed-service validation. Parent owns
 deployment and any broader acceptance criteria.
 
-Artifact `/home/odin/corpus30-aggregate.json` contains all30 IDs, every retained
+Artifact `${EVIDENCE_ROOT}/corpus30-aggregate.json` contains all30 IDs, every retained
 attempt record, selected complete successes, repeat counts, and13independently
 decoded image/full reopened-canvas checks. Progress `/tmp/corpus30-r5-status.txt`
 is the same aggregate, not a misleading last-batch numerator.
@@ -99,7 +99,7 @@ Unicode02 remains a real failed case; expected bytes are not weakened to mojibak
 
 ## Xed completed result
 
-Run `/home/odin/corpus30-xed-c`: **14/14 supported workflows passed**, IDs01 and03
+Run `${EVIDENCE_ROOT}/corpus30-xed-c`: **14/14 supported workflows passed**, IDs01 and03
 through15. Managed PID3583956, driver3583959, 14fresh sandboxes,629seconds, exit0.
 No ID02 rerun or success claim: exact Unicode/tab task failed in discovery run a.
 Therefore Xed contribution to denominator is **14/15**, not14/14 acceptance.
@@ -125,7 +125,7 @@ checks, not runtime coverage. No dependencies installed. No deploy tested here.
 
 ### Repeatability and retained Unicode failure
 
-`/home/odin/corpus30-xed-repeat` runs01,02,06,09,11:4repeat passes,02fails again.
+`${EVIDENCE_ROOT}/corpus30-xed-repeat` runs01,02,06,09,11:4repeat passes,02fails again.
 No denominator increase. Exact independent artifact/closed-screen and5fixture
 cleanup audit passed via validate_action. Driver3640301, managed3640299 exited0
 after198seconds; exact recorded supervisors/units live in events. No fixtures remain.

@@ -66,7 +66,7 @@ checking the same predicate independently.
 ## Root cause: source plus controlled intervention
 
 Exact Ubuntu source, packaging patches applied:
-`/home/odin/tmp/wayland-r5-source-20260907/mutter-noble`.
+`${EVIDENCE_ROOT}/wayland-r5-source-20260907/mutter-noble`.
 The source helper also fetched libei/libeis1.2.1 for read-only comparison. Relevant
 Mutter46.2 paths/functions:
 
@@ -134,8 +134,8 @@ inspection or API exit0, establishes the cause for this tested stack.**
 
 ## All six graphical executions, including failures
 
-All directories below are `/home/odin/tmp/wayland-r5-<suffix>-20260907`.
-All outer logs are `/home/odin/tmp/wayland-r5-<suffix>-driver.log`.
+All directories below are `${EVIDENCE_ROOT}/wayland-r5-<suffix>-20260907`.
+All outer logs are `${EVIDENCE_ROOT}/wayland-r5-<suffix>-driver.log`.
 
 | Suffix | Modes completed | App / outer exit | Observation |
 |---|---:|---:|---|
@@ -189,20 +189,20 @@ query, physical-input attribution or arbitrary input proof.
 
 ## Build/test commands and evidence
 
-From `/home/odin/odin-dev` (each build log retained in `/home/odin/tmp`):
+From `${SOURCE_ROOT}` (each build log retained in `${EVIDENCE_ROOT}`):
 
 ```text
 bash scripts/computer-feasibility/wayland-lab.sh prepare-operator
-docker build --tag localhost/odin-wayland-mutter-baseline:r5 --build-context mutter-src=/home/odin/tmp/wayland-r5-source-20260907/mutter-noble --file scripts/computer-feasibility/wayland-mutter-build.Containerfile scripts/computer-feasibility
+docker build --tag localhost/odin-wayland-mutter-baseline:r5 --build-context mutter-src="${EVIDENCE_ROOT}/wayland-r5-source-20260907/mutter-noble" --file scripts/computer-feasibility/wayland-mutter-build.Containerfile scripts/computer-feasibility
 # Apply ONLY recorded key->button correction to the source with apply_patch.
-docker build --tag localhost/odin-wayland-mutter-fixed:r5 --build-context mutter-src=/home/odin/tmp/wayland-r5-source-20260907/mutter-noble --file scripts/computer-feasibility/wayland-mutter-build.Containerfile scripts/computer-feasibility
+docker build --tag localhost/odin-wayland-mutter-fixed:r5 --build-context mutter-src="${EVIDENCE_ROOT}/wayland-r5-source-20260907/mutter-noble" --file scripts/computer-feasibility/wayland-mutter-build.Containerfile scripts/computer-feasibility
 docker build -t localhost/odin-wayland-guardian-fixed:r5 -f scripts/computer-feasibility/wayland-guardian-fixed.Containerfile scripts/computer-feasibility
-bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r5-guardian1-20260907
-bash scripts/computer-feasibility/wayland-lab.sh experiment-baseline --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r5-causal-baseline-20260907
-bash scripts/computer-feasibility/wayland-lab.sh experiment-fixed --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r5-causal-fixed1-20260907
-bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian-fixed --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r5-guardian-fixed1-20260907
-bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian-fixed --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r5-guardian-fixed2-20260907
-bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian-fixed --parent-authorized-after-contract-correction /home/odin/tmp/wayland-r5-guardian-fixed3-20260907
+bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r5-guardian1-20260907"
+bash scripts/computer-feasibility/wayland-lab.sh experiment-baseline --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r5-causal-baseline-20260907"
+bash scripts/computer-feasibility/wayland-lab.sh experiment-fixed --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r5-causal-fixed1-20260907"
+bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian-fixed --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r5-guardian-fixed1-20260907"
+bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian-fixed --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r5-guardian-fixed2-20260907"
+bash scripts/computer-feasibility/wayland-lab.sh experiment-guardian-fixed --parent-authorized-after-contract-correction "${EVIDENCE_ROOT}/wayland-r5-guardian-fixed3-20260907"
 .venv/bin/pytest -q scripts/computer-feasibility/wayland-owned-input-test.py scripts/computer-feasibility/wayland-telemetry-test.py scripts/computer-feasibility/wayland-lab-test.py
 ```
 

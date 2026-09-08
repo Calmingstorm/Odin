@@ -19,8 +19,8 @@ discord:
 ```yaml
 tools:
   enabled: true
-  ssh_key_path: /home/odin/.ssh/id_ed25519
-  ssh_known_hosts_path: /home/odin/.ssh/known_hosts
+  ssh_key_path: /home/service-user/.ssh/id_ed25519
+  ssh_known_hosts_path: /home/service-user/.ssh/known_hosts
   command_timeout_seconds: 300   # Default per-command timeout
   tool_timeouts:                 # Per-tool overrides
   hosts:

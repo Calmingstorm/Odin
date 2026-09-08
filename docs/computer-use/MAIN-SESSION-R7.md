@@ -1,7 +1,7 @@
 # R7 main-session check: owned cleanup passed, hardware restoration refused
 
 On 2026-09-07 the integrated revision `334f302` was tested once on the explicitly
-authorized `:0`, DP-4, with a new private-HOME/private-bus Inkscape process. The
+authorized desktop and primary monitor, with a new private-HOME/private-bus Inkscape process. The
 exact private CLI had just passed all ten actions and eighteen stages at the same
 revision in `/tmp/private-main-r6-0grvjtzd`. No fault was injected into the real
 desktop and no existing document received input. There was no second GUI attempt.
@@ -52,7 +52,7 @@ Final independent metadata report `/tmp/r7-main-final-comparison.json`:
 - four surviving application records exact: true;
 - four replaced desktop surfaces, matching geometry/state/owner: true;
 - focus identity/revert, pointer, workspace, active state and keymap exact: true;
-- eight current clients, all UID1000; scratch HOME and pixels absent;
+- current clients remained owned by the desktop user; scratch HOME and pixels absent;
 - **full exact baseline: false**, due to recreated desktop identities.
 
 The full metadata is in `/tmp/r7-main-final-full.json`. No screenshots or document

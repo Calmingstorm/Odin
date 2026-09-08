@@ -58,7 +58,7 @@ sudo policy beyond the existing explicitly configured worker execution path.
 
 Final read-only workstation preflight used the actual backend subprocess/identity
 gate with an explicit in-memory `runtime_sudo=true`, not a root-only substitute.
-It resolved the current focused application on DP-4 and returned the precise
+It resolved the current focused application on the primary monitor and returned the precise
 outside-source reason for the other three monitors. No pixels were captured,
 input sent, devices created, focus changed or live configuration written. The
 current sudo policy already permits this worker path; no new sudo grant is
@@ -112,7 +112,7 @@ passed. Existing async/deprecation and bundle-size warnings remain. An earlier
 diagnostic run failed on stale fixtures/API references and exposed insufficient
 in-process lifecycle coverage; those failures are retained, not counted as green.
 
-Read-only live baseline and final checks show service PID8385 still active with
+Read-only live baseline and final checks show the same service process still active with
 zero restarts. No test input was sent to `:0`, no live config or installation was
 changed, and no pipeline, merge or deploy was performed. This report is evidence
 for branch review, not a claim that the fixes are already active on the operator's desktop.

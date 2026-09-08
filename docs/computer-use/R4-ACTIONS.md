@@ -90,7 +90,7 @@ real isolated acceptance remain independent evidence obligations.
 
 ## Recorded validation
 
-Focused deterministic/non-GUI run from `/home/odin/odin-dev`:
+Focused deterministic/non-GUI run from `${SOURCE_ROOT}`:
 
 * `tests/test_computer_actions_r4.py` (68 cases), freshness R1, geometry R1,
   contract R2 and normal-turn R3: **118 passed**, one existing `audioop` deprecation
