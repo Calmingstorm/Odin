@@ -203,6 +203,7 @@ export default {
     const frame = ref(null), frameUrl = ref(''), frameExpired = ref(false), now = ref(Date.now());
     const name = ref(''), artifact = ref(null);
     let generation = 0, timer = null, active = false, token = api.token, lastRefresh = 0;
+    let statusRequest = null;
     const enabledLabel = value => value === true ? 'Enabled' : value === false ? 'Disabled' : 'Unknown';
     const attached = computed(() => status.value.backend?.environment === 'existing_session');
     const accessibilityFresh = computed(() => {
@@ -244,6 +245,7 @@ export default {
     }
     function invalidate() {
       generation++; clearFrame(); artifact.value = null;
+      statusRequest?.abort(); statusRequest = null; loading.value = false;
       reconciliationAck.value = '';
       observing.value = false; exporting.value = false; downloading.value = false;
     }
@@ -267,12 +269,13 @@ export default {
     async function refresh() {
       if (loading.value || toggling.value || stopping.value || pausing.value || recovering.value || !active) return;
       const g = generation, t = api.token; loading.value = true; lastRefresh = Date.now();
+      const request = new AbortController(); statusRequest = request;
       try {
-        const value = await api.get('/api/computer');
+        const value = await api.get('/api/computer', { signal: request.signal });
         if (!current(g, t)) return;
         acceptStatus(value);
       } catch (e) { if (current(g, t)) fail(e); }
-      finally { loading.value = false; }
+      finally { if (statusRequest === request) { statusRequest = null; loading.value = false; } }
     }
     function acceptStatus(value) {
       if ((status.value.session_id && status.value.session_id !== value.session_id)
@@ -322,9 +325,11 @@ export default {
         if (reconciliationAck.value !== 'ACKNOWLEDGE UNVERIFIED CLEANUP ' + selected.session_id) return;
         selected.acknowledgment = reconciliationAck.value;
       }
+      const route = !acknowledge ? 'recover'
+        : status.value.recovery?.reason === 'legacy_runtime_identity_missing' ? 'acknowledge_legacy' : 'reconcile';
       invalidate(); const g = generation, t = api.token; recovering.value = true;
       try {
-        const value = await api.post(acknowledge ? '/api/computer/reconcile' : '/api/computer/recover', selected);
+        const value = await api.post('/api/computer/' + route, selected);
         if (current(g, t)) acceptStatus(value);
       } catch (e) { if (current(g, t)) fail(e); }
       finally { recovering.value = false; }

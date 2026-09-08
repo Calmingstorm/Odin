@@ -29,13 +29,15 @@ const html = `<!doctype html><html><head>
   <link rel="stylesheet" href="/ui/css/style.css">
   <link rel="stylesheet" href="/ui/css/foundation.css">
 </head><body><div id="app"></div><script type="module">
-  import { createApp, h, ref, nextTick } from 'vue';
+  import { createApp, h, ref, nextTick, KeepAlive } from 'vue';
   import Computer from '/ui/js/pages/computer.js';
   import { api } from '/ui/js/api.js';
   api.setToken('fixture-only');
   const view = ref(null);
-  createApp({ render: () => h(Computer, { ref: view }) }).mount('#app');
+  const visible = ref(true);
+  createApp({ render: () => h(KeepAlive, null, { default: () => visible.value ? h(Computer, { ref: view }) : null }) }).mount('#app');
   await nextTick(); window.view = view.value; window.api = api; window.ready = true;
+  window.showComputer = async value => { visible.value = value; await nextTick(); };
 </script></body></html>`;
 server.middlewares.use(async (req, res, next) => {
   if (req.url !== '/__computer_test__.html') return next();
@@ -52,6 +54,7 @@ try {
   const errors = [], requests = [];
   page.on('pageerror', e => errors.push(e.message));
   let state = 'active', code = 200, blocked = null, holdObserve = false;
+  let holdStatus = false, blockedStatus = null;
   let enabled = false, runtimeEnabled = false, runtimeGeneration = 0, holdToggle = false, blockedToggle = null;
   let sessionGeneration = 1, recovery, inputAdmission, applicationProvenance;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
@@ -72,7 +75,10 @@ try {
     assert.equal(req.headers().authorization, 'Bearer fixture-only');
     if (code !== 200) return route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify({ error: 'fixture denial' }) });
     let body;
-    if (path === '/api/computer') body = summary();
+    if (path === '/api/computer') {
+      if (holdStatus) { blockedStatus = route; return; }
+      body = summary();
+    }
     else if (path === '/api/computer/enabled') {
       assert.equal(req.method(), 'POST');
       assert.deepEqual(Object.keys(req.postDataJSON()), ['enabled']);
@@ -90,7 +96,13 @@ try {
       state = 'closed'; recovery = { status: 'absence_verified', reason: 'owned_runtime_gone', complete: true };
       body = summary();
     }
-    else if (path === '/api/computer/reconcile') {
+    else if (path === '/api/computer/reconcile' || path === '/api/computer/acknowledge_legacy') {
+      const legacy = recovery?.reason === 'legacy_runtime_identity_missing';
+      if (path !== (legacy ? '/api/computer/acknowledge_legacy' : '/api/computer/reconcile')) {
+        return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({
+          code: 'runtime_identity_required', error: 'Use legacy acknowledgment for missing runtime identity.',
+        }) });
+      }
       assert.deepEqual(req.postDataJSON(), { session_id: 'computer-session', generation: sessionGeneration,
         acknowledgment: 'ACKNOWLEDGE UNVERIFIED CLEANUP computer-session' });
       state = 'closed'; sessionGeneration++;
@@ -309,6 +321,20 @@ try {
   assert.match(await page.getByRole('region', { name: 'Recovery evidence' }).innerText(), /Cleanup not verified/);
   assert.equal(requests.filter(p => p === '/api/computer/reconcile').length, 1);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, beforeRecoveryCapture);
+  // Older persisted sessions have no runtime descriptor. Their explicit
+  // attestation must use the legacy route, not the descriptor-only reconcile API.
+  state = 'quarantined'; sessionGeneration++;
+  recovery = { status: 'operator_cleanup_required', reason: 'legacy_runtime_identity_missing', complete: false };
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.status.state === 'quarantined');
+  await acknowledgment.fill('ACKNOWLEDGE UNVERIFIED CLEANUP computer-session');
+  await acknowledge.click();
+  await page.waitForFunction(() => !view.recovering);
+  assert.equal(await page.evaluate(() => view.status.state), 'closed');
+  assert.equal(requests.filter(p => p === '/api/computer/acknowledge_legacy').length, 1);
+  assert.equal(requests.filter(p => p === '/api/computer/reconcile').length, 1);
+  assert.match(await page.getByRole('region', { name: 'Recovery evidence' }).innerText(), /Cleanup not verified/);
+  assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, beforeRecoveryCapture);
   // Rejected mutations hide admin controls and are not retried automatically.
   const togglesBefore = requests.filter(p => p.endsWith('/enabled')).length;
   code = 403;
@@ -318,6 +344,27 @@ try {
   assert.equal(await disable.count(), 0);
   assert.equal(requests.filter(p => p.endsWith('/enabled')).length, togglesBefore + 1);
   assert.match(await page.getByRole('alert').innerText(), /Access unavailable or revoked/);
+  // Leaving a kept-alive inspector must retire a hung status read. Otherwise
+  // its loading flag suppresses every refresh after reactivation indefinitely.
+  code = 200;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.adminReady);
+  holdStatus = true;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  for (let n = 0; n < 50 && !blockedStatus; n++) await new Promise(r => setTimeout(r, 10));
+  assert.ok(blockedStatus);
+  const oldStatus = summary();
+  await page.evaluate(() => window.showComputer(false));
+  holdStatus = false; state = 'paused'; sessionGeneration++;
+  const statusCount = requests.filter(p => p === '/api/computer').length;
+  await page.evaluate(() => window.showComputer(true));
+  await page.waitForTimeout(100);
+  assert.equal(requests.filter(p => p === '/api/computer').length, statusCount + 1,
+    'reactivation starts a new status read without waiting for the retired request');
+  await page.waitForFunction(() => !view.loading && view.status.state === 'paused');
+  await blockedStatus.fulfill({ contentType: 'application/json', body: JSON.stringify(oldStatus) });
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => view.status.state), 'paused', 'retired response cannot overwrite current state');
   assert.deepEqual(errors, []);
   console.log('PASS computer operator: authenticated admin enable/disable and readback, lifecycle/generation/restart/input limits, no auto capture, independent stop/pause during blocked toggle and Observe, no late frame, generation invalidation, keyboard/touch, explicit export/download, mutation rejection and unavailable/reconnect.');
 } finally {

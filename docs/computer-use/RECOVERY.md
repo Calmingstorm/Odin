@@ -38,6 +38,12 @@ integer `generation`, and performs owner-scoped automatic absence verification.
 It does not infer input release from process absence. `acknowledge_legacy` accepts
 the same fields plus the exact acknowledgment below, but only for records with
 no runtime identity; it cannot reconcile a modern descriptor.
+The inspector selects `acknowledge_legacy` when the reported recovery reason is
+`legacy_runtime_identity_missing`; otherwise its acknowledgment control uses
+`reconcile`. Both paths preserve unverified cleanup and require explicit operator
+attestation. Leaving the inspector retires its pending status read, so returning
+can check current state without waiting for an old request. It never replays a
+mutation or captures a frame automatically.
 
 An authenticated administrator authorized for the target host can explicitly
 reconcile a stranded **existing-session** record using the
