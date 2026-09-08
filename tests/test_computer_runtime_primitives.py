@@ -562,7 +562,15 @@ def accessibility(children=()):
     a11y = Accessibility()
     a11y.api = SimpleNamespace(
         StateType=SimpleNamespace(
-            ENABLED=1, SENSITIVE=2, SHOWING=3, VISIBLE=4, DEFUNCT=5, FOCUSABLE=6, FOCUSED=7
+            ENABLED=1,
+            SENSITIVE=2,
+            SHOWING=3,
+            VISIBLE=4,
+            DEFUNCT=5,
+            FOCUSABLE=6,
+            FOCUSED=7,
+            MODAL=8,
+            ACTIVE=9,
         ),
         CoordType=SimpleNamespace(SCREEN=0),
         get_desktop=lambda i: desktop,
