@@ -45,6 +45,11 @@ export default withMermaid(defineConfig({
         { text: 'Security model', link: '/security' },
         { text: 'Runtime skills', link: '/skills' },
       ]},
+      { text: 'Computer use', items: [
+        { text: 'Operator guide', link: '/computer-use/OPERATOR' },
+        { text: 'Installation & packaging', link: '/computer-use/PACKAGING' },
+        { text: 'Stop & recovery', link: '/computer-use/RECOVERY' },
+      ]},
       { text: 'Agents & delivery', items: [
         { text: 'Agent tool transcript', link: '/agent-transcript-contract' },
         { text: 'Agent results & tool output', link: '/agent-result-delivery' },
