@@ -1262,14 +1262,15 @@ class TestCallIdAttribution:
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._native_tools = SimpleNamespace(handles=lambda _name: False)
 
-        async def dispatch(*_args):
+        async def dispatch(*_args, audit_owned_by_caller=False):
+            assert audit_owned_by_caller is True
             _, on_output, finish = streamer.create_callback("run_command", channel_id="h")
             await on_output("loop output\n")
             await finish()
             return "ok"
 
         runner.dispatch_loop_tool = dispatch
-        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        runner._audit = SimpleNamespace(log_event=AsyncMock(), log_execution=AsyncMock())
         st = SimpleNamespace(
             tool_timeout=5,
             msg_proxy=object(),
@@ -1278,6 +1279,7 @@ class TestCallIdAttribution:
             channel=object(),
             requester_name="u",
             channel_id_str="c",
+            _iteration_index=1,
         )
         block = SimpleNamespace(
             id="loop_call_alpha",
@@ -1289,8 +1291,15 @@ class TestCallIdAttribution:
         result = await runner._run_one_loop_tool(st, block)
 
         assert result["tool_use_id"] == "loop_call_alpha"
+        assert result["content"] == "ok"
         assert seen
         assert {chunk.call_id for chunk in seen} == {"loop_call_alpha"}
+        runner._audit.log_event.assert_awaited_once()
+        runner._audit.log_execution.assert_awaited_once()
+        for audit_call in (runner._audit.log_event, runner._audit.log_execution):
+            assert audit_call.await_args.kwargs["attribution"] == {
+                "call_id": "loop_call_alpha", "iteration": 1,
+            }
 
     async def test_autonomous_loop_does_not_leak_parent_id_into_native_child(self):
         """A native spawn can create a long-lived child task.
@@ -1308,12 +1317,13 @@ class TestCallIdAttribution:
         runner = ToolLoopRunner.__new__(ToolLoopRunner)
         runner._native_tools = SimpleNamespace(handles=lambda _name: True)
 
-        async def dispatch(*_args):
+        async def dispatch(*_args, audit_owned_by_caller=False):
+            assert audit_owned_by_caller is True
             observed.append(current_call_id.get())
             return "ok"
 
         runner.dispatch_loop_tool = dispatch
-        runner._audit = SimpleNamespace(log_execution=AsyncMock())
+        runner._audit = SimpleNamespace(log_event=AsyncMock(), log_execution=AsyncMock())
         st = SimpleNamespace(
             tool_timeout=5,
             msg_proxy=object(),
@@ -1322,6 +1332,7 @@ class TestCallIdAttribution:
             channel=object(),
             requester_name="u",
             channel_id_str="c",
+            _iteration_index=1,
         )
         block = SimpleNamespace(
             id="spawn_parent",
@@ -1330,9 +1341,17 @@ class TestCallIdAttribution:
             parse_error=None,
         )
 
-        await runner._run_one_loop_tool(st, block)
+        result = await runner._run_one_loop_tool(st, block)
 
+        assert result["tool_use_id"] == "spawn_parent"
+        assert result["content"] == "ok"
         assert observed == [None]
+        runner._audit.log_event.assert_awaited_once()
+        runner._audit.log_execution.assert_awaited_once()
+        for audit_call in (runner._audit.log_event, runner._audit.log_execution):
+            assert audit_call.await_args.kwargs["attribution"] == {
+                "call_id": "spawn_parent", "iteration": 1,
+            }
 
 
 async def _noop():

@@ -8,6 +8,8 @@ wiring that was orphaned in production.
 """
 from __future__ import annotations
 
+from unittest.mock import AsyncMock
+
 import pytest
 
 from src.learning.loop_reflection import LoopReflectionGate, failure_signature
@@ -301,15 +303,13 @@ class _LoopIterClient:
         self._tool_output = tool_output
         self.saved = []          # (trajectory, kwargs) per _save_turn_trajectory
         self.reflected = []      # kwargs per _maybe_loop_reflect
+        self.dispatched = []
 
         async def _chat_with_tools(**kwargs):
             return self._responses.pop(0)
 
-        async def _log_execution(**kwargs):
-            pass
-
         self.llm_client = SimpleNamespace(chat_with_tools=_chat_with_tools)
-        self.audit = SimpleNamespace(log_execution=_log_execution)
+        self.audit = SimpleNamespace(log_event=AsyncMock(), log_execution=AsyncMock())
 
         from src.llm.model_breaker import ModelBreakerRegistry
         from src.llm.recovery import RecoveryPolicy
@@ -367,7 +367,10 @@ class _LoopIterClient:
     def _merged_tool_definitions(self):
         return [{"name": "run_command"}]
 
-    async def _dispatch_loop_tool(self, tool_name, tool_input, msg_proxy, user_id):
+    async def _dispatch_loop_tool(
+        self, tool_name, tool_input, msg_proxy, user_id, *, audit_owned_by_caller=False,
+    ):
+        self.dispatched.append((tool_name, tool_input, user_id, audit_owned_by_caller))
         return self._tool_output
 
     async def _save_turn_trajectory(self, trajectory, **kwargs):
@@ -391,12 +394,16 @@ def _tool_call_response(text="", calls=()):
 
 class TestLoopIterationTrajectory:
     @pytest.mark.asyncio
-    async def test_persists_tool_calls_and_results(self):
+    @pytest.mark.parametrize("audit_error", [None, OSError, RuntimeError])
+    async def test_persists_tool_calls_and_results(self, audit_error):
         from types import SimpleNamespace
         fake = _LoopIterClient([
             _tool_call_response(calls=[("t1", "run_command", {"command": "echo hi"})]),
             _tool_call_response(text="done"),
         ])
+        if audit_error is not None:
+            fake.audit.log_event.side_effect = audit_error("audit start unavailable")
+            fake.audit.log_execution.side_effect = audit_error("audit finish unavailable")
         token = set_turn(source="loop", loop_id="l1", loop_iteration=1,
                          turn_id="loop:l1:1", channel_id="c1")
         try:
@@ -420,6 +427,18 @@ class TestLoopIterationTrajectory:
         assert traj.iterations[0].tool_results[0]["tool_use_id"] == "t1"
         assert traj.iterations[0].tool_results[0]["content"] == "hi out"
         assert fake.reflected and fake.reflected[0]["is_error"] is False
+        assert fake.dispatched == [("run_command", {"command": "echo hi"}, "42", True)]
+        fake.audit.log_event.assert_awaited_once()
+        fake.audit.log_execution.assert_awaited_once()
+        # Tool iteration is zero-based within the one-based outer loop iteration.
+        for audit_call in (fake.audit.log_event, fake.audit.log_execution):
+            assert audit_call.await_args.kwargs["attribution"] == {
+                "call_id": "t1", "iteration": 0,
+            }
+        assert fake.audit.log_event.await_args.kwargs["event_type"] == "loop_tool_start"
+        assert fake.audit.log_event.await_args.kwargs["count_as_tool"] is False
+        assert fake.audit.log_execution.await_args.kwargs["event_type"] == "loop_tool"
+        assert fake.audit.log_execution.await_args.kwargs["error"] is None
 
     @pytest.mark.asyncio
     async def test_results_respect_storage_cap(self):
@@ -444,6 +463,9 @@ class TestLoopIterationTrajectory:
         assert len(stored["content"]) == 100
         assert stored["truncated"] is True
         assert stored["original_chars"] == 5000
+        assert stored["content"] == "y" * 100
+        assert stored["tool_use_id"] == "t1"
+        assert fake.dispatched == [("run_command", {"command": "x"}, "42", True)]
 
 
 # ---------------------------------------------------------------------------
