@@ -1,7 +1,7 @@
 """Installation contract in staging only: no compositor, service or real helpers."""
-import os
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -56,8 +56,10 @@ def test_staged_source_install_does_not_activate(tmp_path, missing):
         assert (stage / "usr/local/lib/odin/odin-hyprland-scope.so").is_symlink()
         installed_plugin = stage / "usr/local/lib/odin" / plugin
         inode = installed_plugin.stat().st_ino
-        again = subprocess.run(["sh", str(ROOT / "packaging/install-hyprland-helpers.sh"), str(build)],
-                               env={**os.environ, "DESTDIR": str(stage)}, capture_output=True)
+        again = subprocess.run(
+            ["sh", str(ROOT / "packaging/install-hyprland-helpers.sh"), str(build)],
+            env={**os.environ, "DESTDIR": str(stage)}, capture_output=True,
+        )
         assert again.returncode == 0
         assert installed_plugin.stat().st_ino == inode
         assert "Explicit operator plugin setup" in result.stdout
@@ -115,13 +117,18 @@ def test_guardian_parser_accepts_flat_companion_identity(tmp_path):
     source = (ROOT / "assets/hyprland-input/guardian.c").read_text()
     start = source.index("struct scope_reply {")
     end = source.index("\n}", source.index("static bool parse_reply(", start)) + 2
-    harness = '#include <stdbool.h>\n#include <stdint.h>\n#include <string.h>\n#include <stddef.h>\n#include <assert.h>\n'
+    harness = ('#include <stdbool.h>\n#include <stdint.h>\n#include <string.h>\n'
+               '#include <stddef.h>\n#include <assert.h>\n')
     harness += source[start:end]
     reply = json.dumps({"ok": True, "armed": False, "keys": 0, "buttons": 0,
                         "rejected": 0, "release_acknowledged": True,
                         "companion_build_id": "a" * 64})
-    harness += '\nint main(void) { struct scope_reply r; assert(parse_reply(' + json.dumps(reply) + ', &r)); assert(r.ok && r.release_acknowledged); }\n'
+    harness += ('\nint main(void) { struct scope_reply r; assert(parse_reply('
+                + json.dumps(reply) + ', &r)); assert(r.ok && r.release_acknowledged); }\n')
     path = tmp_path / "parser.c"
     path.write_text(harness)
-    subprocess.run(["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", str(path), "-o", str(tmp_path / "parser")], check=True)
+    subprocess.run(
+        ["cc", "-std=c11", "-Wall", "-Wextra", "-Werror", str(path),
+         "-o", str(tmp_path / "parser")], check=True,
+    )
     subprocess.run([str(tmp_path / "parser")], check=True)
