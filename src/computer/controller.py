@@ -982,16 +982,15 @@ class ComputerController:
     async def validate_action_binding(self, grant, observation_id):
         return await self._validate_action_binding(grant, observation_id)
 
-    def _finish_action(self, session_id, action_id, result):
+    def _finish_action(self, capabilities, session_id, action_id, result):
         """Keep backend-qualified release facts in durable ordinary-turn receipts.
 
         Derive disclosure from the trusted selected backend, never native prose.
         Other backends retain their existing receipt contract byte-for-byte.
         """
-        live = self._live.get(session_id)
-        if live is not None and live.capabilities is not None and (
-            live.capabilities.backend == "hyprland"
-        ):
+        # The admitted action owns this immutable snapshot. Concurrent cleanup
+        # can remove _live before settlement, but must not erase its provenance.
+        if capabilities is not None and capabilities.backend == "hyprland":
             execution = result.get("execution", {})
             result["input_safety"] = {
                 "backend": "hyprland",
@@ -1003,7 +1002,7 @@ class ComputerController:
                     else "unconfirmed"
                 ),
                 "receiver_release_verified": False,
-                "limitations": live.capabilities.public()["limitations"],
+                "limitations": capabilities.public()["limitations"],
                 "recovery": "operator_release_all_then_close_and_start_new_session",
             }
         return self.store.finish_action(session_id, action_id, result)
@@ -1256,6 +1255,7 @@ class ComputerController:
                     if fresh is not None and fresh.observation_id != original.observation_id:
                         verification["evidence_id"] = fresh.evidence_id
                     return self._finish_action(
+                        live.capabilities,
                         grant.session_id,
                         inp["action_id"],
                         {
@@ -1381,7 +1381,9 @@ class ComputerController:
                             reason=exc.code,
                             next_action="observe_again_without_crop",
                         )
-                        return self._finish_action(grant.session_id, inp["action_id"], result)
+                        return self._finish_action(
+                            live.capabilities, grant.session_id, inp["action_id"], result
+                        )
                     await self._auth(context)
                     self._active(grant)
                     age = self.monotonic() - after.captured_at
@@ -1502,7 +1504,9 @@ class ComputerController:
                             live.capabilities.public() if live.capabilities is not None else None
                         ),
                     }
-                receipt = self._finish_action(grant.session_id, inp["action_id"], result)
+                receipt = self._finish_action(
+                    live.capabilities, grant.session_id, inp["action_id"], result
+                )
             except (Exception, asyncio.CancelledError) as exc:
                 known_release = (
                     settled_result is not None and settled_result["execution"]["released"]
@@ -1529,7 +1533,7 @@ class ComputerController:
                     failed = execution_receipt(
                         None, {"status": "unknown", "reason": "input_outcome_unknown"}
                     )
-                self._finish_action(grant.session_id, inp["action_id"], failed)
+                self._finish_action(live.capabilities, grant.session_id, inp["action_id"], failed)
                 if not known_release or isinstance(exc, asyncio.CancelledError):
                     await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
