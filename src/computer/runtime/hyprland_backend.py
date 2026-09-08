@@ -39,7 +39,8 @@ RESIDUALS = (
     "Releasing Odin's button may clobber a simultaneous physical same-button hold.",
     "Cooperative release acknowledgements are not native receiver qualification.",
     "Not arbitrary-app qualification: only scoped native Wayland top-levels; "
-    "XWayland and ambiguous modal/parented surfaces are not supported.",
+    "Same-process native dialogs require fresh observations; XWayland and foreign parents "
+    "are not supported.",
 )
 
 
@@ -152,7 +153,7 @@ class HyprlandRuntimeBackend:
         "release": "hyprland_best_effort_cooperative_ack",
         "receiver_release_verified": False,
         "residuals": list(RESIDUALS),
-        "application_scope": "contained_native_wayland_toplevel_no_xwayland_or_ambiguous_modals",
+        "application_scope": "original_native_process_same_output_fresh_observed_own_dialogs",
         "recovery": "operator_release_all_then_close_and_start_new_session",
     }
     # Transport-neutral helpers: no portal access or compositor qualification.
@@ -184,6 +185,10 @@ class HyprlandRuntimeBackend:
         self._scope_provider: HyprlandScopeProvider | None = None
         self._identity: HyprlandIdentity | None = None
         self._output: ExplicitOutput | None = None
+        # Preserve original authority over pause/resume and frame invalidation.
+        self._application_pin: dict[str, Any] | None = None
+        self._output_pin: ExplicitOutput | None = None
+        self._original_surface: str | None = None
         self._descriptor: dict[str, Any] | None = None
         self.runtime_identity_callback: Callable[[dict[str, Any]], None] | None = None
         self._selected = uuid.uuid4().hex
@@ -363,6 +368,30 @@ class HyprlandRuntimeBackend:
                 or scope["native_scope_serial"] < 1
                 or not scope.get("native_scope_token")):
             raise ComputerError("hyprland_scope_unknown_locked_or_stale")
+        application = scope.get("application")
+        if (type(application) is not dict
+                or any(type(application.get(k)) is not int for k in ("pid", "uid", "start_ticks"))
+                or application["pid"] <= 1 or application["start_ticks"] <= 0
+                or application["uid"] != self.config.expected_uid
+                or type(application.get("exe")) is not str or not application["exe"].startswith("/")
+                or type(application.get("exe_identity")) is not list
+                or len(application["exe_identity"]) != 2
+                or any(type(n) is not int or n < 0 for n in application["exe_identity"])):
+            raise ComputerError("hyprland_application_identity_unavailable")
+        if self._application_pin is None:
+            self._application_pin = copy.deepcopy(application)
+            self._output_pin = self._output
+            self._original_surface = scope.get("surface_token")
+        elif application != self._application_pin:
+            raise ComputerError("hyprland_original_application_changed")
+        if self._output != self._output_pin:
+            raise ComputerError("hyprland_explicit_output_changed")
+        # Native floating is a dialog candidate, not proof that a floating
+        # original canvas is modal. Returning to that canvas clears the modal.
+        if scope.get("surface_token") == self._original_surface:
+            scope["modal"] = False
+            scope["modal_kind"] = None
+            scope["modal_title_digest"] = None
 
     def _check_ready(self, ready):
         assert self._guardian is not None and self._output is not None
@@ -446,6 +475,7 @@ class HyprlandRuntimeBackend:
     async def observe(self, crop=None):
         async with self._lock:
             rendered, scope, captured_at = await self._capture(crop)
+            self._check_scope(scope)
             fingerprint = _digest([self._selected, self._generation, _binding(scope)])
             if fingerprint != self._fingerprint:
                 self._revision += 1
@@ -598,6 +628,13 @@ class HyprlandRuntimeBackend:
                                                 == after_scope["source_digest"]),
                     actual={"before_sha256": hashlib.sha256(rendered.png).hexdigest(),
                             "after_sha256": hashlib.sha256(after.png).hexdigest()})
+                if (scope.get("surface_token") != after_scope.get("surface_token")
+                        and after_scope.get("modal_kind") == "safe_application"):
+                    # Not a complete map inventory: a focused dialog candidate
+                    # may already have existed. Do not claim dialog_appeared.
+                    receipt["postcondition"]["focused_dialog_transition"] = {
+                        "method": "native_same_process_focused_dialog_transition",
+                        "kind": "dialog_candidate", "newly_mapped": "unmeasured"}
             except Exception:
                 pass
             # Controller delivers the next observation and checks region/stroke effects.

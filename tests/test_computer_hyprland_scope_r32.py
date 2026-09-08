@@ -18,7 +18,8 @@ def sample():
                    "pixel_width": 1200, "pixel_height": 900, "scale": 1.5, "transform": 0},
         "focus": {"token": "123", "serial": 1, "pid": os.getpid(), "wm_class": "fixture",
                   "title": "private", "x": -80, "y": 20, "width": 400, "height": 300,
-                  "modal": False},
+                  "modal": False, "uid": os.getuid(),
+                  "parent_chain_verified": True, "parent_tokens": []},
     }
 
 

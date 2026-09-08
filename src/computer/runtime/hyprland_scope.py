@@ -76,9 +76,18 @@ def _observation(row, name, started_ns):
     token = _text(focus.get("token"), limit=128)
     if not token or any(ord(c) < 33 or ord(c) > 126 for c in token):
         _fail("hyprland_scope_reply_invalid")
+    parents = focus.get("parent_tokens")
+    if (focus.get("parent_chain_verified") is not True or type(parents) is not list
+            or len(parents) > 32
+            or any(type(p) is not str or not p or len(p) > 128
+                   or any(ord(c) < 33 or ord(c) > 126 for c in p) for p in parents)
+            or len(set(parents)) != len(parents) or token in parents):
+        _fail("hyprland_parent_chain_unverified")
     return {
         "output": asdict(explicit), "bounds": {"x": x, "y": y, "width": width, "height": height},
         "pid": _integer(focus, "pid", 2, 2**31 - 1),
+        "uid": _integer(focus, "uid", 0, 2**32 - 1),
+        "parent_tokens": parents,
         "serial": _integer(focus, "serial", 1, 2**63 - 1),
         "focus_token": token, "wm_class": _text(focus.get("wm_class")),
         "title": _text(focus.get("title")), "modal": focus["modal"],
@@ -161,6 +170,8 @@ class HyprlandScopeProvider:
             started = time.monotonic_ns()
             first = _observation(
                 await self._request({"op": "snapshot", "output_name": name}), name, started)
+            if first["uid"] != self.expected_uid:
+                _fail("hyprland_application_identity_unavailable")
             try:
                 application = _process_identity(first["pid"], self.expected_uid)
             except (OSError, RuntimeError, ValueError, IndexError, StopIteration):
@@ -171,7 +182,8 @@ class HyprlandScopeProvider:
             source_digest = _digest(first["output"])
             focus_digest = _digest({
                 "application": application, "compositor": compositor, "serial": first["serial"],
-                "token": first["focus_token"], "wm_class": first["wm_class"]})
+                "token": first["focus_token"], "wm_class": first["wm_class"],
+                "uid": first["uid"], "parents": first["parent_tokens"], "modal": first["modal"]})
             return {
                 "authenticated": True, "native_wayland": True, "safe_focus": True,
                 "locked": False, "output": first["output"],
@@ -179,6 +191,8 @@ class HyprlandScopeProvider:
                 "bounds_digest": _digest({
                     "source": source_digest, "focus": focus_digest, "bounds": first["bounds"]}),
                 "bounds": first["bounds"], "application": application,
+                "surface_token": first["focus_token"],
+                "parent_tokens": first["parent_tokens"], "parent_chain_verified": True,
                 "wm_class": first["wm_class"], "compositor": compositor,
                 "modal": first["modal"],
                 "modal_kind": "safe_application" if first["modal"] else None,

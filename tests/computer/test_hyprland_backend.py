@@ -32,7 +32,10 @@ def output(transform=0):
 def scope(out=None, **overrides):
     out = out or output()
     return dict(source_digest="a" * 64, focus_digest="b" * 64, bounds_digest="c" * 64,
-                application={"kind": "test"}, compositor={"name": "Hyprland"}, modal=False,
+                application={"pid": 1234, "uid": 1000, "start_ticks": 100,
+                             "exe": "/usr/bin/test", "exe_identity": [1, 2]},
+                compositor={"name": "Hyprland"}, modal=False, surface_token="100",
+                parent_tokens=[], parent_chain_verified=True,
                 bounds={"x": 0, "y": 0, "width": out.logical_width,
                         "height": out.logical_height},
                 output=asdict(out), locked=False, authenticated=True, native_wayland=True,
