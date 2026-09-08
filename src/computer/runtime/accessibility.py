@@ -78,7 +78,7 @@ class Accessibility:
         return token
 
     def lineage(self, node, root, guard):
-        result = []
+        result: list[tuple[str, tuple]] = []
         ancestor = node
         for _ in range(7):
             guard()
@@ -121,7 +121,7 @@ class Accessibility:
         # Qt exposes nonvisual Offscreen objects and structural ancestors without
         # Component. Keep their identity/ancestry, but never advertise them as
         # actionable fields or let them stand in for a native window.
-        bounds = (0, 0, 0, 0)
+        bounds: tuple[int, ...] = (0, 0, 0, 0)
         if component is not None:
             rect = component.get_extents(api.CoordType.SCREEN)
             bounds = tuple(int(getattr(rect, key)) for key in ("x", "y", "width", "height"))
@@ -279,7 +279,7 @@ class Accessibility:
             self._load()
             self.status_detail = "window_root_unavailable"
             root, root_fingerprint = self._window_root(window, guard)
-            stack = deque([(root, 0, None, None)])
+            stack: deque[tuple[Any, int, str | None, int | None]] = deque([(root, 0, None, None)])
             nodes = []
             visited = set()
             examined = 0
