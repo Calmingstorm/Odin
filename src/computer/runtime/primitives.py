@@ -740,10 +740,13 @@ class NativeDesktop:
                 self._raster_digest is None
                 or not isinstance(current, tuple)
                 or current[1:3] != observed_extent
-                or hashlib.sha256(current[0]).digest() != self._raster_digest
+                or (not field and hashlib.sha256(current[0]).digest() != self._raster_digest)
             ):
                 self._observation = None
                 raise PrimitiveError("rejected", "Private pixels changed before input")
+            # Native field dispatch revalidates the exact original AT-SPI object,
+            # ancestry, metadata and window in execute(). Unrelated raster change
+            # cannot replace that authority, and is not itself a target change.
             self._guard()
             before_digest = self._raster_digest.hex()
             if action["type"] == "replace_field_pixels":

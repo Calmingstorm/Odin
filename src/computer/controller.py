@@ -1136,7 +1136,14 @@ class ComputerController:
                 and grant.environment == "existing_session"
                 and inp["operation"] in {"type", "key"}
             )
-            if not attached_keyboard and current.image_sha256 != original.image_sha256:
+            from .gui_actions import reconcile_accessible_action
+
+            dispatch_inp = reconcile_accessible_action(inp, original, current)
+            if (
+                not attached_keyboard
+                and inp["operation"] != "replace_field"
+                and current.image_sha256 != original.image_sha256
+            ):
                 from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
 
                 stable = False
@@ -1152,32 +1159,6 @@ class ComputerController:
                     stable = pointer_target_stable(before, after, *pointer_anchor(inp))
                 if not stable:
                     raise ComputerError("visual_target_changed")
-            dispatch_inp = deepcopy(inp)
-            if inp["expect"]["type"] == "field_text_equals":
-                # AT-SPI handles are observation scoped. Rebind only a unique,
-                # exact metadata match, never a name or coordinates alone.
-                old = [
-                    n for n in original.accessibility if n.get("handle") == inp["expect"]["target"]
-                ]
-                if len(old) != 1 or any(
-                    not old[0].get(k)
-                    for k in ("node_identity", "root_identity", "ancestor_identity")
-                ):
-                    raise ComputerError("accessible_native_identity_unavailable")
-
-                def identity(node):
-                    return {k: v for k, v in node.items() if k not in {"handle", "parent"}}
-
-                matches = [
-                    n
-                    for n in current.accessibility
-                    if len(old) == 1 and identity(n) == identity(old[0])
-                ]
-                if len(matches) != 1:
-                    raise ComputerError("accessible_target_changed")
-                dispatch_inp["expect"]["target"] = matches[0]["handle"]
-                if "target" in dispatch_inp:
-                    dispatch_inp["target"] = matches[0]["handle"]
             payload, target = action_payload(dispatch_inp, current)
             before_image = (
                 self.store.read_evidence(context, current.evidence_id)[0]

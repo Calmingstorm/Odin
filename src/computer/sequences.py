@@ -12,7 +12,7 @@ from dataclasses import asdict
 from .actions import _REQUIRED
 from .effects import effect_receipt, measured_appearance, region_effect, stroke_effect
 from .grounding import POINTER_OPERATIONS, pointer_anchor, pointer_target_stable
-from .gui_actions import action_arguments, action_payload
+from .gui_actions import action_arguments, action_payload, reconcile_accessible_action
 from .models import ComputerError
 from .policy import (
     DELIVERED_GROUNDING_SECONDS,
@@ -98,6 +98,9 @@ def _stable_target(controller, context, original, current, step, *, attached_key
     """Exact original binding plus original target pixels, never new authority."""
     if current.geometry != original.geometry:
         raise ComputerError("sequence_target_changed")
+    if step["operation"] == "replace_field":
+        reconcile_accessible_action(step, original, current)
+        return
     if current.image_sha256 == original.image_sha256:
         return
     # A native focused editable node can tolerate selection/text changes without
@@ -219,14 +222,11 @@ async def execute_sequence(controller, context, inp):
             supported = getattr(live.backend, "input_limits", {}).get("effect_expectations")
             if supported is not None and step["expect"]["type"] not in supported:
                 raise ComputerError("unsupported_postcondition")
-            # Fresh accessible handles require per-view reconciliation; the
-            # initial sequence contract does not silently synthesize that.
             if step["operation"] == "replace_field_pixels":
                 raise ComputerError("pixel_field_requires_single_action")
-            if step["operation"] == "replace_field":
-                raise ComputerError("sequence_accessible_target_requires_single_action")
             try:
                 action_payload(step, original)
+                reconcile_accessible_action(step, original, original)
             except ComputerError:
                 if original.modal is not None:
                     await controller._pause(grant.session_id)
@@ -306,7 +306,8 @@ async def execute_sequence(controller, context, inp):
                     latest, latest_image = await capture()
                 stable_target(step)
                 observation_input(grant, live, latest)
-                payload, target = action_payload(step, latest)
+                dispatch_step = reconcile_accessible_action(step, original, latest)
+                payload, target = action_payload(dispatch_step, latest)
                 await authorize()
                 if not 0 <= controller.monotonic() - latest.captured_at <= FRAME_FRESH_SECONDS:
                     raise ComputerError("stale_observation")
@@ -315,7 +316,7 @@ async def execute_sequence(controller, context, inp):
                 latest, latest_image = None, None
                 attempted = index
                 raw = await _bounded(live.backend.act(payload), budget)
-                result = effect_receipt(raw, current, step["expect"], target)
+                result = effect_receipt(raw, current, dispatch_step["expect"], target)
                 raster_satisfied = result.get("status") == "verified"
                 # Never persist raster-only stroke success as semantic proof,
                 # even if cancellation arrives before the checkpoint capture.
@@ -402,7 +403,11 @@ async def execute_sequence(controller, context, inp):
             stop_required |= cancelled or attempted is not None
             if attempted is not None:
                 # Set the cleanup requirement before a possibly failing write.
-                result = {"status": "unknown", "reason": "input_outcome_unknown"}
+                result = {
+                    "status": "unknown",
+                    "reason": "input_outcome_unknown",
+                    "execution": {"injected": None, "released": False},
+                }
                 settled.append(result)
                 controller.store.finish_action(
                     grant.session_id, steps[attempted]["action_id"], result
@@ -459,10 +464,14 @@ async def execute_sequence(controller, context, inp):
                     else "not_satisfied",
                     "verification": verification,
                     "execution": {
-                        "injected": any(
-                            s.get("execution", {}).get("injected") is True
-                            or s.get("status") == "unknown"
-                            for s in settled
+                        "injected": (
+                            True
+                            if any(s.get("execution", {}).get("injected") is True for s in settled)
+                            else None
+                            if any(
+                                s.get("execution", {}).get("injected") is not False for s in settled
+                            )
+                            else False
                         ),
                         "released": not stop_required
                         and all(s.get("execution", {}).get("released") is True for s in settled),

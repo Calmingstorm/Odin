@@ -2,6 +2,7 @@
 
 import math
 import re
+from copy import deepcopy
 from typing import Any
 
 from .actions import _REQUIRED, click_payload
@@ -148,6 +149,46 @@ def action_arguments(inp):
             or not 0 <= duration <= 1
         ):
             raise ComputerError("invalid_bounds")
+
+
+def reconcile_accessible_action(inp, original, current):
+    """Translate an original-view handle, never discover a new input target.
+
+    Handles and parent handles are capture-local. All remaining native metadata
+    must match, including full identity/ancestry, role, bounds, state, and text.
+    A matching raster is neither necessary nor sufficient for native identity.
+    The caller must separately enforce exact source/focus/lifecycle binding.
+    """
+    result = deepcopy(inp)
+    if inp["operation"] != "replace_field":
+        return result
+    old = [node for node in original.accessibility if node.get("handle") == inp["target"]]
+    identities = ("node_identity", "root_identity", "ancestor_identity")
+    if len(old) != 1 or any(
+        not isinstance(old[0].get(key), str) or not old[0][key] for key in identities
+    ):
+        raise ComputerError("accessible_native_identity_unavailable")
+    identity = tuple(old[0][key] for key in identities)
+
+    def candidates(observation):
+        return [
+            node
+            for node in observation.accessibility
+            if tuple(node.get(key) for key in identities) == identity
+        ]
+
+    matches = candidates(current)
+    if len(candidates(original)) != 1 or len(matches) != 1:
+        raise ComputerError("accessible_target_changed")
+
+    def metadata(node):
+        return {key: value for key, value in node.items() if key not in {"handle", "parent"}}
+
+    if metadata(matches[0]) != metadata(old[0]):
+        raise ComputerError("accessible_target_changed")
+    result["target"] = matches[0]["handle"]
+    result["expect"]["target"] = matches[0]["handle"]
+    return result
 
 
 def action_payload(inp, observation):
