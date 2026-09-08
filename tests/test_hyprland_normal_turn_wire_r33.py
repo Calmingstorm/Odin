@@ -19,13 +19,14 @@ from src.computer.runtime.hyprland_capture import ExplicitOutput
 from src.computer.runtime.hyprland_guardian import HyprlandGuardian
 from src.discord.native_tools.registry import NativeToolDispatcher
 from src.discord.tool_loop import ToolLoopRunner
-from tests.computer.test_hyprland_backend import native as pixels, scope
+from tests.computer.test_hyprland_backend import native as pixels
+from tests.computer.test_hyprland_backend import scope
 from tests.test_computer_dispatch_r3 import dispatch_state
 from tests.test_computer_hyprland_integration_r32 import settings
 from tests.test_computer_hyprland_turnloop_r33 import action, call, observe
 from tests.test_computer_lifecycle_r5 import owner
 from tests.test_computer_native_vision_r5 import client, serving
-from tests.test_hyprland_python_native_wire_r32 import native  # noqa: F401
+from tests.test_hyprland_python_native_wire_r32 import native as native
 
 
 @pytest.fixture
