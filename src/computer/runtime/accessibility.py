@@ -3,6 +3,7 @@
 import hashlib
 import math
 import secrets
+from collections import deque
 from dataclasses import dataclass, field
 from functools import partial
 from typing import Any
@@ -27,8 +28,12 @@ def bounded_text(value, limit=512):
 
 
 def finite(value, low, high):
-    if (isinstance(value, bool) or not isinstance(value, (float, int))
-            or not math.isfinite(value) or not low <= value <= high):
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (float, int))
+        or not math.isfinite(value)
+        or not low <= value <= high
+    ):
         raise PrimitiveError("rejected", "Numeric argument is outside its finite bounds")
     return value
 
@@ -89,6 +94,7 @@ class Accessibility:
     def _load(self):
         if self.api is None:
             from .gi_support import load_gi
+
             gi = load_gi()
 
             gi.require_version("Atspi", "2.0")
@@ -111,16 +117,30 @@ class Accessibility:
         states = tuple(sorted(int(item) for item in state.get_states()))
         if len(states) > 64:
             raise PrimitiveError("unsupported", "Accessible states exceed metadata bounds")
-        rect = node.get_component_iface().get_extents(api.CoordType.SCREEN)
-        bounds = tuple(int(getattr(rect, key)) for key in ("x", "y", "width", "height"))
+        component = node.get_component_iface()
+        # Qt exposes nonvisual Offscreen objects and structural ancestors without
+        # Component. Keep their identity/ancestry, but never advertise them as
+        # actionable fields or let them stand in for a native window.
+        bounds = (0, 0, 0, 0)
+        if component is not None:
+            rect = component.get_extents(api.CoordType.SCREEN)
+            bounds = tuple(int(getattr(rect, key)) for key in ("x", "y", "width", "height"))
         if bounds[2] < 0 or bounds[3] < 0:
             raise PrimitiveError("unsupported", "Accessible bounds are invalid")
         fingerprint = (role, hashlib.sha256(name.encode("utf-8")).digest(), bounds, states)
         interfaces = {str(item).rsplit(".", 1)[-1] for item in node.get_interfaces()}
         capabilities = []
-        enabled = all(state.contains(getattr(api.StateType, key))
-                      for key in ("ENABLED", "SENSITIVE", "SHOWING", "VISIBLE"))
-        if enabled and not state.contains(api.StateType.DEFUNCT):
+        enabled = all(
+            state.contains(getattr(api.StateType, key))
+            for key in ("ENABLED", "SENSITIVE", "SHOWING", "VISIBLE")
+        )
+        if (
+            enabled
+            and component is not None
+            and bounds[2] > 0
+            and bounds[3] > 0
+            and not state.contains(api.StateType.DEFUNCT)
+        ):
             if "Component" in interfaces and state.contains(api.StateType.FOCUSABLE):
                 capabilities.append("focus")
             if "Action" in interfaces:
@@ -133,12 +153,18 @@ class Accessibility:
         text, text_readable, text_complete = self._text(node, interfaces, role)
         if "set_text" in capabilities and text_readable and text_complete:
             capabilities.append("replace_field")
-        public = {"role": str(role)[:64], "name": name[:128], "text": text,
-                  "node_identity": self.node_identity(node),
-                  "focused": state.contains(api.StateType.FOCUSED),
-                  "text_readable": text_readable, "text_complete": text_complete,
-                  "bounds": dict(zip(("x", "y", "width", "height"), bounds, strict=True)),
-                  "states": list(states), "capabilities": capabilities}
+        public = {
+            "role": str(role)[:64],
+            "name": name[:128],
+            "text": text,
+            "node_identity": self.node_identity(node),
+            "focused": state.contains(api.StateType.FOCUSED),
+            "text_readable": text_readable,
+            "text_complete": text_complete,
+            "bounds": dict(zip(("x", "y", "width", "height"), bounds, strict=True)),
+            "states": list(states),
+            "capabilities": capabilities,
+        }
         return fingerprint, public
 
     @staticmethod
@@ -165,6 +191,8 @@ class Accessibility:
         self.root_diagnostics = []
         budget = 128
         candidates = []
+        bounds = tuple(window[key] for key in ("x", "y", "width", "height"))
+        frame_bounds = None
         for i in range(min(desktop.get_child_count(), 128)):
             guard()
             app = desktop.get_child_at_index(i)
@@ -177,24 +205,48 @@ class Accessibility:
                 root = app.get_child_at_index(j)
                 if root is None:
                     continue
-                fingerprint, _ = self._data(root)
-                bounds = tuple(window[key] for key in ("x", "y", "width", "height"))
-                self.root_diagnostics.append({"name": (root.get_name() or "")[:128],
-                                              "role": root.get_role_name(),
-                                              "bounds": fingerprint[2]})
-                exact = (root.get_name() == window["title"] and fingerprint[2] == bounds
-                         and root.get_role_name() in ("frame", "dialog", "window"))
-                # GTK describes the WM frame, not xdotool's client geometry.
-                # Require native ancestry geometry and active/modal state.
-                framed = False
-                if not exact:
-                    state = root.get_state_set()
-                    framed = (state.contains(self.api.StateType.ACTIVE)
-                              and state.contains(self.api.StateType.MODAL) == window["modal"]
-                              and root.get_role_name() in (
-                                  "frame", "dialog", "window", "alert", "file chooser")
-                              and fingerprint[2] == self._native_frame_bounds(window, guard))
-                if exact or framed:
+                try:
+                    fingerprint, public = self._data(root)
+                except PrimitiveError as exc:
+                    if exc.status != "unsupported":
+                        raise
+                    continue
+                except Exception:
+                    # One inaccessible auxiliary window must not hide its real
+                    # top-level siblings. The outer guard still owns deadlines.
+                    guard()
+                    continue
+                self.root_diagnostics.append(
+                    {"name": public["name"], "role": public["role"], "bounds": fingerprint[2]}
+                )
+                state = root.get_state_set()
+                if (
+                    root.get_process_id() != window["pid"]
+                    or public["role"] not in ("frame", "dialog", "window", "alert", "file chooser")
+                    or fingerprint[2][2] <= 0
+                    or fingerprint[2][3] <= 0
+                    or state.contains(self.api.StateType.DEFUNCT)
+                    or not all(
+                        state.contains(getattr(self.api.StateType, key))
+                        for key in ("SHOWING", "VISIBLE")
+                    )
+                    or state.contains(self.api.StateType.MODAL) != window["modal"]
+                ):
+                    continue
+                # Qt's accessible title may omit the application/document suffix.
+                # Titles are descriptive, not identity. Bind to the selected native
+                # window's exact client or WM ancestor geometry and require a
+                # unique, visible, same-process, same-modality top-level root.
+                matches = fingerprint[2] == bounds and (
+                    root.get_name() == window["title"] or state.contains(self.api.StateType.ACTIVE)
+                )
+                if not matches:
+                    if frame_bounds is None:
+                        frame_bounds = self._native_frame_bounds(window, guard)
+                    matches = (
+                        state.contains(self.api.StateType.ACTIVE) and fingerprint[2] == frame_bounds
+                    )
+                if matches:
                     candidates.append((root, fingerprint))
             if budget <= 0:
                 break
@@ -204,6 +256,7 @@ class Accessibility:
 
     def _native_frame_bounds(self, window, guard):
         from Xlib import display as xdisplay  # type: ignore[import-untyped]
+
         display = xdisplay.Display(self.display)
         try:
             node = display.create_resource_object("window", window["id"])
@@ -226,13 +279,15 @@ class Accessibility:
             self._load()
             self.status_detail = "window_root_unavailable"
             root, root_fingerprint = self._window_root(window, guard)
-            stack: list[tuple[Any, int, str | None, int | None]] = [(root, 0, None, None)]
+            stack = deque([(root, 0, None, None)])
             nodes = []
             visited = set()
             examined = 0
             while stack and examined < 128:
                 guard()
-                node, depth, parent, index = stack.pop()
+                # Visit shallow controls before menu/resource subtrees consume
+                # the bounded traversal. Krita's toolbar fields are shallow.
+                node, depth, parent, index = stack.popleft()
                 examined += 1
                 if node is None or id(node) in visited:
                     continue
@@ -248,18 +303,37 @@ class Accessibility:
                     public["ancestor_identity"] = hashlib.sha256(repr(lineage).encode()).hexdigest()
                     nodes.append(public)
                     self.references[handle] = Reference(
-                        node, root, fingerprint, root_fingerprint, dict(window),
+                        node,
+                        root,
+                        fingerprint,
+                        root_fingerprint,
+                        dict(window),
                         public["capabilities"],
-                        {key: value for key, value in public.items()
-                         if key not in {"handle", "parent", "depth", "index",
-                                        "root_identity", "ancestor_identity"}},
+                        {
+                            key: value
+                            for key, value in public.items()
+                            if key
+                            not in {
+                                "handle",
+                                "parent",
+                                "depth",
+                                "index",
+                                "root_identity",
+                                "ancestor_identity",
+                            }
+                        },
                         lineage=lineage,
                     )
                     if parent is not None:
                         self.references[parent].children[index] = (node, fingerprint)
                     if depth < 6:
-                        count = min(max(0, node.get_child_count()), 128 - examined - len(stack))
-                        for i in reversed(range(count)):
+                        # Reserve frontier capacity for already queued siblings;
+                        # a large menu must not starve a toolbar at the same depth.
+                        remaining = max(0, 128 - examined - len(stack))
+                        count = min(
+                            max(0, node.get_child_count()), remaining // max(1, len(stack) + 1)
+                        )
+                        for i in range(count):
                             guard()
                             stack.append((node.get_child_at_index(i), depth + 1, handle, i))
                 except PrimitiveError:
@@ -286,11 +360,14 @@ class Accessibility:
         try:
             current, public = self._data(ref.node)
             root_current, _ = self._data(ref.root)
-            if (current != ref.fingerprint or root_current != ref.root_fingerprint
-                    or public != ref.metadata
-                    or self.lineage(ref.node, ref.root, guard) != ref.lineage
-                    or ref.node.get_process_id() != window["pid"]
-                    or ref.root.get_process_id() != window["pid"]):
+            if (
+                current != ref.fingerprint
+                or root_current != ref.root_fingerprint
+                or public != ref.metadata
+                or self.lineage(ref.node, ref.root, guard) != ref.lineage
+                or ref.node.get_process_id() != window["pid"]
+                or ref.root.get_process_id() != window["pid"]
+            ):
                 raise PrimitiveError("rejected", "Accessible target changed since observation")
             ancestor = ref.node
             for _ in range(7):
@@ -307,8 +384,10 @@ class Accessibility:
                 raise PrimitiveError("unsupported", "Target lacks the requested interface")
             if kind == "invoke":
                 interface = ref.node.get_action_iface()
-                names = [(i, interface.get_action_name(i))
-                         for i in range(min(interface.get_n_actions(), 32))]
+                names = [
+                    (i, interface.get_action_name(i))
+                    for i in range(min(interface.get_n_actions(), 32))
+                ]
                 allowed = {"click", "press", "activate", "toggle", "open"}
                 choices = [(i, name) for i, name in names if name in allowed]
                 requested = action.get("action_name")
@@ -326,8 +405,10 @@ class Accessibility:
                 if type(index) is not int or index not in ref.children:
                     raise PrimitiveError("rejected", "Selection child was not observed")
                 child, fingerprint = ref.children[index]
-                if (ref.node.get_child_at_index(index) != child
-                        or self._data(child)[0] != fingerprint):
+                if (
+                    ref.node.get_child_at_index(index) != child
+                    or self._data(child)[0] != fingerprint
+                ):
                     raise PrimitiveError("rejected", "Selection child changed since observation")
                 effect = partial(ref.node.get_selection_iface().select_child, index)
             elif kind == "value":
@@ -359,15 +440,18 @@ class Accessibility:
             # The original native root may acquire a modified-document title;
             # its identity, role, bounds and native window are still bound.
             assert self.api is not None
-            if (ref.node.get_state_set().contains(self.api.StateType.DEFUNCT)
-                    or ref.root.get_state_set().contains(self.api.StateType.DEFUNCT)):
+            if ref.node.get_state_set().contains(
+                self.api.StateType.DEFUNCT
+            ) or ref.root.get_state_set().contains(self.api.StateType.DEFUNCT):
                 raise PrimitiveError("rejected", "Field readback node is defunct")
-            if ((root_current[0], root_current[2])
-                    != (ref.root_fingerprint[0], ref.root_fingerprint[2])
-                    or current[:3] != ref.fingerprint[:3]
-                    or public["node_identity"] != ref.metadata["node_identity"]
-                    or ref.node.get_process_id() != window["pid"]
-                    or ref.root.get_process_id() != window["pid"]):
+            if (
+                (root_current[0], root_current[2])
+                != (ref.root_fingerprint[0], ref.root_fingerprint[2])
+                or current[:3] != ref.fingerprint[:3]
+                or public["node_identity"] != ref.metadata["node_identity"]
+                or ref.node.get_process_id() != window["pid"]
+                or ref.root.get_process_id() != window["pid"]
+            ):
                 raise PrimitiveError("rejected", "Field readback target changed")
             ancestor = ref.node
             for _ in range(7):
@@ -378,7 +462,8 @@ class Accessibility:
             if ancestor != ref.root:
                 raise PrimitiveError("rejected", "Field left its observed native root")
             if tuple(row[0] for row in self.lineage(ref.node, ref.root, guard)) != tuple(
-                    row[0] for row in ref.lineage):
+                row[0] for row in ref.lineage
+            ):
                 raise PrimitiveError("rejected", "Field ancestry changed after editing")
             if not public["text_readable"] or not public["text_complete"]:
                 raise PrimitiveError("unsupported", "Full field text is unavailable")
