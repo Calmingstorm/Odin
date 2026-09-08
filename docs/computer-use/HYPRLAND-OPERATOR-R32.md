@@ -42,7 +42,9 @@ The optional helper installation contains:
 
 * `/usr/local/libexec/odin-hyprland-input`
 * `/usr/local/libexec/odin-hyprland-capture`
-* `/usr/local/lib/odin/odin-hyprland-scope.so`
+* `/usr/local/lib/odin/odin-hyprland-scope-<ELF-SHA256>.so` (immutable load path)
+* Source installer only: `/usr/local/lib/odin/odin-hyprland-scope.so`
+  (compatibility symlink, **not** the recommended load path)
 
 No activation hook is permitted. Hyprland is not a headless base dependency.
 Source installs need native helpers as well as the Python package;
@@ -70,6 +72,7 @@ For an optional `.deb`/RPM, `packaging/nfpm-hyprland.yml` consumes the same
 target distribution's package-version constraint before invoking nFPM:
 
 ```sh
+export SCOPE_PLUGIN_FILENAME=$(python3 -c 'import json; print(json.load(open("build/hyprland/build-identity.json"))["plugin_filename"])')
 nfpm package --config packaging/nfpm-hyprland.yml --packager deb --target build/
 ```
 
@@ -80,7 +83,8 @@ The desktop owner runs this **once at setup**, in the chosen Hyprland session,
 after reviewing the exact matching plugin build:
 
 ```sh
-hyprctl plugin load /usr/local/lib/odin/odin-hyprland-scope.so
+plugin=$(python3 -c 'import json; print(json.load(open("/usr/local/share/doc/odin-hyprland/build-identity.json"))["plugin_filename"])')
+hyprctl plugin load "/usr/local/lib/odin/$plugin"
 ```
 
 This is transient loading, not a persistent `hyprland.conf` edit. Odin never
@@ -88,6 +92,37 @@ automatically loads/unloads it per action or session. Config rereads are allowed
 only during explicit setup/recovery and must remain infrequent. Never rewrite
 the user's compositor config. A compositor restart requires deliberate setup
 again and refreshed explicit session identity in Odin configuration.
+
+### Loaded image identity and recovery
+
+Do not overwrite a mapped plugin ELF or trust an on-disk checksum as evidence
+of the executing image. Same-path unload/load can retain the old mapped
+`(deleted)` ELF through dynamic-loader caching; GNU UNIQUE symbols can prevent
+unloading. The build now uses `-fno-gnu-unique`, but this is not a guarantee
+against every loader reference or plugin-global symbol interposition problem.
+**Always use the immutable versioned filename from the manifest.** The source
+installer preserves an existing matching versioned inode and atomically changes
+only the compatibility symlink. Package builds ship only the versioned image.
+Keep old images until the owner confirms they are no longer mapped.
+
+`build-identity.json` records `companion_build_id` (SHA-256 over the build script,
+plugin source and local deadline header, including relative source names),
+`plugin_sha256` (actual ELF bytes), and `plugin_filename`. The companion's flat
+JSON `status` response reports `companion_build_id` from the **executing** code.
+Compare that value with the manifest before qualification/admission. A missing
+or mismatched value means stop, not “the new file must be loaded.” The source
+ID does not attest compiler, headers or libraries; the ELF digest and exact ABI
+pin are separate evidence. This metadata is not an automatic Python admission
+gate and `runtime_qualified: false` must not be mistaken for live approval.
+
+During explicit owner-supervised recovery only: end input, verify owned release,
+unload the old plugin using its actual loaded path, and load the new versioned
+path once. Recheck executing build ID, cleanup status and required runtime
+qualification. If identity remains stale or unloading is uncertain, stop and
+arrange an owner-approved compositor restart; do not accumulate concurrent
+plugin instances or repeatedly reload hoping the loader changes its mind.
+Neither builds nor installation perform these steps. This is setup/recovery,
+never per-action reload and never an automatic compositor restart.
 
 ## Provision the exact target
 

@@ -33,8 +33,19 @@ if [ "$actual" != "$pin" ]; then
     echo 'Hyprland headers do not match qualified plugin ABI' >&2
     exit 1
 fi
-${CXX:-c++} -std=c++23 -shared -fPIC -O2 -Wall -Wextra -Werror \
+# Source identity is independent of scratch paths, not runtime qualification.
+build_id=$(cd "$root" && sha256sum scripts/build-hyprland-input.sh \
+    assets/hyprland-input/scope-plugin.cpp assets/hyprland-input/scope-deadline.hpp | sha256sum | cut -d ' ' -f 1)
+${CXX:-c++} -std=c++23 -shared -fPIC -fno-gnu-unique -O2 -Wall -Wextra -Werror \
+    -DODIN_SCOPE_BUILD_ID=\"$build_id\" \
     $(pkg-config --cflags hyprland json-c) "$root/assets/hyprland-input/scope-plugin.cpp" \
     -o "$build/odin-hyprland-scope.so" $(pkg-config --libs json-c)
-printf '{"schema":1,"hyprland_version":"0.55.2","hyprland_commit":"%s","runtime_qualified":false}\n' "$pin" > "$build/build-identity.json"
-printf '%s\n' "$build/odin-hyprland-input" "$build/odin-hyprland-scope.so"
+plugin_sha=$(sha256sum "$build/odin-hyprland-scope.so" | cut -d ' ' -f 1)
+plugin_name=odin-hyprland-scope-$plugin_sha.so
+if [ -e "$build/$plugin_name" ]; then
+    cmp "$build/odin-hyprland-scope.so" "$build/$plugin_name"
+else
+    cp "$build/odin-hyprland-scope.so" "$build/$plugin_name"
+fi
+printf '{"schema":1,"hyprland_version":"0.55.2","hyprland_commit":"%s","runtime_qualified":false,"companion_build_id":"%s","plugin_sha256":"%s","plugin_filename":"%s"}\n' "$pin" "$build_id" "$plugin_sha" "$plugin_name" > "$build/build-identity.json"
+printf '%s\n' "$build/odin-hyprland-input" "$build/$plugin_name"

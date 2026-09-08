@@ -20,8 +20,8 @@ contents:
   - src: ./build/hyprland/odin-hyprland-capture
     dst: /usr/local/libexec/odin-hyprland-capture
     file_info: {owner: root, group: root, mode: 0755}
-  - src: ./build/hyprland/odin-hyprland-scope.so
-    dst: /usr/local/lib/odin/odin-hyprland-scope.so
+  - src: ./build/hyprland/${SCOPE_PLUGIN_FILENAME}
+    dst: /usr/local/lib/odin/${SCOPE_PLUGIN_FILENAME}
     file_info: {owner: root, group: root, mode: 0644}
   - src: ./build/hyprland/build-identity.json
     dst: /usr/local/share/doc/odin-hyprland/build-identity.json

@@ -38,6 +38,10 @@
 #include <array>
 #include "scope-deadline.hpp"
 
+#ifndef ODIN_SCOPE_BUILD_ID
+#error "Build with scripts/build-hyprland-input.sh to supply source identity"
+#endif
+
 namespace {
 constexpr auto PIN = "39d7e209c79d451efab1b21151d5938289da838d";
 constexpr auto DISPATCHER = "odin-scope-recovery";
@@ -322,6 +326,7 @@ struct State {
     }
     J status(bool ok = true, const std::string& error = {}) {
         auto j = obj(); put(j.get(), "ok", ok); put(j.get(), "version", int64_t(1));
+        put(j.get(), "companion_build_id", std::string(ODIN_SCOPE_BUILD_ID));
         put(j.get(), "armed", armed); put(j.get(), "keys", int64_t(keys.size())); put(j.get(), "buttons", int64_t(buttons.size()));
         put(j.get(), "accepted", int64_t(accepted)); put(j.get(), "rejected", int64_t(rejected));
         put(j.get(), "failed", failed); put(j.get(), "reason", reason); put(j.get(), "revision", int64_t(revision));
