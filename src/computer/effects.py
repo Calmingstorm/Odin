@@ -367,6 +367,9 @@ def region_effect(result, expected, before, after, *, binding_matches):
         expected["type"] != "region_changed"
         or not binding_matches
         or result.get("status") in {"interrupted", "unknown", "unavailable"}
+        or result.get("execution", {}).get("injected") is not True
+        or result.get("execution", {}).get("released") is not True
+        or result.get("verification", {}).get("target_application_matches") is not True
     ):
         return
     from PIL import Image, ImageChops
