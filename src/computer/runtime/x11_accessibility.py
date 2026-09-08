@@ -161,14 +161,25 @@ class AttachedAccessibility(Accessibility):
         return nodes, status, private
 
     def stable(self, guard):
+        # Validate each retained vertex and edge exactly once. All ancestors are
+        # retained by snapshot, including nonvisual structures and the root, so
+        # walking their full metadata again for each descendant is redundant.
         for ref in self.references.values():
             guard()
             fingerprint, public = self._data(ref.node)
-            if (
-                fingerprint != ref.fingerprint
-                or public != ref.metadata
-                or self.lineage(ref.node, ref.root, guard) != ref.lineage
-            ):
+            lineage = ()
+            if ref.parent_handle is not None:
+                parent = self.references.get(ref.parent_handle)
+                if parent is None or ref.node.get_parent() != parent.node:
+                    raise PrimitiveError(
+                        "rejected", "Accessibility ancestry changed during capture"
+                    )
+                lineage = ((self.node_identity(parent.node), parent.fingerprint),) + parent.lineage
+            elif ref.node != ref.root:
+                # Non-tree presentation edges used a real native ancestor walk
+                # at capture; revalidate that same ancestry without shortcuts.
+                lineage = self.lineage(ref.node, ref.root, guard)
+            if fingerprint != ref.fingerprint or public != ref.metadata or lineage != ref.lineage:
                 raise PrimitiveError("rejected", "Accessibility changed during capture")
         guard()
         if self.references and next(iter(self.references.values())).window != self.window():

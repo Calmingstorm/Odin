@@ -49,6 +49,7 @@ class Reference:
     metadata: dict = field(default_factory=dict)
     children: dict = field(default_factory=dict)
     lineage: tuple = ()
+    parent_handle: str | None = None
 
 
 class Accessibility:
@@ -292,6 +293,35 @@ class Accessibility:
         finally:
             display.close()
 
+    def _traversal_priority(self, node, inherited):
+        """Cheap semantic frontier probe, not an actionable identity snapshot.
+
+        Hidden visual widgets cannot expose actionable descendants. Nonvisual
+        structural ancestors, however, may legitimately omit visibility states.
+        Keep those ancestors, and prefer visible controls over resource browsers
+        without relying on application names or widget labels.
+        """
+        assert self.api is not None
+        if hasattr(node, "clear_cache"):
+            node.clear_cache()
+        state = node.get_state_set()
+        if state.contains(self.api.StateType.DEFUNCT):
+            return None
+        showing = all(
+            state.contains(getattr(self.api.StateType, key)) for key in ("SHOWING", "VISIBLE")
+        )
+        if not showing and node.get_component_iface() is not None:
+            return None
+        role = node.get_role_name()
+        if showing and (
+            role == "tool bar"
+            or "EditableText" in {str(item).rsplit(".", 1)[-1] for item in node.get_interfaces()}
+        ):
+            return 0
+        if role in {"menu", "menu bar", "list", "table", "tree", "tree table"}:
+            return 2
+        return inherited
+
     def snapshot(self, window, observation_id, guard):
         self.references.clear()
         self.observation_id = observation_id
@@ -300,34 +330,59 @@ class Accessibility:
             self._load()
             self.status_detail = "window_root_unavailable"
             root, root_fingerprint = self._window_root(window, guard)
-            stack: deque[tuple[Any, int, str | None, int | None]] = deque([(root, 0, None, None)])
-            deferred: deque[tuple[Any, int, str, int, int]] = deque()
+            stacks: list[deque[tuple[Any, int, str | None, int | None]]] = [
+                deque() for _ in range(3)
+            ]
+            stacks[1].append((root, 0, None, None))
+            deferred: list[deque[tuple[Any, int, str, int, int]]] = [deque() for _ in range(3)]
             nodes = []
             visited = set()
-            examined = 0
-            while (stack or deferred) and examined < 128:
+            probes = 0
+            # Cheap rejected frontier nodes do not consume public identity slots.
+            # Bound that work by the public-node budget times its depth horizon;
+            # the existing outer worker deadline remains authoritative as well.
+            frontier_budget = 128 * 7
+            while any(stacks) or any(deferred):
+                if len(nodes) >= 128:
+                    break
+                priority = next(i for i in range(3) if stacks[i] or deferred[i])
+                stack, pending = stacks[priority], deferred[priority]
                 if not stack:
-                    # Finish each breadth before expanding the next. Retain a
-                    # cursor per parent and round-robin their children so large
-                    # menus cannot consume all slots before toolbar fields. No
-                    # fair-share remainder is discarded while budget remains.
-                    while deferred and examined + len(stack) < 128:
+                    # Fair breadth within each semantic priority, retaining every
+                    # parent cursor. Inspect siblings before choosing a subtree so
+                    # a late toolbar is not buried beneath hidden dockers/menus.
+                    while (
+                        pending and len(nodes) + sum(len(q) for q in stacks[: priority + 1]) < 128
+                    ):
+                        if probes >= frontier_budget:
+                            break
                         guard()
-                        ancestor, child_depth, owner, i, count = deferred.popleft()
+                        ancestor, child_depth, owner, i, count = pending.popleft()
+                        probes += 1
                         try:
                             child = ancestor.get_child_at_index(i)
+                            child_priority = (
+                                self._traversal_priority(child, priority)
+                                if child is not None
+                                else None
+                            )
+                            if child_priority is not None:
+                                stacks[child_priority].append((child, child_depth, owner, i))
                         except PrimitiveError:
                             raise
                         except Exception:
-                            child = None
-                        stack.append((child, child_depth, owner, i))
+                            pass
                         if i + 1 < count:
-                            deferred.append((ancestor, child_depth, owner, i + 1, count))
+                            pending.append((ancestor, child_depth, owner, i + 1, count))
+                    if probes >= frontier_budget:
+                        for queue in deferred:
+                            queue.clear()
+                    if not any(stacks):
+                        continue
+                    priority = next(i for i in range(3) if stacks[i])
+                    stack = stacks[priority]
                 guard()
-                # Visit shallow controls before menu/resource subtrees consume
-                # the bounded traversal. Krita's toolbar fields are shallow.
                 node, depth, parent, index = stack.popleft()
-                examined += 1
                 if node is None or id(node) in visited:
                     continue
                 visited.add(id(node))
@@ -336,7 +391,23 @@ class Accessibility:
                     if node.get_process_id() != window["pid"]:
                         continue
                     handle = secrets.token_urlsafe(18)
-                    lineage = self.lineage(node, root, guard)
+                    # Every parent was already fingerprinted in this capture.
+                    # Verify the actual immediate edge before reusing its chain;
+                    # repeated full ancestor walks add no new graph coverage.
+                    lineage = ()
+                    lineage_parent = parent
+                    if parent is not None:
+                        parent_ref = self.references[parent]
+                        if node.get_parent() != parent_ref.node:
+                            # Some toolkits enumerate a presentation child whose
+                            # real parent is a different structural object. That
+                            # edge cannot use our cached enumeration ancestry.
+                            lineage = self.lineage(node, root, guard)
+                            lineage_parent = None
+                        else:
+                            lineage = (
+                                (self.node_identity(parent_ref.node), parent_ref.fingerprint),
+                            ) + parent_ref.lineage
                     public.update(handle=handle, parent=parent, depth=depth, index=index)
                     public["root_identity"] = self.node_identity(root)
                     public["ancestor_identity"] = hashlib.sha256(repr(lineage).encode()).hexdigest()
@@ -362,13 +433,14 @@ class Accessibility:
                             }
                         },
                         lineage=lineage,
+                        parent_handle=lineage_parent,
                     )
                     if parent is not None:
                         self.references[parent].children[index] = (node, fingerprint)
                     if depth < 6:
                         count = min(max(0, node.get_child_count()), 128)
                         if count:
-                            deferred.append((node, depth + 1, handle, 0, count))
+                            deferred[priority].append((node, depth + 1, handle, 0, count))
                 except PrimitiveError:
                     raise
                 except Exception:
