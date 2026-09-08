@@ -13,6 +13,7 @@ import stat
 from pathlib import Path
 
 from ..runtime_paths import runtime_install_root
+from .models import ComputerError
 
 DEFAULT_STORAGE = Path("/var/lib/odin/computer")
 _ERRORS = {
@@ -35,7 +36,7 @@ _ERRORS = {
 }
 
 
-class ComputerProvisioningError(ValueError):
+class ComputerProvisioningError(ComputerError):
     """Safe public preflight failure; never includes paths or OS exception text."""
 
     outcome = "not_applied"
@@ -43,21 +44,26 @@ class ComputerProvisioningError(ValueError):
     def __init__(self, code: str):
         self.code = code if code in _ERRORS else "storage_unavailable"
         self.message, self.remedy = _ERRORS[self.code]
-        super().__init__(self.message)
+        ValueError.__init__(self, self.message)
 
 
 def checked_path(path: str | Path) -> Path:
     p = Path(path)
     root = runtime_install_root()
-    if (
-        not p.is_absolute()
-        or ".." in p.parts
-        or p == Path("/")
-        or any(part.is_symlink() for part in (p, *p.parents))
-        or root in (p, *p.parents)
-        or root.resolve() in (p.resolve(), *p.resolve().parents)
-    ):
-        raise ComputerProvisioningError("unsafe_storage_path")
+    try:
+        if (
+            not p.is_absolute()
+            or ".." in p.parts
+            or p == Path("/")
+            or any(part.is_symlink() for part in (p, *p.parents))
+            or root in (p, *p.parents)
+            or root.resolve() in (p.resolve(), *p.resolve().parents)
+        ):
+            raise ComputerProvisioningError("unsafe_storage_path")
+    except OSError as exc:
+        raise ComputerProvisioningError("storage_unavailable") from exc
+    except RuntimeError as exc:
+        raise ComputerProvisioningError("unsafe_storage_path") from exc
     return p
 
 
@@ -104,7 +110,11 @@ def open_private_directory(path: str | Path) -> int:
         result, fd = fd, -1
         return result
     except OSError as exc:
-        code = "unsafe_storage_path" if exc.errno in {errno.ELOOP, errno.ENOTDIR} else "storage_unavailable"
+        code = (
+            "unsafe_storage_path"
+            if exc.errno in {errno.ELOOP, errno.ENOTDIR}
+            else "storage_unavailable"
+        )
         raise ComputerProvisioningError(code) from exc
     finally:
         if fd != -1:
@@ -125,6 +135,7 @@ def provision_storage(settings) -> Path:
         try:
             path.lstat()
         except FileNotFoundError:
+            checked_path(path)
             state = os.environ.get("XDG_STATE_HOME")
             base = Path(state) if state else Path.home() / ".local" / "state"
             path = checked_path(base / "odin" / "computer")

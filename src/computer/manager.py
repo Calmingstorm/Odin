@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import os
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from ..config.persistence import config_transaction, persist_config_paths_locked
+from .provisioning import ComputerProvisioningError, provision_storage
 
 _TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 _binding: contextvars.ContextVar[tuple | None] = contextvars.ContextVar(
@@ -33,6 +32,7 @@ class ComputerLifecycle:
         self._watchers = {}
         self._inflight = set()
         self._janitor = None
+        self._selected_storage = None
 
     @property
     def enabled(self):
@@ -68,17 +68,13 @@ class ComputerLifecycle:
             and (not settings.display or not settings.monitor_names)
         ):
             raise ValueError("Existing-session capture needs explicit display and monitor names")
-        root = Path(settings.storage_dir)
-        if (
-            not root.is_absolute()
-            or not root.is_dir()
-            or any(p.is_symlink() for p in (root, *root.parents))
-            or Path("/opt/odin") in (root, *root.parents)
-        ):
-            raise ValueError("Computer storage must be provisioned outside the live install")
-        mode = root.stat()
-        if mode.st_uid != os.geteuid() or mode.st_mode & 0o077:
-            raise ValueError("Computer storage must be service-owned with mode 0700")
+        root = provision_storage(settings)
+        self._selected_storage = str(root)
+        if (self._selected_storage != settings.storage_dir
+                and self.bot.config.computer.storage_dir != settings.storage_dir):
+            # A deferred operator edit takes precedence over automatic selection;
+            # never overwrite it while constructing from our startup snapshot.
+            raise ComputerProvisioningError("storage_selection_required")
         factory = self._factory
         if factory is None:
             if settings.platform == "wayland":
@@ -100,7 +96,18 @@ class ComputerLifecycle:
             from .integration import ComputerIntegration
 
             factory = ComputerIntegration
-        return factory(self.bot, settings=settings.model_copy(deep=True, update={"enabled": True}))
+        return factory(self.bot, settings=settings.model_copy(
+            deep=True, update={"enabled": True, "storage_dir": str(root)}))
+
+    def _storage_changes(self):
+        if self._selected_storage != self.settings.storage_dir:
+            return [(("computer", "storage_dir"), self._selected_storage)]
+        return []
+
+    def _publish_storage(self, config):
+        if self._storage_changes():
+            config.computer.storage_dir = self._selected_storage
+            self.settings.storage_dir = self._selected_storage
 
     async def start(self):
         if not self.bot.config.computer.enabled or self._active:
@@ -112,6 +119,21 @@ class ComputerLifecycle:
                 raise RuntimeError("Computer lifecycle unavailable for startup")
             try:
                 self._service = self._construct()
+                if self._storage_changes():
+                    try:
+                        exc, cancelled = await self._persist(self._storage_changes())
+                    except BaseException:
+                        await self._settle(self._discard())
+                        raise
+                    if exc is not None:
+                        await self._discard()
+                        raise RuntimeError("Computer storage selection was not saved") from exc
+                    config = self.bot.config.model_copy(deep=True)
+                    self._publish_storage(config)
+                    self.bot.config = config
+                    if cancelled:
+                        await self._discard()
+                        raise asyncio.CancelledError
             except Exception:
                 self.error = "startup_failed"
                 self._invalidate()
@@ -224,7 +246,8 @@ class ComputerLifecycle:
                     self.error = "evidence_cleanup_failed"
                     await self._discard()
                     raise
-                exc, cancelled = await self._persist([(("computer", "enabled"), True)])
+                exc, cancelled = await self._persist(
+                    [(("computer", "enabled"), True), *self._storage_changes()])
                 if exc is not None:
                     self._service = candidate
                     await self._discard()
@@ -232,6 +255,7 @@ class ComputerLifecycle:
                     raise RuntimeError("Computer enable was not saved") from exc
                 config = self.bot.config.model_copy(deep=True)
                 config.computer.enabled = True
+                self._publish_storage(config)
                 self.bot.config = config
                 self._service = candidate
                 self._active = not self._closing
