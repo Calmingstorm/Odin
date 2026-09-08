@@ -181,7 +181,9 @@ static bool parse_reply(const char *p, struct scope_reply *r) {
 static bool scope_exchange(struct guardian *g, const char *request, struct scope_reply *reply) {
     if (g->scope_fd < 0) return false;
     size_t length = strlen(request), sent = 0, used = 0; char response[4096];
-    uint64_t deadline = now_us() + 50000;
+    /* Only cleanup gets a longer reply budget, after owned ups were submitted.
+     * This never grants input or renews the 250 ms compositor scope lease. */
+    uint64_t deadline = now_us() + (strstr(request, "\"release_all\"") ? 500000 : 50000);
     /* Renewal cannot stall the existing independent owned-release deadline.
      * Cleanup retains its own bounded budget regardless of expired scope. */
     if (strstr(request, "\"renew\"") && g->begun) {
@@ -191,6 +193,7 @@ static bool scope_exchange(struct guardian *g, const char *request, struct scope
     while (now_us() < deadline) {
         struct pollfd fd = {g->scope_fd, sent < length ? POLLOUT : POLLIN, 0};
         int rc = poll(&fd, 1, 2);
+        if (now_us() >= deadline) return false;
         if (rc < 0 && errno == EINTR) continue;
         if (rc < 0 || (fd.revents & (POLLERR | POLLHUP | POLLNVAL))) return false;
         if (sent < length && (fd.revents & POLLOUT)) {
@@ -203,14 +206,17 @@ static bool scope_exchange(struct guardian *g, const char *request, struct scope
             if (memchr(response + used, 0, (size_t)n)) return false;
             used += (size_t)n; response[used] = 0;
             char *nl = strchr(response, '\n');
-            if (nl) return nl == response + used - 1 && parse_reply(response, reply) && reply->ok;
+            if (nl) return nl == response + used - 1 && parse_reply(response, reply) && now_us() < deadline;
             if (used == sizeof response - 1) return false;
         }
     }
     return false;
 }
 static bool scope_call(struct guardian *g, const char *request, struct scope_reply *reply) {
-    if (scope_exchange(g, request, reply)) return true;
+    /* A complete negative reply is a refused operation, not a lost stream.
+     * In particular, a focus-revoked renewal must leave this connection alive
+     * for explicit release acknowledgement. Callers still stop on refusal. */
+    if (scope_exchange(g, request, reply)) return reply->ok;
     /* Poison after ambiguous send: a late reply cannot acknowledge later work. */
     if (g->scope_fd >= 0) close(g->scope_fd);
     g->scope_fd = -1;
@@ -557,15 +563,20 @@ static void action_receipt(struct guardian *g,const char *event,const char *reas
     if (!emit(line)) fail(g,"transport-error");
 }
 static void step(struct guardian *g) {
-    if (!g->action || !alive_scope(g)) return;
+    /* Queue one already-due group without an artificial poll/flush between
+     * MOVE, DOWN and UP. Each event retains its own compositor scope check and
+     * pointer frame. Future stroke timestamps and pixel permits still yield. */
+    uint64_t due = now_us(); unsigned queued = 0;
+    while (g->action) {
     if (g->index==g->planned) {
         if (!release_all(g)) { fail(g,"input-path-lost"); return; }
         if (g->reason) return;
         action_receipt(g,"action_done","completed");
         g->action=g->begun=false; g->lease=g->scope_deadline=0; g->idle=now_us()+2000000; return;
     }
+    if (!alive_scope(g) || queued == 32) return;
     struct event *e=&g->events[g->index];
-    if (now_us()<g->start+e->at) return;
+    if (due<g->start+e->at) return;
     if (e->kind==GATE) {
         if (!g->gate_waiting && !g->gate_allowed) {
             if (++g->gate_serial>1000000) { fail(g,"invalid-command"); return; }
@@ -586,7 +597,8 @@ static void step(struct guardian *g) {
         zwlr_virtual_pointer_v1_axis_discrete(g->pointer,(uint32_t)(now_us()/1000),e->code,wl_fixed_from_double(e->x*15),(int32_t)e->x);
         zwlr_virtual_pointer_v1_frame(g->pointer);
     }
-    ++g->index; ++g->completed;
+    ++g->index; ++g->completed; ++queued;
+    }
 }
 static bool command(struct guardian *g,char *line) {
     if (!strcmp(line,"C")||!strcmp(line,"R")) { fail(g,"cancelled");return true; }

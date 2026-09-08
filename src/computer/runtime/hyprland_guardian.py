@@ -7,6 +7,7 @@ Guardian SIGKILL and same-button physical/virtual overlap remain residuals.
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 import pwd
 import re
@@ -15,7 +16,15 @@ from typing import Any
 
 from .hyprland_identity import connect_peer
 from .hyprland_scope import _TOKEN, LEASE_NS
-from .wayland_guardian import WaylandGuardian, WaylandGuardianError, _Credentials, trusted_binary
+from .wayland_guardian import (
+    WaylandGuardian,
+    WaylandGuardianError,
+    _action_diagnostics,
+    _Credentials,
+    trusted_binary,
+)
+
+log = logging.getLogger("odin.computer.hyprland_guardian")
 
 
 class HyprlandGuardianError(WaylandGuardianError):
@@ -128,8 +137,22 @@ class HyprlandGuardian(WaylandGuardian):
         if (type(scope_deadline_ns) is not int
                 or not time.monotonic_ns() < scope_deadline_ns <= self._scope_deadline):
             raise HyprlandGuardianError("hyprland_guardian_scope_expired")
-        receipt = await super().act(
-            command, pixel_guard=pixel_guard, scope_deadline_ns=scope_deadline_ns)
+        try:
+            receipt = await super().act(
+                command, pixel_guard=pixel_guard, scope_deadline_ns=scope_deadline_ns)
+        except Exception:
+            # Controller receipts conservatively collapse dispatch exceptions.
+            # Preserve bounded native facts in the journal, never commands,
+            # coordinates, socket tokens, application text or raw exceptions.
+            log.warning(
+                "Hyprland native action failed: diagnostics=%s input_was_sent=%s "
+                "release_sent=%s release_acknowledged=%s",
+                _action_diagnostics(self._last_terminal),
+                *(self._last_terminal.get(key)
+                  if type(self._last_terminal.get(key)) is bool else None
+                  for key in ("input_was_sent", "release_sent", "release_acknowledged")),
+            )
+            raise
         receipt["release_ack"] = receipt.pop("release_acknowledged", False) is True
         receipt["receiver_release_verified"] = False
         return receipt
