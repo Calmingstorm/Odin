@@ -188,16 +188,48 @@ async def test_parallel_same_name_reverse_completion_and_reused_ids(tmp_path, ro
 
 
 @pytest.mark.parametrize("route", ["foreground", "autonomous"])
-async def test_timeout_keeps_single_terminal_with_identity(tmp_path, route):
-    runner, st, _ = harness(tmp_path)
+@pytest.mark.parametrize("slow_audit", [False, True])
+async def test_timeout_keeps_single_terminal_with_identity(
+    tmp_path, monkeypatch, route, slow_audit
+):
+    runner, st, events = harness(tmp_path)
     st.tool_timeout = 0.01
+    real_log_event = runner._audit.log_event
+
+    async def slow_log_event(*args, **kwargs):
+        await real_log_event(*args, **kwargs)
+        await asyncio.sleep(0.05)
+
+    if slow_audit:
+        runner._audit.log_event = slow_log_event
     st._cancel = asyncio.Event()
     st.durability.after_tool_interrupted = AsyncMock()
+    started = asyncio.Event()
     cancelled = asyncio.Event()
+    real_wait_for = asyncio.wait_for
+    timed_waits = []
+
+    async def wait_for_started_tool(awaitable, timeout):
+        # Foreground's deadline includes the durable start audit; autonomous's
+        # does not. This test exercises cancellation of RUNNING dispatch, not
+        # whether a CI filesystem can persist its start within ten milliseconds.
+        # Keep the actual asyncio timeout/cancellation, but arm it after entry.
+        task = asyncio.ensure_future(awaitable)
+        try:
+            await real_wait_for(started.wait(), timeout=5)
+            timed_waits.append(timeout)
+            return await real_wait_for(task, timeout=timeout)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    monkeypatch.setattr("src.discord.tool_loop.asyncio.wait_for", wait_for_started_tool)
 
     async def execute(*args, **kwargs):
         try:
-            await asyncio.sleep(20)
+            started.set()
+            await asyncio.Event().wait()
         finally:
             cancelled.set()
 
@@ -211,11 +243,49 @@ async def test_timeout_keeps_single_terminal_with_identity(tmp_path, route):
     finally:
         reset_turn(token)
     assert "timed out" in result["content"]
+    assert timed_waits == [st.tool_timeout]
+    assert started.is_set()
     assert cancelled.is_set()
     records = await runner._audit.search()
+    assert list(reversed(records)) == events
     assert len(records) == 2
     assert len({correlation(record) for record in records}) == 1
+    assert correlation(records[0])[0] == "turn-timeout"
+    assert correlation(records[0])[2:4] == (3, "call-1")
+    assert len([row for row in records if "result_summary" in row]) == 1
     assert records[0]["error"]
+    assert await runner._audit.count_by_tool() == {"run_script": 1}
+
+
+async def test_foreground_timeout_during_start_audit_never_dispatches(tmp_path):
+    """The outer deadline may legitimately expire before executor entry."""
+    runner, st, events = harness(tmp_path)
+    st._cancel = asyncio.Event()
+    st.durability.after_tool_interrupted = AsyncMock()
+    real_log_event = runner._audit.log_event
+
+    async def blocked_start_audit(*args, **kwargs):
+        await real_log_event(*args, **kwargs)
+        await asyncio.Event().wait()
+
+    runner._audit.log_event = blocked_start_audit
+    # Unlike the running-dispatch test, leave the production deadline untouched.
+    token = set_turn(turn_id="turn-before-dispatch")
+    try:
+        result = await runner._run_one_tool_with_timeout(st, block(), 0.01)
+    finally:
+        reset_turn(token)
+    assert "timed out" in result["content"]
+    runner._tool_executor.execute.assert_not_awaited()
+    st.durability.after_tool_interrupted.assert_awaited_once()
+    records = await runner._audit.search()
+    assert list(reversed(records)) == events
+    # Start persistence itself can exceed the budget. Only require a start row
+    # when its writer completed, but always require exactly one terminal row.
+    assert len([row for row in records if "result_summary" in row]) == 1
+    assert len({correlation(row) for row in records}) == 1
+    assert records[0]["error"]
+    assert await runner._audit.count_by_tool() == {"run_script": 1}
 
 
 async def test_autonomous_start_observer_failure_does_not_suppress_execution(tmp_path):
