@@ -461,6 +461,12 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
     const Vector2D pos = s.bound.outputPos + event.absolute * s.bound.outputSize;
     if (!s.point(pos)) { ++s.rejected; s.revoke("warp-destination-refused"); return; }
     original(manager, event);
+    // Pinned Hyprland 0.55.2 onMouseWarp sends motion but no seat frame.
+    // Its onPointerFrame ignores virtual-pointer frames unless an axis is
+    // pending. GTK therefore batches absolute vertices until a button frame,
+    // collapsing a stroke to its endpoint. Match onMouseMoved's completion,
+    // only for this authenticated, scope-validated owned absolute event.
+    g_pSeatManager->sendPointerFrame();
 }
 void onFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface) {
     auto& s = *live; auto original = reinterpret_cast<FocusFn>(s.focusHook->m_original);
