@@ -536,7 +536,8 @@ static bool release_all(struct guardian *g) {
         xkb_state_update_mask(g->state,0,0,0,0,0,0);
     }
     bool sync=queued && synchronize(g,100);
-    g->release_sent=queued && !g->disconnected;
+    /* Buffered requests alone do not establish transport submission. */
+    g->release_sent=queued && !g->disconnected && wl_display_flush(g->display)>=0;
     if (g->release_sent) receipt(g,"release_sent","explicit-owned-release");
     struct scope_reply r;
     bool ack=scope_call(g,"{\"op\":\"release_all\"}\n",&r);
