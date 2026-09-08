@@ -75,6 +75,10 @@ std::string nonce() {
     for (auto c : bytes) { s += hex[c >> 4]; s += hex[c & 15]; }
     return s;
 }
+struct PopupWatch {
+    bool valid = true;
+    std::vector<CHyprSignalListener> listeners;
+};
 struct Snapshot {
     WP<CWLSurfaceResource> surface;
     WP<CWLSurfaceResource> pointerSurface;
@@ -89,6 +93,8 @@ struct Snapshot {
     uid_t uid = 0;
     std::shared_ptr<int> processFD;
     std::vector<odin_scope::NativeAncestor> ancestry;
+    std::vector<std::vector<odin_scope::PopupAncestor>> popups;
+    std::shared_ptr<PopupWatch> popupWatch;
     bool modal = false;
     uint64_t revision = 0;
 };
@@ -134,6 +140,7 @@ struct State {
     PHLWINDOWREF watchedWindow;
     PHLMONITORREF watchedMonitor;
     Vector2D watchedPos, watchedSize;
+    std::vector<std::vector<odin_scope::PopupAncestor>> watchedPopups;
     std::vector<std::unique_ptr<Keyboard>> keyboards;
     std::vector<std::unique_ptr<Pointer>> pointers;
     std::map<int, std::unique_ptr<Peer>> peers;
@@ -175,7 +182,7 @@ struct State {
             !message || !message->resource || s.bound.surface.expired()) return;
         if (std::strcmp(wl_resource_get_class(message->resource), "wl_pointer") != 0 ||
             wl_resource_get_client(message->resource) != s.bound.surface->client() ||
-            g_pSeatManager->m_state.pointerFocus != s.bound.surface) return;
+            !s.destination(s.bound, g_pSeatManager->m_state.pointerFocus.lock())) return;
         const auto opcode = message->message_opcode;
         if (!((opcode == 2 && message->arguments_count == 3) ||
               (opcode == 3 && message->arguments_count == 4) ||
@@ -310,11 +317,94 @@ struct State {
         }
         return !chain.empty();
     }
+    bool popupChain(const Snapshot& b, SP<CWLSurfaceResource> surface,
+                    std::vector<odin_scope::PopupAncestor>& chain) const {
+        chain.clear();
+        if (b.surface.expired() || b.window.expired()) return false;
+        std::set<uintptr_t> seen;
+        while (surface) {
+            if (chain.size() >= 33 || !seen.insert(reinterpret_cast<uintptr_t>(surface.get())).second ||
+                !surface->good() || !surface->m_mapped || !surface->m_role ||
+                surface->client() != b.surface->client() || surface->m_role->role() != SURFACE_ROLE_XDG_SHELL) return false;
+            const auto* role = dynamic_cast<CXDGSurfaceRole*>(surface->m_role.get());
+            if (!role) return false;
+            auto xdg = role->m_xdgSurface.lock();
+            if (!xdg || !xdg->good() || !xdg->m_mapped || xdg->m_surface.lock() != surface ||
+                xdg->m_owner.expired() || !xdg->m_owner->good() || xdg->m_owner->client() != surface->client()) return false;
+            auto popup = xdg->m_popup.lock();
+            const auto& g = xdg->m_current.geometry;
+            odin_scope::PopupAncestor n{reinterpret_cast<uintptr_t>(surface.get()), reinterpret_cast<uintptr_t>(xdg.get()),
+                0, reinterpret_cast<uintptr_t>(surface->client()), 0, true, bool(popup), {g.x, g.y, g.w, g.h, 0, 0, 0, 0}};
+            if (surface == b.surface.lock()) {
+                auto top = xdg->m_toplevel.lock();
+                if (popup || !top || !top->good() || top->m_owner.lock() != xdg ||
+                    top->m_window != b.window || b.window->m_xdgSurface.lock() != xdg) return false;
+                n.role = reinterpret_cast<uintptr_t>(top.get()); chain.push_back(n);
+                return odin_scope::valid_popup_ancestry(chain, reinterpret_cast<uintptr_t>(b.surface.lock().get()), n.client);
+            }
+            if (!popup || !popup->good() || !xdg->m_toplevel.expired() || popup->m_surface.lock() != xdg || popup->m_parent.expired()) return false;
+            n.role = reinterpret_cast<uintptr_t>(popup.get());
+            n.parent = reinterpret_cast<uintptr_t>(popup->m_parent.lock().get());
+            const auto& p = popup->m_geometry;
+            n.geometry[4] = p.x; n.geometry[5] = p.y; n.geometry[6] = p.w; n.geometry[7] = p.h;
+            chain.push_back(n); surface = popup->m_parent->m_surface.lock();
+        }
+        return false;
+    }
+    std::vector<std::vector<odin_scope::PopupAncestor>> popupInventory(const Snapshot& b) const {
+        // Other wm_base bindings remain unsupported, never admitted by client ID.
+        std::vector<std::vector<odin_scope::PopupAncestor>> result;
+        if (b.window.expired() || b.window->m_xdgSurface.expired() || b.window->m_xdgSurface->m_owner.expired()) return result;
+        if (b.window->m_xdgSurface->m_owner->m_surfaces.size() > 256) return {{{}}};
+        for (const auto& candidate : b.window->m_xdgSurface->m_owner->m_surfaces) {
+            if (candidate.expired() || candidate->m_popup.expired()) continue;
+            std::vector<odin_scope::PopupAncestor> chain;
+            if (popupChain(b, candidate->m_surface.lock(), chain)) result.push_back(std::move(chain));
+        }
+        return result;
+    }
+    bool destination(const Snapshot& b, SP<CWLSurfaceResource> surface) const {
+        std::vector<odin_scope::PopupAncestor> chain;
+        if (!popupChain(b, surface, chain)) return false;
+        return chain.size() == 1 || std::find(b.popups.begin(), b.popups.end(), chain) != b.popups.end();
+    }
+    void watchPopups(Snapshot& b) {
+        b.popupWatch = std::make_shared<PopupWatch>();
+        if (b.window.expired() || b.window->m_xdgSurface.expired() || b.window->m_xdgSurface->m_owner.expired() ||
+            b.window->m_xdgSurface->m_owner->m_surfaces.size() > 256) { b.popupWatch->valid = false; return; }
+        const std::weak_ptr<PopupWatch> weak = b.popupWatch;
+        const auto invalidate = [this, weak] { if (auto watch = weak.lock(); watch && watch->valid) { watch->valid = false; ++revision; } };
+        b.popupWatch->listeners.emplace_back(b.window->m_xdgSurface->m_events.newPopup.listen([invalidate](SP<CXDGPopupResource>) { invalidate(); }));
+        for (const auto& candidate : b.window->m_xdgSurface->m_owner->m_surfaces) {
+            if (candidate.expired() || candidate->m_popup.expired()) continue;
+            std::vector<odin_scope::PopupAncestor> chain;
+            if (!popupChain(b, candidate->m_surface.lock(), chain)) continue;
+            auto popup = candidate->m_popup.lock();
+            b.popupWatch->listeners.emplace_back(popup->m_events.reposition.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(popup->m_events.dismissed.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(popup->m_events.destroy.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(candidate->m_events.unmap.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(candidate->m_events.destroy.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(candidate->m_events.newPopup.listen([invalidate](SP<CXDGPopupResource>) { invalidate(); }));
+            const auto geometry = candidate->m_current.geometry;
+            const auto placement = popup->m_geometry;
+            b.popupWatch->listeners.emplace_back(candidate->m_events.commit.listen([candidate, geometry, placement, invalidate] {
+                if (candidate.expired() || candidate->m_popup.expired() || candidate->m_current.geometry != geometry ||
+                    candidate->m_popup->m_geometry != placement) invalidate();
+            }));
+        }
+    }
+    SP<CWLSurfaceResource> destinationAt(const Vector2D& pos) const {
+        if (!point(pos)) return nullptr;
+        Vector2D local;
+        auto surface = g_pCompositor->vectorWindowToSurface(pos, bound.window.lock(), local);
+        return destination(bound, surface) ? surface : nullptr;
+    }
     bool same(const Snapshot& b) const {
         if (!environment() || b.revision != revision || b.surface.expired() || b.window.expired() || b.monitor.expired()) return false;
         auto w = b.window.lock(); auto m = b.monitor.lock();
         std::vector<odin_scope::NativeAncestor> chain;
-        if (!b.processFD || !provenance(w, chain) || chain != b.ancestry) return false;
+        if (!b.processFD || !b.popupWatch || !b.popupWatch->valid || !provenance(w, chain) || chain != b.ancestry || popupInventory(b) != b.popups) return false;
         pollfd identity{*b.processFD, POLLIN, 0};
         if (poll(&identity, 1, 0) != 0) return false;
         return w->m_isMapped && w->visible() && !w->m_isX11 && w->wlSurface() &&
@@ -384,6 +474,13 @@ struct State {
         put(j.get(), "release_submitted", !armed); put(j.get(), "release_acknowledged", !armed && !failed && keys.empty() && buttons.empty() && !ownedModifiers);
         put(j.get(), "receiver_proven", false);
         if (!error.empty()) put(j.get(), "error", error);
+        Snapshot target;
+        if (Desktop::focusState()) target.window = Desktop::focusState()->window();
+        if (!target.window.expired()) target.surface = target.window->resource();
+        std::vector<odin_scope::PopupAncestor> pointerChain;
+        const bool pointerKnown = g_pSeatManager && popupChain(target, g_pSeatManager->m_state.pointerFocus.lock(), pointerChain);
+        put(j.get(), "current_pointer_role", std::string(pointerKnown ? (pointerChain.size() == 1 ? "root" : "owned-popup") : "other"));
+        put(j.get(), "pointer_popup_depth", int64_t(pointerKnown ? pointerChain.size() - 1 : 0));
         return j;
     }
     J snapshot(const std::string& output) {
@@ -411,6 +508,9 @@ struct State {
             targetListeners.emplace_back(m->m_events.dpmsChanged.listen(invalidate));
         }
         b.surface = w->resource(); b.window = w; b.monitor = m;
+        b.popups = popupInventory(b);
+        if (b.popups != watchedPopups) { watchedPopups = b.popups; ++revision; }
+        watchPopups(b);
         b.pos = w->m_realPosition->value(); b.size = w->m_realSize->value();
         b.outputPos = m->m_position; b.outputSize = m->m_size; b.pixelSize = m->m_pixelSize;
         b.scale = m->m_scale; b.transform = int(m->m_transform); b.title = w->m_title; b.app = w->m_class; b.revision = revision;
@@ -619,7 +719,8 @@ void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer>
         State::OwnedDispatch trace(s, false); original(manager, event, device); return;
     }
     if (p != s.pointer || !s.allow()) { if (p != s.pointer) ++s.rejected; return; }
-    if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || g_pSeatManager->m_state.pointerFocus != s.bound.surface || !s.point(g_pPointerManager->position())) { ++s.rejected; s.revoke("button-destination-refused"); return; }
+    if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || !s.destinationAt(g_pPointerManager->position()) ||
+        s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.rejected; s.revoke("button-destination-refused"); return; }
     s.buttons.insert(event.button);
     State::OwnedDispatch trace(s, false); original(manager, event, device);
 }
@@ -628,7 +729,7 @@ void onAxis(CInputManager* manager, IPointer::SAxisEvent event, SP<IPointer> dev
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
     if (p != s.pointer) { ++s.rejected; return; }
     if (!s.allow()) return;
-    if (g_pSeatManager->m_state.pointerFocus != s.bound.surface || !s.point(g_pPointerManager->position())) { ++s.rejected; s.revoke("axis-destination-refused"); return; }
+    if (!s.destinationAt(g_pPointerManager->position()) || s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.rejected; s.revoke("axis-destination-refused"); return; }
     original(manager, event, device);
 }
 void onMotion(CInputManager* manager, IPointer::SMotionEvent event) {
@@ -637,7 +738,9 @@ void onMotion(CInputManager* manager, IPointer::SMotionEvent event) {
     if (p != s.pointer) { ++s.rejected; return; }
     if (!s.allow()) return;
     const auto pos = g_pPointerManager->position();
-    if (g_pSeatManager->m_state.pointerFocus != s.bound.surface || !s.point(pos + event.delta) || !s.point(pos + event.unaccel)) { ++s.rejected; s.revoke("motion-destination-refused"); return; }
+    if (!s.destination(s.bound, g_pSeatManager->m_state.pointerFocus.lock()) ||
+        s.destinationAt(pos + event.delta) != g_pSeatManager->m_state.pointerFocus.lock() ||
+        s.destinationAt(pos + event.unaccel) != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.rejected; s.revoke("motion-destination-refused"); return; }
     original(manager, event);
 }
 void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
@@ -648,21 +751,22 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
     if (p != s.pointer) { ++s.rejected; return; }
     if (!s.allow()) return;
     const Vector2D pos = s.bound.outputPos + event.absolute * s.bound.outputSize;
-    const bool positioning = g_pSeatManager->m_state.pointerFocus != s.bound.surface;
-    if (!s.point(pos) || (positioning && (!s.keys.empty() || !s.buttons.empty() || s.ownedModifiers ||
+    const auto destination = s.destinationAt(pos);
+    const bool positioning = g_pSeatManager->m_state.pointerFocus.lock() != destination;
+    if (!destination || (positioning && (!s.keys.empty() || !s.buttons.empty() || s.ownedModifiers ||
         s.inputHeld()))) {
         ++s.rejected; s.revoke("warp-destination-refused"); return;
     }
     State::OwnedDispatch trace(s, true);
     // Only this synchronous owned, no-held-input absolute positioning dispatch
-    // can enter the ALREADY observed keyboard target. Never a new window lease.
+    // can enter the ALREADY observed root or mapped popup. Never a new window lease.
     struct Positioning {
         State& state;
         Positioning(State& value, bool active) : state(value) { state.positioningBoundSurface = active; }
         ~Positioning() { state.positioningBoundSurface = false; }
     } positioningGuard(s, positioning);
     original(manager, event);
-    if (!s.scope() || g_pSeatManager->m_state.pointerFocus != s.bound.surface) {
+    if (!s.scope() || g_pSeatManager->m_state.pointerFocus.lock() != destination || s.destinationAt(pos) != destination) {
         ++s.rejected; s.revoke("warp-focus-postcondition-refused"); return;
     }
     // Pinned Hyprland 0.55.2 onMouseWarp sends motion but no seat frame.
@@ -680,7 +784,7 @@ void onFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface) {
 void onPointerFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface, const Vector2D& local) {
     auto& s = *live; auto original = reinterpret_cast<PointerFocusFn>(s.pointerFocusHook->m_original);
     if (surface != g_pSeatManager->m_state.pointerFocus.lock() && s.positioningBoundSurface &&
-        s.scope() && surface == s.bound.surface.lock() && s.keys.empty() && s.buttons.empty() && !s.ownedModifiers &&
+        s.scope() && surface && s.destinationAt(g_pPointerManager->position()) == surface && s.keys.empty() && s.buttons.empty() && !s.ownedModifiers &&
         !s.inputHeld() &&
         s.point(g_pPointerManager->position())) {
         // Consume before dispatch: at most one exact target transfer, no reentry.
