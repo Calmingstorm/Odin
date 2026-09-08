@@ -2761,6 +2761,40 @@ class ToolLoopRunner:
                 if tool_name in {"computer_session", "computer_observe", "computer_act"}
                 else None
             )
+            if terminal_event:
+                # Native observations and settled receipts contain accessible
+                # document text, names and field readback. They belong in the
+                # model-facing evidence, not durable audit or its live fan-out.
+                # Do not parse/partially scrub that arbitrary desktop payload:
+                # retain only the tool-layer outcome, not a claim about pixels
+                # or application effects. Delivery failure remains a failure
+                # even when an action receipt independently settled as OK.
+                unknown = error == "outcome_unknown" or bool(
+                    tool_result and tool_result.uncertain_outcome
+                )
+                failed = bool(error or (tool_result is not None and not tool_result.ok))
+                status = "outcome_unknown" if unknown else "failed" if failed else "succeeded"
+                result = json.dumps(
+                    {
+                        "kind": "computer_audit",
+                        "tool_status": status,
+                        "output_omitted": "private desktop content",
+                    },
+                    separators=(",", ":"),
+                )
+                # Exception messages can also contain desktop text. Only these
+                # internal codes are permitted in the audit's error field.
+                if error not in {
+                    None,
+                    "computer_observation_rejected",
+                    "computer_rejected",
+                    "computer_not_satisfied",
+                    "outcome_unknown",
+                    "permission_denied",
+                }:
+                    error = "computer_rejected"
+                if not error and (unknown or failed):
+                    error = "outcome_unknown" if unknown else "computer_not_satisfied"
             scrubbed_input = _scrub_tool_input_for_storage(
                 tool_name,
                 {
