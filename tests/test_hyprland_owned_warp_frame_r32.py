@@ -51,6 +51,7 @@ struct State {
     Pointer* pointer;
     unsigned rejected = 0;
     bool allowed = true;
+    bool inputHeld() const { return false; }
     bool positioningBoundSurface=false, ownedModifiers=false;
     std::vector<int> keys, buttons;
     struct { Vector2D outputPos{0,0}, outputSize{1,1}; int surface=1; } bound;

@@ -17,6 +17,7 @@
 #include <hyprland/src/event/EventBus.hpp>
 #include <json-c/json.h>
 #include <wayland-server-core.h>
+#include <linux/input-event-codes.h>
 #include <sys/socket.h>
 #include <sys/un.h>
 #include <sys/stat.h>
@@ -271,6 +272,27 @@ struct State {
             g_pSeatManager && g_pInputManager && g_pPointerManager && Desktop::focusState() &&
             !g_pInputManager->isConstrained() && g_pInputManager->m_exclusiveLSes.empty();
     }
+    bool inputHeld() const {
+        // getKeysFromAllKBs() is the seat-OUTPUT ledger, not device input state.
+        // A compositor-consumed release can leave it stale (R38: KEY_LEFTMETA
+        // there, all live device ledgers empty). Conversely, a consumed press
+        // need not appear there at all. Never clear it or release foreign keys.
+        if (!g_pInputManager || g_pInputManager->m_keyboards.empty() ||
+            g_pInputManager->hasHeldButtons()) return true;
+        // Preserve refusal for out-of-evdev protocol values seen by the seat;
+        // they are outside the supported keyboard input domain, not stale
+        // normal-key entries we can reconcile through the public device API.
+        for (const auto code : g_pInputManager->getKeysFromAllKBs())
+            if (code > KEY_MAX) return true;
+        for (const auto& device : g_pInputManager->m_keyboards) {
+            if (!device) return true;
+            // IKeyboard::updatePressed runs before the input-manager hook and
+            // keybind filtering. Include disabled, physical AND virtual devices.
+            for (uint32_t code = 0; code <= KEY_MAX; ++code)
+                if (device->getPressed(code)) return true;
+        }
+        return false;
+    }
     bool provenance(PHLWINDOW w, std::vector<odin_scope::NativeAncestor>& chain) const {
         chain.clear();
         if (!w || w->m_isX11 || w->m_xdgSurface.expired() || w->m_xdgSurface->m_toplevel.expired()) return false;
@@ -483,7 +505,7 @@ struct State {
         if (!k) return status(false, "missing-guardian-keyboard");
         for (auto& x : pointers) if (!x->dead && x->client == k->client) { if (p) return status(false, "ambiguous-pointer"); p = x.get(); }
         if (!p || p->resource->m_boundOutput != it->second.monitor || p->device->m_boundOutput != it->second.monitor->m_name) return status(false, "missing-or-wrong-output-pointer");
-        if (!g_pInputManager->getKeysFromAllKBs().empty() || g_pInputManager->hasHeldButtons()) return status(false, "human-input-held");
+        if (inputHeld()) return status(false, "human-input-held");
         keyboard = k; pointer = p; guardianFD = peer.fd; bound = it->second; snapshots.erase(it);
         if (diagnosticToken != bound.token) { diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0; }
         deadline = expiry; armed = true; reason = "armed";
@@ -628,7 +650,7 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
     const Vector2D pos = s.bound.outputPos + event.absolute * s.bound.outputSize;
     const bool positioning = g_pSeatManager->m_state.pointerFocus != s.bound.surface;
     if (!s.point(pos) || (positioning && (!s.keys.empty() || !s.buttons.empty() || s.ownedModifiers ||
-        !g_pInputManager->getKeysFromAllKBs().empty() || g_pInputManager->hasHeldButtons()))) {
+        s.inputHeld()))) {
         ++s.rejected; s.revoke("warp-destination-refused"); return;
     }
     State::OwnedDispatch trace(s, true);
@@ -659,7 +681,7 @@ void onPointerFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface, const
     auto& s = *live; auto original = reinterpret_cast<PointerFocusFn>(s.pointerFocusHook->m_original);
     if (surface != g_pSeatManager->m_state.pointerFocus.lock() && s.positioningBoundSurface &&
         s.scope() && surface == s.bound.surface.lock() && s.keys.empty() && s.buttons.empty() && !s.ownedModifiers &&
-        g_pInputManager->getKeysFromAllKBs().empty() && !g_pInputManager->hasHeldButtons() &&
+        !s.inputHeld() &&
         s.point(g_pPointerManager->position())) {
         // Consume before dispatch: at most one exact target transfer, no reentry.
         s.positioningBoundSurface = false;

@@ -65,12 +65,12 @@ def test_native_keyboard_and_pointer_fences_remain_distinct():
     warp = source.split("void onWarp(", 1)[1].split("\nvoid ", 1)[0]
     assert "!s.point(pos)" in warp
     assert "s.ownedModifiers" in warp
-    assert "getKeysFromAllKBs().empty()" in warp
-    assert "hasHeldButtons()" in warp
+    assert "s.inputHeld()" in warp
     assert 's.revoke("warp-focus-postcondition-refused")' in warp
     transfer = source.split("void onPointerFocus(", 1)[1].split("\nvoid ", 1)[0]
     assert "surface == s.bound.surface.lock()" in transfer
     assert "s.scope()" in transfer
+    assert "!s.inputHeld()" in transfer
     assert "s.point(g_pPointerManager->position())" in transfer
     assert "s.positioningBoundSurface = false" in transfer
 

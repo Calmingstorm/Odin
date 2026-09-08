@@ -1544,9 +1544,15 @@ class ComputerController:
                             native = native_failure({**detail, "native_failure": detail})
                             if native is not None:
                                 failed["native_failure"] = native
-                self._finish_action(live.capabilities, grant.session_id, inp["action_id"], failed)
-                if not known_release or isinstance(exc, asyncio.CancelledError):
-                    await self._stop(grant.session_id, "cancelled")
+                try:
+                    self._finish_action(
+                        live.capabilities, grant.session_id, inp["action_id"], failed
+                    )
+                finally:
+                    # Receipt-storage failure must not skip required cleanup or
+                    # turn a pending reservation into permission to replay.
+                    if not known_release or isinstance(exc, asyncio.CancelledError):
+                        await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 return self.store.receipt(grant.session_id, inp["action_id"], payload_hash)

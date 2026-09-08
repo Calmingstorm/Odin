@@ -67,6 +67,7 @@ struct State {
     unsigned rejected=0, revision=0, boundRevision=0, revokes=0, releases=0;
     std::vector<int> keys, buttons;
     std::string reason;
+    bool inputHeld() const { return !input.physicalKeys.empty() || input.physicalButtons; }
     struct {
         Vector2D outputPos{0,0}, outputSize{1,1};
         Ref surface, pointerSurface;

@@ -567,6 +567,7 @@ class ComputerStore:
             "diagnostics",
             "targeting",
             "input_safety",
+            "native_failure",
         }
         if set(result) - allowed or result.get("status") not in {
             "executed",
@@ -577,6 +578,17 @@ class ComputerStore:
             "interrupted",
         }:
             raise ComputerError("invalid_receipt")
+        if "native_failure" in result:
+            # One bounded native schema, not arbitrary peer data. Keep these
+            # facts separate from the conservative execution/release verdict.
+            from .runtime.hyprland_guardian import native_failure
+
+            detail = result["native_failure"]
+            if type(detail) is not dict:
+                raise ComputerError("invalid_receipt")
+            clean = native_failure({**detail, "native_failure": detail})
+            if clean is None or clean != detail:
+                raise ComputerError("invalid_receipt")
         with self.lock:
             row = self.db.execute(
                 "SELECT result FROM receipts WHERE session_id=? AND action_id=?",
