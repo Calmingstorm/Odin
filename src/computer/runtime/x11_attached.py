@@ -1282,39 +1282,88 @@ class X11AttachedBackend:
             if self._lifecycle_job is not None:
                 if self._lifecycle is not None:
                     self._lifecycle.stdin.close()
-                _done, pending = await asyncio.wait({self._lifecycle_job}, timeout=max(
-                    0, cleanup_deadline - time.monotonic()))
+                _done, pending = await asyncio.wait(
+                    {self._lifecycle_job}, timeout=max(0, cleanup_deadline - time.monotonic())
+                )
                 settled = settled and not pending
             restored = self._restoration_verified()
             if restored:
                 self._device_state = "removed"
-            clean = (settled and (restored or (not self._release_failed
-                     and self._device_state == "not_created" and not self.creates_devices)))
+            clean = settled and (
+                restored
+                or (
+                    not self._release_failed
+                    and self._device_state == "not_created"
+                    and not self.creates_devices
+                )
+            )
             if clean and not self.creates_devices and self._device_identity is not None:
                 clean = self._shared_cleanup_identity == self._device_identity
             if settled and self._session_lease_fd is not None:
                 os.close(self._session_lease_fd)
                 self._session_lease_fd = None
-            return {"stopped": clean, "released": clean,
-                    **{key: self._restoration.get(key) is True for key in (
-                        "physical_slaves_restored", "no_inflight_input",
-                        "no_active_grabs", "owned_masters_removed")},
-                    # XI2 state cannot prove arbitrary clients consumed their
-                    # device events. GDK can issue stale XIBarrierReleasePointer
-                    # requests after removal and abort on XI_BadDevice.
-                    "applications_preserved": not self.creates_devices,
-                    "input_revoked": True, "capture_revoked": True,
-                    "owned_devices": self._device_state, "input_was_enabled": self._input_enabled,
-                    "state": "closed" if clean and not self.creates_devices else "quarantined",
-                    "recovery": ("application_preservation_unverified" if clean and
-                                 self.creates_devices else None if clean else
-                                 "owned_x11_cleanup_unverified")}
+            shared = not self.creates_devices and self._device_state == "not_created"
+            # Restoration certificates describe created XI2 seats only. Missing
+            # certificate fields are not negative measurements of shared input.
+            # Worker settlement DOES prove absence of our inflight input. There
+            # is no safe global-grab probe on another client's shared devices.
+            evidence = (
+                {
+                    "physical_slaves_restored": None,
+                    "no_inflight_input": settled,
+                    "no_active_grabs": None,
+                    "owned_masters_removed": None,
+                    "cleanup_checks": {
+                        "physical_slaves_restored": "not_applicable_no_owned_masters",
+                        "no_inflight_input": "measured_owned_worker_fence",
+                        "no_active_grabs": "unsupported_shared_server_probe",
+                        "owned_masters_removed": "not_applicable_no_owned_masters",
+                    },
+                }
+                if shared
+                else {
+                    key: self._restoration.get(key) is True
+                    for key in (
+                        "physical_slaves_restored",
+                        "no_inflight_input",
+                        "no_active_grabs",
+                        "owned_masters_removed",
+                    )
+                }
+            )
+            return {
+                "stopped": clean,
+                "released": clean,
+                **evidence,
+                # XI2 state cannot prove arbitrary clients consumed their
+                # device events. GDK can issue stale XIBarrierReleasePointer
+                # requests after removal and abort on XI_BadDevice.
+                "applications_preserved": not self.creates_devices,
+                "input_revoked": True,
+                "capture_revoked": True,
+                "owned_devices": self._device_state,
+                "input_was_enabled": self._input_enabled,
+                "state": "closed" if clean and not self.creates_devices else "quarantined",
+                "recovery": (
+                    "application_preservation_unverified"
+                    if clean and self.creates_devices
+                    else None
+                    if clean
+                    else "owned_x11_cleanup_unverified"
+                ),
+            }
 
     def _restoration_verified(self):
         return self._restoration.get("owned_devices") == "removed" and all(
-            self._restoration.get(key) is True for key in (
-                "released", "physical_slaves_restored", "no_inflight_input",
-                "no_active_grabs", "owned_masters_removed"))
+            self._restoration.get(key) is True
+            for key in (
+                "released",
+                "physical_slaves_restored",
+                "no_inflight_input",
+                "no_active_grabs",
+                "owned_masters_removed",
+            )
+        )
 
     stop = detach
     close = detach

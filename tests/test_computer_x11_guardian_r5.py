@@ -1,4 +1,5 @@
 """R5 ownership/attached-input contract stubs. Never open a display or spawn X."""
+
 import asyncio
 import base64
 import copy
@@ -17,6 +18,7 @@ from src.computer.runtime import x11_guardian as guardian
 def prohibit_real_children(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("unit contract test attempted a real process")
+
     monkeypatch.setattr(guardian.subprocess, "Popen", forbidden)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", forbidden)
 
@@ -83,8 +85,13 @@ class Helper:
 def rig(**kwargs):
     native = Native()
     helper = Helper(native)
-    guard = guardian.Guardian(native, helper, kwargs.pop("validate", lambda step: None),
-                              controller_fd=kwargs.pop("controller_fd", None), **kwargs)
+    guard = guardian.Guardian(
+        native,
+        helper,
+        kwargs.pop("validate", lambda step: None),
+        controller_fd=kwargs.pop("controller_fd", None),
+        **kwargs,
+    )
     return native, helper, guard
 
 
@@ -146,18 +153,25 @@ def test_unowned_up_rejected_and_ack_only_clears_verified_release():
     assert not ledger.keys
 
 
-@pytest.mark.parametrize("trigger,reason", [
-    ("eof", "controller_eof"), ("cancel", "controller_cancel"),
-    ("lease", "input_lease_expired"), ("helper_normal", "input_helper_eof"),
-    ("helper_abrupt", "input_helper_eof"),
-])
+@pytest.mark.parametrize(
+    "trigger,reason",
+    [
+        ("eof", "controller_eof"),
+        ("cancel", "controller_cancel"),
+        ("lease", "input_lease_expired"),
+        ("helper_normal", "input_helper_eof"),
+        ("helper_abrupt", "input_helper_eof"),
+    ],
+)
 def test_interruption_fences_before_owned_release(monkeypatch, trigger, reason):
     now, readable = [10.0], [False]
     native, helper, guard = rig(controller_fd=987, clock=lambda: now[0])
-    monkeypatch.setattr(guardian.select, "select",
-                        lambda *args: ([987] if readable[0] else [], [], []))
-    monkeypatch.setattr(guardian.os, "read",
-                        lambda *args: b"cancel" if trigger == "cancel" else b"")
+    monkeypatch.setattr(
+        guardian.select, "select", lambda *args: ([987] if readable[0] else [], [], [])
+    )
+    monkeypatch.setattr(
+        guardian.os, "read", lambda *args: b"cancel" if trigger == "cancel" else b""
+    )
 
     def interrupt():
         if trigger in {"eof", "cancel"}:
@@ -179,7 +193,9 @@ def test_same_key_physical_race_is_unknown_and_never_repairs_physical_state():
     helper.after_send = lambda: native.physical_keys.add(38)
     receipt = guard.run([("key", 38, True), ("key", 38, False)])
     assert receipt["status"] == "unknown" and receipt["overlap_uncertain"]
-    assert receipt["reason"] == "human_input_overlap" and receipt["released"]
+    assert receipt["reason"] == "human_input_overlap" and not receipt["released"]
+    # Own key-up succeeded, but a physical overlap cannot certify global release.
+    assert receipt["diagnostics"]["release"] == "unknown"
     assert native.physical_keys == {38} and native.keys == set()
 
 
@@ -200,17 +216,25 @@ def test_app_scope_failure_blocks_next_down_and_releases_previously_owned_input(
 
 def test_ctrl_s_modal_on_down_allows_only_own_tracked_releases():
     changed = [False]
+
     def validate(step):
         if changed[0]:
             raise RuntimeError("modal changed old snapshot")
+
     native, helper, guard = rig(validate=validate)
     helper.after_send = lambda: changed.__setitem__(0, changed[0] or 39 in native.keys)
-    receipt = guard.run([("key", 37, True), ("key", 39, True),
-                         ("key", 39, False), ("key", 37, False)])
+    receipt = guard.run(
+        [("key", 37, True), ("key", 39, True), ("key", 39, False), ("key", 37, False)]
+    )
     assert receipt["status"] == "executed" and receipt["released"]
     assert not native.keys and not guard.ledger.keys and helper.fenced
-    assert native.calls == [("key", 37, True), ("key", 39, True),
-                            ("key", 39, False), ("key", 37, False), ("fence",)]
+    assert native.calls == [
+        ("key", 37, True),
+        ("key", 39, True),
+        ("key", 39, False),
+        ("key", 37, False),
+        ("fence",),
+    ]
 
 
 def test_dispatch_budget_does_not_extend_native_lease():
@@ -245,18 +269,28 @@ def test_normal_completion_has_empty_ledger_after_verified_up():
 
 
 def backend(**kwargs):
-    return attached.X11AttachedBackend(enabled=True, display_name=":177",
-                                       monitor_names=["fixture"], app_profile="xed", **kwargs)
+    return attached.X11AttachedBackend(
+        enabled=True, display_name=":177", monitor_names=["fixture"], app_profile="xed", **kwargs
+    )
 
 
 async def observed(monkeypatch):
     b = backend(input_enabled=True)
-    state = {"binding": {"focused": True, "modal": None, "modal_kind": None,
-                         "process": {"pid": 17, "start_ticks": 300}, "window": 90,
-                         "topology": "fixture", "source_rect": [100, 200, 40, 20],
-                         "transient_chain": [],
-                         "rect": [100, 200, 40, 20], "source_origin": [100, 200]},
-             "image": b"before"}
+    state = {
+        "binding": {
+            "focused": True,
+            "modal": None,
+            "modal_kind": None,
+            "process": {"pid": 17, "start_ticks": 300},
+            "window": 90,
+            "topology": "fixture",
+            "source_rect": [100, 200, 40, 20],
+            "transient_chain": [],
+            "rect": [100, 200, 40, 20],
+            "source_origin": [100, 200],
+        },
+        "image": b"before",
+    }
     monitor = {"name": "fixture", "width": 40, "height": 20, "index": 0}
 
     async def read(operation, **kwargs):
@@ -265,14 +299,25 @@ async def observed(monkeypatch):
         if operation == "scope_readiness":
             return {"scope_readiness": [{"name": "fixture", "eligible": True, "reason": None}]}
         if operation == "input_capabilities":
-            return {"released": True, "pointer": "shared", "keyboard_focus": "shared",
-                    "persistent_input_devices": False, "owned_devices": "not_created",
-                    "device_identity": [11, 12]}
-        return {"ok": True, "source_width": 40, "source_height": 20,
-                "width": 20, "height": 10, "resize_scale": [1, 2],
-                "delivered_to_source": AffineTransform(a=2, e=2).public(),
-                "input_scope": copy.deepcopy(state["binding"]),
-                "image": base64.b64encode(state["image"]).decode()}
+            return {
+                "released": True,
+                "pointer": "shared",
+                "keyboard_focus": "shared",
+                "persistent_input_devices": False,
+                "owned_devices": "not_created",
+                "device_identity": [11, 12],
+            }
+        return {
+            "ok": True,
+            "source_width": 40,
+            "source_height": 20,
+            "width": 20,
+            "height": 10,
+            "resize_scale": [1, 2],
+            "delivered_to_source": AffineTransform(a=2, e=2).public(),
+            "input_scope": copy.deepcopy(state["binding"]),
+            "image": base64.b64encode(state["image"]).decode(),
+        }
 
     monkeypatch.setattr(b, "_read_worker", read)
     monkeypatch.setattr(b, "_start_device_lifecycle", lambda: read("input_capabilities"))
@@ -282,10 +327,15 @@ async def observed(monkeypatch):
 
 
 def click(frame):
-    return {"type": "click", "source_id": frame.source.source_id,
-            "source_revision": frame.source.source_revision,
-            "consent_generation": frame.source.consent_generation,
-            "expected": {"type": "visual_change"}, "x": 3, "y": 4}
+    return {
+        "type": "click",
+        "source_id": frame.source.source_id,
+        "source_revision": frame.source.source_revision,
+        "consent_generation": frame.source.consent_generation,
+        "expected": {"type": "visual_change"},
+        "x": 3,
+        "y": 4,
+    }
 
 
 @pytest.mark.asyncio
@@ -334,11 +384,18 @@ async def test_actor_maps_delivered_pixels_through_source_then_private_origin(mo
 @pytest.mark.asyncio
 async def test_safe_modal_transition_verifies_same_app_but_consumes_old_binding(monkeypatch):
     b, state, frame = await observed(monkeypatch)
+
     async def act(request):
-        state["binding"].update(window=91, transient_chain=[90], modal=True,
-                                modal_kind="safe_application", rect=[100, 200, 30, 10])
+        state["binding"].update(
+            window=91,
+            transient_chain=[90],
+            modal=True,
+            modal_kind="safe_application",
+            rect=[100, 200, 30, 10],
+        )
         state["image"] = b"dialog appeared"
         return {"status": "executed", "released": True}
+
     monkeypatch.setattr(b, "_input_worker", act)
     result = await b.act(click(frame))
     assert result["postcondition"]["target_application_matches"] is True
@@ -351,24 +408,38 @@ async def test_safe_modal_transition_verifies_same_app_but_consumes_old_binding(
         await b.act(click(fresh))
 
 
-@pytest.mark.parametrize("change", [
-    {"process": {"pid": 18, "start_ticks": 300}},
-    {"process": {"pid": 17, "start_ticks": 301}},
-    {"window": 92, "transient_chain": []}, {"topology": "changed"},
-    {"source_rect": [0, 0, 40, 20]}, {"source_origin": [0, 0]},
-    {"modal_kind": "unrecognized"}, {"focused": False}, {"process": None},
-])
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"process": {"pid": 18, "start_ticks": 300}},
+        {"process": {"pid": 17, "start_ticks": 301}},
+        {"window": 92, "transient_chain": []},
+        {"topology": "changed"},
+        {"source_rect": [0, 0, 40, 20]},
+        {"source_origin": [0, 0]},
+        {"modal_kind": "unrecognized"},
+        {"focused": False},
+        {"process": None},
+    ],
+)
 async def test_postcondition_rejects_other_app_or_source_or_unknown_modal(monkeypatch, change):
     _, state, _ = await observed(monkeypatch)
     before = state["binding"]
-    after = {**before, "window": 91, "transient_chain": [90],
-             "modal": True, "modal_kind": "safe_application", **change}
+    after = {
+        **before,
+        "window": 91,
+        "transient_chain": [90],
+        "modal": True,
+        "modal_kind": "safe_application",
+        **change,
+    }
     assert not attached.same_application_scope(before, after)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("receipt", [{"status": "unknown", "released": False},
-                                     {"status": "unknown"}])
+@pytest.mark.parametrize(
+    "receipt", [{"status": "unknown", "released": False}, {"status": "unknown"}]
+)
 async def test_unverified_release_receipt_quarantines_backend(monkeypatch, receipt):
     b, state, frame = await observed(monkeypatch)
 
