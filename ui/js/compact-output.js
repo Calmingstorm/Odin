@@ -5,7 +5,7 @@ import { compactOutput } from './compact-output-format.js';
 export default {
   name: 'CompactOutput',
   props: { value: { default: '' }, rawValue: { default: undefined }, label: { type: String, default: 'Output' },
-    hasContext: { type: Boolean, default: false } },
+    hasContext: { type: Boolean, default: false }, recordId: { default: null } },
   setup(props) {
     const expanded = ref(false), wrapped = ref(true), rawMode = ref(false), copyStatus = ref('');
     const previewElement = ref(null), summaryElement = ref(null), layoutFolded = ref(false);
@@ -41,7 +41,14 @@ export default {
         if (received === props.value) copyStatus.value = 'Copied';
       } catch { if (received === props.value) copyStatus.value = 'Copy unavailable — select text manually'; }
     }
-    watch(() => props.value, () => { expanded.value = false; rawMode.value = false; copyStatus.value = ''; });
+    watch([() => props.value, () => props.rawValue, () => props.recordId], (current, previous) => {
+      // A live lifecycle update enriches the same inspected row. Unkeyed
+      // consumers retain the old reset behavior when their value changes.
+      if (props.recordId === null || current[2] !== previous[2]) {
+        expanded.value = false; rawMode.value = false;
+      }
+      copyStatus.value = '';
+    });
     watch([previewElement, summaryElement, expanded, wrapped, model], () => nextTick(observe), { flush: 'post' });
     onMounted(() => { observer = new ResizeObserver(measure); observe(); });
     onUnmounted(() => observer?.disconnect());

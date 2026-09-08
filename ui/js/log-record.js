@@ -2,6 +2,7 @@ import { computed } from 'vue';
 import ToolOutput from './tool-output.js';
 import { logDisplay, operatorMetadata } from './log-display.js';
 import { displayText } from './compact-output-format.js';
+import { retainedLogRecord } from './log-records.js';
 
 /** Live tail only: one row for chronological and turn-grouped audit streams. */
 export default {
@@ -13,13 +14,18 @@ export default {
     const argumentsText = computed(() => displayText(props.entry.record?.tool_input ?? ''));
     const errorText = computed(() => displayText(props.entry.record?.error || props.entry.record?.metadata?.error || ''));
     const metadataText = computed(() => operatorMetadata(props.entry.record));
-    return { display, argumentsText, errorText, metadataText };
+    const rawRecord = computed(() => retainedLogRecord(props.entry));
+    const lifecycle = computed(() => (props.entry.events || [props.entry.record]).filter(Boolean).map(record => ({
+      type: record.type || 'execution', timestamp: record.timestamp || 'Time not recorded',
+      status: record.status || record.metadata?.status || '',
+    })));
+    return { display, argumentsText, errorText, metadataText, rawRecord, lifecycle };
   },
   template: `
     <article class="log-line log-compact-line min-w-0"
              :class="{ 'log-line-error': entry.level === 'ERROR', 'log-line-warning': entry.level === 'WARNING' }"
              :data-log-id="entry.id">
-      <tool-output presentation="compact" :value="display.body" :raw-value="entry.record || undefined" label="Live log record"
+      <tool-output presentation="compact" :value="display.body" :raw-value="rawRecord || undefined" :record-id="entry.id" label="Live log record"
                    :has-context="display.status !== '' || display.duration !== null || Boolean(entry.attribution.agentId || argumentsText)">
         <template #header>
           <button class="log-ts text-gray-500 hover:text-gray-300" @click="$emit('copy', entry)"
@@ -53,6 +59,10 @@ export default {
           </div>
           <div v-if="metadataText" class="log-compact-metadata">
             <span class="text-gray-500">Metadata</span><pre class="output-body output-wrapped">{{ metadataText }}</pre>
+          </div>
+          <div v-if="entry.events" class="log-compact-lifecycle">
+            <span class="text-gray-500">Retained lifecycle evidence ({{ lifecycle.length }} events)</span>
+            <div v-for="(event, index) in lifecycle" :key="index">{{ event.type }} · {{ event.timestamp }} {{ event.status }}</div>
           </div>
         </template>
       </tool-output>

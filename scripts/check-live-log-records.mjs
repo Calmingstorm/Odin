@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { groupLogEntries, logAttribution, parseLogEntry, serializeLogRecord } from '../ui/js/log-records.js';
+import { appendLogEntry, groupLogEntries, logAttribution, parseLogEntry, serializeLogRecord } from '../ui/js/log-records.js';
 import { compactOutput, displayText } from '../ui/js/compact-output-format.js';
 import { logDisplay, operatorMetadata } from '../ui/js/log-display.js';
 
@@ -49,6 +49,74 @@ assert.deepEqual(groupLogEntries(rows.slice(3)).map(g => g.key), ['turn:turn-two
 assert.equal(groupLogEntries([parseLogEntry({ metadata: { agent_id: 'orphan', root_agent_id: 'root' } }, 15, at)])[0].key, 'root:root');
 assert.equal(groupLogEntries(rows)[0].sections[0].entries[0].id, 1, 'grouping preserves stable row identity');
 console.log('live-log-records: lossless transports, attribution, search/copy, same-name isolation, local grouping and eviction passed');
+
+const lifecycle = (tool = 'run_command', call = 'a') => {
+  const base = { tool_name: tool, channel_id: 'channel', user_id: 'user', turn: { turn_id: 'turn' } };
+  return [
+    { ...base, type: 'tool_start', metadata: { call_id: call, iteration: 1, tool_input_keys: ['command'] }, timestamp: '2026-09-06T16:00:00Z' },
+    { ...base, call_id: call, iteration: 1, result_summary: 'complete result', tool_input: { command: 'example' }, execution_time_ms: 7, error: null, timestamp: '2026-09-06T16:00:01Z' },
+    { ...base, type: 'tool_end', detail: 'clipped terminal', metadata: { call_id: call, iteration: 1, elapsed_ms: 8 }, timestamp: '2026-09-06T16:00:02Z' },
+  ];
+};
+for (const tool of ['run_command', 'read_file', 'computer_act', 'invoke_skill', 'mcp_example', 'future_tool']) {
+  for (const order of [[0, 1, 2], [0, 2, 1], [1, 2, 0], [2, 0, 1]]) {
+    const events = lifecycle(tool), entries = [];
+    order.forEach((n, i) => appendLogEntry(entries, parseLogEntry(events[n], i + 1, at)));
+    assert.equal(entries.length, 1, `${tool}: one call in order ${order}`);
+    assert.equal(entries[0].id, 1, 'stable first-arrival identity');
+    assert.equal(logDisplay(entries[0]).body, 'complete result');
+    assert.equal(logDisplay(entries[0]).status, 'succeeded');
+    assert.equal(logDisplay(entries[0]).duration, 7, 'canonical timing beats terminal metadata');
+    assert.deepEqual(JSON.parse(serializeLogRecord(entries[0])), order.map(n => events[n]), 'all raw signed evidence preserved, not a fabricated audit record');
+    assert.ok(entries[0].searchText.includes('clipped terminal'));
+    appendLogEntry(entries, parseLogEntry(events[order[0]], 9, at));
+    assert.equal(entries[0].events.length, 3, 'identical replay adds no evidence duplicate');
+  }
+}
+const calls = [], aEvents = lifecycle(), bEvents = lifecycle('run_command', 'b');
+[aEvents[0], bEvents[0], bEvents[2], aEvents[1], aEvents[2], bEvents[1]].forEach((e, i) => appendLogEntry(calls, parseLogEntry(e, i, at)));
+assert.equal(calls.length, 2, 'reverse completion of parallel same-name calls stays distinct');
+for (const change of [{ turn: { turn_id: 'other' } }, { agent_id: 'child' }, { iteration: 2 }, { channel_id: 'elsewhere' }, { user_id: 'other' }]) {
+  appendLogEntry(calls, parseLogEntry({ ...aEvents[1], ...change }, 20, at));
+}
+assert.equal(calls.length, 7, 'call-id reuse across scopes never joins');
+const uncorrelated = [];
+for (const e of [{ ...aEvents[1], call_id: undefined }, { ...aEvents[1], call_id: undefined }, { ...aEvents[1], turn: undefined }, { ...aEvents[1], turn: undefined }, { ...aEvents[1], type: 'web_action' }]) {
+  appendLogEntry(uncorrelated, parseLogEntry(e, 1, at));
+}
+assert.equal(uncorrelated.length, 5, 'no IDs, no ownership scope, or unrelated events must remain separate');
+const failures = [];
+[aEvents[0], aEvents[1], { ...aEvents[2], metadata: { ...aEvents[2].metadata, status: 'outcome_unknown', error: 'not verified' } }].forEach((e, i) => appendLogEntry(failures, parseLogEntry(e, i, at)));
+assert.equal(logDisplay(failures[0]).status, 'outcome_unknown');
+assert.equal(failures[0].level, 'ERROR');
+assert.equal(failures[0].record.error, 'not verified');
+const capped = [];
+appendLogEntry(capped, parseLogEntry(aEvents[0], 1, at), 1);
+appendLogEntry(capped, parseLogEntry(bEvents[0], 2, at), 1);
+appendLogEntry(capped, parseLogEntry(aEvents[2], 3, at), 1);
+assert.equal(capped[0].id, 3, 'evicted calls never resurrect stale start evidence');
+assert.equal(capped[0].events, undefined);
+const canonical = [];
+const canonicalEnd = { ...aEvents[1], type: 'tool_end', action: 'run_command' };
+appendLogEntry(canonical, parseLogEntry(aEvents[0], 1, at));
+appendLogEntry(canonical, parseLogEntry(canonicalEnd, 2, at));
+assert.equal(canonical.length, 1, 'canonical execution-as-terminal uses the same coalescer');
+assert.equal(canonical[0].events.length, 2);
+assert.equal(logDisplay(canonical[0]).body, 'complete result');
+const topLevelFailure = [];
+appendLogEntry(topLevelFailure, parseLogEntry({ ...aEvents[0], metadata: { ...aEvents[0].metadata, status: 'started' } }, 1, at));
+appendLogEntry(topLevelFailure, parseLogEntry({ ...aEvents[1], status: 'denied' }, 2, at));
+assert.equal(topLevelFailure[0].level, 'ERROR', 'start metadata never masks top-level terminal failure');
+assert.equal(logDisplay(topLevelFailure[0]).status, 'denied');
+for (const status of ['failed', 'error', 'cancelled', 'denied', 'outcome_unknown']) {
+  const entries = [];
+  appendLogEntry(entries, parseLogEntry({ ...aEvents[2], metadata: { ...aEvents[2].metadata, status } }, 1, at));
+  appendLogEntry(entries, parseLogEntry(aEvents[0], 2, at));
+  appendLogEntry(entries, parseLogEntry(aEvents[1], 3, at));
+  assert.equal(logDisplay(entries[0]).status, status, 'late success cannot hide retained terminal failure');
+  assert.equal(entries[0].level, 'ERROR');
+}
+console.log('live-log coalescing: all tool families, reordered events, parallel scopes, lossless raw evidence, replay, failure precedence and eviction passed');
 
 // Exact promotion boundaries are measured on body, not pretty JSON or the record.
 for (const [value, promoted, lines, chars] of [

@@ -7,7 +7,7 @@ import { api, ws } from '../api.js';
 import { computed, nextTick, onActivated, onDeactivated, onMounted, onUnmounted, ref, watch } from 'vue';
 import ToolOutput from '../tool-output.js';
 import LogRecord from '../log-record.js';
-import { groupLogEntries, parseLogEntry, serializeLogRecord } from '../log-records.js';
+import { appendLogEntry, groupLogEntries, parseLogEntry, serializeLogRecord } from '../log-records.js';
 
 
 const LOG_LEVELS = ['INFO', 'WARNING', 'ERROR'];
@@ -614,10 +614,7 @@ export default {
     }
 
     function addEntry(entry) {
-      logs.value.push(entry);
-      if (logs.value.length > MAX_LOGS) {
-        logs.value = logs.value.slice(-MAX_LOGS);
-      }
+      appendLogEntry(logs.value, entry, MAX_LOGS);
       if (autoScroll.value) {
         nextTick(() => scrollToBottom());
       }
