@@ -1,4 +1,5 @@
 """Exercise runtime boundaries using fake native APIs, never a real display."""
+
 import asyncio
 import ctypes
 import hashlib
@@ -19,6 +20,7 @@ NS = SimpleNamespace
 def no_native_effects(monkeypatch):
     def denied(*args, **kwargs):
         pytest.fail("Unexpected native operation")
+
     monkeypatch.setattr(subprocess, "Popen", denied)
     monkeypatch.setattr(ctypes, "CDLL", denied)
     monkeypatch.setattr(asyncio, "create_subprocess_exec", denied)
@@ -41,7 +43,10 @@ def test_profile_validation_and_preflight(monkeypatch):
     with pytest.raises(ValueError):
         profile.validate_session("../escape")
     assert profile.clean_environment() == {
-        "PATH": "/usr/bin", "LANG": "C.UTF-8", "LC_ALL": "C.UTF-8"}
+        "PATH": "/usr/bin",
+        "LANG": "C.UTF-8",
+        "LC_ALL": "C.UTF-8",
+    }
     with pytest.raises(ValueError):
         profile.preflight("terminal")
     monkeypatch.setattr(profile.os, "access", lambda path, mode: True)
@@ -56,8 +61,14 @@ def test_profile_validation_and_preflight(monkeypatch):
 
 
 def descriptor(kind="processes"):
-    result = dict(version=1, session_id="s", kind=kind, boot_id="a" * 36,
-                  launch_pending=False, processes=[dict(pid=42, start_ticks=123)])
+    result = dict(
+        version=1,
+        session_id="s",
+        kind=kind,
+        boot_id="a" * 36,
+        launch_pending=False,
+        processes=[dict(pid=42, start_ticks=123)],
+    )
     if kind == "isolated":
         token = hashlib.sha256(b"s").hexdigest()[:32] + "-" + "b" * 32
         result.update(token=token, unit=profile.unit_for(token))
@@ -80,9 +91,14 @@ def test_recovery_identity_parser_and_boot_validation(monkeypatch):
     assert recovery.boot_id() == "a" * 36
 
 
-@pytest.mark.parametrize("change", [
-    dict(version=2), dict(processes=[{"pid": True, "start_ticks": 1}]),
-    dict(no_persistent_devices="false")])
+@pytest.mark.parametrize(
+    "change",
+    [
+        dict(version=2),
+        dict(processes=[{"pid": True, "start_ticks": 1}]),
+        dict(no_persistent_devices="false"),
+    ],
+)
 def test_descriptor_rejects_invalid_ownership(change):
     value = descriptor()
     value.update(change)
@@ -98,7 +114,9 @@ async def test_persistent_device_descriptor_does_not_prove_cleanup(monkeypatch):
     monkeypatch.setattr(recovery, "boot_id", lambda: value["boot_id"])
     monkeypatch.setattr(recovery, "_processes_gone", lambda _: None)
     assert await recovery.verify_absence(value) == {
-        "status": "unknown", "reason": "persistent_input_state_unproven"}
+        "status": "unknown",
+        "reason": "persistent_input_state_unproven",
+    }
 
 
 def test_process_tree_inspection_is_conservative(tmp_path, monkeypatch):
@@ -122,10 +140,15 @@ def test_process_tree_inspection_is_conservative(tmp_path, monkeypatch):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("code,data,expected", [
-    (0, b"Id=u\nActiveState=inactive\nignored", {"Id": "u", "ActiveState": "inactive"}),
-    (4, b"LoadState=not-found\n", {"LoadState": "not-found"}),
-    (7, b"Id=u", None), (0, b"a" * 4097, None)])
+@pytest.mark.parametrize(
+    "code,data,expected",
+    [
+        (0, b"Id=u\nActiveState=inactive\nignored", {"Id": "u", "ActiveState": "inactive"}),
+        (4, b"LoadState=not-found\n", {"LoadState": "not-found"}),
+        (7, b"Id=u", None),
+        (0, b"a" * 4097, None),
+    ],
+)
 async def test_unit_probe_parses_bounded_status(monkeypatch, code, data, expected):
     proc = NS(returncode=code, communicate=AsyncMock(return_value=(data, b"")))
     launch = AsyncMock(return_value=proc)
@@ -137,8 +160,12 @@ async def test_unit_probe_parses_bounded_status(monkeypatch, code, data, expecte
 
 @pytest.mark.asyncio
 async def test_unit_probe_failure_reaps_only_probe(monkeypatch):
-    proc = NS(returncode=None, communicate=AsyncMock(side_effect=TimeoutError),
-              kill=Mock(), wait=AsyncMock())
+    proc = NS(
+        returncode=None,
+        communicate=AsyncMock(side_effect=TimeoutError),
+        kill=Mock(),
+        wait=AsyncMock(),
+    )
     monkeypatch.setattr(asyncio, "create_subprocess_exec", AsyncMock(return_value=proc))
     with pytest.raises(TimeoutError):
         await recovery._unit_state("owned.service")
@@ -156,27 +183,42 @@ def test_cgroup_malformed_events_fail_closed(tmp_path):
 @pytest.mark.asyncio
 async def test_verify_absence_returns_reason_not_exception(monkeypatch):
     assert await recovery.verify_absence(None) == {
-        "status": "unknown", "reason": "inspection_unavailable"}
+        "status": "unknown",
+        "reason": "inspection_unavailable",
+    }
     monkeypatch.setattr(recovery, "boot_id", lambda: "a" * 36)
     monkeypatch.setattr(recovery, "_processes_gone", lambda value: "owned_process_remaining")
     assert await recovery.verify_absence(descriptor()) == {
-        "status": "unknown", "reason": "owned_process_remaining"}
+        "status": "unknown",
+        "reason": "owned_process_remaining",
+    }
 
 
 def fake_display(monkeypatch, nodes, root=None):
-    display = NS(create_resource_object=lambda kind, ident: nodes[ident], close=Mock(),
-                 screen=lambda: NS(root=root))
+    display = NS(
+        create_resource_object=lambda kind, ident: nodes[ident],
+        close=Mock(),
+        screen=lambda: NS(root=root),
+    )
     opener = Mock(return_value=display)
     monkeypatch.setitem(sys.modules, "Xlib", NS(display=NS(Display=opener)))
     return display, opener
 
 
-@pytest.mark.parametrize("chain,expected", [
-    ({2: 3, 3: 9}, True), ({2: 1}, False), ({2: 3, 3: 2}, False), ({2: 0}, False),
-    ({2: 100, **{i: i + 1 for i in range(100, 170)}}, False)])
+@pytest.mark.parametrize(
+    "chain,expected",
+    [
+        ({2: 3, 3: 9}, True),
+        ({2: 1}, False),
+        ({2: 3, 3: 2}, False),
+        ({2: 0}, False),
+        ({2: 100, **{i: i + 1 for i in range(100, 170)}}, False),
+    ],
+)
 def test_native_ancestry_bounded_and_display_closed(monkeypatch, chain, expected):
-    nodes = {i: NS(query_tree=lambda p=p: NS(parent=NS(id=p), root=NS(id=1)))
-             for i, p in chain.items()}
+    nodes = {
+        i: NS(query_tree=lambda p=p: NS(parent=NS(id=p), root=NS(id=1))) for i, p in chain.items()
+    }
     display, opener = fake_display(monkeypatch, nodes)
     desktop = primitives.NativeDesktop(clock=lambda: 0)
     desktop._deadline = 10
@@ -186,18 +228,22 @@ def test_native_ancestry_bounded_and_display_closed(monkeypatch, chain, expected
 
 
 def test_native_transient_and_frame_geometry(monkeypatch):
-    parent = NS(id=3, query_tree=lambda: NS(parent=NS(id=1), root=NS(id=1)),
-                get_geometry=lambda: NS(x=2, y=4, width=8, height=16))
-    node = NS(get_wm_transient_for=lambda: parent,
-              query_tree=lambda: NS(parent=parent, root=NS(id=1)))
+    parent = NS(
+        id=3,
+        query_tree=lambda: NS(parent=NS(id=1), root=NS(id=1)),
+        get_geometry=lambda: NS(x=2, y=4, width=8, height=16),
+    )
+    node = NS(
+        get_wm_transient_for=lambda: parent, query_tree=lambda: NS(parent=parent, root=NS(id=1))
+    )
     display, _ = fake_display(monkeypatch, {2: node})
     desktop = primitives.NativeDesktop(clock=lambda: 0, command_runner=lambda *a, **kw: "42")
     desktop._deadline = 10
     assert desktop._same_app_transient({"id": 2, "pid": 42})
-    assert accessibility.Accessibility._native_frame_bounds({"id": 2}, Mock()) == (2, 4, 8, 16)
+    assert accessibility.Accessibility()._native_frame_bounds({"id": 2}, Mock()) == (2, 4, 8, 16)
     assert display.close.call_count == 2
     parent.query_tree = lambda: NS(parent=parent, root=NS(id=1))
-    assert accessibility.Accessibility._native_frame_bounds({"id": 2}, Mock()) is None
+    assert accessibility.Accessibility()._native_frame_bounds({"id": 2}, Mock()) is None
 
 
 def test_identity_parser_and_missing_process(monkeypatch):
@@ -219,8 +265,9 @@ def test_ownership_loop_and_depth_bounds(monkeypatch):
 def test_native_command_transport_exit_and_size(monkeypatch, result, output):
     class Process:
         returncode = result
-        communicate = Mock(side_effect=[subprocess.TimeoutExpired("fake", .1), (output, None)])
+        communicate = Mock(side_effect=[subprocess.TimeoutExpired("fake", 0.1), (output, None)])
         poll = Mock(return_value=result)
+
     launch = Mock(return_value=Process())
     monkeypatch.setattr(subprocess, "Popen", launch)
     desktop = primitives.NativeDesktop(clock=lambda: 0)
@@ -241,7 +288,7 @@ def test_launch_failed_identity_reaps_fake_child(monkeypatch):
     monkeypatch.setattr(desktop, "_identity", lambda pid: None)
     assert desktop.launch("drawing")["status"] == "failed"
     proc.kill.assert_called_once_with()
-    proc.wait.assert_called_once_with(timeout=.1)
+    proc.wait.assert_called_once_with(timeout=0.1)
     assert desktop._apps == {}
     monkeypatch.setattr(subprocess, "Popen", Mock(side_effect=OSError))
     assert desktop.launch("xed")["status"] == "unsupported"
@@ -258,8 +305,16 @@ class NativeFunction:
 
 
 def xlibs(monkeypatch):
-    names = ("XOpenDisplay", "XInternAtom", "XGetWindowProperty", "XFree", "XCloseDisplay",
-             "XQueryKeymap", "XSync", "XTestFakeKeyEvent")
+    names = (
+        "XOpenDisplay",
+        "XInternAtom",
+        "XGetWindowProperty",
+        "XFree",
+        "XCloseDisplay",
+        "XQueryKeymap",
+        "XSync",
+        "XTestFakeKeyEvent",
+    )
     lib = NS(**{name: NativeFunction() for name in names})
     monkeypatch.setattr(ctypes, "CDLL", lambda name: lib)
     return lib
@@ -280,6 +335,7 @@ def test_modal_property_native_boundary(monkeypatch, case):
         pointer = ctypes.POINTER(ctypes.c_ubyte)
         ctypes.cast(args[11], ctypes.POINTER(pointer))[0] = ctypes.cast(values, pointer)
         return 1 if case == "property_failed" else 0
+
     lib.XGetWindowProperty.fn = property_result
     desktop = primitives.NativeDesktop()
     if case in {"open_failed", "property_failed"}:
@@ -291,8 +347,9 @@ def test_modal_property_native_boundary(monkeypatch, case):
     assert len(lib.XFree.calls) == (case != "open_failed")
 
 
-@pytest.mark.parametrize("case", [
-    "success", "open_failed", "query_failed", "release_failed", "held"])
+@pytest.mark.parametrize(
+    "case", ["success", "open_failed", "query_failed", "release_failed", "held"]
+)
 def test_typed_keys_native_release_verifies_keymap(monkeypatch, case):
     lib = xlibs(monkeypatch)
     desktop = primitives.NativeDesktop(clock=lambda: 0)
@@ -303,6 +360,7 @@ def test_typed_keys_native_release_verifies_keymap(monkeypatch, case):
         queries.append(1)
         state[2] = 1 if len(queries) == 1 or case == "held" else 0
         return 0 if case == "query_failed" else 1
+
     lib.XQueryKeymap.fn = query
     if case == "open_failed":
         lib.XOpenDisplay.fn = lambda *a: 0
@@ -330,20 +388,25 @@ def test_accessibility_load_uses_bounded_timeout_once(monkeypatch):
     api.set_timeout.assert_called_once_with(100, 100)
 
 
-@pytest.mark.parametrize("problem,diagnostic", [
-    ("name", "Accessible name is unbounded"),
-    ("states", "Accessible states exceed metadata bounds"),
-    ("bounds", "Accessible bounds are invalid"),
-])
+@pytest.mark.parametrize(
+    "problem,diagnostic",
+    [
+        ("name", "Accessible name is unbounded"),
+        ("states", "Accessible states exceed metadata bounds"),
+        ("bounds", "Accessible bounds are invalid"),
+    ],
+)
 def test_accessibility_unbounded_metadata_refused(problem, diagnostic):
     access = accessibility.Accessibility()
     access.api = NS(CoordType=NS(SCREEN=0))
-    node = NS(get_role_name=lambda: "frame",
-              get_name=lambda: "x" * (16385 if problem == "name" else 1),
-              get_state_set=lambda: NS(get_states=lambda: range(65 if problem == "states" else 1)),
-              get_component_iface=lambda: NS(
-                  get_extents=lambda coord: NS(
-                      x=0, y=0, width=-1 if problem == "bounds" else 2, height=2)))
+    node = NS(
+        get_role_name=lambda: "frame",
+        get_name=lambda: "x" * (16385 if problem == "name" else 1),
+        get_state_set=lambda: NS(get_states=lambda: range(65 if problem == "states" else 1)),
+        get_component_iface=lambda: NS(
+            get_extents=lambda coord: NS(x=0, y=0, width=-1 if problem == "bounds" else 2, height=2)
+        ),
+    )
     with pytest.raises(accessibility.PrimitiveError, match=diagnostic) as exc:
         access._data(node)
     assert exc.value.status == "unsupported"

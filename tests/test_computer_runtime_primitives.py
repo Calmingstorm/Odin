@@ -32,20 +32,36 @@ def prohibit_native_calls(monkeypatch):
 
 
 def chunk(kind, payload):
-    return (struct.pack(">I", len(payload)) + kind + payload
-            + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+    return (
+        struct.pack(">I", len(payload))
+        + kind
+        + payload
+        + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF)
+    )
 
 
 def png(*, width=120, height=100, color=2, depth=8, interlace=0, ancillary=False):
     head = struct.pack(">IIBBBBB", width, height, depth, color, 0, 0, interlace)
     raw = bytes((width * (4 if color == 6 else 3) + 1) * height)
-    return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", head)
-            + (chunk(b"tEXt", b"comment\x00untrusted image metadata") if ancillary else b"")
-            + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + chunk(b"IHDR", head)
+        + (chunk(b"tEXt", b"comment\x00untrusted image metadata") if ancillary else b"")
+        + chunk(b"IDAT", zlib.compress(raw))
+        + chunk(b"IEND", b"")
+    )
 
 
-WINDOW = {"id": 17, "title": "Test document", "x": 10, "y": 10, "width": 90,
-          "height": 80, "pid": 1001, "modal": False}
+WINDOW = {
+    "id": 17,
+    "title": "Test document",
+    "x": 10,
+    "y": 10,
+    "width": 90,
+    "height": 80,
+    "pid": 1001,
+    "modal": False,
+}
 
 
 class Commands:
@@ -73,11 +89,15 @@ class Commands:
         if command == "mousemove":
             self.pointer = (int(argv[2]), int(argv[3]))
         if command == "getmouselocation":
-            return (f"X={self.pointer[0]}\nY={self.pointer[1]}\nSCREEN=0\n"
-                    f"WINDOW={self.pointer_window}")
+            return (
+                f"X={self.pointer[0]}\nY={self.pointer[1]}\nSCREEN=0\nWINDOW={self.pointer_window}"
+            )
         if command == "getwindowgeometry":
-            values = {"WINDOW": self.window["id"], "SCREEN": 0,
-                      **{key.upper(): self.window[key] for key in ("x", "y", "width", "height")}}
+            values = {
+                "WINDOW": self.window["id"],
+                "SCREEN": 0,
+                **{key.upper(): self.window[key] for key in ("x", "y", "width", "height")},
+            }
             return "\n".join(f"{key}={value}" for key, value in values.items())
         return ""
 
@@ -102,6 +122,11 @@ class Desktop(native.NativeDesktop):
     def _release_typed_keys(self):
         self.typed_releases += 1
 
+    def _resolve_key_plan(self, modifiers, symbol=None):
+        # Simulate a proven private XKB plan without opening a native display.
+        names = {"ctrl": "Control_L", "alt": "Alt_L", "shift": "Shift_L", "super": "Super_L"}
+        return [names[name] for name in modifiers] + ([symbol] if symbol is not None else [])
+
 
 def ready(**kwargs):
     desktop = Desktop(**kwargs)
@@ -111,9 +136,15 @@ def ready(**kwargs):
 
 
 def act(desktop, observation, kind, event=None, **kwargs):
-    return desktop.execute({"type": kind, "expected_window": observation["window"],
-                            "observation_id": observation["observation_id"], **kwargs},
-                           event if event is not None else threading.Event())
+    return desktop.execute(
+        {
+            "type": kind,
+            "expected_window": observation["window"],
+            "observation_id": observation["observation_id"],
+            **kwargs,
+        },
+        event if event is not None else threading.Event(),
+    )
 
 
 def inputs(desktop):
@@ -140,9 +171,19 @@ def test_png_capture_is_canonical_and_ancillary_chunks_removed(color):
     assert image == png(color=color)
 
 
-@pytest.mark.parametrize("image", [b"", png()[:-1], png() + b"extra",
-                                      png(color=3), png(depth=16), png(interlace=1),
-                                      png()[:25] + b"bad", png(width=0)])
+@pytest.mark.parametrize(
+    "image",
+    [
+        b"",
+        png()[:-1],
+        png() + b"extra",
+        png(color=3),
+        png(depth=16),
+        png(interlace=1),
+        png()[:25] + b"bad",
+        png(width=0),
+    ],
+)
 def test_png_invalid_encodings_rejected(image):
     with pytest.raises(PrimitiveError):
         native.sanitize_png(image)
@@ -183,8 +224,9 @@ def test_snapshot_fails_closed_unknown_focus_pid_and_geometry(problem):
         desktop.snapshot()
 
 
-@pytest.mark.parametrize("field,value", [("title", "Different document"), ("x", 11),
-                                        ("modal", True), ("pid", 2000)])
+@pytest.mark.parametrize(
+    "field,value", [("title", "Different document"), ("x", 11), ("modal", True), ("pid", 2000)]
+)
 def test_changed_window_never_receives_input(field, value):
     desktop, observation = ready()
     desktop.commands.window[field] = value
@@ -201,15 +243,18 @@ def test_pid_reuse_and_missing_expected_window_fail_closed():
     assert inputs(desktop) == []
 
 
-@pytest.mark.parametrize("kind,arguments,count", [
-    ("move", {"x": 20, "y": 20}, 1),
-    ("click", {"x": 20, "y": 20}, 3),
-    ("double_click", {"x": 20, "y": 20}, 5),
-    ("scroll", {"x": 20, "y": 20, "direction": "down", "count": 2}, 5),
-    ("key", {"chord": "ctrl+a"}, 4),
-    ("type", {"text": "A bounded note\nsecond line"}, 1),
-    ("polyline", {"points": [[20, 20], [21, 21], [22, 23]]}, 5),
-])
+@pytest.mark.parametrize(
+    "kind,arguments,count",
+    [
+        ("move", {"x": 20, "y": 20}, 1),
+        ("click", {"x": 20, "y": 20}, 3),
+        ("double_click", {"x": 20, "y": 20}, 5),
+        ("scroll", {"x": 20, "y": 20, "direction": "down", "count": 2}, 5),
+        ("key", {"chord": "ctrl+a"}, 4),
+        ("type", {"text": "A bounded note\nsecond line"}, 1),
+        ("polyline", {"points": [[20, 20], [21, 21], [22, 23]]}, 5),
+    ],
+)
 def test_physical_receipts_argv_and_release(kind, arguments, count):
     desktop, observation = ready()
     receipt = act(desktop, observation, kind, **arguments)
@@ -226,38 +271,54 @@ def test_physical_receipts_argv_and_release(kind, arguments, count):
     if kind == "type":
         first, second = arguments["text"].split("\n")
         assert inputs(desktop)[0] == [
-            "type", "--delay", "0", "--args", "1", "--", first,
-            "key", "Return",
-            "type", "--delay", "0", "--args", "1", "--", second,
+            "type",
+            "--delay",
+            "0",
+            "--args",
+            "1",
+            "--",
+            first,
+            "key",
+            "Return",
+            "type",
+            "--delay",
+            "0",
+            "--args",
+            "1",
+            "--",
+            second,
         ]
         assert desktop.typed_releases == 1
     if kind == "key":
-        assert inputs(desktop)[-2:] == [["keyup", "a"], ["keyup", "ctrl"]]
+        assert inputs(desktop)[-2:] == [["keyup", "a"], ["keyup", "Control_L"]]
 
 
-@pytest.mark.parametrize("kind,arguments", [
-    ("move", {"x": float("nan"), "y": 20}),
-    ("move", {"x": float("inf"), "y": 20}),
-    ("move", {"x": True, "y": 20}),
-    ("move", {"x": 9, "y": 20}),
-    ("move", {"x": 20.5, "y": 20}),
-    ("click", {"x": 20, "y": 20, "button": "extra"}),
-    ("click", {"x": 20, "y": 20, "unknown": True}),
-    ("right_click", {"x": 20, "y": 20, "button": "left"}),
-    ("move", {"x": 20, "y": 20, "chord": "Return"}),
-    ("key", {"chord": "Return", "x": 20}),
-    ("scroll", {"x": 20, "y": 20, "direction": "down", "count": 21}),
-    ("scroll", {"x": 20, "y": 20, "direction": "down", "count": True}),
-    ("key", {"chord": "ctrl++F12"}),
-    ("type", {"text": "x" * 513}),
-    ("type", {"text": "nul\x00text"}),
-    ("type", {"text": "\ud800"}),
-    ("polyline", {"points": [[20, 20]] * 257}),
-    ("polyline", {"points": [[20, 20], [999, 999]]}),
-    ("polyline", {"points": [[20, 20], [21, 21]], "duration": float("inf")}),
-    ("polyline", {"points": [[20, 20], [21, 21]], "duration": 2.01}),
-    ("unsupported", {}),
-])
+@pytest.mark.parametrize(
+    "kind,arguments",
+    [
+        ("move", {"x": float("nan"), "y": 20}),
+        ("move", {"x": float("inf"), "y": 20}),
+        ("move", {"x": True, "y": 20}),
+        ("move", {"x": 9, "y": 20}),
+        ("move", {"x": 20.5, "y": 20}),
+        ("click", {"x": 20, "y": 20, "button": "extra"}),
+        ("click", {"x": 20, "y": 20, "unknown": True}),
+        ("right_click", {"x": 20, "y": 20, "button": "left"}),
+        ("move", {"x": 20, "y": 20, "chord": "Return"}),
+        ("key", {"chord": "Return", "x": 20}),
+        ("scroll", {"x": 20, "y": 20, "direction": "down", "count": 21}),
+        ("scroll", {"x": 20, "y": 20, "direction": "down", "count": True}),
+        ("key", {"chord": "ctrl++F12"}),
+        ("type", {"text": "x" * 513}),
+        ("type", {"text": "nul\x00text"}),
+        ("type", {"text": "\ud800"}),
+        ("polyline", {"points": [[20, 20]] * 257}),
+        ("polyline", {"points": [[20, 20], [999, 999]]}),
+        ("polyline", {"points": [[20, 20], [21, 21]], "duration": float("inf")}),
+        ("polyline", {"points": [[20, 20], [21, 21]], "duration": 2.01}),
+        ("unsupported", {}),
+    ],
+)
 def test_invalid_action_never_injects(kind, arguments):
     desktop, observation = ready()
     receipt = act(desktop, observation, kind, **arguments)
@@ -274,11 +335,14 @@ def test_pre_cancelled_action_does_nothing():
     assert desktop.commands.calls == []
 
 
-@pytest.mark.parametrize("kind,args,trigger,release", [
-    ("click", {"x": 20, "y": 20}, "mousedown", "mouseup"),
-    ("key", {"chord": "ctrl+a"}, "keydown", "keyup"),
-    ("polyline", {"points": [[20, 20], [21, 21]]}, "mousedown", "mouseup"),
-])
+@pytest.mark.parametrize(
+    "kind,args,trigger,release",
+    [
+        ("click", {"x": 20, "y": 20}, "mousedown", "mouseup"),
+        ("key", {"chord": "ctrl+a"}, "keydown", "keyup"),
+        ("polyline", {"points": [[20, 20], [21, 21]]}, "mousedown", "mouseup"),
+    ],
+)
 def test_cancel_during_input_releases_held_state(kind, args, trigger, release):
     desktop, observation = ready()
     event = threading.Event()
@@ -442,19 +506,27 @@ class Node:
         return SimpleNamespace(get_states=lambda: self.states, contains=self.states.__contains__)
 
     def get_component_iface(self):
-        return SimpleNamespace(get_extents=lambda coord: SimpleNamespace(
-            **dict(zip(("x", "y", "width", "height"), self.bounds, strict=True))),
-            grab_focus=lambda: self.record("focus"))
+        return SimpleNamespace(
+            get_extents=lambda coord: SimpleNamespace(
+                **dict(zip(("x", "y", "width", "height"), self.bounds, strict=True))
+            ),
+            grab_focus=lambda: self.record("focus"),
+        )
 
     def get_interfaces(self):
         return ["Component", "Action", "Text", "EditableText", "Selection", "Value"]
 
     def get_text_iface(self):
-        return SimpleNamespace(get_text=lambda start, end: "t" * 1000)
+        return SimpleNamespace(
+            get_character_count=lambda: 1000, get_text=lambda start, end: "t" * (end - start)
+        )
 
     def get_action_iface(self):
-        return SimpleNamespace(get_n_actions=lambda: 1, get_action_name=lambda i: "click",
-                               do_action=lambda i: self.record("invoke", i))
+        return SimpleNamespace(
+            get_n_actions=lambda: 1,
+            get_action_name=lambda i: "click",
+            do_action=lambda i: self.record("invoke", i),
+        )
 
     def get_editable_text_iface(self):
         return SimpleNamespace(set_text_contents=lambda text: self.record("set_text", text))
@@ -463,8 +535,11 @@ class Node:
         return SimpleNamespace(select_child=lambda index: self.record("select", index))
 
     def get_value_iface(self):
-        return SimpleNamespace(get_minimum_value=lambda: 0, get_maximum_value=lambda: 10,
-                               set_current_value=lambda value: self.record("value", value))
+        return SimpleNamespace(
+            get_minimum_value=lambda: 0,
+            get_maximum_value=lambda: 10,
+            set_current_value=lambda value: self.record("value", value),
+        )
 
     def get_child_count(self):
         return len(self.children)
@@ -486,9 +561,11 @@ def accessibility(children=()):
     desktop = Node(children=[app])
     a11y = Accessibility()
     a11y.api = SimpleNamespace(
-        StateType=SimpleNamespace(ENABLED=1, SENSITIVE=2, SHOWING=3, VISIBLE=4, DEFUNCT=5,
-                                  FOCUSABLE=6),
-        CoordType=SimpleNamespace(SCREEN=0), get_desktop=lambda i: desktop,
+        StateType=SimpleNamespace(
+            ENABLED=1, SENSITIVE=2, SHOWING=3, VISIBLE=4, DEFUNCT=5, FOCUSABLE=6, FOCUSED=7
+        ),
+        CoordType=SimpleNamespace(SCREEN=0),
+        get_desktop=lambda i: desktop,
     )
     return a11y, root
 
@@ -509,9 +586,16 @@ def test_accessibility_metadata_bound_depth_and_opaque_handles():
     assert max(node["depth"] for node in nodes) == 6 and len(nodes) == 7
 
 
-@pytest.mark.parametrize("kind,args", [("invoke", {}), ("focus", {}),
-                                      ("set_text", {"text": "A bounded note"}),
-                                      ("select", {"index": 0}), ("value", {"value": 5})])
+@pytest.mark.parametrize(
+    "kind,args",
+    [
+        ("invoke", {}),
+        ("focus", {}),
+        ("set_text", {"text": "A bounded note"}),
+        ("select", {"index": 0}),
+        ("value", {"value": 5}),
+    ],
+)
 def test_semantic_actions_use_real_node_references(kind, args):
     target = Node(children=[Node()])
     a11y, root = accessibility([target])
@@ -527,11 +611,24 @@ def test_changed_accessible_target_is_rejected(change):
     target = Node()
     a11y, root = accessibility([target])
     nodes, _ = a11y.snapshot(WINDOW, "old", lambda: None)
-    setattr(target, change, {"name": "New", "role": "entry", "bounds": (1, 1, 2, 2),
-                             "states": {1, 2}, "pid": 2000, "parent": None}[change])
+    setattr(
+        target,
+        change,
+        {
+            "name": "New",
+            "role": "entry",
+            "bounds": (1, 1, 2, 2),
+            "states": {1, 2},
+            "pid": 2000,
+            "parent": None,
+        }[change],
+    )
     with pytest.raises(PrimitiveError):
-        a11y.execute({"type": "invoke", "observation_id": "old", "target": nodes[1]["handle"]},
-                     WINDOW, lambda: None)
+        a11y.execute(
+            {"type": "invoke", "observation_id": "old", "target": nodes[1]["handle"]},
+            WINDOW,
+            lambda: None,
+        )
     assert target.calls == []
 
 
@@ -541,8 +638,11 @@ def test_observation_scopes_handles_and_new_snapshot_invalidates_old():
     a11y.snapshot(WINDOW, "new", lambda: None)
     for observation in ("old", "new"):
         with pytest.raises(PrimitiveError):
-            a11y.execute({"type": "focus", "target": nodes[1]["handle"],
-                          "observation_id": observation}, WINDOW, lambda: None)
+            a11y.execute(
+                {"type": "focus", "target": nodes[1]["handle"], "observation_id": observation},
+                WINDOW,
+                lambda: None,
+            )
 
 
 def test_selection_revalidates_observed_child_reference():
@@ -551,8 +651,11 @@ def test_selection_revalidates_observed_child_reference():
     nodes, _ = a11y.snapshot(WINDOW, "obs", lambda: None)
     target.children[0] = Node(name="Replaced")
     with pytest.raises(PrimitiveError, match="changed"):
-        a11y.execute({"type": "select", "index": 0, "observation_id": "obs",
-                      "target": nodes[1]["handle"]}, WINDOW, lambda: None)
+        a11y.execute(
+            {"type": "select", "index": 0, "observation_id": "obs", "target": nodes[1]["handle"]},
+            WINDOW,
+            lambda: None,
+        )
     assert target.calls == []
 
 
@@ -562,6 +665,14 @@ def test_unsupported_semantics_and_password_fields_are_explicit():
     nodes, _ = a11y.snapshot(WINDOW, "obs", lambda: None)
     assert nodes[1]["text"] == "" and "set_text" not in nodes[1]["capabilities"]
     with pytest.raises(PrimitiveError) as caught:
-        a11y.execute({"type": "set_text", "text": "Test text", "observation_id": "obs",
-                      "target": nodes[1]["handle"]}, WINDOW, lambda: None)
+        a11y.execute(
+            {
+                "type": "set_text",
+                "text": "Test text",
+                "observation_id": "obs",
+                "target": nodes[1]["handle"],
+            },
+            WINDOW,
+            lambda: None,
+        )
     assert caught.value.status == "unsupported"
