@@ -12,7 +12,8 @@ const computerUse = join(docs, 'computer-use')
 // Only the installed operator handoff belongs in the hub. All other computer-use
 // documents are repository-only engineering evidence, including future reports.
 const computerUsePages = new Set(
-  ['OPERATOR.md', 'PACKAGING.md', 'RECOVERY.md'].map((name) => join(computerUse, name)),
+  ['OPERATOR.md', 'PACKAGING.md', 'RECOVERY.md', 'HYPRLAND-OPERATOR-R32.md']
+    .map((name) => join(computerUse, name)),
 )
 
 rmSync(content, { recursive: true, force: true })
