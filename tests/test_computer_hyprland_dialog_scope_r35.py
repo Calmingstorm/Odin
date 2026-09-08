@@ -59,10 +59,23 @@ async def test_own_dialog_new_class_fresh_frame_then_return_canvas(backend, pare
     dialog = await backend.observe()
     assert dialog.modal_kind == "safe_application"
     assert dialog.source.source_revision > first.source.source_revision
-    current = scope(modal=True, modal_kind="safe_application", native_scope_serial=3)
+    current = scope(modal=False, modal_kind=None, native_scope_serial=3)
     canvas = await backend.observe()
     assert canvas.modal is None and canvas.modal_kind is None
     assert canvas.source.source_revision > dialog.source.source_revision
+
+
+def test_initial_dialog_and_reused_address_keep_modal_candidate():
+    runtime = hb.HyprlandRuntimeBackend(config=config(), enabled=True)
+    runtime._output = output()
+    first = scope(modal=True, modal_kind="safe_application", modal_title_digest="a" * 64)
+    runtime._check_scope(first)
+    assert first["modal"] and first["modal_kind"] == "safe_application"
+    # Same numeric allocation address, different later dialog and revision.
+    later = scope(modal=True, modal_kind="safe_application", modal_title_digest="b" * 64,
+                  native_scope_serial=3)
+    runtime._check_scope(later)
+    assert later["modal"] and later["modal_title_digest"] == "b" * 64
 
 
 async def test_unseen_dialog_cannot_rebind_without_frame(backend):

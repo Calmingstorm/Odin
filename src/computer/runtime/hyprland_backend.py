@@ -188,7 +188,6 @@ class HyprlandRuntimeBackend:
         # Preserve original authority over pause/resume and frame invalidation.
         self._application_pin: dict[str, Any] | None = None
         self._output_pin: ExplicitOutput | None = None
-        self._original_surface: str | None = None
         self._descriptor: dict[str, Any] | None = None
         self.runtime_identity_callback: Callable[[dict[str, Any]], None] | None = None
         self._selected = uuid.uuid4().hex
@@ -381,17 +380,13 @@ class HyprlandRuntimeBackend:
         if self._application_pin is None:
             self._application_pin = copy.deepcopy(application)
             self._output_pin = self._output
-            self._original_surface = scope.get("surface_token")
         elif application != self._application_pin:
             raise ComputerError("hyprland_original_application_changed")
         if self._output != self._output_pin:
             raise ComputerError("hyprland_explicit_output_changed")
-        # Native floating is a dialog candidate, not proof that a floating
-        # original canvas is modal. Returning to that canvas clears the modal.
-        if scope.get("surface_token") == self._original_surface:
-            scope["modal"] = False
-            scope["modal_kind"] = None
-            scope["modal_title_digest"] = None
+        # Do not suppress native modal candidates using a remembered surface
+        # address. Compositor allocations can reuse a destroyed dialog's address;
+        # an initially floating canvas also remains a conservative candidate.
 
     def _check_ready(self, ready):
         assert self._guardian is not None and self._output is not None
