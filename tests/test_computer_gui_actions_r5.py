@@ -7,7 +7,11 @@ import pytest
 
 from src.computer.gui_actions import visual_receipt
 from src.computer.models import ComputerError, RequestContext
-from tests.test_computer_actions_r4 import persisted_receipt, setup
+from tests.test_computer_actions_r4 import (
+    assert_stroke_requires_inspection,
+    persisted_receipt,
+    setup,
+)
 
 
 def changed(payload, *, binding=True, change=True):
@@ -51,8 +55,11 @@ async def test_new_actions_pending_before_input_no_replay(tmp_path, operation, f
 
         backend.hook = hook
         result = await controller.act(ctx, inp)
-        assert result["status"] == "verified"
-        assert result["verification"]["scope"] == "raster_change_only"
+        if operation in {"polyline", "drag"}:
+            assert_stroke_requires_inspection(result)
+        else:
+            assert result["status"] == "verified"
+            assert result["verification"]["scope"] == "raster_change_only"
         assert result["next_observation"]["image_bytes"]
         assert await controller.act(ctx, inp) == persisted_receipt(result)
         assert len(backend.calls) == 1

@@ -16,7 +16,7 @@ from src.computer.geometry import AffineTransform
 from src.computer.models import ComputerError, RequestContext
 from src.computer.runtime.x11_attached import X11AttachedBackend
 from src.computer.store import ComputerStore
-from tests.test_computer_actions_r4 import persisted_receipt
+from tests.test_computer_actions_r4 import assert_stroke_requires_inspection, persisted_receipt
 
 
 def raster(value):
@@ -173,8 +173,11 @@ async def test_changed_pixels_keyboard_only_and_no_replay(
         action.update(operation=operation, **fields)
         if environment == "existing_session":
             result = await c.act(ctx, action)
-            assert result["status"] == "verified"
-            assert result["verification"]["scope"] == "raster_change_only"
+            if operation == "drag":
+                assert_stroke_requires_inspection(result)
+            else:
+                assert result["status"] == "verified"
+                assert result["verification"]["scope"] == "raster_change_only"
             assert result["next_observation"]["image_bytes"]
             assert await c.act(ctx, action) == persisted_receipt(result)
             assert len(calls) == 1

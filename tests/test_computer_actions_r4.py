@@ -19,6 +19,22 @@ def persisted_receipt(result):
     return {key: value for key, value in result.items() if key != "next_observation"}
 
 
+def assert_stroke_requires_inspection(result, *, path_changed=False):
+    """R19: acknowledged dispatch and raster changes never prove a painted mark."""
+    assert result["status"] == "executed"
+    assert result["execution"] == {"sent": True, "injected": True, "released": True}
+    verification = result["verification"]
+    assert verification["status"] == "unavailable"
+    assert verification["method"] == "delivered_path_pixels_after_release"
+    assert verification["scope"] == "requested_path_raster_evidence_only"
+    assert verification["semantic_mark_verified"] is False
+    assert verification["reason"] == (
+        "requested_mark_requires_visual_inspection"
+        if path_changed
+        else "no_requested_path_raster_change"
+    )
+
+
 class Backend(Stub):
     def __init__(self):
         super().__init__()

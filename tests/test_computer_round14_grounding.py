@@ -9,7 +9,7 @@ from PIL import Image, ImageDraw
 from src.computer.grounding import pointer_target_stable
 from src.computer.models import ComputerError
 from src.computer.runtime.x11_attached import AttachedFailure, X11AttachedBackend
-from tests.test_computer_actions_r4 import persisted_receipt
+from tests.test_computer_actions_r4 import assert_stroke_requires_inspection, persisted_receipt
 from tests.test_computer_keyboard_grounding_r6 import fixture
 
 
@@ -196,7 +196,7 @@ async def test_stroke_checks_start_once_and_allows_its_own_canvas_changes(
 
         monkeypatch.setattr(backend, "_input_worker", draw)
         result = await controller.act(ctx, action)
-        assert result["status"] == "verified"
+        assert_stroke_requires_inspection(result, path_changed=True)
         assert checked == [(2, 2)]
         assert calls[0]["action"]["type"] == "polyline"
         assert calls[0]["action"]["points"] == [[105, 205], [121, 215], [131, 217]]
