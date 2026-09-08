@@ -26,14 +26,16 @@ export default {
       <div v-if="error" class="hm-card border-red-900 error-state mb-4" role="alert">
         <span class="error-icon" aria-hidden="true"><odin-icon name="warning" :size="21" /></span>
         <p class="text-red-400">{{ error }}</p>
+        <p v-if="remedy" class="text-amber-300">Operator action: {{ remedy }}</p>
       </div>
       <div class="hm-card computer-status-card mb-4" role="status" aria-live="polite">
         <div>
-          <div class="section-eyebrow">Current session</div>
+          <div class="section-eyebrow">{{ adminReady ? 'Current session' : 'Last-known session (not current)' }}</div>
           <div class="computer-state">{{ status.state || 'unknown' }}</div>
         </div>
-        <span class="badge badge-info">{{ loading ? 'Checking status' : 'Session status' }}</span>
+        <span class="badge badge-info">{{ loading ? 'Checking status' : adminReady ? 'Session status' : 'Status not current' }}</span>
       </div>
+      <p v-if="!adminReady" class="page-lede mb-4" role="status">{{ checkedAt ? 'Last successful status check: ' + new Date(checkedAt).toISOString() + '. ' : 'No successful status check. ' }}Preserved details are read-only history, not current readiness, consent or session authority. Refresh status independently before further operations. Emergency Pause / Stop only request revocation and remain independently authenticated by the server.</p>
       <div class="space-y-4">
       <section class="hm-card" aria-labelledby="computer-lifecycle-title">
         <div class="section-card-header">
@@ -124,8 +126,8 @@ export default {
         <p v-if="inputLimits" class="page-lede">Per-call input bounds: {{ inputLimits }}. These limits are not application restrictions.</p>
       </section>
       <div v-if="status.state === 'unavailable'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">Disabled or unavailable. Check configured state, lifecycle state and backend prerequisites separately.</div>
-      <div v-if="status.state === 'paused'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">Agent input is revoked. This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</div>
-      <div v-if="status.state === 'unknown'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">Outcome is unknown. Refresh status; do not replay the last action.</div>
+      <div v-if="status.state === 'paused'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">{{ adminReady ? 'Agent input is revoked.' : 'Last-known session was paused; this is not current evidence of revocation.' }} This inspector does not provide remote mouse or keyboard control. Resume requires a renewed generation and fresh evidence.</div>
+      <div v-if="adminReady && status.state === 'unknown'" class="hm-card border-amber-900 text-sm text-amber-300" role="status">Outcome is unknown. Refresh status; do not replay the last action.</div>
       <section v-if="status.recovery" class="hm-card" aria-labelledby="computer-recovery-title">
         <div class="section-card-header">
           <h2 id="computer-recovery-title" class="text-sm font-semibold text-gray-300">Recovery evidence</h2>
@@ -161,7 +163,7 @@ export default {
           </div>
           <div class="action-row">
             <button class="btn btn-ghost btn-touch" @click="refresh" :disabled="loading"><odin-icon name="refresh" :size="15" /> Refresh status</button>
-            <button class="btn btn-primary btn-touch" @click="observe" :disabled="observing || !status.available"><odin-icon name="eye" :size="15" /> {{ observing ? 'Observing…' : 'Observe / view frame' }}</button>
+            <button class="btn btn-primary btn-touch" @click="observe" :disabled="observing || !adminReady || !status.available"><odin-icon name="eye" :size="15" /> {{ observing ? 'Observing…' : 'Observe / view frame' }}</button>
             <button v-if="frameUrl" class="btn btn-ghost btn-touch" @click="clearFrame">Hide frame</button>
           </div>
         </div>
@@ -183,11 +185,11 @@ export default {
           <label class="field-label" for="computer-export-name">Filename</label>
           <div class="export-controls mt-2">
             <input id="computer-export-name" class="hm-input export-name" v-model="name" maxlength="100" required autocomplete="off" placeholder="drawing.png" />
-            <button class="btn btn-primary btn-touch" type="submit" :disabled="exporting || !status.available">{{ exporting ? 'Preparing…' : 'Prepare export' }}</button>
+            <button class="btn btn-primary btn-touch" type="submit" :disabled="exporting || !adminReady || !status.available">{{ exporting ? 'Preparing…' : 'Prepare export' }}</button>
           </div>
         </form>
         <div v-if="artifact" class="artifact-row mt-4">
-          <button class="btn btn-ghost btn-touch" @click="download" :disabled="downloading"><odin-icon name="download" :size="15" /> Download {{ artifact.name }}</button>
+          <button class="btn btn-ghost btn-touch" @click="download" :disabled="downloading || !adminReady"><odin-icon name="download" :size="15" /> Download {{ artifact.name }}</button>
           <span class="text-xs text-gray-500">Expires {{ artifact.expires_at }}</span>
         </div>
       </section>
@@ -199,16 +201,18 @@ export default {
     const loading = ref(false), observing = ref(false), stopping = ref(false), pausing = ref(false);
     const exporting = ref(false), downloading = ref(false), error = ref('');
     const toggling = ref(false), adminReady = ref(false), recovering = ref(false);
+    const checkedAt = ref(0), remedy = ref('');
     const reconciliationAck = ref('');
     const frame = ref(null), frameUrl = ref(''), frameExpired = ref(false), now = ref(Date.now());
     const name = ref(''), artifact = ref(null);
     let generation = 0, timer = null, active = false, token = api.token, lastRefresh = 0;
     let statusRequest = null;
+    let checkedToken = null, pollingSuspended = false;
     const enabledLabel = value => value === true ? 'Enabled' : value === false ? 'Disabled' : 'Unknown';
     const attached = computed(() => status.value.backend?.environment === 'existing_session');
     const accessibilityFresh = computed(() => {
       const checked = Date.parse(status.value.accessibility?.checked_at || '');
-      return Number.isFinite(checked) && now.value - checked < 15000 && now.value >= checked - 5000;
+      return adminReady.value && Number.isFinite(checked) && now.value - checked < 15000 && now.value >= checked - 5000;
     });
     const accessibilityLabel = computed(() => accessibilityFresh.value
       ? enabledLabel(status.value.accessibility?.enabled) : 'Unknown / not current');
@@ -245,25 +249,46 @@ export default {
     }
     function invalidate() {
       generation++; clearFrame(); artifact.value = null;
+      adminReady.value = false;
       statusRequest?.abort(); statusRequest = null; loading.value = false;
       reconciliationAck.value = '';
       observing.value = false; exporting.value = false; downloading.value = false;
     }
     function current(g, t) { return active && g === generation && t === api.token; }
-    function fail(e) {
+    function authorized() {
+      // Method-level fence: retained details and an old token never authorize
+      // operations, even before the timer detects a token change or stale read.
+      return active && adminReady.value && checkedToken === api.token
+        && Date.now() - checkedAt.value < 15000;
+    }
+    function fail(e, phase = 'mutation') {
       invalidate();
-      adminReady.value = false;
+      pollingSuspended = true; remedy.value = '';
       const code = e.status || (e.name === 'AuthError' ? 401 : 0);
-      status.value = { available: false, state: code === 503 ? 'unavailable' : 'unknown' };
+      // Permission loss retires private data; transient failures preserve only
+      // the last accepted snapshot, explicitly labelled historical.
+      if ([401, 403, 404].includes(code)) {
+        checkedAt.value = 0; checkedToken = null;
+        status.value = { available: false, state: 'unknown' };
+      } else if (!checkedAt.value) {
+        status.value = { available: false, state: code === 503 ? 'unavailable' : 'unknown' };
+      }
       error.value = code === 401 || code === 403 || code === 404
         ? 'Access unavailable or revoked. Authenticate as the session owner, then refresh.'
         : code === 410 ? 'Evidence or artifact expired. Observe or prepare the export again.'
-          : code === 503 ? 'Computer use is disabled or unavailable.' : 'Request failed; outcome unknown. Refresh status. No action was replayed.';
+          : phase === 'read' ? 'Status refresh failed. Last-known details are not current. No mutation was requested by this read.'
+            : phase === 'acknowledged' ? 'The mutation was acknowledged, but status refresh failed. Refresh status independently; do not replay the change.'
+              : 'Request failed; outcome unknown. Refresh status. No action was replayed.';
       // Only typed API diagnostics may replace the fallback; Vue interpolation
       // treats the bounded message as text, never executable HTML.
-      if (![401, 403, 404].includes(code) && typeof e.data?.code === 'string'
+      if (phase === 'mutation' && ![401, 403, 404].includes(code) && typeof e.data?.code === 'string'
           && /^[a-z_]{1,64}$/.test(e.data.code) && typeof e.data?.error === 'string') {
         error.value = e.data.error.slice(0, 512);
+        if (e.data.outcome === 'not_applied' && e.data.next_action === 'repair_provisioning'
+            && typeof e.data.remedy === 'string') {
+          error.value = 'Not applied (preflight rejection). ' + error.value;
+          remedy.value = e.data.remedy.slice(0, 1024);
+        }
       }
     }
     async function refresh() {
@@ -274,41 +299,56 @@ export default {
         const value = await api.get('/api/computer', { signal: request.signal });
         if (!current(g, t)) return;
         acceptStatus(value);
-      } catch (e) { if (current(g, t)) fail(e); }
+      } catch (e) { if (current(g, t)) fail(e, 'read'); }
       finally { if (statusRequest === request) { statusRequest = null; loading.value = false; } }
     }
-    function acceptStatus(value) {
+    function acceptStatus(value, completed = '') {
+      if (!value || typeof value !== 'object' || typeof value.state !== 'string'
+          || typeof value.available !== 'boolean') throw new Error('Invalid status');
       if ((status.value.session_id && status.value.session_id !== value.session_id)
           || (status.value.generation != null && status.value.generation !== value.generation)
           || (status.value.session_generation != null && status.value.session_generation !== value.session_generation)) invalidate();
-      status.value = value; adminReady.value = true; error.value = '';
+      status.value = value; checkedAt.value = Date.now(); checkedToken = api.token;
+      // A readback for one completed operation cannot reauthorize the UI while
+      // a different lifecycle mutation is still unresolved (e.g. Stop during a
+      // hung Enable). A later independent refresh must reconcile that outcome.
+      adminReady.value = !(toggling.value && completed !== 'toggle')
+        && !(stopping.value && completed !== 'stop') && !(pausing.value && completed !== 'pause')
+        && !(recovering.value && completed !== 'recovery');
+      error.value = ''; remedy.value = ''; pollingSuspended = !adminReady.value;
     }
     async function setEnabled(enabled) {
-      if (!active || !adminReady.value || toggling.value || stopping.value || pausing.value) return;
+      if (!authorized() || toggling.value || stopping.value || pausing.value || recovering.value) return;
       invalidate(); const g = generation, t = api.token; toggling.value = true;
+      let acknowledged = false;
       try {
         await api.post('/api/computer/enabled', { enabled });
+        acknowledged = true;
         if (!current(g, t)) return;
         // The mutation acknowledgement is not evidence of backend readiness.
         const value = await api.get('/api/computer');
-        if (current(g, t)) acceptStatus(value);
-      } catch (e) { if (current(g, t)) fail(e); }
+        if (current(g, t)) acceptStatus(value, 'toggle');
+      } catch (e) { if (current(g, t)) fail(e, acknowledged ? 'acknowledged' : 'mutation'); }
       finally { toggling.value = false; }
     }
     async function control(operation) {
       // Separate request path: Stop remains usable while Observe is blocked.
+      // No identifiers or consent come from the preserved snapshot.
+      if (!active || !['pause', 'stop'].includes(operation)
+          || (operation === 'stop' ? stopping.value : pausing.value)) return;
       invalidate(); const g = generation, t = api.token;
       const busy = operation === 'stop' ? stopping : pausing; busy.value = true;
+      let acknowledged = false;
       try {
-        const value = await api.post('/api/computer/' + operation, {});
+        await api.post('/api/computer/' + operation, {});
+        acknowledged = true;
         if (current(g, t)) {
           // Stop intentionally returns state only. Read current lifecycle/session
           // metadata separately rather than erasing it or treating old data as live.
-          status.value = { ...status.value, ...value };
           const latest = await api.get('/api/computer');
-          if (current(g, t)) acceptStatus(latest);
+          if (current(g, t)) acceptStatus(latest, operation);
         }
-      } catch (e) { if (current(g, t)) fail(e); }
+      } catch (e) { if (current(g, t)) fail(e, acknowledged ? 'acknowledged' : 'mutation'); }
       finally { busy.value = false; }
     }
     async function recover() {
@@ -318,7 +358,7 @@ export default {
       return recoveryRequest(true);
     }
     async function recoveryRequest(acknowledge) {
-      if (!active || !adminReady.value || recovering.value || status.value.state !== 'quarantined') return;
+      if (!authorized() || recovering.value || toggling.value || stopping.value || pausing.value || status.value.state !== 'quarantined') return;
       const selected = { session_id: status.value.session_id, generation: status.value.session_generation };
       if (!selected.session_id || !Number.isInteger(selected.generation)) return;
       if (acknowledge) {
@@ -328,13 +368,16 @@ export default {
       const route = !acknowledge ? 'recover'
         : status.value.recovery?.reason === 'legacy_runtime_identity_missing' ? 'acknowledge_legacy' : 'reconcile';
       invalidate(); const g = generation, t = api.token; recovering.value = true;
+      let acknowledged = false;
       try {
         const value = await api.post('/api/computer/' + route, selected);
-        if (current(g, t)) acceptStatus(value);
-      } catch (e) { if (current(g, t)) fail(e); }
+        acknowledged = true;
+        if (current(g, t)) acceptStatus(value, 'recovery');
+      } catch (e) { if (current(g, t)) fail(e, acknowledged ? 'acknowledged' : 'mutation'); }
       finally { recovering.value = false; }
     }
     async function observe() {
+      if (!authorized() || observing.value || !status.value.available) return;
       clearFrame(); frameExpired.value = false;
       const g = generation, t = api.token; observing.value = true;
       try {
@@ -349,6 +392,7 @@ export default {
       finally { if (g === generation) observing.value = false; }
     }
     async function exportFile() {
+      if (!authorized() || exporting.value || !status.value.available) return;
       artifact.value = null; const g = generation, t = api.token; exporting.value = true;
       try {
         const value = await api.post('/api/computer/export', { name: name.value });
@@ -357,6 +401,7 @@ export default {
       finally { if (g === generation) exporting.value = false; }
     }
     async function download() {
+      if (!authorized() || downloading.value || !artifact.value) return;
       const g = generation, t = api.token, selected = artifact.value; downloading.value = true;
       try {
         if (!/^[A-Za-z0-9_-]{8,128}$/.test(selected?.artifact_id || '')) throw new Error('Invalid export');
@@ -369,17 +414,23 @@ export default {
       finally { if (g === generation) downloading.value = false; }
     }
     function start() {
-      if (active) return; active = true; refresh();
+      if (active) return;
+      if (token !== api.token) {
+        token = api.token; invalidate(); checkedAt.value = 0; checkedToken = null;
+        status.value = { state: 'unknown', available: false }; error.value = ''; remedy.value = '';
+      }
+      active = true; refresh();
       timer = setInterval(() => {
         now.value = Date.now();
-        if (token !== api.token) { token = api.token; invalidate(); adminReady.value = false; status.value = { state: 'unknown', available: false }; }
+        if (token !== api.token) { token = api.token; invalidate(); checkedAt.value = 0; checkedToken = null; error.value = ''; remedy.value = ''; status.value = { state: 'unknown', available: false }; }
+        if (adminReady.value && now.value - checkedAt.value >= 15000) invalidate();
         if (frame.value && Date.parse(frame.value.expires_at) <= now.value) { clearFrame(); frameExpired.value = true; }
         if (artifact.value && Date.parse(artifact.value.expires_at) <= now.value) artifact.value = null;
-        if (now.value - lastRefresh >= 5000) refresh();
+        if (!pollingSuspended && now.value - lastRefresh >= 5000) refresh();
       }, 500);
     }
     function cleanup() { active = false; clearInterval(timer); timer = null; invalidate(); adminReady.value = false; }
     onMounted(start); onActivated(start); onDeactivated(cleanup); onUnmounted(cleanup);
-    return { status, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, reconcile, reconciliationAck, applicationProfiles, attached, scriptIdentity, inputLimits, accessibilityLabel, accessibilityDetail };
+    return { status, checkedAt, remedy, loading, observing, stopping, pausing, exporting, downloading, error, frame, frameUrl, frameExpired, freshness, name, artifact, refresh, control, observe, clearFrame, exportFile, download, toggling, adminReady, enabledLabel, restartSettings, setEnabled, recovering, recover, reconcile, reconciliationAck, applicationProfiles, attached, scriptIdentity, inputLimits, accessibilityLabel, accessibilityDetail };
   },
 };

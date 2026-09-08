@@ -9,6 +9,7 @@ from typing import Any
 from aiohttp import web
 
 from ...computer.models import ComputerError
+from ...computer.provisioning import ComputerProvisioningError
 from ..api_common import admin_gate
 from ..computer_binding import operator_binding, operator_scope
 
@@ -134,7 +135,7 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             raise web.HTTPServiceUnavailable(headers=_PRIVATE)
         try:
             result = await adapter(**actor, **kwargs)
-        except ComputerError:
+        except (ComputerError, ComputerProvisioningError):
             raise
         except (ValueError, TypeError, KeyError) as exc:
             # A valid request can hit an internal invariant. Do not blame its
@@ -148,6 +149,13 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             return await operation(request)
         except web.HTTPException:
             raise
+        except ComputerProvisioningError as exc:
+            # Only the provisioning contract proves the lifecycle change was
+            # not applied. Generic ValueError / transport failures cannot.
+            return web.json_response({
+                "error": exc.message, "code": exc.code, "remedy": exc.remedy,
+                "outcome": exc.outcome, "next_action": "repair_provisioning",
+            }, status=409, headers=_PRIVATE)
         except ComputerError as exc:
             code, message, action = _PUBLIC_ERRORS.get(exc.code, (
                 409, "Computer operation unavailable; outcome unknown. Refresh status.",
@@ -163,7 +171,11 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
         except (ValueError, TypeError, KeyError):
             message, code = "Invalid computer request or response", 400
         except Exception:
-            message, code = "Computer operation unavailable; outcome unknown. Refresh status.", 409
+            return web.json_response({
+                "error": "Computer operation unavailable; outcome unknown. Refresh status.",
+                "code": "computer_operation_unavailable", "outcome": "outcome_unknown",
+                "next_action": "refresh_status",
+            }, status=409, headers=_PRIVATE)
         return web.json_response({"error": message}, status=code, headers=_PRIVATE)
 
     def status_json(value, actor, *, accessibility=None):
@@ -422,7 +434,15 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
             raise web.HTTPServiceUnavailable(
                 text="Computer lifecycle control is unavailable", headers=_PRIVATE,
             )
-        await toggle(body["enabled"])
+        try:
+            await toggle(body["enabled"])
+        except (ComputerError, ComputerProvisioningError):
+            raise
+        except Exception as exc:
+            # The body was validated before dispatch. Internal persistence or
+            # publication failures (including filesystem errors) do not prove
+            # the mutation was not applied or that authorization was revoked.
+            raise _OperatorError from exc
         authenticate(request)
         return web.json_response({"enabled": bool(bot.config.computer.enabled)}, headers=_PRIVATE)
 
