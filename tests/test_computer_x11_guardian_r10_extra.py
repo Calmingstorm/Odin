@@ -246,7 +246,7 @@ def test_execute_revalidates_application_and_always_closes(monkeypatch, case, re
         def __init__(self, native, child, validate, **kwargs):
             self.validate = validate
 
-        def run(self, actual):
+        def run(self, actual, *, paced=False):
             assert actual == steps
             if case == "topology":
                 connection.topology.return_value = None

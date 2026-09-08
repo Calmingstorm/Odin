@@ -1080,7 +1080,17 @@ class SessionXTest(PersistentXTest):
         # Kept for compatibility, but now means the full pre-create core-slave
         # identity, including disabled endpoints.
         self._session_physical_slaves = self._core_slave_baseline
-        self._owned_pair(self._topology())
+        try:
+            self._owned_pair(self._topology())
+        except BaseException:
+            # The base constructor's cleanup scope has already ended. A final
+            # census failure must still close handles and, when safe, remove
+            # the exact pair this constructor created.
+            try:
+                self._startup_failure_cleanup()
+            finally:
+                self.close()
+            raise
 
     def _prepare_master(self):
         self._x.XGrabServer(self._display)

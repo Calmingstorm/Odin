@@ -58,6 +58,22 @@ def execution_receipt(raw, result):
         result.update(status="interrupted", reason="effect_unknown_reconcile_no_replay")
     diagnostics = raw.get("diagnostics", {})
     diagnostics = diagnostics if type(diagnostics) is dict else {}
+    planned, completed = (diagnostics.get(k) for k in ("steps_planned", "steps_completed"))
+    incomplete = type(planned) is int and type(completed) is int and completed != planned
+    failed_reason = any(
+        type(reason) is str and reason not in {"complete", "completed"}
+        for reason in (diagnostics.get("reason"), raw.get("reason"))
+    )
+    if (
+        released
+        and result["status"] in {"executed", "verified", "not_satisfied"}
+        and (incomplete or failed_reason or diagnostics.get("release") == "unknown")
+    ):
+        # Pixel changes or a final pointer location cannot make a partial native
+        # plan complete. Keep its actual release evidence, require reconciliation,
+        # and never promote this receipt back to success in effect verification.
+        result.update(status="interrupted", reason="effect_unknown_reconcile_no_replay")
+        result["verification"] = {"status": "unavailable"}
     phase = diagnostics.get("phase")
     safe: dict[str, Any] = {
         "phase": phase

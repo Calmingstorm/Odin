@@ -327,10 +327,11 @@ class Guardian:
         if self.clock() >= self.dispatch_deadline:
             raise GuardianFailure("input_dispatch_expired")
 
-    def run(self, steps, *, semantic=None):
+    def run(self, steps, *, semantic=None, paced=False):
         released = False
         sampled_step_seconds = DISPATCH_STEP_SECONDS
         first_down = True
+        wait_target = None
         try:
             ready = getattr(self.helper, "ready", None)
             if ready is not None:
@@ -362,10 +363,20 @@ class Guardian:
                         raise GuardianFailure("input_dispatch_expired")
                     first_down = False
                 if kind == "wait":
-                    end = self.clock() + step[1]
+                    # Polyline duration is a timeline, not extra sleep after
+                    # every native scope check/round trip. Adding that latency
+                    # at every vertex exhausted otherwise admissible leases.
+                    # Click spacing remains relative; only strokes are paced.
+                    if paced:
+                        wait_target = (started if wait_target is None else wait_target) + step[1]
+                        end = wait_target
+                    else:
+                        end = self.clock() + step[1]
                     while self.clock() < end:
                         self.dispatch_guard()
-                        time.sleep(WAIT_QUANTUM_SECONDS)
+                        remaining = end - self.clock()
+                        if remaining > 0:
+                            time.sleep(min(WAIT_QUANTUM_SECONDS, remaining))
                     self.dispatch_guard()
                     self.steps_completed += 1
                     continue
@@ -785,7 +796,7 @@ def _execute(request, *, controller_fd=0, authorize=None):
                 with contextlib.suppress(Exception):
                     accessibility.close()
         else:
-            receipt = guardian.run(steps)
+            receipt = guardian.run(steps, paced=request["action"]["type"] == "polyline")
         if (
             request.get("verify_pointer") is True
             and receipt.get("status") == "executed"

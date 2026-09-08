@@ -9,7 +9,9 @@ from pathlib import Path
 import pytest
 
 
-def test_private_xvfb_long_stroke_delivery(tmp_path):
+@pytest.mark.parametrize("mode", ["normal", "latency", "stall", "dense"])
+@pytest.mark.parametrize("input_mode", ["shared", "independent"])
+def test_private_xvfb_long_stroke_delivery(tmp_path, mode, input_mode):
     if not all(shutil.which(x) for x in ("Xvfb", "xauth")):
         pytest.skip("private X11 utilities unavailable")
     pytest.importorskip("Xlib")
@@ -30,6 +32,8 @@ def test_private_xvfb_long_stroke_delivery(tmp_path):
         "-B",
         "-I",
         str(root / "tests/fixtures/computer_x11_dispatch_r19.py"),
+        mode,
+        input_mode,
     ]
     result = subprocess.run(
         command,
@@ -49,5 +53,9 @@ def test_private_xvfb_long_stroke_delivery(tmp_path):
     assert owned["completed"] and owned["cleanup_ok"] and owned["census_complete"]
     assert not owned["signals"] and not owned["residuals"]
     evidence = json.loads(result.stdout.splitlines()[-1])
-    assert evidence == {"runs": 3, "all_vertices_delivered": True}
+    assert evidence == {
+        "runs": 3 if mode in {"normal", "latency"} else 1,
+        "mode": mode,
+        "validated": True,
+    }
     print(result.stdout)
