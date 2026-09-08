@@ -18,6 +18,15 @@ See [OPERATOR.md](OPERATOR.md) for setup and safe first use, and
 [RECOVERY.md](RECOVERY.md) for stop, privacy and recovery. Engineering records
 remain in the source repository, not in the installed operator documentation.
 
+## Native Hyprland optional installation
+
+The first-class native Hyprland route has a separate, exact-compositor-ABI
+helper installation. It does not add Hyprland to the headless base package or
+load a plugin on installation. See [HYPRLAND-OPERATOR-R32.md](HYPRLAND-OPERATOR-R32.md)
+for native build/install, explicit one-time plugin setup, target trust configuration
+and independent operator release recovery. Installing Python extras alone is
+insufficient for native capture/input.
+
 ## One package, optional desktop dependencies
 
 The amd64 `odin` `.deb` contains the application, runtime assets, documentation,

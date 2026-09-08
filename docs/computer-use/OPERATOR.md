@@ -11,6 +11,9 @@ Installing dependencies is not consent to observe or control a desktop. Enabling
 the feature is not a task grant. Obtain the user's explicit, bounded task request
 and keep the user present with Stop and administrator Disable available.
 
+For the explicit native Hyprland route, setup and accepted best-effort residuals,
+see [HYPRLAND-OPERATOR-R32.md](HYPRLAND-OPERATOR-R32.md). It never falls back to portals.
+
 ## Product contract and evidence
 
 Computer use is default-off and available to authorized foreground conversations,
@@ -51,7 +54,7 @@ or an unchanged core-device hierarchy alone does not prove held input released.
 See [RECOVERY.md](RECOVERY.md). Never fault-test held input on a user's desktop.
 
 GNOME and KDE adapter registration is an implementation contract, not proof that
-every version passes. Wayland requires a successful same-stack disposable release
+every version passes. Portal Wayland requires a successful same-stack disposable release
 probe, trusted application scope and portal capabilities for each session.
 wlroots/Hyprland support must not be inferred from the word Wayland. Historical
 R8 results covered specific GNOME/Mutter 48.7 fixtures; R6/R7 application results

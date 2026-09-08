@@ -12,8 +12,8 @@ from src.computer.models import BackendCapabilities, ComputerError, RequestConte
 from src.computer.policy import input_eligible
 from src.computer.store import ComputerStore
 from src.config.schema import ComputerUseConfig
-from tests.test_computer_attached_controller_r5 import Attached
 from tests.test_computer_api import Controller, client
+from tests.test_computer_attached_controller_r5 import Attached
 
 
 def settings(**updates):
