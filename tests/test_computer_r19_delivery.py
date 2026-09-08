@@ -1,11 +1,14 @@
 """Post-action images are evidence until the live delivery gate accepts them."""
 
 from copy import deepcopy
+from types import SimpleNamespace
 
 import pytest
 
+from src.computer.integration import ComputerIntegration
 from src.computer.models import ComputerError
 from src.computer.policy import DELIVERED_GROUNDING_SECONDS, FRAME_FRESH_SECONDS
+from src.computer.vision import VisionError
 from tests.test_computer_keyboard_grounding_r6 import fixture
 
 
@@ -131,4 +134,43 @@ async def test_partial_native_action_keeps_progress_and_never_replays(tmp_path, 
         replay = await controller.act(context, action)
         assert "next_observation" not in replay
         assert replay == {k: v for k, v in result.items() if k != "next_observation"}
+        assert len(calls) == 1
+
+
+async def test_native_facade_only_delivers_exact_post_action_image_from_its_call(
+    tmp_path, monkeypatch
+):
+    from tests.test_computer_native_vision_r5 import client, serving
+
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        action.update(operation="key", key="Right")
+        bot = SimpleNamespace(
+            config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
+            host_access_manager=SimpleNamespace(is_host_allowed=lambda *_: True),
+            tool_executor=SimpleNamespace(check_permission=lambda *_: None),
+        )
+        service = ComputerIntegration(bot, controller=controller)
+        monkeypatch.setattr(service, "_context", lambda _: context)
+        turn = SimpleNamespace(
+            user_id=context.owner_id,
+            message=SimpleNamespace(channel=SimpleNamespace(id=context.channel_id)),
+            _computer_serving=serving(client()),
+        )
+        block = SimpleNamespace(id="native-call", name="computer_act", input=action)
+        with service.foreground(turn, block):
+            image = await service._tool(block.name, action)
+            receipt = image["__computer_action_receipt__"]
+            assert receipt["execution"]["released"] is True
+            assert action["session_id"] not in controller._delivered_observations
+            with pytest.raises(VisionError, match="not authorized"):
+                await service.validate_delivery(turn, block, deepcopy(image))
+            await service.validate_delivery(turn, block, image)
+            assert (
+                controller._delivered_observations[action["session_id"]]
+                == image["__computer_frame__"]["observation_id"]
+            )
+            with pytest.raises(VisionError, match="not authorized"):
+                await service.validate_delivery(turn, block, image)
+        replay = await controller.act(context, action)
+        assert replay == receipt
         assert len(calls) == 1
