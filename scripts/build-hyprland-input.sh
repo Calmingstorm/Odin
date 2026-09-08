@@ -35,7 +35,8 @@ if [ "$actual" != "$pin" ]; then
 fi
 # Source identity is independent of scratch paths, not runtime qualification.
 build_id=$(cd "$root" && sha256sum scripts/build-hyprland-input.sh \
-    assets/hyprland-input/scope-plugin.cpp assets/hyprland-input/scope-deadline.hpp | sha256sum | cut -d ' ' -f 1)
+    assets/hyprland-input/scope-plugin.cpp assets/hyprland-input/scope-deadline.hpp \
+    assets/hyprland-input/scope-provenance.hpp | sha256sum | cut -d ' ' -f 1)
 ${CXX:-c++} -std=c++23 -shared -fPIC -fno-gnu-unique -O2 -Wall -Wextra -Werror \
     -DODIN_SCOPE_BUILD_ID=\"$build_id\" \
     $(pkg-config --cflags hyprland json-c) "$root/assets/hyprland-input/scope-plugin.cpp" \

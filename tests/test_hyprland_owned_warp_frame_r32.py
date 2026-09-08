@@ -36,7 +36,11 @@ struct IPointer { struct SMotionAbsoluteEvent {
     std::shared_ptr<Device> device;
     Vector2D absolute;
 }; };
-struct CInputManager {};
+struct CInputManager {
+    std::vector<int> getKeysFromAllKBs() { return {}; }
+    bool hasHeldButtons() { return false; }
+} inputManager;
+CInputManager* g_pInputManager=&inputManager;
 using WarpFn = void (*)(CInputManager*, IPointer::SMotionAbsoluteEvent);
 struct Hook { WarpFn m_original; };
 struct Pointer { std::shared_ptr<Device> device; };
@@ -47,7 +51,10 @@ struct State {
     Pointer* pointer;
     unsigned rejected = 0;
     bool allowed = true;
-    struct { Vector2D outputPos{0,0}, outputSize{1,1}; } bound;
+    bool positioningBoundSurface=false, ownedModifiers=false;
+    std::vector<int> keys, buttons;
+    struct { Vector2D outputPos{0,0}, outputSize{1,1}; int surface=1; } bound;
+    bool scope() { return allowed; }
     bool allow() { return allowed; }
     bool point(Vector2D p) { return p.x>=0 && p.y>=0 && p.x<1000 && p.y<1000; }
     void revoke(const char*) { allowed=false; }
@@ -55,6 +62,7 @@ struct State {
 State* live;
 // Model receiver buffering: motion updates pending position; frame delivers it.
 struct Seat {
+    struct { int pointerFocus=1; } m_state;
     Vector2D pending{};
     bool dirty=false;
     unsigned frames=0;

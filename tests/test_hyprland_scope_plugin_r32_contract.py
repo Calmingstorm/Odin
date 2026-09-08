@@ -58,7 +58,7 @@ def test_fail_closed_scope_and_epoch_invalidation():
     text = source()
     for guard in (
         "!PROTO::sessionLock->isLocked()", "b.revision != revision", "w->m_isX11",
-        "fractional-or-unknown-geometry", "modal-or-unknown-toplevel",
+        "fractional-or-unknown-geometry", "foreign-or-unknown-toplevel-provenance",
     ):
         assert guard in text
     for event in (

@@ -82,7 +82,7 @@ def test_plugin_build_identity_contract():
     assert "-fno-gnu-unique" in build
     assert "-DODIN_SCOPE_BUILD_ID=" in build
     assert '"companion_build_id", std::string(ODIN_SCOPE_BUILD_ID)' in source
-    assert "scope-deadline.hpp | sha256sum" in build
+    assert "scope-provenance.hpp | sha256sum" in build
     assert '"plugin_sha256"' in build and '"plugin_filename"' in build
 
 

@@ -37,6 +37,7 @@
 #include <vector>
 #include <array>
 #include "scope-deadline.hpp"
+#include "scope-provenance.hpp"
 
 #ifndef ODIN_SCOPE_BUILD_ID
 #error "Build with scripts/build-hyprland-input.sh to supply source identity"
@@ -75,6 +76,7 @@ std::string nonce() {
 }
 struct Snapshot {
     WP<CWLSurfaceResource> surface;
+    WP<CWLSurfaceResource> pointerSurface;
     PHLWINDOWREF window;
     PHLMONITORREF monitor;
     Vector2D pos, size, outputPos, outputSize, pixelSize;
@@ -83,6 +85,10 @@ struct Snapshot {
     std::string token, title, app;
     pid_t pid = 0;
     int64_t measured = 0;
+    uid_t uid = 0;
+    std::shared_ptr<int> processFD;
+    std::vector<odin_scope::NativeAncestor> ancestry;
+    bool modal = false;
     uint64_t revision = 0;
 };
 struct Keyboard {
@@ -153,6 +159,7 @@ struct State {
     std::array<WireEvent, 256> wire{};
     size_t wireCount = 0;
     bool wireOverflow = false, ownedDispatch = false, warpDispatch = false;
+    bool positioningBoundSurface = false;
     int64_t dispatchNumber = 0;
     std::string diagnosticToken;
 
@@ -264,15 +271,37 @@ struct State {
             g_pSeatManager && g_pInputManager && g_pPointerManager && Desktop::focusState() &&
             !g_pInputManager->isConstrained() && g_pInputManager->m_exclusiveLSes.empty();
     }
+    bool provenance(PHLWINDOW w, std::vector<odin_scope::NativeAncestor>& chain) const {
+        chain.clear();
+        if (!w || w->m_isX11 || w->m_xdgSurface.expired() || w->m_xdgSurface->m_toplevel.expired()) return false;
+        auto top = w->m_xdgSurface->m_toplevel.lock();
+        while (top) {
+            if (top->m_owner.expired() || top->m_owner->m_surface.expired() || top->m_window.expired()) return false;
+            auto surface = top->m_owner->m_surface.lock();
+            auto ancestor = top->m_window.lock();
+            if (ancestor->m_isX11 || ancestor->resource() != surface || ancestor->m_xdgSurface != top->m_owner) return false;
+            pid_t pid = 0; uid_t uid = 0; gid_t gid = 0;
+            wl_client_get_credentials(surface->client(), &pid, &uid, &gid);
+            chain.push_back({reinterpret_cast<uintptr_t>(top->m_window.lock().get()), pid, uid});
+            if (!odin_scope::valid_ancestry(chain)) return false;
+            top = top->m_parent.lock();
+        }
+        return !chain.empty();
+    }
     bool same(const Snapshot& b) const {
         if (!environment() || b.revision != revision || b.surface.expired() || b.window.expired() || b.monitor.expired()) return false;
         auto w = b.window.lock(); auto m = b.monitor.lock();
+        std::vector<odin_scope::NativeAncestor> chain;
+        if (!b.processFD || !provenance(w, chain) || chain != b.ancestry) return false;
+        pollfd identity{*b.processFD, POLLIN, 0};
+        if (poll(&identity, 1, 0) != 0) return false;
         return w->m_isMapped && w->visible() && !w->m_isX11 && w->wlSurface() &&
             w->resource() == b.surface.lock() &&
             Desktop::focusState()->window() == w && Desktop::focusState()->monitor() == m &&
-            g_pSeatManager->m_state.keyboardFocus == b.surface && g_pSeatManager->m_state.pointerFocus == b.surface &&
+            g_pSeatManager->m_state.keyboardFocus == b.surface && g_pSeatManager->m_state.pointerFocus == b.pointerSurface &&
             w->m_monitor == b.monitor && w->m_realPosition->value() == b.pos && w->m_realSize->value() == b.size &&
-            w->m_class == b.app && w->getPID() == b.pid &&
+            w->m_class == b.app && chain.front().pid == b.pid && chain.front().uid == b.uid &&
+            (chain.size() > 1 || w->m_isFloating) == b.modal &&
             m->m_position == b.outputPos && m->m_size == b.outputSize && m->m_pixelSize == b.pixelSize &&
             m->m_scale == b.scale && int(m->m_transform) == b.transform && m->m_dpmsStatus &&
             !m->m_isUnsafeFallback && !m->m_isBeingLeased && m->m_mirrorOf.expired() && m->m_enabled &&
@@ -340,8 +369,15 @@ struct State {
         Snapshot b; auto w = Desktop::focusState()->window(); auto m = Desktop::focusState()->monitor();
         if (!w || !m || output.empty() || m->m_name != output || w->m_isX11 || !w->m_isMapped || !w->visible() || !w->wlSurface())
             return status(false, "unknown-or-nonnative-focus");
-        if (w->m_xdgSurface.expired() || w->m_xdgSurface->m_toplevel.expired() || !w->m_xdgSurface->m_toplevel->m_parent.expired())
-            return status(false, "modal-or-unknown-toplevel");
+        if (!provenance(w, b.ancestry)) return status(false, "foreign-or-unknown-toplevel-provenance");
+        b.pid = b.ancestry.front().pid; b.uid = b.ancestry.front().uid;
+        const int processFD = syscall(SYS_pidfd_open, b.pid, 0);
+        if (processFD < 0) return status(false, "native-process-lifetime-unavailable");
+        b.processFD = std::shared_ptr<int>(new int(processFD), [](int* fd) { close(*fd); delete fd; });
+        b.modal = b.ancestry.size() > 1 || w->m_isFloating;
+        // Cursor need not enter a newly focused dialog for observation/keyboard.
+        // Its independently measured focus stays immutable for the whole lease.
+        b.pointerSurface = g_pSeatManager->m_state.pointerFocus;
         if (watchedWindow != w || watchedMonitor != m) {
             targetListeners.clear(); watchedWindow = w; watchedMonitor = m;
             watchedPos = w->m_realPosition->value(); watchedSize = w->m_realSize->value();
@@ -355,7 +391,7 @@ struct State {
         b.surface = w->resource(); b.window = w; b.monitor = m;
         b.pos = w->m_realPosition->value(); b.size = w->m_realSize->value();
         b.outputPos = m->m_position; b.outputSize = m->m_size; b.pixelSize = m->m_pixelSize;
-        b.scale = m->m_scale; b.transform = int(m->m_transform); b.title = w->m_title; b.app = w->m_class; b.pid = w->getPID(); b.revision = revision;
+        b.scale = m->m_scale; b.transform = int(m->m_transform); b.title = w->m_title; b.app = w->m_class; b.revision = revision;
         for (double v : {b.pos.x, b.pos.y, b.size.x, b.size.y, b.outputPos.x, b.outputPos.y, b.outputSize.x, b.outputSize.y, b.pixelSize.x, b.pixelSize.y})
             if (!std::isfinite(v) || std::floor(v) != v || std::abs(v) > 1000000) return status(false, "fractional-or-unknown-geometry");
         if (!same(b) || b.pid <= 1 || b.app.empty() || b.size.x <= 0 || b.size.y <= 0 ||
@@ -375,7 +411,11 @@ struct State {
         json_object_object_add(j.get(), "output", o.release());
         auto f = obj(); put(f.get(), "token", std::to_string(reinterpret_cast<uintptr_t>(w.get())));
         put(f.get(), "serial", int64_t(revision)); put(f.get(), "pid", int64_t(b.pid)); put(f.get(), "wm_class", b.app); put(f.get(), "title", b.title);
-        put(f.get(), "x", int64_t(b.pos.x)); put(f.get(), "y", int64_t(b.pos.y)); put(f.get(), "width", int64_t(b.size.x)); put(f.get(), "height", int64_t(b.size.y)); put(f.get(), "modal", false);
+        put(f.get(), "uid", int64_t(b.uid)); put(f.get(), "parent_chain_verified", true);
+        auto* parents = json_object_new_array();
+        for (size_t i = 1; i < b.ancestry.size(); ++i) json_object_array_add(parents, json_object_new_string(std::to_string(b.ancestry[i].token).c_str()));
+        json_object_object_add(f.get(), "parent_tokens", parents);
+        put(f.get(), "x", int64_t(b.pos.x)); put(f.get(), "y", int64_t(b.pos.y)); put(f.get(), "width", int64_t(b.size.x)); put(f.get(), "height", int64_t(b.size.y)); put(f.get(), "modal", b.modal);
         json_object_object_add(j.get(), "focus", f.release()); return j;
     }
     J request(Peer& peer, json_object* j) {
@@ -532,7 +572,7 @@ void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer>
         State::OwnedDispatch trace(s, false); original(manager, event, device); return;
     }
     if (p != s.pointer || !s.allow()) { if (p != s.pointer) ++s.rejected; return; }
-    if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || !s.point(g_pPointerManager->position())) { ++s.rejected; s.revoke("button-destination-refused"); return; }
+    if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || g_pSeatManager->m_state.pointerFocus != s.bound.surface || !s.point(g_pPointerManager->position())) { ++s.rejected; s.revoke("button-destination-refused"); return; }
     s.buttons.insert(event.button);
     State::OwnedDispatch trace(s, false); original(manager, event, device);
 }
@@ -541,7 +581,7 @@ void onAxis(CInputManager* manager, IPointer::SAxisEvent event, SP<IPointer> dev
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
     if (p != s.pointer) { ++s.rejected; return; }
     if (!s.allow()) return;
-    if (!s.point(g_pPointerManager->position())) { ++s.rejected; s.revoke("axis-destination-refused"); return; }
+    if (g_pSeatManager->m_state.pointerFocus != s.bound.surface || !s.point(g_pPointerManager->position())) { ++s.rejected; s.revoke("axis-destination-refused"); return; }
     original(manager, event, device);
 }
 void onMotion(CInputManager* manager, IPointer::SMotionEvent event) {
@@ -550,7 +590,7 @@ void onMotion(CInputManager* manager, IPointer::SMotionEvent event) {
     if (p != s.pointer) { ++s.rejected; return; }
     if (!s.allow()) return;
     const auto pos = g_pPointerManager->position();
-    if (!s.point(pos + event.delta) || !s.point(pos + event.unaccel)) { ++s.rejected; s.revoke("motion-destination-refused"); return; }
+    if (g_pSeatManager->m_state.pointerFocus != s.bound.surface || !s.point(pos + event.delta) || !s.point(pos + event.unaccel)) { ++s.rejected; s.revoke("motion-destination-refused"); return; }
     original(manager, event);
 }
 void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
@@ -561,9 +601,23 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
     if (p != s.pointer) { ++s.rejected; return; }
     if (!s.allow()) return;
     const Vector2D pos = s.bound.outputPos + event.absolute * s.bound.outputSize;
-    if (!s.point(pos)) { ++s.rejected; s.revoke("warp-destination-refused"); return; }
+    const bool positioning = g_pSeatManager->m_state.pointerFocus != s.bound.surface;
+    if (!s.point(pos) || (positioning && (!s.keys.empty() || !s.buttons.empty() || s.ownedModifiers ||
+        !g_pInputManager->getKeysFromAllKBs().empty() || g_pInputManager->hasHeldButtons()))) {
+        ++s.rejected; s.revoke("warp-destination-refused"); return;
+    }
     State::OwnedDispatch trace(s, true);
+    // Only this synchronous owned, no-held-input absolute positioning dispatch
+    // can enter the ALREADY observed keyboard target. Never a new window lease.
+    struct Positioning {
+        State& state;
+        Positioning(State& value, bool active) : state(value) { state.positioningBoundSurface = active; }
+        ~Positioning() { state.positioningBoundSurface = false; }
+    } positioningGuard(s, positioning);
     original(manager, event);
+    if (!s.scope() || g_pSeatManager->m_state.pointerFocus != s.bound.surface) {
+        ++s.rejected; s.revoke("warp-focus-postcondition-refused"); return;
+    }
     // Pinned Hyprland 0.55.2 onMouseWarp sends motion but no seat frame.
     // Its onPointerFrame ignores virtual-pointer frames unless an axis is
     // pending. This is source evidence only, NOT proof of GTK batching or
@@ -578,6 +632,17 @@ void onFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface) {
 }
 void onPointerFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface, const Vector2D& local) {
     auto& s = *live; auto original = reinterpret_cast<PointerFocusFn>(s.pointerFocusHook->m_original);
+    if (surface != g_pSeatManager->m_state.pointerFocus.lock() && s.positioningBoundSurface &&
+        s.scope() && surface == s.bound.surface.lock() && s.keys.empty() && s.buttons.empty() && !s.ownedModifiers &&
+        g_pInputManager->getKeysFromAllKBs().empty() && !g_pInputManager->hasHeldButtons() &&
+        s.point(g_pPointerManager->position())) {
+        // Consume before dispatch: at most one exact target transfer, no reentry.
+        s.positioningBoundSurface = false;
+        original(manager, surface, local);
+        s.bound.pointerSurface = surface;
+        if (!s.scope()) s.revoke("positioning-scope-postcondition-refused");
+        return;
+    }
     if (surface != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.revision; if (!s.draining) s.revoke("pre-pointer-focus-transfer"); }
     original(manager, surface, local);
 }
