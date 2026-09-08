@@ -1,4 +1,4 @@
-"""Unwired Hyprland peer/process identity. Recognition is not input admission."""
+"""Hyprland peer/process identity. Recognition alone is not input admission."""
 
 from __future__ import annotations
 

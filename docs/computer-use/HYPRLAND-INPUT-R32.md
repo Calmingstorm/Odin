@@ -95,3 +95,33 @@ The first broad suite found six inventory/documentation integration failures
 (new API route, schema count, shipped links and native spawn classification).
 Those were corrected and their focused checks passed. Final broad-run completion
 is recorded below; earlier progress is not a successful suite result.
+
+The subsequent complete suite finished with **15,880 passed, six skipped,
+1,018 warnings, exit 0**, in 730.10 seconds, with the native wire binary enabled.
+Existing asynchronous teardown/unawaited-coroutine diagnostics remain; this is
+not a warning-free result. The final native transport suite also passed on the
+target in private scratch: **12 passed**, without contacting its compositor.
+The Pages build initially found a missing operator-page allowlist entry; that
+was fixed and the complete VitePress build then passed with dead-link checking
+still enabled. Hosted coverage remains a separate CI result, not established by
+the ordinary suite or these local gates.
+
+## Phase 4 handoff
+
+**Build ready for config-protected branch deployment and supervised native
+qualification. Not live-qualified and not a release approval.**
+
+No live desktop input, virtual-device creation on the live compositor, plugin
+load/unload, compositor reload, Odin deployment or service restart was performed
+in R32. Native builds/tests stayed in private scratch; the installed configuration
+and data were not edited or checked out. Both configuration hashes, service and
+compositor process identities, restart count and device-inventory digest matched
+the preflight record. Pinta's measured geometry was unchanged. Another existing
+window's geometry differed between snapshots; no input was sent by this work,
+and the observation is not attributed to a cause without evidence.
+
+The supervising operator must back up, protect/restore and verify `config.yml`
+and `data/` before the branch deploy. Load the exact-ABI companion once at setup,
+verify the disclosed capabilities, then perform the bounded Pinta draw and check
+receiver behavior and input cleanup. No source/fake-wire result replaces that
+last stage. Keep the standalone recovery command available throughout.

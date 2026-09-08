@@ -1,7 +1,8 @@
-"""Unwired explicit-output screencopy client, never an implicit desktop selector.
+"""Explicit-output screencopy client, never an implicit desktop selector.
 
-The scope callback is a trusted integration seam, NOT public consent. No
-qualified Hyprland compositor-loop scope provider is shipped by this module.
+The scope callback is a trusted integration seam, NOT public consent. The native
+runtime supplies the authenticated compositor-loop provider and helper trust;
+constructing a proof object alone does not authorize capture or input.
 """
 
 from __future__ import annotations
@@ -87,7 +88,7 @@ class ExplicitOutput:
 
 @dataclass(frozen=True)
 class ScopeProof:
-    """Measured by a future authenticated provider; construction is not proof."""
+    """Measured by the authenticated provider; construction alone is not proof."""
 
     identity_digest: str
     output: ExplicitOutput
@@ -160,10 +161,10 @@ async def capture_explicit_output(
 ) -> NativeFrame:
     """Consume a pinned unused socket; return only a post-fenced native frame.
 
-    Requires an explicitly trusted helper and future qualified scope provider.
+    Requires an explicitly trusted helper and authenticated scope provider.
     Even preflight failure consumes/closes the connection. The scope seam must
     fence consent/revocation in the compositor loop; IPC polling is insufficient.
-    Rechecking a Python object is not native proof. Not runtime-registered.
+    Rechecking a Python object is not native proof. Runtime supplies the provider.
     """
     process = None
     try:
