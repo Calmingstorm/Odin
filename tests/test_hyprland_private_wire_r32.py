@@ -32,13 +32,18 @@ int64_t ns() {return 123;}
 struct Surface {wl_client* c; wl_client* client() {return c;}};
 struct Weak {
     Surface* p; bool expired() const {return !p;} Surface* operator->() {return p;}
+    Surface* lock() const {return p;}
     bool operator!=(const Weak& b) const {return p != b.p;}
 };
 struct Seat { struct {Weak pointerFocus;} m_state;} seat;
 Seat* g_pSeatManager = &seat;
 struct State {
     bool armed = true;
-    struct {Weak surface; std::string token;} bound;
+    struct Binding {Weak surface; std::string token;} bound;
+    Surface* popup=nullptr;
+    bool destination(const Binding& b, Surface* focus) {
+        return focus && (focus==b.surface.p || focus==popup);
+    }
     struct WireEvent {FIELDS
     static void protocolEvent(CALLBACK
 };
@@ -63,10 +68,17 @@ int main() {
     assert(s.wireCount==0);
     m.arguments=args; emit();
     assert(s.wireCount==1 && s.wire[0].x==10 && s.wire[0].y==20 && s.wire[0].time==17);
+    // Destination predicate is independently production-tested by popup tests;
+    // here verify the actual logger delegates to it rather than root equality.
+    Surface ownedPopup{&target}, sibling{&target};
+    s.popup=&ownedPopup; seat.m_state.pointerFocus={&sibling}; emit();
+    assert(s.wireCount==1);
+    seat.m_state.pointerFocus={&ownedPopup}; emit(); assert(s.wireCount==2);
+    seat.m_state.pointerFocus={&surface};
     m.message_opcode=5; m.arguments_count=0; emit();
-    assert(s.wire[1].opcode==5);
+    assert(s.wire[2].opcode==5);
     m.message_opcode=3; m.arguments_count=4; args[1].u=18; args[2].u=272; args[3].u=1; emit();
-    assert(s.wire[2].button==272 && s.wire[2].state==1 && s.wire[2].time==18);
+    assert(s.wire[3].button==272 && s.wire[3].state==1 && s.wire[3].time==18);
     for(int i=0;i<300;++i) emit();
     assert(s.wireCount==256 && s.wireOverflow);
 }

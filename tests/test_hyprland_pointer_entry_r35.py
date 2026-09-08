@@ -160,7 +160,8 @@ int main(int argc, char** argv) {
     assert(!s.positioningBoundSurface);
     if (test=="success" || test=="popup-success") {
         assert(s.armed && s.scope() && s.revokes==0 && s.revision==0);
-        assert(seat.m_state.pointerFocus.lock()==destination && s.bound.pointerSurface.lock()==destination);
+        assert(seat.m_state.pointerFocus.lock()==destination &&
+               s.bound.pointerSurface.lock()==destination);
         assert(seat.m_state.keyboardFocus.lock()==target && s.bound.surface.lock()==target);
         assert(warps==1 && focuses==1 && seat.frames==1 && !flagSeen);
         // An ordinary later focus transfer cannot inherit the exemption.

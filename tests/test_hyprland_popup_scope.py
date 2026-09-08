@@ -2,8 +2,36 @@
 import pathlib
 import subprocess
 
+import pytest
 
 ROOT = pathlib.Path(__file__).resolve().parents[1]
+
+
+@pytest.fixture(scope="module")
+def extracted_popup_binary(tmp_path_factory):
+    """Execute verbatim production methods with protocol/signal boundary doubles."""
+    directory = tmp_path_factory.mktemp("popup-production")
+    production = (ROOT / "assets/hyprland-input/scope-plugin.cpp").read_text()
+    methods = production[production.index("    bool popupChain("):
+                         production.index("    SP<CWLSurfaceResource> destinationAt(")]
+    source = directory / "popup.cpp"
+    source.write_text('#include "native_popup_fixture.hpp"\n'
+                      'struct State { unsigned revision=0;\n' + methods +
+                      '\n};\n#include "native_popup_cases.hpp"\n')
+    binary = directory / "popup"
+    subprocess.run(["c++", "-std=c++23", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(ROOT / "tests"), "-I", str(ROOT / "assets/hyprland-input"),
+                    str(source), "-o", str(binary)], check=True)
+    return binary
+
+
+@pytest.mark.parametrize("scenario", [
+    "ancestry", "bounds", "map-unmap", "geometry", "placement", "reposition",
+    "dismissed", "popup-destroy", "surface-destroy", "unmap", "root-new",
+    "nested-new", "expired-popup", "retired-watch", "unrelated",
+])
+def test_extracted_production_popup_methods(extracted_popup_binary, scenario):
+    subprocess.run([str(extracted_popup_binary), scenario], check=True)
 
 
 def test_native_popup_ancestry(tmp_path):
@@ -32,14 +60,16 @@ int main() {
     bad=popup; bad.role=0; assert(!valid_popup_ancestry({bad,root},1,99));
     bad=popup; bad.xdg=0; assert(!valid_popup_ancestry({bad,root},1,99));
     bad=popup; bad.geometry[6]=0; assert(!valid_popup_ancestry({bad,root},1,99));
-    bad=popup; bad.geometry[0]=std::numeric_limits<double>::quiet_NaN(); assert(!valid_popup_ancestry({bad,root},1,99));
+    bad=popup; bad.geometry[0]=std::numeric_limits<double>::quiet_NaN();
+    assert(!valid_popup_ancestry({bad,root},1,99));
     bad=popup; bad.geometry[4]++; assert(bad != popup);
     assert(!valid_popup_ancestry(std::vector<PopupAncestor>(34,popup),1,99));
 }
 ''')
     binary = tmp_path / "popup"
     subprocess.run(["c++", "-std=c++23", "-Wall", "-Wextra", "-Werror", "-I",
-                    str(ROOT / "assets/hyprland-input"), str(source), "-o", str(binary)], check=True)
+                    str(ROOT / "assets/hyprland-input"), str(source), "-o", str(binary)],
+                   check=True)
     subprocess.run([str(binary)], check=True)
 
 
@@ -51,7 +81,8 @@ def test_scope_contract():
     assert "!b.popupWatch->valid" in source
     for event in ("reposition", "dismissed", "destroy", "map", "unmap", "newPopup"):
         assert f"m_events.{event}.listen" in source
-    watcher = source.split("void watchPopups(", 1)[1].split("SP<CWLSurfaceResource> destinationAt", 1)[0]
+    watcher = source.split("void watchPopups(", 1)[1].split(
+        "SP<CWLSurfaceResource> destinationAt", 1)[0]
     # Existing unmapped popups must be watched before map->unmap restores the
     # inventory. Lifecycle watching must not use the mapped admission predicate.
     assert "popupChain(" not in watcher
