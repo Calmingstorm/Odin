@@ -13,7 +13,7 @@ import os
 import re
 import secrets
 
-from .accessibility import Accessibility, PrimitiveError
+from .accessibility import Accessibility, PrimitiveError, Reference
 
 
 def seal(value):
@@ -145,6 +145,7 @@ class AttachedAccessibility(Accessibility):
         nodes, status = self.snapshot(window, observation_id, guard)
         private = {}
         if status == "available":
+            rows = {row["handle"]: row for row in nodes}
             for handle, ref in self.references.items():
                 private[handle] = {
                     "observation_id": observation_id,
@@ -158,6 +159,14 @@ class AttachedAccessibility(Accessibility):
                     "window": window,
                     "scope_fingerprint": self.scope["fingerprint"],
                 }
+                # This private enumeration route is a lookup hint, not authority.
+                # Restore rechecks exact identities and real native ancestry.
+                route = []
+                row = rows[handle]
+                while row["parent"] is not None:
+                    route.append(row["index"])
+                    row = rows[row["parent"]]
+                private[handle]["route"] = list(reversed(route))
         return nodes, status, private
 
     def stable(self, guard):
@@ -193,11 +202,60 @@ class AttachedAccessibility(Accessibility):
             or saved.get("window") != self.window()
         ):
             raise PrimitiveError("rejected", "Stale native accessibility scope")
-        _, status, private = self.capture(guard)
-        matches = [row for row in private.values() if row["identity"] == saved.get("identity")]
-        if status != "available" or len(matches) != 1:
-            raise PrimitiveError("unsupported", "Original accessible node unavailable")
-        current = matches[0]
+        if "route" in saved:
+            route = saved["route"]
+            if (
+                type(route) is not list
+                or len(route) > 6
+                or any(type(index) is not int or not 0 <= index < 128 for index in route)
+            ):
+                raise PrimitiveError("rejected", "Invalid accessible identity route")
+            guard()
+            self._load()
+            root, root_fingerprint = self._window_root(saved["window"], guard)
+            node = root
+            for index in route:
+                guard()
+                node = node.get_child_at_index(index)
+                if node is None:
+                    raise PrimitiveError("rejected", "Original accessible node unavailable")
+            guard()
+            fingerprint, metadata = self._data(node)
+            lineage = self.lineage(node, root, guard)
+            current = {
+                "identity": self.native_identity(node),
+                "root_identity": self.native_identity(root),
+                "fingerprint": seal(fingerprint),
+                "root_fingerprint": seal(root_fingerprint),
+                "lineage": seal(lineage),
+                "metadata": metadata,
+                "window": self.window(),
+            }
+            if (
+                current["identity"] != saved.get("identity")
+                or node.get_process_id() != saved["window"]["pid"]
+                or root.get_process_id() != saved["window"]["pid"]
+            ):
+                raise PrimitiveError("rejected", "Original accessible identity changed")
+            ref = Reference(
+                node,
+                root,
+                fingerprint,
+                root_fingerprint,
+                saved["window"],
+                metadata["capabilities"],
+                metadata,
+                lineage=lineage,
+            )
+            guard()
+        else:
+            # Old private observations never gain an inferred/name-based route.
+            _, status, private = self.capture(guard)
+            matches = [row for row in private.values() if row["identity"] == saved.get("identity")]
+            if status != "available" or len(matches) != 1:
+                raise PrimitiveError("unsupported", "Original accessible node unavailable")
+            current = matches[0]
+            ref = self.references[current["handle"]]
         for key in (
             "root_identity",
             "fingerprint",
@@ -208,7 +266,6 @@ class AttachedAccessibility(Accessibility):
         ):
             if current[key] != saved.get(key):
                 raise PrimitiveError("rejected", "Original accessible node changed")
-        ref = self.references[current["handle"]]
         bx, by, bw, bh = (ref.metadata["bounds"][key] for key in ("x", "y", "width", "height"))
         x, y, width, height = self.scope["source_rect"]
         if not (
