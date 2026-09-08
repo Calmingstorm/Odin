@@ -106,7 +106,7 @@ only the compatibility symlink. Package builds ship only the versioned image.
 Keep old images until the owner confirms they are no longer mapped.
 
 `build-identity.json` records `companion_build_id` (SHA-256 over the build script,
-plugin source and local deadline header, including relative source names),
+plugin source and local deadline/provenance headers, including relative source names),
 `plugin_sha256` (actual ELF bytes), and `plugin_filename`. The companion's flat
 JSON `status` response reports `companion_build_id` from the **executing** code.
 Compare that value with the manifest before qualification/admission. A missing
@@ -159,10 +159,27 @@ checks have a 250ms freshness budget. Locked/unknown state, unknown focus, chang
 output/geometry and stale identity revoke or refuse input. A screenshot or ready
 helper does not prove task success.
 
-The initial native scope implementation requires a wholly contained native
-Wayland top-level window with keyboard and pointer focus on that window. Unknown
-or modal/parented surfaces and fractional/ambiguous window geometry refuse
-instead of guessing. XWayland application input is not admitted by this route.
+Native scope requires a wholly contained native Wayland top-level window on the
+granted output. A session remains pinned to the original measured process lifetime
+and executable identity. Same-process dialogs may change application class and
+have an xdg parent, provided the compositor verifies the entire parent chain's
+native client PID/UID. Different processes, foreign parents and XWayland refuse.
+Floating windows are conservative safe-application dialog candidates, not proof
+that a new dialog appeared. Use `visual_change`, inspect the next delivered view,
+and supply its `expected_modal` when present. Open dialogs in a separate action,
+not a batch which blindly continues inside unseen content.
+
+Keyboard focus must match the observed target. The pointer may initially remain
+outside a new dialog; only a hit-tested, no-held-input owned positioning operation
+can enter that already observed keyboard target. Other focus transitions still
+revoke held input. Button, axis and motion destinations remain target-fenced.
+
+Window animation can produce fractional coordinates. Observation-only settling
+waits for authenticated same-process/same-output geometry, without issuing an
+input token for fractional geometry. Retry initiation is bounded to one second;
+an already-started raster retains its normal completion allowance under a total
+five-second ceiling. Predispatch checks and 250 ms input leases are unchanged.
+Generic scope/identity failures are not retried, and input is never replayed.
 Text and key chords use an owned US virtual keymap without changing the physical
 keyboard layout; characters absent from that keymap are rejected before input.
 Accessible-field identity is not advertised here; grounded pixel field replacement
