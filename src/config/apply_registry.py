@@ -2231,6 +2231,7 @@ def build_meta_payload(
     boot_dump: dict[str, Any] | None = None,
     generated_at: str | None = None,
     persistence_error: str | None = None,
+    image_model_defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The full ``/api/config/meta`` document."""
     boot_flat = dict(flatten(boot_dump)) if boot_dump is not None else {}
@@ -2266,6 +2267,9 @@ def build_meta_payload(
         "schema_version": SCHEMA_VERSION,
         "revision": desired_revision,
         "generated_at": generated_at,
+        # Source-presence intent is supplied by the route, never inferred from
+        # this resolved dump. This metadata is not part of the Config schema.
+        "image_model_defaults": image_model_defaults,
         "fields": fields,
         "status": {
             "counts": counts,
