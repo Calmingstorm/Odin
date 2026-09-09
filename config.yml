@@ -301,8 +301,9 @@ image:
   backend: auto
   openai:
     enabled: true          # kill switch for the native wire implementation
-    outer_model: gpt-5.5   # Responses model hosting the image tool (pinned, not the chat model)
-    image_model: gpt-image-2
+    # Absent model leaves follow the shipped defaults; uncomment a leaf to pin it.
+    # outer_model: gpt-6-astra   # Responses model hosting the image tool, not the chat model
+    # image_model: gpt-image-2.5-flare
 
 # Web UI and API — all web configuration lives here (not in .env)
 web:
