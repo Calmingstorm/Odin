@@ -89,6 +89,33 @@ class ComputerIntegration:
                 app, platform=getattr(self.settings, "platform", "x11"), environment="isolated"
             )
         if getattr(self.settings, "platform", "x11") == "wayland":
+            if getattr(self.settings, "wayland_backend", "portal") == "hyprland":
+                from .runtime.hyprland_backend import HyprlandRuntimeBackend, HyprlandSessionConfig
+                from .runtime.hyprland_identity import ExecutableTrust
+
+                s = self.settings
+                return HyprlandRuntimeBackend(
+                    enabled=self.enabled, environment=s.environment,
+                    config=HyprlandSessionConfig(
+                        expected_uid=s.wayland_uid,
+                        runtime_dir=s.hyprland_runtime_dir,
+                        wayland_display=s.hyprland_wayland_display,
+                        instance_signature=s.hyprland_instance_signature,
+                        output_name=s.hyprland_output_name,
+                        compositor_pid=s.hyprland_compositor_pid,
+                        compositor_trust=ExecutableTrust(
+                            path=s.hyprland_compositor_executable,
+                            sha256=s.hyprland_compositor_sha256,
+                            version=s.hyprland_compositor_version,
+                            commit=s.hyprland_compositor_commit,
+                            owner_uid=s.hyprland_compositor_owner_uid,
+                        ),
+                        guardian_binary=s.hyprland_guardian_binary,
+                        capture_binary=s.hyprland_capture_binary,
+                        scope_socket=s.hyprland_scope_socket or (
+                            s.hyprland_runtime_dir + "/odin-hyprland-scope.sock"),
+                    ),
+                )
             from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
             from .runtime.wayland_probe import SameStackQualifier
 
@@ -472,6 +499,12 @@ class ComputerIntegration:
     async def operator_recover(self, *, owner_id, web_session_id, session_id, generation):
         context = self._operator_context(owner_id, web_session_id, emergency=True)
         return await self.controller.reconcile_recovery(context, session_id, generation)
+
+    async def operator_release_owned_input(
+        self, *, owner_id, web_session_id, session_id, generation
+    ):
+        context = self._operator_context(owner_id, web_session_id, emergency=True)
+        return await self.controller.operator_release_owned_input(context, session_id, generation)
 
     async def operator_reconcile(
         self, *, owner_id, web_session_id, session_id, generation, acknowledgment

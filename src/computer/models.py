@@ -77,6 +77,7 @@ class BackendCapabilities:
     keyboard_separation: str = "unknown"
     owned_input_release: str = "unknown"
     application_preserving_detach: str = "unknown"
+    backend: str = ""
 
     def __post_init__(self):
         if self.platform not in {"x11", "wayland"} or self.environment not in {
@@ -84,15 +85,25 @@ class BackendCapabilities:
             "existing_session",
         }:
             raise ComputerError("unsupported_backend_contract")
+        if type(self.backend) is not str or self.backend not in {"", "hyprland"} or (
+            self.backend == "hyprland"
+            and (self.platform != "wayland" or self.environment != "existing_session")
+        ):
+            raise ComputerError("unsupported_backend_contract")
         if any(
             v not in {"independent", "shared", "unknown"}
             for v in (self.pointer_separation, self.keyboard_separation)
         ):
             raise ComputerError("invalid_input_separation")
-        if any(
-            type(v) is not str or v not in {"verified", "failed", "unknown"}
-            for v in (self.owned_input_release, self.application_preserving_detach)
+        release_states = {"verified", "failed", "unknown"}
+        if self.backend == "hyprland" and (
+            self.platform == "wayland" and self.environment == "existing_session"
         ):
+            release_states.add("hyprland_best_effort")
+        if (type(self.owned_input_release) is not str
+                or self.owned_input_release not in release_states
+                or type(self.application_preserving_detach) is not str
+                or self.application_preserving_detach not in {"verified", "failed", "unknown"}):
             raise ComputerError("invalid_input_lifecycle")
 
     def public(self) -> dict[str, Any]:
@@ -118,8 +129,15 @@ class BackendCapabilities:
                     "shared_x11_abrupt_guardian_death_server_release_unproven",
                 ]
             )
+        if self.backend == "hyprland":
+            limitations.extend([
+                "hyprland_guardian_sigkill_can_leave_owned_input_held",
+                "hyprland_same_button_release_can_clobber_human_hold",
+                "hyprland_native_toplevel_only_not_arbitrary_app_qualification",
+            ])
         return {
             "platform": self.platform,
+            **({"backend": self.backend} if self.backend else {}),
             "environment": self.environment,
             "pointer_separation": self.pointer_separation,
             "keyboard_separation": self.keyboard_separation,

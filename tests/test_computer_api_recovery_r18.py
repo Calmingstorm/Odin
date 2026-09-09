@@ -50,8 +50,8 @@ def body_for(route):
     (ComputerError("legacy_acknowledgment_unavailable"), 409,
      "legacy_acknowledgment_unavailable"),
     (ComputerError("/private/path secret text"), 409, "computer_operation_unavailable"),
-    (ValueError("/private/path secret text"), 409, None),
-    (TypeError("/private/path secret text"), 409, None),
+    (ValueError("/private/path secret text"), 409, "computer_operation_unavailable"),
+    (TypeError("/private/path secret text"), 409, "computer_operation_unavailable"),
 ])
 async def test_correct_body_preserves_safe_controller_failure(route, error, status, code):
     controller = RecoveryController()

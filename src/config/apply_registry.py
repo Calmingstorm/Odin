@@ -454,7 +454,8 @@ FIELDS: dict[str, FieldSpec] = {
     "computer.platform": FieldSpec(
         label="Display platform",
         description="Choose X11 or Wayland. Wayland requires an existing session, an explicit "
-        "session bus and desktop UID. Input remains backend capability-gated.",
+        "desktop UID and explicit backend target. Portal needs a session bus; native Hyprland "
+        "requires approved compositor identity and output. Input remains capability-gated.",
     ),
     "computer.display": FieldSpec(
         label="X11 display",
@@ -474,7 +475,7 @@ FIELDS: dict[str, FieldSpec] = {
     "computer.wayland_bus_address": FieldSpec(
         label="Wayland session bus",
         description="Explicit local session bus, such as unix:path=/run/user/1000/bus. "
-        "Required for Wayland; not discovered from the service environment.",
+        "Required for the portal backend only; not discovered from the service environment.",
     ),
     "computer.wayland_uid": FieldSpec(
         label="Wayland desktop UID",
@@ -485,6 +486,76 @@ FIELDS: dict[str, FieldSpec] = {
         label="Wayland input guardian",
         description="Absolute path to the separately installed Wayland input guardian "
         "executable. Saving does not install or qualify it.",
+    ),
+    "computer.wayland_backend": FieldSpec(
+        label="Wayland backend",
+        description="Portal preserves GNOME/KWin behavior. Hyprland explicitly selects native "
+        "capture/input with no portal fallback. Hyprland input is best-effort: hard guardian "
+        "SIGKILL may leave held input; release may clobber a simultaneous human same-button hold.",
+    ),
+    "computer.hyprland_runtime_dir": FieldSpec(
+        label="Hyprland runtime directory",
+        description="Explicit desktop-owner runtime directory, e.g. /run/user/1000. "
+        "Never inferred.",
+    ),
+    "computer.hyprland_wayland_display": FieldSpec(
+        label="Hyprland Wayland socket name",
+        description="Explicit local socket basename, e.g. wayland-1. "
+        "Must belong to the pinned compositor.",
+    ),
+    "computer.hyprland_instance_signature": FieldSpec(
+        label="Hyprland instance signature",
+        description="Explicit target HYPRLAND_INSTANCE_SIGNATURE. Update after compositor restart.",
+    ),
+    "computer.hyprland_output_name": FieldSpec(
+        label="Hyprland consented output",
+        description="The one output explicitly granted for native screencopy and input, e.g. DP-1. "
+        "No default output, whole-desktop capture or portal chooser fallback.",
+    ),
+    "computer.hyprland_compositor_pid": FieldSpec(
+        label="Hyprland compositor PID",
+        description="Explicit live compositor PID, pinned with UID, "
+        "process start time and executable build.",
+    ),
+    "computer.hyprland_compositor_executable": FieldSpec(
+        label="Hyprland trusted executable",
+        description="Absolute approved compositor executable path, not a command. "
+        "Must match the socket peer.",
+    ),
+    "computer.hyprland_compositor_sha256": FieldSpec(
+        label="Hyprland approved SHA-256",
+        description="64 lowercase hex digits for the independently approved executable. "
+        "Never learned from the peer.",
+    ),
+    "computer.hyprland_compositor_version": FieldSpec(
+        label="Hyprland approved version",
+        description="Exact approved compositor build version. "
+        "Plugin headers and binary must match this build.",
+    ),
+    "computer.hyprland_compositor_commit": FieldSpec(
+        label="Hyprland approved commit",
+        description="40-64 lowercase hex digits identifying the approved compositor build commit.",
+    ),
+    "computer.hyprland_compositor_owner_uid": FieldSpec(
+        label="Hyprland executable owner UID",
+        description="Approved owner of the compositor executable, normally root (0), "
+        "not the desktop UID.",
+    ),
+    "computer.hyprland_guardian_binary": FieldSpec(
+        label="Hyprland input helper",
+        description="Absolute separately installed native guardian executable. "
+        "Saving never installs or starts it.",
+    ),
+    "computer.hyprland_capture_binary": FieldSpec(
+        label="Hyprland capture helper",
+        description="Absolute separately installed native "
+        "explicit-output screencopy-v3 executable.",
+    ),
+    "computer.hyprland_scope_socket": FieldSpec(
+        label="Hyprland scope socket",
+        description="Explicit absolute scope socket; empty uses "
+        "runtime directory/odin-hyprland-scope.sock. "
+        "Load the ABI-matched plugin once during operator setup; Odin never edits hyprland.conf.",
     ),
     "timezone": FieldSpec(
         label="Timezone",

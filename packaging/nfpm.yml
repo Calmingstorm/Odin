@@ -120,6 +120,8 @@ contents:
     dst: /usr/share/doc/odin/computer-use/OPERATOR.md
   - src: ./docs/computer-use/RECOVERY.md
     dst: /usr/share/doc/odin/computer-use/RECOVERY.md
+  - src: ./docs/computer-use/HYPRLAND-OPERATOR-R32.md
+    dst: /usr/share/doc/odin/computer-use/HYPRLAND-OPERATOR-R32.md
   # KWin uses a private compositor ABI. Ship its opt-in companion sources;
   # the separate version-bound companion package carries the compiled plugin.
   # No main-package hook builds, loads, enables or reloads a desktop plugin.

@@ -4,13 +4,12 @@ from __future__ import annotations
 
 import asyncio
 import contextvars
-import os
 from contextlib import contextmanager
 from datetime import UTC, datetime
-from pathlib import Path
 from typing import Any
 
 from ..config.persistence import config_transaction, persist_config_paths_locked
+from .provisioning import ComputerProvisioningError, provision_storage
 
 _TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 _binding: contextvars.ContextVar[tuple | None] = contextvars.ContextVar(
@@ -33,6 +32,7 @@ class ComputerLifecycle:
         self._watchers = {}
         self._inflight = set()
         self._janitor = None
+        self._selected_storage = None
 
     @property
     def enabled(self):
@@ -56,51 +56,75 @@ class ComputerLifecycle:
             mcp.get_tool_definitions() if mcp is not None else [],
         )
         settings = self.settings
+        hyprland = settings.platform == "wayland" and settings.wayland_backend == "hyprland"
         if settings.platform == "wayland" and (
             settings.environment != "existing_session"
-            or not settings.wayland_bus_address
+            or (not hyprland and not settings.wayland_bus_address)
             or settings.wayland_uid is None
         ):
-            raise ValueError("Wayland needs an explicit existing session bus and desktop UID")
+            raise ComputerProvisioningError("computer_target_incomplete")
+        if hyprland and not all((
+            settings.hyprland_runtime_dir, settings.hyprland_wayland_display,
+            settings.hyprland_instance_signature, settings.hyprland_output_name,
+            settings.hyprland_compositor_pid, settings.hyprland_compositor_executable,
+            settings.hyprland_compositor_sha256, settings.hyprland_compositor_version,
+            settings.hyprland_compositor_commit, settings.hyprland_guardian_binary,
+            settings.hyprland_capture_binary,
+        )):
+            raise ComputerProvisioningError("computer_target_incomplete")
         if (
             settings.platform == "x11"
             and settings.environment == "existing_session"
             and (not settings.display or not settings.monitor_names)
         ):
-            raise ValueError("Existing-session capture needs explicit display and monitor names")
-        root = Path(settings.storage_dir)
-        if (
-            not root.is_absolute()
-            or not root.is_dir()
-            or any(p.is_symlink() for p in (root, *root.parents))
-            or Path("/opt/odin") in (root, *root.parents)
-        ):
-            raise ValueError("Computer storage must be provisioned outside the live install")
-        mode = root.stat()
-        if mode.st_uid != os.geteuid() or mode.st_mode & 0o077:
-            raise ValueError("Computer storage must be service-owned with mode 0700")
+            raise ComputerProvisioningError("computer_target_incomplete")
+        root = provision_storage(settings)
+        self._selected_storage = str(root)
+        if (self._selected_storage != settings.storage_dir
+                and self.bot.config.computer.storage_dir != settings.storage_dir):
+            # A deferred operator edit takes precedence over automatic selection;
+            # never overwrite it while constructing from our startup snapshot.
+            raise ComputerProvisioningError("storage_selection_required")
         factory = self._factory
         if factory is None:
-            if settings.platform == "wayland":
+            if hyprland:
+                # Native helpers are checked at session start. Enabling neither
+                # loads the plugin nor connects to the user's compositor.
+                pass
+            elif settings.platform == "wayland":
                 import importlib.util
 
                 if importlib.util.find_spec("dbus_next") is None:
-                    raise ValueError("Wayland session-bus dependency unavailable")
+                    raise ComputerProvisioningError("computer_dependency_unavailable")
                 # No bus connection, capture, consent prompt or input probe at
                 # Enable. Per-session qualification belongs to backend.start().
             elif settings.environment == "isolated":
                 from .runtime.profile import preflight
 
-                preflight()
+                try:
+                    preflight()
+                except RuntimeError as exc:
+                    raise ComputerProvisioningError("computer_dependency_unavailable") from exc
             else:
                 import importlib.util
 
                 if importlib.util.find_spec("Xlib") is None:
-                    raise ValueError("X11 capture dependency unavailable")
+                    raise ComputerProvisioningError("computer_dependency_unavailable")
             from .integration import ComputerIntegration
 
             factory = ComputerIntegration
-        return factory(self.bot, settings=settings.model_copy(deep=True, update={"enabled": True}))
+        return factory(self.bot, settings=settings.model_copy(
+            deep=True, update={"enabled": True, "storage_dir": str(root)}))
+
+    def _storage_changes(self):
+        if self._selected_storage != self.settings.storage_dir:
+            return [(("computer", "storage_dir"), self._selected_storage)]
+        return []
+
+    def _publish_storage(self, config):
+        if self._storage_changes():
+            config.computer.storage_dir = self._selected_storage
+            self.settings.storage_dir = self._selected_storage
 
     async def start(self):
         if not self.bot.config.computer.enabled or self._active:
@@ -112,6 +136,21 @@ class ComputerLifecycle:
                 raise RuntimeError("Computer lifecycle unavailable for startup")
             try:
                 self._service = self._construct()
+                if self._storage_changes():
+                    try:
+                        exc, cancelled = await self._persist(self._storage_changes())
+                    except BaseException:
+                        await self._settle(self._discard())
+                        raise
+                    if exc is not None:
+                        await self._discard()
+                        raise RuntimeError("Computer storage selection was not saved") from exc
+                    config = self.bot.config.model_copy(deep=True)
+                    self._publish_storage(config)
+                    self.bot.config = config
+                    if cancelled:
+                        await self._discard()
+                        raise asyncio.CancelledError
             except Exception:
                 self.error = "startup_failed"
                 self._invalidate()
@@ -224,7 +263,8 @@ class ComputerLifecycle:
                     self.error = "evidence_cleanup_failed"
                     await self._discard()
                     raise
-                exc, cancelled = await self._persist([(("computer", "enabled"), True)])
+                exc, cancelled = await self._persist(
+                    [(("computer", "enabled"), True), *self._storage_changes()])
                 if exc is not None:
                     self._service = candidate
                     await self._discard()
@@ -232,6 +272,7 @@ class ComputerLifecycle:
                     raise RuntimeError("Computer enable was not saved") from exc
                 config = self.bot.config.model_copy(deep=True)
                 config.computer.enabled = True
+                self._publish_storage(config)
                 self.bot.config = config
                 self._service = candidate
                 self._active = not self._closing
@@ -322,6 +363,8 @@ class ComputerLifecycle:
                 "environment": self.settings.environment,
                 "input_supported": None,
                 "readiness": "not_checked",
+                **({"native_backend": "hyprland"} if self.settings.platform == "wayland"
+                   and self.settings.wayland_backend == "hyprland" else {}),
             },
         }
 
@@ -479,6 +522,7 @@ class ComputerLifecycle:
             "stop",
             "pause",
             "recover",
+            "release_owned_input",
             "reconcile",
             "acknowledge_legacy",
         }:
@@ -498,7 +542,8 @@ class ComputerLifecycle:
             ):
                 return self.snapshot()
             raise
-        if method in {"status", "stop", "pause", "recover", "reconcile", "acknowledge_legacy"}:
+        if method in {"status", "stop", "pause", "recover", "reconcile",
+                      "acknowledge_legacy", "release_owned_input"}:
             result = {**self.snapshot(), **value}
             result["session_generation"] = value.get("generation")
             result["generation"] = self.generation
@@ -513,10 +558,12 @@ class ComputerLifecycle:
                     if capabilities.get("environment") == "existing_session":
                         input_supported = bool(
                             input_supported
-                            and all(
-                                capabilities.get(k) == "verified"
-                                for k in ("owned_input_release", "application_preserving_detach")
-                            )
+                            and capabilities.get("application_preserving_detach") == "verified"
+                            and (capabilities.get("owned_input_release") == "verified" or (
+                                capabilities.get("platform") == "wayland"
+                                and capabilities.get("backend") == "hyprland"
+                                and capabilities.get("owned_input_release")
+                                == "hyprland_best_effort"))
                         )
                 result["backend"] = {
                     "platform": capabilities.get("platform"),
@@ -524,6 +571,7 @@ class ComputerLifecycle:
                     "input_supported": input_supported,
                     "readiness": value.get("input_readiness", "session_capabilities"),
                     "input_blocker": value.get("input_blocker"),
+                    "native_backend": capabilities.get("backend"),
                 }
             if value.get("state") == "quarantined":
                 result["backend"] = {
@@ -590,6 +638,9 @@ class ComputerLifecycle:
 
     async def operator_recover(self, **identity):
         return await self._operator("recover", **identity)
+
+    async def operator_release_owned_input(self, **identity):
+        return await self._operator("release_owned_input", **identity)
 
     async def operator_reconcile(self, **identity):
         return await self._operator("reconcile", **identity)

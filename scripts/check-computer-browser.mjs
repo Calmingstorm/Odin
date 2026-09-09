@@ -56,6 +56,7 @@ try {
   let state = 'active', code = 200, blocked = null, holdObserve = false;
   let holdStatus = false, blockedStatus = null;
   let enabled = false, runtimeEnabled = false, runtimeGeneration = 0, holdToggle = false, blockedToggle = null;
+  let toggleFailure = null, statusFailure = null;
   let sessionGeneration = 1, recovery, inputAdmission, applicationProvenance;
   let backend = { platform: 'x11', environment: 'isolated', input_supported: false }, restartRequired = ['backend.environment'];
   let applicationProfiles = [{ id: 'drawing', label: 'Drawing', input: 'supported' }, { id: 'xed', label: 'Xed', input: 'supported' }];
@@ -76,6 +77,8 @@ try {
     if (code !== 200) return route.fulfill({ status: code, contentType: 'application/json', body: JSON.stringify({ error: 'fixture denial' }) });
     let body;
     if (path === '/api/computer') {
+      if (statusFailure === 'network') return route.abort('failed');
+      if (statusFailure) return route.fulfill({ status: 503, contentType: 'application/json', body: JSON.stringify({ error: 'fixture status unavailable' }) });
       if (holdStatus) { blockedStatus = route; return; }
       body = summary();
     }
@@ -83,6 +86,12 @@ try {
       assert.equal(req.method(), 'POST');
       assert.deepEqual(Object.keys(req.postDataJSON()), ['enabled']);
       assert.equal(typeof req.postDataJSON().enabled, 'boolean');
+      if (toggleFailure === 'preflight') return route.fulfill({ status: 409, contentType: 'application/json', body: JSON.stringify({
+        code: 'storage_unavailable', error: 'Private computer storage cannot be prepared.',
+        remedy: 'Repair the configured storage ownership and permissions. <b>Do not weaken permissions.</b>',
+        outcome: 'not_applied', next_action: 'repair_provisioning',
+      }) });
+      if (toggleFailure === 'network') return route.abort('failed');
       enabled = req.postDataJSON().enabled; runtimeEnabled = enabled; runtimeGeneration++;
       if (holdToggle) { blockedToggle = route; return; }
       body = { enabled };
@@ -277,6 +286,9 @@ try {
   blockedToggle = null; holdToggle = false;
   await page.waitForFunction(() => !view.toggling);
   assert.equal(await page.locator('img').count(), 0);
+  assert.equal(await page.evaluate(() => view.adminReady), false, 'Stop readback does not settle the interrupted Enable');
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.adminReady);
   // A generation change invalidates evidence even with the same session ID.
   await observe.click(); await page.waitForFunction(() => !!view.frameUrl);
   runtimeGeneration++; backend = undefined; restartRequired = false; applicationProfiles = [{ id: 'bogus', label: '<script>bad</script>', input: 'ready' }, null];
@@ -335,6 +347,112 @@ try {
   assert.equal(requests.filter(p => p === '/api/computer/reconcile').length, 1);
   assert.match(await page.getByRole('region', { name: 'Recovery evidence' }).innerText(), /Cleanup not verified/);
   assert.equal(requests.filter(p => /observe|evidence/.test(p)).length, beforeRecoveryCapture);
+  // R29: preserve factual status, but revoke every evidence/config/session
+  // authority after a preflight rejection, failed read, or unknown mutation.
+  const snapshot = await page.evaluate(() => JSON.stringify(view.status));
+  const stamp = await page.evaluate(() => view.checkedAt);
+  let beforeToggle = requests.filter(p => p.endsWith('/enabled')).length;
+  toggleFailure = 'preflight';
+  await disable.click();
+  await page.waitForFunction(() => !view.toggling && !!view.error);
+  assert.equal(await page.evaluate(() => JSON.stringify(view.status)), snapshot);
+  assert.equal(await page.evaluate(() => view.checkedAt), stamp);
+  assert.equal(await page.evaluate(() => view.adminReady), false);
+  assert.equal(await enable.count(), 0);
+  assert.equal(await observe.isDisabled(), true);
+  assert.match(await page.locator('.computer-status-card').innerText(), /Last-known session \(not current\)/i);
+  assert.match(await page.getByRole('alert').innerText(), /Not applied \(preflight rejection\)/);
+  assert.match(await page.getByRole('alert').innerText(), /Repair the configured storage ownership/);
+  assert.equal(await page.getByRole('alert').locator('b').count(), 0, 'remedy is escaped text');
+  const afterFailure = requests.length;
+  await page.evaluate(async () => {
+    await view.observe(); await view.exportFile(); await view.download();
+    await view.setEnabled(true); await view.recover(); await view.reconcile();
+    await view.control('resume');
+  });
+  assert.equal(requests.length, afterFailure, 'direct method calls cannot use retained authority');
+  await page.waitForTimeout(5200);
+  assert.equal(requests.length, afterFailure, 'failure requires independent refresh; no implicit retry or reauthorization');
+  assert.equal(requests.filter(p => p.endsWith('/enabled')).length, beforeToggle + 1);
+  toggleFailure = null;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.adminReady);
+  assert.equal(requests.filter(p => p.endsWith('/enabled')).length, beforeToggle + 1, 'refresh never replays enable');
+
+  // A read failure is not an unknown lifecycle mutation. Transient unavailability
+  // retains owner/generations/backend details but no frames or export handles.
+  await observe.click(); await page.waitForFunction(() => !!view.frameUrl);
+  const readSnapshot = await page.evaluate(() => JSON.stringify(view.status));
+  statusFailure = 'unavailable';
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && !!view.error);
+  assert.equal(await page.evaluate(() => JSON.stringify(view.status)), readSnapshot);
+  assert.equal(await page.evaluate(() => view.frameUrl), '');
+  assert.match(await page.getByRole('alert').innerText(), /No mutation was requested by this read/);
+  assert.doesNotMatch(await page.getByRole('alert').innerText(), /outcome unknown/);
+  assert.equal(await observe.isDisabled(), true);
+  assert.equal(await stop.isEnabled(), true, 'independent revoke-only emergency path survives failed status');
+  statusFailure = null;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.adminReady);
+
+  beforeToggle = requests.filter(p => p.endsWith('/enabled')).length;
+  toggleFailure = 'network';
+  await disable.click();
+  await page.waitForFunction(() => !view.toggling && !!view.error);
+  assert.match(await page.getByRole('alert').innerText(), /outcome unknown/);
+  assert.doesNotMatch(await page.getByRole('alert').innerText(), /Not applied/);
+  assert.equal(await page.evaluate(() => JSON.stringify(view.status)), readSnapshot);
+  assert.equal(requests.filter(p => p.endsWith('/enabled')).length, beforeToggle + 1);
+  toggleFailure = null;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.adminReady);
+
+  // Successful POST followed by failed GET must not be labelled not_applied,
+  // and never replaces the complete last-known snapshot with a partial ACK.
+  statusFailure = 'network';
+  await disable.click();
+  await page.waitForFunction(() => !view.toggling && !!view.error);
+  assert.match(await page.getByRole('alert').innerText(), /mutation was acknowledged, but status refresh failed/);
+  assert.equal(await page.evaluate(() => JSON.stringify(view.status)), readSnapshot);
+  assert.equal(await page.evaluate(() => view.adminReady), false);
+  statusFailure = null;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  await page.waitForFunction(() => !view.loading && view.adminReady);
+
+  // An already pending read cannot restore readiness after a mutation starts.
+  holdStatus = true;
+  await page.getByRole('button', { name: 'Refresh status', exact: true }).click();
+  for (let n = 0; n < 50 && !blockedStatus; n++) await new Promise(r => setTimeout(r, 10));
+  assert.ok(blockedStatus);
+  const raceStatus = summary();
+  holdToggle = true;
+  await enable.click();
+  await page.waitForFunction(() => view.toggling);
+  for (let n = 0; n < 50 && !blockedToggle; n++) await new Promise(r => setTimeout(r, 10));
+  assert.ok(blockedToggle);
+  await blockedStatus.fulfill({ contentType: 'application/json', body: JSON.stringify(raceStatus) });
+  blockedStatus = null; holdStatus = false;
+  await page.waitForTimeout(50);
+  assert.equal(await page.evaluate(() => view.adminReady), false, 'pre-mutation read is retired');
+  const raceRequests = requests.length;
+  await page.evaluate(async () => { await view.refresh(); await view.observe(); await view.setEnabled(false); });
+  assert.equal(requests.length, raceRequests, 'pending mutation cannot gain authority from a late read');
+  await blockedToggle.fulfill({ contentType: 'application/json', body: JSON.stringify({ enabled: true }) });
+  blockedToggle = null; holdToggle = false;
+  await page.waitForFunction(() => !view.toggling && view.adminReady);
+
+  // Direct method invocations after identity change are fenced before the
+  // display timer notices the new token; no private handles cross identities.
+  const identityRequests = requests.length;
+  await page.evaluate(async () => {
+    api.setToken('other-fixture');
+    await view.observe(); await view.exportFile(); await view.setEnabled(false);
+    await view.recover(); await view.reconcile(); await view.download();
+    api.setToken('fixture-only');
+  });
+  assert.equal(requests.length, identityRequests);
+
   // Rejected mutations hide admin controls and are not retried automatically.
   const togglesBefore = requests.filter(p => p.endsWith('/enabled')).length;
   code = 403;
@@ -366,7 +484,7 @@ try {
   await page.waitForTimeout(50);
   assert.equal(await page.evaluate(() => view.status.state), 'paused', 'retired response cannot overwrite current state');
   assert.deepEqual(errors, []);
-  console.log('PASS computer operator: authenticated admin enable/disable and readback, lifecycle/generation/restart/input limits, no auto capture, independent stop/pause during blocked toggle and Observe, no late frame, generation invalidation, keyboard/touch, explicit export/download, mutation rejection and unavailable/reconnect.');
+  console.log('PASS computer operator: authenticated lifecycle/readback, R29 preflight not_applied versus unknown mutation versus acknowledged/read failure, preserved historical status without evidence/authority, explicit refresh without replay, token/mutation-read race fences, independent stop/pause during blocked toggle and Observe, no late frame, generation invalidation, keyboard/touch, explicit export/download, unavailable/reconnect.');
 } finally {
   await browser?.close(); await server.close();
 }

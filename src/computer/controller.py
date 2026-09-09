@@ -439,6 +439,13 @@ class ComputerController:
                     and result.get("portal_session_closed") is True
                     and result.get("ei_connection_closed") is True
                 )
+                hyprland_devices = (
+                    live.capabilities.platform == "wayland"
+                    and live.capabilities.backend == "hyprland"
+                    and device_state == "hyprland_owned_connections_closed"
+                    and result.get("hyprland_owned_connections_closed") is True
+                    and result.get("receiver_release_verified") is False
+                )
                 clean = (
                     result.get("released") is True
                     and result.get("applications_preserved") is True
@@ -459,6 +466,7 @@ class ComputerController:
                         )
                         or no_devices
                         or portal_devices
+                        or hyprland_devices
                     )
                 )
         except (Exception, asyncio.CancelledError):
@@ -974,6 +982,31 @@ class ComputerController:
     async def validate_action_binding(self, grant, observation_id):
         return await self._validate_action_binding(grant, observation_id)
 
+    def _finish_action(self, capabilities, session_id, action_id, result):
+        """Keep backend-qualified release facts in durable ordinary-turn receipts.
+
+        Derive disclosure from the trusted selected backend, never native prose.
+        Other backends retain their existing receipt contract byte-for-byte.
+        """
+        # The admitted action owns this immutable snapshot. Concurrent cleanup
+        # can remove _live before settlement, but must not erase its provenance.
+        if capabilities is not None and capabilities.backend == "hyprland":
+            execution = result.get("execution", {})
+            result["input_safety"] = {
+                "backend": "hyprland",
+                "guarantee": "best_effort",
+                "release_basis": (
+                    "not_required_no_input_sent" if execution.get("injected") is False
+                    and execution.get("released") is True
+                    else "cooperative_native_ack" if execution.get("released") is True
+                    else "unconfirmed"
+                ),
+                "receiver_release_verified": False,
+                "limitations": capabilities.public()["limitations"],
+                "recovery": "operator_release_all_then_close_and_start_new_session",
+            }
+        return self.store.finish_action(session_id, action_id, result)
+
     def _operator_grant(self, context):
         if context.surface != "webui":
             raise ComputerError("operator_surface_required")
@@ -1010,6 +1043,53 @@ class ComputerController:
         if operation == "pause":
             return await self._pause(grant.session_id)
         return await self._stop(grant.session_id, "closed" if operation == "close" else "cancelled")
+
+    async def operator_release_owned_input(self, context, session_id, generation):
+        """Emergency Hyprland release, never an action or generic tool operation."""
+        await self._auth(context, emergency=True)
+        grant = self._operator_grant(context)
+        if grant.session_id != session_id:
+            raise ComputerError("not_found")
+        if grant.generation != generation:
+            raise ComputerError("stale_generation")
+        live = self._live.get(session_id)
+        if (live is None or live.capabilities is None
+                or live.capabilities.backend != "hyprland"
+                or live.capabilities.platform != "wayland"):
+            raise ComputerError("hyprland_recovery_unavailable")
+        recovery = getattr(live.backend, "recover_owned_input", None)
+        if not callable(recovery):
+            raise ComputerError("hyprland_recovery_unavailable")
+        # Revoke before awaiting recovery, even with an action in flight. Never
+        # acquire the action lock first: the native recovery closes input.
+        self._fence(session_id)
+        try:
+            self.store.set_state(session_id, "paused", revoke=True)
+        except BaseException:
+            await self._stop(session_id, "cancelled")
+            raise
+        live.observations.clear()
+        self._delivered_observations.pop(session_id, None)
+        if live.task_context is not None:
+            live.task_context.invalidate("operator_release_owned_input")
+        try:
+            receipt = await _bounded(recovery(), ATTACHED_STOP_TIMEOUT_SECONDS)
+            if (not isinstance(receipt, dict) or receipt.get("input_revoked") is not True
+                    or receipt.get("capture_revoked") is not True):
+                raise ComputerError("hyprland_recovery_unavailable")
+        except BaseException:
+            await self._stop(session_id, "cancelled")
+            raise
+        await self._auth(context, emergency=True)
+        if receipt.get("released") is not True:
+            self.store.set_state(session_id, "quarantined")
+        return {**self._public_session(self.store.get_session(session_id)),
+                "owned_input_recovery": {
+                    "released": receipt.get("released") is True,
+                    "receiver_release_verified": False,
+                    "input_revoked": True, "capture_revoked": True,
+                    "renewed_consent_required": True,
+                }}
 
     async def operator_observe(self, context):
         await self._auth(context)
@@ -1174,7 +1254,8 @@ class ComputerController:
                     }
                     if fresh is not None and fresh.observation_id != original.observation_id:
                         verification["evidence_id"] = fresh.evidence_id
-                    return self.store.finish_action(
+                    return self._finish_action(
+                        live.capabilities,
                         grant.session_id,
                         inp["action_id"],
                         {
@@ -1300,7 +1381,9 @@ class ComputerController:
                             reason=exc.code,
                             next_action="observe_again_without_crop",
                         )
-                        return self.store.finish_action(grant.session_id, inp["action_id"], result)
+                        return self._finish_action(
+                            live.capabilities, grant.session_id, inp["action_id"], result
+                        )
                     await self._auth(context)
                     self._active(grant)
                     age = self.monotonic() - after.captured_at
@@ -1421,7 +1504,9 @@ class ComputerController:
                             live.capabilities.public() if live.capabilities is not None else None
                         ),
                     }
-                receipt = self.store.finish_action(grant.session_id, inp["action_id"], result)
+                receipt = self._finish_action(
+                    live.capabilities, grant.session_id, inp["action_id"], result
+                )
             except (Exception, asyncio.CancelledError) as exc:
                 known_release = (
                     settled_result is not None and settled_result["execution"]["released"]
@@ -1429,6 +1514,15 @@ class ComputerController:
                 if known_release:
                     assert settled_result is not None
                     failed = settled_result
+                    if live.capabilities.backend == "hyprland":
+                        # The backend's earlier raster evidence cannot certify a
+                        # checkpoint whose scope/capture failed in the normal
+                        # controller path. Retain execution, not false success.
+                        if failed["status"] in {"verified", "not_satisfied"}:
+                            failed["status"] = "executed"
+                        failed["verification"].update(
+                            status="unavailable", reason="post_action_capture_unavailable"
+                        )
                     failed.setdefault("verification", {}).update(
                         next_action="observe_and_reconcile", delivery="unavailable"
                     )
@@ -1439,9 +1533,26 @@ class ComputerController:
                     failed = execution_receipt(
                         None, {"status": "unknown", "reason": "input_outcome_unknown"}
                     )
-                self.store.finish_action(grant.session_id, inp["action_id"], failed)
-                if not known_release or isinstance(exc, asyncio.CancelledError):
-                    await self._stop(grant.session_id, "cancelled")
+                    if live.capabilities.backend == "hyprland":
+                        from .runtime.hyprland_guardian import native_failure
+
+                        # Label native facts separately. Execution/quarantine
+                        # policy remains conservative and unchanged.
+                        details = getattr(exc, "details", None)
+                        detail = details.get("native_failure") if type(details) is dict else None
+                        if type(detail) is dict:
+                            native = native_failure({**detail, "native_failure": detail})
+                            if native is not None:
+                                failed["native_failure"] = native
+                try:
+                    self._finish_action(
+                        live.capabilities, grant.session_id, inp["action_id"], failed
+                    )
+                finally:
+                    # Receipt-storage failure must not skip required cleanup or
+                    # turn a pending reservation into permission to replay.
+                    if not known_release or isinstance(exc, asyncio.CancelledError):
+                        await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 return self.store.receipt(grant.session_id, inp["action_id"], payload_hash)

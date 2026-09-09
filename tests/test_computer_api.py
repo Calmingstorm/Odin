@@ -82,7 +82,8 @@ class Controller:
         return {"data": b"saved file", "expires_at": self.expiration}
 
 
-def client(controller, *, enabled=True, user="alice", tier="admin", session="private-session"):
+def client(controller, *, enabled=True, user="alice", tier="admin", session="private-session",
+           toggle=None):
     import time
 
     from src.config.schema import ApiTokenIdentity
@@ -110,6 +111,8 @@ def client(controller, *, enabled=True, user="alice", tier="admin", session="pri
         web=SimpleNamespace(api_token="", api_tokens=[principal]),
     ))
     app = web.Application(middlewares=[identity])
+    if toggle is not None:
+        bot.computer_set_enabled = toggle
     app["session_manager"] = sessions
     routes = web.RouteTableDef()
     register_computer(routes, bot)
@@ -229,3 +232,68 @@ async def test_toggle_fail_closed_without_lifecycle_hook_and_strict_input():
             assert response.status == 400
     async with client(Controller(), user=None, enabled=False) as c:
         assert (await c.post("/api/computer/enabled", json={"enabled": True})).status == 401
+
+
+@pytest.mark.asyncio
+async def test_typed_provisioning_preflight_is_not_applied_with_safe_remedy():
+    from src.computer.provisioning import ComputerProvisioningError
+
+    calls = []
+    failure = ComputerProvisioningError("storage_unavailable")
+
+    async def toggle(enabled):
+        calls.append(enabled)
+        raise failure
+
+    controller = Controller()
+    async with client(controller, enabled=False, toggle=toggle) as c:
+        before = await (await c.get("/api/computer")).json()
+        response = await c.post("/api/computer/enabled", json={"enabled": True})
+        body = await response.json()
+        assert response.status == 409
+        assert body == {"code": failure.code, "error": failure.message,
+                        "remedy": failure.remedy, "outcome": "not_applied",
+                        "next_action": "repair_provisioning"}
+        assert "no-store" in response.headers["Cache-Control"]
+        after = await (await c.get("/api/computer")).json()
+        # The read-only accessibility probe has its own fresh timestamp.
+        before.pop("accessibility")
+        after.pop("accessibility")
+        assert after == before
+    assert calls == [True]
+    assert controller.calls == ["status", "status"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure", [ValueError, TypeError, KeyError, RuntimeError,
+                                     PermissionError, FileNotFoundError, TimeoutError])
+async def test_dispatched_enable_failure_is_unknown_not_bad_request(failure):
+    calls = []
+
+    async def toggle(enabled):
+        calls.append(enabled)  # stand-in for a mutation before failed publication
+        raise failure("/private/path bearer-secret desktop text")
+
+    async with client(Controller(), enabled=False, toggle=toggle) as c:
+        response = await c.post("/api/computer/enabled", json={"enabled": True})
+        body = await response.json()
+        assert response.status == 409
+        assert body["outcome"] == "outcome_unknown"
+        assert body["next_action"] == "refresh_status"
+        assert "not_applied" not in str(body)
+        assert "bearer-secret" not in str(body) and "/private" not in str(body)
+    assert calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_provisioning_error_does_not_bypass_auth_or_validation():
+    calls = []
+
+    async def toggle(enabled):
+        calls.append(enabled)
+
+    async with client(Controller(), toggle=toggle) as c:
+        assert (await c.post("/api/computer/enabled", json={"enabled": "true"})).status == 400
+    async with client(Controller(), user=None, toggle=toggle) as c:
+        assert (await c.post("/api/computer/enabled", json={"enabled": True})).status == 401
+    assert calls == []

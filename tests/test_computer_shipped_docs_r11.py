@@ -6,7 +6,7 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
 DOCS = ROOT / "docs/computer-use"
-SHIPPED = {"PACKAGING.md", "OPERATOR.md", "RECOVERY.md"}
+SHIPPED = {"PACKAGING.md", "OPERATOR.md", "RECOVERY.md", "HYPRLAND-OPERATOR-R32.md"}
 
 
 def test_package_ships_exact_operator_files_not_engineering_tree():

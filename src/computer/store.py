@@ -13,6 +13,7 @@ from pathlib import Path
 
 from .models import ComputerError, RequestContext, SessionGrant
 from .policy import MAX_TASK_SECONDS
+from .provisioning import ComputerProvisioningError, checked_path, open_private_directory
 
 FRAME_MAX_BYTES = 2 * 1024 * 1024
 FRAME_MAX_PIXELS = 2_000_000
@@ -22,17 +23,10 @@ EVIDENCE_TTL = 24 * 3600
 
 
 def _private_path(path: str | Path, *, directory: bool) -> Path:
-    p = Path(path)
-    if not p.is_absolute() or p.is_symlink():
-        raise ComputerError("unsafe_storage_path")
-    if Path("/opt/odin") in (p.resolve(), *p.resolve().parents):
-        raise ComputerError("unsafe_storage_path")
-    if any(parent.is_symlink() for parent in p.parents):
-        raise ComputerError("unsafe_storage_path")
+    p = checked_path(path)
     target = p if directory else p.parent
-    target.mkdir(mode=0o700, parents=True, exist_ok=True)
-    if target.stat().st_uid != os.geteuid() or target.stat().st_mode & 0o077:
-        raise ComputerError("storage_not_private")
+    fd = open_private_directory(target)
+    os.close(fd)
     return p
 
 
@@ -54,11 +48,35 @@ class ComputerStore:
         self.lock = threading.RLock()
         path = _private_path(db_path, directory=False)
         self.evidence_path = _private_path(evidence_path, directory=True)
-        if path.exists() and (not path.is_file() or path.stat().st_mode & 0o077):
-            raise ComputerError("storage_not_private")
-        fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
-        self.dir_fd = os.open(self.evidence_path, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        parent_fd = open_private_directory(path.parent)
+        try:
+            # Validate pre-existing SQLite sidecars as well as the receipt file;
+            # no chmod/chown/unlink repair can discard durable no-replay state.
+            for name in (path.name, path.name + "-wal", path.name + "-shm",
+                         path.name + "-journal"):
+                flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
+                if name == path.name:
+                    flags |= os.O_CREAT
+                try:
+                    fd = os.open(name, flags, 0o600, dir_fd=parent_fd)
+                except FileNotFoundError:
+                    if name != path.name:
+                        continue
+                    raise
+                try:
+                    info = os.fstat(fd)
+                    named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
+                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                            or info.st_mode & 0o077 or info.st_nlink != 1
+                            or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
+                        raise ComputerProvisioningError("storage_not_private")
+                finally:
+                    os.close(fd)
+        except OSError as exc:
+            raise ComputerProvisioningError("storage_unavailable") from exc
+        finally:
+            os.close(parent_fd)
+        self.dir_fd = open_private_directory(self.evidence_path)
         try:
             self.db = sqlite3.connect(path, isolation_level=None, check_same_thread=False)
         except BaseException:
@@ -310,6 +328,8 @@ class ComputerStore:
                 "input_was_enabled",
                 "portal_session_closed",
                 "ei_connection_closed",
+                "hyprland_owned_connections_closed",
+                "receiver_release_verified",
                 "portal_connection_closed",
                 "physical_slaves_restored",
                 "no_inflight_input",
@@ -322,7 +342,8 @@ class ComputerStore:
             devices
             if type(devices) is str
             and devices
-            in {"removed", "retained_inactive", "not_created", "portal_owned_connections_closed"}
+            in {"removed", "retained_inactive", "not_created", "portal_owned_connections_closed",
+                "hyprland_owned_connections_closed"}
             else "unknown"
         )
         # Only persist documented reason codes, never backend prose or paths.
@@ -364,6 +385,16 @@ class ComputerStore:
             ):
                 clean = False
             if devices == "retained_inactive":
+                clean = False
+            if devices == "hyprland_owned_connections_closed" and not (
+                grant.platform == "wayland"
+                and receipt["hyprland_owned_connections_closed"] is True
+                and receipt["receiver_release_verified"] is False
+                and all(receipt[key] is True for key in (
+                    "stopped", "released", "applications_preserved",
+                    "input_revoked", "capture_revoked"
+                ))
+            ):
                 clean = False
             if devices == "removed" and not all(
                 receipt[key] is True
@@ -535,6 +566,8 @@ class ComputerStore:
             "unsupported_characters",
             "diagnostics",
             "targeting",
+            "input_safety",
+            "native_failure",
         }
         if set(result) - allowed or result.get("status") not in {
             "executed",
@@ -545,6 +578,17 @@ class ComputerStore:
             "interrupted",
         }:
             raise ComputerError("invalid_receipt")
+        if "native_failure" in result:
+            # One bounded native schema, not arbitrary peer data. Keep these
+            # facts separate from the conservative execution/release verdict.
+            from .runtime.hyprland_guardian import native_failure
+
+            detail = result["native_failure"]
+            if type(detail) is not dict:
+                raise ComputerError("invalid_receipt")
+            clean = native_failure({**detail, "native_failure": detail})
+            if clean is None or clean != detail:
+                raise ComputerError("invalid_receipt")
         with self.lock:
             row = self.db.execute(
                 "SELECT result FROM receipts WHERE session_id=? AND action_id=?",

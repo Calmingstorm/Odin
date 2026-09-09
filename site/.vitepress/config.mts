@@ -47,6 +47,7 @@ export default withMermaid(defineConfig({
       ]},
       { text: 'Computer use', items: [
         { text: 'Operator guide', link: '/computer-use/OPERATOR' },
+        { text: 'Native Hyprland setup', link: '/computer-use/HYPRLAND-OPERATOR-R32' },
         { text: 'Installation & packaging', link: '/computer-use/PACKAGING' },
         { text: 'Stop & recovery', link: '/computer-use/RECOVERY' },
       ]},

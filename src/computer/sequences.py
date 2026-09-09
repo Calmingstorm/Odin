@@ -322,7 +322,9 @@ async def execute_sequence(controller, context, inp):
                 # even if cancellation arrives before the checkpoint capture.
                 stroke_effect(result, step, None, None, binding_matches=False)
                 # Commit injection/release facts BEFORE any capture/auth await.
-                controller.store.finish_action(grant.session_id, step["action_id"], result)
+                controller._finish_action(
+                    live.capabilities, grant.session_id, step["action_id"], result
+                )
                 settled.append(result)
                 attempted = None
                 if result["status"] == "unknown":
@@ -379,7 +381,9 @@ async def execute_sequence(controller, context, inp):
                         continuation_accepted=True,
                         visual_review_required=True,
                     )
-                controller.store.finish_action(grant.session_id, step["action_id"], result)
+                controller._finish_action(
+                    live.capabilities, grant.session_id, step["action_id"], result
+                )
                 if result["status"] != "verified" and not stroke_completed:
                     raise ComputerError("sequence_step_not_verified")
                 completed_steps += 1
@@ -409,14 +413,15 @@ async def execute_sequence(controller, context, inp):
                     "execution": {"injected": None, "released": False},
                 }
                 settled.append(result)
-                controller.store.finish_action(
-                    grant.session_id, steps[attempted]["action_id"], result
+                controller._finish_action(
+                    live.capabilities, grant.session_id, steps[attempted]["action_id"], result
                 )
         finally:
             # Cleanup cannot be skipped if durable settlement itself fails.
             try:
                 for step in steps[len(settled) :]:
-                    controller.store.finish_action(
+                    controller._finish_action(
+                        live.capabilities,
                         grant.session_id,
                         step["action_id"],
                         {
@@ -482,7 +487,9 @@ async def execute_sequence(controller, context, inp):
                 }
                 if reason is not None:
                     result["reason"] = reason
-                controller.store.finish_action(grant.session_id, inp["action_id"], result)
+                controller._finish_action(
+                    live.capabilities, grant.session_id, inp["action_id"], result
+                )
             except BaseException:
                 stop_required = True
                 raise

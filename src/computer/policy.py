@@ -55,7 +55,10 @@ def input_eligible(capabilities: BackendCapabilities) -> None:
     if type(capabilities) is not BackendCapabilities:
         raise ComputerError("backend_capabilities_unknown")
     if capabilities.environment == "existing_session" and (
-        capabilities.owned_input_release != "verified"
+        not (capabilities.owned_input_release == "verified" or (
+            capabilities.platform == "wayland" and capabilities.backend == "hyprland"
+            and capabilities.owned_input_release == "hyprland_best_effort"
+        ))
         or capabilities.application_preserving_detach != "verified"
     ):
         raise ComputerError("assisted_input_lifecycle_unproven")

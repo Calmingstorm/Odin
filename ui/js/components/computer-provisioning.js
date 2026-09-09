@@ -17,6 +17,7 @@ export default {
         <span class="badge badge-warning">Restart required</span>
       </div>
       <p class="page-lede mb-3">Saving does not install dependencies, create storage, grant OS permissions, attach to a desktop or restart Odin. Enable/disable and Stop session are separate lifecycle controls above.</p>
+      <p v-if="draft.platform === 'wayland' && draft.wayland_backend === 'hyprland'" class="text-sm text-amber-300 mb-3" role="note"><strong>Hyprland only: best-effort input.</strong> A hard guardian SIGKILL can leave input held. Releasing Odin's button can clobber the physical user's simultaneous same-button hold. Use Release owned input for recovery, then obtain a fresh observation. Native explicit-output capture only; there is no portal fallback. The operator must load the ABI-matched scope plugin once at setup. Saving or enabling never loads it or edits hyprland.conf.</p>
       <p v-if="message" class="text-sm text-amber-300 mb-3" role="status">{{ message }}</p>
       <p v-if="error" class="text-sm text-red-400 mb-3" role="alert">{{ error }}</p>
       <p v-if="loading" class="page-lede" role="status">Loading desired configuration and restart metadata…</p>
