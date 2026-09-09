@@ -13,6 +13,7 @@ from src.discord.background_task import _execute_tool
 from src.discord.response_guards import truncate_tool_output
 from src.discord.tool_loop import ToolLoopRunner
 from src.llm.secret_scrubber import scrub_output_secrets
+from src.tools.mcp.outcomes import MCPToolOutcome
 from src.tools.output_delivery import DeliveredOutput, RankedOutput, deliver, delivery_scope
 from src.tools.output_retention import OutputStore
 from src.tools.result_capture import capture_active
@@ -209,8 +210,8 @@ async def test_autonomous_mcp_dispatch_retains_before_model_cap(tmp_path):
     runner._native_tools.handles = lambda _: False
     runner._mcp_manager = SimpleNamespace(
         has_tool=lambda _: True,
-        execute=AsyncMock(return_value=SimpleNamespace(
-            text=text, ok=True, server="fixture", tool="echo", generation=1,
+        execute=AsyncMock(return_value=MCPToolOutcome(
+            text=text, server="fixture", tool="echo", generation=1,
             negotiated_version="test", status="ok")),
     )
     result = await runner.dispatch_loop_tool_inner(

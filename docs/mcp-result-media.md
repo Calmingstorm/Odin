@@ -100,10 +100,31 @@ extraction, Discord attachment, transcription, or automatic execution is added.
 
 ## Campaign verification status
 
-This change is source-only on `feat/campaign-2026-09` (PR #355). No new tests,
-CI runs, lint, mypy or test suites are part of this change per campaign policy.
-Syntax compilation/imports and source review are not runtime acceptance. At campaign
-end, cover multi-image/text delivery on all three model turn surfaces, legacy
-single-image/computer gates, corrupt/unsupported media, binary page reconstruction,
-scope revocation and cross-requester denial, quota/TTL/restart behavior, failure
-outcomes, and absence of binary data in text/audit/trajectory result records.
+The 2026-09-09 checkpoint adds focused executable coverage for commit `4ecb63b0`:
+
+- `tests/test_mcp_media_checkpoint.py`: real negotiated modern/legacy HTTP JSON
+  and SSE mixed-image/text ingress, typed dispatch, `isError`, signature sniffing,
+  corrupt/unsupported media, binary/image limits, aggregate wire ceilings,
+  single-call/no-replay behavior, and payload-free textual/audit representations.
+- `tests/test_mcp_media_surfaces_checkpoint.py`: chat (including the HTTP API),
+  autonomous loops, and agent model continuations; multiple image-call groups;
+  Codex/Ollama/Kimi provider conversion; legacy single-image delivery;
+  independent computer freshness acceptance/rejection; native agent refusal;
+  failure/uncertain outcomes and image/binary-free audit/trajectory result records.
+- `tests/test_mcp_media_retention_checkpoint.py`: byte/hash/page reconstruction
+  including empty files and repeatable reads; requester/channel/permission and
+  credential/host-binding revocation before body loading; shared quota and
+  metadata charging; atomic SQL failure rollback; manifest discoverability when
+  text quota is exhausted; private database mode; restart and fixed TTL pruning;
+  retention failure preserving the server outcome and vision evidence.
+
+Checkpoint tests exposed and fixed expired-read pruning being rolled back on
+error, and Kimi conversion silently discarding native image blocks. Existing
+runtime-retention and legacy image characterization fixtures were updated to
+the typed outcome / per-call image-message contract, not disabled.
+
+These are focused local harness checks, not a full campaign acceptance claim.
+The parent checkpoint owns full-suite, coverage, lint/type baseline and CI
+gates. No deploy or real provider/model-vision acceptance is claimed. Raster
+validation remains signature-only; explicit binary page retrieval can enter
+ordinary transcript retention as documented above.

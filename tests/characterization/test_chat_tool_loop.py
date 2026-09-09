@@ -773,8 +773,11 @@ class TestToolSurfaceAndSkills:
         vision_msg = fake.messages_of_call(1)[-1]
         assert vision_msg["role"] == "user"
         parts = vision_msg["content"]
-        assert parts[0] == block
-        assert "analyze_image" in parts[-1]["text"]
+        # Legacy unlabelled single images remain a native image-only message;
+        # the instruction stays with the corresponding tool result. Typed MCP
+        # calls instead carry their explicit labels beside each image group.
+        assert parts == [block]
         # The tool_result itself was replaced with the loaded-image marker
         result_content = fake.messages_of_call(1)[-2]["content"][0]["content"]
         assert "Image loaded" in result_content
+        assert "describe it" in result_content

@@ -368,6 +368,9 @@ def make_app(mode: str) -> tuple[web.Application, dict[str, Any]]:
         return web.json_response(response_msg)
 
     def _run_tool(name: str, arguments: dict) -> dict:
+        # Media tests exercise negotiated JSON/SSE ingress, not a mocked client.
+        if "tool_result" in state:
+            return _result(mode, state["tool_result"])
         if name == "echo":
             return _result(
                 mode,

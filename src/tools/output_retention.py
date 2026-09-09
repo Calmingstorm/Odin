@@ -203,9 +203,13 @@ class OutputStore:
                     (result_id,),
                 ).fetchone()
             if meta is None or meta[4] <= self.clock():
+                # A failed lookup must not roll back expiry housekeeping.
+                # No payload has been loaded, and reads never refresh TTL.
+                db.commit()
                 raise RetentionError("Retention expired or unavailable; no continuation exists.")
             hosts = tuple(json.loads(meta[3]))
             if not owner or meta[:2] != (owner, channel) or not authorize(meta[2], hosts):
+                db.commit()
                 raise RetentionError(
                     "Permission denied: originating output scope is no longer authorized.")
             if binary:

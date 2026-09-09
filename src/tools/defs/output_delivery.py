@@ -17,7 +17,9 @@ TOOLS_SECTION = [{
             "cursor": {"type": "string",
                        "description": "Exact cursor returned by tool output delivery."},
             "limit": {"type": "integer", "minimum": 4, "maximum": 8000, "default": 4000,
-                      "description": "Maximum text/base64 characters; envelope budget may yield fewer."},
+                      "description": (
+                          "Maximum text/base64 characters; envelope budget may yield fewer."
+                      )},
         },
         "required": ["cursor"],
     },
