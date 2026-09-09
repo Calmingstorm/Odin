@@ -186,7 +186,10 @@ class TestResolution:
         from src.config.apply_registry import schema_facts
 
         facts = schema_facts()
-        assert len(facts) == 299  # Includes fourteen additive native Hyprland target leaves.
+        # Fourteen native Hyprland leaves plus the two live MCP publication caps.
+        assert len(facts) == 301
+        assert "mcp.max_published_tools_per_server" in facts
+        assert "mcp.max_published_tools_global" in facts
         assert "graceful_degradation.enabled" not in facts
         assert "grafana_alerts.enabled" not in facts
         for path in (

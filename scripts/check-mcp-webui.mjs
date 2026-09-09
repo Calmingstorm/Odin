@@ -352,5 +352,127 @@ assert.equal(
   'Disabled — global MCP is off',
 );
 
-console.log('mcp-webui: modal navigation, endpoint honesty, payloads, routes, confirmations, card toggle, and masked endpoint pinned');
+// Publication limits use the real setup and mounted lifecycle. A minimal Vue
+// renderer supplies lifecycle only; numeric DOM constraints are checked on the
+// actual template AST, while every edit/save/poll action below runs page code.
+const { createRenderer } = await import('vue');
+const perServer = 'max_published_tools_per_server';
+const globalLimit = 'max_published_tools_global';
+const limitsForm = findElement(mcpTemplateAst,
+  node => node.tag === 'form' && staticAttribute(node, 'aria-label') === 'MCP publication limits');
+assert.ok(limitsForm);
+for (const [field, max] of [[perServer, '128'], [globalLimit, '256']]) {
+  const input = findElement(limitsForm, node => node.tag === 'input'
+    && node.props?.some(prop => prop.type === 7 && prop.exp?.content === `limitDraft.${field}`));
+  assert.ok(input, `${field} must have its own numeric input`);
+  for (const [attribute, expected] of [['type', 'number'], ['min', '1'], ['max', max], ['step', '1']]) {
+    assert.equal(staticAttribute(input, attribute), expected);
+  }
+  assert.ok(input.props.some(prop => prop.type === 6 && prop.name === 'required'));
+}
+let canonical = { enabled: true, servers: [], [perServer]: 40, [globalLimit]: 40 };
+const limitPosts = [];
+let failSave = false;
+let pendingGet = null;
+let pendingSave = null;
+globalThis.fetch = async (path, opts) => {
+  assert.ok(['/api/mcp/status', '/api/mcp/limits'].includes(path));
+  if (opts.method === 'POST') {
+    const payload = JSON.parse(opts.body);
+    limitPosts.push(payload);
+    if (failSave) throw new Error('disk full');
+    if (pendingSave) await pendingSave;
+    canonical = { ...canonical, ...payload, saved: true };
+  } else if (pendingGet) {
+    return pendingGet;
+  }
+  const snapshot = { ...canonical };
+  return { status: 200, ok: true, json: async () => snapshot };
+};
+const renderer = createRenderer({
+  insert() {}, remove() {}, createComment() { return {}; },
+  parentNode() { return null; }, nextSibling() { return null; },
+});
+let limitsState;
+const limitsApp = renderer.createApp({
+  setup() { limitsState = mcpServersPage.setup(); return () => null; },
+});
+limitsApp.mount({});
+try {
+  await limitsState.refreshAll();
+  assert.equal(limitsState.limitsAvailable.value, true);
+  assert.deepEqual(limitsState.limitDraft.value, { [perServer]: '40', [globalLimit]: '40' });
+  await limitsState.saveLimits();
+  assert.equal(limitPosts.length, 0, 'untouched controls must not save');
+  limitsState.editLimit(perServer, '');
+  await limitsState.refreshAll();
+  assert.equal(limitsState.limitDraft.value[perServer], '', 'poll must preserve cleared draft');
+  for (const [field, max] of [[perServer, 128], [globalLimit, 256]]) {
+    limitsState.editLimit(perServer, '40');
+    limitsState.editLimit(globalLimit, '40');
+    for (const value of ['', ' ', '0', '-1', '1.5', 'NaN', 'Infinity', String(max + 1)]) {
+      limitsState.editLimit(field, value);
+      await limitsState.saveLimits();
+      assert.match(limitsState.limitsError.value, new RegExp(`between 1 and ${max}`));
+      assert.equal(limitPosts.length, 0, `invalid ${field}=${value} must not post`);
+    }
+    limitsState.editLimit(field, '40');
+    assert.equal(limitsState.limitDirty.value.size, 0, 'restored value is clean');
+    assert.equal(limitsState.limitsError.value, '');
+  }
+  limitsState.editLimit(perServer, '128');
+  canonical[globalLimit] = 200;
+  await limitsState.refreshAll();
+  assert.equal(limitsState.limitDraft.value[perServer], '128');
+  assert.equal(limitsState.limitDraft.value[globalLimit], '200', 'clean field follows polling');
+  await limitsState.saveLimits();
+  assert.deepEqual(limitPosts.at(-1), { [perServer]: 128 }, 'save only dirty fields as numbers');
+  assert.equal(limitsState.limitDirty.value.size, 0);
+  assert.equal(limitsState.status.value[globalLimit], 200);
+
+  // Failed persistence retains the operator draft and old canonical status.
+  limitsState.editLimit(globalLimit, '256');
+  failSave = true;
+  await limitsState.saveLimits();
+  assert.match(limitsState.limitsError.value, /disk full/);
+  assert.equal(limitsState.limitDraft.value[globalLimit], '256');
+  assert.equal(limitsState.status.value[globalLimit], 200);
+  assert.equal(limitsState.limitDirty.value.has(globalLimit), true);
+  assert.equal(limitsState.limitsSaving.value, false);
+  assert.equal(limitsState.mutating.value, false);
+  failSave = false;
+
+  // Old poll completion cannot overwrite a newer saved response. A pending
+  // save also prevents duplicate submits; resolve owned promises explicitly.
+  let resolveGet;
+  pendingGet = new Promise(resolve => { resolveGet = resolve; });
+  const stalePoll = limitsState.refreshAll();
+  let resolveSave;
+  pendingSave = new Promise(resolve => { resolveSave = resolve; });
+  const saving = limitsState.saveLimits();
+  assert.equal(limitsState.limitsSaving.value, true);
+  const postCount = limitPosts.length;
+  await limitsState.saveLimits();
+  assert.equal(limitPosts.length, postCount);
+  resolveGet({ status: 200, ok: true, json: async () => ({ ...canonical, [globalLimit]: 7 }) });
+  await stalePoll;
+  assert.equal(limitsState.status.value[globalLimit], 200);
+  pendingGet = null;
+  pendingSave = null;
+  resolveSave();
+  await saving;
+  assert.equal(limitsState.status.value[globalLimit], 256);
+  assert.equal(limitsState.limitDraft.value[globalLimit], '256');
+  assert.equal(limitsState.limitDirty.value.size, 0);
+
+  limitsState.status.value = { enabled: false, servers: [] };
+  limitsState.editLimit(perServer, '1');
+  assert.equal(limitsState.limitsAvailable.value, false);
+  await limitsState.saveLimits();
+  assert.equal(limitPosts.length, postCount, 'missing server limits must disable saving');
+} finally {
+  limitsApp.unmount();
+}
+
+console.log('mcp-webui: existing MCP checks plus numeric publication limits, partial saves, validation, persistence failure, polling and save races pinned');
 process.exit(0);
