@@ -163,6 +163,64 @@ def test_special_string_spellings(tmp_path, value):
     assert actual == IMAGE_MODEL_DEFAULTS['image_model']
 
 
+@pytest.mark.parametrize('style', ['|-', '>-', '|2-', '>2-'])
+@pytest.mark.parametrize('newline', ['\n', '\r\n', '\r'])
+def test_block_header_comment_preserved(tmp_path, style, newline):
+    path = tmp_path / 'config.yml'
+    raw = (
+        'image:\n  openai:\n'
+        f'    image_model: {style} # gpt-image-2 stays here\n'
+        '      gpt-image-2\n'
+        '# gpt-image-2 stays here too\n'
+    ).replace('\n', newline)
+    expected = raw.replace('      gpt-image-2', '      gpt-image-2.5-flare')
+    path.write_bytes(raw.encode())
+    data = yaml.safe_load(raw)
+    apply_image_defaults_migration(data, path, raw)
+    assert path.read_bytes() == expected.encode()
+    assert data == yaml.safe_load(expected)
+
+
+def test_scalar_anchor_name_refused(tmp_path):
+    path = tmp_path / 'config.yml'
+    raw = 'image: {openai: {image_model: &gpt-image-2 gpt-image-2}}\n'
+    path.write_text(raw)
+    with pytest.raises(MigrationCompletionError):
+        migrate(path)
+    assert path.read_text() == raw
+    assert not image_defaults_marker_path(path).exists()
+
+
+def test_postimage_value_mismatch_refused_before_commit(tmp_path, monkeypatch):
+    path = tmp_path / 'config.yml'
+    raw = 'image: {openai: {image_model: gpt-image-2}}\n'
+    path.write_text(raw)
+    data = yaml.safe_load(raw)
+    # A valid YAML replacement whose parsed value differs from its source.
+    monkeypatch.setitem(IMAGE_MODEL_DEFAULTS, 'image_model', 'null')
+    with pytest.raises(MigrationCompletionError, match='postimage validation'):
+        apply_image_defaults_migration(data, path, raw)
+    assert path.read_text() == raw
+    assert data == yaml.safe_load(raw)
+    assert not image_defaults_marker_path(path).exists()
+
+
+def test_env_expansion_old_value_is_not_raw_match(tmp_path, monkeypatch):
+    from src.config.schema import _substitute_env_vars
+    path = tmp_path / 'config.yml'
+    raw = (
+        'image: {openai: {image_model: "${MODEL}", outer_model: gpt-5.5}}\n'
+        'extra: &x {value: unchanged}\nother: *x\n'
+    )
+    monkeypatch.setenv('MODEL', 'gpt-image-2')
+    path.write_text(raw)
+    data = yaml.safe_load(_substitute_env_vars(raw))
+    apply_image_defaults_migration(data, path, raw)
+    expected = raw.replace('gpt-5.5', IMAGE_MODEL_DEFAULTS['outer_model'])
+    assert path.read_text() == expected
+    assert data == yaml.safe_load(_substitute_env_vars(expected))
+
+
 def test_loader_new_defaults_and_later_old_pin(tmp_path):
     from src.config.schema import load_config
     path = tmp_path / 'config.yml'

@@ -706,6 +706,11 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
 
             document, mode = _load_document(target)
             root = yaml.compose(raw, Loader=yaml.SafeLoader)
+            scalar_tokens = {
+                token.end_mark.index: token
+                for token in yaml.scan(raw, Loader=yaml.SafeLoader)
+                if isinstance(token, yaml.tokens.ScalarToken)
+            }
             edits = []
             updates = {}
             for leaf, old in LEGACY_IMAGE_MODEL_DEFAULTS.items():
@@ -723,7 +728,15 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                     node = node[segment]
                 _assert_not_shared(node, ("image", "openai"))
                 _assert_not_shared(node[leaf], ("image", "openai", leaf))
-                token = raw[scalar.start_mark.index:scalar.end_mark.index]
+                source_token = scalar_tokens[scalar.end_mark.index]
+                start = source_token.start_mark.index
+                token = raw[start:scalar.end_mark.index]
+                if scalar.style in {"|", ">"}:
+                    # A block token includes its header comment. Only its body
+                    # contains value bytes; never replace a match in the header.
+                    body_offset = len(token.splitlines(keepends=True)[0])
+                    start += body_offset
+                    token = token[body_offset:]
                 new = IMAGE_MODEL_DEFAULTS[leaf]
                 if old in token:
                     replacement = token.replace(old, new, 1)
@@ -733,11 +746,24 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                     raise MigrationCompletionError(
                         "exact old image default uses unsupported scalar syntax; edit it directly"
                     )
-                edits.append((scalar.start_mark.index, scalar.end_mark.index, replacement))
+                edits.append((start, scalar.end_mark.index, replacement))
                 updates[leaf] = new
             rewritten = raw
             for start, end, replacement in sorted(edits, reverse=True):
                 rewritten = rewritten[:start] + replacement + rewritten[end:]
+            # Prove the postimage's actual YAML values before writing either
+            # provenance or config. Planned replacements are not parsed values.
+            verified_root = yaml.compose(rewritten, Loader=yaml.SafeLoader)
+            for leaf, expected in updates.items():
+                verified = verified_root
+                for segment in ("image", "openai", leaf):
+                    verified = _mapping_value(verified, segment) if verified is not None else None
+                if (
+                    not isinstance(verified, ScalarNode)
+                    or verified.tag != "tag:yaml.org,2002:str"
+                    or verified.value != expected
+                ):
+                    raise MigrationCompletionError("image-default postimage validation failed")
             record = {
                 "version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
                 "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten),
