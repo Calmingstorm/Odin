@@ -1022,9 +1022,9 @@ class ImageOpenAIConfig(BaseModel):
     enabled: bool = True  # kill switch for the native wire implementation
     outer_model: str = "gpt-6-astra"  # Responses model that hosts the image tool
     image_model: str = "gpt-image-2.5-flare"  # the image_generation tool's model
-    # NOTE: this route IGNORES the requested size and always returns a
-    # backend-selected SQUARE image, so there is no size allowlist — the
-    # selector sends non-square requests to ComfyUI instead.
+    # Native output dimensions and aspect ratio are backend-selected, not
+    # guaranteed square. Explicit size requests are routed to ComfyUI instead;
+    # this native configuration therefore has no size allowlist.
     # Image-specific deadline (separate from chat). Progress events keep the
     # read timer alive but must not defeat the total.
     request_timeout_seconds: int = 180
