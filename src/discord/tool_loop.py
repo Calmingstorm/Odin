@@ -106,6 +106,7 @@ from .response_guards import (
     wait_iteration_fingerprint,
     wait_target_alive,
 )
+from .steer_notifications import notify_steer
 from .tool_loop_helpers import (
     _ALLOWED_WEBHOOK_IDS,
     _EMPTY_RESPONSE_FALLBACK,
@@ -468,6 +469,7 @@ class _ChatTurn:
             })
             self._steer_inbox.last_consumed_sequence = sequence
             self.inbox_events.append({"event": "consumed", "sequence": sequence, "at": time.time()})
+            notify_steer(item, "consumed")
             consumed = True
         if consumed:
             self._inbox_event.clear()

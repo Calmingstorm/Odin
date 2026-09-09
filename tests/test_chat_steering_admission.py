@@ -8,7 +8,7 @@ from __future__ import annotations
 import asyncio
 import copy
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from src.discord.channel_state import (
     STEER_MESSAGE_MAX_CHARS,
@@ -39,6 +39,8 @@ class _Interaction:
         self.channel_id = channel_id
         self.user = SimpleNamespace(id=user_id, bot=bot)
         self.response = SimpleNamespace(send_message=AsyncMock())
+        self.edit_original_response = AsyncMock()
+        self.is_expired = Mock(return_value=False)
 
 
 def _turn(inbox: ChatTurnInbox) -> _ChatTurn:
@@ -205,7 +207,7 @@ def test_old_new_request_isolation_late_cleanup_and_late_bind_do_not_touch_new_m
         "Message queued (sequence 1; not yet consumed)."
     )
     assert new.inbox.get_nowait()["text"] == "new direction"
-    assert old.inbox.get_nowait()["text"] == "old direction"
+    assert old.inbox.empty()
     assert late_old.inbox.empty()
 
 

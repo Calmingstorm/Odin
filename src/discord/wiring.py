@@ -1093,6 +1093,12 @@ async def shutdown_services(bot) -> None:
 
             block_reexec("computer cleanup unverified")
 
+    channel_state = getattr(bot, "channel_state", None)
+    if channel_state is not None:
+        # Close pending steering before disconnecting Discord. Only graceful
+        # shutdown waits (bounded); turns never wait on receipt transport.
+        await channel_state.shutdown_steering()
+
     loop_manager = getattr(bot, "loop_manager", None)
     if loop_manager is not None:
         try:

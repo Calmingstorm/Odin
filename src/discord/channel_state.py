@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
+from .steer_notifications import SteerNotifier, finish_steer_notifications, notify_steer
 
 if TYPE_CHECKING:
     from .background_task import BackgroundTask
@@ -37,8 +38,9 @@ STEER_MESSAGES_PER_TURN = 128
 class ChatTurnInbox:
     """Process-local steering primitives, shared by the registry and one turn.
 
-    No task, waiter, timer or callback is installed. The turn alone consumes
-    the queue; admission and consumption are synchronous event-loop operations.
+    The turn alone consumes the queue; admission and consumption are synchronous
+    event-loop operations. Optional item-owned notifier callables are detached
+    only on consumption or closure, never installed on the unsteered path.
     """
 
     requester_id: str = ""
@@ -72,6 +74,7 @@ class ChannelStateRegistry:
         self.active_requests: dict[str, str] = {}
         # Request-owned like _stop_waiters, never a channel-only mailbox.
         self._steer_inboxes: dict[tuple[str, str], ChatTurnInbox] = {}
+        self._steering_closed = False
         # Per-channel completion signal for an owned /stop. Created lazily by
         # request_stop so set_active_request remains event-loop agnostic.
         self.stop_results: dict[str, asyncio.Future[str]] = {}
@@ -143,16 +146,39 @@ class ChannelStateRegistry:
         self, channel_id: str, request_id: str, inbox: ChatTurnInbox
     ) -> None:
         """Bind only to the still-current owner, never to its replacement."""
-        if self.active_requests.get(channel_id) != request_id:
+        if self._steering_closed or self.active_requests.get(channel_id) != request_id:
             inbox.accepting = False
             return
+        existing = self._steer_inboxes.get((channel_id, request_id))
+        if existing is inbox:
+            return
+        if existing is not None:
+            self.close_steer_inbox(channel_id, request_id)
         self._steer_inboxes[(channel_id, request_id)] = inbox
 
     def close_steer_inbox(self, channel_id: str, request_id: str) -> None:
-        """End steering admission without changing /stop or active ownership."""
+        """Close this owner only; queued directives cannot be consumed later.
+
+        Notify pending items independently of terminal persistence and /stop.
+        Popping the ownership key and items makes repeated/late cleanup a no-op.
+        """
         inbox = self._steer_inboxes.pop((channel_id, request_id), None)
         if inbox is not None:
             inbox.accepting = False
+            while not inbox.inbox.empty():
+                item = inbox.inbox.get_nowait()
+                inbox.inbox_events.append({
+                    "event": "closed", "sequence": item["sequence"], "at": time.time(),
+                })
+                inbox.event.clear()
+                notify_steer(item, "closed")
+
+    async def shutdown_steering(self) -> None:
+        """Best-effort receipts before graceful restart disconnects Discord."""
+        self._steering_closed = True
+        for channel_id, request_id in list(self._steer_inboxes):
+            self.close_steer_inbox(channel_id, request_id)
+        await finish_steer_notifications()
 
     def request_steer(
         self,
@@ -161,6 +187,7 @@ class ChannelStateRegistry:
         *,
         user_id: str,
         is_admin: bool = False,
+        notifier: SteerNotifier | None = None,
     ) -> str:
         """Atomically authorize and enqueue against the current request ID.
 
@@ -184,7 +211,10 @@ class ChannelStateRegistry:
             return "This turn's steering limit has been reached; message was not queued."
         inbox.inbox_sequence += 1
         sequence = inbox.inbox_sequence
-        inbox.inbox.put_nowait({"sequence": sequence, "text": message, "user_id": user_id})
+        item: dict = {"sequence": sequence, "text": message, "user_id": user_id}
+        if notifier is not None:
+            item["notifier"] = notifier
+        inbox.inbox.put_nowait(item)
         inbox.inbox_events.append({"event": "queued", "sequence": sequence, "at": time.time()})
         inbox.event.set()
         log.info(

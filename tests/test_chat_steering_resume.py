@@ -159,7 +159,13 @@ def test_checkpoint_keeps_consumed_directives_but_drops_pending_mailbox():
 
     # This receipt existed only in the process-local mailbox when the process
     # checkpointed. It must not become a surprise instruction after resume.
-    inbox.inbox.put_nowait({"sequence": 3, "text": "pending must not replay", "user_id": "12345"})
+    async def notifier(_sequence, _outcome):
+        raise AssertionError("checkpointing must not invoke transport")
+
+    inbox.inbox.put_nowait({
+        "sequence": 3, "text": "pending must not replay", "user_id": "12345",
+        "notifier": notifier,
+    })
     inbox.event.set()
     payload = snapshot_chat_turn(turn, store_blob=lambda _data: "unused", generation_seq=3)
     restored = restore_field_values(
@@ -168,6 +174,7 @@ def test_checkpoint_keeps_consumed_directives_but_drops_pending_mailbox():
 
     assert "_steer_inbox" not in payload["fields"]
     assert "_steer_inbox" not in restored
+    assert "notifier" not in str(payload)
     assert _directive_sequences(restored["messages"]) == [1, 2]
     assert "pending must not replay" not in str(restored["messages"])
 

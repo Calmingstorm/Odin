@@ -50,10 +50,11 @@ async def prepare(script, *, cap=8):
     return bot, runner, state, llm, checkpoints
 
 
-def enqueue(runner, state, text="Use the corrected plan", *, user_id=None):
+def enqueue(runner, state, text="Use the corrected plan", *, user_id=None, notifier=None):
     receipt = runner._channel_state.request_steer(
         state._ch_id, text, user_id=user_id or state.user_id,
         is_admin=user_id is not None,
+        notifier=notifier,
     )
     assert "not yet consumed" in receipt
     return receipt
@@ -351,6 +352,10 @@ async def test_safety_exit_drops_pending_with_no_replay_and_fences_persistence(
 
     _, runner, st, llm, _ = await prepare([text_response("Old answer.")])
     old_inbox = st._steer_inbox
+    notifications = []
+
+    async def notifier(sequence, outcome):
+        notifications.append((sequence, outcome))
     if exit_kind.startswith("suspend"):
         entered, release = asyncio.Event(), asyncio.Event()
 
@@ -366,7 +371,7 @@ async def test_safety_exit_drops_pending_with_no_replay_and_fences_persistence(
         monkeypatch.setattr(st.durability, "suspend", suspend_persistence)
 
         async def capacity(state, **kwargs):
-            enqueue(runner, state, "never replay this pending directive")
+            enqueue(runner, state, "never replay this pending directive", notifier=notifier)
             return "done", await runner._suspend_turn(state, LLMCapacityError("capacity"))
 
         original_call = runner._call_llm
@@ -381,7 +386,7 @@ async def test_safety_exit_drops_pending_with_no_replay_and_fences_persistence(
         entered, release = gate_first_call(monkeypatch, llm, "chat_with_tools")
         task = asyncio.create_task(runner._run_with_guards(st))
         await reach(entered)
-        enqueue(runner, st, "never replay this pending directive")
+        enqueue(runner, st, "never replay this pending directive", notifier=notifier)
         if exit_kind == "stop":
             runner._channel_state.request_stop(st._ch_id)
             release.set()
@@ -393,6 +398,9 @@ async def test_safety_exit_drops_pending_with_no_replay_and_fences_persistence(
     assert not old_inbox.accepting
     assert old_inbox.last_consumed_sequence == 0
     assert not directives(st.messages)
+    for _ in range(5):
+        await asyncio.sleep(0)
+    assert notifications == [(1, "closed")]
     # Even reusing a restored object must reconstruct, not replay, its queue.
     # This bypasses durable resume admission deliberately to test that defense.
     st.durability = TurnDurability.disabled()
@@ -402,3 +410,70 @@ async def test_safety_exit_drops_pending_with_no_replay_and_fences_persistence(
     assert st._steer_inbox is not old_inbox
     assert st.inbox_sequence == 0
     assert not directives(llm.messages_of_call(-1))
+
+
+@pytest.mark.parametrize("exit_kind", ["provider_error", "escape", "cap"])
+async def test_unconsumed_receipt_on_error_escape_and_final_budget(monkeypatch, exit_kind):
+    from src.discord.steer_notifications import finish_steer_notifications
+    from src.llm.errors import LLMAuthError
+
+    response = (LLMAuthError("test failure") if exit_kind == "provider_error"
+                else text_response("old"))
+    _, runner, st, llm, _ = await prepare([response], cap=1)
+    notifications = []
+
+    async def notify(sequence, outcome):
+        notifications.append((sequence, outcome))
+
+    entered, release = gate_first_call(monkeypatch, llm, "chat_with_tools")
+    if exit_kind == "escape":
+        async def explode(*_args):
+            raise RuntimeError("turn escaped")
+
+        monkeypatch.setattr(runner, "_check_stuck_and_record", explode)
+    elif exit_kind == "cap":
+        # The first correction was consumed on the last iteration. Another
+        # arrives while WI-5 yields, too late for the exhausted turn to drain.
+        original = st.durability.on_guard_injection
+
+        async def late_pending(state):
+            enqueue(runner, state, "second, still pending", notifier=notify)
+            await original(state)
+
+        monkeypatch.setattr(st.durability, "on_guard_injection", late_pending)
+
+    task = asyncio.create_task(runner._run_with_guards(st))
+    await reach(entered)
+    enqueue(runner, st, notifier=notify)
+    release.set()
+    if exit_kind == "escape":
+        with pytest.raises(RuntimeError, match="turn escaped"):
+            await finish(task)
+    else:
+        assert (await finish(task))[2] is True
+    await finish_steer_notifications()
+    assert notifications == ([(1, "consumed"), (2, "closed")] if exit_kind == "cap"
+                             else [(1, "closed")])
+    assert st._inbox.empty() and not st._steer_inbox.accepting
+
+
+async def test_receipt_transport_never_holds_up_turn_completion():
+    from src.discord.steer_notifications import finish_steer_notifications
+
+    _, runner, st, _, _ = await prepare([text_response("Corrected answer.")])
+    started, release, settled = asyncio.Event(), asyncio.Event(), asyncio.Event()
+
+    async def notify(_sequence, _outcome):
+        started.set()
+        await release.wait()
+        settled.set()
+
+    enqueue(runner, st, notifier=notify)
+    task = asyncio.create_task(runner._run_with_guards(st))
+    try:
+        await reach(started)
+        assert (await finish(task))[0] == "Corrected answer."
+        assert not settled.is_set()
+    finally:
+        release.set()
+        await finish_steer_notifications()

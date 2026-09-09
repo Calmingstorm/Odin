@@ -29,6 +29,7 @@ from .. import __version__
 from ..credential_redaction import check_for_secrets
 from ..odin_log import get_logger
 from .channel_state import STEER_MESSAGE_MAX_CHARS
+from .steer_notifications import SteerOutcome
 
 log = get_logger("discord")
 
@@ -453,15 +454,43 @@ def register_commands(bot) -> None:
             )
             return
         user_id = str(interaction.user.id)
+        response_ready = asyncio.Event()
+        response_sent = False
+
+        async def notify(sequence: int, outcome: SteerOutcome) -> None:
+            # Consumption/closure can win while send_message is in flight.
+            # Only this detached observer waits; the turn never does. Avoid
+            # an early edit racing the initial queued receipt and overwriting
+            # the terminal outcome with "not yet consumed".
+            await response_ready.wait()
+            try:
+                if not response_sent or interaction.is_expired():
+                    return
+                content = (
+                    f"Message consumed (sequence {sequence})."
+                    if outcome == "consumed"
+                    else f"Turn ended without consuming this message (sequence {sequence})."
+                )
+                await interaction.edit_original_response(content=content)
+            except Exception:
+                # A 15-minute token expiry (including one during the edit),
+                # deleted response or transport failure is silently dropped.
+                pass
+
         result = bot.channel_state.request_steer(
             str(interaction.channel_id),
             message,
             user_id=user_id,
             is_admin=bot.permissions.is_admin(user_id),
+            notifier=notify,
         )
         # No defer, channel lock or wait for consumption. This receipt attests
         # only to in-memory enqueueing, not execution or durable delivery.
-        await interaction.response.send_message(result, ephemeral=True)
+        try:
+            await interaction.response.send_message(result, ephemeral=True)
+            response_sent = True
+        finally:
+            response_ready.set()
 
     @bot.tree.command(name="stop", description="Stop Odin's current task in this channel")
     async def cmd_stop(interaction: discord.Interaction) -> None:
