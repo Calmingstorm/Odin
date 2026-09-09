@@ -24,6 +24,8 @@ Outcome rules: a ``tools/call`` ends ok / failed / uncertain
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import itertools
 import json
 import re
@@ -32,6 +34,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from ...odin_log import get_logger
+from ..media_result import BinaryAttachment
 from . import protocol as proto
 from .errors import (
     MCPConnectError,
@@ -1034,7 +1037,11 @@ class MCPServerConnection:
         budget = timeout if timeout is not None else self.timeout
         version = self.negotiated_version or ""
 
-        def outcome(status: str, text: str, detail: str = "") -> MCPToolOutcome:
+        def outcome(
+            status: str, text: str, detail: str = "", *,
+            image_blocks: tuple[dict, ...] = (),
+            attachments: tuple[BinaryAttachment, ...] = (),
+        ) -> MCPToolOutcome:
             return MCPToolOutcome(
                 status=status,
                 text=text,
@@ -1043,6 +1050,8 @@ class MCPServerConnection:
                 negotiated_version=version,
                 generation=generation,
                 detail=detail,
+                image_blocks=image_blocks,
+                attachments=attachments,
             )
 
         if not self.connected or self.era is None:
@@ -1113,10 +1122,14 @@ class MCPServerConnection:
             )
         if not rt.ok:
             return outcome(OUTCOME_FAILED, f"protocol violation: {rt.reason}")
-        text, is_error = _render_tool_result(result)
-        if is_error:
-            return outcome(OUTCOME_FAILED, text or "tool reported an error")
-        return outcome(OUTCOME_OK, text)
+        images: list[dict] = []
+        attachments: list[BinaryAttachment] = []
+        text, is_error = _render_tool_result(result, images=images, attachments=attachments)
+        return outcome(
+            OUTCOME_FAILED if is_error else OUTCOME_OK,
+            text or ("tool reported an error" if is_error else "(no output)"),
+            image_blocks=tuple(images), attachments=tuple(attachments),
+        )
 
     async def _call_stdio(self, params: dict, budget: float) -> dict:
         assert self.era is not None and self.negotiated_version is not None
@@ -1312,23 +1325,91 @@ class _SessionLostError(MCPProtocolError):
     rejected the session; the request was not executed."""
 
 
-def _render_tool_result(result: dict) -> tuple[str, bool]:
-    """Model-facing rendering of a tools/call result: text content joined;
-    structured content JSON-dumped when no text exists; binary content
-    described, never embedded."""
+MAX_BINARY_PARTS = 64
+MAX_VISION_IMAGES = 16
+
+
+def _image_media_type(data: bytes) -> str | None:
+    # Same supported raster signatures as analyze_image. Do not trust an MCP
+    # server's MIME claim or send SVG/arbitrary bytes to a vision adapter.
+    if data.startswith(b"\x89PNG\r\n\x1a\n"):
+        return "image/png"
+    if data.startswith(b"\xff\xd8"):
+        return "image/jpeg"
+    if data.startswith((b"GIF87a", b"GIF89a")):
+        return "image/gif"
+    if data.startswith(b"RIFF") and data[8:12] == b"WEBP":
+        return "image/webp"
+    return None
+
+
+def _render_tool_result(
+    result: dict, *, images: list[dict] | None = None,
+    attachments: list[BinaryAttachment] | None = None,
+) -> tuple[str, bool]:
+    """Render text in content order; extract bounded media out-of-band.
+
+    Production callers supply both collectors. Never stringify binary data,
+    fetch a resource URI, or confuse a local delivery failure with whether the
+    already-settled MCP operation succeeded. The wire cap covers the complete
+    JSON body/event, not just each individual content item.
+    """
     is_error = bool(result.get("isError", False))
     texts: list[str] = []
+    binary_count = 0
+
+    def binary(item: dict, key: str, kind: str, index: int) -> None:
+        nonlocal binary_count
+        binary_count += 1
+        label = f"MCP content item {index} ({kind})"
+        if binary_count > MAX_BINARY_PARTS:
+            if binary_count == MAX_BINARY_PARTS + 1:
+                texts.append(f"[Binary part limit {MAX_BINARY_PARTS} exceeded; "
+                             "remaining binary parts are not retained or sent to vision.]")
+            return
+        encoded = item.get(key)
+        if not isinstance(encoded, str) or len(encoded) > proto.WIRE_RESULT_CEILING:
+            texts.append(f"[{label}: missing/oversized base64 data; no bytes available.]")
+            return
+        try:
+            data = base64.b64decode(encoded, validate=True)
+        except (ValueError, binascii.Error):
+            texts.append(f"[{label}: invalid base64 data; no bytes available.]")
+            return
+        mime = item.get("mimeType", "application/octet-stream")
+        if not isinstance(mime, str) or not re.fullmatch(r"[\w.+-]+/[\w.+-]+", mime, re.ASCII):
+            mime = "application/octet-stream"
+        mime = mime.lower()[:127]
+        if attachments is not None:
+            attachments.append(BinaryAttachment(index, kind, mime, data))
+        else:
+            texts.append(f"[{label}: binary delivery unavailable; bytes not retained.]")
+        if kind == "image":
+            actual = _image_media_type(data)
+            if actual and images is not None and len(images) < MAX_VISION_IMAGES:
+                images.append({"type": "image", "source": {
+                    "type": "base64", "media_type": actual,
+                    "data": base64.b64encode(data).decode("ascii"),
+                }})
+                texts.append(f"[{label}: vision image {len(images)} ({actual}).]")
+            else:
+                texts.append(f"[{label}: not sent to vision "
+                             "(unsupported raster format, image limit, or no vision sink); "
+                             "see binary retrieval status.]")
+
     content = result.get("content")
     if isinstance(content, list):
-        for item in content:
+        for index, item in enumerate(content, 1):
             if isinstance(item, dict):
                 kind = item.get("type")
                 if kind == "text":
                     texts.append(str(item.get("text", "")))
                 elif kind == "image":
                     texts.append(f"[image: {item.get('mimeType', 'unknown')}]")
+                    binary(item, "data", "image", index)
                 elif kind == "audio":
                     texts.append(f"[audio: {item.get('mimeType', 'unknown')}]")
+                    binary(item, "data", "audio", index)
                 elif kind == "resource":
                     resource = item.get("resource")
                     uri = (
@@ -1337,6 +1418,11 @@ def _render_tool_result(result: dict) -> tuple[str, bool]:
                         else item.get("uri", "unknown")
                     )
                     texts.append(f"[resource: {uri}]")
+                    if isinstance(resource, dict):
+                        if isinstance(resource.get("text"), str):
+                            texts.append(resource["text"])
+                        if "blob" in resource:
+                            binary(resource, "blob", "resource", index)
                 else:
                     texts.append(f"[{kind or 'unknown'} content]")
             elif isinstance(item, str):

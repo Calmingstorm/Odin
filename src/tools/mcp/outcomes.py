@@ -17,6 +17,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
+from ..media_result import BinaryAttachment
+
 OUTCOME_OK = "ok"
 OUTCOME_FAILED = "failed"
 OUTCOME_UNCERTAIN = "uncertain"
@@ -40,6 +42,8 @@ class MCPToolOutcome:
     negotiated_version: str = ""
     generation: int = 0
     detail: str = field(default="", repr=False)
+    image_blocks: tuple[dict, ...] = field(default=(), repr=False)
+    attachments: tuple[BinaryAttachment, ...] = field(default=(), repr=False)
 
     def __post_init__(self) -> None:
         if self.status not in _VALID_STATUSES:

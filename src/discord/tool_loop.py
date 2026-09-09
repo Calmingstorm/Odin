@@ -446,6 +446,7 @@ class _LoopTurn:
     channel_id_str: str
     loop_cap: int
     _loop_details: list = field(default_factory=list)
+    pending_image_blocks: list = field(default_factory=list)
     final_text: str = ""
     completed_naturally: bool = False  # True only when a tool-free turn ended the loop
     tool_calls_made: int = 0
@@ -2618,7 +2619,22 @@ class ToolLoopRunner:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-        # Only a newly issued, live-owned computer response may repair evidence.
+        # MCP media uses the ordinary evidence path, never the computer gate.
+        if tool_result is not None and (tool_result.attachments or tool_result.image_blocks):
+            from ..tools.runtime_delivery import deliver_runtime_result
+
+            tool_result = deliver_runtime_result(
+                self._tool_executor, tool_result, tool_name=tool_name, tool_input=tool_input,
+                user_id=st.user_id, channel_id=str(st.message.channel.id),
+            )
+            result = tool_result.output
+            if tool_result.image_blocks:
+                from ..tools.media_result import tool_image_content
+
+                st.pending_image_blocks.extend(tool_image_content(
+                    list(tool_result.image_blocks), tool_name, block.id))
+
+        # Only computer responses may repair foreground evidence.
         # Historical transcript scans and legacy analyze_image never do so.
         if (
             tool_name in {"computer_session", "computer_observe", "computer_act"}
@@ -2666,10 +2682,18 @@ class ToolLoopRunner:
                 else:
                     result = "Computer observation rejected; obtain a fresh observation."
 
-        # Handle special image block return from analyze_image
-        if isinstance(result, dict) and "__image_block__" in result:
-            st.pending_image_blocks.append(result["__image_block__"])
-            result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
+        # Legacy analyze_image and plural native markers. Computer results were
+        # already consumed by their stricter freshness/ownership gate above.
+        from ..tools.media_result import image_result_parts, tool_image_content
+
+        image_parts = image_result_parts(result)
+        if image_parts is not None:
+            legacy_single = isinstance(result, dict) and "__image_block__" in result
+            result, images = image_parts
+            if legacy_single:
+                st.pending_image_blocks.extend(images)
+            else:
+                st.pending_image_blocks.extend(tool_image_content(images, tool_name, block.id))
 
         # Use structured metadata from ToolResult when available
         if tool_result is not None:
@@ -3029,20 +3053,12 @@ class ToolLoopRunner:
         # Inject pending image blocks as vision content for the next LLM call.
         # This reuses the same base64 image block format as _process_attachments.
         if st.pending_image_blocks:
-            vision_content: list[dict] = list(st.pending_image_blocks)
-            vision_content.append(
-                {
-                    "type": "text",
-                    "text": (
-                        "The image(s) above were fetched by analyze_image. "
-                        "Describe and analyze them."
-                    ),
-                }
-            )
-            st.messages.append({"role": "user", "content": vision_content})
+            from ..tools.media_result import append_image_messages
+
+            append_image_messages(st.messages, st.pending_image_blocks)
             log.info(
                 "Injected %d image block(s) into tool loop messages",
-                len(st.pending_image_blocks),
+                sum(b.get("type") == "image" for b in st.pending_image_blocks),
             )
             st.pending_image_blocks.clear()
 
@@ -3708,9 +3724,16 @@ class ToolLoopRunner:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-        # Handle image block returns from analyze_image
-        if isinstance(raw, dict) and "__image_block__" in raw:
-            raw = f"[Image loaded: {raw.get('__prompt__', '')}]"
+        # Typed MCP images keep their structured status; native image markers
+        # retain the same single/plural contract as foreground chat.
+        from ..tools.media_result import image_result_parts, tool_image_content
+
+        image_parts = image_result_parts(raw)
+        if image_parts is not None:
+            image_text, images = image_parts
+            st.pending_image_blocks.extend(tool_image_content(images, tool_name, block.id))
+            if not isinstance(raw, ToolResult):
+                raw = image_text
 
         # Make structured failure visible (see ensure_failure_visible)
         # and propagate it into the audit error field.
@@ -3770,6 +3793,11 @@ class ToolLoopRunner:
         st.messages.append({"role": "user", "content": list(tool_results)})
 
         _results_by_id = {r.get("tool_use_id"): r for r in tool_results if isinstance(r, dict)}
+        if st.pending_image_blocks:
+            from ..tools.media_result import append_image_messages
+
+            append_image_messages(st.messages, st.pending_image_blocks)
+            st.pending_image_blocks.clear()
         for _tc in response.tool_calls:
             if st._trace is not None and _tc.id not in _results_by_id:
                 st._trace.warning(
@@ -3960,7 +3988,11 @@ class ToolLoopRunner:
             from ..tools.result_validator import _is_error_result
 
             status, error = "succeeded", None
-            detail = str(result) if result is not None else ""
+            from ..tools.media_result import image_result_parts
+
+            image_parts = image_result_parts(result)
+            detail = (image_parts[0] if image_parts is not None
+                      else str(result) if result is not None else "")
             audit_metadata = None
             if isinstance(result, ToolResult):
                 detail = result.output

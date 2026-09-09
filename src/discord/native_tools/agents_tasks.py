@@ -1024,9 +1024,12 @@ class AgentTaskTools:
             )
             if isinstance(result, ToolResult):
                 return result
-            if isinstance(result, dict) and "__image_block__" in result:
-                # Agent callbacks have no native pixel transport. The foreground
-                # marker bypasses text caps, so never stringify any part of it.
+            if isinstance(result, dict) and (
+                "__image_block__" in result or "__image_blocks__" in result
+            ):
+                # Computer/native marker admission remains foreground-only.
+                # MCP uses typed ToolResult.image_blocks, consumed by the agent
+                # cycle without granting computer authority or stringifying pixels.
                 return ToolResult(
                     "Error: image results are unsupported in spawned agents; "
                     "native vision requires a supported foreground conversation.",

@@ -9,8 +9,8 @@ still fails typed inside ``manager.execute``.
 
 Outcome mapping (the durability contract):
 
-- ``ok``        → ``ToolResult(ok=True)`` with the model-facing text bounded
-                  to the standard 12K result cap.
+- ``ok``        → ``ToolResult(ok=True)``; dispatch owners retain/cap text
+                  and binary attachments, and deliver native image blocks.
 - ``failed``    → ``ok=False`` with the failure text (definite — the call did
                   not execute or the server rejected it).
 - ``uncertain`` → ``ok=False`` AND ``outcome: "uncertain"`` in
@@ -94,4 +94,7 @@ async def dispatch_mcp_tool(
         duration_ms=duration_ms,
         tool_name=tool_name,
         audit_metadata=metadata,
+        uncertain_outcome=outcome.uncertain,
+        image_blocks=outcome.image_blocks,
+        attachments=outcome.attachments,
     )
