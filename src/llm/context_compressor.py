@@ -109,10 +109,15 @@ def _hash_prefix(system: str, messages: list[dict]) -> str:
 # ------------------------------------------------------------------
 
 
+def _is_injected_directive(msg: dict) -> bool:
+    """Structural control provenance, never inferred from user-controlled text."""
+    return msg.get("provenance") in ("agent_parent", "human_steer")
+
+
 def _is_tool_message(msg: dict) -> bool:
     """True if a message contains tool_use or tool_result content blocks,
     or agent-style string tool result messages."""
-    if msg.get("provenance") == "agent_parent":
+    if _is_injected_directive(msg):
         return False
     content = msg.get("content")
     if isinstance(content, list):
@@ -132,7 +137,7 @@ def _is_tool_use_message(msg: dict) -> bool:
 
 
 def _is_tool_result_message(msg: dict) -> bool:
-    if msg.get("provenance") == "agent_parent":
+    if _is_injected_directive(msg):
         return False
     content = msg.get("content")
     if isinstance(content, list):
@@ -312,7 +317,7 @@ def summarize_iteration(iteration: list[dict]) -> str:
     outcomes: list[str] = []
 
     for msg in iteration:
-        if msg.get("provenance") == "agent_parent":
+        if _is_injected_directive(msg):
             continue
         content = msg.get("content")
         # Structured content blocks (main loop format)
@@ -445,7 +450,7 @@ def compress_tool_context(
 
     result = list(prefix) + [summary_msg]
     result.extend(
-        msg for it in to_compress for msg in it if msg.get("provenance") == "agent_parent"
+        msg for it in to_compress for msg in it if _is_injected_directive(msg)
     )
     for iteration in to_keep:
         result.extend(iteration)
@@ -546,7 +551,7 @@ def _truncate_iteration(iteration: list[dict], max_chars: int) -> tuple[list[dic
 
     strings: list[tuple[dict, str, str]] = []
     for msg in work:
-        if msg.get("provenance") == "agent_parent":
+        if _is_injected_directive(msg):
             continue
         content = msg.get("content", "")
         if isinstance(content, str):
@@ -588,7 +593,7 @@ def _is_emergency_summary(msg: dict) -> bool:
     content = msg.get("content")
     return (
         msg.get("role") == "user"
-        and msg.get("provenance") != "agent_parent"
+        and not _is_injected_directive(msg)
         and isinstance(content, str)
         and content.startswith(_EMERGENCY_SUMMARY_PREFIX)
         and content.endswith(_EMERGENCY_SUMMARY_SUFFIX)
@@ -819,7 +824,7 @@ def emergency_compress_for_window(
         prefix = list(raw_prefix)
         boundary_controls: list[dict] = []
         while len(prefix) > 1:
-            if prefix[-1].get("provenance") == "agent_parent":
+            if _is_injected_directive(prefix[-1]):
                 boundary_controls.append(prefix.pop())
             elif _is_emergency_summary(prefix[-1]):
                 body = _emergency_summary_body(prefix.pop())
@@ -831,11 +836,11 @@ def emergency_compress_for_window(
         carried_summaries.reverse()
 
     # Controls between cycles are immutable too, not ordinary tool output.
-    controls = [msg for it in iterations for msg in it if msg.get("provenance") == "agent_parent"]
+    controls = [msg for it in iterations for msg in it if _is_injected_directive(msg)]
     if controls:
         prefix.extend(controls)
         iterations = [
-            [msg for msg in it if msg.get("provenance") != "agent_parent"] for it in iterations
+            [msg for msg in it if not _is_injected_directive(msg)] for it in iterations
         ]
         iterations = [it for it in iterations if it]
     prefix_chars = estimate_message_chars(prefix)

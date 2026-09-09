@@ -1138,11 +1138,11 @@ Source: [`src/tools/defs/output_delivery.py`](https://github.com/Calmingstorm/Od
 
 **Core:** No
 
-<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Read retained tool evidence without re-running its tool. Follow cursor until truncated=false. Pages are contiguous head-only; initial labelled tails are context only. Evidence expires 24 hours after capture (fixed TTL), with per-result/global quotas. Original caller, channel, tool permission and host scope are rechecked; a cursor is not permission. For process spools use the returned manage_process retrieval arguments instead.</pre>
+<pre v-pre style="white-space: pre-wrap; overflow-wrap: anywhere; font: inherit;">Read retained tool evidence without re-running its tool. Follow cursor until truncated=false. Pages are contiguous head-only; initial labelled tails are context only. Evidence expires 24 hours after capture (fixed TTL), with per-result/global quotas. Original caller, channel, tool permission and host scope are rechecked; a cursor is not permission. Binary attachments return data_base64 pages with byte offsets, MIME and SHA-256; decode each page and concatenate bytes in order. No audio understanding. For process spools use the returned manage_process retrieval arguments instead.</pre>
 
 <p v-pre><small>[affordances: cost=medium risk=low latency=seconds]</small></p>
 
 | Name | Type | Required | Description |
 | --- | --- | --- | --- |
 | <code>cursor</code> | string | Yes | Exact cursor returned by tool output delivery. |
-| <code>limit</code> | integer | No | Maximum code points; envelope budget may yield fewer.<br>Constraints: <code>&#123;&quot;minimum&quot;:4,&quot;maximum&quot;:8000,&quot;default&quot;:4000&#125;</code> |
+| <code>limit</code> | integer | No | Maximum text/base64 characters; envelope budget may yield fewer.<br>Constraints: <code>&#123;&quot;minimum&quot;:4,&quot;maximum&quot;:8000,&quot;default&quot;:4000&#125;</code> |

@@ -392,10 +392,11 @@ class TurnDurability:
         await asyncio.to_thread(self._checkpoint_sync, st, progressed=True)
 
     async def on_guard_injection(self, st) -> None:
-        """WI-5: consumed one-shot flags durable before the LLM retry.
+        """WI-5: consumed controls durable before the LLM retry.
 
-        Not "real progress" — guard nudges must not extend the resumable
-        TTL the way completed tool batches do.
+        Includes user steering appended at a safe boundary. Neither guard
+        nudges nor queued human corrections establish completed tool progress:
+        do not extend the resumable TTL or advance generation/intent counters.
         """
         if not self.enabled:
             return

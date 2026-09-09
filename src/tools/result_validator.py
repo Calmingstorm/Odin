@@ -16,6 +16,8 @@ import json
 import logging
 from dataclasses import dataclass, field
 
+from .media_result import BinaryAttachment
+
 log = logging.getLogger("odin.tools.result_validator")
 
 RESULT_MAX_CHARS = 12_000
@@ -101,6 +103,11 @@ class ToolResult:
     # Non-model-facing structured record for the audit log (never in output).
     # Bounded, non-sensitive enums/metadata only — no prompts, IDs, or payloads.
     audit_metadata: dict | None = None
+    # Out-of-band media, deliberately absent from str()/as_dict()/repr().
+    # Dispatch owners retain attachments before exposing their references and
+    # deliver images through native vision, never through string truncation.
+    image_blocks: tuple[dict, ...] = field(default=(), repr=False)
+    attachments: tuple[BinaryAttachment, ...] = field(default=(), repr=False)
 
     def __str__(self) -> str:
         return self.output

@@ -666,8 +666,38 @@ class ToolExecutor:
                     return False
         return True
 
+    def retain_attachments(self, attachments, *, tool_name, user_id, channel_id=None,
+                           status="succeeded"):
+        """Channel-neutral binary retention using the text-output access fences."""
+        from datetime import UTC, datetime
+
+        from .output_retention import RetentionError
+
+        owner, channel = delivery_scope.get()
+        owner = str(user_id or owner or "")
+        channel = str(channel_id if channel_id is not None else channel)
+        channel = request_delivery_channel.get() or channel
+        # Do not issue an unusable cursor, even for a tiny attachment.
+        if not self._authorize_output("get_tool_output", (), owner):
+            raise RetentionError("Retrieval is not authorized.")
+        hosts = list((accessed_hosts.get() or {}).values())
+        if request_scope_id.get():
+            hosts.append({"scope": request_scope_id.get()})
+        if not self._authorize_output(tool_name, hosts, owner):
+            raise RetentionError("Originating output scope is no longer authorized.")
+        manifest = self._ensure_output_store().retain_binary_bundle(
+            attachments, owner=owner, channel=channel, tool=tool_name, hosts=hosts, status=status)
+        return {
+            "kind": "tool_attachment_manifest", "retention": "retained", "status": status,
+            "result_id": manifest.result_id, "attachment_count": len(attachments),
+            "expires_at": datetime.fromtimestamp(manifest.expires_at, UTC).isoformat(),
+            "retrieval": {"tool": "get_tool_output", "arguments": {
+                "cursor": f"{manifest.result_id}:0",
+            }},
+        }
+
     def deliver_output(self, text, *, tool_name, tool_input, user_id,
-                       channel_id=None, status="succeeded"):
+                       channel_id=None, status="succeeded", budget=None):
         # These have their own byte-faithful or bounded retention contracts.
         # Do not re-scrub process byte offsets or persist a second spool copy.
         if tool_name == "read_file" or isinstance(text, DeliveredOutput):
@@ -675,8 +705,9 @@ class ToolExecutor:
         if tool_name == "manage_process" and tool_input.get("action") == "poll":
             return text
         config = getattr(self, "config", None)
+        budget = get_delivery_budget(config) if budget is None else budget
         if config is None:
-            return deliver(text, tool=tool_name, status=status)
+            return deliver(text, tool=tool_name, status=status, budget=budget)
         owner, channel = delivery_scope.get()
         owner = str(user_id or owner or "")
         channel = str(channel_id if channel_id is not None else channel)
@@ -684,7 +715,7 @@ class ToolExecutor:
         hosts = list((accessed_hosts.get() or {}).values())
         if request_scope_id.get():
             hosts.append({"scope": request_scope_id.get()})
-        if ((len(text) > get_delivery_budget(config) or getattr(text, "recovery_required", False))
+        if ((len(text) > budget or getattr(text, "recovery_required", False))
                 and (not tool_scope_allows("get_tool_output")
                      or self.check_permission("get_tool_output", owner)
                      or (self._builtin_policy is not None
@@ -692,10 +723,10 @@ class ToolExecutor:
             from .output_delivery import delivery_failure
 
             return delivery_failure("Retrieval is not authorized; no continuation exists.", status,
-                                    text=text, budget=get_delivery_budget(config))
+                                    text=text, budget=budget)
         return deliver(text, store=self._ensure_output_store(), owner=owner, channel=channel,
                        tool=tool_name, hosts=hosts, status=status,
-                       budget=get_delivery_budget(config))
+                       budget=budget)
 
     async def _exec_remote_target(self, target, command: str, timeout: int):
         """Process-manager transport using one exact leased target."""

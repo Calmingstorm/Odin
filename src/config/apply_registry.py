@@ -276,9 +276,10 @@ SECTIONS: dict[str, SectionSpec] = {
         "live_apply",
         "Model Context Protocol servers and tool publication.",
         owner="mcp",
-        apply_handler="POST/PUT/DELETE /api/mcp/servers*, POST /api/mcp/enabled",
+        apply_handler="POST/PUT/DELETE /api/mcp/servers*, POST /api/mcp/enabled, "
+        "POST /api/mcp/limits",
         activation_policy="Managed live through the dedicated /api/mcp routes: "
-        "server CRUD, the global switch, reconnect, and tools refresh persist "
+        "server CRUD, publication limits, the global switch, reconnect, and tools refresh persist "
         "desired state to this file and reconcile the running control plane "
         "in the same operation. Direct file edits apply on restart.",
     ),
@@ -428,6 +429,27 @@ _IDENTITY_CONSUMERS: tuple[Consumer, ...] = (
 )
 
 FIELDS: dict[str, FieldSpec] = {
+    "mcp.max_published_tools_per_server": FieldSpec(
+        label="Published tools per server",
+        apply_mode="live_read",
+        owner="mcp",
+        apply_handler="POST /api/mcp/limits",
+        unit="tools",
+        description="Maximum tools one MCP server may publish (1-128). Read at each "
+        "publication or tools refresh; saving does not evict existing tools. "
+        "The global MCP limit also applies.",
+    ),
+    "mcp.max_published_tools_global": FieldSpec(
+        label="Published tools across MCP",
+        apply_mode="live_read",
+        owner="mcp",
+        apply_handler="POST /api/mcp/limits",
+        unit="tools",
+        description="Maximum published tools across all MCP servers (1-256), excluding "
+        "built-in tools and skills. Read at each publication or tools refresh; saving "
+        "does not evict existing tools. Larger catalogs consume more model context "
+        "and may exceed a provider's total tool limit.",
+    ),
     "computer.enabled": FieldSpec(
         apply_mode="live_apply",
         owner="computer",
@@ -2231,6 +2253,7 @@ def build_meta_payload(
     boot_dump: dict[str, Any] | None = None,
     generated_at: str | None = None,
     persistence_error: str | None = None,
+    image_model_defaults: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """The full ``/api/config/meta`` document."""
     boot_flat = dict(flatten(boot_dump)) if boot_dump is not None else {}
@@ -2266,6 +2289,9 @@ def build_meta_payload(
         "schema_version": SCHEMA_VERSION,
         "revision": desired_revision,
         "generated_at": generated_at,
+        # Source-presence intent is supplied by the route, never inferred from
+        # this resolved dump. This metadata is not part of the Config schema.
+        "image_model_defaults": image_model_defaults,
         "fields": fields,
         "status": {
             "counts": counts,

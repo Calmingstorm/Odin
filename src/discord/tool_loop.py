@@ -81,6 +81,7 @@ if TYPE_CHECKING:
     from .response_guards import StuckLoopTracker
     from .tool_catalog import ToolCatalog
     from .turn_recorder import TurnRecorder
+from .channel_state import ChatTurnInbox
 from .delivery import DISCORD_MAX_LEN, TOOL_STATUS_LABELS
 from .llm_gateway import LLMServingIdentity
 from .mcp_dispatch import dispatch_mcp_tool, is_mcp_tool
@@ -105,6 +106,7 @@ from .response_guards import (
     wait_iteration_fingerprint,
     wait_target_alive,
 )
+from .steer_notifications import notify_steer
 from .tool_loop_helpers import (
     _ALLOWED_WEBHOOK_IDS,
     _EMPTY_RESPONSE_FALLBACK,
@@ -423,6 +425,55 @@ class _ChatTurn:
     # RECONSTRUCTED in the checkpoint codec: a resumed turn gets a fresh
     # handle bound to the resume lease, never a deserialized one.
     durability: TurnDurability = field(default_factory=TurnDurability.disabled)
+    # One request-owned object, also held by ChannelStateRegistry. Queue,
+    # Event and sequence metadata must not be copied between producer/consumer.
+    # Appended to preserve existing positional constructor arguments.
+    _steer_inbox: ChatTurnInbox = field(default_factory=ChatTurnInbox, repr=False)
+
+    @property
+    def _inbox(self) -> asyncio.Queue:
+        return self._steer_inbox.inbox
+
+    @property
+    def _inbox_event(self) -> asyncio.Event:
+        return self._steer_inbox.event
+
+    @property
+    def inbox_sequence(self) -> int:
+        return self._steer_inbox.inbox_sequence
+
+    @property
+    def last_consumed_sequence(self) -> int:
+        return self._steer_inbox.last_consumed_sequence
+
+    @property
+    def inbox_events(self) -> list[dict]:
+        return self._steer_inbox.inbox_events
+
+    def drain_inbox(self) -> bool:
+        """Agent.drain_inbox's FIFO/exactly-once contract, with human provenance.
+
+        An empty inbox is a true no-op: no messages, guard changes, timestamps,
+        persistence, status updates, tasks or extra generation are produced.
+        """
+        consumed = False
+        while not self._inbox.empty():
+            item = self._inbox.get_nowait()
+            sequence = item["sequence"]
+            self.messages.append({
+                "role": "user",
+                "content": f"[Human steering from user {item['user_id']}] {item['text']}",
+                "provenance": "human_steer",
+                "sequence": sequence,
+                "user_id": item["user_id"],
+            })
+            self._steer_inbox.last_consumed_sequence = sequence
+            self.inbox_events.append({"event": "consumed", "sequence": sequence, "at": time.time()})
+            notify_steer(item, "consumed")
+            consumed = True
+        if consumed:
+            self._inbox_event.clear()
+        return consumed
 
 
 @dataclass
@@ -446,6 +497,7 @@ class _LoopTurn:
     channel_id_str: str
     loop_cap: int
     _loop_details: list = field(default_factory=list)
+    pending_image_blocks: list = field(default_factory=list)
     final_text: str = ""
     completed_naturally: bool = False  # True only when a tool-free turn ended the loop
     tool_calls_made: int = 0
@@ -712,12 +764,28 @@ class ToolLoopRunner:
         ``st.iteration`` — the restored transcript already contains every
         earlier generation."""
         st._cancel = self._channel_state.set_active_request(st._ch_id, st._req_id, st._cancel)
+        # Only consumed directives survive in the checkpoint transcript. Never
+        # resurrect a pending mailbox from a suspended/replaced process owner.
+        last_sequence = max(
+            (m.get("sequence", 0) for m in st.messages if m.get("provenance") == "human_steer"),
+            default=0,
+        )
+        st._steer_inbox = ChatTurnInbox(
+            requester_id=st.user_id,
+            inbox_sequence=last_sequence,
+            last_consumed_sequence=last_sequence,
+        )
+        self._channel_state.bind_steer_inbox(st._ch_id, st._req_id, st._steer_inbox)
         set_turn(
             turn_id=st._trajectory.message_id or None,
             source=st._trajectory.source,
             channel_id=st._trajectory.channel_id,
         )
-        await self._delivery.set_status("Resuming preserved work...", task_start=True)
+        try:
+            await self._delivery.set_status("Resuming preserved work...", task_start=True)
+        except BaseException:
+            self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
+            raise
         return await self._run_with_guards(st)
 
     async def _run_with_guards(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
@@ -780,6 +848,7 @@ class ToolLoopRunner:
             # endpoint 500s left six dead turns with no trajectory at all).
             # Record bounded, clean up, re-raise — the user-facing message
             # is intake_pipeline's job, not ours.
+            self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
             try:
                 await self._turn_recorder._save_turn_trajectory(
                     st._trajectory, error=_error_summary(exc), trace=st.trace
@@ -801,6 +870,7 @@ class ToolLoopRunner:
             raise
         finally:
             # A suspended durable turn still owns its lineage and may resume.
+            self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
             await self._stop_computer_turn(st)
             if computer_stop_observer is not None:
                 computer_stop_observer.cancel()
@@ -818,6 +888,8 @@ class ToolLoopRunner:
         Starts from ``st.iteration``: 0 for a fresh turn (unchanged), the
         interrupted generation's index for a resumed one — the restored
         transcript already carries everything before it."""
+        if st.drain_inbox():
+            await st.durability.on_guard_injection(st)
         entry_outcome = await self._judge_entry_stuck(st)
         if entry_outcome is not None:
             kind, val = entry_outcome
@@ -830,6 +902,9 @@ class ToolLoopRunner:
             st.iteration = iteration
             if st._cancel.is_set():
                 return self._stopped(st, "iteration_start")
+
+            if st.drain_inbox():
+                await st.durability.on_guard_injection(st)
 
             # ONE capture of this uninterrupted generation's serving
             # identity: soft compaction, preflight, breaker admission, and
@@ -893,6 +968,13 @@ class ToolLoopRunner:
             # loop already uses this stricter form; matching it prevents an
             # empty-tool_use response from skipping finalization and re-looping.
             if not llm_resp.tool_calls:
+                if st.drain_inbox():
+                    # The text predates the correction. Keep generation/usage
+                    # recording, but do not publish it or spend a guard budget.
+                    await st.durability.on_guard_injection(st)
+                    if iteration + 1 == st.chat_cap:
+                        return await self._finalize_steer_cap_hit(st)
+                    continue
                 kind, val = await self._finalize_or_retry(st, llm_resp)
                 if kind == "done":
                     return val
@@ -921,6 +1003,17 @@ class ToolLoopRunner:
             outcome = await self._post_iteration(st, tool_calls, tool_results)
             if outcome is not None:
                 return outcome[1]
+
+            if st.drain_inbox():
+                # The whole batch and its native call/result pairs have settled.
+                # Replan before an old-plan wait judgment or skill handoff.
+                # Do not resurrect a skipped judgment on durable resume; the
+                # fingerprint and one-shot warned budget remain untouched.
+                st.wait_judgment_pending = False
+                await st.durability.on_guard_injection(st)
+                if iteration + 1 == st.chat_cap:
+                    return await self._finalize_steer_cap_hit(st)
+                continue
 
             if wait_iteration:
                 outcome = await self._judge_wait_stuck(st, tool_calls, tool_results)
@@ -1091,6 +1184,8 @@ class ToolLoopRunner:
         # content-derived debug provenance and collides for repeated messages.
         _req_id = str(_trajectory.message_id or req_hash)
         _cancel = self._channel_state.set_active_request(_ch_id, _req_id, asyncio.Event())
+        _steer_inbox = ChatTurnInbox(requester_id=user_id)
+        self._channel_state.bind_steer_inbox(_ch_id, _req_id, _steer_inbox)
 
         # Durable-turn admission: Discord chat turns only, resolved the same
         # way the trajectory source is (web/API turns share this runner via
@@ -1103,13 +1198,17 @@ class ToolLoopRunner:
             and self._turn_store is not None
             and _trajectory.source == "discord"
         ):
-            durability = await TurnDurability.admit(
-                self._turn_store,  # type: ignore[arg-type]
-                message=message,
-                system_prompt=system_prompt,
-                tools=tools,
-                session_snapshot={"history_len": len(history)},
-            )
+            try:
+                durability = await TurnDurability.admit(
+                    self._turn_store,  # type: ignore[arg-type]
+                    message=message,
+                    system_prompt=system_prompt,
+                    tools=tools,
+                    session_snapshot={"history_len": len(history)},
+                )
+            except BaseException:
+                self._channel_state.close_steer_inbox(_ch_id, _req_id)
+                raise
 
         return _ChatTurn(
             message=message,
@@ -1131,6 +1230,7 @@ class ToolLoopRunner:
             _cancel=_cancel,
             _ch_id=_ch_id,
             _req_id=_req_id,
+            _steer_inbox=_steer_inbox,
             durability=durability,
         )
 
@@ -1445,6 +1545,7 @@ class ToolLoopRunner:
 
     def _stopped(self, st: _ChatTurn, where: str) -> tuple[str, bool, bool, list[str], bool]:
         log.info("Task stopped by /stop in channel %s at %s", st._ch_id, where)
+        self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
         # Carry the cancellation fact past _clear_active (which clears the
         # shared event) so terminal settlement records TERMINAL_CANCELLED —
         # a cancelled turn must never look resumable or completed.
@@ -1974,6 +2075,7 @@ class ToolLoopRunner:
         """
         err_msg = format_user_facing_error(api_err)
         log.error("LLM API call failed: %s", err_msg, exc_info=api_err)
+        self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
         await self._turn_recorder._save_turn_trajectory(
             st._trajectory, error=err_msg, trace=st.trace
         )
@@ -1984,6 +2086,7 @@ class ToolLoopRunner:
         """Suspend with preserved work; falls back to the plain error when
         suspension persistence itself fails (no false preservation claims)."""
         reason = str(cap_err) or "capacity exhausted"
+        self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
         preserved = await st.durability.suspend(st, reason)
         if not preserved:
             return await self._llm_error_done(st, cap_err)
@@ -2086,6 +2189,7 @@ class ToolLoopRunner:
         if st.stuck_tracker.check():
             if st.stuck_tracker.warned:
                 log.warning("Stuck loop confirmed after warning — terminating tool loop")
+                self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
                 await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
                 await self._turn_recorder._emit_lifecycle_event(
                     "loop.stuck",
@@ -2148,6 +2252,7 @@ class ToolLoopRunner:
         last_fp = st.stuck_tracker.last_fingerprint
         if st.stuck_tracker.warned:
             log.warning("Restored tracker already confirmed-stuck — terminating before generation")
+            self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
             await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
             await self._turn_recorder._emit_lifecycle_event(
                 "loop.stuck",
@@ -2251,6 +2356,7 @@ class ToolLoopRunner:
             return None
         if st.stuck_tracker.warned:
             log.warning("Frozen wait repetition confirmed after warning — terminating tool loop")
+            self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
             await self._turn_recorder._save_turn_trajectory(st._trajectory, trace=st.trace)
             await self._turn_recorder._emit_lifecycle_event(
                 "loop.stuck",
@@ -2392,11 +2498,29 @@ class ToolLoopRunner:
         # Tier 3: Completion classifier — uses LLM to judge whether
         # the user's request was fully addressed.
         if st.tools_used_in_loop and st.continuation_count < st.max_continuations:
+            completion_request = st.message.content
+            if st.last_consumed_sequence:
+                # A correction can replace the original goal. Do not let the
+                # classifier force completion of a goal the human withdrew.
+                directives = "\n".join(
+                    m["content"] for m in st.messages if m.get("provenance") == "human_steer"
+                )
+                completion_request += (
+                    "\n\nHuman steering received during this turn (later corrections "
+                    "supersede conflicting earlier requests):\n" + directives
+                )
             is_complete, reason = await self._completion_classifier.classify(
-                st.message.content,
+                completion_request,
                 llm_resp.text or "",
                 st.tools_used_in_loop,
             )
+            # classify() yields: a human may have corrected the request while
+            # it was judging the old answer. Check before spending guard budget.
+            if st.drain_inbox():
+                if st.iteration + 1 == st.chat_cap:
+                    await st.durability.on_guard_injection(st)
+                    return ("done", await self._finalize_steer_cap_hit(st))
+                return ("retry", None)
             if not is_complete:
                 log.info(
                     "Completion classifier: INCOMPLETE (%d/%d) "
@@ -2437,6 +2561,11 @@ class ToolLoopRunner:
             _final = ""
         else:
             _final = _EMPTY_RESPONSE_FALLBACK
+        # No await separates the last drain (caller/classifier above) from
+        # this admission fence. A slash command during the asynchronous save
+        # must not receive a queued receipt for an already-final answer. Keep
+        # the existing /stop and active-request cleanup timing unchanged.
+        self._channel_state.close_steer_inbox(st._ch_id, st._req_id)
         await self._turn_recorder._save_turn_trajectory(
             st._trajectory,
             final_response=_final,
@@ -2618,7 +2747,22 @@ class ToolLoopRunner:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-        # Only a newly issued, live-owned computer response may repair evidence.
+        # MCP media uses the ordinary evidence path, never the computer gate.
+        if tool_result is not None and (tool_result.attachments or tool_result.image_blocks):
+            from ..tools.runtime_delivery import deliver_runtime_result
+
+            tool_result = deliver_runtime_result(
+                self._tool_executor, tool_result, tool_name=tool_name, tool_input=tool_input,
+                user_id=st.user_id, channel_id=str(st.message.channel.id),
+            )
+            result = tool_result.output
+            if tool_result.image_blocks:
+                from ..tools.media_result import tool_image_content
+
+                st.pending_image_blocks.extend(tool_image_content(
+                    list(tool_result.image_blocks), tool_name, block.id))
+
+        # Only computer responses may repair foreground evidence.
         # Historical transcript scans and legacy analyze_image never do so.
         if (
             tool_name in {"computer_session", "computer_observe", "computer_act"}
@@ -2666,10 +2810,18 @@ class ToolLoopRunner:
                 else:
                     result = "Computer observation rejected; obtain a fresh observation."
 
-        # Handle special image block return from analyze_image
-        if isinstance(result, dict) and "__image_block__" in result:
-            st.pending_image_blocks.append(result["__image_block__"])
-            result = f"[Image loaded. Analyze it with this instruction: {result['__prompt__']}]"
+        # Legacy analyze_image and plural native markers. Computer results were
+        # already consumed by their stricter freshness/ownership gate above.
+        from ..tools.media_result import image_result_parts, tool_image_content
+
+        image_parts = image_result_parts(result)
+        if image_parts is not None:
+            legacy_single = isinstance(result, dict) and "__image_block__" in result
+            result, images = image_parts
+            if legacy_single:
+                st.pending_image_blocks.extend(images)
+            else:
+                st.pending_image_blocks.extend(tool_image_content(images, tool_name, block.id))
 
         # Use structured metadata from ToolResult when available
         if tool_result is not None:
@@ -3029,20 +3181,12 @@ class ToolLoopRunner:
         # Inject pending image blocks as vision content for the next LLM call.
         # This reuses the same base64 image block format as _process_attachments.
         if st.pending_image_blocks:
-            vision_content: list[dict] = list(st.pending_image_blocks)
-            vision_content.append(
-                {
-                    "type": "text",
-                    "text": (
-                        "The image(s) above were fetched by analyze_image. "
-                        "Describe and analyze them."
-                    ),
-                }
-            )
-            st.messages.append({"role": "user", "content": vision_content})
+            from ..tools.media_result import append_image_messages
+
+            append_image_messages(st.messages, st.pending_image_blocks)
             log.info(
                 "Injected %d image block(s) into tool loop messages",
-                len(st.pending_image_blocks),
+                sum(b.get("type") == "image" for b in st.pending_image_blocks),
             )
             st.pending_image_blocks.clear()
 
@@ -3066,6 +3210,23 @@ class ToolLoopRunner:
             self._clear_active(st)
             return ("done", (skill_output, False, False, st.tools_used_in_loop, True))
         return None
+
+    async def _finalize_steer_cap_hit(
+        self, st: _ChatTurn
+    ) -> tuple[str, bool, bool, list[str], bool]:
+        """A consumed correction is not a completed correction without a generation."""
+        self._clear_active(st)
+        text = (
+            "Steering message consumed, but no chat iteration budget remains to replan. "
+            "The correction has not been acted on. Send a new message to continue."
+        )
+        await self._turn_recorder._save_turn_trajectory(
+            st._trajectory,
+            error=text,
+            tools_used=st.tools_used_in_loop,
+            trace=st.trace,
+        )
+        return (text, False, True, st.tools_used_in_loop, False)
 
     async def _finalize_cap_hit(self, st: _ChatTurn) -> tuple[str, bool, bool, list[str], bool]:
         """The for-loop fell through: iteration cap exhausted."""
@@ -3708,9 +3869,16 @@ class ToolLoopRunner:
 
         elapsed_ms = int((time.monotonic() - t0) * 1000)
 
-        # Handle image block returns from analyze_image
-        if isinstance(raw, dict) and "__image_block__" in raw:
-            raw = f"[Image loaded: {raw.get('__prompt__', '')}]"
+        # Typed MCP images keep their structured status; native image markers
+        # retain the same single/plural contract as foreground chat.
+        from ..tools.media_result import image_result_parts, tool_image_content
+
+        image_parts = image_result_parts(raw)
+        if image_parts is not None:
+            image_text, images = image_parts
+            st.pending_image_blocks.extend(tool_image_content(images, tool_name, block.id))
+            if not isinstance(raw, ToolResult):
+                raw = image_text
 
         # Make structured failure visible (see ensure_failure_visible)
         # and propagate it into the audit error field.
@@ -3770,6 +3938,11 @@ class ToolLoopRunner:
         st.messages.append({"role": "user", "content": list(tool_results)})
 
         _results_by_id = {r.get("tool_use_id"): r for r in tool_results if isinstance(r, dict)}
+        if st.pending_image_blocks:
+            from ..tools.media_result import append_image_messages
+
+            append_image_messages(st.messages, st.pending_image_blocks)
+            st.pending_image_blocks.clear()
         for _tc in response.tool_calls:
             if st._trace is not None and _tc.id not in _results_by_id:
                 st._trace.warning(
@@ -3960,7 +4133,11 @@ class ToolLoopRunner:
             from ..tools.result_validator import _is_error_result
 
             status, error = "succeeded", None
-            detail = str(result) if result is not None else ""
+            from ..tools.media_result import image_result_parts
+
+            image_parts = image_result_parts(result)
+            detail = (image_parts[0] if image_parts is not None
+                      else str(result) if result is not None else "")
             audit_metadata = None
             if isinstance(result, ToolResult):
                 detail = result.output

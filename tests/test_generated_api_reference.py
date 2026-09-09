@@ -26,7 +26,7 @@ def test_committed_api_reference_is_byte_identical():
 def test_routes_exactly_match_characterization_method_path_name_and_order():
     rows = reference.collect_rest_routes()
     assert [(r.method, r.path, r.handler_name) for r in rows] == EXPECTED_ROUTES
-    assert len(rows) == 223
+    assert len(rows) == 225
     assert len({(r.method, r.path) for r in rows}) == len(rows)
     rendered = reference.render().split("## Other HTTP and WebSocket routes", 1)[0]
     table = [line.split(" | ") for line in rendered.splitlines() if line.startswith("| ")][2:]
@@ -72,6 +72,8 @@ def test_every_purpose_and_owner_come_from_the_registered_handler():
         ("GET", "/api/ollama/models", True, False),
         ("POST", "/api/ollama/model", True, False),
         ("GET", "/api/config", True, False),
+        ("POST", "/api/config/image-models", True, False),
+        ("POST", "/api/mcp/limits", True, False),
         ("POST", "/api/computer/reconcile", True, False),
         ("GET", "/api/sessions/token-usage", True, True),
         ("GET", "/api/host-access", True, True),
@@ -186,7 +188,7 @@ def test_generation_does_not_load_config_start_services_or_read_ui(monkeypatch):
     import socket
 
     from src import config
-    from src.config import schema
+    from src.config import image_defaults, schema
     from src.health.server import HealthServer
 
     def forbidden(*args, **kwargs):
@@ -194,13 +196,14 @@ def test_generation_does_not_load_config_start_services_or_read_ui(monkeypatch):
 
     monkeypatch.setattr(config, "_load_env", forbidden)
     monkeypatch.setattr(schema, "load_config", forbidden)
+    monkeypatch.setattr(image_defaults, "read_image_model_metadata", forbidden)
     monkeypatch.setattr(HealthServer, "start", forbidden)
     monkeypatch.setattr(socket.socket, "connect", forbidden)
     monkeypatch.setattr(socket.socket, "bind", forbidden)
     # Constructors can register routes but must not inspect UI assets on disk.
     monkeypatch.setattr(reference.Path, "is_dir", forbidden)
     monkeypatch.setattr(reference.Path, "is_file", forbidden)
-    assert "**223 REST registrations**" in reference.render()
+    assert "**225 REST registrations**" in reference.render()
 
 
 def test_cli_is_offline_and_works_outside_repo_without_git(tmp_path):

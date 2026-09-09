@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 
 
-def compact_retained_output(text: str) -> str | None:
+def compact_retained_output(text: str, *, _with_related: bool = True) -> str | None:
     """Return a minimal valid retrieval envelope, or None for ordinary content.
 
     The pointer rewinds to the START of the removed page, not its continuation:
@@ -14,8 +14,13 @@ def compact_retained_output(text: str) -> str | None:
     fit, its existing admission failure is safer than destroying the pointer.
     """
     source = text
+    related = None
     if "\n[output retention] " in text:
-        source = text.rsplit("\n[output retention] ", 1)[1]
+        body, source = text.rsplit("\n[output retention] ", 1)
+        # MCP media can have both a retained text body and a separately
+        # admitted attachment manifest. Preserve BOTH after removing previews.
+        if _with_related:
+            related = compact_retained_output(body, _with_related=False)
     try:
         value = json.loads(source)
     except (ValueError, TypeError):
@@ -24,7 +29,11 @@ def compact_retained_output(text: str) -> str | None:
         return None
     if value.get("kind") == "tool_output_compacted":
         return text
-    if value.get("kind") == "tool_output" and value.get("retention") == "retained":
+    if value.get("kind") == "tool_attachment_manifest":
+        value = {**value, "kind": "tool_output", "start": 0}
+    if value.get("kind") in ("tool_output", "tool_attachment_page") and (
+        value.get("retention") == "retained"
+    ):
         result_id, start = value.get("result_id"), value.get("start")
         if not isinstance(result_id, str) or type(start) is not int or start < 0:
             return None
@@ -57,4 +66,6 @@ def compact_retained_output(text: str) -> str | None:
         compact["expires_at"] = value["expires_at"]
     if value.get("exit_code") is not None:
         compact["exit_code"] = value["exit_code"]
+    if related is not None:
+        compact["related_retained_output"] = json.loads(related)
     return json.dumps(compact, ensure_ascii=True, separators=(",", ":"))

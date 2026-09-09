@@ -349,6 +349,43 @@ export default {
                   </div>
 
                   <div v-else class="cfgc-field-groups">
+                    <section v-if="section === 'image'" class="cfgc-field-group nested cfgc-image-models" aria-label="Image model defaults">
+                      <header class="cfgc-field-group-header">
+                        <div>
+                          <strong>Image model defaults</strong>
+                          <p>Follow shipped defaults or pin the current runtime model.</p>
+                          <p id="cfgc-image-model-save-note">Changes save immediately, without saving drafts. Edited model drafts remain unsaved.</p>
+                        </div>
+                        <button type="button" class="btn btn-ghost text-xs" :disabled="saving" @click="refreshImageModelMetadata">
+                          <odin-icon name="refresh" :size="13" /> Refresh status
+                        </button>
+                      </header>
+                      <p v-if="imageModelError" class="cfgc-image-model-notice cfgc-field-error" role="alert">{{ imageModelError }}</p>
+                      <p v-if="!meta?.image_model_defaults" class="cfgc-image-model-notice">Image model metadata is unavailable.</p>
+                      <div class="cfgc-fields">
+                        <div v-for="leaf in imageModelLeaves" :key="leaf" class="cfgc-field" :data-image-model="leaf">
+                          <div class="cfgc-field-copy">
+                            <span class="cfgc-field-label" :id="'cfgc-image-model-label-' + leaf">{{ leaf === 'image_model' ? 'Image model' : 'Outer model' }}</span>
+                            <code>image.openai.{{ leaf }}</code>
+                          </div>
+                          <div class="cfgc-field-control cfgc-image-model-control">
+                            <div class="cfgc-image-model-effective">
+                              <code>{{ meta?.image_model_defaults?.[leaf]?.effective ?? 'Unavailable' }}</code>
+                              <span class="cfgc-image-model-status">{{ meta?.image_model_defaults?.[leaf]?.status === 'follow' ? 'Following defaults' : meta?.image_model_defaults?.[leaf]?.status === 'pin' ? 'Pinned' : 'Unavailable' }}</span>
+                            </div>
+                            <div class="cfgc-image-model-choice" role="group" :aria-labelledby="'cfgc-image-model-label-' + leaf" aria-describedby="cfgc-image-model-save-note">
+                              <button type="button" :aria-pressed="meta?.image_model_defaults?.[leaf]?.status === 'follow'"
+                                      :disabled="saving || !meta?.image_model_defaults?.[leaf]" @click="setImageModelDefaults([leaf], 'follow')">Follow defaults</button>
+                              <button type="button" :aria-pressed="meta?.image_model_defaults?.[leaf]?.status === 'pin'"
+                                      :disabled="saving || !meta?.image_model_defaults?.[leaf]" @click="setImageModelDefaults([leaf], 'pin')">Pin current</button>
+                            </div>
+                            <p v-if="meta?.image_model_defaults?.[leaf]?.default != null && meta.image_model_defaults[leaf].default !== meta.image_model_defaults[leaf].effective" class="cfgc-image-model-shipped">
+                              Shipped default: <code>{{ meta.image_model_defaults[leaf].default }}</code>
+                            </p>
+                          </div>
+                        </div>
+                      </div>
+                    </section>
                     <div v-if="section === 'tools' && hasHostsCollection()" class="cfgc-mcp-owner">
                       <span class="cfgc-mcp-owner-icon" aria-hidden="true"><odin-icon name="server" :size="18" /></span>
                       <div>
@@ -369,7 +406,7 @@ export default {
                         <span>{{ fieldGroup.entries.length }} setting{{ fieldGroup.entries.length === 1 ? '' : 's' }}</span>
                       </header>
 
-                      <div class="cfgc-fields">
+                      <div class="cfgc-fields" :inert="saving">
                         <div v-for="field in fieldGroup.entries" :key="field.path" :id="fieldId(field.path)"
                              :class="['cfgc-field', { changed: fieldChanged(field.path), invalid: fieldError(field) }]">
                           <div class="cfgc-field-copy">
@@ -584,6 +621,8 @@ export default {
     const loading = ref(true);
     const configMain = ref(null);
     const saving = ref(false);
+    const imageModelError = ref(null);
+    const imageModelLeaves = ['image_model', 'outer_model'];
     const error = ref(null);
     const toast = ref(null);
     const metaRefreshError = ref(null);
@@ -981,6 +1020,7 @@ export default {
 
 
     function discardAllDrafts() {
+      if (saving.value) return;
       if (!hasChanges.value) return;
       recordUndo();
       drafts.value = {};
@@ -1017,6 +1057,7 @@ export default {
     }
 
     function setFieldValue(field, value, options = {}) {
+      if (saving.value) return;
       if (CONFIG_EXCLUDED_SECTIONS.has(field.path.split('.')[0])) return;
       const [section, ...segments] = field.path.split('.');
       recordUndoForField(field.path, Boolean(options.coalesce));
@@ -1169,6 +1210,7 @@ export default {
     }
 
     function undo() {
+      if (saving.value) return;
       if (!undoStack.value.length) return;
       redoStack.value.push(deepClone(drafts.value));
       drafts.value = undoStack.value.pop();
@@ -1178,6 +1220,7 @@ export default {
     }
 
     function redo() {
+      if (saving.value) return;
       if (!redoStack.value.length) return;
       undoStack.value.push(deepClone(drafts.value));
       drafts.value = redoStack.value.pop();
@@ -1313,8 +1356,67 @@ export default {
       }
     }
 
+    async function refreshImageModelMetadata() {
+      if (saving.value) return;
+      saving.value = true;
+      imageModelError.value = null;
+      try {
+        meta.value = await loadConfigMeta();
+        metaRefreshError.value = null;
+      } catch (failure) {
+        imageModelError.value = `Image model status could not be refreshed: ${failure.message || 'Unknown error'}`;
+      } finally {
+        saving.value = false;
+      }
+    }
+
+    async function setImageModelDefaults(leaves, operation) {
+      if (saving.value || !['follow', 'pin'].includes(operation)
+          || !leaves.length || leaves.some(leaf => !imageModelLeaves.includes(leaf) || !meta.value?.image_model_defaults?.[leaf])) return;
+      saving.value = true;
+      imageModelError.value = null;
+      let committed = false;
+      try {
+        const result = await api.post('/api/config/image-models', {
+          operations: Object.fromEntries(leaves.map(leaf => [leaf, operation])),
+          expected_revision: meta.value.image_model_revision,
+        });
+        committed = true;
+        // Adopt only this operation's leaves. Never replace unrelated baselines
+        // with the full redacted response or save whole-section drafts here.
+        for (const leaf of leaves) {
+          const path = `image.openai.${leaf}`;
+          const oldValue = valueAtPath(config.value, path);
+          const nextValue = valueAtPath(result.config, path);
+          const rebase = snapshot => {
+            if (!Object.hasOwn(snapshot, 'image') || !deepEqual(valueAtPath(snapshot, path), oldValue)) return snapshot;
+            return setNestedValue(snapshot, path.split('.'), nextValue);
+          };
+          drafts.value = rebase(drafts.value);
+          undoStack.value = undoStack.value.map(rebase);
+          redoStack.value = redoStack.value.map(rebase);
+          config.value = setNestedValue(config.value, path.split('.'), nextValue);
+        }
+        meta.value = { ...meta.value, image_model_defaults: result.image_model_defaults,
+          image_model_revision: result.image_model_revision };
+        showToast('success', 'Image model defaults saved. Unrelated drafts were not saved.');
+      } catch (failure) {
+        imageModelError.value = `Image model operation failed: ${failure.message || 'Unknown error'}. Refresh status before retrying if the outcome is uncertain.`;
+      }
+      try {
+        meta.value = await loadConfigMeta();
+        metaRefreshError.value = null;
+      } catch (failure) {
+        const detail = `Image model status could not be refreshed: ${failure.message || 'Unknown error'}`;
+        metaRefreshError.value = detail;
+        imageModelError.value = committed ? `Image model defaults were saved, but ${detail}` : `${imageModelError.value} ${detail}`;
+      } finally {
+        saving.value = false;
+      }
+    }
+
     async function fetchConfig() {
-      if (hasChanges.value) return;
+      if (hasChanges.value || saving.value) return;
       loading.value = true;
       error.value = null;
       try {
@@ -1401,6 +1503,7 @@ export default {
     return {
       armKeydown, disarmKeydown, handleKeydown,
       config, meta, loading, saving, error, toast, metaRefreshError, restartPromptOpen, restartScheduled, restartError, configMain,
+      imageModelError, imageModelLeaves, setImageModelDefaults, refreshImageModelMetadata,
       searchQuery, healthFilter, activeCategory, reviewOpen, mobileOverflowOpen, warningThresholdInput, arrayInputs,
       healthFilters, visibleCategories, displayGroups, reviewGroups,
       sectionCount, fieldCount, hasChanges, changeCount, changedSectionCount,

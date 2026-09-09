@@ -5,6 +5,7 @@ import time
 
 from ..audit.tool_context import agent_tool_context
 from ..llm.secret_scrubber import scrub_output_secrets
+from ..tools.media_result import append_image_messages, tool_image_content
 from ..tools.result_validator import ToolResult, _is_error_result
 from .execution_context import waiting_agent
 from .wait_deadlines import WAIT_FOR_AGENTS_NESTED_GRACE_SECONDS, wait_for_agents_wrapper_timeout
@@ -37,6 +38,7 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
     A cancelled dispatched operation has unknown effects, never fake success.
     """
     active = None
+    image_messages: list[dict] = []
     try:
         for call in calls:
             lifetime = agent.max_lifetime - (time.time() - agent.created_at)
@@ -98,6 +100,11 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                         record["status"] = "interrupted_effect_free"
                     if raw.audit_metadata:
                         record["audit_metadata"] = raw.audit_metadata
+                    if raw.image_blocks:
+                        # Append only to model messages, not result records:
+                        # those feed trajectory/audit/repetition text consumers.
+                        append_image_messages(image_messages, tool_image_content(
+                            list(raw.image_blocks), name, call["id"]))
                 else:
                     text = raw if isinstance(raw, str) else str(raw)
                     status = "failed" if _is_error_result(text) else "succeeded"
@@ -166,3 +173,4 @@ async def execute_cycle(agent, calls, execute, results, *, timeouts, default_tim
                 ],
             }
         )
+        agent.messages.extend(image_messages)

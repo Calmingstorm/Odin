@@ -118,6 +118,10 @@ _GEN_EFFORTS = CODEX_REASONING_EFFORTS
 RECONSTRUCTED_FIELDS: frozenset[str] = frozenset({
     "message",
     "_cancel",
+    # Live Queue/Event + admission/sequence metadata, bound to the current
+    # (channel, request) owner. Pending steering is NOT a durable delivery
+    # promise; consumed human_steer messages persist in `messages` already.
+    "_steer_inbox",
     "tools",
     "policy",
     "trace",

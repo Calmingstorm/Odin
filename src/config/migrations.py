@@ -626,3 +626,161 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
     # the unambiguous null takes the vacuous branch on the next boot.
     _record_after_rewrite(shared_marker, config_id)
     _record_after_rewrite(marker, config_id)
+
+
+def image_defaults_marker_path(config_path: str | Path) -> Path:
+    """Canonical identity rendezvous, shared by every symlink launch alias."""
+    target = Path(config_path).resolve()
+    return target.parent / ".odin-data" / "config_migrations" / (
+        f"image_model_defaults_v1.{_config_identity(target)}.json"
+    )
+
+
+def apply_image_defaults_migration(data: dict, config_path: str | Path, original_raw: str) -> None:
+    """Upgrade exact raw defaults once, preserving every other source byte.
+
+    A deliberate pin equal to an old shipped default is indistinguishable from
+    inheritance and is intentionally upgraded. Other literals are retained.
+    Prepared records fence interrupted commits; an ambiguous preimage requires
+    inspection, never a blind second rewrite of a possible later operator pin.
+    """
+    from .image_defaults import IMAGE_MODEL_DEFAULTS, LEGACY_IMAGE_MODEL_DEFAULTS
+    from .persistence import _assert_not_shared, _config_file_lock, _dump_atomic, _load_document
+    from .schema import _substitute_env_vars
+
+    def reconcile(raw):
+        # Expand the exact committed source, never a YAML reserialization: quoting
+        # around placeholders is part of the startup parsing contract.
+        committed = yaml.safe_load(_substitute_env_vars(raw))
+        if not isinstance(committed, dict):
+            raise MigrationCompletionError("committed config must be a mapping")
+        data.clear()
+        data.update(committed)
+
+    target = Path(config_path).resolve()
+    marker = image_defaults_marker_path(target)
+    config_id = _config_identity(target)
+    try:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        with _config_file_lock(target):
+            with open(target, encoding="utf-8", newline="") as stream:
+                raw = stream.read()
+
+            def digest(text):
+                return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+            missing = object()
+            try:
+                record = json.loads(marker.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                record = missing
+            except (OSError, ValueError) as exc:
+                raise MigrationCompletionError("invalid image-default migration record") from exc
+            if record is not missing:
+                valid = (
+                    isinstance(record, dict)
+                    and set(record) == {
+                        "version", "migration", "config_id", "state", "after_sha256",
+                    }
+                    and type(record.get("version")) is int and record["version"] == 1
+                    and record.get("migration") == "image_model_defaults_v1"
+                    and record.get("config_id") == config_id
+                    and record.get("state") in {"prepared", "completed"}
+                    and isinstance(record.get("after_sha256"), str)
+                    and len(record["after_sha256"]) == 64
+                    and all(c in "0123456789abcdef" for c in record["after_sha256"])
+                )
+                if not valid:
+                    raise MigrationCompletionError("invalid image-default migration record")
+                if record["state"] == "prepared":
+                    if digest(raw) != record["after_sha256"]:
+                        raise MigrationCompletionError(
+                            "interrupted image-default migration; "
+                            "inspect config and record before retrying"
+                        )
+                    record["state"] = "completed"
+                    _atomic_write_marker(marker, record)
+                if raw != original_raw:
+                    reconcile(raw)
+                return
+
+            document, mode = _load_document(target)
+            root = yaml.compose(raw, Loader=yaml.SafeLoader)
+            scalar_tokens = {
+                token.end_mark.index: token
+                for token in yaml.scan(raw, Loader=yaml.SafeLoader)
+                if isinstance(token, yaml.tokens.ScalarToken)
+            }
+            edits = []
+            updates = {}
+            for leaf, old in LEGACY_IMAGE_MODEL_DEFAULTS.items():
+                scalar = root
+                for segment in ("image", "openai", leaf):
+                    scalar = _mapping_value(scalar, segment) if scalar is not None else None
+                if (
+                    not isinstance(scalar, ScalarNode)
+                    or scalar.tag != "tag:yaml.org,2002:str" or scalar.value != old
+                ):
+                    continue
+                node = document
+                for segment in ("image", "openai"):
+                    _assert_not_shared(node, ("image", "openai", leaf))
+                    node = node[segment]
+                _assert_not_shared(node, ("image", "openai"))
+                _assert_not_shared(node[leaf], ("image", "openai", leaf))
+                source_token = scalar_tokens[scalar.end_mark.index]
+                start = source_token.start_mark.index
+                token = raw[start:scalar.end_mark.index]
+                if scalar.style in {"|", ">"}:
+                    # A block token includes its header comment. Only its body
+                    # contains value bytes; never replace a match in the header.
+                    body_offset = len(token.splitlines(keepends=True)[0])
+                    start += body_offset
+                    token = token[body_offset:]
+                new = IMAGE_MODEL_DEFAULTS[leaf]
+                if old in token:
+                    replacement = token.replace(old, new, 1)
+                elif scalar.style == '"':
+                    replacement = token[:token.index('"')] + json.dumps(new)
+                else:
+                    raise MigrationCompletionError(
+                        "exact old image default uses unsupported scalar syntax; edit it directly"
+                    )
+                edits.append((start, scalar.end_mark.index, replacement))
+                updates[leaf] = new
+            rewritten = raw
+            for start, end, replacement in sorted(edits, reverse=True):
+                rewritten = rewritten[:start] + replacement + rewritten[end:]
+            # Prove the postimage's actual YAML values before writing either
+            # provenance or config. Planned replacements are not parsed values.
+            verified_root = yaml.compose(rewritten, Loader=yaml.SafeLoader)
+            for leaf, expected in updates.items():
+                verified = verified_root
+                for segment in ("image", "openai", leaf):
+                    verified = _mapping_value(verified, segment) if verified is not None else None
+                if (
+                    not isinstance(verified, ScalarNode)
+                    or verified.tag != "tag:yaml.org,2002:str"
+                    or verified.value != expected
+                ):
+                    raise MigrationCompletionError("image-default postimage validation failed")
+            record = {
+                "version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
+                "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten),
+            }
+            _atomic_write_marker(marker, record)
+            if edits:
+                _dump_atomic(document, target, mode, raw_text=rewritten)
+                record["state"] = "completed"
+                _atomic_write_marker(marker, record)
+            if raw != original_raw:
+                reconcile(rewritten)
+            else:
+                for leaf, value in updates.items():
+                    data["image"]["openai"][leaf] = value
+    except MigrationCompletionError:
+        raise
+    except Exception as exc:
+        raise MigrationCompletionError(
+            "image-default migration could not commit safely; inspect config and record"
+        ) from exc

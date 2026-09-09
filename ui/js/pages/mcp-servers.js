@@ -90,6 +90,27 @@ export default {
               <span class="toggle-slider"></span>
             </span>
           </label>
+          <form class="mcp-publication-limits" @submit.prevent="saveLimits" aria-label="MCP publication limits" :aria-busy="limitsSaving ? 'true' : 'false'">
+            <label class="mcp-field">
+              <span>Published tools per server</span>
+              <input class="hm-input" type="number" min="1" max="128" step="1" required
+                :value="limitDraft.max_published_tools_per_server"
+                @input="editLimit('max_published_tools_per_server', $event.target.value)"
+                :disabled="mutating || !limitsAvailable" aria-describedby="mcp-limits-help" />
+              <small>1-128 tools. The global limit also applies.</small>
+            </label>
+            <label class="mcp-field">
+              <span>Published tools across MCP</span>
+              <input class="hm-input" type="number" min="1" max="256" step="1" required
+                :value="limitDraft.max_published_tools_global"
+                @input="editLimit('max_published_tools_global', $event.target.value)"
+                :disabled="mutating || !limitsAvailable" aria-describedby="mcp-limits-help" />
+              <small>1-256 tools total. Excludes built-in tools and skills.</small>
+            </label>
+            <button type="submit" class="btn btn-primary text-xs" :disabled="mutating || !limitsAvailable || !limitDirty.size">{{ limitsSaving ? 'Saving…' : 'Save limits' }}</button>
+            <p id="mcp-limits-help" class="mcp-limits-help">No restart needed. New limits apply on the next publication or tools refresh; saving does not remove existing tools. Use Refresh tools on a server to apply now. Larger catalogs use more context and may exceed the model provider's total tool limit.</p>
+            <p v-if="limitsError" class="mcp-limits-error" role="alert">{{ limitsError }}</p>
+          </form>
           <div class="mcp-aggregate" aria-label="MCP aggregate status">
             <div><strong>{{ aggregate.serverCount }}</strong><span>Configured</span></div>
             <div><strong>{{ aggregate.enabledCount }}</strong><span>Enabled</span></div>
@@ -310,6 +331,12 @@ export default {
     const status = ref(null);
     const loading = ref(false);
     const mutating = ref(false);
+    const limitsSaving = ref(false);
+    const limitsError = ref('');
+    const limitDraft = ref({ max_published_tools_per_server: '', max_published_tools_global: '' });
+    const limitDirty = ref(new Set());
+    const limitsAvailable = computed(() => Object.keys(limitDraft.value)
+      .every(field => Number.isInteger(status.value?.[field])));
     const pageError = ref('');
     const activeServerOps = ref(new Set());
     const expandedServers = ref(new Set());
@@ -357,12 +384,19 @@ export default {
       pollTimer = null;
     }
     async function refreshAll({ quiet = false } = {}) {
+      if (limitsSaving.value) return;
       const generation = ++refreshGeneration;
       if (!quiet) loading.value = true;
       try {
         const next = await api.get('/api/mcp/status');
         if (generation !== refreshGeneration || !active) return;
         status.value = next;
+        // Polls may update status, but never replace an operator's unsaved limits.
+        for (const field of Object.keys(limitDraft.value)) {
+          if (!limitDirty.value.has(field) && Number.isInteger(next[field])) {
+            limitDraft.value[field] = String(next[field]);
+          }
+        }
         pageError.value = '';
         const names = new Set((next.servers || []).map(server => server.name));
         expandedServers.value = new Set([...expandedServers.value].filter(name => names.has(name)));
@@ -424,6 +458,50 @@ export default {
         const done = new Set(togglePending.value);
         done.delete(server.name);
         togglePending.value = done;
+      }
+    }
+
+    function editLimit(field, value) {
+      limitDraft.value[field] = value;
+      const dirty = new Set(limitDirty.value);
+      if (value === String(status.value?.[field])) dirty.delete(field); else dirty.add(field);
+      limitDirty.value = dirty;
+      limitsError.value = '';
+    }
+
+    async function saveLimits() {
+      if (mutating.value || !limitsAvailable.value || !limitDirty.value.size) return;
+      const payload = {};
+      for (const field of limitDirty.value) {
+        const value = Number(limitDraft.value[field]);
+        const max = field === 'max_published_tools_per_server' ? 128 : 256;
+        if (!Number.isInteger(value) || value < 1 || value > max) {
+          limitsError.value = `Enter a whole number between 1 and ${max}.`;
+          return;
+        }
+        payload[field] = value;
+      }
+      limitsSaving.value = true;
+      mutating.value = true;
+      limitsError.value = '';
+      // Fence a pre-save poll before it can overwrite the canonical save response.
+      ++refreshGeneration;
+      loading.value = false;
+      try {
+        const response = await api.post('/api/mcp/limits', payload);
+        status.value = response;
+        for (const field of Object.keys(limitDraft.value)) {
+          if (Number.isInteger(response[field])) limitDraft.value[field] = String(response[field]);
+        }
+        limitDirty.value = new Set();
+        toast.success('MCP limits saved. Applied at the next publication or tools refresh.');
+      } catch (error) {
+        // Keep the draft on failure so a failed disk write never looks saved.
+        limitsError.value = error.message || 'Failed to save MCP publication limits';
+      } finally {
+        limitsSaving.value = false;
+        mutating.value = false;
+        await refreshAll({ quiet: true });
       }
     }
 
@@ -593,6 +671,7 @@ export default {
 
     return {
       status, loading, mutating, pageError, servers, masterEnabled, aggregate,
+      limitsSaving, limitsError, limitsAvailable, limitDraft, limitDirty, editLimit, saveLimits,
       expandedServers, toolQueries, toolErrors, toolsLoading,
       editorOpen, editorMode, editingName, editingServer, form, formError, saving, editorGroups,
       configuredHeaderKeys, configuredEnvKeys, savedHttpEndpoint, endpointRequired,

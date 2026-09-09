@@ -27,10 +27,12 @@ import hashlib
 import random
 import re
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 from urllib.parse import unquote, unquote_plus, urlsplit
 
+from ...config.schema import MCPConfig
 from ...llm.secret_scrubber import scrub_output_secrets
 from ...odin_log import get_logger
 from . import protocol as proto
@@ -267,7 +269,26 @@ class MCPManager:
     exist only for globally-enabled, per-server-enabled configurations after
     ``start()`` (or a mutation) reconciles them."""
 
-    def __init__(self, *, on_catalog_changed: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        on_catalog_changed: Any | None = None,
+        max_published_tools_per_server_provider: Callable[[], int] | None = None,
+        max_published_tools_global_provider: Callable[[], int] | None = None,
+    ) -> None:
+        # Production providers follow the live config root, not the boot object.
+        # Standalone managers use schema defaults, never a second protocol cap.
+        defaults = MCPConfig()
+        self._max_published_tools_per_server_provider = (
+            max_published_tools_per_server_provider
+            if max_published_tools_per_server_provider is not None
+            else lambda: defaults.max_published_tools_per_server
+        )
+        self._max_published_tools_global_provider = (
+            max_published_tools_global_provider
+            if max_published_tools_global_provider is not None
+            else lambda: defaults.max_published_tools_global
+        )
         self._servers: dict[str, _ServerRuntime] = {}
         self._global_enabled = False
         self._generation = 0
@@ -325,6 +346,13 @@ class MCPManager:
                     }
                 )
         return defs
+
+    def get_publication_limits(self) -> dict[str, int]:
+        """Read current admission policy; a save does not evict existing tools."""
+        return {
+            "max_published_tools_per_server": self._max_published_tools_per_server_provider(),
+            "max_published_tools_global": self._max_published_tools_global_provider(),
+        }
 
     def get_status(self) -> dict[str, Any]:
         servers = []
@@ -387,6 +415,7 @@ class MCPManager:
             )
         return {
             "enabled": self._global_enabled,
+            **self.get_publication_limits(),
             "server_count": len(self._servers),
             "enabled_server_count": sum(1 for r in self._servers.values() if r.enabled),
             "connected_count": sum(1 for r in self._servers.values() if r.state == STATE_CONNECTED),
@@ -1131,7 +1160,8 @@ class MCPManager:
     ) -> bool:
         """Validate limits and publish under the lock, fenced by generation.
         Over-limit servers are BLOCKED — they publish nothing until the
-        admin narrows the allowlist; the first N are never silently chosen."""
+        admin narrows the allowlist or raises the limits and refreshes;
+        the first N are never silently chosen."""
         async with self._lock:
             runtime = self._servers.get(name)
             if (
@@ -1154,13 +1184,16 @@ class MCPManager:
             runtime.last_refresh_monotonic = time.monotonic()
             runtime.connection = connection
             runtime.backoff_idx = 0
-            if len(candidates) > proto.MAX_PUBLISHED_TOOLS_PER_SERVER:
+            limits = self.get_publication_limits()
+            per_server_limit = limits["max_published_tools_per_server"]
+            global_limit = limits["max_published_tools_global"]
+            if len(candidates) > per_server_limit:
                 runtime.state = STATE_BLOCKED
                 runtime.published = {}
                 runtime.blocked_reason = (
                     f"{len(candidates)} publishable tools exceed the per-server "
-                    f"limit of {proto.MAX_PUBLISHED_TOOLS_PER_SERVER}; narrow "
-                    "tool_allowlist to select the tools to publish"
+                    f"limit of {per_server_limit}; narrow tool_allowlist or "
+                    "raise the publication limit and refresh tools"
                 )
                 runtime.last_error = runtime.blocked_reason
                 self._rebuild_published_index_locked()
@@ -1171,14 +1204,14 @@ class MCPManager:
                 for n, r in self._servers.items()
                 if n != name and r.state == STATE_CONNECTED
             )
-            if global_published + len(candidates) > proto.MAX_PUBLISHED_TOOLS_GLOBAL:
+            if global_published + len(candidates) > global_limit:
                 runtime.state = STATE_BLOCKED
                 runtime.published = {}
                 runtime.blocked_reason = (
                     f"publishing {len(candidates)} tools would exceed the "
-                    f"global MCP limit of {proto.MAX_PUBLISHED_TOOLS_GLOBAL} "
+                    f"global MCP limit of {global_limit} "
                     f"({global_published} already published); narrow "
-                    "tool_allowlist"
+                    "tool_allowlist or raise the publication limit and refresh tools"
                 )
                 runtime.last_error = runtime.blocked_reason
                 self._rebuild_published_index_locked()

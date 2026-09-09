@@ -587,7 +587,15 @@ def build_services(
     # must work even while globally disabled, and the first server must be
     # addable through a live control plane. Transports exist only after the
     # async start path reconciles enabled configurations (start_mcp).
-    mcp_manager = MCPManager()
+    current_config = get_config if get_config is not None else lambda: config
+    mcp_manager = MCPManager(
+        max_published_tools_per_server_provider=(
+            lambda: current_config().mcp.max_published_tools_per_server
+        ),
+        max_published_tools_global_provider=(
+            lambda: current_config().mcp.max_published_tools_global
+        ),
+    )
 
     return BotServices(
         channel_state=channel_state,
@@ -1084,6 +1092,12 @@ async def shutdown_services(bot) -> None:
             from ..restart import block_reexec
 
             block_reexec("computer cleanup unverified")
+
+    channel_state = getattr(bot, "channel_state", None)
+    if channel_state is not None:
+        # Close pending steering before disconnecting Discord. Only graceful
+        # shutdown waits (bounded); turns never wait on receipt transport.
+        await channel_state.shutdown_steering()
 
     loop_manager = getattr(bot, "loop_manager", None)
     if loop_manager is not None:

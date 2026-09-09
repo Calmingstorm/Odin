@@ -1020,11 +1020,11 @@ class ImageOpenAIConfig(BaseModel):
     """
 
     enabled: bool = True  # kill switch for the native wire implementation
-    outer_model: str = "gpt-5.5"  # Responses model that hosts the image tool
-    image_model: str = "gpt-image-2"  # the image_generation tool's model
-    # NOTE: this route IGNORES the requested size and always returns a
-    # backend-selected SQUARE image, so there is no size allowlist — the
-    # selector sends non-square requests to ComfyUI instead.
+    outer_model: str = "gpt-6-astra"  # Responses model that hosts the image tool
+    image_model: str = "gpt-image-2.5-flare"  # the image_generation tool's model
+    # Native output dimensions and aspect ratio are backend-selected, not
+    # guaranteed square. Explicit size requests are routed to ComfyUI instead;
+    # this native configuration therefore has no size allowlist.
     # Image-specific deadline (separate from chat). Progress events keep the
     # read timer alive but must not defeat the total.
     request_timeout_seconds: int = 180
@@ -1185,6 +1185,10 @@ class EmailConfig(BaseModel):
 
 class MCPConfig(BaseModel):
     enabled: bool = False
+    # Publication policy, not wire limits. Read live at each publish/refresh.
+    # Per-server ceiling matches the protocol's 128-tool discovery bound.
+    max_published_tools_per_server: int = Field(default=40, strict=True, ge=1, le=128)
+    max_published_tools_global: int = Field(default=40, strict=True, ge=1, le=256)
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 
@@ -1437,14 +1441,19 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # Runs on the raw dict so pydantic validates what will actually apply;
     # the unsubstituted text distinguishes a literal legacy default from a
     # deliberate ${VAR} placeholder.
-    from .migrations import MigrationCompletionError, apply_legacy_ceiling_migration
+    from .migrations import (
+        MigrationCompletionError,
+        apply_image_defaults_migration,
+        apply_legacy_ceiling_migration,
+    )
 
     try:
         apply_legacy_ceiling_migration(data, path, original_raw)
+        apply_image_defaults_migration(data, path, original_raw)
     except MigrationCompletionError as exc:
         raise SystemExit(
             f"Configuration migration failed for {path}: {exc}\n"
-            "Inspect the ceiling-migration record and retry; Odin will not "
+            "Inspect the configuration migration record and retry; Odin will not "
             "guess at operator provenance."
         ) from exc
     try:

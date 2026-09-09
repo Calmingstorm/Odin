@@ -53,8 +53,8 @@ assert.equal(
 );
 assert.equal(
   (configPage.match(/await loadConfigMeta\(\)/g) || []).length,
-  3,
-  'initial load, post-save refresh, and restart recovery must read the registry endpoint',
+  5,
+  'initial load, post-save refresh, restart recovery, image operations and explicit image refresh must read the registry endpoint',
 );
 
 const applyDetails = collectApplyDetails([{

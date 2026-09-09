@@ -111,12 +111,23 @@ class KimiClient(LLMProvider):
 
             if isinstance(content, list):
                 text_parts = []
+                image_parts = []
                 tool_calls = []
                 tool_results = []
                 for block in content:
                     if isinstance(block, dict):
                         if block.get("type") == "text":
                             text_parts.append(block["text"])
+                        elif block.get("type") == "image":
+                            source = block.get("source", {})
+                            if source.get("type") == "base64" and source.get("data"):
+                                mime = source.get("media_type", "image/png")
+                                image_parts.append({
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:{mime};base64,{source['data']}",
+                                    },
+                                })
                         elif block.get("type") == "tool_use":
                             tool_calls.append({
                                 "id": block.get("id", ""),
@@ -137,11 +148,16 @@ class KimiClient(LLMProvider):
                     elif isinstance(block, str):
                         text_parts.append(block)
 
-                if text_parts or tool_calls:
+                if text_parts or image_parts or tool_calls:
                     entry: dict = {
                         "role": role,
                         "content": "\n".join(text_parts) if text_parts else "",
                     }
+                    if image_parts:
+                        entry["content"] = [
+                            *({"type": "text", "text": text} for text in text_parts),
+                            *image_parts,
+                        ]
                     if tool_calls and role == "assistant":
                         entry["tool_calls"] = tool_calls
                         if not entry["content"]:

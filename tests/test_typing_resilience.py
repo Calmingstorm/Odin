@@ -24,11 +24,14 @@ from types import SimpleNamespace
 import pytest
 
 import discord
+from src.discord.channel_state import ChannelStateRegistry
 from src.discord.intake_pipeline import MessagePipeline, MessagePipelineDeps
 from src.discord.tool_loop import (
+    CHAT_POLICY,
     ToolLoopDeps,
     ToolLoopRunner,
     _best_effort_typing,
+    _ChatTurn,
     _error_summary,
 )
 
@@ -213,6 +216,11 @@ def _make_runner(recorder_save=None):
     saved = []
     cleared = []
 
+    class RecordingChannelState(ChannelStateRegistry):
+        def clear_active_request(self, ch, req, **kwargs):
+            cleared.append((ch, req))
+            return super().clear_active_request(ch, req, **kwargs)
+
     async def _default_save(trajectory, **kwargs):
         saved.append((trajectory, kwargs))
 
@@ -223,9 +231,7 @@ def _make_runner(recorder_save=None):
         llm_gateway=SimpleNamespace(),
         prompt_builder=SimpleNamespace(),
         tool_catalog=SimpleNamespace(),
-        channel_state=SimpleNamespace(
-            clear_active_request=lambda ch, req: cleared.append((ch, req))
-        ),
+        channel_state=RecordingChannelState(),
         channel_config=SimpleNamespace(),
         delivery=SimpleNamespace(),
         turn_recorder=SimpleNamespace(_save_turn_trajectory=recorder_save or _default_save),
@@ -251,7 +257,9 @@ def _stub_state(channel=None):
     from src.discord.response_guards import StuckLoopTracker
     from src.turn_state.durability import TurnDurability
 
-    return SimpleNamespace(
+    return _ChatTurn(
+        policy=CHAT_POLICY,
+        _result_store_cap=2000,
         chat_cap=3,
         iteration=0,
         stuck_tracker=StuckLoopTracker(),

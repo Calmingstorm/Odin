@@ -11,6 +11,8 @@ parity contract pins.
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import json
 import time
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,7 +26,7 @@ from ...config.persistence import (
     persist_config_paths_locked,
     submitted_leaves,
 )
-from ...config.schema import Config
+from ...config.schema import Config, active_config_path
 from ...context.loader import ContextReloadReport
 from ...odin_log import get_logger
 from ...setup_wizard import (
@@ -46,6 +48,10 @@ from ..api_common import (
 )
 
 log = get_logger("web.api")
+
+
+def _image_intent_revision(metadata: dict) -> str:
+    return hashlib.sha256(json.dumps(metadata, sort_keys=True).encode()).hexdigest()
 
 
 def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
@@ -365,13 +371,106 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         appear here unclassified.
         """
         from ...config.apply_registry import build_meta_payload
+        from ...config.image_defaults import read_image_model_metadata
 
-        payload = build_meta_payload(
-            bot.config.model_dump(),
-            boot_dump=getattr(bot, "boot_config_snapshot", None),
-            generated_at=datetime.now(UTC).isoformat(),
-        )
+        async with config_transaction():
+            try:
+                image_defaults = read_image_model_metadata(active_config_path(), bot.config)
+            except Exception as exc:
+                return web.json_response(
+                    {"error": f"Image model intent unavailable: {_sanitize_error(exc)}"},
+                    status=500,
+                )
+            payload = build_meta_payload(
+                bot.config.model_dump(),
+                boot_dump=getattr(bot, "boot_config_snapshot", None),
+                generated_at=datetime.now(UTC).isoformat(),
+                image_model_defaults=image_defaults,
+            )
+            payload["image_model_revision"] = _image_intent_revision(image_defaults)
         return web.json_response(payload)
+
+    @routes.post("/api/config/image-models")
+    async def update_image_model_intent(request: web.Request) -> web.Response:
+        """Adopt shipped defaults or pin transaction-current effective strings.
+
+        Both leaves share one durable commit and publication. Unrelated fields
+        and unsaved browser drafts never enter this operation.
+        """
+        denied = admin_gate(bot)(request)
+        if denied is not None:
+            return denied
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        operations = body.get("operations") if isinstance(body, dict) else None
+        if (
+            not isinstance(body, dict) or set(body) != {"operations", "expected_revision"}
+            or not isinstance(body.get("expected_revision"), str)
+            or not isinstance(operations, dict) or not operations
+            or not set(operations).issubset({"image_model", "outer_model"})
+            or any(value not in ("follow", "pin") for value in operations.values())
+        ):
+            return web.json_response(
+                {"error": "operations must map image_model and/or outer_model to follow or pin"},
+                status=400,
+            )
+        from ...config.image_defaults import read_image_model_metadata
+
+        async with config_transaction():
+            try:
+                metadata = read_image_model_metadata(active_config_path(), bot.config)
+                if body["expected_revision"] != _image_intent_revision(metadata):
+                    return web.json_response(
+                        {"error": "Image model intent changed; refresh status before retrying"},
+                        status=409,
+                    )
+                before_intent = {leaf: dict(record) for leaf, record in metadata.items()}
+                current = bot.config.model_dump()
+                changes = []
+                for leaf, operation in operations.items():
+                    value = metadata[leaf]["default" if operation == "follow" else "effective"]
+                    current["image"]["openai"][leaf] = value
+                    changes.append((("image", "openai", leaf), value))
+                desired = Config(**current)
+            except Exception as exc:
+                return web.json_response(
+                    {"error": f"Image models not changed: {_sanitize_error(exc)}"}, status=500,
+                )
+            persist_exc, was_cancelled = await persist_config_paths_locked(
+                changes, image_model_intent=operations,
+            )
+            if persist_exc is not None:
+                if was_cancelled:
+                    raise asyncio.CancelledError
+                return web.json_response(
+                    {"error": f"Image models not saved: {_sanitize_error(persist_exc)}"},
+                    status=500,
+                )
+            # Generation reads bot.config.image on its next request. Do not
+            # rebuild a backend or pretend an in-flight generation changed.
+            bot.config = desired
+            for leaf, operation in operations.items():
+                metadata[leaf] = {**metadata[leaf],
+                                  "effective": getattr(desired.image.openai, leaf),
+                                  "status": operation}
+            if was_cancelled:
+                raise asyncio.CancelledError
+            # Equal-value pin/follow changes still change operator intent.
+            try:
+                from ...audit.diff_tracker import compute_dict_diff
+
+                request["_config_diff"] = compute_dict_diff(
+                    before_intent, metadata, label="image model intent",
+                )
+            except Exception:
+                request["_config_diff"] = None
+            return web.json_response({
+                "config": _redact_config(desired.model_dump()),
+                "image_model_defaults": metadata,
+                "image_model_revision": _image_intent_revision(metadata),
+            })
 
     @routes.put("/api/config")
     async def update_config(request: web.Request) -> web.Response:

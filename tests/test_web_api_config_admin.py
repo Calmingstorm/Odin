@@ -1430,7 +1430,7 @@ class TestConfigMeta:
         raw_config["outbound_webhooks"]["targets"] = [
             {"name": "a", "url": "https://x", "secret": "tok-target-leak"}
         ]
-        bot.config = SimpleNamespace(model_dump=lambda: raw_config)
+        bot.config = SimpleNamespace(model_dump=lambda: raw_config, image=bot.config.image)
 
         async with TestClient(TestServer(app)) as c:
             raw = await (await c.get("/api/config/meta")).text()

@@ -424,11 +424,26 @@ async def test_existing_foreground_dispatch_does_not_audit_pixels(tmp_path, monk
     assert encoded not in str(bot.audit.log_event.call_args_list)
 
 
-def test_kimi_converter_has_no_pixel_delivery_capability():
-    # Serializer negative proof. Foreground admission must reject this adapter,
-    # not mistake a generic LLM interface for native multimodal support.
+def test_kimi_serializes_native_images_without_gaining_computer_admission():
+    # MCP image transport is supported; computer admission remains codex-only.
+    from types import SimpleNamespace
+
+    from src.computer.capabilities import native_transport_evidence
     from src.llm.kimi import KimiClient
 
     observation = observation_image(png(), metadata())
     wire = KimiClient._convert_messages(None, [image_message(observation)], "")
-    assert observation["__image_block__"]["source"]["data"] not in json.dumps(wire)
+    encoded = observation["__image_block__"]["source"]["data"]
+    images = [b for m in wire for b in m["content"] if b.get("type") == "image_url"]
+    assert len(images) == 1
+    assert images[0]["image_url"]["url"] == f"data:image/png;base64,{encoded}"
+    assert base64.b64decode(encoded, validate=True) == png()
+    images[0]["image_url"]["url"] = "native-image-verified"
+    assert encoded not in json.dumps(wire)
+    # Bypass construction only, never call the network. Even a client with
+    # working image serialization does not qualify as a computer actuator.
+    client = object.__new__(KimiClient)
+    for provider in ("kimi", "codex"):
+        with pytest.raises(PermissionError, match="verified native image transport"):
+            native_transport_evidence(SimpleNamespace(
+                provider=provider, client=client, model="kimi-k2.6"))
