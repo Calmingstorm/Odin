@@ -349,20 +349,42 @@ export default {
                   </div>
 
                   <div v-else class="cfgc-field-groups">
-                    <section v-if="section === 'image'" class="cfgc-field-group" aria-label="Image model defaults">
-                      <strong>Image model defaults</strong>
-                      <p>Follow shipped defaults or pin the current runtime model. These actions save immediately, without saving drafts. Edited model drafts remain unsaved.</p>
-                      <p v-if="imageModelError" role="alert">{{ imageModelError }}</p>
-                      <p v-if="!meta?.image_model_defaults">Image model metadata is unavailable.</p>
-                      <div v-for="leaf in imageModelLeaves" :key="leaf" :data-image-model="leaf">
-                        <strong>{{ leaf === 'image_model' ? 'Image model' : 'Outer model' }}</strong>
-                        <p>Effective: <code>{{ meta?.image_model_defaults?.[leaf]?.effective ?? 'Unavailable' }}</code> · Shipped default: <code>{{ meta?.image_model_defaults?.[leaf]?.default ?? 'Unavailable' }}</code> · Status: {{ meta?.image_model_defaults?.[leaf]?.status ?? 'Unavailable' }}</p>
-                        <button type="button" class="btn btn-ghost" :disabled="saving || !meta?.image_model_defaults?.[leaf]" @click="setImageModelDefaults([leaf], 'follow')">Follow defaults</button>
-                        <button type="button" class="btn btn-ghost" :disabled="saving || !meta?.image_model_defaults?.[leaf]" @click="setImageModelDefaults([leaf], 'pin')">Pin current</button>
+                    <section v-if="section === 'image'" class="cfgc-field-group nested cfgc-image-models" aria-label="Image model defaults">
+                      <header class="cfgc-field-group-header">
+                        <div>
+                          <strong>Image model defaults</strong>
+                          <p>Follow shipped defaults or pin the current runtime model.</p>
+                          <p id="cfgc-image-model-save-note">Changes save immediately, without saving drafts. Edited model drafts remain unsaved.</p>
+                        </div>
+                        <button type="button" class="btn btn-ghost text-xs" :disabled="saving" @click="refreshImageModelMetadata">
+                          <odin-icon name="refresh" :size="13" /> Refresh status
+                        </button>
+                      </header>
+                      <p v-if="imageModelError" class="cfgc-image-model-notice cfgc-field-error" role="alert">{{ imageModelError }}</p>
+                      <p v-if="!meta?.image_model_defaults" class="cfgc-image-model-notice">Image model metadata is unavailable.</p>
+                      <div class="cfgc-fields">
+                        <div v-for="leaf in imageModelLeaves" :key="leaf" class="cfgc-field" :data-image-model="leaf">
+                          <div class="cfgc-field-copy">
+                            <span class="cfgc-field-label" :id="'cfgc-image-model-label-' + leaf">{{ leaf === 'image_model' ? 'Image model' : 'Outer model' }}</span>
+                            <code>image.openai.{{ leaf }}</code>
+                          </div>
+                          <div class="cfgc-field-control cfgc-image-model-control">
+                            <div class="cfgc-image-model-effective">
+                              <code>{{ meta?.image_model_defaults?.[leaf]?.effective ?? 'Unavailable' }}</code>
+                              <span class="cfgc-image-model-status">{{ meta?.image_model_defaults?.[leaf]?.status === 'follow' ? 'Following defaults' : meta?.image_model_defaults?.[leaf]?.status === 'pin' ? 'Pinned' : 'Unavailable' }}</span>
+                            </div>
+                            <div class="cfgc-image-model-choice" role="group" :aria-labelledby="'cfgc-image-model-label-' + leaf" aria-describedby="cfgc-image-model-save-note">
+                              <button type="button" :aria-pressed="meta?.image_model_defaults?.[leaf]?.status === 'follow'"
+                                      :disabled="saving || !meta?.image_model_defaults?.[leaf]" @click="setImageModelDefaults([leaf], 'follow')">Follow defaults</button>
+                              <button type="button" :aria-pressed="meta?.image_model_defaults?.[leaf]?.status === 'pin'"
+                                      :disabled="saving || !meta?.image_model_defaults?.[leaf]" @click="setImageModelDefaults([leaf], 'pin')">Pin current</button>
+                            </div>
+                            <p v-if="meta?.image_model_defaults?.[leaf]?.default != null && meta.image_model_defaults[leaf].default !== meta.image_model_defaults[leaf].effective" class="cfgc-image-model-shipped">
+                              Shipped default: <code>{{ meta.image_model_defaults[leaf].default }}</code>
+                            </p>
+                          </div>
+                        </div>
                       </div>
-                      <button type="button" class="btn btn-ghost" :disabled="saving || !imageModelMetadataReady" @click="setImageModelDefaults(imageModelLeaves, 'follow')">Follow defaults for both</button>
-                      <button type="button" class="btn btn-ghost" :disabled="saving || !imageModelMetadataReady" @click="setImageModelDefaults(imageModelLeaves, 'pin')">Pin current for both</button>
-                      <button type="button" class="btn btn-ghost" :disabled="saving" @click="refreshImageModelMetadata">Refresh image model status</button>
                     </section>
                     <div v-if="section === 'tools' && hasHostsCollection()" class="cfgc-mcp-owner">
                       <span class="cfgc-mcp-owner-icon" aria-hidden="true"><odin-icon name="server" :size="18" /></span>
@@ -601,7 +623,6 @@ export default {
     const saving = ref(false);
     const imageModelError = ref(null);
     const imageModelLeaves = ['image_model', 'outer_model'];
-    const imageModelMetadataReady = computed(() => imageModelLeaves.every(leaf => meta.value?.image_model_defaults?.[leaf]));
     const error = ref(null);
     const toast = ref(null);
     const metaRefreshError = ref(null);
@@ -1482,7 +1503,7 @@ export default {
     return {
       armKeydown, disarmKeydown, handleKeydown,
       config, meta, loading, saving, error, toast, metaRefreshError, restartPromptOpen, restartScheduled, restartError, configMain,
-      imageModelError, imageModelLeaves, imageModelMetadataReady, setImageModelDefaults, refreshImageModelMetadata,
+      imageModelError, imageModelLeaves, setImageModelDefaults, refreshImageModelMetadata,
       searchQuery, healthFilter, activeCategory, reviewOpen, mobileOverflowOpen, warningThresholdInput, arrayInputs,
       healthFilters, visibleCategories, displayGroups, reviewGroups,
       sectionCount, fieldCount, hasChanges, changeCount, changedSectionCount,
