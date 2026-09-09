@@ -95,10 +95,9 @@ an unsteered turn. The existing completion-classifier arguments and ordinary
 final response remain unchanged. The mailbox itself is only process-local
 bookkeeping.
 
-This campaign change adds no tests and runs no suites, CI, lint or mypy. The
-existing exact slash-command inventory is updated to include `steer`. Source
-inspection, syntax compilation and import/registration inspection are not a
-runtime proof of behavioral parity. At campaign end, exercise:
+The original implementation commit did not establish these gates. The
+checkpoint test pass now exercises the following with isolated test data and
+fake provider/tool effects (no live Discord or operational mutation):
 
 - unsteered trace/return/guard/checkpoint parity, including error and resume;
 - FIFO and exact-once drain, counter/event state, empty-drain no-op;
@@ -108,3 +107,34 @@ runtime proof of behavioral parity. At campaign end, exercise:
 - complete native call/result pairing, no stale handoff or pending wait judgment;
 - consumed-directive compression and checkpoint/resume sequence continuity;
 - stop/suspension/failure dropping pending messages without replay.
+
+### Established checkpoint evidence
+
+- `tests/test_chat_steering_admission.py`: FIFO/exact-once and empty no-op;
+  requester/admin/allowed-user/bot/credential/size/total-turn count boundaries;
+  ephemeral queue-only receipts; old/new ownership, late bind and late cleanup.
+- `tests/test_chat_steering_runtime.py`: actual `_run_chat_iterations` with
+  event barriers during generation, classification, tools, WI-4/WI-5 and
+  terminal persistence. Pins complete native call/result ordering, discarded
+  stale classifier judgments/handoffs, cleared pending wait judgment with
+  fingerprints and warned budget retained, original requester dispatch,
+  operational-validation enforcement, final-iteration explicit error and
+  failed WI-5 blocking another generation. Stop/cancellation/suspension/failure
+  close admission and never replay pending directives into a resumed mailbox.
+- `tests/test_chat_steering_parity.py`: deterministic runtime trace/return,
+  classifier arguments, guards and checkpoint goldens captured by executing
+  pre-steering `4ecb63b0`; includes error and restored iteration entry. Goldens
+  need no historical Git objects in shallow CI clones. The terminal admission
+  close is synchronous bookkeeping; ordinary trace and awaits remain unchanged.
+- `tests/test_chat_steering_resume.py`: structural soft/emergency compression,
+  actual codec snapshot/restore excluding pending queues, `run_resumed`
+  sequence continuity and persisted cleared wait-judgment state.
+
+The focused checkpoint invocation passed **186 tests** across the four new
+steering files and existing recovery, typing-resilience, context-budget,
+checkpoint-codec and slash-command files. Existing recovery/typing fixtures now
+construct real `_ChatTurn` and `ChannelStateRegistry` objects instead of stale
+partial namespaces; their behavioral assertions are unchanged. Relevant source
+and changed-test lint is checked separately. These are focused runtime and
+codec gates, not a claim of full-suite coverage, GitHub CI, deployment health,
+real-provider delivery, or successful persistence under a production outage.

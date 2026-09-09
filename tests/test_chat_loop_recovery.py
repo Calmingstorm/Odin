@@ -14,8 +14,9 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.discord.channel_state import ChannelStateRegistry
 from src.discord.response_guards import StuckLoopTracker
-from src.discord.tool_loop import ToolLoopRunner
+from src.discord.tool_loop import CHAT_POLICY, ToolLoopRunner, _ChatTurn
 from src.llm.context_budget import resolve_context_budget
 from src.llm.context_compressor import SurfaceBoundary, estimate_message_chars
 from src.llm.errors import LLMAuthError, LLMRequestError
@@ -112,8 +113,9 @@ class _Gateway:
         return await self.script(len(self.calls), messages)
 
 
-def _chat_state(messages, *, durability=None) -> SimpleNamespace:
-    return SimpleNamespace(
+def _chat_state(messages, *, durability=None) -> _ChatTurn:
+    return _ChatTurn(
+        policy=CHAT_POLICY,
         chat_cap=3,
         iteration=0,
         stuck_tracker=StuckLoopTracker(),
@@ -167,6 +169,7 @@ class _NullCM:
 
 def _runner(gateway) -> ToolLoopRunner:
     runner = ToolLoopRunner.__new__(ToolLoopRunner)
+    runner._channel_state = ChannelStateRegistry()
     runner._llm_gateway = gateway
     runner._get_config = lambda: SimpleNamespace(openai_codex=None)
     runner._get_context_compressor = lambda: None
@@ -1319,6 +1322,11 @@ def _census_runner(gw, *, config=None, recorder=None):
     )
     cleared = []
 
+    class RecordingChannelState(ChannelStateRegistry):
+        def clear_active_request(self, ch, req, **kwargs):
+            cleared.append((ch, req))
+            return super().clear_active_request(ch, req, **kwargs)
+
     async def _set_status(*a, **kw):
         return None
 
@@ -1329,10 +1337,7 @@ def _census_runner(gw, *, config=None, recorder=None):
         llm_gateway=gw,
         prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
         tool_catalog=SimpleNamespace(merged_definitions=lambda: []),
-        channel_state=SimpleNamespace(
-            set_active_request=lambda ch, req, event=None: event,
-            clear_active_request=lambda ch, req, **kw: cleared.append((ch, req)),
-        ),
+        channel_state=RecordingChannelState(),
         channel_config=SimpleNamespace(),
         delivery=SimpleNamespace(set_status=_set_status),
         turn_recorder=rec,

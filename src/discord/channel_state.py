@@ -187,7 +187,9 @@ class ChannelStateRegistry:
         inbox.inbox.put_nowait({"sequence": sequence, "text": message, "user_id": user_id})
         inbox.inbox_events.append({"event": "queued", "sequence": sequence, "at": time.time()})
         inbox.event.set()
-        log.info("Queued steering %d for request %s in channel %s", sequence, request_id, channel_id)
+        log.info(
+            "Queued steering %d for request %s in channel %s", sequence, request_id, channel_id
+        )
         return f"Message queued (sequence {sequence}; not yet consumed)."
 
     def request_stop(
