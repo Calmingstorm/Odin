@@ -257,7 +257,9 @@ def _load_document(config_path: Path) -> tuple[Any, int]:
     return existing, os.stat(config_path).st_mode & 0o777
 
 
-def _dump_atomic(document: Any, config_path: Path, orig_mode: int, *, raw_text: str | None = None) -> None:
+def _dump_atomic(
+    document: Any, config_path: Path, orig_mode: int, *, raw_text: str | None = None,
+) -> None:
     """Serialize *document* over *config_path* atomically, preserving mode."""
     import io
 
@@ -330,6 +332,31 @@ def patch_config_paths(
     changes: Iterable[ConfigChange], *, path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> None:
+    """Serialize the file revision with startup migration and other processes."""
+    import fcntl
+
+    from .migrations import _config_identity
+
+    changes = list(changes)
+    if not changes and not image_model_intent:
+        return
+    target = _resolve_path(path).resolve()
+    lock_path = (
+        Path(tempfile.gettempdir()) / f"odin-config-locks-{os.getuid()}" / _config_identity(target)
+    )
+    try:
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(lock_path, "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            _patch_config_paths(changes, path=target, image_model_intent=image_model_intent)
+    except OSError:
+        raise
+
+
+def _patch_config_paths(
+    changes: Iterable[ConfigChange], *, path: Path | str | None = None,
+    image_model_intent: Mapping[str, str] | None = None,
+) -> None:
     """Apply leaf *changes* to the active config file, touching nothing else.
 
     Each change is a ``(path_segments, value)`` pair. Missing intermediate
@@ -348,7 +375,9 @@ def patch_config_paths(
         if intent == "follow":
             changes = [c for c in changes if tuple(c[0]) != target_path]
             changes.append((target_path, DELETE_CONFIG_PATH))
-        elif not any(tuple(c[0]) == target_path and isinstance(c[1], str) and c[1] for c in changes):
+        elif not any(
+            tuple(c[0]) == target_path and isinstance(c[1], str) and c[1] for c in changes
+        ):
             raise ConfigPersistError("pin requires an explicit effective image model value")
     if not changes:
         return
@@ -365,10 +394,14 @@ def patch_config_paths(
             continue
         existing_node = document
         for segment in segments[:-1]:
-            existing_node = existing_node.get(segment, {}) if isinstance(existing_node, dict) else {}
+            existing_node = (
+                existing_node.get(segment, {}) if isinstance(existing_node, dict) else {}
+            )
         present_leaf = isinstance(existing_node, dict) and segments[-1] in existing_node
         previous = existing_node.get(segments[-1]) if present_leaf else None
-        is_image_model = tuple(segments[:-1]) == IMAGE_MODEL_PREFIX and segments[-1] in IMAGE_MODEL_DEFAULTS
+        is_image_model = (
+            tuple(segments[:-1]) == IMAGE_MODEL_PREFIX and segments[-1] in IMAGE_MODEL_DEFAULTS
+        )
         explicit_pin = is_image_model and intents.get(segments[-1]) == "pin"
         if value is DELETE_CONFIG_PATH and not present_leaf:
             continue
@@ -394,6 +427,9 @@ def patch_config_paths(
         # validation_alias wins on reload — so the change would silently revert.
         # When the file has none of them, create the canonical key.
         present = [k for k in (leaf, *aliases) if hasattr(node, "get") and k in node]
+        if is_image_model:
+            for target in present:
+                _assert_not_shared(node[target], tuple(segments))
         if value is DELETE_CONFIG_PATH:
             for target in present:
                 del node[target]
@@ -484,7 +520,11 @@ async def persist_config_paths_locked(
     changes = list(changes)
     if not changes and not image_model_intent:
         return None, False
-    return await _run_settled(lambda: patch_config_paths(changes, path=path, image_model_intent=image_model_intent))
+    if image_model_intent is None:
+        return await _run_settled(lambda: patch_config_paths(changes, path=path))
+    return await _run_settled(
+        lambda: patch_config_paths(changes, path=path, image_model_intent=image_model_intent)
+    )
 
 
 async def persist_config_paths(

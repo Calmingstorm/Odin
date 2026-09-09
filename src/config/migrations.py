@@ -652,9 +652,11 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     target = Path(config_path).resolve()
     marker = image_defaults_marker_path(target)
     config_id = _config_identity(target)
-    marker.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with open(marker.with_suffix(".lock"), "a") as lock:
+        marker.parent.mkdir(parents=True, exist_ok=True)
+        lock_path = Path(tempfile.gettempdir()) / f"odin-config-locks-{os.getuid()}" / config_id
+        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
+        with open(lock_path, "a") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             with open(target, encoding="utf-8", newline="") as stream:
                 raw = stream.read()
@@ -671,7 +673,9 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
             if record is not None:
                 valid = (
                     isinstance(record, dict)
-                    and set(record) == {"version", "migration", "config_id", "state", "after_sha256"}
+                    and set(record) == {
+                        "version", "migration", "config_id", "state", "after_sha256",
+                    }
                     and type(record.get("version")) is int and record["version"] == 1
                     and record.get("migration") == "image_model_defaults_v1"
                     and record.get("config_id") == config_id
@@ -684,9 +688,20 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                     raise MigrationCompletionError("invalid image-default migration record")
                 if record["state"] == "prepared":
                     if digest(raw) != record["after_sha256"]:
-                        raise MigrationCompletionError("interrupted image-default migration; inspect config and record before retrying")
+                        raise MigrationCompletionError(
+                            "interrupted image-default migration; "
+                            "inspect config and record before retrying"
+                        )
                     record["state"] = "completed"
                     _atomic_write_marker(marker, record)
+                from .schema import _substitute_env_vars
+
+                if raw != original_raw:
+                    committed = yaml.safe_load(raw)
+                    image_raw = committed.get("image", {})
+                    data["image"] = yaml.safe_load(
+                        _substitute_env_vars(yaml.safe_dump(image_raw))
+                    )
                 return
 
             document, mode = _load_document(target)
@@ -697,7 +712,10 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                 scalar = root
                 for segment in ("image", "openai", leaf):
                     scalar = _mapping_value(scalar, segment) if scalar is not None else None
-                if not isinstance(scalar, ScalarNode) or scalar.tag != "tag:yaml.org,2002:str" or scalar.value != old:
+                if (
+                    not isinstance(scalar, ScalarNode)
+                    or scalar.tag != "tag:yaml.org,2002:str" or scalar.value != old
+                ):
                     continue
                 node = document
                 for segment in ("image", "openai"):
@@ -706,17 +724,24 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                 _assert_not_shared(node, ("image", "openai"))
                 _assert_not_shared(node[leaf], ("image", "openai", leaf))
                 token = raw[scalar.start_mark.index:scalar.end_mark.index]
-                if token not in {old, f"'{old}'", f'"{old}"'}:
-                    continue
                 new = IMAGE_MODEL_DEFAULTS[leaf]
-                replacement = new if token == old else token[0] + new + token[-1]
+                if old in token:
+                    replacement = token.replace(old, new, 1)
+                elif scalar.style == '"':
+                    replacement = token[:token.index('"')] + json.dumps(new)
+                else:
+                    raise MigrationCompletionError(
+                        "exact old image default uses unsupported scalar syntax; edit it directly"
+                    )
                 edits.append((scalar.start_mark.index, scalar.end_mark.index, replacement))
                 updates[leaf] = new
             rewritten = raw
             for start, end, replacement in sorted(edits, reverse=True):
                 rewritten = rewritten[:start] + replacement + rewritten[end:]
-            record = {"version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
-                      "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten)}
+            record = {
+                "version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
+                "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten),
+            }
             _atomic_write_marker(marker, record)
             if edits:
                 _dump_atomic(document, target, mode, raw_text=rewritten)
@@ -727,4 +752,6 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     except MigrationCompletionError:
         raise
     except Exception as exc:
-        raise MigrationCompletionError("image-default migration could not commit safely; inspect config and record") from exc
+        raise MigrationCompletionError(
+            "image-default migration could not commit safely; inspect config and record"
+        ) from exc

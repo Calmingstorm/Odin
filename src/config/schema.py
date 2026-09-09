@@ -1439,8 +1439,8 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # deliberate ${VAR} placeholder.
     from .migrations import (
         MigrationCompletionError,
-        apply_legacy_ceiling_migration,
         apply_image_defaults_migration,
+        apply_legacy_ceiling_migration,
     )
 
     try:

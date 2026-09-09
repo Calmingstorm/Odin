@@ -7,7 +7,9 @@ LEGACY_IMAGE_MODEL_DEFAULTS = {"image_model": "gpt-image-2", "outer_model": "gpt
 IMAGE_MODEL_PREFIX = ("image", "openai")
 
 
-def read_image_model_metadata(config_path: str | Path | None, config: Any) -> dict[str, dict[str, str]]:
+def read_image_model_metadata(
+    config_path: str | Path | None, config: Any,
+) -> dict[str, dict[str, str]]:
     """Raw explicit, alias, and merge-inherited leaves are pins; absence follows."""
     from .persistence import _load_document, _resolve_path
 
