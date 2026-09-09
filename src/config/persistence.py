@@ -32,6 +32,7 @@ import asyncio
 import contextlib
 import os
 import shutil
+import stat
 import tempfile
 import threading
 import weakref
@@ -328,29 +329,48 @@ def _resolve_path(path: Path | str | None) -> Path:
     return resolved
 
 
+@contextlib.contextmanager
+def _config_file_lock(target: Path):
+    """Same-user rendezvous without following attacker-created lock paths."""
+    import fcntl
+
+    from .migrations import _config_identity
+
+    directory = Path(tempfile.gettempdir()) / f"odin-config-locks-{os.geteuid()}"
+    directory.mkdir(mode=0o700, exist_ok=True)
+    directory_fd = os.open(directory, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+    try:
+        info = os.fstat(directory_fd)
+        if info.st_uid != os.geteuid() or stat.S_IMODE(info.st_mode) != 0o700:
+            raise ConfigPersistError("unsafe config lock directory ownership or permissions")
+        fd = os.open(
+            _config_identity(target), os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK,
+            0o600, dir_fd=directory_fd,
+        )
+        try:
+            info = os.fstat(fd)
+            if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
+                    or stat.S_IMODE(info.st_mode) != 0o600 or info.st_nlink != 1):
+                raise ConfigPersistError("unsafe config lock file ownership or permissions")
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            os.close(fd)
+    finally:
+        os.close(directory_fd)
+
+
 def patch_config_paths(
     changes: Iterable[ConfigChange], *, path: Path | str | None = None,
     image_model_intent: Mapping[str, str] | None = None,
 ) -> None:
     """Serialize the file revision with startup migration and other processes."""
-    import fcntl
-
-    from .migrations import _config_identity
-
     changes = list(changes)
     if not changes and not image_model_intent:
         return
     target = _resolve_path(path).resolve()
-    lock_path = (
-        Path(tempfile.gettempdir()) / f"odin-config-locks-{os.getuid()}" / _config_identity(target)
-    )
-    try:
-        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with open(lock_path, "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
-            _patch_config_paths(changes, path=target, image_model_intent=image_model_intent)
-    except OSError:
-        raise
+    with _config_file_lock(target):
+        _patch_config_paths(changes, path=target, image_model_intent=image_model_intent)
 
 
 def _patch_config_paths(

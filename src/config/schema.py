@@ -1445,7 +1445,7 @@ def load_config(path: str | Path = "config.yml") -> Config:
 
     try:
         apply_legacy_ceiling_migration(data, path, original_raw)
-        apply_image_defaults_migration(data, path, path.read_text())
+        apply_image_defaults_migration(data, path, original_raw)
     except MigrationCompletionError as exc:
         raise SystemExit(
             f"Configuration migration failed for {path}: {exc}\n"

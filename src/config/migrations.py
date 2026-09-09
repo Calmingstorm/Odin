@@ -644,33 +644,39 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
     Prepared records fence interrupted commits; an ambiguous preimage requires
     inspection, never a blind second rewrite of a possible later operator pin.
     """
-    import fcntl
-
     from .image_defaults import IMAGE_MODEL_DEFAULTS, LEGACY_IMAGE_MODEL_DEFAULTS
-    from .persistence import _assert_not_shared, _dump_atomic, _load_document
+    from .persistence import _assert_not_shared, _config_file_lock, _dump_atomic, _load_document
+    from .schema import _substitute_env_vars
+
+    def reconcile(raw):
+        # Expand the exact committed source, never a YAML reserialization: quoting
+        # around placeholders is part of the startup parsing contract.
+        committed = yaml.safe_load(_substitute_env_vars(raw))
+        if not isinstance(committed, dict):
+            raise MigrationCompletionError("committed config must be a mapping")
+        data.clear()
+        data.update(committed)
 
     target = Path(config_path).resolve()
     marker = image_defaults_marker_path(target)
     config_id = _config_identity(target)
     try:
         marker.parent.mkdir(parents=True, exist_ok=True)
-        lock_path = Path(tempfile.gettempdir()) / f"odin-config-locks-{os.getuid()}" / config_id
-        lock_path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        with open(lock_path, "a") as lock:
-            fcntl.flock(lock, fcntl.LOCK_EX)
+        with _config_file_lock(target):
             with open(target, encoding="utf-8", newline="") as stream:
                 raw = stream.read()
 
             def digest(text):
                 return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
+            missing = object()
             try:
                 record = json.loads(marker.read_text(encoding="utf-8"))
             except FileNotFoundError:
-                record = None
+                record = missing
             except (OSError, ValueError) as exc:
                 raise MigrationCompletionError("invalid image-default migration record") from exc
-            if record is not None:
+            if record is not missing:
                 valid = (
                     isinstance(record, dict)
                     and set(record) == {
@@ -694,14 +700,8 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                         )
                     record["state"] = "completed"
                     _atomic_write_marker(marker, record)
-                from .schema import _substitute_env_vars
-
                 if raw != original_raw:
-                    committed = yaml.safe_load(raw)
-                    image_raw = committed.get("image", {})
-                    data["image"] = yaml.safe_load(
-                        _substitute_env_vars(yaml.safe_dump(image_raw))
-                    )
+                    reconcile(raw)
                 return
 
             document, mode = _load_document(target)
@@ -747,6 +747,9 @@ def apply_image_defaults_migration(data: dict, config_path: str | Path, original
                 _dump_atomic(document, target, mode, raw_text=rewritten)
                 record["state"] = "completed"
                 _atomic_write_marker(marker, record)
+            if raw != original_raw:
+                reconcile(rewritten)
+            else:
                 for leaf, value in updates.items():
                     data["image"]["openai"][leaf] = value
     except MigrationCompletionError:
