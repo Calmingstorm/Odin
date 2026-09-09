@@ -425,7 +425,7 @@ def _patch_config_paths(
         explicit_pin = is_image_model and intents.get(segments[-1]) == "pin"
         if value is DELETE_CONFIG_PATH and not present_leaf:
             continue
-        if not explicit_pin and (
+        if not explicit_pin and not aliases and (
             (present_leaf and (previous == value or _placeholder_still_accurate(previous, value)))
             or (is_image_model and not present_leaf and value == IMAGE_MODEL_DEFAULTS[segments[-1]])
         ):
