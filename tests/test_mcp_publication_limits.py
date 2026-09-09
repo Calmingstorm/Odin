@@ -46,7 +46,7 @@ def test_schema_defaults_bounds_and_serialization(field, maximum):
         config = MCPConfig(**{field: value})
         assert config.model_dump()[field] == value
         assert getattr(MCPConfig.model_validate_json(config.model_dump_json()), field) == value
-    for value in (0, -1, maximum + 1, 1.5, None):
+    for value in (0, -1, maximum + 1, True, False, 2.0, "2", 1.5, None):
         with pytest.raises(ValidationError):
             MCPConfig(**{field: value})
 
@@ -244,6 +244,16 @@ def auth(tier="admin"):
     return {"Authorization": f"Bearer checkpoint-{tier}"}
 
 
+def limits_handler(client):
+    """Return the registered production limits handler, without HTTP transport races."""
+    return next(
+        route.handler
+        for route in client.server.app.router.routes()
+        if route.method == "POST"
+        and getattr(route.resource, "canonical", None) == "/api/mcp/limits"
+    )
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 async def test_status_always_reports_defaults_even_disabled(limits_api, enabled):
     client, bot, _ = limits_api
@@ -412,6 +422,53 @@ async def test_save_adopts_into_rebound_root_after_writer(limits_api, monkeypatc
     assert getattr(old.mcp, PER_SERVER) == 40
     assert bot.mcp_manager.get_publication_limits() == {PER_SERVER: 77, GLOBAL: 40}
     assert yaml.safe_load(path.read_text())["mcp"][PER_SERVER] == 77
+
+
+@pytest.mark.parametrize("cancellation", ["writer", "request"])
+async def test_limits_handler_cancellation_after_durable_commit_adopts_once(
+    limits_api, monkeypatch, cancellation
+):
+    """A committed limits change survives either cancellation signal path.
+
+    ``writer`` exercises the route's explicit ``writer_cancelled`` raise;
+    ``request`` cancels the actual handler while its committed child task is
+    still draining. Both must expose cancellation only after the one durable
+    write and live adoption have completed.
+    """
+    client, bot, path = limits_api
+    original_writer = persistence.persist_config_paths_locked
+    persisted = asyncio.Event()
+    release = asyncio.Event()
+    calls = 0
+    payload = {PER_SERVER: 71, GLOBAL: 143}
+
+    async def committed_writer(changes):
+        nonlocal calls
+        calls += 1
+        error, _ = await original_writer(changes)
+        persisted.set()
+        if cancellation == "request":
+            await release.wait()
+        return error, cancellation == "writer"
+
+    monkeypatch.setattr(persistence, "persist_config_paths_locked", committed_writer)
+    request = SimpleNamespace(json=AsyncMock(return_value=payload))
+    task = asyncio.create_task(limits_handler(client)(request))
+    await asyncio.wait_for(persisted.wait(), timeout=1)
+    if cancellation == "request":
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done(), "post-commit cancellation must drain the handler"
+        release.set()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Disk and the live provider agree despite no successful response.
+    assert calls == 1
+    assert bot.mcp_manager.get_publication_limits() == payload
+    assert {field: getattr(bot.config.mcp, field) for field in payload} == payload
+    disk = yaml.safe_load(path.read_text())["mcp"]
+    assert {field: disk[field] for field in payload} == payload
 
 
 async def test_unchanged_save_is_idempotent_and_writes_no_paths(limits_api, monkeypatch):
