@@ -76,8 +76,8 @@ RESULT_TYPE_COMPLETE = "complete"
 RESULT_TYPE_INPUT_REQUIRED = "input_required"
 
 # ---------------------------------------------------------------------------
-# Bounds (plan §9). Wire-level bounds apply BEFORE parsing; model-facing caps
-# (description, published counts) are enforced at publication time.
+# Bounds (plan §9). Wire-level bounds apply BEFORE parsing; description caps
+# are enforced at publication time. Published-count policy lives in MCPConfig.
 # ---------------------------------------------------------------------------
 WIRE_RESULT_CEILING = 4 * 1024 * 1024  # one JSON body / SSE data accumulation
 MAX_STDOUT_LINE_BYTES = WIRE_RESULT_CEILING
@@ -88,8 +88,6 @@ MAX_SSE_EVENT_LINES = 16_384
 MAX_STDERR_STORE_BYTES = 64 * 1024
 MAX_LIST_PAGES = 32
 MAX_DISCOVERED_TOOLS = 128
-MAX_PUBLISHED_TOOLS_PER_SERVER = 40
-MAX_PUBLISHED_TOOLS_GLOBAL = 40
 MAX_SCHEMA_BYTES_PER_TOOL = 32 * 1024
 MAX_SCHEMA_BYTES_PER_SERVER = 256 * 1024
 MAX_SCHEMA_DEPTH = 20

@@ -108,8 +108,17 @@ control-character-stripped.
 
 ## Bounds
 
-40 published tools per server and globally (over-limit ⇒ blocked, resolved
-via per-server `tool_allowlist`); 128-char server/original-tool audit identifiers;
+Published tools default to 40 per server and 40 globally. Live configuration
+`mcp.max_published_tools_per_server` (1-128) and `mcp.max_published_tools_global`
+(1-256) is managed in Capabilities > MCP, exposed by `GET /api/mcp/status`, and
+saved through `POST /api/mcp/limits` (either or both integer leaves). Limits are
+read at each publication/refresh, without a restart or reconnect. Saving does
+not evict existing published tools; use **Refresh tools** to apply immediately
+to a server. Over-limit servers publish nothing, never a silently truncated
+subset; narrow their `tool_allowlist` or raise the relevant limit and refresh.
+The global cap covers MCP only, not built-ins/skills: higher values consume
+more context and may exceed the model provider's total tool limit. Discovery
+and wire safety bounds are unchanged. 128-char server/original-tool audit identifiers;
 1,024-char model-facing descriptions;
 32 KiB schema per tool / 256 KiB per server / depth 20 / 2,048 nodes;
 32 list pages / 128 discovered tools; 4 MiB wire-result ceiling before the

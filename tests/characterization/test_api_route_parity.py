@@ -111,6 +111,7 @@ EXPECTED_ROUTES = [
     ("POST", "/api/mcp/servers/{name}/refresh-tools", "refresh_mcp_server_tools"),
     ("GET", "/api/mcp/status", "mcp_status"),
     ("POST", "/api/mcp/enabled", "set_mcp_enabled"),
+    ("POST", "/api/mcp/limits", "set_mcp_publication_limits"),
     ("POST", "/api/mcp/servers/{name}/enabled", "set_mcp_server_enabled"),
     ("GET", "/api/slack/status", "slack_status"),
     ("POST", "/api/slack/test", "slack_test"),
@@ -272,7 +273,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 224
+        assert len(actual) == len(expected) == 225
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

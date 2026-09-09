@@ -587,7 +587,15 @@ def build_services(
     # must work even while globally disabled, and the first server must be
     # addable through a live control plane. Transports exist only after the
     # async start path reconciles enabled configurations (start_mcp).
-    mcp_manager = MCPManager()
+    current_config = get_config if get_config is not None else lambda: config
+    mcp_manager = MCPManager(
+        max_published_tools_per_server_provider=(
+            lambda: current_config().mcp.max_published_tools_per_server
+        ),
+        max_published_tools_global_provider=(
+            lambda: current_config().mcp.max_published_tools_global
+        ),
+    )
 
     return BotServices(
         channel_state=channel_state,

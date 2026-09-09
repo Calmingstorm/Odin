@@ -1185,6 +1185,10 @@ class EmailConfig(BaseModel):
 
 class MCPConfig(BaseModel):
     enabled: bool = False
+    # Publication policy, not wire limits. Read live at each publish/refresh.
+    # Per-server ceiling matches the protocol's 128-tool discovery bound.
+    max_published_tools_per_server: int = Field(default=40, ge=1, le=128)
+    max_published_tools_global: int = Field(default=40, ge=1, le=256)
     servers: dict[str, MCPServerConfig] = Field(default_factory=dict)
 
 

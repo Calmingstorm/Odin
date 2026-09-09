@@ -61,7 +61,7 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
     """
     from ...config import persistence as config_persistence
     from ...config.persistence import DELETE_CONFIG_PATH, config_transaction
-    from ...config.schema import MCPServerConfig
+    from ...config.schema import MCPConfig, MCPServerConfig
     from ...tools.mcp import MCPConfigError, validate_server_config
     from ..api_common import contains_redaction_mask
 
@@ -390,6 +390,59 @@ def register_mcp_servers(routes: web.RouteTableDef, bot) -> None:
                     ),
                     writer_cancelled,
                 )
+
+        response, writer_cancelled = await _drain_mcp_management(
+            mutate(), commit_started=commit_started
+        )
+        if writer_cancelled:
+            raise asyncio.CancelledError
+        return response
+
+    @routes.post("/api/mcp/limits")
+    async def set_mcp_publication_limits(request: web.Request) -> web.Response:
+        """Persist only submitted limits; publication reads them live, without reconnecting."""
+        try:
+            body = await request.json()
+        except Exception:
+            return web.json_response({"error": "invalid JSON"}, status=400)
+        fields = {"max_published_tools_per_server", "max_published_tools_global"}
+        if not isinstance(body, dict) or not body or set(body) - fields:
+            return web.json_response(
+                {
+                    "error": "provide max_published_tools_per_server and/or "
+                    "max_published_tools_global only"
+                },
+                status=400,
+            )
+        if any(type(value) is not int for value in body.values()):
+            return web.json_response({"error": "publication limits must be integers"}, status=400)
+        try:
+            validated = MCPConfig(**body)
+        except ValueError as exc:
+            return web.json_response({"error": _sanitized(str(exc))}, status=400)
+        limits = {field: getattr(validated, field) for field in body}
+        commit_started = asyncio.Event()
+
+        async def mutate():
+            async with management_lock:
+                async with config_transaction():
+                    changes = [
+                        (("mcp", field), value)
+                        for field, value in limits.items()
+                        if getattr(bot.config.mcp, field) != value
+                    ]
+                    commit_started.set()
+                    exc, writer_cancelled = await config_persistence.persist_config_paths_locked(
+                        changes
+                    )
+                    if exc is not None:
+                        raise exc
+                    # Re-read the current root after the writer, preserving unrelated
+                    # config and all server credentials/placeholders. No transport work.
+                    for field, value in limits.items():
+                        setattr(bot.config.mcp, field, value)
+                    status = _manager().get_status()
+                return web.json_response({"saved": True, **status}), writer_cancelled
 
         response, writer_cancelled = await _drain_mcp_management(
             mutate(), commit_started=commit_started
