@@ -20,6 +20,7 @@ def facade():
         session=AsyncMock(return_value={"state": "active"}),
         observe=AsyncMock(return_value={"state": "active"}),
         act=AsyncMock(return_value={"state": "active"}),
+        finish_turn=AsyncMock(),
     )
     bot = SimpleNamespace(
         config=SimpleNamespace(computer=SimpleNamespace(enabled=True)),
@@ -180,6 +181,47 @@ async def test_turn_cleanup_delegates_without_restriction_lookup():
     state = dispatch_state()
     await runner._stop_computer_turn(state)
     service.finish_turn.assert_awaited_once_with(state)
+
+
+@pytest.mark.parametrize("binding", [None, "", 0])
+async def test_unbound_web_turn_cleanup_is_noop_but_foreground_remains_denied(binding):
+    service = facade()
+    state = dispatch_state()
+    state.message._odin_source = "web"
+    state.message._computer_web_session_id = binding
+
+    assert await service.finish_turn(state) is None
+    service.controller.finish_turn.assert_not_called()
+
+    block = SimpleNamespace(name="computer_session", id="start", input={"operation": "start"})
+    with pytest.raises(PermissionError, match="Missing authenticated web session binding"):
+        with service.foreground(state, block):
+            pytest.fail("unbound web foreground authority was granted")
+    service.controller.session.assert_not_called()
+
+
+@pytest.mark.parametrize("surface", ["discord", "bound_web"])
+async def test_authorized_turn_cleanup_still_reaches_controller(surface):
+    service = facade()
+    state = dispatch_state()
+    if surface == "bound_web":
+        state.message._odin_source = "web"
+        state.message._computer_web_session_id = "private-browser-session"
+
+    await service.finish_turn(state)
+
+    context = service.controller.finish_turn.await_args.args[0]
+    assert context.owner_id == "alice" and context.turn_id == "turn-one"
+    if surface == "bound_web":
+        assert context.surface == "webui"
+        assert context.channel_id == service.web_binding("private-browser-session")
+    else:
+        assert context.surface == "discord"
+        assert context.channel_id == str(state.message.channel.id)
+
+    service.controller.finish_turn.side_effect = RuntimeError("owned cleanup failed")
+    with pytest.raises(RuntimeError, match="owned cleanup failed"):
+        await service.finish_turn(state)
 
 
 def test_frame_integrity_retires_lost_evidence_without_blocking_ordinary_turn():

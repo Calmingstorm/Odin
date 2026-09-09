@@ -416,6 +416,16 @@ class ComputerIntegration:
         await self.controller.session(context, {"operation": "stop"})
 
     async def finish_turn(self, st):
+        # Raw /api/execute turns deliberately have no browser-session binding
+        # and therefore cannot own foreground desktop state. Their generic
+        # turn-finalizer still reaches this facade; there is nothing to clean
+        # up, and routing them through _context() would turn that expected lack
+        # of authority into a spurious cleanup error. Bound web turns and
+        # Discord turns retain the normal ownership-checked cleanup path.
+        if getattr(st.message, "_odin_source", None) == "web":
+            binding = getattr(st.message, "_computer_web_session_id", None)
+            if not isinstance(binding, str) or not binding:
+                return None
         return await self.controller.finish_turn(self._context(st))
 
     async def stop_channel(self, owner_id, channel_id):
