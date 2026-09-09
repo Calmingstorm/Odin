@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 import collections
 import time
+from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
 from ..odin_log import get_logger
@@ -26,6 +27,27 @@ if TYPE_CHECKING:
     from .background_task import BackgroundTask
 
 log = get_logger("discord")
+
+
+STEER_MESSAGE_MAX_CHARS = 4000
+STEER_MESSAGES_PER_TURN = 128
+
+
+@dataclass
+class ChatTurnInbox:
+    """Process-local steering primitives, shared by the registry and one turn.
+
+    No task, waiter, timer or callback is installed. The turn alone consumes
+    the queue; admission and consumption are synchronous event-loop operations.
+    """
+
+    requester_id: str = ""
+    inbox: asyncio.Queue = field(default_factory=asyncio.Queue, repr=False)
+    event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
+    inbox_sequence: int = 0
+    last_consumed_sequence: int = 0
+    inbox_events: list[dict] = field(default_factory=list)
+    accepting: bool = True
 
 
 class ChannelStateRegistry:
@@ -48,6 +70,8 @@ class ChannelStateRegistry:
         self.cancel_events: dict[str, asyncio.Event] = {}
         self._cancel_request_ids: dict[str, str] = {}
         self.active_requests: dict[str, str] = {}
+        # Request-owned like _stop_waiters, never a channel-only mailbox.
+        self._steer_inboxes: dict[tuple[str, str], ChatTurnInbox] = {}
         # Per-channel completion signal for an owned /stop. Created lazily by
         # request_stop so set_active_request remains event-loop agnostic.
         self.stop_results: dict[str, asyncio.Future[str]] = {}
@@ -103,6 +127,9 @@ class ChannelStateRegistry:
         """
         event = cancel_event or asyncio.Event()
         event.clear()
+        previous = self.active_requests.get(channel_id)
+        if previous is not None:
+            self.close_steer_inbox(channel_id, previous)
         self.cancel_events[channel_id] = event
         self._cancel_request_ids[channel_id] = request_id
         self.active_requests[channel_id] = request_id
@@ -111,6 +138,57 @@ class ChannelStateRegistry:
         # settles. Replacement must not publish a false terminal result.
         self.stop_results.pop(channel_id, None)
         return event
+
+    def bind_steer_inbox(
+        self, channel_id: str, request_id: str, inbox: ChatTurnInbox
+    ) -> None:
+        """Bind only to the still-current owner, never to its replacement."""
+        if self.active_requests.get(channel_id) != request_id:
+            inbox.accepting = False
+            return
+        self._steer_inboxes[(channel_id, request_id)] = inbox
+
+    def close_steer_inbox(self, channel_id: str, request_id: str) -> None:
+        """End steering admission without changing /stop or active ownership."""
+        inbox = self._steer_inboxes.pop((channel_id, request_id), None)
+        if inbox is not None:
+            inbox.accepting = False
+
+    def request_steer(
+        self,
+        channel_id: str,
+        message: str,
+        *,
+        user_id: str,
+        is_admin: bool = False,
+    ) -> str:
+        """Atomically authorize and enqueue against the current request ID.
+
+        As with request_stop, no await separates owner lookup from delivery.
+        A late cleanup can only remove its own (channel_id, request_id) key.
+        Steering never changes the turn's requester/tool-execution authority.
+        """
+        request_id = self.active_requests.get(channel_id)
+        inbox = self._steer_inboxes.get((channel_id, request_id)) if request_id else None
+        if inbox is None or not inbox.accepting:
+            return "No running chat turn accepting steering in this channel."
+        if user_id != inbox.requester_id and not is_admin:
+            return "Access denied. Only the turn's requester or an admin may steer it."
+        if self._cancel_request_ids.get(channel_id) == request_id and self.is_cancelled(channel_id):
+            return "The current task is stopping; steering was not queued."
+        if not message.strip():
+            return "Message cannot be empty."
+        if len(message) > STEER_MESSAGE_MAX_CHARS:
+            return f"Steering messages must be at most {STEER_MESSAGE_MAX_CHARS} characters."
+        if inbox.inbox_sequence >= STEER_MESSAGES_PER_TURN:
+            return "This turn's steering limit has been reached; message was not queued."
+        inbox.inbox_sequence += 1
+        sequence = inbox.inbox_sequence
+        inbox.inbox.put_nowait({"sequence": sequence, "text": message, "user_id": user_id})
+        inbox.inbox_events.append({"event": "queued", "sequence": sequence, "at": time.time()})
+        inbox.event.set()
+        log.info("Queued steering %d for request %s in channel %s", sequence, request_id, channel_id)
+        return f"Message queued (sequence {sequence}; not yet consumed)."
 
     def request_stop(
         self, channel_id: str
@@ -174,6 +252,7 @@ class ChannelStateRegistry:
         the slash command reaches its bounded, truthful timeout instead of a
         cleanup path publishing an acknowledgement without a terminal record.
         """
+        self.close_steer_inbox(channel_id, request_id)
         if self.active_requests.get(channel_id) == request_id:
             waiter = self._stop_waiters.get((channel_id, request_id))
             if resolve_stop_waiter:

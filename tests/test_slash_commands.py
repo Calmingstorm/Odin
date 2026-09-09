@@ -57,7 +57,7 @@ def _bot(**extra):
 
 def test_exact_command_set():
     bot = _bot()
-    assert set(bot.tree.commands) == {"status", "reload", "usage", "stop"}
+    assert set(bot.tree.commands) == {"status", "reload", "usage", "stop", "steer"}
 
 
 async def test_reload_is_ephemeral_and_renders_the_report():

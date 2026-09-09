@@ -1,9 +1,10 @@
 """Slash-command registration (RFC-001 Phase 10).
 
-Four commands: ``/status`` (runtime configuration and health), ``/reload``
+Five commands: ``/status`` (runtime configuration and health), ``/reload``
 (context files, with the loader's report of what is effective, removed, and
 skipped), ``/usage`` (durable usage totals plus the live Codex quota for the
-account currently serving), and ``/stop``.  ``/reset`` and ``/purge`` were
+account currently serving), ``/stop``, and ``/steer`` (queue a correction to
+the running main chat turn). ``/reset`` and ``/purge`` were
 removed: session reset stays reachable through the WebUI and native tools,
 and message purging through the ``!purge`` moderation prefix command.
 
@@ -25,7 +26,9 @@ import discord
 from discord import app_commands
 
 from .. import __version__
+from ..credential_redaction import check_for_secrets
 from ..odin_log import get_logger
+from .channel_state import STEER_MESSAGE_MAX_CHARS
 
 log = get_logger("discord")
 
@@ -431,6 +434,34 @@ def register_commands(bot) -> None:
         await interaction.followup.send(
             render_usage(summary, range_name, _quota_lines(bot, now)), ephemeral=True
         )
+
+    @bot.tree.command(name="steer", description="Queue a message to Odin's running chat turn")
+    @app_commands.describe(message="Correction or direction for the currently running turn")
+    async def cmd_steer(
+        interaction: discord.Interaction,
+        message: app_commands.Range[str, 1, STEER_MESSAGE_MAX_CHARS],
+    ) -> None:
+        if not bot.intake.is_allowed_user(interaction.user) or interaction.user.bot:
+            await interaction.response.send_message("Access denied.", ephemeral=True)
+            return
+        # Slash options bypass MessageIntake.handle's secret gate. Never echo
+        # the message in the acknowledgement or send credentials to the model.
+        if check_for_secrets(message):
+            await interaction.response.send_message(
+                "A secret/credential was detected. Remove it and send the steering message again.",
+                ephemeral=True,
+            )
+            return
+        user_id = str(interaction.user.id)
+        result = bot.channel_state.request_steer(
+            str(interaction.channel_id),
+            message,
+            user_id=user_id,
+            is_admin=bot.permissions.is_admin(user_id),
+        )
+        # No defer, channel lock or wait for consumption. This receipt attests
+        # only to in-memory enqueueing, not execution or durable delivery.
+        await interaction.response.send_message(result, ephemeral=True)
 
     @bot.tree.command(name="stop", description="Stop Odin's current task in this channel")
     async def cmd_stop(interaction: discord.Interaction) -> None:
