@@ -1020,8 +1020,8 @@ class ImageOpenAIConfig(BaseModel):
     """
 
     enabled: bool = True  # kill switch for the native wire implementation
-    outer_model: str = "gpt-5.5"  # Responses model that hosts the image tool
-    image_model: str = "gpt-image-2"  # the image_generation tool's model
+    outer_model: str = "gpt-6-astra"  # Responses model that hosts the image tool
+    image_model: str = "gpt-image-2.5-flare"  # the image_generation tool's model
     # NOTE: this route IGNORES the requested size and always returns a
     # backend-selected SQUARE image, so there is no size allowlist — the
     # selector sends non-square requests to ComfyUI instead.
@@ -1437,14 +1437,19 @@ def load_config(path: str | Path = "config.yml") -> Config:
     # Runs on the raw dict so pydantic validates what will actually apply;
     # the unsubstituted text distinguishes a literal legacy default from a
     # deliberate ${VAR} placeholder.
-    from .migrations import MigrationCompletionError, apply_legacy_ceiling_migration
+    from .migrations import (
+        MigrationCompletionError,
+        apply_legacy_ceiling_migration,
+        apply_image_defaults_migration,
+    )
 
     try:
         apply_legacy_ceiling_migration(data, path, original_raw)
+        apply_image_defaults_migration(data, path, path.read_text())
     except MigrationCompletionError as exc:
         raise SystemExit(
             f"Configuration migration failed for {path}: {exc}\n"
-            "Inspect the ceiling-migration record and retry; Odin will not "
+            "Inspect the configuration migration record and retry; Odin will not "
             "guess at operator provenance."
         ) from exc
     try:

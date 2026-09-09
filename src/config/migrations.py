@@ -626,3 +626,105 @@ def apply_legacy_ceiling_migration(data: dict, config_path: str | Path, original
     # the unambiguous null takes the vacuous branch on the next boot.
     _record_after_rewrite(shared_marker, config_id)
     _record_after_rewrite(marker, config_id)
+
+
+def image_defaults_marker_path(config_path: str | Path) -> Path:
+    """Canonical identity rendezvous, shared by every symlink launch alias."""
+    target = Path(config_path).resolve()
+    return target.parent / ".odin-data" / "config_migrations" / (
+        f"image_model_defaults_v1.{_config_identity(target)}.json"
+    )
+
+
+def apply_image_defaults_migration(data: dict, config_path: str | Path, original_raw: str) -> None:
+    """Upgrade exact raw defaults once, preserving every other source byte.
+
+    A deliberate pin equal to an old shipped default is indistinguishable from
+    inheritance and is intentionally upgraded. Other literals are retained.
+    Prepared records fence interrupted commits; an ambiguous preimage requires
+    inspection, never a blind second rewrite of a possible later operator pin.
+    """
+    import fcntl
+
+    from .image_defaults import IMAGE_MODEL_DEFAULTS, LEGACY_IMAGE_MODEL_DEFAULTS
+    from .persistence import _assert_not_shared, _dump_atomic, _load_document
+
+    target = Path(config_path).resolve()
+    marker = image_defaults_marker_path(target)
+    config_id = _config_identity(target)
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with open(marker.with_suffix(".lock"), "a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            with open(target, encoding="utf-8", newline="") as stream:
+                raw = stream.read()
+
+            def digest(text):
+                return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+            try:
+                record = json.loads(marker.read_text(encoding="utf-8"))
+            except FileNotFoundError:
+                record = None
+            except (OSError, ValueError) as exc:
+                raise MigrationCompletionError("invalid image-default migration record") from exc
+            if record is not None:
+                valid = (
+                    isinstance(record, dict)
+                    and set(record) == {"version", "migration", "config_id", "state", "after_sha256"}
+                    and type(record.get("version")) is int and record["version"] == 1
+                    and record.get("migration") == "image_model_defaults_v1"
+                    and record.get("config_id") == config_id
+                    and record.get("state") in {"prepared", "completed"}
+                    and isinstance(record.get("after_sha256"), str)
+                    and len(record["after_sha256"]) == 64
+                    and all(c in "0123456789abcdef" for c in record["after_sha256"])
+                )
+                if not valid:
+                    raise MigrationCompletionError("invalid image-default migration record")
+                if record["state"] == "prepared":
+                    if digest(raw) != record["after_sha256"]:
+                        raise MigrationCompletionError("interrupted image-default migration; inspect config and record before retrying")
+                    record["state"] = "completed"
+                    _atomic_write_marker(marker, record)
+                return
+
+            document, mode = _load_document(target)
+            root = yaml.compose(raw, Loader=yaml.SafeLoader)
+            edits = []
+            updates = {}
+            for leaf, old in LEGACY_IMAGE_MODEL_DEFAULTS.items():
+                scalar = root
+                for segment in ("image", "openai", leaf):
+                    scalar = _mapping_value(scalar, segment) if scalar is not None else None
+                if not isinstance(scalar, ScalarNode) or scalar.tag != "tag:yaml.org,2002:str" or scalar.value != old:
+                    continue
+                node = document
+                for segment in ("image", "openai"):
+                    _assert_not_shared(node, ("image", "openai", leaf))
+                    node = node[segment]
+                _assert_not_shared(node, ("image", "openai"))
+                _assert_not_shared(node[leaf], ("image", "openai", leaf))
+                token = raw[scalar.start_mark.index:scalar.end_mark.index]
+                if token not in {old, f"'{old}'", f'"{old}"'}:
+                    continue
+                new = IMAGE_MODEL_DEFAULTS[leaf]
+                replacement = new if token == old else token[0] + new + token[-1]
+                edits.append((scalar.start_mark.index, scalar.end_mark.index, replacement))
+                updates[leaf] = new
+            rewritten = raw
+            for start, end, replacement in sorted(edits, reverse=True):
+                rewritten = rewritten[:start] + replacement + rewritten[end:]
+            record = {"version": 1, "migration": "image_model_defaults_v1", "config_id": config_id,
+                      "state": "prepared" if edits else "completed", "after_sha256": digest(rewritten)}
+            _atomic_write_marker(marker, record)
+            if edits:
+                _dump_atomic(document, target, mode, raw_text=rewritten)
+                record["state"] = "completed"
+                _atomic_write_marker(marker, record)
+                for leaf, value in updates.items():
+                    data["image"]["openai"][leaf] = value
+    except MigrationCompletionError:
+        raise
+    except Exception as exc:
+        raise MigrationCompletionError("image-default migration could not commit safely; inspect config and record") from exc
