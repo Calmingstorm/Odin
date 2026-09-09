@@ -332,6 +332,52 @@ async def test_native_no_size_omits_it_from_payload():
     assert "size" not in sent["tools"][0]
 
 
+@pytest.mark.parametrize(
+    ("overrides", "outer", "renderer"),
+    [
+        ({}, "gpt-6-astra", "gpt-image-2.5-flare"),
+        ({"outer_model": "custom-carrier"}, "custom-carrier", "gpt-image-2.5-flare"),
+        ({"image_model": "custom-renderer"}, "gpt-6-astra", "custom-renderer"),
+        (
+            {"outer_model": "gpt-5.5", "image_model": "gpt-image-2"},
+            "gpt-5.5", "gpt-image-2",
+        ),
+    ],
+)
+async def test_default_pair_and_explicit_pins_reach_wire_unchanged(overrides, outer, renderer):
+    """The schema changes the pair, not the wire, chat settings, or deadlines."""
+    backend, cfg = _backend(
+        _FakePool(), [_FakeResp(200, (_sse(_final_image_event()),))], **overrides,
+    )
+    cfg.openai_codex.model = "unrelated-chat-model"
+    calls = []
+    original_post = backend._session.post
+
+    def record_post(url, **kwargs):
+        calls.append(kwargs)
+        return original_post(url, **kwargs)
+
+    backend._session.post = record_post
+    result = await backend.generate(prompt="a copper observatory")
+    assert result.image_model == renderer
+    assert len(calls) == 1
+    assert calls[0]["json"] == {
+        "model": outer,
+        "instructions": (
+            "You are an image generation assistant. Produce exactly the requested image."
+        ),
+        "input": [{"role": "user", "content": [
+            {"type": "input_text", "text": "a copper observatory"},
+        ]}],
+        "tools": [{"type": "image_generation", "model": renderer}],
+        "tool_choice": {"type": "image_generation"},
+        "stream": True,
+        "store": False,
+    }
+    timeout = calls[0]["timeout"]
+    assert (timeout.total, timeout.sock_connect, timeout.sock_read) == (180, 30, 120)
+
+
 async def test_kill_switch_unavailable():
     pool = _FakePool()
     b, _ = _backend(pool, [], enabled=False)
