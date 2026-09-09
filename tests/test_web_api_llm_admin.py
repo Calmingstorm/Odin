@@ -1213,7 +1213,7 @@ class TestPersistHelpers:
         real_open = os.open
 
         def _open(path, *a, **k):
-            if os.path.isdir(path):
+            if os.path.isdir(path) and Path(path).resolve() == Path("config.yml").resolve().parent:
                 raise OSError("dir fsync open failed")
             return real_open(path, *a, **k)
 

@@ -452,6 +452,36 @@ def test_reconcile_rejects_nonmapping(tmp_path):
         apply_image_defaults_migration({}, path, initial)
 
 
+def test_escaped_continuation_old_literal(tmp_path):
+    path = tmp_path / "config.yml"
+    text = 'image: {openai: {image_model: "gpt-image-\\\n    2"}}\n'
+    path.write_text(text)
+    # Double-quoted escaped continuations are supported and become a new pin.
+    migrate(path)
+    assert yaml.safe_load(path.read_text())["image"]["openai"]["image_model"] == (
+        IMAGE_MODEL_DEFAULTS["image_model"]
+    )
+
+
+def test_inconsistent_scalar_token_fails_closed(tmp_path, monkeypatch):
+    path = tmp_path / "config.yml"
+    text = 'image: {openai: {image_model: gpt-image-2}}\n'
+    path.write_text(text)
+    scan = yaml.scan
+
+    def inconsistent_scan(*args, **kwargs):
+        for token in scan(*args, **kwargs):
+            if isinstance(token, yaml.tokens.ScalarToken) and token.value == 'gpt-image-2':
+                token.start_mark.index = token.end_mark.index
+            yield token
+
+    monkeypatch.setattr(yaml, 'scan', inconsistent_scan)
+    with pytest.raises(MigrationCompletionError, match='unsupported scalar syntax'):
+        migrate(path)
+    assert path.read_text() == text
+    assert not image_defaults_marker_path(path).exists()
+
+
 def test_pin_requires_value_and_follow_overrides_value(tmp_path):
     path = tmp_path / 'config.yml'
     path.write_text('image: {}\n')
