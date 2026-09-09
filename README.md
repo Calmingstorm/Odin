@@ -65,8 +65,8 @@ during setup, which can take a few minutes. Optional computer-use support has
 distribution-specific requirements; see [the packaging handoff](docs/computer-use/PACKAGING.md).
 
 ```bash
-curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.96.0_amd64.deb
-sudo apt install ./odin_3.96.0_amd64.deb
+curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.97.0_amd64.deb
+sudo apt install ./odin_3.97.0_amd64.deb
 sudoedit /etc/odin/.env          # DISCORD_TOKEN=...
 sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
   --credentials-path /var/lib/odin/codex_auth.json --device
