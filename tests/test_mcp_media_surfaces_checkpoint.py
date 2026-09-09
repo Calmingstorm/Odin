@@ -1,7 +1,9 @@
 """Checkpoint: typed MCP image evidence crosses every model-turn surface."""
 from __future__ import annotations
 
+import asyncio
 import base64
+import copy
 import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -10,7 +12,7 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.agents.manager import AgentInfo, _run_agent
+from src.agents.manager import AgentInfo, AgentManager, _run_agent
 from src.discord.mcp_dispatch import dispatch_mcp_tool
 from src.llm.kimi import KimiClient
 from src.llm.ollama import OllamaClient
@@ -20,6 +22,7 @@ from src.tools.media_result import BinaryAttachment
 from src.tools.result_validator import ToolResult
 from src.web.api.sessions_chat import register_chat
 from tests.fakes import FakeLLM, FakeMessage, make_bot, text_response, tool_call_response
+from tests.test_native_agents_tasks import _cfg, _fake_gateway, _message, _tools
 
 PIXELS = ("MCP_PIXELS_A", "MCP_PIXELS_B", "MCP_PIXELS_C")
 BINARY = b"private-binary-checkpoint\x00\xff"
@@ -66,6 +69,53 @@ def assert_grouping(messages, expected):
     assert actual == expected
 
 
+def assert_provider_pairing_and_groups(messages, expected):
+    """Check each labelled call, not merely total image counts across calls."""
+    uses = [b for m in messages if m.get("role") == "assistant"
+            and isinstance(m.get("content"), list)
+            for b in m["content"] if b.get("type") == "tool_use"]
+    results = [b for m in messages if isinstance(m.get("content"), list)
+               for b in m["content"] if b.get("type") == "tool_result"]
+    assert [b["id"] for b in uses] == list(expected)
+    assert [b["tool_use_id"] for b in results] == list(expected)
+    assert [b["name"] for b in uses] == ["mcp_fixture_one", "mcp_fixture_two"]
+    assert "one" in results[0]["content"] and "two" in results[1]["content"]
+    codex = CodexChatClient._convert_messages_with_tools(None, messages)
+    assert [(b["call_id"], b["name"]) for b in codex if b.get("type") == "function_call"] == [
+        (b["id"], b["name"]) for b in uses]
+    assert [(b["call_id"], b["output"]) for b in codex
+            if b.get("type") == "function_call_output"] == [
+        (b["tool_use_id"], b["content"]) for b in results]
+    kimi = KimiClient._convert_messages(None, messages, "")
+    assert [(b["id"], b["function"]["name"]) for m in kimi
+            for b in m.get("tool_calls", [])] == [(b["id"], b["name"]) for b in uses]
+    assert [(m["tool_call_id"], m["content"]) for m in kimi if m.get("role") == "tool"] == [
+        (b["tool_use_id"], b["content"]) for b in results]
+    ollama = OllamaClient._convert_messages(None, messages, "")
+    # Ollama's native format has positional rather than call-ID pairing.
+    assert [b["function"]["name"] for m in ollama for b in m.get("tool_calls", [])] == [
+        b["name"] for b in uses]
+    assert [m["content"] for m in ollama if m.get("role") == "tool"] == [
+        b["content"] for b in results]
+    for wire, kind in ((codex, "input_image"), (kimi, "image_url"), (ollama, "images")):
+        grouped = {}
+        for m in wire:
+            if kind == "images":
+                pixels, label = m.get("images", []), m.get("content", "")
+            else:
+                content = m.get("content", [])
+                if not isinstance(content, list):
+                    continue
+                pixels = [(b["image_url"] if kind == "input_image" else b["image_url"]["url"])
+                          .rsplit(",", 1)[1] for b in content if b.get("type") == kind]
+                label = " ".join(b.get("text", "") for b in content)
+            if pixels:
+                call_id = next(key for key in expected if f"call {key}," in label)
+                assert call_id not in grouped
+                grouped[call_id] = pixels
+        assert grouped == expected
+
+
 @pytest.fixture(autouse=True)
 def isolated_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
@@ -79,10 +129,26 @@ class TestChatApiAndProviderCheckpoint:
             text_response("done"),
         ])
         bot = make_bot(fake_llm=fake)
-        install(bot, manager(outcome("one", PIXELS[0], PIXELS[1], status=status),
-                             outcome("two", PIXELS[2])))
-        result = await bot.tool_loop.run(
-            FakeMessage("inspect"), [{"role": "user", "content": "inspect"}])
+        first_started, second_completed = asyncio.Event(), asyncio.Event()
+        completions = []
+
+        async def execute(name, _input):
+            if name == "mcp_fixture_one":
+                first_started.set()
+                await second_completed.wait()
+                completions.append(name)
+                return outcome("one", PIXELS[0], PIXELS[1], status=status)
+            await first_started.wait()
+            completions.append(name)
+            second_completed.set()
+            return outcome("two", PIXELS[2])
+
+        mcp = manager()
+        mcp.execute = AsyncMock(side_effect=execute)
+        install(bot, mcp)
+        result = await asyncio.wait_for(bot.tool_loop.run(
+            FakeMessage("inspect"), [{"role": "user", "content": "inspect"}]), timeout=5)
+        assert completions == ["mcp_fixture_two", "mcp_fixture_one"]
         assert result[0] == "done" and result[2] is False
         continuation = fake.messages_of_call(1)
         assert_grouping(continuation, {"call-1": list(PIXELS[:2]), "call-2": [PIXELS[2]]})
@@ -105,14 +171,16 @@ class TestChatApiAndProviderCheckpoint:
                     if b.get("type") == "input_image"]) == 3
         ollama = OllamaClient(base_url="http://localhost", model="test")._convert_messages(
             continuation, "")
-        assert [p for item in ollama for p in item.get("images", [])] == list(PIXELS)
+        assert sorted(p for item in ollama for p in item.get("images", [])) == sorted(PIXELS)
         kimi = KimiClient(api_key="test", model="kimi-k2.6")._convert_messages(continuation, "")
         vision = [item for item in kimi if isinstance(item.get("content"), list)]
         assert len(vision) == 2
         converted_pixels = [part["image_url"]["url"].rsplit(",", 1)[1]
                             for item in vision for part in item["content"]
                             if part.get("type") == "image_url"]
-        assert converted_pixels == list(PIXELS)
+        assert sorted(converted_pixels) == sorted(PIXELS)
+        assert_provider_pairing_and_groups(
+            continuation, {"call-1": list(PIXELS[:2]), "call-2": [PIXELS[2]]})
 
     async def test_api_chat_exercises_same_typed_media_continuation(self):
         fake = FakeLLM([tool_call_response(("mcp_fixture_inspect", {})), text_response("API done")])
@@ -143,6 +211,66 @@ class TestChatApiAndProviderCheckpoint:
 
 
 class TestLoopAndAgentCheckpoint:
+    @pytest.mark.parametrize("status", ["ok", "failed", OUTCOME_UNCERTAIN])
+    async def test_spawned_agent_mcp_callbacks_deliver_to_second_generation(self, status):
+        fake = FakeLLM([
+            tool_call_response(("mcp_fixture_one", {}), ("mcp_fixture_two", {})),
+            text_response("agent done"),
+        ])
+        # Keep gateway generation planning real, with hermetic provider I/O and
+        # a deep snapshot at request time rather than post-run agent.messages.
+        fake.provider_name = "ollama"
+        fake.model = "test"
+        requests = []
+        original = fake.chat_with_tools
+
+        async def chat_with_tools(**kwargs):
+            requests.append(copy.deepcopy(kwargs["messages"]))
+            return await original(**kwargs)
+
+        fake.chat_with_tools = chat_with_tools
+        bot = make_bot(fake_llm=fake)
+        mcp = manager(outcome("one", PIXELS[0], PIXELS[1], status=status),
+                      outcome("two", PIXELS[2]))
+        install(bot, mcp)
+        agents = AgentManager()
+        saver = SimpleNamespace(save=AsyncMock())
+        cfg = _cfg()
+        cfg.agents.max_iterations = 2
+        tools = _tools(get_config=lambda: cfg, llm_gateway=_fake_gateway(fake),
+                       agent_manager=agents, agent_trajectory_saver=saver,
+                       tool_loop=bot.tool_loop)
+        result = await tools._handle_spawn_agent(_message(), {"label": "media", "goal": "inspect"})
+        assert "spawned" in result
+        agent_id = next(iter(agents._agents))
+        agent = agents._agents[agent_id]
+        try:
+            await asyncio.wait_for(agent._task, timeout=5)
+            assert agent.status == "completed", agent.result
+            assert len(requests) == 2
+            continuation = requests[1]
+            expected = {"call-1": list(PIXELS[:2]), "call-2": [PIXELS[2]]}
+            assert_grouping(continuation, expected)
+            assert_provider_pairing_and_groups(continuation, expected)
+            assert [c.args[0] for c in mcp.execute.await_args_list] == [
+                "mcp_fixture_one", "mcp_fixture_two"]
+            records = [b for m in continuation if isinstance(m.get("content"), list)
+                       for b in m["content"] if b.get("type") == "tool_result"]
+            assert records[0]["status"] == {
+                "ok": "succeeded", "failed": "failed", OUTCOME_UNCERTAIN: "outcome_unknown",
+            }[status]
+            assert "tool_attachment" in records[0]["content"]
+            assert all(p not in json.dumps(records) for p in PIXELS)
+            trajectory = json.dumps(saver.save.call_args.args[0].to_dict())
+            assert "one" in trajectory and "two" in trajectory
+            assert all(p not in trajectory for p in PIXELS)
+            assert base64.b64encode(BINARY).decode() not in trajectory
+        finally:
+            if not agent._task.done():
+                agent._task.cancel()
+                await asyncio.gather(agent._task, return_exceptions=True)
+            agents._remove_agent(agent_id, source="test")
+
     async def test_autonomous_loop_keeps_multiple_calls_grouped_and_audit_pixel_free(self):
         fake = FakeLLM([tool_call_response(("mcp_fixture_one", {}), ("mcp_fixture_two", {})),
                         text_response("loop done")])

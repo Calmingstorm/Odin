@@ -8,7 +8,7 @@ import re
 import sqlite3
 from datetime import UTC, datetime
 
-from ..llm.secret_scrubber import scrub_output_secrets
+from ..llm.secret_scrubber import iter_secret_spans, scrub_output_secrets
 from .output_retention import BinarySnapshot, RetentionError
 
 TOOL_OUTPUT_MAX_CHARS = 12000
@@ -98,6 +98,18 @@ def render_page(snapshot, *, offset=0, budget=12000, limit=4000, initial=False):
     if isinstance(snapshot, BinarySnapshot):
         return render_binary_page(snapshot, offset=offset, budget=budget, limit=limit)
     text, total = snapshot.text, len(snapshot.text)
+    # Older persisted manifests may predate metadata scrubbing. Mask before
+    # slicing, preserving character offsets for already-issued text cursors.
+    # BinarySnapshot took the separate branch above: never scrub opaque bytes,
+    # their base64 representation, hashes, or binary cursor metadata.
+    spans = list(iter_secret_spans(text)) if text.startswith('{"attachments":') else []
+    if spans:
+        pieces: list[str] = []
+        start = 0
+        for left, right in spans:
+            pieces.extend((text[start:left], "*" * (right - left)))
+            start = right
+        text = "".join((*pieces, text[start:]))
     total_bytes = len(text.encode("utf-8"))
     expires = datetime.fromtimestamp(snapshot.expires_at, UTC).isoformat()
 
@@ -164,10 +176,13 @@ def binary_reference(snapshot):
     """No payload in the initial tool result, only an authorized read cursor."""
     cursor = f"{snapshot.result_id}:0"
     return {
-        "kind": "tool_attachment", "retention": "retained", "status": snapshot.status,
+        "kind": "tool_attachment", "retention": "retained",
+        "status": scrub_output_secrets(str(snapshot.status)),
         "result_id": snapshot.result_id,
-        "content_index": snapshot.content_index, "content_type": snapshot.kind,
-        "media_type": snapshot.media_type, "total_bytes": len(snapshot.data),
+        "content_index": snapshot.content_index,
+        "content_type": scrub_output_secrets(str(snapshot.kind)),
+        "media_type": scrub_output_secrets(str(snapshot.media_type)),
+        "total_bytes": len(snapshot.data),
         "sha256": snapshot.sha256,
         "expires_at": datetime.fromtimestamp(snapshot.expires_at, UTC).isoformat(),
         "retrieval": {"tool": "get_tool_output", "arguments": {"cursor": cursor}},

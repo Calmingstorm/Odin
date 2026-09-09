@@ -152,7 +152,8 @@ class OutputStore:
         now = self.clock()
         blobs = [BinarySnapshot(
             uuid.uuid4().hex, item.data, owner, channel, tool, tuple(hosts), now + 86400,
-            status, item.media_type, item.content_index, item.kind,
+            scrub_output_secrets(str(status)), scrub_output_secrets(str(item.media_type)),
+            item.content_index, scrub_output_secrets(str(item.kind)),
             hashlib.sha256(item.data).hexdigest(),
         ) for item in attachments]
         text = json.dumps({"attachments": [binary_reference(blob) for blob in blobs]},
@@ -173,7 +174,7 @@ class OutputStore:
             for blob in blobs:
                 db.execute("INSERT INTO output_blobs VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)", (
                     blob.result_id, blob.data, owner, channel, tool, json.dumps(hosts),
-                    blob.expires_at, status, len(blob.data) + 512, blob.media_type,
+                    blob.expires_at, blob.status, len(blob.data) + 512, blob.media_type,
                     blob.content_index, blob.kind, blob.sha256,
                 ))
             db.execute("INSERT INTO outputs VALUES (?,?,?,?,?,?,?,?,?,?)", (

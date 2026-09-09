@@ -133,6 +133,58 @@ def test_binary_pages_reconstruct_byte_faithfully_repeatably_including_empty_fil
         assert metadata["sha256"] == hashlib.sha256(expected).hexdigest()
 
 
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("mime", ["application/vnd.fixture+zip", "application/ghp_" + "a" * 36])
+def test_metadata_scrub_preserves_payload_hash_and_restart_cursors(tmp_path, legacy, mime):
+    token = "ghp_" + "a" * 36
+    # Secret-shaped bytes belong to the file, NOT to its display metadata.
+    payload = b"\x00\xff" + token.encode() + bytes(range(256))
+    attachments = []
+    _render_tool_result({"content": [{"type": "resource", "resource": {
+        "uri": "urn:fixture", "mimeType": mime,
+        "blob": base64.b64encode(payload).decode(),
+    }}]}, attachments=attachments)
+    assert attachments[0].media_type == mime
+    store = store_at(tmp_path)
+    manifest, listed = manifest_and_blobs(store, attachments)
+    blob_id = listed[0]["result_id"]
+    safe_mime = mime.replace(token, "[REDACTED]")
+    assert listed[0]["media_type"] == safe_mime
+    assert token not in manifest.text
+    with sqlite3.connect(store.path) as db:
+        assert db.execute("SELECT media_type FROM output_blobs").fetchone()[0] == safe_mime
+        if legacy:
+            # Old rows, including a previously issued mid-token manifest cursor.
+            listed[0]["media_type"] = mime
+            text = json.dumps({"attachments": listed}, separators=(",", ":"))
+            db.execute("UPDATE output_blobs SET media_type=?", (mime,))
+            db.execute("UPDATE outputs SET text=? WHERE id=?", (text, manifest.result_id))
+    restarted = store_at(tmp_path)
+    snapshot, _ = read(restarted, f"{manifest.result_id}:0")
+    raw = render_page(snapshot, initial=True)
+    assert token not in raw
+    text = snapshot.text
+    start = text.find(token) + 5 if token in text else 5
+    page = json.loads(render_page(snapshot, offset=start, limit=7))
+    assert page["start"] == start and page["end"] == start + 7
+    if token in text:
+        assert page["text"] == "*" * 7
+    rebuilt = b""
+    cursor = f"{blob_id}:0"
+    while cursor:
+        blob, offset = read(restarted, cursor)
+        raw = render_page(blob, offset=offset, limit=32)
+        page = json.loads(raw)
+        assert token not in raw
+        assert page["media_type"] == safe_mime
+        assert page["sha256"] == hashlib.sha256(payload).hexdigest()
+        assert page["content_type"] == "resource" and page["content_index"] == 1
+        rebuilt += base64.b64decode(page["data_base64"], validate=True)
+        cursor = page["cursor"]
+    assert rebuilt == payload
+    assert hashlib.sha256(rebuilt).hexdigest() == listed[0]["sha256"]
+
+
 def test_binary_retention_scope_denials_recheck_requester_channel_and_permission(tmp_path):
     store = store_at(tmp_path)
     _, listed = manifest_and_blobs(store, [attachment(1, b"private")])
