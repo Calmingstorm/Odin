@@ -17,6 +17,11 @@ writes its current effective value. Neither action replaces the image section.
 Provenance/status metadata is not configuration and is never persisted in YAML.
 An unrelated save must not convert an absent model into a pin.
 
+The controls save immediately and do not save unrelated browser drafts. Pin-current
+uses the displayed runtime value, not an edited unsaved draft. Each operation
+requires an intent-aware revision; a concurrent follow/pin change returns HTTP
+409 rather than silently applying a stale selection. Refresh status before retrying.
+
 ## One-time first-upgrade exception
 
 The first upgrade independently changes only exact literal old shipped values:
@@ -35,6 +40,18 @@ loads, unrelated saves and subsequent upgrades never re-clobber an operator's
 choice. After successful migration, explicitly pinning an old model is allowed
 and must remain pinned on later loads. Do not delete the marker to troubleshoot:
 doing so may make the first-upgrade rule eligible again.
+
+The marker is at `.odin-data/config_migrations/image_model_defaults_v1.<identity>.json`
+beside the canonical config target. Symlink launch aliases rendezvous on that
+same target and marker; distinct config paths have independent identities. This
+state must be included with configuration backups, including `/etc/odin/.odin-data`
+for packaged installs. The YAML document itself contains no marker or provenance.
+
+Only model scalar spans are rewritten during migration, retaining surrounding
+comments, quoting, line endings, placeholders and unrelated source bytes. Shared
+YAML anchors or merge mappings are not rewritten through: unsafe target edits
+fail clearly and require an explicit operator edit. A model inherited through a
+merge remains a pin; the migration does not expand the merge into literal leaves.
 
 ## Installation paths
 
@@ -55,6 +72,15 @@ Investigate write permissions and reported migration errors before retrying.
 Never mark an unsuccessful rewrite complete. Retrying must preserve custom pins
 and unrelated settings and be idempotent after a successful migration.
 
+A `prepared` record means a rewrite was planned but completion was not confirmed.
+If the exact committed postimage exists, the next load can finish the marker
+without rewriting configuration. Any other source content is ambiguous and
+startup refuses rather than guessing whether an operator subsequently chose an
+old model. Preserve the config and record as evidence, compare them with a trusted
+backup, and restore a consistent pair or obtain an explicit recovery decision.
+Corrupt or identity-mismatched records also fail closed. Do not simply delete a
+record and repeat the migration.
+
 Rolling back code changes the effective defaults for absent leaves to the older
 release's defaults; explicit new pins remain explicit and are not automatically
 downgraded. Restore a consistent config/state backup if restoring the whole
@@ -72,3 +98,10 @@ integration gate must also load fresh/source/wizard/upgraded configurations via
 the common loader, exercise the intent/failure matrix, and generate a decodable
 image through Odin with actual Discord delivery on the new pairing. HTTP 200 or
 an unpacked package alone is not that gate.
+
+`scripts/smoke_image_defaults.py` is an explicitly confirmed, quota-bearing
+development-checkout smoke. It loads an isolated config with absent model leaves,
+uses Odin's real selector/backend/media handler, verifies full image decoding,
+posts with discord.py and reads the attachment back for byte-for-byte comparison.
+It does not start a second gateway bot, alter the running config, refresh live
+credentials or restart a service. A prior evidence file prevents automatic replay.
