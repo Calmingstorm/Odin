@@ -17,8 +17,8 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | Method | Path | Owning module / handler source | Admin-gated | Purpose |
 | --- | --- | --- | --- | --- |
 | POST | /api/auth/login | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L466) | No | — |
-| POST | /api/auth/logout | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L528) | No | — |
-| GET | /api/auth/session | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L550) | No | — |
+| POST | /api/auth/logout | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L546) | No | — |
+| GET | /api/auth/session | [src.web.api.security](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/security.py#L568) | No | — |
 | GET | /api/setup/status | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L61) | Yes | Check whether first-boot setup is needed. |
 | POST | /api/setup/complete | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L72) | Yes | Receive wizard data, write config files, signal restart. |
 | GET | /api/status | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L208) | Yes | — |
