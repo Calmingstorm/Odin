@@ -195,6 +195,44 @@ class TestHostAccessRoutes:
 
 class TestApiTokenRoutes:
     @pytest.mark.asyncio
+    @pytest.mark.parametrize("with_websocket_manager", [False, True])
+    async def test_delete_last_credential_conflict_preserves_auth(
+        self, tmp_path, with_websocket_manager,
+    ):
+        bot = _make_bot(tmp_path, auth_configured=False)
+        tm = bot.api_token_manager
+        created = await tm.create_token("sole-admin")
+        tm.set_last_credential_guard(lambda inventory: inventory.dynamic_usable > 0)
+        persisted = (tmp_path / "tokens.json").read_bytes()
+        app = _app(bot)
+        sessions = MagicMock()
+        app["session_manager"] = sessions
+        ws = MagicMock()
+        ws.close_by_user_id = AsyncMock()
+        if with_websocket_manager:
+            app["ws_manager"] = ws
+
+        async with TestClient(TestServer(app)) as client:
+            response = await client.delete("/api/tokens/sole-admin")
+            assert response.status == 409
+            assert await response.json() == {
+                "error": "cannot remove the last usable credential from a non-loopback listener",
+            }
+
+        assert tm.resolve(created.token).user_id == "sole-admin"
+        assert (tmp_path / "tokens.json").read_bytes() == persisted
+        reloaded = ApiTokenManager(path=str(tmp_path / "tokens.json"))
+        assert reloaded.resolve(created.token).user_id == "sole-admin"
+        sessions.destroy_by_user_id.assert_not_called()
+        ws.close_by_user_id.assert_not_awaited()
+        if with_websocket_manager:
+            ws.policy_change.assert_called_once_with("sole-admin")
+            fence = ws.policy_change.return_value
+            fence.__aenter__.assert_awaited_once()
+            fence.__aexit__.assert_awaited_once()
+            assert fence.__aexit__.await_args.args[0] is PermissionError
+
+    @pytest.mark.asyncio
     async def test_create_list_update_regen_delete_lifecycle(self, tmp_path):
         bot = _make_bot(tmp_path)
         async with TestClient(TestServer(_app(bot))) as c:
