@@ -452,8 +452,18 @@ class WebSocketManager:
                 message=b"token in URL is not accepted; use the bearer subprotocol",
             )
             return ws
+        # aiohttp's auth middleware has already resolved a header bearer into
+        # ``request._api_identity``.  Do not discard that carrier here merely
+        # because no WebSocket subprotocol was offered: non-browser clients
+        # legitimately use Authorization, and the value below is also the
+        # provenance we must re-check after ``prepare`` suspends.
+        header = request.headers.get("Authorization", "")
+        token = (
+            header[len("Bearer ") :]
+            if header.startswith("Bearer ")
+            else _decode_bearer_subprotocol(offered_protocol)
+        )
         if self._authentication_required():
-            token = _decode_bearer_subprotocol(offered_protocol)
             valid = False
             if token:
                 resolved = self._resolve_identity(token, request)
@@ -488,12 +498,7 @@ class WebSocketManager:
         legacy = getattr(config, "api_token", "") if config is not None else self._api_token
         if not self._usable_credential(legacy):
             legacy = ""
-        header = request.headers.get("Authorization", "")
-        presented = (
-            header[len("Bearer ") :]
-            if header.startswith("Bearer ")
-            else _decode_bearer_subprotocol(offered_protocol)
-        )
+        presented = token
         session_identity = None
         if ws._odin_session_managed:  # type: ignore[attr-defined]
             # Middleware historically refreshes sessions by user ID. That is
@@ -587,7 +592,45 @@ class WebSocketManager:
                     if not self._session_is_valid(
                         ws, touch=not is_ping
                     ) or not self._policy_authorized(ws):
-                        break
+                        # A policy route starts transport teardown after it
+                        # has fenced publication.  Until that asynchronous
+                        # close runs, reject each newly received frame rather
+                        # than silently ending the receive loop: callers get
+                        # the same command-shaped denial they would receive
+                        # from the normal authorization gates, without a
+                        # window in which the command can execute.
+                        credential = getattr(ws, "_odin_credential_policy", None)
+                        if (
+                            isinstance(credential, _CredentialPolicy)
+                            and credential.source == "development"
+                        ):
+                            # Bootstrap sockets have no credential to retain
+                            # authority once live auth is published.  Unlike a
+                            # revoked credential, there is no authenticated
+                            # client session to keep alive during teardown.
+                            break
+                        if data.get("type") == "ping":
+                            # Keepalive is deliberately side-effect free. It
+                            # remains useful to an already-connected browser
+                            # while the policy route owns the pending close.
+                            await ws.send_json({"type": "pong", "ts": data.get("ts")})
+                        elif data.get("type") == "chat":
+                            await ws.send_json(
+                                {
+                                    "type": "chat_error",
+                                    "error": "authorization changed; reconnect",
+                                }
+                            )
+                        elif data.get("subscribe") in {"logs", "events"}:
+                            await ws.send_json(
+                                {
+                                    "error": "admin access required",
+                                    "channel": data["subscribe"],
+                                }
+                            )
+                        else:
+                            await ws.send_json({"error": "authorization changed; reconnect"})
+                        continue
 
                     sub = data.get("subscribe")
                     unsub = data.get("unsubscribe")
