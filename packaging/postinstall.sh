@@ -43,15 +43,15 @@ fi
 # Create FHS directories
 # Computer evidence must never follow a symlink, including on upgrades. Check
 # before mkdir/chown can touch an unexpected target. Existing receipts are kept.
-for directory in /var /var/lib "$DATA_DIR" "$DATA_DIR/computer"; do
+for directory in /var /var/lib "$DATA_DIR" "$DATA_DIR/computer" "$DATA_DIR/initialization"; do
     if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
         echo "Odin: unsafe computer state directory: $directory" >&2
         exit 1
     fi
 done
 mkdir -p "$CONFIG_DIR"
-mkdir -p "$DATA_DIR"/{sessions,context,skills,search,knowledge,trajectories,computer}
-chmod 0700 "$DATA_DIR/computer"
+mkdir -p "$DATA_DIR"/{sessions,context,skills,search,knowledge,trajectories,computer,initialization}
+chmod 0700 "$DATA_DIR/computer" "$DATA_DIR/initialization"
 mkdir -p "$LOG_DIR"
 mkdir -p "$WORKSPACE_DIR"
 
@@ -137,8 +137,21 @@ chown -R "$SERVICE_USER:$SERVICE_GROUP" "$CONFIG_DIR"
 chmod 600 "$CONFIG_DIR/.env"
 chown root:root /usr/lib/systemd/system/odin.service
 
+# Provision pending only for a genuinely fresh installation. Upgrades do not
+# invent state: a missing legacy record migrates to complete at runtime only
+# after Odin has verified the live credential inventory. The store requires the
+# service account to own its record, hence this runs as odin rather than root.
+if [ "$FRESH_INSTALL" = true ]; then
+    (cd "$APP_DIR" && runuser -u "$SERVICE_USER" -- "$APP_DIR/.venv/bin/python" -m src.config.startup_context \
+        "$CONFIG_DIR/config.yml" \
+        --env-file "$CONFIG_DIR/.env" \
+        --initialization-state "$DATA_DIR/initialization/state.json" \
+        --provision-fresh-initialization)
+fi
+
 # Enable the service (do NOT auto-start on a fresh install — it would crash-loop
-# until the Discord token is set). prerm captured the upgrade's original state.
+# until the final setup gate has completed). prerm captured the upgrade's
+# original state.
 systemctl daemon-reload
 if [ "$FRESH_INSTALL" = true ]; then
     systemctl enable odin.service >/dev/null

@@ -46,6 +46,17 @@ esac
 ''')
     for command in ("getent", "id", "chown", "groupadd", "useradd"):
         executable(bins / command, f'echo "{command} $*" >> "$TRACE"\n')
+    executable(bins / "runuser", '''
+echo "runuser $*" >> "$TRACE"
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  if [ "${args[$i]}" = "--" ]; then
+    "${args[@]:$((i+1))}"
+    exit $?
+  fi
+done
+exit 2
+''')
     executable(app / ".venv/bin/pip", '''
 echo "pip $*" >> "$TRACE"
 test "${FAIL_PIP:-0}" != 1
@@ -103,6 +114,15 @@ def test_fresh_install_enables_but_does_not_start(sandbox):
     assert "systemctl enable" in trace.read_text()
     assert "systemctl restart" not in trace.read_text()
     assert not state.exists()
+
+
+def test_fresh_install_provisions_pending_initialization_record_as_service_user(sandbox):
+    _, trace, _, invoke = sandbox
+    assert invoke("postinstall", "configure").returncode == 0
+    calls = trace.read_text()
+    assert "runuser -u odin" in calls
+    assert "--provision-fresh-initialization" in calls
+    assert "systemctl restart" not in calls
 
 
 @pytest.mark.parametrize("failure", ["FAIL_PIP", "FAIL_IMPORT", "FAIL_RESTART"])
