@@ -1211,6 +1211,8 @@ class ComputerUseConfig(BaseModel):
     wayland_guardian_binary: str = "/usr/libexec/odin-computer-wayland-input"
     # Portal defaults remain unchanged. Hyprland is explicit, never a fallback.
     wayland_backend: Literal["portal", "hyprland"] = "portal"
+    # Existing installations retain explicit pins until the operator opts in.
+    hyprland_discovery_mode: Literal["pinned", "auto"] = "pinned"
     hyprland_runtime_dir: str = ""
     hyprland_wayland_display: str = ""
     hyprland_instance_signature: str = ""
