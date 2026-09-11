@@ -80,6 +80,12 @@ class ComputerLifecycle:
         )):
             raise ComputerProvisioningError("computer_target_incomplete")
         if (
+            hyprland
+            and settings.hyprland_managed_activation
+            and not settings.hyprland_plugin_manifest
+        ):
+            raise ComputerProvisioningError("hyprland_plugin_manifest_required")
+        if (
             settings.platform == "x11"
             and settings.environment == "existing_session"
             and (not settings.display or not settings.monitor_names)

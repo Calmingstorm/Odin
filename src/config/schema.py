@@ -1226,9 +1226,13 @@ class ComputerUseConfig(BaseModel):
     hyprland_guardian_binary: str = "/usr/local/libexec/odin-hyprland-input"
     hyprland_capture_binary: str = "/usr/local/libexec/odin-hyprland-capture"
     hyprland_scope_socket: str = ""
+    hyprland_managed_activation: bool = False
+    # Root-installed build identity. The sibling artifact name comes only from it.
+    hyprland_plugin_manifest: str = ""
 
     @field_validator("hyprland_runtime_dir", "hyprland_compositor_executable",
-                     "hyprland_scope_socket", "hyprland_guardian_binary", "hyprland_capture_binary")
+                     "hyprland_scope_socket", "hyprland_guardian_binary", "hyprland_capture_binary",
+                     "hyprland_plugin_manifest")
     @classmethod
     def validate_hyprland_path(cls, value: str) -> str:
         if value and (len(value) > 4096 or not Path(value).is_absolute()

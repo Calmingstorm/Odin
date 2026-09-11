@@ -117,6 +117,8 @@ class ComputerIntegration:
                         capture_binary=s.hyprland_capture_binary,
                         scope_socket=s.hyprland_scope_socket or (runtime_dir + "/odin-hyprland-scope.sock"),
                         discovery_mode="auto" if auto else "pinned",
+                        managed_activation=s.hyprland_managed_activation,
+                        plugin_manifest_path=s.hyprland_plugin_manifest or None,
                     ),
                 )
             from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig

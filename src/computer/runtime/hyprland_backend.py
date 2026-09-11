@@ -57,6 +57,10 @@ class HyprlandSessionConfig:
     capture_binary: str = "/usr/local/libexec/odin-hyprland-capture"
     scope_socket: str | None = None
     discovery_mode: str = "pinned"
+    plugin_manifest: Any | None = None
+    plugin_path: str | None = None
+    managed_activation: bool = False
+    plugin_manifest_path: str | None = None
 
     def __post_init__(self):
         paths: tuple[str, ...] = (self.runtime_dir, self.guardian_binary, self.capture_binary)
@@ -66,6 +70,18 @@ class HyprlandSessionConfig:
             type(self.expected_uid) is not int
             or not 0 <= self.expected_uid < 2**32
             or self.discovery_mode not in {"pinned", "auto"}
+            or type(self.managed_activation) is not bool
+            or (self.plugin_manifest_path is not None and (
+                type(self.plugin_manifest_path) is not str
+                or not self.plugin_manifest_path.startswith("/")
+            ))
+            or (self.plugin_manifest is None) != (self.plugin_path is None)
+            or (
+                self.plugin_manifest is not None
+                and (type(self.plugin_manifest).__name__ != "_TrustedPluginManifest"
+                     or type(self.plugin_path) is not str
+                     or self.plugin_manifest.path != self.plugin_path)
+            )
             or (
                 self.discovery_mode == "pinned"
                 and (type(self.compositor_pid) is not int or self.compositor_pid <= 1)
@@ -435,6 +451,10 @@ class HyprlandRuntimeBackend:
                 capture_binary=self.config.capture_binary,
                 scope_socket=self.config.scope_socket,
                 discovery_mode="pinned",
+                plugin_manifest=self.config.plugin_manifest,
+                plugin_path=self.config.plugin_path,
+                managed_activation=self.config.managed_activation,
+                plugin_manifest_path=self.config.plugin_manifest_path,
             )
         if self.config.compositor_pid is None:
             raise ComputerError("hyprland_explicit_session_configuration_required")
@@ -448,6 +468,32 @@ class HyprlandRuntimeBackend:
                 trust=self.config.compositor_trust,
             )
             connection.close()
+            if self.config.managed_activation:
+                # Session startup is the only approved write path. Inventory/status
+                # remain observational and cannot reach this branch.
+                from .hyprland_plugin import (
+                    HyprlandPluginError,
+                    HyprlandPluginIPC,
+                    ManagedHyprlandPlugin,
+                    ProcMappedPluginVerifier,
+                    read_trusted_plugin_manifest,
+                )
+
+                try:
+                    # Session start is the only manifest read/load path.
+                    approval = read_trusted_plugin_manifest(
+                        self.config.plugin_manifest_path or ""
+                    ).approval
+                    plugin_state = await ManagedHyprlandPlugin(
+                        approval=approval,
+                        identity=self._identity,
+                        ipc=HyprlandPluginIPC(identity=self._identity, ipc_path=self.config.ipc_path),
+                        mapped_verifier=ProcMappedPluginVerifier(),
+                    ).activate(authorized_task=True)
+                    if not plugin_state.ready:
+                        raise HyprlandPluginError(plugin_state.code or "hyprland_plugin_unready")
+                except HyprlandPluginError as error:
+                    raise ComputerError(str(error)) from None
             selected = None
             if selection is not None:
                 self._scope_provider = await HyprlandScopeProvider.from_identity(
@@ -470,6 +516,10 @@ class HyprlandRuntimeBackend:
                     capture_binary=self.config.capture_binary,
                     scope_socket=self._scope_provider.socket_path,
                     discovery_mode="pinned",
+                    plugin_manifest=self.config.plugin_manifest,
+                    plugin_path=self.config.plugin_path,
+                    managed_activation=self.config.managed_activation,
+                    plugin_manifest_path=self.config.plugin_manifest_path,
                 )
                 self._selected = selected["output_name"]
                 self._selected_binding = selected

@@ -588,6 +588,27 @@ FIELDS: dict[str, FieldSpec] = {
         "runtime directory/odin-hyprland-scope.sock. "
         "Load the ABI-matched plugin once during operator setup; Odin never edits hyprland.conf.",
     ),
+    "computer.hyprland_managed_activation": FieldSpec(
+        label="Hyprland managed activation",
+        apply_mode="restart",
+        restart_reason="The desktop lifecycle snapshots native activation policy at construction.",
+        description=(
+            "Permit session-start activation of one root-installed, "
+            "manifest-derived plugin."
+        ),
+    ),
+    "computer.hyprland_plugin_manifest": FieldSpec(
+        label="Hyprland plugin manifest",
+        apply_mode="restart",
+        restart_reason=(
+            "The desktop lifecycle snapshots the trusted manifest location "
+            "at construction."
+        ),
+        description=(
+            "Absolute root-owned build-identity manifest. Its plugin filename "
+            "selects the sibling artifact."
+        ),
+    ),
     "timezone": FieldSpec(
         label="Timezone",
         description="Timezone used in prompts and scheduled-time parsing.",
