@@ -116,3 +116,45 @@ def test_native_release_ack_loss_is_not_reconstructed_as_ack(binary, peer):
         assert closed["release_acknowledged"] is False
     finally:
         client.close()
+
+
+def test_native_release_status_queries_once_after_lost_ack(binary, peer):
+    client = Client(binary, peer)
+    try:
+        client.receipt("ready")
+        peer.drop_release_once = True
+        client.begin()
+        client.send("L 272 2 1000 30 40 300 400")
+        peer.wait(lambda: (272, 1) in peer.buttons())
+        client.proc.send_signal(__import__("signal").SIGTERM)
+        closed = client.receipt("closed")
+        detail = loss(closed)
+        peer.wait(lambda: [request["op"] for request in peer.requests].count("release_status") == 1)
+        assert detail["scope_outcome"] == "transport_lost"
+        assert detail["release_ack"] == "acknowledged"
+        assert [request["op"] for request in peer.requests].count("release_all") == 1
+        assert [request["op"] for request in peer.requests].count("release_status") == 1
+    finally:
+        client.close()
+
+
+@pytest.mark.parametrize("reply", [b"not-json\n", b'{"ok":true,"armed":false}\n'])
+def test_native_malformed_or_incomplete_release_status_is_not_ack(binary, peer, reply):
+    client = Client(binary, peer)
+    try:
+        client.receipt("ready")
+        peer.drop_release_once = True
+        peer.release_status_reply = reply
+        client.begin()
+        client.send("L 272 2 1000 30 40 300 400")
+        peer.wait(lambda: (272, 1) in peer.buttons())
+        client.proc.send_signal(__import__("signal").SIGTERM)
+        closed = client.receipt("closed")
+        detail = loss(closed)
+        assert detail["scope_outcome"] == "transport_lost"
+        assert closed["release_acknowledged"] is False
+        assert detail["release_ack"] in {"transport_lost", "invalid_or_unconfirmed"}
+        assert [request["op"] for request in peer.requests].count("release_all") == 1
+        assert [request["op"] for request in peer.requests].count("release_status") == 1
+    finally:
+        client.close()

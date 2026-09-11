@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -66,16 +67,19 @@ struct guardian {
     struct xkb_keymap *keymap;
     struct xkb_state *state;
     bool keys[248], buttons[8], modifiers;
-    bool ready, begun, action, input_sent, release_sent, release_acknowledged;
+    bool ready, begun, action, input_sent, release_sent, release_acknowledged, release_status_v1;
     bool disconnected, changed, gate_waiting, gate_allowed;
     /* Bounded transport evidence, never receiver or application proof. */
     const char *terminal_cause, *scope_outcome, *release_submission, *release_ack, *resource_closure;
     unsigned input_queued, input_submitted;
     int scope_fd, parent_fd, status;
     pid_t parent_pid, compositor_pid;
+    uid_t uid;
     unsigned width, height, planned, completed, index, gate_serial;
     uint64_t lease, scope_deadline, idle, start, rejected;
-    char mapping[129], scope_token[129], arm_token[129];
+    char mapping[129], scope_path[108], compositor_start_ticks[32], scope_token[129], arm_token[129];
+    dev_t scope_dev;
+    ino_t scope_ino;
     const char *reason;
     const char *scope_operation, *scope_error, *command_name;
     struct event events[MAX_STEPS];
@@ -154,7 +158,7 @@ static bool synchronize(struct guardian *g, unsigned timeout_ms) {
 }
 /* Bounded flat JSON reply parser: no duplicate fields, nesting, escapes,
  * overflows, non-boolean ok/armed, or unframed bytes. */
-struct scope_reply { bool ok, armed, have_ok, have_armed, have_keys, have_buttons, have_rejected, release_acknowledged; uint64_t keys, buttons, rejected; const char *error; };
+struct scope_reply { bool ok, armed, have_ok, have_armed, have_keys, have_buttons, have_rejected, release_acknowledged, release_status_v1; uint64_t keys, buttons, rejected; const char *error; };
 /* Fixed vocabulary only: never copy tokens, peer prose or application data. */
 static const char *scope_error_code(const char *value) {
     static const char *const codes[] = {
@@ -203,6 +207,7 @@ static bool parse_reply(const char *p, struct scope_reply *r) {
         if (!strcmp(name, "ok")) { if (!boolean) return false; r->have_ok = true; r->ok = truth; }
         else if (!strcmp(name, "armed")) { if (!boolean) return false; r->have_armed = true; r->armed = truth; }
         else if (!strcmp(name, "release_acknowledged")) { if (!boolean) return false; r->release_acknowledged = truth; }
+        else if (!strcmp(name, "release_status_v1")) { if (!boolean) return false; r->release_status_v1 = truth; }
         else if (!strcmp(name, "keys")) { if (!numeric || number > 248) return false; r->have_keys = true; r->keys = number; }
         else if (!strcmp(name, "buttons")) { if (!numeric || number > 8) return false; r->have_buttons = true; r->buttons = number; }
         else if (!strcmp(name, "rejected")) { if (!numeric) return false; r->have_rejected = true; r->rejected = number; }
@@ -313,6 +318,47 @@ static int connect_peer(const char *path, pid_t pid, uid_t uid, bool private) {
     return fd;
 bad:
     close(fd); return -1;
+}
+static bool process_start_ticks(pid_t pid, char out[32]) {
+    char stat_path[64];
+    if (snprintf(stat_path, sizeof stat_path, "/proc/%ld/stat", (long)pid) < 0) return false;
+    FILE *f = fopen(stat_path, "re"); char line[4096], *close, *p;
+    if (!f || !fgets(line, sizeof line, f)) { if (f) fclose(f); return false; }
+    fclose(f); close = strrchr(line, ')'); if (!close || close[1] != ' ') return false;
+    p = close + 2;
+    for (unsigned i = 0; i <= 19; ++i) {
+        while (*p == ' ') ++p;
+        char *start = p; while (*p && *p != ' ') ++p;
+        if (!*start || (i == 19 && (p - start >= 32 || strspn(start, "0123456789") != (size_t)(p - start)))) return false;
+        if (i == 19) { memcpy(out, start, (size_t)(p - start)); out[p - start] = 0; return true; }
+    }
+    return false;
+}
+static bool own_start_ticks(char out[32]) { return process_start_ticks(getpid(), out); }
+static bool connect_scope_peer(struct guardian *g, bool initial) {
+    struct stat st;
+    if (!path_socket(g->scope_path, g->uid, true) || stat(g->scope_path, &st)) return false;
+    if (!initial && (st.st_dev != g->scope_dev || st.st_ino != g->scope_ino)) return false;
+    char ticks[32];
+    if (!process_start_ticks(g->compositor_pid, ticks) ||
+        (!initial && strcmp(ticks, g->compositor_start_ticks))) return false;
+    int fd = connect_peer(g->scope_path, g->compositor_pid, g->uid, true);
+    if (fd < 0) return false;
+    if (stat(g->scope_path, &st) || (!initial && (st.st_dev != g->scope_dev || st.st_ino != g->scope_ino))) {
+        close(fd); return false;
+    }
+    if (initial) {
+        g->scope_dev = st.st_dev; g->scope_ino = st.st_ino;
+        strcpy(g->compositor_start_ticks, ticks);
+    }
+    g->scope_fd = fd;
+    return true;
+}
+static bool command_id(char out[49]) {
+    unsigned char bytes[24]; static const char hex[] = "0123456789abcdef";
+    if (getrandom(bytes, sizeof bytes, 0) != (ssize_t)sizeof bytes) return false;
+    for (size_t i = 0; i < sizeof bytes; ++i) { out[i * 2] = hex[bytes[i] >> 4]; out[i * 2 + 1] = hex[bytes[i] & 15]; }
+    out[48] = 0; return true;
 }
 static void output_geometry(void *data, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph, int32_t sub, const char *make, const char *model, int32_t transform) {
     (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)sub; (void)make; (void)model;
@@ -605,8 +651,21 @@ static bool release_all(struct guardian *g) {
     g->release_sent=queued && !g->disconnected && wl_display_flush(g->display)>=0;
     g->release_submission = !queued ? "not_attempted" : g->release_sent ? "submitted" : "queued_not_submitted";
     if (g->release_sent) receipt(g,"release_sent","explicit-owned-release");
-    struct scope_reply r;
-    bool ack=scope_call(g,"{\"op\":\"release_all\"}\n",&r);
+    struct scope_reply r = {0}; char id[49], ticks[32], request[192];
+    bool tagged = g->release_status_v1 && own_start_ticks(ticks) && command_id(id);
+    if (tagged) snprintf(request, sizeof request, "{\"op\":\"release_all\",\"command_id\":\"%s\",\"guardian_start_ticks\":\"%s\"}\n", id, ticks);
+    else strcpy(request, "{\"op\":\"release_all\"}\n");
+    bool ack=scope_call(g,request,&r);
+    /* A complete release write with a lost ACK gets exactly one readonly lookup.
+     * It never retries release or creates an input-capable replacement lease. */
+    const char *initial_scope_outcome = g->scope_outcome;
+    if (!ack && tagged && initial_scope_outcome && !strcmp(initial_scope_outcome, "transport_lost")) {
+        if (connect_scope_peer(g, false)) {
+            snprintf(request, sizeof request, "{\"op\":\"release_status\",\"command_id\":\"%s\",\"guardian_start_ticks\":\"%s\"}\n", id, ticks);
+            ack = scope_call(g, request, &r);
+        }
+        g->scope_outcome = initial_scope_outcome;
+    }
     g->release_acknowledged=sync && ack && r.release_acknowledged && r.have_armed && !r.armed && r.have_keys && !r.keys && r.have_buttons && !r.buttons;
     g->release_ack = g->release_acknowledged ? "acknowledged" :
         (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "refused")) ? "negative" :
@@ -719,20 +778,20 @@ static bool decimal(const char *s,uint64_t *out,uint64_t lo,uint64_t hi) {
 }
 int main(int argc,char **argv) {
     uint64_t pid,uid,width,height;
-    if (argc!=8||!decimal(argv[2],&pid,1,INT32_MAX)||!decimal(argv[3],&uid,0,UINT32_MAX)||uid!=getuid()||geteuid()!=getuid()||!mapping_valid(argv[4])||!decimal(argv[6],&width,1,32768)||!decimal(argv[7],&height,1,32768)) return 64;
+    if (argc!=8||!decimal(argv[2],&pid,1,INT32_MAX)||!decimal(argv[3],&uid,0,UINT32_MAX)||uid!=getuid()||geteuid()!=getuid()||!mapping_valid(argv[4])||strlen(argv[5]) >= sizeof(((struct guardian *)0)->scope_path)||!decimal(argv[6],&width,1,32768)||!decimal(argv[7],&height,1,32768)) return 64;
     struct guardian *g=calloc(1,sizeof *g);if (!g) return 70;
-    g->scope_fd=g->parent_fd=-1;g->parent_pid=getppid();g->compositor_pid=(pid_t)pid;
-    g->width=(unsigned)width;g->height=(unsigned)height;strcpy(g->mapping,argv[4]);
+    g->scope_fd=g->parent_fd=-1;g->parent_pid=getppid();g->compositor_pid=(pid_t)pid;g->uid=(uid_t)uid;
+    g->width=(unsigned)width;g->height=(unsigned)height;strcpy(g->mapping,argv[4]);strcpy(g->scope_path,argv[5]);
     struct sigaction sa={.sa_handler=on_signal};sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM,&sa,NULL);sigaction(SIGINT,&sa,NULL);sigaction(SIGHUP,&sa,NULL);signal(SIGPIPE,SIG_IGN);
     if (prctl(PR_SET_PDEATHSIG,SIGTERM)||getppid()!=g->parent_pid) { free(g);return 65; }
     g->parent_fd=(int)syscall(SYS_pidfd_open,g->parent_pid,0);
     if (g->parent_fd<0) { free(g);return 65; }
     for (int f=0;f<=1;++f) { int flags=fcntl(f,F_GETFL);if (flags<0||fcntl(f,F_SETFL,flags|O_NONBLOCK)) { close(g->parent_fd);free(g);return 65; } }
-    g->scope_fd=connect_peer(argv[5],(pid_t)pid,(uid_t)uid,true);
+    if (!connect_scope_peer(g, true)) { fail(g,"input-path-lost");goto cleanup; }
     struct scope_reply registration;
     if (!scope_call(g,"{\"op\":\"status\"}\n",&registration)) { fail(g,"input-path-lost");goto cleanup; }
-    g->rejected=registration.rejected;
+    g->rejected=registration.rejected; g->release_status_v1=registration.release_status_v1;
     int fd=connect_peer(argv[1],(pid_t)pid,(uid_t)uid,false);
     if (fd<0) { fail(g,"input-path-lost");goto cleanup; }
     g->display=wl_display_connect_to_fd(fd);

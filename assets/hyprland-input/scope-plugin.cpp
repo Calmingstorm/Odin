@@ -178,6 +178,9 @@ std::string nonce() {
     for (auto c : bytes) { s += hex[c >> 4]; s += hex[c & 15]; }
     return s;
 }
+bool releaseCommandID(const std::string& value) {
+    return value.size() == 48 && std::all_of(value.begin(), value.end(), [](unsigned char c) { return std::isxdigit(c); });
+}
 struct PopupWatch {
     bool valid = true;
     std::vector<CHyprSignalListener> listeners;
@@ -279,6 +282,13 @@ struct State {
     wl_event_source *legacyListenerSource = nullptr, *instanceListenerSource = nullptr, *timer = nullptr;
     std::string legacySocketPath, instanceSocketPath, instanceID, compositorStartTicks, compositorBootID,
         legacyEndpointStatus = "not-attempted", reason = "idle";
+    struct ReleaseReceipt {
+        pid_t pid = 0;
+        std::string startTicks, commandID;
+        int64_t completed = 0;
+        bool acknowledged = false;
+        bool valid() const { return pid > 1 && !startTicks.empty() && !commandID.empty() && completed > 0; }
+    } releaseReceipt;
     struct WireEvent {
         uint32_t opcode = 0, time = 0, button = 0, state = 0, resource = 0;
         int64_t monotonic = 0, dispatch = 0;
@@ -601,6 +611,7 @@ struct State {
         // This is a locally observed compositor-instance binding.  It is not an
         // ELF measurement: companion_build_id identifies the build inputs only.
         put(j.get(), "scope_protocol_version", int64_t(1));
+        put(j.get(), "release_status_v1", true);
         put(j.get(), "instance_id", instanceID);
         put(j.get(), "compositor_pid", int64_t(getpid()));
         put(j.get(), "compositor_uid", int64_t(getuid()));
@@ -816,7 +827,28 @@ struct State {
             diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0;
             return status();
         }
-        if (op == "release_all" || op == "stop") { revoke("operator-recovery"); return status(!failed); }
+        if (op == "release_status") {
+            const auto id = text(j, "command_id"), ticks = text(j, "guardian_start_ticks");
+            const bool fresh = releaseReceipt.valid() && ns() - releaseReceipt.completed >= 0 && ns() - releaseReceipt.completed <= 500000000;
+            if (!fresh || !releaseCommandID(id) || id != releaseReceipt.commandID || ticks != releaseReceipt.startTicks ||
+                peer.pid != releaseReceipt.pid || processStartTicks(peer.pid) != ticks)
+                return status(false, "release-status-unknown");
+            auto response = status(true); put(response.get(), "release_acknowledged", releaseReceipt.acknowledged); return response;
+        }
+        if (op == "release_all") {
+            const auto id = text(j, "command_id"), ticks = text(j, "guardian_start_ticks");
+            const bool tagged = !id.empty() || !ticks.empty();
+            if (tagged) {
+                if (peer.fd != guardianFD || !releaseCommandID(id) || ticks.empty() || processStartTicks(peer.pid) != ticks)
+                    return status(false, "release-command-refused");
+                releaseReceipt = {.pid = peer.pid, .startTicks = ticks, .commandID = id};
+                revoke("operator-recovery");
+                releaseReceipt.completed = ns(); releaseReceipt.acknowledged = !failed && keys.empty() && buttons.empty() && !ownedModifiers;
+                return status(!failed);
+            }
+            revoke("operator-recovery"); return status(!failed);
+        }
+        if (op == "stop") { revoke("operator-recovery"); return status(!failed); }
         if (op != "arm" && op != "renew") return status(false, "unknown-operation");
         const int lease = integer(j, "lease_ms"); const auto token = text(j, "token");
         json_object* absolute = nullptr;
