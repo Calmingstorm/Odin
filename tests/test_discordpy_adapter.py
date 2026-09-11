@@ -66,7 +66,9 @@ async def test_ready_rechecks_ownership_after_command_sync(monkeypatch):
     obj._vector_store = None
     obj.delivery = type("Delivery", (), {"set_status": staticmethod(asyncio.sleep)})()
     obj.scheduler = type("Scheduler", (), {"start": lambda *args: None})()
-    obj.scheduled_events = type("Events", (), {"_on_scheduled_task": None, "_on_schedule_failure": None})()
+    obj.scheduled_events = type(
+        "Events", (), {"_on_scheduled_task": None, "_on_schedule_failure": None}
+    )()
 
     async def sync():
         supervisor.owned.clear()

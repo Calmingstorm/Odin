@@ -1,7 +1,10 @@
 import asyncio
 from types import SimpleNamespace
+
 import pytest
+
 from src.discord.wiring import close_computer_once
+
 
 @pytest.mark.asyncio
 async def test_computer_cleanup_is_once_for_independent_lifecycle_callers():
