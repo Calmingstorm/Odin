@@ -460,7 +460,6 @@ def _make_admin_middleware(web_config: WebConfig | Callable[[], WebConfig]) -> M
             if callable(web_config) and not hasattr(web_config, "api_token")
             else web_config
         )
-        getattr(current_web_config, "api_token", "") or ""
         tm = request.app.get("token_manager")
         has_any_token = _static_credential_count(current_web_config) or (
             tm and tm.credential_inventory.has_usable_auth
