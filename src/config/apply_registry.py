@@ -515,6 +515,15 @@ FIELDS: dict[str, FieldSpec] = {
         "capture/input with no portal fallback. Hyprland input is best-effort: hard guardian "
         "SIGKILL may leave held input; release may clobber a simultaneous human same-button hold.",
     ),
+    "computer.hyprland_discovery_mode": FieldSpec(
+        label="Hyprland discovery mode",
+        apply_mode="restart",
+        restart_reason="The computer lifecycle snapshots its desktop target when it is "
+        "constructed; existing sessions retain their pinned or auto-discovery policy.",
+        description="Pinned requires every explicit compositor identity value. Auto "
+        "discovers only the runtime socket identity while retaining the approved "
+        "output and executable trust pins.",
+    ),
     "computer.hyprland_runtime_dir": FieldSpec(
         label="Hyprland runtime directory",
         description="Explicit desktop-owner runtime directory, e.g. /run/user/1000. "

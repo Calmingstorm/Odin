@@ -1237,7 +1237,7 @@ def test_startup_migration_provisions_before_commands_are_served() -> None:
     assert "provision_startup_workspace(" in main_src, "startup must provision the workspace"
     provision_at = main_src.index("provision_startup_workspace(")
     bot_at = main_src.index("bot = OdinBot(config)")
-    config_at = main_src.index("config = load_config(config_path)")
+    config_at = main_src.index("config = load_config(context.config_path)")
     assert config_at < provision_at < bot_at, (
         "provisioning must run after the real config loads and before the bot "
         "(and therefore command service) is constructed"
