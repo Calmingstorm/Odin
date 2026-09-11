@@ -19,6 +19,11 @@ from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
 from src.config.schema import Config
+from src.config.startup_context import (
+    StartupContext,
+    provision_initialization_parent,
+    resolve_startup_context,
+)
 from src.web.api.config_admin import (
     register_discord_config,
     register_personality,
@@ -27,6 +32,7 @@ from src.web.api.config_admin import (
     register_startup_diagnostics,
     register_status_info,
 )
+from src.web.onboarding import OnboardingCoordinator
 
 
 @pytest.fixture(autouse=True)
@@ -103,6 +109,26 @@ def _app(*registrars, bot=None):
     return app, bot
 
 
+@pytest.fixture
+def onboarding_context(tmp_path) -> StartupContext:
+    config_path = tmp_path / "onboarding-config.yml"
+    config_path.write_text("discord:\n  token: existing-token\n")
+    context = resolve_startup_context(config_path)
+    provision_initialization_parent(context.initialization_state_path)
+    context.onboarding_store().provision_fresh()
+    return context
+
+
+def _onboarding_bot(context: StartupContext, config: Config | None = None):
+    return SimpleNamespace(
+        config=config or Config(discord={"token": "existing-token"}),
+        onboarding=OnboardingCoordinator(
+            context.onboarding_store(), context.environment_source(), True
+        ),
+        connection_supervisor=None,
+    )
+
+
 # --------------------------------------------------------------------------- #
 # Fake discord objects
 # --------------------------------------------------------------------------- #
@@ -147,40 +173,42 @@ def _channel_config():
 # --------------------------------------------------------------------------- #
 class TestSetupWizard:
     @pytest.mark.asyncio
-    async def test_status(self):
+    async def test_status_requires_explicit_context(self):
         app, _ = _app(register_setup_wizard)
         async with TestClient(TestServer(app)) as c:
-            # empty tmp dir → no config.yml → setup is needed
-            assert (await (await c.get("/api/setup/status")).json())["needed"] is True
+            response = await c.get("/api/setup/status")
+            assert response.status == 503
+            assert (await response.json())["needed"] is False
 
     @pytest.mark.asyncio
-    async def test_complete_already_done_409(self):
-        app, _ = _app(register_setup_wizard)
-        with patch("src.web.api.config_admin.is_setup_needed", return_value=False):
-            async with TestClient(TestServer(app)) as c:
-                assert (await c.post("/api/setup/complete", json={})).status == 409
+    async def test_complete_already_done_409(self, onboarding_context):
+        onboarding_context.onboarding_store().complete(lambda: None)
+        app, _ = _app(register_setup_wizard, bot=_onboarding_bot(onboarding_context))
+        async with TestClient(TestServer(app)) as c:
+            assert (await c.post("/api/setup/complete", json={})).status == 409
 
     @pytest.mark.asyncio
-    async def test_complete_validation(self):
-        app, _ = _app(register_setup_wizard)
-        async with TestClient(TestServer(app)) as c:  # setup needed (empty dir)
+    async def test_complete_validation(self, onboarding_context):
+        app, _ = _app(register_setup_wizard, bot=_onboarding_bot(onboarding_context))
+        async with TestClient(TestServer(app)) as c:
             assert (await c.post("/api/setup/complete", data="bad")).status == 400
-            assert (await c.post("/api/setup/complete", json={})).status == 400  # no token
             with patch("src.web.api.config_admin.validate_token_format", return_value=False):
                 r = await c.post("/api/setup/complete", json={"discord_token": "x"})
                 assert r.status == 400
 
     @pytest.mark.asyncio
-    async def test_complete_success_writes_and_schedules_restart(self):
-        from src import restart
-
-        app, _ = _app(register_setup_wizard)
-        # Patch the process-kill primitive to a no-op — the handler schedules a
-        # SIGTERM to itself on success; it must never reach the test runner.
-        with (
-            patch("src.web.api.config_admin.validate_token_format", return_value=True),
-            patch("os.kill") as kill,
-        ):
+    async def test_tokenless_complete_persists_configuration_without_restart(
+        self, onboarding_context
+    ):
+        config = Config(
+            discord={"token": "existing-token"},
+            timezone="America/New_York",
+            tools={"hosts": {"old": {"address": "192.0.2.10", "ssh_user": "odin"}}},
+            browser={"enabled": False},
+            comfyui={"enabled": True},
+        )
+        app, bot = _app(register_setup_wizard, bot=_onboarding_bot(onboarding_context, config))
+        with patch("src.web.api.config_admin.validate_token_format", return_value=True):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post(
                     "/api/setup/complete",
@@ -192,28 +220,25 @@ class TestSetupWizard:
                         "timezone": "UTC",
                     },
                 )
-                assert r.status == 200 and (await r.json())["restart_scheduled"] is True
-            kill.assert_not_called()  # scheduled via call_later(2s), not fired in-test
-        # In-place restart armed, carrying the fresh token as an exec-time env
-        # override — exec inherits the old environment and
-        # load_dotenv(override=False) would otherwise keep the stale value.
-        assert restart.restart_requested() is True
-        assert restart.pending_env_overrides() == {"DISCORD_TOKEN": "fake-token"}
+                assert r.status == 200
+                assert (await r.json())["mode"] == "complete"
+        assert bot.config.timezone == "UTC"
+        assert bot.config.tools.hosts["srv"].address == "10.0.0.1"
+        assert bot.config.browser.enabled is True
+        assert onboarding_context.onboarding_store().state().mode.value == "complete"
 
     @pytest.mark.asyncio
-    async def test_complete_write_failure_500(self):
-        from src import restart
+    async def test_complete_write_failure_500(self, onboarding_context):
 
-        app, _ = _app(register_setup_wizard)
+        app, _ = _app(register_setup_wizard, bot=_onboarding_bot(onboarding_context))
         with (
             patch("src.web.api.config_admin.validate_token_format", return_value=True),
-            patch("src.web.api.config_admin._write_config", side_effect=OSError("disk full")),
+            patch("src.web.onboarding.edit_environment", side_effect=OSError("disk full")),
         ):
             async with TestClient(TestServer(app)) as c:
                 r = await c.post("/api/setup/complete", json={"discord_token": "fake-token"})
                 assert r.status == 500
-        # a failed save must never arm the restart
-        assert restart.restart_requested() is False
+        assert onboarding_context.onboarding_store().state().mode.value == "pending"
 
 
 # --------------------------------------------------------------------------- #

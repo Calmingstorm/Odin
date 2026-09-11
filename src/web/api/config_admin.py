@@ -15,11 +15,15 @@ import hashlib
 import json
 import time
 from datetime import UTC, datetime
-from pathlib import Path
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 from aiohttp import web
 
 from ... import restart
+from ...config.initialization import (
+    InitializationAlreadyCompleteError,
+    InitializationRecoveryRequiredError,
+)
 from ...config.persistence import (
     PersistOutcome,
     config_transaction,
@@ -29,12 +33,7 @@ from ...config.persistence import (
 from ...config.schema import Config, active_config_path
 from ...context.loader import ContextReloadReport
 from ...odin_log import get_logger
-from ...setup_wizard import (
-    build_config,
-    build_env,
-    is_setup_needed,
-    validate_token_format,
-)
+from ...setup_wizard import validate_token_format
 from ...version import get_version
 from ..api_common import (
     _SENSITIVE_FIELDS,
@@ -42,10 +41,9 @@ from ..api_common import (
     _deep_merge,
     _redact_config,
     _sanitize_error,
-    _write_config,
-    _write_env_file,
     admin_gate,
 )
+from ..onboarding import OnboardingCoordinator, OnboardingError
 
 log = get_logger("web.api")
 
@@ -55,7 +53,7 @@ def _image_intent_revision(metadata: dict) -> str:
 
 
 def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
-    """Setup wizard (first-boot, no auth required) (verbatim from the monolith)."""
+    """Installation-bound setup endpoints, never CWD/token heuristics."""
     # ------------------------------------------------------------------
     # Setup wizard (first-boot, no auth required)
     # ------------------------------------------------------------------
@@ -63,10 +61,13 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
     @routes.get("/api/setup/status")
     async def setup_status(_request: web.Request) -> web.Response:
         """Check whether first-boot setup is needed."""
-        config_path = Path("config.yml")
-        env_path = Path(".env")
-        needed = is_setup_needed(config_path, env_path)
-        return web.json_response({"needed": needed})
+        coordinator = getattr(bot, "onboarding", None)
+        if not isinstance(coordinator, OnboardingCoordinator):
+            return web.json_response(
+                {"needed": False, "error": "setup context unavailable"}, status=503
+            )
+        state = await coordinator.state()
+        return web.json_response({"needed": state.setup_allowed, "mode": state.mode.value})
 
     @routes.post("/api/setup/complete")
     async def setup_complete(request: web.Request) -> web.Response:
@@ -78,9 +79,16 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
         first-boot routes should stop being first-boot routes after
         first boot.
         """
-        config_path = Path("config.yml")
-        env_path = Path(".env")
-        if not is_setup_needed(config_path, env_path):
+        coordinator = getattr(bot, "onboarding", None)
+        if not isinstance(coordinator, OnboardingCoordinator):
+            return web.json_response({"error": "setup context unavailable"}, status=503)
+        state = await coordinator.state()
+        if state.mode.value == "recovery":
+            return web.json_response(
+                {"error": "setup recovery is required", "mode": state.mode.value},
+                status=503,
+            )
+        if not state.setup_allowed:
             return web.json_response(
                 {
                     "error": "setup already complete",
@@ -98,13 +106,10 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
         except Exception:
             return web.json_response({"error": "invalid JSON"}, status=400)
 
-        # Validate required fields
-        discord_token = (data.get("discord_token") or "").strip()
-        if not discord_token:
-            return web.json_response(
-                {"error": "discord_token is required"}, status=400
-            )
-        if not validate_token_format(discord_token):
+        # Credentials are optional: bootstrap can be completed for a local
+        # web-only installation and Discord can attach later.
+        discord_token = (data.get("discord_token") or "").strip() or None
+        if discord_token is not None and not validate_token_format(discord_token):
             return web.json_response(
                 {"error": "discord_token format is invalid"}, status=400
             )
@@ -112,64 +117,85 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
         # Extract optional fields
         hosts: dict[str, dict[str, str]] = {}
         raw_hosts = data.get("hosts")
-        if isinstance(raw_hosts, dict):
+        if raw_hosts is not None:
+            if not isinstance(raw_hosts, dict):
+                return web.json_response({"error": "hosts must be an object"}, status=400)
             for name, info in raw_hosts.items():
-                if isinstance(info, dict) and info.get("address"):
-                    hosts[str(name)] = {
-                        "address": str(info["address"]),
-                        "ssh_user": str(info.get("ssh_user", "root")),
-                    }
+                if not isinstance(name, str) or not name.strip() or not isinstance(info, dict):
+                    return web.json_response({"error": "host entries are invalid"}, status=400)
+                address = info.get("address")
+                ssh_user = info.get("ssh_user", "root")
+                if (
+                    not isinstance(address, str)
+                    or not address.strip()
+                    or not isinstance(ssh_user, str)
+                    or not ssh_user.strip()
+                ):
+                    return web.json_response(
+                        {"error": "host entries require address and ssh_user strings"}, status=400
+                    )
+                hosts[name] = {"address": address.strip(), "ssh_user": ssh_user.strip()}
 
         features: dict[str, bool] = {}
         raw_features = data.get("features")
+        if raw_features is not None and not isinstance(raw_features, dict):
+            return web.json_response({"error": "features must be an object"}, status=400)
         if isinstance(raw_features, dict):
             for key in ("browser", "comfyui"):
                 if key in raw_features:
-                    features[key] = bool(raw_features[key])
+                    if type(raw_features[key]) is not bool:
+                        return web.json_response(
+                            {"error": f"features.{key} must be boolean"}, status=400
+                        )
+                    features[key] = raw_features[key]
 
-        web_api_token = str(data.get("web_api_token", "")).strip()
-        timezone = str(data.get("timezone", "UTC")).strip() or "UTC"
-
-        # Build config and env content
-        cfg = build_config(
-            timezone=timezone,
-            hosts=hosts,
-            features=features,
-            web_api_token=web_api_token,
-        )
-        env_content = build_env(discord_token)
-
-        # Write files
-        config_path = Path("config.yml")
-        env_path = Path(".env")
+        web_api_token = str(data.get("web_api_token", "")).strip() or None
+        updates: dict[str, object] = {}
+        if "timezone" in data:
+            timezone = data["timezone"]
+            if not isinstance(timezone, str) or not timezone.strip():
+                return web.json_response({"error": "timezone must be an IANA timezone"}, status=400)
+            try:
+                ZoneInfo(timezone.strip())
+            except ZoneInfoNotFoundError:
+                return web.json_response({"error": "timezone must be an IANA timezone"}, status=400)
+            updates["timezone"] = timezone.strip()
+        if raw_hosts is not None:
+            updates["tools"] = {"hosts": hosts}
+        if "browser" in features:
+            updates["browser"] = {"enabled": features["browser"]}
+        if "comfyui" in features:
+            updates["comfyui"] = {"enabled": features["comfyui"]}
         try:
-            await asyncio.to_thread(_write_config, config_path, cfg)
-            await asyncio.to_thread(_write_env_file, env_path, env_content)
-        except Exception as e:
+            result = await coordinator.submit(
+                bot, discord_token=discord_token, web_api_token=web_api_token,
+                config_updates=updates,
+            )
+        except (InitializationAlreadyCompleteError, InitializationRecoveryRequiredError):
+            # The preflight is for feedback only. The store lock is authority.
+            return web.json_response({"error": "setup already complete"}, status=409)
+        except OnboardingError as e:
             log.error("Setup wizard failed to write config: %s", e)
             return web.json_response(
                 {"error": f"Failed to write config: {_sanitize_error(e)}"},
                 status=500,
             )
 
-        log.info("Setup wizard completed — config files written")
-
-        # Record restart intent, then schedule a delayed SIGTERM so the HTTP
-        # response can flush; main() re-execs in place once the loop drains,
-        # independent of any supervisor Restart= policy. The fresh token must
-        # ride as an exec-time env override: exec inherits the already-loaded
-        # environment, and load_dotenv(override=False) in the new image would
-        # otherwise keep serving the stale DISCORD_TOKEN.
-        restart.request_restart(env_overrides={"DISCORD_TOKEN": discord_token})
-        import os as _os
-        import signal as _signal
-        loop = asyncio.get_running_loop()
-        loop.call_later(2.0, _os.kill, _os.getpid(), _signal.SIGTERM)
-
+        discord: dict[str, str] = {}
+        if result.gateway_attached is True:
+            # Attachment returns before discord.py's ready event. This is a
+            # truthful connection state, not a fabricated ready signal.
+            discord["state"] = "connecting"
+        elif result.gateway_attached is False:
+            discord = {"state": "failed", "error": result.activation_detail}
+        elif discord_token is not None:
+            discord = {
+                "state": "failed",
+                "error": result.activation_detail or "gateway unavailable",
+            }
         return web.json_response({
-            "status": "ok",
-            "message": "Configuration saved. Odin is restarting...",
-            "restart_scheduled": True,
+            "status": "ok", "mode": "complete", "persisted": result.persisted,
+            "discord": discord,
         })
 
 
@@ -181,6 +207,13 @@ def register_status_info(routes: web.RouteTableDef, bot) -> None:
 
     @routes.get("/api/status")
     async def get_status(_request: web.Request) -> web.Response:
+        # Before initial setup there is no authenticated operational surface.
+        # Keep the bootstrap probe intentionally minimal and secret-free.
+        coordinator = getattr(bot, "onboarding", None)
+        if isinstance(coordinator, OnboardingCoordinator):
+            state = await coordinator.state()
+            if state.setup_allowed:
+                return web.json_response({"status": "setup_required", "mode": state.mode.value})
         guilds = [
             {"id": str(g.id), "name": g.name, "member_count": g.member_count or 0}
             for g in bot.guilds
@@ -563,6 +596,9 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             # Validate by reconstructing the config model
             try:
                 new_config = Config(**current)
+                health = getattr(bot, "health_server", None)
+                if health is not None:
+                    health.validate_web_credential_transition(new_config.web)
             except Exception as e:
                 return web.json_response({"error": f"Invalid config: {e}"}, status=400)
 
@@ -590,6 +626,10 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             # is not the whole effective state: personality presets and prompt /
             # tool schemas have process-global or cached derivatives.
             bot.config = new_config
+            health = getattr(bot, "health_server", None)
+            publish_web = getattr(health, "publish_web_config", None)
+            if publish_web is not None:
+                publish_web(new_config.web)
             if "personality" in updates:
                 from src.llm.system_prompt import register_user_presets
 
