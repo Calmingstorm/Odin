@@ -149,12 +149,13 @@ if [ "$FRESH_INSTALL" = true ]; then
         --provision-fresh-initialization)
 fi
 
-# Enable the service (do NOT auto-start on a fresh install — it would crash-loop
-# until the final setup gate has completed). prerm captured the upgrade's
-# original state.
+# Fresh installs have a durable pending state before start. Runtime derives an
+# effective loopback listener and exposes only bootstrap routes. Missing Discord
+# credentials must not leave the WebUI stranded. Upgrade restart intent remains
+# governed solely by the pre-removal state marker.
 systemctl daemon-reload
 if [ "$FRESH_INSTALL" = true ]; then
-    systemctl enable odin.service >/dev/null
+    systemctl enable --now odin.service >/dev/null
 elif [ -f "$STATE_FILE" ]; then
     case "$(cat "$STATE_FILE")" in
         active) systemctl restart odin.service ;;
@@ -179,25 +180,29 @@ if [ "$FRESH_INSTALL" = true ]; then
     SSH_PUB="$(cat "$APP_DIR/.ssh/id_ed25519.pub" 2>/dev/null || echo '(key not generated)')"
     cat << SETUPEOF
 
-First-time setup (3 steps — the service is enabled but not started yet):
+First-time setup: open the local WebUI and complete the guided setup:
 
-  1. Set your Discord bot token
-       sudoedit $CONFIG_DIR/.env         # set DISCORD_TOKEN=...
-     Create the bot at https://discord.com/developers/applications and
-     enable MESSAGE CONTENT INTENT under the Bot settings.
+  http://127.0.0.1:$WEB_PORT
 
-  2. Authenticate the LLM backend (OpenAI Codex, ChatGPT Plus/Team account)
+The service is running in a loopback-only bootstrap context until setup is
+complete. Enter the Discord token in the WebUI, then finish the existing
+provider device authorization there. A valid Discord token attaches Odin to
+Discord without a second service start.
+
+For a remote host, use SSH port forwarding and open the same loopback URL
+locally. Do not expose bootstrap setup through a public reverse proxy.
+
+To inspect startup: sudo journalctl -u odin -f
+
+Manual device-login fallback, if the WebUI flow is unavailable:
        sudo -u $SERVICE_USER $APP_DIR/.venv/bin/python $APP_DIR/scripts/codex_login.py \\
             --credentials-path $DATA_DIR/codex_auth.json
      Add --device on a headless server. Repeat to add more accounts for
      rate-limit rotation. (Or configure Kimi/Ollama in the web UI instead.)
 
-  3. Review config and start Odin
+Manual configuration notes:
        sudoedit $CONFIG_DIR/config.yml   # hosts, permissions, etc. (optional)
-       sudo systemctl start odin
-       sudo journalctl -u odin -f        # watch it come up
 
-  Web dashboard:  http://localhost:$WEB_PORT
   Config file:    $CONFIG_DIR/config.yml
   Secrets (.env): $CONFIG_DIR/.env
   Full guide:     https://github.com/Calmingstorm/Odin#first-time-setup
