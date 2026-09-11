@@ -1,4 +1,5 @@
 """Explicit-output Hyprland runtime, without portals or receiver-proof claims."""
+# ruff: noqa: E501
 
 from __future__ import annotations
 
@@ -51,11 +52,12 @@ class HyprlandSessionConfig:
     wayland_display: str
     instance_signature: str
     output_name: str
-    compositor_pid: int
+    compositor_pid: int | None
     compositor_trust: ExecutableTrust
     guardian_binary: str = "/usr/local/libexec/odin-hyprland-input"
     capture_binary: str = "/usr/local/libexec/odin-hyprland-capture"
     scope_socket: str | None = None
+    discovery_mode: str = "pinned"
 
     def __post_init__(self):
         paths: tuple[str, ...] = (self.runtime_dir, self.guardian_binary, self.capture_binary)
@@ -63,20 +65,24 @@ class HyprlandSessionConfig:
             paths += (self.scope_socket,)
         if (
             type(self.expected_uid) is not int or not 0 <= self.expected_uid < 2**32
-            or type(self.compositor_pid) is not int or self.compositor_pid <= 1
+            or self.discovery_mode not in {"pinned", "auto"}
+            or (self.discovery_mode == "pinned" and (type(self.compositor_pid) is not int or self.compositor_pid <= 1))
+            or (self.discovery_mode == "auto" and self.compositor_pid is not None)
             or type(self.compositor_trust) is not ExecutableTrust
             or any(type(p) is not str or not p.startswith("/")
                    or any(ord(c) < 32 for c in p) or ".." in p.split("/") for p in paths)
-            or any(type(p) is not str or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", p)
-                   or p in {".", ".."} for p in (
-                       self.wayland_display, self.instance_signature, self.output_name))
+            or type(self.output_name) is not str or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", self.output_name)
+            or self.output_name in {".", ".."}
+            or (self.discovery_mode == "pinned" and any(type(p) is not str
+                or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", p) or p in {".", ".."}
+                for p in (self.wayland_display, self.instance_signature)))
         ):
             raise ComputerError("hyprland_explicit_session_configuration_required")
         if self.scope_socket is None:
             object.__setattr__(self, "scope_socket", self.runtime_dir + "/odin-hyprland-scope.sock")
-        if any(len(os.fsencode(p)) > 107 for p in (
-            self.wayland_path, self.ipc_path, cast(str, self.scope_socket),
-        )):
+        sockets = (cast(str, self.scope_socket),) if self.discovery_mode == "auto" else (
+            self.wayland_path, self.ipc_path, cast(str, self.scope_socket))
+        if any(len(os.fsencode(p)) > 107 for p in sockets):
             raise ComputerError("hyprland_explicit_socket_required")
 
     @property
@@ -301,6 +307,20 @@ class HyprlandRuntimeBackend:
         from .hyprland_guardian import HyprlandGuardian
 
         trusted_binary(self.config.capture_binary)
+        if self.config.discovery_mode == "auto":
+            from .hyprland_discovery import HyprlandDiscoveryPolicy, HyprlandDiscoveryResolver
+
+            resolved = await HyprlandDiscoveryResolver(HyprlandDiscoveryPolicy(
+                self.config.expected_uid, self.config.runtime_dir, self.config.compositor_trust)).resolve()
+            self.config = HyprlandSessionConfig(
+                expected_uid=self.config.expected_uid, runtime_dir=resolved.runtime_dir,
+                wayland_display=resolved.wayland_display,
+                instance_signature=resolved.instance_signature, output_name=self.config.output_name,
+                compositor_pid=resolved.pid, compositor_trust=self.config.compositor_trust,
+                guardian_binary=self.config.guardian_binary, capture_binary=self.config.capture_binary,
+                scope_socket=self.config.scope_socket, discovery_mode="pinned")
+        if self.config.compositor_pid is None:
+            raise ComputerError("hyprland_explicit_session_configuration_required")
         connection = None
         try:
             self._identity, connection = await pin_connections(
@@ -445,6 +465,7 @@ class HyprlandRuntimeBackend:
                 scope["observed_monotonic_ns"], scope["locked"], _digest(_binding(scope)))
 
         trusted_binary(self.config.capture_binary)
+        assert self.config.compositor_pid is not None
         connection = await connect_peer(
             self.config.wayland_path, self.config.compositor_pid, self.config.expected_uid,
             time.monotonic() + 3)
