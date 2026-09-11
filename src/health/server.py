@@ -9,7 +9,7 @@ import time
 from collections import defaultdict
 from collections.abc import Awaitable, Callable
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Protocol, runtime_checkable
 from urllib.parse import urlparse
 
 from aiohttp import web
@@ -41,6 +41,13 @@ ComponentCheck = Callable[[], tuple[bool, str]]
 
 SendMessageCallback = Callable[[str, str], Awaitable[None]]
 TriggerCallback = Callable[[str, dict], Awaitable[int]]
+
+
+@runtime_checkable
+class ListenerSocket(Protocol):
+    """Minimal listener interface supplied by aiohttp's private server boundary."""
+
+    def getsockname(self) -> tuple[object, ...]: ...
 
 # --- Route auth policy table ---
 # Single source of truth for which routes bypass authentication.
@@ -358,7 +365,7 @@ def _make_auth_middleware(
 
         current_web_config = (
             web_config()
-            if callable(web_config) and not hasattr(web_config, "api_token")
+            if callable(web_config)
             else web_config
         )
         configured_token = getattr(current_web_config, "api_token", "") or ""
@@ -457,7 +464,7 @@ def _make_admin_middleware(web_config: WebConfig | Callable[[], WebConfig]) -> M
             return await handler(request)
         current_web_config = (
             web_config()
-            if callable(web_config) and not hasattr(web_config, "api_token")
+            if callable(web_config)
             else web_config
         )
         tm = request.app.get("token_manager")
@@ -706,9 +713,9 @@ class HealthServer:
         self._start_time = time.monotonic()
         self._components: dict[str, ComponentCheck] = {}
         self._initialization_store = initialization_store
-        self._config_owner = None
+        self._config_owner: OdinBot | None = None
         self._effective_bind_host: str | None = None
-        self._listener_sockets = ()
+        self._listener_sockets: tuple[ListenerSocket, ...] = ()
 
         # Grafana alert handler
         rules: list[RemediationRule] = []
@@ -903,8 +910,9 @@ class HealthServer:
 
     def _current_web_config(self) -> WebConfig:
         """Read the transaction-published config, not the startup snapshot."""
-        config = getattr(self._config_owner, "config", None)
-        return getattr(config, "web", self._web_config)
+        if self._config_owner is None:
+            return self._web_config
+        return self._config_owner.config.web
 
     def attach_onboarding(self, onboarding) -> None:
         """Attach explicit startup setup context before the listener starts."""
@@ -984,8 +992,12 @@ class HealthServer:
             site = web.TCPSite(self._runner, bind_host, self.port)
             await site.start()
             self._effective_bind_host = bind_host
+            server = getattr(site, "_server", None)
+            sockets = getattr(server, "sockets", ()) or ()
             self._listener_sockets = tuple(
-                getattr(getattr(site, "_server", None), "sockets", ()) or ()
+                listener_socket
+                for listener_socket in sockets
+                if isinstance(listener_socket, ListenerSocket)
             )
             log.info("Health server listening on %s:%d", bind_host, self.port)
         except BaseException:
@@ -1001,11 +1013,14 @@ class HealthServer:
         from ..web.bootstrap_policy import may_remove_last_credential, numeric_loopback
 
         hosts: list[str] = []
-        for sock in self._listener_sockets:
+        for listener_socket in self._listener_sockets:
             try:
-                hosts.append(sock.getsockname()[0])
+                address = listener_socket.getsockname()
             except OSError:
                 return False
+            if not address or not isinstance(address[0], str):
+                return False
+            hosts.append(address[0])
         if not hosts:
             hosts = [self._effective_bind_host or ""]
         return candidate.has_usable_auth or all(
@@ -1097,10 +1112,16 @@ class HealthServer:
         configured_host = getattr(self._current_web_config(), "host", "0.0.0.0")
         hosts: list[str] = []
         ports: list[int] = []
-        for sock in self._listener_sockets:
+        for listener_socket in self._listener_sockets:
             try:
-                address = sock.getsockname()
+                address = listener_socket.getsockname()
             except OSError:
+                continue
+            if (
+                len(address) < 2
+                or not isinstance(address[0], str)
+                or not isinstance(address[1], int)
+            ):
                 continue
             hosts.append(address[0])
             ports.append(address[1])

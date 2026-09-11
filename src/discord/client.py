@@ -32,6 +32,7 @@ from .wiring import build_components, build_services, shutdown_services, start_m
 
 if TYPE_CHECKING:  # health.server imports this module at runtime — cycle-free typing only
     from ..health.server import HealthServer
+    from ..web.onboarding import OnboardingCoordinator
 
 log = get_logger("discord")
 
@@ -60,6 +61,9 @@ class OdinBot(commands.Bot):
     # health-check hasattr semantics depend on it. Assigning None here would
     # make hasattr(bot, "health_server") true from construction.
     health_server: HealthServer | None
+    # Assigned by application startup before HealthServer.set_bot(). Like the
+    # health backlink, this remains absent on a freshly constructed bot.
+    onboarding: OnboardingCoordinator
 
     def __init__(self, config: Config) -> None:
         intents = discord.Intents.default()

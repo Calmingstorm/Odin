@@ -149,9 +149,9 @@ class OnboardingCoordinator:
                                 )
                     self.initialization_store.complete(files)
 
-                exc, cancelled = await _run_settled(publish)
+                write_error, cancelled = await _run_settled(publish)
                 observed = await self.state()
-                if exc is not None:
+                if write_error is not None:
                     # Config/env publication can fail after a file commit, and
                     # completion durability can fail after its rename.  Read
                     # the record rather than inventing a pending outcome.
@@ -175,7 +175,7 @@ class OnboardingCoordinator:
                             f"config_committed={config_committed}; "
                             f"environment_committed={environment_committed}; "
                             f"current setup mode is {observed.mode.value}"
-                        ) from exc
+                        ) from write_error
                 # Runtime publication follows durable config exactly as generic
                 # config does.  Update process environment only after the
                 # declared source accepted it, so an inherited old token cannot
@@ -206,11 +206,11 @@ class OnboardingCoordinator:
                         try:
                             await supervisor.attach(discord_token)
                             attached = True
-                        except Exception as exc:
+                        except Exception as activation_error:
                             attached = False
                             detail = (
                                 "Discord credential saved; gateway activation failed: "
-                                f"{type(exc).__name__}"
+                                f"{type(activation_error).__name__}"
                             )
                 return OnboardingSubmitResult(
                     persisted=True,

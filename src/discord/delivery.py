@@ -80,7 +80,9 @@ def _prepare_owned_file_fallbacks(
         for file in files:
             original_pos = file.fp.tell()
             try:
-                duplicate = os.fdopen(os.dup(file.fp.fileno()), "rb")
+                duplicate: io.BufferedIOBase = io.BufferedReader(
+                    io.FileIO(os.dup(file.fp.fileno()), mode="rb", closefd=True)
+                )
             except (AttributeError, OSError, ValueError):
                 # BytesIO has no descriptor, but its immutable buffer can be
                 # safely copied without borrowing or closing the caller's IO.
