@@ -436,11 +436,14 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "token manager not available"}, status=503)
         uid = request.match_info["user_id"]
         ws_mgr = request.app.get("ws_manager")
-        if ws_mgr:
-            async with ws_mgr.policy_change(uid):
+        try:
+            if ws_mgr:
+                async with ws_mgr.policy_change(uid):
+                    deleted = await tm.delete_token(uid)
+            else:
                 deleted = await tm.delete_token(uid)
-        else:
-            deleted = await tm.delete_token(uid)
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         if not deleted:
             return web.json_response({"error": "token not found"}, status=404)
         sm = request.app.get("session_manager")
