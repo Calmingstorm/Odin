@@ -498,6 +498,16 @@ def model_rejects_effort(model: str | None, effort: str | None) -> bool:
     return str(effort) in unsupported
 
 
+def retired_codex_model_error(model: str | None) -> str | None:
+    """Retirement is explicit, never an unknown-model budget or silent migration."""
+    if str(model or "").strip() == "gpt-5.3-codex-spark":
+        return (
+            "Codex model 'gpt-5.3-codex-spark' is retired; "
+            "choose a supported model explicitly (for example gpt-5.6-terra)."
+        )
+    return None
+
+
 def effort_incompatibility_error(model: str | None, effort: str | None) -> str | None:
     """Canonical human-readable rejection for an incompatible model/effort pair.
 
@@ -506,6 +516,9 @@ def effort_incompatibility_error(model: str | None, effort: str | None) -> str |
     admin API, spawn errors, and request-construction errors. None when the
     pair is fine.
     """
+    retired = retired_codex_model_error(model)
+    if retired:
+        return retired
     if not model_rejects_effort(model, effort):
         return None
     allowed = ", ".join(sorted(allowed_efforts_for_model(model)))
@@ -536,7 +549,6 @@ CODEX_MODEL_INPUT_BUDGETS: dict[str, int] = {
     "gpt-5.4": 917_506,
     "gpt-5.5": 270_001,
     "gpt-5.4-mini": 262_146,
-    "gpt-5.3-codex-spark": 124_001,
 }
 
 # Unknown exact slugs assume the pre-campaign uniform window, so a new or
@@ -561,6 +573,9 @@ def canonical_codex_model(model: str | None) -> str:
     authority on model names).
     """
     trimmed = str(model or "").strip()
+    retired = retired_codex_model_error(trimmed)
+    if retired:
+        raise ValueError(retired)
     return _CODEX_MODEL_ALIASES.get(trimmed, trimmed)
 
 
@@ -628,6 +643,15 @@ class OpenAICodexConfig(BaseModel):
     # like ``model`` otherwise (the WebUI dropdown is the constraint; an
     # unsupported value fails per-request). Read at call time.
     agent_model: str | None = "auto"
+    # Validate fixed agent models even when effort selection remains automatic.
+    @field_validator("model", "agent_model")
+    @classmethod
+    def _reject_retired_model(cls, v):
+        retired = retired_codex_model_error(v)
+        if retired:
+            raise ValueError(retired)
+        return v
+
     credentials_path: str = "./data/codex_auth.json"
     # Streaming transport timeouts: a generous whole-request backstop (long
     # high-effort reasoning turns stream well past 10 minutes) plus a stall

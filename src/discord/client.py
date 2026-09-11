@@ -88,7 +88,6 @@ class OdinBot(commands.Bot):
         # "guild:<id>") already forced to the exact tree in THIS process. A
         # reconnect's on_ready retries only failed or newly seen scopes.
         self._synced_command_scopes: set[str] = set()
-        self._command_snapshot: list | None = None
         # The application outlives any Discord transport generation.
         self._application_started = False
         self._application_shutdown = False
@@ -459,48 +458,25 @@ class OdinBot(commands.Bot):
     async def _reconcile_application_commands(self, guilds=None) -> None:
         """Force Discord's registered commands to match the tree exactly.
 
-        Commands are served as per-guild copies (instant) and the GLOBAL scope
-        is reconciled to EMPTY.  The previous per-guild ``copy_global_to`` +
-        ``sync(guild=)`` never touched the global scope, and ``copy_global_to``
-        is an additive merge, so removed or changed commands lingered for as
-        long as their stale global registration lived.  Syncing the tree
-        globally instead would register every command twice (Discord shows a
-        global and a guild copy side by side), so the desired state is: no
-        global commands, and each guild holding exactly the tree.
-
-        Scopes are isolated — one failed guild neither blocks the others nor
-        the rest of startup — and remembered per process so a reconnect's
-        ``on_ready`` retries only what failed or is new.
+        One global set serves guilds and bot DMs. Bulk sync replaces the exact
+        desired set, including deletions. Clear legacy guild copies FIRST;
+        failed cleanup defers initial global publication to avoid duplicates.
+        Ready/resume/join retry failed scopes without blocking bot startup.
         """
-        if self._command_snapshot is None:
-            # Taken once, before the local global mapping is cleared, and
-            # reused for guilds joined later in the process lifetime.
-            self._command_snapshot = list(self.tree.get_commands(guild=None))
-        commands_ = self._command_snapshot
-        names = sorted(cmd.name for cmd in commands_)
-        if "global" not in self._synced_command_scopes:
-            try:
-                self.tree.clear_commands(guild=None)
-                await self.tree.sync()
-                self._synced_command_scopes.add("global")
-                log.info("Slash commands reconciled: global scope cleared")
-            except Exception:
-                log.exception(
-                    "Slash-command sync failed for scope global; guild reconciliation continues"
-                )
-        for guild in (self.guilds if guilds is None else guilds):
+        # A join must not publish globally while another guild's cleanup failed.
+        targets = {guild.id: guild for guild in self.guilds}
+        targets.update({guild.id: guild for guild in (guilds or ())})
+        for guild in targets.values():
             scope = f"guild:{guild.id}"
             if scope in self._synced_command_scopes:
                 continue
             try:
                 self.tree.clear_commands(guild=guild)
-                for cmd in commands_:
-                    self.tree.add_command(cmd, guild=guild)
                 await self.tree.sync(guild=guild)
                 self._synced_command_scopes.add(scope)
                 log.info(
-                    "Slash commands reconciled for guild %s (%s): %s",
-                    guild.name, guild.id, ", ".join(names),
+                    "Legacy slash commands cleared for guild %s (%s)",
+                    guild.name, guild.id,
                 )
             except Exception:
                 log.exception(
@@ -508,6 +484,19 @@ class OdinBot(commands.Bot):
                     "will retry on a later ready",
                     guild.name, guild.id,
                 )
+        if any(f"guild:{gid}" not in self._synced_command_scopes for gid in targets):
+            log.warning("Global slash-command publication deferred: guild cleanup incomplete")
+            return
+        if "global" not in self._synced_command_scopes:
+            try:
+                await self.tree.sync()
+                self._synced_command_scopes.add("global")
+                log.info(
+                    "Global slash commands reconciled: %s",
+                    ", ".join(sorted(cmd.name for cmd in self.tree.get_commands())),
+                )
+            except Exception:
+                log.exception("Global slash-command sync failed; will retry on ready/resume/join")
 
     async def _backfill_archives(self) -> None:
         """Backfill semantic search index and FTS5 with existing archive files."""
