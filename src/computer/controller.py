@@ -405,7 +405,14 @@ class ComputerController:
         return row is None
 
     async def _recover_focus(self, context, grant, live, expected_application):
-        """Refocus the selected Hyprland target before dispatch, never replay input."""
+        """Refocus the selected Hyprland target before dispatch, never replay input.
+
+        The caller owns ``_actions`` for this entire method. That makes each
+        no-pending-receipt check a controller-action serialization point, not a
+        promise across the native await below; recovery work can still appear
+        while the backend is awaiting, so it is checked again before a recovered
+        binding can be used.
+        """
         if not self._recovery_enabled(live) or not self._no_input_pending(grant.session_id):
             return False
         await self._auth(context)
@@ -425,7 +432,10 @@ class ComputerController:
             return False
         await self._auth(context)
         self._active(grant)
-        return True
+        # A pending receipt is never a reason to create a fresh binding or to
+        # continue toward input. The pre-await check cannot establish that fact
+        # after a native focus operation yields.
+        return self._no_input_pending(grant.session_id)
 
     def _observation_response(self, live, grant, obs, image, hints=None):
         return {
@@ -975,6 +985,10 @@ class ComputerController:
         if pause is None:
             return await self._stop(sid, "cancelled")
         try:
+            # Recovery may be between native focus calls. Cancel before the
+            # first pause backend await; durable pause revocation above remains
+            # in force if cancellation cleanup cannot prove its final send.
+            self._cancel_focus_recovery(sid)
             timeout = (
                 ATTACHED_STOP_TIMEOUT_SECONDS
                 if live.capabilities is not None
