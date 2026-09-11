@@ -700,8 +700,21 @@ class HyprlandRuntimeBackend:
                 or self._output is None
             ):
                 return False
-            selected = self._selected_binding
+            # Recovery only revalidates the immutable selection made at grant
+            # time. Current focus, a title, or a replacement output cannot
+            # broaden that grant.
+            selected = copy.deepcopy(self._selected_binding)
+            if (
+                type(selected.get("output_name")) is not str
+                or type(selected.get("output")) is not str
+                or type(selected.get("identity")) is not dict
+                or selected["output_name"] != self.config.output_name
+                or selected["output"] != self._output.name
+            ):
+                return False
             try:
+                assert self._identity is not None
+                await revalidate(self._identity, time.monotonic() + 3)
                 focused = await self._scope_provider.focus_bound_candidate(selected)
                 if (
                     focused["output_name"] != self.config.output_name
@@ -719,6 +732,7 @@ class HyprlandRuntimeBackend:
                 assert self._guardian is not None
                 await self._guardian.bind_scope(scope)
                 self._scope, self._frame, self._captured_at = scope, None, 0.0
+                await revalidate(self._identity, time.monotonic() + 3)
                 return True
             except (ComputerError, HyprlandGeometryUnsettled):
                 self._frame = None

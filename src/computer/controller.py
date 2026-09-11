@@ -61,6 +61,8 @@ _TASK_LOG = logging.getLogger(__name__)
 _OWNED_TASKS: set[asyncio.Future] = set()
 _CANCELLATION_CHECKS: dict[asyncio.Future, asyncio.TimerHandle] = {}
 _CANCEL_SETTLE_SECONDS = 0.1
+_HYPRLAND_RECOVERY_ATTEMPTS = 3
+_HYPRLAND_RECOVERY_BACKOFF_SECONDS = 0.15
 
 
 def _own_task(task):
@@ -415,27 +417,52 @@ class ComputerController:
         """
         if not self._recovery_enabled(live) or not self._no_input_pending(grant.session_id):
             return False
-        await self._auth(context)
-        self._active(grant)
+        for attempt in range(_HYPRLAND_RECOVERY_ATTEMPTS):
+            # This is deliberately a known-no-input path. A pending durable
+            # receipt has an unknown outcome until its normal cleanup path says
+            # otherwise; focus retries must not turn it into a harmless wait.
+            if not self._no_input_pending(grant.session_id):
+                return False
+            await self._auth(context)
+            self._active(grant)
 
-        async def recover():
-            return await live.backend.recover_focus(expected_application, context=context)
+            async def recover():
+                return await live.backend.recover_focus(expected_application, context=context)
 
-        task = _own_task(asyncio.create_task(recover()))
-        self._recoveries[grant.session_id] = task
-        try:
-            recovered = await _bounded(task, FRAME_FRESH_SECONDS)
-        finally:
-            if self._recoveries.get(grant.session_id) is task:
-                self._recoveries.pop(grant.session_id, None)
-        if recovered is not True:
-            return False
-        await self._auth(context)
-        self._active(grant)
-        # A pending receipt is never a reason to create a fresh binding or to
-        # continue toward input. The pre-await check cannot establish that fact
-        # after a native focus operation yields.
-        return self._no_input_pending(grant.session_id)
+            task = _own_task(asyncio.create_task(recover()))
+            self._recoveries[grant.session_id] = task
+            try:
+                recovered = await _bounded(task, FRAME_FRESH_SECONDS)
+            finally:
+                if self._recoveries.get(grant.session_id) is task:
+                    self._recoveries.pop(grant.session_id, None)
+            if recovered is True:
+                await self._auth(context)
+                self._active(grant)
+                # A pending receipt is never a reason to create a fresh binding
+                # or to continue toward input. The pre-await check cannot prove
+                # that fact after the native focus operation yielded.
+                return self._no_input_pending(grant.session_id)
+            if attempt + 1 < _HYPRLAND_RECOVERY_ATTEMPTS:
+                # Keep the quiet/backoff wait cancellable through the same
+                # recovery fence. Otherwise pause/stop could only be noticed
+                # after this timer, leaving a needless self-resume window.
+                backoff = _own_task(
+                    asyncio.create_task(
+                        asyncio.sleep(_HYPRLAND_RECOVERY_BACKOFF_SECONDS * (attempt + 1))
+                    )
+                )
+                self._recoveries[grant.session_id] = backoff
+                try:
+                    await backoff
+                finally:
+                    if self._recoveries.get(grant.session_id) is backoff:
+                        self._recoveries.pop(grant.session_id, None)
+                # Pause/stop/cancel revoke the grant and make this raise rather
+                # than silently rearming recovery.
+                await self._auth(context)
+                self._active(grant)
+        return False
 
     def _observation_response(self, live, grant, obs, image, hints=None):
         return {
@@ -1139,7 +1166,32 @@ class ComputerController:
                     await _bounded(follow(), FRAME_FRESH_SECONDS)
                     self._active(grant)
                     await self._auth(context)
-            obs, image = await self._capture(grant, crop=crop)
+            try:
+                obs, image = await self._capture(grant, crop=crop)
+            except ComputerError as exc:
+                # A requested observation can be the first proof that a human
+                # changed focus or the scoped native geometry. With no action
+                # pending, Hyprland may revalidate its existing selected
+                # candidate and produce entirely fresh pixels. It never adopts
+                # a different output/application or resumes input.
+                live = self._live.get(grant.session_id)
+                if (
+                    grant.environment == "existing_session"
+                    and live is not None
+                    and exc.code in {"stale_source_binding", "input_focus_unavailable"}
+                    and self._no_input_pending(grant.session_id)
+                    and await self._recover_focus(
+                        context,
+                        grant,
+                        live,
+                        getattr(live.backend, "application_provenance", None),
+                    )
+                ):
+                    await self._auth(context)
+                    self._active(grant)
+                    obs, image = await self._capture(grant, crop=crop)
+                else:
+                    raise
             await self._auth(context)
             self._active(grant)
             if not 0 <= self.monotonic() - obs.captured_at <= FRAME_FRESH_SECONDS:
