@@ -142,7 +142,40 @@ class ComputerController:
         self._delivered_observations: dict[str, str] = {}
         self._stop_locks: dict[str, asyncio.Lock] = {}
         self._stops: dict[str, asyncio.Task] = {}
+        self._recoveries: dict[str, asyncio.Task] = {}
+        self._selection_bindings: dict[str, dict] = {}
         self.store.recover()
+
+    async def _close_inventory_backend(self, backend):
+        close = getattr(backend, "close", None)
+        if callable(close):
+            result = close()
+            if inspect.isawaitable(result):
+                await result
+
+    def _selection_binding(self, context, selected):
+        binding = self._selection_bindings.get(selected["candidate_epoch"])
+        if binding is None or binding["expires_at"] < self.monotonic():
+            self._selection_bindings.pop(selected["candidate_epoch"], None)
+            raise ComputerError("target_selection_stale")
+        if (
+            binding["owner_id"] != context.owner_id
+            or binding["host_id"] != context.host_id
+            or binding["turn_id"] != context.turn_id
+        ):
+            raise ComputerError("target_selection_forbidden")
+        target = binding["targets"].get(selected["target_id"])
+        if target is None:
+            raise ComputerError("target_selection_forbidden")
+        output_id = selected.get("output_id", target["output_id"])
+        if output_id != target["output_id"]:
+            raise ComputerError("target_selection_invalid")
+        self._selection_bindings.pop(selected["candidate_epoch"], None)
+        return {
+            "target_id": target["native_target_id"],
+            "output_id": output_id,
+            "candidate_epoch": binding["native_epoch"],
+        }
 
     def _prepare_runtime(self, grant, backend):
         prepare = getattr(backend, "startup_descriptor", None)
@@ -339,11 +372,74 @@ class ComputerController:
 
     def _fence(self, sid):
         """Revoke live input/capture before any persistence or awaited cleanup."""
+        self._cancel_focus_recovery(sid)
         self._delivered_observations.pop(sid, None)
         live = self._live.get(sid)
         if live is not None:
             live.revoked = True
             live.observations.clear()
+
+    def _cancel_focus_recovery(self, sid):
+        task = self._recoveries.get(sid)
+        if task is not None and not task.done():
+            _cancel_owned(task)
+
+    @staticmethod
+    def _recovery_enabled(live):
+        """A narrow Hyprland seam, never a generic callback binder."""
+        backend = live.backend
+        return (
+            live.capabilities is not None
+            and live.capabilities.backend == "hyprland"
+            and live.capabilities.platform == "wayland"
+            and getattr(backend, "recovery_supported", False) is True
+            and callable(getattr(backend, "recover_focus", None))
+        )
+
+    def _no_input_pending(self, session_id):
+        with self.store.lock:
+            row = self.store.db.execute(
+                "SELECT 1 FROM receipts WHERE session_id=? AND status='pending' LIMIT 1",
+                (session_id,),
+            ).fetchone()
+        return row is None
+
+    async def _recover_focus(self, context, grant, live, expected_application):
+        """Refocus the selected Hyprland target before dispatch, never replay input."""
+        if not self._recovery_enabled(live) or not self._no_input_pending(grant.session_id):
+            return False
+        await self._auth(context)
+        self._active(grant)
+
+        async def recover():
+            return await live.backend.recover_focus(expected_application, context=context)
+
+        task = _own_task(asyncio.create_task(recover()))
+        self._recoveries[grant.session_id] = task
+        try:
+            recovered = await _bounded(task, FRAME_FRESH_SECONDS)
+        finally:
+            if self._recoveries.get(grant.session_id) is task:
+                self._recoveries.pop(grant.session_id, None)
+        if recovered is not True:
+            return False
+        await self._auth(context)
+        self._active(grant)
+        return True
+
+    def _observation_response(self, live, grant, obs, image, hints=None):
+        return {
+            **obs.public(),
+            "image_bytes": image,
+            **self._input_status(live, grant),
+            "task_context": self._task_context(live, hints),
+            "sources": (
+                live.backend.sources() if callable(getattr(live.backend, "sources", None)) else []
+            ),
+            "backend_capabilities": (
+                live.capabilities.public() if live.capabilities is not None else None
+            ),
+        }
 
     async def _stop(self, sid, state):
         self._fence(sid)
@@ -583,11 +679,86 @@ class ComputerController:
         }
 
     async def session(self, context: RequestContext, inp: dict) -> dict:
-        exact_keys(inp, {"operation", "session_id", "generation", "app", "name"}, {"operation"})
+        exact_keys(
+            inp,
+            {
+                "operation",
+                "session_id",
+                "generation",
+                "app",
+                "name",
+                "target_id",
+                "output_id",
+                "candidate_epoch",
+            },
+            {"operation"},
+        )
         operation = inp["operation"]
         await self._auth(context, emergency=operation in {"stop", "cancel", "close", "status"})
+        if operation == "inventory_targets":
+            exact_keys(inp, {"operation"}, {"operation"})
+            backend = self.backend_factory(None)
+            if inspect.isawaitable(backend):
+                backend = await backend
+            capabilities = getattr(backend, "capabilities", None)
+            inventory = getattr(backend, "inventory_targets", None)
+            if (
+                type(capabilities) is not BackendCapabilities
+                or capabilities.backend != "hyprland"
+                or not callable(inventory)
+            ):
+                await self._close_inventory_backend(backend)
+                raise ComputerError("target_inventory_unavailable")
+            try:
+                result = await inventory()
+                await self._auth(context)
+                if (
+                    type(result) is not dict
+                    or type(result.get("candidate_epoch")) is not int
+                    or result["candidate_epoch"] < 1
+                    or type(result.get("candidates")) is not list
+                ):
+                    raise ComputerError("target_inventory_unavailable")
+                epoch = "e1-" + uuid.uuid4().hex
+                targets = {}
+                public = []
+                for candidate in result["candidates"]:
+                    if (
+                        type(candidate) is not dict
+                        or type(candidate.get("id")) is not str
+                        or type(candidate.get("label")) is not str
+                        or type(candidate.get("output_id")) is not str
+                    ):
+                        raise ComputerError("target_inventory_unavailable")
+                    target_id = "t1-" + uuid.uuid4().hex
+                    targets[target_id] = {
+                        "native_target_id": candidate["id"],
+                        "output_id": candidate["output_id"],
+                    }
+                    public.append(
+                        {
+                            "target_id": target_id,
+                            "label": candidate["label"],
+                            "output_id": candidate["output_id"],
+                        }
+                    )
+                self._selection_bindings[epoch] = {
+                    "owner_id": context.owner_id,
+                    "host_id": context.host_id,
+                    "turn_id": context.turn_id,
+                    "expires_at": self.monotonic() + FRAME_FRESH_SECONDS,
+                    "native_epoch": result["candidate_epoch"],
+                    "targets": targets,
+                }
+                return {"candidate_epoch": epoch, "candidates": public}
+            finally:
+                await self._close_inventory_backend(backend)
         if operation == "start":
-            exact_keys(inp, {"operation", "app"}, {"operation"})
+            exact_keys(
+                inp,
+                {"operation", "app", "target_id", "output_id", "candidate_epoch"},
+                {"operation"},
+            )
             app = inp.get("app")
             if app is not None and (not isinstance(app, str) or not 1 <= len(app) <= 96):
                 raise ComputerError("unsupported_app")
@@ -611,6 +782,23 @@ class ComputerController:
                     raise ComputerError("attachment_unavailable")
                 if supported:
                     input_eligible(capabilities)
+            selected = {
+                key: inp[key] for key in ("target_id", "output_id", "candidate_epoch") if key in inp
+            }
+            if selected and capabilities.backend != "hyprland":
+                raise ComputerError("target_selection_unsupported")
+            if selected and set(selected) not in (
+                {"target_id", "candidate_epoch"},
+                {"target_id", "output_id", "candidate_epoch"},
+            ):
+                raise ComputerError("target_selection_invalid")
+            if selected:
+                if any(
+                    type(value) is not str or not 1 <= len(value) <= 128
+                    for value in selected.values()
+                ):
+                    raise ComputerError("target_selection_invalid")
+                selected = self._selection_binding(context, selected)
             grant = self.store.create_session(
                 context, app, platform=capabilities.platform, environment=capabilities.environment
             )
@@ -624,7 +812,12 @@ class ComputerController:
                 timeout = (
                     WAYLAND_START_TIMEOUT_SECONDS if capabilities.platform == "wayland" else 20
                 )
-                await _bounded(backend.start(grant.session_id), timeout)
+                await _bounded(
+                    backend.start(grant.session_id, selection=selected)
+                    if selected
+                    else backend.start(grant.session_id),
+                    timeout,
+                )
                 measured = getattr(backend, "capabilities", None)
                 if type(measured) is not BackendCapabilities or (
                     measured.platform,
@@ -996,9 +1189,10 @@ class ComputerController:
                 "backend": "hyprland",
                 "guarantee": "best_effort",
                 "release_basis": (
-                    "not_required_no_input_sent" if execution.get("injected") is False
-                    and execution.get("released") is True
-                    else "cooperative_native_ack" if execution.get("released") is True
+                    "not_required_no_input_sent"
+                    if execution.get("injected") is False and execution.get("released") is True
+                    else "cooperative_native_ack"
+                    if execution.get("released") is True
                     else "unconfirmed"
                 ),
                 "receiver_release_verified": False,
@@ -1053,9 +1247,12 @@ class ComputerController:
         if grant.generation != generation:
             raise ComputerError("stale_generation")
         live = self._live.get(session_id)
-        if (live is None or live.capabilities is None
-                or live.capabilities.backend != "hyprland"
-                or live.capabilities.platform != "wayland"):
+        if (
+            live is None
+            or live.capabilities is None
+            or live.capabilities.backend != "hyprland"
+            or live.capabilities.platform != "wayland"
+        ):
             raise ComputerError("hyprland_recovery_unavailable")
         recovery = getattr(live.backend, "recover_owned_input", None)
         if not callable(recovery):
@@ -1074,8 +1271,11 @@ class ComputerController:
             live.task_context.invalidate("operator_release_owned_input")
         try:
             receipt = await _bounded(recovery(), ATTACHED_STOP_TIMEOUT_SECONDS)
-            if (not isinstance(receipt, dict) or receipt.get("input_revoked") is not True
-                    or receipt.get("capture_revoked") is not True):
+            if (
+                not isinstance(receipt, dict)
+                or receipt.get("input_revoked") is not True
+                or receipt.get("capture_revoked") is not True
+            ):
                 raise ComputerError("hyprland_recovery_unavailable")
         except BaseException:
             await self._stop(session_id, "cancelled")
@@ -1083,13 +1283,16 @@ class ComputerController:
         await self._auth(context, emergency=True)
         if receipt.get("released") is not True:
             self.store.set_state(session_id, "quarantined")
-        return {**self._public_session(self.store.get_session(session_id)),
-                "owned_input_recovery": {
-                    "released": receipt.get("released") is True,
-                    "receiver_release_verified": False,
-                    "input_revoked": True, "capture_revoked": True,
-                    "renewed_consent_required": True,
-                }}
+        return {
+            **self._public_session(self.store.get_session(session_id)),
+            "owned_input_recovery": {
+                "released": receipt.get("released") is True,
+                "receiver_release_verified": False,
+                "input_revoked": True,
+                "capture_revoked": True,
+                "renewed_consent_required": True,
+            },
+        }
 
     async def operator_observe(self, context):
         await self._auth(context)
@@ -1223,7 +1426,9 @@ class ComputerController:
             except ComputerError as exc:
                 if any(obs.modal is not None for obs in live.observations.values()):
                     await self._pause(grant.session_id)
-                elif grant.environment == "existing_session" and exc.code == "stale_source_binding":
+                elif grant.environment == "existing_session" and exc.code in {
+                    "stale_source_binding", "input_focus_unavailable"
+                }:
                     # No backend input has been dispatched. A focus/geometry
                     # change is a recoverable refusal, not permission to rebase
                     # coordinates or steal focus. The capture that detected it
@@ -1231,6 +1436,12 @@ class ComputerController:
                     fresh = next(iter(live.observations.values()), None)
                     live.observations.clear()
                     self._delivered_observations.pop(grant.session_id, None)
+                    recovered = await self._recover_focus(
+                        context,
+                        grant,
+                        live,
+                        getattr(live.backend, "application_provenance", None),
+                    )
                     await self._auth(context)
                     self._active(grant)
                     existing = self.store.begin_action(
@@ -1241,20 +1452,32 @@ class ComputerController:
                     verification = {
                         "status": "unavailable",
                         "reason": exc.code,
+                        # Existing attached/X11 refusal semantics stay intact:
+                        # no input was sent and a new observation remains safe.
                         "recoverable": True,
+                        "focus_recovered": recovered,
                         "source_id": original.source.source_id,
-                        "next_action": "wait_for_intended_application_then_observe_without_crop",
+                        "next_action": (
+                            "observe_fresh_recovered_binding"
+                            if recovered
+                            else "wait_for_intended_application_then_observe_without_crop"
+                        ),
                         "instruction": (
+                            "No input was sent. Call computer_observe without crop and verify "
+                            "the application and target from new pixels before planning a new "
+                            "action with a new action_id. Do not replay this action, reuse its "
+                            "coordinates, or act in another application."
+                            if recovered else
                             "No input was sent. Let the user return focus to the intended "
-                            "application, then call computer_observe without crop. Verify "
-                            "the application and target from the new pixels before planning "
-                            "a new action with a new action_id. Do not steal focus, replay "
-                            "this action, reuse its coordinates, or act in another application."
+                            "application, then call computer_observe without crop. Verify the "
+                            "application and target from the new pixels before planning a new "
+                            "action with a new action_id. Do not steal focus, replay this action, "
+                            "reuse its coordinates, or act in another application."
                         ),
                     }
                     if fresh is not None and fresh.observation_id != original.observation_id:
                         verification["evidence_id"] = fresh.evidence_id
-                    return self._finish_action(
+                    receipt = self._finish_action(
                         live.capabilities,
                         grant.session_id,
                         inp["action_id"],
@@ -1265,6 +1488,20 @@ class ComputerController:
                             "verification": verification,
                         },
                     )
+                    if not recovered:
+                        return receipt
+                    # Refocus has no action semantics. Capture and register a
+                    # fresh ordinary binding, then require normal delivery.
+                    try:
+                        after, image = await self._capture(grant)
+                        await self._auth(context)
+                        self._active(grant)
+                    except ComputerError:
+                        return receipt
+                    return {
+                        **receipt,
+                        "next_observation": self._observation_response(live, grant, after, image),
+                    }
                 raise
             # R6: attached keyboard targets the freshly verified native app/focus
             # binding, not pixels that may change with a blinking caret. Geometry

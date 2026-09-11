@@ -9,7 +9,6 @@ import hashlib
 import os
 import re
 import time
-import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from fractions import Fraction
@@ -64,24 +63,43 @@ class HyprlandSessionConfig:
         if self.scope_socket is not None:
             paths += (self.scope_socket,)
         if (
-            type(self.expected_uid) is not int or not 0 <= self.expected_uid < 2**32
+            type(self.expected_uid) is not int
+            or not 0 <= self.expected_uid < 2**32
             or self.discovery_mode not in {"pinned", "auto"}
-            or (self.discovery_mode == "pinned" and (type(self.compositor_pid) is not int or self.compositor_pid <= 1))
+            or (
+                self.discovery_mode == "pinned"
+                and (type(self.compositor_pid) is not int or self.compositor_pid <= 1)
+            )
             or (self.discovery_mode == "auto" and self.compositor_pid is not None)
             or type(self.compositor_trust) is not ExecutableTrust
-            or any(type(p) is not str or not p.startswith("/")
-                   or any(ord(c) < 32 for c in p) or ".." in p.split("/") for p in paths)
-            or type(self.output_name) is not str or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", self.output_name)
+            or any(
+                type(p) is not str
+                or not p.startswith("/")
+                or any(ord(c) < 32 for c in p)
+                or ".." in p.split("/")
+                for p in paths
+            )
+            or type(self.output_name) is not str
+            or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", self.output_name)
             or self.output_name in {".", ".."}
-            or (self.discovery_mode == "pinned" and any(type(p) is not str
-                or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", p) or p in {".", ".."}
-                for p in (self.wayland_display, self.instance_signature)))
+            or (
+                self.discovery_mode == "pinned"
+                and any(
+                    type(p) is not str
+                    or not re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", p)
+                    or p in {".", ".."}
+                    for p in (self.wayland_display, self.instance_signature)
+                )
+            )
         ):
             raise ComputerError("hyprland_explicit_session_configuration_required")
         if self.scope_socket is None:
             object.__setattr__(self, "scope_socket", self.runtime_dir + "/odin-hyprland-scope.sock")
-        sockets = (cast(str, self.scope_socket),) if self.discovery_mode == "auto" else (
-            self.wayland_path, self.ipc_path, cast(str, self.scope_socket))
+        sockets = (
+            (cast(str, self.scope_socket),)
+            if self.discovery_mode == "auto"
+            else (self.wayland_path, self.ipc_path, cast(str, self.scope_socket))
+        )
         if any(len(os.fsencode(p)) > 107 for p in sockets):
             raise ComputerError("hyprland_explicit_socket_required")
 
@@ -115,8 +133,13 @@ def _render_native(frame, crop):
             transforms.append(Image.Transpose.FLIP_LEFT_RIGHT)
         rotation = output.transform & 3
         if rotation:
-            transforms.append({1: Image.Transpose.ROTATE_90, 2: Image.Transpose.ROTATE_180,
-                               3: Image.Transpose.ROTATE_270}[rotation])
+            transforms.append(
+                {
+                    1: Image.Transpose.ROTATE_90,
+                    2: Image.Transpose.ROTATE_180,
+                    3: Image.Transpose.ROTATE_270,
+                }[rotation]
+            )
         for transform in transforms:
             changed = image.transpose(transform)
             image.close()
@@ -128,9 +151,14 @@ def _render_native(frame, crop):
 
             rectangle = FrameCrop(**crop_arguments(crop, width, height))
         return render_frame(
-            image.tobytes(), SourceGeometry("capture", 1, 1, width, height), mode="RGB",
-            observation_id="capture", session_id="capture", generation=1,
-            captured_monotonic_ns=time.monotonic_ns(), crop=rectangle,
+            image.tobytes(),
+            SourceGeometry("capture", 1, 1, width, height),
+            mode="RGB",
+            observation_id="capture",
+            session_id="capture",
+            generation=1,
+            captured_monotonic_ns=time.monotonic_ns(),
+            crop=rectangle,
         )
     finally:
         image.close()
@@ -148,6 +176,7 @@ class _GroundedCommandEncoder(WaylandRuntimeBackend):
 
 class HyprlandRuntimeBackend:
     startup_timeout_seconds = 30
+    recovery_supported = False
     input_supported = False
     input_blocker: str | None = "hyprland_session_not_ready"
     input_limits = {
@@ -162,14 +191,24 @@ class HyprlandRuntimeBackend:
         "application_scope": "original_native_process_same_output_fresh_observed_own_dialogs",
         "recovery": "operator_release_all_then_close_and_start_new_session",
     }
+
     # Transport-neutral helpers: no portal access or compositor qualification.
     def _command(self, action, frame, scope):
         return _GroundedCommandEncoder(self._guardian)._command(action, frame, scope)
 
-    def __init__(self, *, config: HyprlandSessionConfig, enabled=False,
-                 environment="existing_session", app_profile=None):
-        if (type(config) is not HyprlandSessionConfig or type(enabled) is not bool
-                or environment != "existing_session"):
+    def __init__(
+        self,
+        *,
+        config: HyprlandSessionConfig,
+        enabled=False,
+        environment="existing_session",
+        app_profile=None,
+    ):
+        if (
+            type(config) is not HyprlandSessionConfig
+            or type(enabled) is not bool
+            or environment != "existing_session"
+        ):
             raise ComputerError("hyprland_explicit_session_configuration_required")
         self.config, self.enabled = config, enabled
         # Backend family is immutable provenance, not input eligibility. Publish
@@ -177,9 +216,11 @@ class HyprlandRuntimeBackend:
         # retain the right route even when native admission never completes.
         self.capabilities = BackendCapabilities("wayland", environment, backend="hyprland")
         self.input_admission = InputAdmission(
-            "pending", cast(str, self.input_blocker),
+            "pending",
+            cast(str, self.input_blocker),
             "Native session safety evidence is unmeasured.",
-            "Explicitly configure the pinned Hyprland build and provisioned native companion.")
+            "Explicitly configure the pinned Hyprland build and provisioned native companion.",
+        )
         self._generation, self._revision = 1, 0
         self._started = self._closed = self._paused = False
         self._frame: BackendObservation | None = None
@@ -196,7 +237,10 @@ class HyprlandRuntimeBackend:
         self._output_pin: ExplicitOutput | None = None
         self._descriptor: dict[str, Any] | None = None
         self.runtime_identity_callback: Callable[[dict[str, Any]], None] | None = None
-        self._selected = uuid.uuid4().hex
+        # Legacy explicit-output startup does not select a native candidate.
+        # Its configured output name remains the valid source identity.
+        self._selected = config.output_name
+        self._selected_binding: dict[str, Any] | None = None
         self._lock, self._stop_lock = asyncio.Lock(), asyncio.Lock()
         self._scope_jobs: set[asyncio.Task[dict[str, Any]]] = set()
         self._jobs: set[asyncio.Task[None]] = set()
@@ -212,9 +256,14 @@ class HyprlandRuntimeBackend:
         validate_session(session_id)
         if self._descriptor is None:
             self._descriptor = {
-                "version": 1, "kind": "processes", "session_id": session_id,
-                "boot_id": boot_id(), "no_persistent_devices": True,
-                "input_was_enabled": True, "launch_pending": True, "processes": [],
+                "version": 1,
+                "kind": "processes",
+                "session_id": session_id,
+                "boot_id": boot_id(),
+                "no_persistent_devices": True,
+                "input_was_enabled": True,
+                "launch_pending": True,
+                "processes": [],
             }
         if self._descriptor["session_id"] != session_id:
             raise ComputerError("wayland_session_identity_changed")
@@ -273,8 +322,52 @@ class HyprlandRuntimeBackend:
         from .hyprland_scope import HyprlandScopeProvider
 
         return HyprlandScopeProvider(
-            socket_path=self.config.scope_socket, expected_uid=self.config.expected_uid,
-            expected_compositor_pid=self.config.compositor_pid)
+            socket_path=self.config.scope_socket,
+            expected_uid=self.config.expected_uid,
+            expected_compositor_pid=self.config.compositor_pid,
+        )
+
+    async def inventory_targets(self):
+        """Pre-grant native inventory. No capture, guardian, or input is started."""
+        if (
+            not self.enabled
+            or self._started
+            or self._closed
+            or self.config.discovery_mode != "auto"
+        ):
+            raise ComputerError("target_inventory_unavailable")
+        from .hyprland_discovery import HyprlandDiscoveryPolicy, HyprlandDiscoveryResolver
+
+        resolved = await HyprlandDiscoveryResolver(
+            HyprlandDiscoveryPolicy(
+                self.config.expected_uid, self.config.runtime_dir, self.config.compositor_trust
+            )
+        ).resolve()
+        connection = provider = None
+        try:
+            identity, connection = await pin_connections(
+                wayland_path=resolved.runtime_dir + "/" + resolved.wayland_display,
+                ipc_path=resolved.runtime_dir
+                + "/hypr/"
+                + resolved.instance_signature
+                + "/.socket.sock",
+                expected_pid=resolved.pid,
+                expected_uid=self.config.expected_uid,
+                trust=self.config.compositor_trust,
+            )
+            provider = await HyprlandScopeProvider.from_identity(
+                identity=identity, runtime_dir=resolved.runtime_dir
+            )
+            return await provider.inventory_targets()
+        except ComputerError:
+            raise
+        except Exception:
+            raise ComputerError("target_inventory_unavailable") from None
+        finally:
+            if provider is not None:
+                await provider.close()
+            if connection is not None:
+                connection.close()
 
     def _metadata(self):
         data: dict[str, str | list[int]] = {"mapping_id": self.config.output_name}
@@ -282,63 +375,127 @@ class HyprlandRuntimeBackend:
             data["size"] = [self._output.logical_width, self._output.logical_height]
         return data
 
-    async def start(self, session_id):
+    async def start(self, session_id, *, selection=None):
         if not self.enabled or self._started or self._closed:
             raise ComputerError("hyprland_backend_not_startable")
         self.startup_descriptor(session_id)
         self._started = True
         try:
-            await self._open()
-            return {"ok": True, "session_id": session_id, "capture_only": False,
-                    "input_supported": True, "input_blocker": None,
-                    "input_admission": self.input_admission.public(),
-                    "capabilities": self.capabilities.public(), "sources": self.sources()}
+            if selection is not None and (
+                type(selection) is not dict
+                or set(selection) != {"target_id", "output_id", "candidate_epoch"}
+            ):
+                raise ComputerError("target_selection_invalid")
+            await self._open(selection=selection)
+            return {
+                "ok": True,
+                "session_id": session_id,
+                "capture_only": False,
+                "input_supported": True,
+                "input_blocker": None,
+                "input_admission": self.input_admission.public(),
+                "capabilities": self.capabilities.public(),
+                "sources": self.sources(),
+            }
         except BaseException as exc:
             await self.stop()
             if isinstance(exc, asyncio.CancelledError):
                 raise
             code = exc.code if isinstance(exc, ComputerError) else "hyprland_native_start_failed"
-            raise InputAdmissionError(InputAdmission(
-                "refused", code, "The explicitly configured native Hyprland path was not ready.",
-                "Check the pinned compositor, explicit output and native companion setup."
-            )) from None
+            raise InputAdmissionError(
+                InputAdmission(
+                    "refused",
+                    code,
+                    "The explicitly configured native Hyprland path was not ready.",
+                    "Check the pinned compositor, explicit output and native companion setup.",
+                )
+            ) from None
 
-    async def _open(self):
+    async def _open(self, *, selection=None):
         from .hyprland_guardian import HyprlandGuardian
 
         trusted_binary(self.config.capture_binary)
         if self.config.discovery_mode == "auto":
             from .hyprland_discovery import HyprlandDiscoveryPolicy, HyprlandDiscoveryResolver
 
-            resolved = await HyprlandDiscoveryResolver(HyprlandDiscoveryPolicy(
-                self.config.expected_uid, self.config.runtime_dir, self.config.compositor_trust)).resolve()
+            resolved = await HyprlandDiscoveryResolver(
+                HyprlandDiscoveryPolicy(
+                    self.config.expected_uid, self.config.runtime_dir, self.config.compositor_trust
+                )
+            ).resolve()
             self.config = HyprlandSessionConfig(
-                expected_uid=self.config.expected_uid, runtime_dir=resolved.runtime_dir,
+                expected_uid=self.config.expected_uid,
+                runtime_dir=resolved.runtime_dir,
                 wayland_display=resolved.wayland_display,
-                instance_signature=resolved.instance_signature, output_name=self.config.output_name,
-                compositor_pid=resolved.pid, compositor_trust=self.config.compositor_trust,
-                guardian_binary=self.config.guardian_binary, capture_binary=self.config.capture_binary,
-                scope_socket=self.config.scope_socket, discovery_mode="pinned")
+                instance_signature=resolved.instance_signature,
+                output_name=self.config.output_name,
+                compositor_pid=resolved.pid,
+                compositor_trust=self.config.compositor_trust,
+                guardian_binary=self.config.guardian_binary,
+                capture_binary=self.config.capture_binary,
+                scope_socket=self.config.scope_socket,
+                discovery_mode="pinned",
+            )
         if self.config.compositor_pid is None:
             raise ComputerError("hyprland_explicit_session_configuration_required")
         connection = None
         try:
             self._identity, connection = await pin_connections(
-                wayland_path=self.config.wayland_path, ipc_path=self.config.ipc_path,
-                expected_pid=self.config.compositor_pid, expected_uid=self.config.expected_uid,
-                trust=self.config.compositor_trust)
+                wayland_path=self.config.wayland_path,
+                ipc_path=self.config.ipc_path,
+                expected_pid=self.config.compositor_pid,
+                expected_uid=self.config.expected_uid,
+                trust=self.config.compositor_trust,
+            )
             connection.close()
-            self._scope_provider = self._new_provider()
+            selected = None
+            if selection is not None:
+                self._scope_provider = await HyprlandScopeProvider.from_identity(
+                    identity=self._identity, runtime_dir=self.config.runtime_dir
+                )
+                selected = await self._scope_provider.focus_candidate(
+                    candidate_id=selection["target_id"],
+                    output_id=selection["output_id"],
+                    topology_epoch=selection["candidate_epoch"],
+                )
+                self.config = HyprlandSessionConfig(
+                    expected_uid=self.config.expected_uid,
+                    runtime_dir=self.config.runtime_dir,
+                    wayland_display=self.config.wayland_display,
+                    instance_signature=self.config.instance_signature,
+                    output_name=selected["output_name"],
+                    compositor_pid=self.config.compositor_pid,
+                    compositor_trust=self.config.compositor_trust,
+                    guardian_binary=self.config.guardian_binary,
+                    capture_binary=self.config.capture_binary,
+                    scope_socket=self._scope_provider.socket_path,
+                    discovery_mode="pinned",
+                )
+                self._selected = selected["output_name"]
+                self._selected_binding = selected
+            else:
+                self._scope_provider = self._new_provider()
             scope, _ = await self._action_scope(self._metadata())
             self._output = self._checked_output(scope)
             self._check_scope(scope)
+            if selected is not None:
+                application = scope.get("application")
+                if type(application) is not dict or any(
+                    application.get(key) != value for key, value in selected["identity"].items()
+                ):
+                    raise ComputerError("target_selection_changed")
             self._guardian = HyprlandGuardian(
-                self.config.guardian_binary, self.config.expected_uid, self._record_spawn)
+                self.config.guardian_binary, self.config.expected_uid, self._record_spawn
+            )
             self._record_spawn(None)
             await self._guardian.start(
-                self.config.wayland_path, self.config.output_name,
-                self.config.scope_socket, self.config.compositor_pid,
-                self._output.logical_width, self._output.logical_height)
+                self.config.wayland_path,
+                self.config.output_name,
+                self.config.scope_socket,
+                self.config.compositor_pid,
+                self._output.logical_width,
+                self._output.logical_height,
+            )
             scope, _ = await self._action_scope(self._metadata())
             self._check_scope(scope)
             await self._guardian.bind_scope(scope)
@@ -351,17 +508,35 @@ class HyprlandRuntimeBackend:
                 self.runtime_identity_callback(copy.deepcopy(descriptor))
             self._descriptor = descriptor
             self.capabilities = BackendCapabilities(
-                "wayland", "existing_session", "shared", "shared", "hyprland_best_effort",
-                "verified", backend="hyprland")
+                "wayland",
+                "existing_session",
+                "shared",
+                "shared",
+                "hyprland_best_effort",
+                "verified",
+                backend="hyprland",
+            )
             self.input_supported, self.input_blocker = True, None
+            self.recovery_supported = self._selected_binding is not None
             self.input_admission = InputAdmission(
-                "eligible", "hyprland_best_effort_ready", " ".join(RESIDUALS),
+                "eligible",
+                "hyprland_best_effort_ready",
+                " ".join(RESIDUALS),
                 "Use supervised bounded actions; release-all then renewed consent recovers.",
-                compositor=CompositorIdentity("Hyprland", self.config.compositor_trust.version,
-                                              "native", self.config.compositor_trust.sha256),
-                probe_scope="active_session", checks=(
-                    "compositor_executable_and_so_peercred_pinned", "explicit_output_native_scope",
-                    "native_guardian_connected", "receiver_release_unmeasured"))
+                compositor=CompositorIdentity(
+                    "Hyprland",
+                    self.config.compositor_trust.version,
+                    "native",
+                    self.config.compositor_trust.sha256,
+                ),
+                probe_scope="active_session",
+                checks=(
+                    "compositor_executable_and_so_peercred_pinned",
+                    "explicit_output_native_scope",
+                    "native_guardian_connected",
+                    "receiver_release_unmeasured",
+                ),
+            )
         finally:
             if connection is not None:
                 connection.close()
@@ -379,23 +554,31 @@ class HyprlandRuntimeBackend:
         if self._checked_output(scope) != self._output:
             raise ComputerError("hyprland_explicit_output_changed")
         measured = scope.get("observed_monotonic_ns")
-        if (scope.get("locked") is not False or type(measured) is not int
-                or scope.get("authenticated") is not True
-                or scope.get("native_wayland") is not True or scope.get("safe_focus") is not True
-                or not 0 <= time.monotonic_ns() - measured < 250_000_000
-                or type(scope.get("native_scope_serial")) is not int
-                or scope["native_scope_serial"] < 1
-                or not scope.get("native_scope_token")):
+        if (
+            scope.get("locked") is not False
+            or type(measured) is not int
+            or scope.get("authenticated") is not True
+            or scope.get("native_wayland") is not True
+            or scope.get("safe_focus") is not True
+            or not 0 <= time.monotonic_ns() - measured < 250_000_000
+            or type(scope.get("native_scope_serial")) is not int
+            or scope["native_scope_serial"] < 1
+            or not scope.get("native_scope_token")
+        ):
             raise ComputerError("hyprland_scope_unknown_locked_or_stale")
         application = scope.get("application")
-        if (type(application) is not dict
-                or any(type(application.get(k)) is not int for k in ("pid", "uid", "start_ticks"))
-                or application["pid"] <= 1 or application["start_ticks"] <= 0
-                or application["uid"] != self.config.expected_uid
-                or type(application.get("exe")) is not str or not application["exe"].startswith("/")
-                or type(application.get("exe_identity")) is not list
-                or len(application["exe_identity"]) != 2
-                or any(type(n) is not int or n < 0 for n in application["exe_identity"])):
+        if (
+            type(application) is not dict
+            or any(type(application.get(k)) is not int for k in ("pid", "uid", "start_ticks"))
+            or application["pid"] <= 1
+            or application["start_ticks"] <= 0
+            or application["uid"] != self.config.expected_uid
+            or type(application.get("exe")) is not str
+            or not application["exe"].startswith("/")
+            or type(application.get("exe_identity")) is not list
+            or len(application["exe_identity"]) != 2
+            or any(type(n) is not int or n < 0 for n in application["exe_identity"])
+        ):
             raise ComputerError("hyprland_application_identity_unavailable")
         if self._application_pin is None:
             self._application_pin = copy.deepcopy(application)
@@ -410,20 +593,35 @@ class HyprlandRuntimeBackend:
 
     def _check_ready(self, ready):
         assert self._guardian is not None and self._output is not None
-        if (not self._guardian.alive or ready.get("width") != self._output.logical_width
-                or ready.get("height") != self._output.logical_height):
+        if (
+            not self._guardian.alive
+            or ready.get("width") != self._output.logical_width
+            or ready.get("height") != self._output.logical_height
+        ):
             raise ComputerError("hyprland_input_extent_mismatch")
 
     def _active(self):
-        if (not self._started or self._closed or self._paused or self._identity is None
-                or self._scope_provider is None or self._guardian is None
-                or not self._guardian.alive):
+        if (
+            not self._started
+            or self._closed
+            or self._paused
+            or self._identity is None
+            or self._scope_provider is None
+            or self._guardian is None
+            or not self._guardian.alive
+        ):
             raise ComputerError("hyprland_session_revoked")
 
     def sources(self):
         width, height = self._output.oriented_size if self._output else (0, 0)
-        return [{"source_id": self._selected, "label": "Explicitly granted Hyprland output",
-                 "width": width, "height": height}]
+        return [
+            {
+                "source_id": self._selected,
+                "label": "Explicitly granted Hyprland output",
+                "width": width,
+                "height": height,
+            }
+        ]
 
     @property
     def input_readiness(self):
@@ -440,6 +638,41 @@ class HyprlandRuntimeBackend:
                 raise ComputerError("hyprland_capture_source_not_granted")
             self._frame = None
             return {"selected_source": source_id, "capture_only": False}
+
+    async def recover_focus(self, expected_application, *, context) -> bool:
+        """Refocus only the selected native identity and invalidate old pixels."""
+        del context
+        async with self._lock:
+            self._active()
+            if (
+                self._selected_binding is None
+                or self._scope_provider is None
+                or self._output is None
+            ):
+                return False
+            selected = self._selected_binding
+            try:
+                focused = await self._scope_provider.focus_bound_candidate(selected)
+                if (
+                    focused["output_name"] != self.config.output_name
+                    or focused["output"] != selected["output"]
+                    or focused["identity"] != selected["identity"]
+                ):
+                    return False
+                scope, _ = await self._action_scope(self._metadata())
+                self._check_scope(scope)
+                if (
+                    scope.get("application") != self._application_pin
+                    or canonical_application_provenance(scope) != expected_application
+                ):
+                    return False
+                assert self._guardian is not None
+                await self._guardian.bind_scope(scope)
+                self._scope, self._frame, self._captured_at = scope, None, 0.0
+                return True
+            except (ComputerError, HyprlandGeometryUnsettled):
+                self._frame = None
+                return False
 
     @property
     def application_provenance(self):
@@ -461,18 +694,34 @@ class HyprlandRuntimeBackend:
             self._check_scope(scope)
             last_scope = scope
             return ScopeProof(
-                self._identity.digest, self._output, scope["native_scope_serial"], generation,
-                scope["observed_monotonic_ns"], scope["locked"], _digest(_binding(scope)))
+                self._identity.digest,
+                self._output,
+                scope["native_scope_serial"],
+                generation,
+                scope["observed_monotonic_ns"],
+                scope["locked"],
+                _digest(_binding(scope)),
+            )
 
         trusted_binary(self.config.capture_binary)
         assert self.config.compositor_pid is not None
         connection = await connect_peer(
-            self.config.wayland_path, self.config.compositor_pid, self.config.expected_uid,
-            time.monotonic() + 3)
+            self.config.wayland_path,
+            self.config.compositor_pid,
+            self.config.expected_uid,
+            time.monotonic() + 3,
+        )
         captured_at = time.monotonic()
-        capturing = asyncio.create_task(capture_explicit_output(
-            helper=self.config.capture_binary, wayland=connection, identity=self._identity,
-            output=self._output, scope=proof, on_spawn=self._record_spawn))
+        capturing = asyncio.create_task(
+            capture_explicit_output(
+                helper=self.config.capture_binary,
+                wayland=connection,
+                identity=self._identity,
+                output=self._output,
+                scope=proof,
+                on_spawn=self._record_spawn,
+            )
+        )
         self._capture_jobs.add(capturing)
         try:
             native = await capturing
@@ -521,8 +770,11 @@ class HyprlandRuntimeBackend:
                             raise ComputerError("hyprland_explicit_output_changed") from None
                     except ComputerError as exc:
                         # This reason is emitted only after fresh before/after proofs.
-                        if (str(exc) != "hyprland_capture_scope_changed"
-                                or application is None or output is None):
+                        if (
+                            str(exc) != "hyprland_capture_scope_changed"
+                            or application is None
+                            or output is None
+                        ):
                             raise
                     if attempt == 50 or time.monotonic() >= retry_deadline:
                         break
@@ -542,20 +794,36 @@ class HyprlandRuntimeBackend:
             assert self._output is not None
             width, height = self._output.oriented_size
             source = SourceGeometry(
-                self._selected, self._revision, self._generation, width, height,
-                input_region_id=self._selected, input_width=Fraction(self._output.logical_width),
+                self._selected,
+                self._revision,
+                self._generation,
+                width,
+                height,
+                input_region_id=self._selected,
+                input_width=Fraction(self._output.logical_width),
                 input_height=Fraction(self._output.logical_height),
-                pixel_to_input=AffineTransform(a=Fraction(self._output.logical_width, width),
-                                              e=Fraction(self._output.logical_height, height)))
+                pixel_to_input=AffineTransform(
+                    a=Fraction(self._output.logical_width, width),
+                    e=Fraction(self._output.logical_height, height),
+                ),
+            )
             fm = rendered.metadata
             frame = BackendObservation(
-                source, CaptureScope(self._generation, frozenset({self._selected}),
-                                     frozenset({self._selected})),
-                fm.width, fm.height, fm.delivered_to_source, rendered.png, focused=True,
+                source,
+                CaptureScope(
+                    self._generation, frozenset({self._selected}), frozenset({self._selected})
+                ),
+                fm.width,
+                fm.height,
+                fm.delivered_to_source,
+                rendered.png,
+                focused=True,
                 crop=(fm.crop.x, fm.crop.y, fm.crop.width, fm.crop.height) if fm.crop else None,
-                resize_scale=fm.resize_scale, resize_rounding=fm.resize_rounding,
+                resize_scale=fm.resize_scale,
+                resize_rounding=fm.resize_rounding,
                 modal=scope.get("modal_title_digest") if scope.get("modal") else None,
-                modal_kind=scope.get("modal_kind") if scope.get("modal") else None)
+                modal_kind=scope.get("modal_kind") if scope.get("modal") else None,
+            )
             self._frame, self._scope, self._captured_at = frame, scope, captured_at
             self._crop = dict(crop) if crop else None
             return frame
@@ -589,24 +857,41 @@ class HyprlandRuntimeBackend:
             self._active()
             assert self._guardian is not None and self._identity is not None
             frame, scope = self._frame, self._scope
-            if (not self.input_supported or self.input_admission.state != "eligible"
-                    or self._release_failed or frame is None or scope is None
-                    or not frame.focused or not 0 <= time.monotonic() - self._captured_at <= 5):
+            if (
+                not self.input_supported
+                or self.input_admission.state != "eligible"
+                or self._release_failed
+                or frame is None
+                or scope is None
+                or not frame.focused
+                or not 0 <= time.monotonic() - self._captured_at <= 5
+            ):
                 raise ComputerError("hyprland_fresh_application_observation_required")
             command = self._command(action, frame, scope)
             rendered, fresh, _ = await self._capture(self._crop)
             stable = rendered.png == frame.image_bytes
             if not stable and action["type"] in {
-                "click", "double_click", "right_click", "middle_click", "scroll", "polyline",
+                "click",
+                "double_click",
+                "right_click",
+                "middle_click",
+                "scroll",
+                "polyline",
             }:
                 from ..grounding import pointer_target_stable
 
-                anchor = (action["points"][0] if action["type"] == "polyline"
-                          else (action["x"], action["y"]))
+                anchor = (
+                    action["points"][0]
+                    if action["type"] == "polyline"
+                    else (action["x"], action["y"])
+                )
                 stable = pointer_target_stable(frame.image_bytes, rendered.png, *anchor)
-            if (not stable or rendered.metadata.width != frame.width
-                    or rendered.metadata.height != frame.height
-                    or _binding(scope) != _binding(fresh)):
+            if (
+                not stable
+                or rendered.metadata.width != frame.width
+                or rendered.metadata.height != frame.height
+                or _binding(scope) != _binding(fresh)
+            ):
                 self._frame = None
                 raise ComputerError("hyprland_observation_changed")
             await revalidate(self._identity, time.monotonic() + 3)
@@ -639,36 +924,59 @@ class HyprlandRuntimeBackend:
                 if action["type"] == "replace_field_pixels":
                     kwargs["pixel_guard"] = pixel_guard
                 delivered = await self._guardian.act(command, **kwargs)
-                if (self._paused or self._closed or generation != self._generation
-                        or time.monotonic_ns() >= lease[0]
-                        or delivered.get("event") != "action_done"
-                        or not self._release_ack(delivered)):
+                if (
+                    self._paused
+                    or self._closed
+                    or generation != self._generation
+                    or time.monotonic_ns() >= lease[0]
+                    or delivered.get("event") != "action_done"
+                    or not self._release_ack(delivered)
+                ):
                     raise ComputerError("hyprland_action_revoked_outcome_unknown")
                 if delivered.get("input_was_sent") is False:
-                    return {"status": "unavailable", "injected": False, "released": True,
-                            "reason": "hyprland_native_no_input_sent"}
+                    return {
+                        "status": "unavailable",
+                        "injected": False,
+                        "released": True,
+                        "reason": "hyprland_native_no_input_sent",
+                    }
                 receipt = {
-                    "status": "executed", "injected": True, "released": True,
+                    "status": "executed",
+                    "injected": True,
+                    "released": True,
                     "targeting_path": (
-                        "explicit_pixel_region" if action["type"] == "replace_field_pixels"
-                        else "native_window_focus" if action["type"] in {"type", "key"}
-                        else "observed_pixel_coordinates"),
+                        "explicit_pixel_region"
+                        if action["type"] == "replace_field_pixels"
+                        else "native_window_focus"
+                        if action["type"] in {"type", "key"}
+                        else "observed_pixel_coordinates"
+                    ),
                     "release_basis": "hyprland_cooperative_native_ack_best_effort",
-                    "receiver_release_verified": False, "residuals": list(RESIDUALS),
+                    "receiver_release_verified": False,
+                    "residuals": list(RESIDUALS),
                     "application_provenance": canonical_application_provenance(scope),
                     "postcondition": {
-                        "type": "visual_change", "status": "unavailable",
+                        "type": "visual_change",
+                        "status": "unavailable",
                         "source_id": frame.source.source_id,
                         "source_revision": frame.source.source_revision,
-                        "consent_generation": frame.source.consent_generation}}
+                        "consent_generation": frame.source.consent_generation,
+                    },
+                }
                 if "diagnostics" in delivered:
                     receipt["diagnostics"] = delivered["diagnostics"]
             except BaseException as exc:
                 details = getattr(exc, "details", {})
-                if (details.get("event") == "action_rejected"
-                        and details.get("input_was_sent") is False):
-                    return {"status": "unavailable", "injected": False, "released": True,
-                            "reason": details.get("reason", "hyprland_action_rejected")}
+                if (
+                    details.get("event") == "action_rejected"
+                    and details.get("input_was_sent") is False
+                ):
+                    return {
+                        "status": "unavailable",
+                        "injected": False,
+                        "released": True,
+                        "reason": details.get("reason", "hyprland_action_rejected"),
+                    }
                 self._paused = True
                 self.input_supported = False
                 cleanup = await self._guardian.close()
@@ -681,34 +989,52 @@ class HyprlandRuntimeBackend:
             try:
                 after, after_scope, _ = await self._capture_observation(self._crop)
                 receipt["postcondition"].update(
-                    status="observed", method="raster_digest_after_release",
-                    target_application_matches=(scope["application"] == after_scope["application"]
-                                                and scope["source_digest"]
-                                                == after_scope["source_digest"]),
-                    actual={"before_sha256": hashlib.sha256(rendered.png).hexdigest(),
-                            "after_sha256": hashlib.sha256(after.png).hexdigest()})
-                if (scope.get("surface_token") != after_scope.get("surface_token")
-                        and after_scope.get("modal_kind") == "safe_application"):
+                    status="observed",
+                    method="raster_digest_after_release",
+                    target_application_matches=(
+                        scope["application"] == after_scope["application"]
+                        and scope["source_digest"] == after_scope["source_digest"]
+                    ),
+                    actual={
+                        "before_sha256": hashlib.sha256(rendered.png).hexdigest(),
+                        "after_sha256": hashlib.sha256(after.png).hexdigest(),
+                    },
+                )
+                if (
+                    scope.get("surface_token") != after_scope.get("surface_token")
+                    and after_scope.get("modal_kind") == "safe_application"
+                ):
                     # Not a complete map inventory: a focused dialog candidate
                     # may already have existed. Do not claim dialog_appeared.
                     receipt["postcondition"]["focused_dialog_transition"] = {
                         "method": "native_same_process_focused_dialog_transition",
-                        "kind": "dialog_candidate", "newly_mapped": "unmeasured"}
+                        "kind": "dialog_candidate",
+                        "newly_mapped": "unmeasured",
+                    }
             except Exception as exc:
                 # Keep static protocol diagnostics, never arbitrary exception text.
                 reason = str(exc)
                 safe_reasons = {
-                    "hyprland_capture_settle_budget_exhausted", "hyprland_capture_scope_changed",
-                    "hyprland_original_application_changed", "hyprland_explicit_output_changed",
-                    "hyprland_provider_owner_changed", "hyprland_session_revoked",
-                    "hyprland_generation_revoked", "hyprland_scope_unavailable",
-                    "hyprland_scope_reply_invalid", "hyprland_scope_unknown_locked_or_stale",
-                    "hyprland_application_identity_unavailable", "hyprland_capture_helper_failed",
-                    "hyprland_capture_transport_failed", "hyprland_parent_chain_unverified",
-                    "hyprland_focus_outside_source", "window-geometry-unsettled",
+                    "hyprland_capture_settle_budget_exhausted",
+                    "hyprland_capture_scope_changed",
+                    "hyprland_original_application_changed",
+                    "hyprland_explicit_output_changed",
+                    "hyprland_provider_owner_changed",
+                    "hyprland_session_revoked",
+                    "hyprland_generation_revoked",
+                    "hyprland_scope_unavailable",
+                    "hyprland_scope_reply_invalid",
+                    "hyprland_scope_unknown_locked_or_stale",
+                    "hyprland_application_identity_unavailable",
+                    "hyprland_capture_helper_failed",
+                    "hyprland_capture_transport_failed",
+                    "hyprland_parent_chain_unverified",
+                    "hyprland_focus_outside_source",
+                    "window-geometry-unsettled",
                 }
                 receipt["postcondition"]["reason"] = (
-                    reason if reason in safe_reasons else "hyprland_postcapture_unavailable")
+                    reason if reason in safe_reasons else "hyprland_postcapture_unavailable"
+                )
             # Controller delivers the next observation and checks region/stroke effects.
             return receipt
 
@@ -752,10 +1078,13 @@ class HyprlandRuntimeBackend:
         self._release_failed |= not released
         clean = released and reaped and scope_closed and not self._release_failed
         self._cleanup_evidence = {
-            "guardian_process_reaped": reaped, "scope_connection_closed": scope_closed,
+            "guardian_process_reaped": reaped,
+            "scope_connection_closed": scope_closed,
             "hyprland_owned_connections_closed": clean,
-            "release_ack": released, "receiver_release_verified": False,
-            "residuals": list(RESIDUALS)}
+            "release_ack": released,
+            "receiver_release_verified": False,
+            "residuals": list(RESIDUALS),
+        }
         return clean
 
     async def _cleanup(self):
@@ -767,8 +1096,13 @@ class HyprlandRuntimeBackend:
         self._invalidate()
         async with self._stop_lock:
             clean = await self._cleanup()
-        return {"paused": True, "input_revoked": True, "capture_revoked": True,
-                "released": clean, **self._cleanup_evidence}
+        return {
+            "paused": True,
+            "input_revoked": True,
+            "capture_revoked": True,
+            "released": clean,
+            **self._cleanup_evidence,
+        }
 
     async def recover_owned_input(self):
         """Operator-only native recovery; never automatic resume or qualification."""
@@ -782,20 +1116,33 @@ class HyprlandRuntimeBackend:
                     raise ComputerError("hyprland_recovery_identity_unavailable")
                 await revalidate(self._identity, time.monotonic() + 3)
                 result = await asyncio.wait_for(provider.release_all(), 3)
-                released = (self._release_ack(result)
-                            and self._cleanup_evidence.get("guardian_process_reaped") is True)
+                released = (
+                    self._release_ack(result)
+                    and self._cleanup_evidence.get("guardian_process_reaped") is True
+                )
                 if released:
                     self._release_failed = False
                     self._guardian = None
             finally:
                 await provider.close()
-        return {"paused": True, "input_revoked": True, "capture_revoked": True,
-                "released": released, "release_ack": released,
-                "receiver_release_verified": False, "residuals": list(RESIDUALS)}
+        return {
+            "paused": True,
+            "input_revoked": True,
+            "capture_revoked": True,
+            "released": released,
+            "release_ack": released,
+            "receiver_release_verified": False,
+            "residuals": list(RESIDUALS),
+        }
 
     async def resume(self, *, consent_generation):
-        if (self._closed or not self._paused or self._release_failed
-                or type(consent_generation) is not int or consent_generation <= self._generation):
+        if (
+            self._closed
+            or not self._paused
+            or self._release_failed
+            or type(consent_generation) is not int
+            or consent_generation <= self._generation
+        ):
             raise ComputerError("hyprland_renewed_session_consent_required")
         async with self._stop_lock:
             if not await self._cleanup():
@@ -809,19 +1156,28 @@ class HyprlandRuntimeBackend:
                 self._invalidate()
                 await self._cleanup()
                 raise
-        return {"resumed": True, "capture_only": False,
-                "input_admission": self.input_admission.public()}
+        return {
+            "resumed": True,
+            "capture_only": False,
+            "input_admission": self.input_admission.public(),
+        }
 
     async def detach(self):
         self._closed = True
         self._invalidate()
         async with self._stop_lock:
             clean = await self._cleanup()
-        return {"stopped": clean, "released": clean, "applications_preserved": True,
-                "input_revoked": True, "capture_revoked": True, **self._cleanup_evidence,
-                "owned_devices": "hyprland_owned_connections_closed" if clean else "unknown",
-                "state": "closed" if clean else "quarantined",
-                "recovery": None if clean else "hyprland_operator_release_all_required"}
+        return {
+            "stopped": clean,
+            "released": clean,
+            "applications_preserved": True,
+            "input_revoked": True,
+            "capture_revoked": True,
+            **self._cleanup_evidence,
+            "owned_devices": "hyprland_owned_connections_closed" if clean else "unknown",
+            "state": "closed" if clean else "quarantined",
+            "recovery": None if clean else "hyprland_operator_release_all_required",
+        }
 
     stop = detach
     close = detach

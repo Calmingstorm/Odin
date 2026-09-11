@@ -53,6 +53,7 @@ _DEFINITIONS = [
                 "type": "string",
                 "enum": [
                     "start",
+                    "inventory_targets",
                     "status",
                     "stop",
                     "pause",
@@ -68,6 +69,9 @@ _DEFINITIONS = [
                 "enum": ["drawing", "xed"],
                 "description": "Isolated launch profile only; omit for existing sessions.",
             },
+            "target_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "output_id": {"type": "string", "minLength": 1, "maxLength": 128},
+            "candidate_epoch": {"type": "string", "minLength": 1, "maxLength": 128},
             "generation": {"type": "integer", "minimum": 1},
             "name": {
                 "type": "string",

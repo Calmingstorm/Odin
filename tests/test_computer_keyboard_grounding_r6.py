@@ -188,6 +188,65 @@ async def test_changed_pixels_keyboard_only_and_no_replay(
             assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
 
 
+@pytest.mark.asyncio
+async def test_hyprland_predispatch_focus_recovery_registers_fresh_binding_never_dispatches(
+    tmp_path, monkeypatch
+):
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        backend = controller._live[action["session_id"]].backend
+        backend.capabilities = replace(
+            backend.capabilities, platform="wayland", backend="hyprland",
+            owned_input_release="hyprland_best_effort",
+        )
+        controller._live[action["session_id"]].capabilities = backend.capabilities
+        backend.recovery_supported = True
+        recovered = []
+
+        async def recover_focus(expected_application, *, context):
+            recovered.append((expected_application, context))
+            state["binding"]["window"] = 90
+            state["binding"]["focus_window"] = 90
+            return True
+
+        backend.recover_focus = recover_focus
+        state["binding"]["window"] = 91
+        state["binding"]["focus_window"] = 91
+        action.update(operation="key", key="Right")
+        result = await controller.act(context, action)
+
+        assert len(recovered) == 1
+        assert calls == []
+        assert result["status"] == "unavailable"
+        assert result["execution"]["injected"] is False
+        assert result["next_observation"]["observation_id"] != action["observation_id"]
+        assert action["session_id"] not in controller._delivered_observations
+
+
+@pytest.mark.asyncio
+async def test_x11_predispatch_binding_failure_does_not_call_hyprland_recovery(
+    tmp_path, monkeypatch
+):
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        backend = controller._live[action["session_id"]].backend
+        called = False
+
+        async def recover_focus(*args, **kwargs):
+            nonlocal called
+            called = True
+            return True
+
+        backend.recovery_supported = True
+        backend.recover_focus = recover_focus
+        state["binding"]["window"] = 91
+        state["binding"]["focus_window"] = 91
+        action.update(operation="key", key="Right")
+        result = await controller.act(context, action)
+
+        assert called is False
+        assert calls == []
+        assert result["reason"] == "stale_source_binding"
+
+
 @pytest.mark.parametrize(
     "operation,fields", [("type", {"text": "note"}), ("key", {"key": "Right"})]
 )
