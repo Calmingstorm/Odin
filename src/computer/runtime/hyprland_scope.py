@@ -11,6 +11,12 @@ import time
 from dataclasses import asdict
 
 from .hyprland_capture import ExplicitOutput
+from .hyprland_errors import (
+    HyprlandDiagnosticError,
+    HyprlandFailureCause,
+    HyprlandFailureStage,
+    classified_cause,
+)
 from .hyprland_identity import _proc_start, _unique_object, connect_peer
 from .wayland_scope import WaylandScopeFailure, _digest, _process_identity
 
@@ -21,6 +27,15 @@ _TOKEN = re.compile(r"[0-9a-f]{32,128}")
 
 class HyprlandScopeFailure(WaylandScopeFailure):  # noqa: N818
     """Static failure vocabulary only."""
+
+    def __init__(self, reason="hyprland_scope_unavailable", *, stage=None, cause=None):
+        self.stage = stage or HyprlandFailureStage.READ
+        self.cause = cause or HyprlandFailureCause.UNAVAILABLE
+        super().__init__(reason)
+
+    @property
+    def diagnostic(self):
+        return {"stage": self.stage.value, "cause": self.cause.value}
 
 
 class HyprlandGeometryUnsettled(HyprlandScopeFailure):  # noqa: N818
@@ -33,8 +48,8 @@ class HyprlandGeometryUnsettled(HyprlandScopeFailure):  # noqa: N818
         self.output = dict(output)
 
 
-def _fail(reason="hyprland_scope_unavailable"):
-    raise HyprlandScopeFailure(reason)
+def _fail(reason="hyprland_scope_unavailable", *, stage=None, cause=None):
+    raise HyprlandScopeFailure(reason, stage=stage, cause=cause)
 
 
 def _text(value, *, limit=4096):
@@ -167,9 +182,12 @@ class HyprlandScopeProvider:
             return row
         except HyprlandScopeFailure:
             raise
-        except (OSError, RuntimeError, ValueError, TimeoutError, UnicodeError, RecursionError,
-                IndexError, StopIteration):
-            _fail()
+        except HyprlandDiagnosticError as exc:
+            _fail(stage=exc.stage, cause=exc.cause)
+        except (OSError, TimeoutError) as exc:
+            _fail(stage=HyprlandFailureStage.READ, cause=classified_cause(exc))
+        except (RuntimeError, ValueError, UnicodeError, RecursionError, IndexError, StopIteration):
+            _fail(stage=HyprlandFailureStage.PARSE, cause=HyprlandFailureCause.INVALID)
         finally:
             if connection is not None:
                 connection.close()
