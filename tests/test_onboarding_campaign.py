@@ -65,3 +65,32 @@ async def test_complete_is_context_bound_and_second_call_conflicts(tmp_path, mon
             assert (await client.post("/api/setup/complete", json={})).status == 409
     finally:
         set_active_config_path(previous)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("payload, expected", [
+    ({"hosts": []}, "hosts must be an object"),
+    ({"hosts": {"forge": {"address": "", "ssh_user": "odin"}}}, "host entries require"),
+    ({"features": {"browser": "yes"}}, "features.browser must be boolean"),
+    ({"timezone": "Mars/Olympus"}, "timezone must be an IANA timezone"),
+])
+async def test_setup_rejects_invalid_optional_configuration_before_publication(
+    tmp_path, monkeypatch, payload, expected
+):
+    config_path = tmp_path / "config.yml"
+    config_path.write_text("discord:\n  token: '[REDACTED]'\n")
+    environment = tmp_path / "environment"
+    environment.write_text("DISCORD_TOKEN=old-value\n")
+    store = InitializationStore(tmp_path / "state.json", InstallationBinding("test", config_path))
+    store.provision_fresh()
+    bot = SimpleNamespace(
+        config=Config(discord={"token": "[REDACTED]"}),
+        onboarding=OnboardingCoordinator(store, EnvironmentSource(environment), True),
+        connection_supervisor=None,
+    )
+    async with TestClient(TestServer(_app(bot))) as client:
+        response = await client.post("/api/setup/complete", json=payload)
+        body = await response.json()
+    assert response.status == 400 and expected in body["error"]
+    assert environment.read_text() == "DISCORD_TOKEN=old-value\n"
+    assert store.state().setup_allowed

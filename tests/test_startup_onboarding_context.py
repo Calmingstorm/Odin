@@ -3,7 +3,7 @@ from __future__ import annotations
 
 import os
 
-from src.config.initialization import InitializationMode
+from src.config.initialization import InitializationError, InitializationMode
 from src.config.startup_context import (
     default_environment_path,
     default_initialization_state_path,
@@ -162,3 +162,41 @@ def test_packaged_state_path_and_legacy_upgrade_migration(tmp_path, monkeypatch)
 def test_short_config_option_preserves_positional_compatibility():
     assert parse_startup_arguments(["legacy.yml"]).config == "legacy.yml"
     assert parse_startup_arguments(["-c", "explicit.yml"]).config == "explicit.yml"
+
+
+def test_cli_fresh_provision_is_idempotent_with_private_parent(tmp_path, monkeypatch):
+    from src.config.startup_context import provision_fresh_from_cli, provision_initialization_parent
+
+    monkeypatch.setattr("src.config.startup_context._machine_identity", lambda: "test-machine")
+    config = tmp_path / "installation" / "config.yml"
+    config.parent.mkdir()
+    state = tmp_path / "state-parent" / "nested" / "state.json"
+    provision_initialization_parent(state)
+
+    assert provision_fresh_from_cli([
+        "--provision-fresh-initialization", "--config", str(config),
+        "--initialization-state", str(state),
+    ]) == 0
+    assert state.parent.stat().st_mode & 0o077 == 0
+    context = resolve_startup_context(config, initialization_state=state)
+    assert context.onboarding_store().state().mode is InitializationMode.PENDING
+    try:
+        provision_fresh_from_cli([
+            "--provision-fresh-initialization", "--config", str(config),
+            "--initialization-state", str(state),
+        ])
+    except InitializationError as exc:
+        assert "already exists" in str(exc)
+    else:  # pragma: no cover - repeat provisioning must not reset setup state
+        raise AssertionError("existing initialization state was overwritten")
+
+
+def test_cli_refuses_provision_without_explicit_flag():
+    from src.config.startup_context import provision_fresh_from_cli
+
+    try:
+        provision_fresh_from_cli(["--config", "/tmp/not-used.yml"])
+    except SystemExit as exc:
+        assert "provision-fresh-initialization" in str(exc)
+    else:  # pragma: no cover - the safety gate must remain mandatory
+        raise AssertionError("missing explicit provision flag was accepted")

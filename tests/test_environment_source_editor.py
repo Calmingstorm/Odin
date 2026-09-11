@@ -53,6 +53,35 @@ def test_rejects_loop_control_and_ambiguous_value(tmp_path: Path) -> None:
         edit_environment(EnvironmentSource(root / "x"), {"A": "${X}'"})
 
 
+def test_invalid_update_is_rejected_before_any_secret_source_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Validation failures must not touch the declared credential source."""
+    env = _private(tmp_path / "root") / ".env"
+    env.write_text("TOKEN=private-value\n")
+    import src.config.environment as environment
+
+    def unexpected_read(*_args: object, **_kwargs: object) -> int:
+        raise AssertionError("invalid input must not open the environment source")
+
+    monkeypatch.setattr(environment.os, "open", unexpected_read)
+    with pytest.raises(EnvironmentSourceError, match="invalid environment variable name") as error:
+        edit_environment(EnvironmentSource(env), {"NOT VALID": "new"})
+    assert "private-value" not in str(error.value)
+
+
+def test_existing_invalid_owned_binding_fails_without_replacing_source(tmp_path: Path) -> None:
+    env = _private(tmp_path / "root") / ".env"
+    original = "TOKEN='unterminated\nKEEP=private-value\n"
+    env.write_text(original)
+
+    with pytest.raises(EnvironmentSourceError, match="invalid dotenv binding") as error:
+        edit_environment(EnvironmentSource(env), {"TOKEN": "new-value"})
+
+    assert env.read_text() == original
+    assert "private-value" not in str(error.value)
+
+
 def test_refuses_terminal_swap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env = _private(tmp_path / "root") / ".env"
     env.write_text("A=old\n")

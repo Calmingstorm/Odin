@@ -86,3 +86,58 @@ async def test_stale_callback_generation_cannot_change_current_transport_state()
 
     assert supervisor.transport_ready(old).state == "connecting"
     assert supervisor.transport_disconnected(old).state == "connecting"
+
+
+@pytest.mark.asyncio
+async def test_failed_gateway_is_unavailable_then_can_be_retired_cleanly() -> None:
+    class FailingBot:
+        async def start(self, token: str) -> None:
+            raise OSError("local connection refused")
+
+    supervisor = ConnectionSupervisor(FailingBot(), adapter=FakeAdapter())
+    await supervisor.attach("opaque-test-token")
+    task = supervisor._task
+    assert task is not None
+    await asyncio.gather(task, return_exceptions=True)
+    await asyncio.sleep(0)  # permit the done callback to publish its terminal state
+    assert supervisor.status().state == "failed"
+    assert not supervisor.connection_availability().available
+    assert supervisor.connection_availability().reason.value == "unavailable"
+
+    detached = await supervisor.detach()
+    assert detached.state == "detached"
+    assert supervisor.connection_availability().reason.value == "disconnected"
+
+
+@pytest.mark.asyncio
+async def test_cancelled_detach_keeps_retirement_owned_until_later_waiter_finishes() -> None:
+    class SlowAdapter(FakeAdapter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.started = asyncio.Event()
+            self.release = asyncio.Event()
+
+        async def retire_gateway(self, task: asyncio.Task) -> None:
+            self.retired.append(task)
+            self.started.set()
+            await self.release.wait()
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    bot = FakeBot()
+    adapter = SlowAdapter()
+    supervisor = ConnectionSupervisor(bot, adapter=adapter)
+    await supervisor.attach("first")
+    await asyncio.sleep(0)
+    detaching = asyncio.create_task(supervisor.detach())
+    await adapter.started.wait()
+    detaching.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await detaching
+    assert supervisor.status().state == "detaching"
+    assert supervisor._retirement is not None and not supervisor._retirement.done()
+
+    adapter.release.set()
+    detached = await supervisor.detach()
+    assert detached.state == "detached"
+    assert supervisor._retirement is None and supervisor._task is None

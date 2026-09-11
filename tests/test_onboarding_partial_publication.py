@@ -222,3 +222,34 @@ async def test_environment_source_symlink_is_preserved(tmp_path, monkeypatch):
     assert source.is_symlink()
     assert source.resolve() == target
     assert "DISCORD_TOKEN=new-token" in target.read_text(encoding="utf-8")
+
+
+@pytest.mark.asyncio
+async def test_pending_partial_success_can_recover_once_without_replaying_prior_config(
+    tmp_path, monkeypatch,
+):
+    bot, coordinator, store, config_path, environment = _make(tmp_path, monkeypatch)
+    real_edit = edit_environment
+    failed = False
+
+    def fail_once(source, updates):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise OSError("temporary environment write failure")
+        return real_edit(source, updates)
+
+    monkeypatch.setattr("src.web.onboarding.edit_environment", fail_once)
+    with pytest.raises(OnboardingError, match="environment_committed=False"):
+        await coordinator.submit(
+            bot, discord_token="a.b.c", web_api_token=None,
+            config_updates={"timezone": "America/New_York"},
+        )
+    assert _yaml(config_path)["timezone"] == "America/New_York"
+    assert (await coordinator.state()).mode is InitializationMode.PENDING
+
+    result = await coordinator.submit(bot, discord_token="a.b.c", web_api_token=None)
+    assert result.persisted and result.environment_committed and result.initialization_complete
+    assert (await coordinator.state()).mode is InitializationMode.COMPLETE
+    assert _yaml(config_path)["timezone"] == "America/New_York"
+    assert "DISCORD_TOKEN=a.b.c" in environment.read_text(encoding="utf-8")
