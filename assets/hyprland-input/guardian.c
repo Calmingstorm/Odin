@@ -68,6 +68,9 @@ struct guardian {
     bool keys[248], buttons[8], modifiers;
     bool ready, begun, action, input_sent, release_sent, release_acknowledged;
     bool disconnected, changed, gate_waiting, gate_allowed;
+    /* Bounded transport evidence, never receiver or application proof. */
+    const char *terminal_cause, *scope_outcome, *release_submission, *release_ack, *resource_closure;
+    unsigned input_queued, input_submitted;
     int scope_fd, parent_fd, status;
     pid_t parent_pid, compositor_pid;
     unsigned width, height, planned, completed, index, gate_serial;
@@ -77,7 +80,24 @@ struct guardian {
     const char *scope_operation, *scope_error, *command_name;
     struct event events[MAX_STEPS];
 };
-static void fail(struct guardian *g, const char *reason) { if (!g->reason) g->reason = reason; }
+static const char *cause_for_reason(const char *reason) {
+    if (!strcmp(reason, "controller-eof")) return "controller_eof";
+    if (!strcmp(reason, "controller-timeout")) return "controller_timeout";
+    if (!strcmp(reason, "signal-cancel")) return "signal_cancel";
+    if (!strcmp(reason, "scope-evidence-expired") || !strcmp(reason, "lease-expired")) return "scope_timeout";
+    if (!strcmp(reason, "mapping-changed")) return "mapping_changed";
+    if (!strcmp(reason, "invalid-command")) return "invalid_command";
+    if (!strcmp(reason, "input-path-lost")) return "wayland_dispatch_failed";
+    return "other";
+}
+static void fail(struct guardian *g, const char *reason) {
+    if (!g->reason) {
+        g->reason = reason;
+        /* scope_bind records a more specific terminal cause before the legacy
+         * command parser labels the command invalid. Preserve that evidence. */
+        if (!g->terminal_cause) g->terminal_cause = cause_for_reason(reason);
+    }
+}
 /* stdout is nonblocking: a stalled controller must never stall owned release. */
 static bool emit(const char *line) {
     size_t n = strlen(line); ssize_t result = write(STDOUT_FILENO, line, n);
@@ -113,7 +133,9 @@ static int pump(struct guardian *g, int wait_ms) {
     if (fd.revents & (POLLERR | POLLHUP | POLLNVAL)) goto lost;
     return 0;
 lost:
-    g->disconnected = true; return -1;
+    g->disconnected = true;
+    if (!g->terminal_cause) g->terminal_cause = "wayland_dispatch_failed";
+    return -1;
 }
 static void synced(void *data, struct wl_callback *callback, uint32_t serial) {
     (void)callback; (void)serial; *(bool *)data = true;
@@ -231,10 +253,14 @@ static bool scope_call(struct guardian *g, const char *request, struct scope_rep
     /* A complete negative reply is a refused operation, not a lost stream.
      * In particular, a focus-revoked renewal must leave this connection alive
      * for explicit release acknowledgement. Callers still stop on refusal. */
-    if (scope_exchange(g, request, reply)) return reply->ok;
+    if (scope_exchange(g, request, reply)) {
+        g->scope_outcome = reply->ok ? "accepted" : "refused";
+        return reply->ok;
+    }
     /* Poison after ambiguous send: a late reply cannot acknowledge later work. */
     if (g->scope_fd >= 0) close(g->scope_fd);
     g->scope_fd = -1;
+    g->scope_outcome = "transport_lost";
     return false;
 }
 static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
@@ -250,6 +276,8 @@ static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
     g->scope_token[0] = 0;
     struct scope_reply r = {0};
     if (!scope_call(g, request, &r)) {
+        if (g->scope_outcome && !strcmp(g->scope_outcome, "refused")) g->terminal_cause = "scope_refused";
+        else if (g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) g->terminal_cause = "scope_transport_failed";
         g->scope_error = g->scope_fd < 0 ? "scope-exchange-failed" :
             (r.error ? r.error : "scope-operation-refused");
         return false;
@@ -575,16 +603,20 @@ static bool release_all(struct guardian *g) {
     bool sync=queued && synchronize(g,100);
     /* Buffered requests alone do not establish transport submission. */
     g->release_sent=queued && !g->disconnected && wl_display_flush(g->display)>=0;
+    g->release_submission = !queued ? "not_attempted" : g->release_sent ? "submitted" : "queued_not_submitted";
     if (g->release_sent) receipt(g,"release_sent","explicit-owned-release");
     struct scope_reply r;
     bool ack=scope_call(g,"{\"op\":\"release_all\"}\n",&r);
     g->release_acknowledged=sync && ack && r.release_acknowledged && r.have_armed && !r.armed && r.have_keys && !r.keys && r.have_buttons && !r.buttons;
+    g->release_ack = g->release_acknowledged ? "acknowledged" :
+        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "refused")) ? "negative" :
+        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) ? "transport_lost" : "invalid_or_unconfirmed";
     if (ack && (!r.have_rejected || r.rejected!=g->rejected)) fail(g,"scope-evidence-expired");
     return g->release_acknowledged;
 }
 static void action_receipt(struct guardian *g,const char *event,const char *reason) {
     char line[1024];
-    snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"release_sent\":%s,\"release_acknowledged\":%s,\"receiver_proven\":false,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"},\"native_failure\":{\"command\":\"%s\",\"scope_operation\":\"%s\",\"scope_error\":\"%s\"}}\n",event,reason,g->input_sent?"true":"false",g->release_sent?"true":"false",g->release_acknowledged?"true":"false",!strcmp(event,"action_done")?"complete":"release",g->planned,g->completed,g->release_acknowledged?"confirmed":"unknown",reason,g->command_name?g->command_name:"none",g->scope_operation?g->scope_operation:"none",g->scope_error?g->scope_error:"none");
+    snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"release_sent\":%s,\"release_acknowledged\":%s,\"receiver_proven\":false,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"},\"native_failure\":{\"command\":\"%s\",\"scope_operation\":\"%s\",\"scope_error\":\"%s\",\"input_loss_v1\":{\"terminal_cause\":\"%s\",\"scope_outcome\":\"%s\",\"events_queued\":%u,\"events_submitted\":%u,\"release_submission\":\"%s\",\"release_ack\":\"%s\",\"resource_closure\":\"%s\"}}}\n",event,reason,g->input_sent?"true":"false",g->release_sent?"true":"false",g->release_acknowledged?"true":"false",!strcmp(event,"action_done")?"complete":"release",g->planned,g->completed,g->release_acknowledged?"confirmed":"unknown",reason,g->command_name?g->command_name:"none",g->scope_operation?g->scope_operation:"none",g->scope_error?g->scope_error:"none",g->terminal_cause?g->terminal_cause:"orderly",g->scope_outcome?g->scope_outcome:"not_attempted",g->input_queued,g->input_submitted,g->release_submission?g->release_submission:"not_attempted",g->release_ack?g->release_ack:"not_attempted",g->resource_closure?g->resource_closure:"not_started");
     if (!emit(line)) fail(g,"transport-error");
 }
 static void step(struct guardian *g) {
@@ -623,6 +655,9 @@ static void step(struct guardian *g) {
         zwlr_virtual_pointer_v1_frame(g->pointer);
     }
     ++g->index; ++g->completed; ++queued;
+    ++g->input_queued;
+    /* Submission means accepted by the Wayland transport, not delivery. */
+    if (wl_display_flush(g->display) >= 0) ++g->input_submitted;
     }
 }
 static bool command(struct guardian *g,char *line) {
@@ -739,15 +774,19 @@ int main(int argc,char **argv) {
     }
 cleanup:
     if (g->ready) (void)release_all(g);
-    action_receipt(g,"closed",g->reason?g->reason:"orderly");
     int status=g->ready&&g->release_acknowledged?0:1;
     if (g->pointer) zwlr_virtual_pointer_v1_destroy(g->pointer);
     if (g->keyboard) zwp_virtual_keyboard_v1_destroy(g->keyboard);
-    if (g->display) { (void)synchronize(g,50);wl_display_disconnect(g->display); }
+    if (g->display) { (void)synchronize(g,50);wl_display_disconnect(g->display); g->resource_closure="display_disconnected"; }
     if (g->scope_fd>=0) close(g->scope_fd);
     if (g->parent_fd>=0) close(g->parent_fd);
     if (g->state) xkb_state_unref(g->state);
     if (g->keymap) xkb_keymap_unref(g->keymap);
     if (g->xctx) xkb_context_unref(g->xctx);
+    g->resource_closure="complete";
+    /* The terminal receipt is intentionally emitted only after locally-owned
+     * Wayland and scope resources have been closed. This proves local closure,
+     * not compositor receipt of a previous release request. */
+    action_receipt(g,"closed",g->reason?g->reason:"orderly");
     free(g);return status;
 }

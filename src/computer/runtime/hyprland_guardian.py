@@ -40,6 +40,54 @@ _SCOPE_ERRORS = frozenset({
     "scope-operation-refused", "scope-ack-invalid", "scope-rejected-input", "scope-ack-expired",
 })
 
+# This is intentionally a Hyprland-native extension. The shared guardian
+# turns transport exceptions into the compatibility error
+# ``wayland_guardian_input_path_lost``; changing that behavior would alter the
+# X11 and portal paths as well.
+_INPUT_LOSS_CAUSES = frozenset({
+    "scope_refused", "controller_eof", "controller_timeout",
+    "wayland_dispatch_failed", "scope_transport_failed", "signal_cancel",
+    "scope_timeout", "mapping_changed", "invalid_command", "other", "orderly",
+})
+_SCOPE_OUTCOMES = frozenset({
+    "not_attempted", "accepted", "refused", "transport_lost",
+})
+_RELEASE_SUBMISSIONS = frozenset({
+    "not_attempted", "queued_not_submitted", "submitted",
+})
+_RELEASE_ACKS = frozenset({
+    "not_attempted", "acknowledged", "negative", "transport_lost", "invalid_or_unconfirmed",
+})
+_RESOURCE_CLOSURES = frozenset({"not_started", "display_disconnected", "complete"})
+_INPUT_LOSS_COUNT_LIMIT = 4096
+
+
+def _input_loss_v1(raw):
+    """Return only bounded native terminal evidence, never native prose.
+
+    An absent or malformed extension is deliberately not a reason to discard
+    legacy failure evidence. Older native guardians retain the existing
+    unknown-outcome behavior, while newer ones can provide this bounded record.
+    """
+    if type(raw) is not dict:
+        return None
+    enums = {
+        "terminal_cause": _INPUT_LOSS_CAUSES,
+        "scope_outcome": _SCOPE_OUTCOMES,
+        "release_submission": _RELEASE_SUBMISSIONS,
+        "release_ack": _RELEASE_ACKS,
+        "resource_closure": _RESOURCE_CLOSURES,
+    }
+    counts = ("events_queued", "events_submitted")
+    if (set(raw) != set(enums) | set(counts)
+            or any(type(raw.get(key)) is not str or raw[key] not in allowed
+                   for key, allowed in enums.items())
+            or any(type(raw.get(key)) is not int or not 0 <= raw[key] <= _INPUT_LOSS_COUNT_LIMIT
+                   for key in counts)
+            or raw["events_submitted"] > raw["events_queued"]):
+        return None
+    return {key: raw[key] for key in (*enums, *counts)}
+
 
 def _native_diagnostics(row):
     """Malformed native enums must not replace the original dispatch failure."""
@@ -74,6 +122,9 @@ def native_failure(row):
     diagnostics = _native_diagnostics(row)
     if diagnostics is not None:
         result["diagnostics"] = diagnostics
+    input_loss = _input_loss_v1(raw.get("input_loss_v1"))
+    if input_loss is not None:
+        result["input_loss_v1"] = input_loss
     return result
 
 
