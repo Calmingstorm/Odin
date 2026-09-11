@@ -521,7 +521,9 @@ class HyprlandRuntimeBackend:
                     managed_activation=self.config.managed_activation,
                     plugin_manifest_path=self.config.plugin_manifest_path,
                 )
-                self._selected = selected["output_name"]
+                # The display name is configuration identity; source grounding
+                # must retain the opaque output id returned by this selection.
+                self._selected = selected["output_id"]
                 self._selected_binding = selected
             else:
                 self._scope_provider = self._new_provider()
@@ -672,6 +674,17 @@ class HyprlandRuntimeBackend:
                 "height": height,
             }
         ]
+
+    @property
+    def hyprland_handoff_binding(self):
+        """Path-free native selection evidence, never input authority."""
+        if self._application_pin is None or self._output is None:
+            return None
+        return {
+            "output_name": self._output.name,
+            "source_id": self._selected,
+            "application_identity": copy.deepcopy(self._application_pin),
+        }
 
     @property
     def input_readiness(self):

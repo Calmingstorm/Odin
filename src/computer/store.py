@@ -9,6 +9,7 @@ import stat
 import threading
 import time
 import uuid
+from dataclasses import dataclass
 from pathlib import Path
 
 from .models import ComputerError, RequestContext, SessionGrant
@@ -20,6 +21,38 @@ FRAME_MAX_PIXELS = 2_000_000
 SESSION_MAX_BYTES = 64 * 1024 * 1024
 GLOBAL_MAX_BYTES = 256 * 1024 * 1024
 EVIDENCE_TTL = 24 * 3600
+STORE_SCHEMA_VERSION = 1
+
+
+@dataclass(frozen=True)
+class HyprlandOutputGrant:
+    """Immutable durable binding, never live scope or input authority."""
+
+    grant_id: int
+    session_id: str
+    generation: int
+    consent_generation: int
+    output_name: str
+    source_id: str
+    application_identity: dict[str, object]
+    created_at: float
+    parent_grant_id: int | None = None
+
+
+@dataclass(frozen=True)
+class RecoveryPending:
+    """CAS-owned recovery coordination state; no release attestation fields."""
+
+    session_id: str
+    recovery_generation: int
+    grant_generation: int
+    stop_epoch: int
+    phase: str
+    reason: str
+    attempt: int
+    next_retry_at: float | None
+    old_grant: dict[str, object]
+    candidate_epoch: str | None
 
 
 def _private_path(path: str | Path, *, directory: bool) -> Path:
@@ -52,8 +85,7 @@ class ComputerStore:
         try:
             # Validate pre-existing SQLite sidecars as well as the receipt file;
             # no chmod/chown/unlink repair can discard durable no-replay state.
-            for name in (path.name, path.name + "-wal", path.name + "-shm",
-                         path.name + "-journal"):
+            for name in (path.name, path.name + "-wal", path.name + "-shm", path.name + "-journal"):
                 flags = os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK
                 if name == path.name:
                     flags |= os.O_CREAT
@@ -66,9 +98,13 @@ class ComputerStore:
                 try:
                     info = os.fstat(fd)
                     named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
-                    if (not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid()
-                            or info.st_mode & 0o077 or info.st_nlink != 1
-                            or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)):
+                    if (
+                        not stat.S_ISREG(info.st_mode)
+                        or info.st_uid != os.geteuid()
+                        or info.st_mode & 0o077
+                        or info.st_nlink != 1
+                        or (info.st_dev, info.st_ino) != (named.st_dev, named.st_ino)
+                    ):
                         raise ComputerProvisioningError("storage_not_private")
                 finally:
                     os.close(fd)
@@ -94,35 +130,29 @@ class ComputerStore:
     def _initialize_database(self) -> None:
         """Initialize only while the constructor owns failure cleanup."""
         self.db.row_factory = sqlite3.Row
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if type(version) is not int or not 0 <= version <= STORE_SCHEMA_VERSION:
+            raise ComputerProvisioningError("storage_schema_unsupported")
+        if version == STORE_SCHEMA_VERSION:
+            self.db.execute("DROP TABLE IF EXISTS restrictions")
+            self._validate_current_schema()
+            self.db.execute("PRAGMA journal_mode=WAL")
+            self.db.execute("PRAGMA synchronous=FULL")
+            return
+        tables = {
+            row[0]
+            for row in self.db.execute("SELECT name FROM sqlite_master WHERE type='table'")
+        }
+        if tables:
+            self._validate_base_schema()
         self.db.execute("PRAGMA journal_mode=WAL")
         self.db.execute("PRAGMA synchronous=FULL")
-        self.db.executescript("""
-            CREATE TABLE IF NOT EXISTS sessions (
-                session_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, channel_id TEXT NOT NULL,
-                turn_id TEXT NOT NULL, host_id TEXT NOT NULL, generation INTEGER NOT NULL,
-                state TEXT NOT NULL, app TEXT NOT NULL, created_at REAL NOT NULL,
-                expires_at REAL NOT NULL, actions INTEGER NOT NULL DEFAULT 0);
-            CREATE UNIQUE INDEX IF NOT EXISTS single_active_computer ON sessions ((1))
-                WHERE state IN ('starting','active','paused','quarantined');
-            CREATE TABLE IF NOT EXISTS receipts (
-                session_id TEXT NOT NULL, action_id TEXT NOT NULL, payload_hash TEXT NOT NULL,
-                status TEXT NOT NULL, result TEXT NOT NULL,
-                PRIMARY KEY(session_id,action_id));
-            CREATE TABLE IF NOT EXISTS session_cleanup (
-                session_id TEXT PRIMARY KEY, result TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS session_runtime (
-                session_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS session_recovery (
-                session_id TEXT PRIMARY KEY, result TEXT NOT NULL);
-            CREATE TABLE IF NOT EXISTS evidence (
-                evidence_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL,
-                kind TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL,
-                device INTEGER NOT NULL, inode INTEGER NOT NULL, expires_at REAL NOT NULL);
-        """)
-        # Upgrade development stores without recreating sessions or their evidence.
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
+                if not tables:
+                    self._create_base_schema()
+                # Upgrade development stores without recreating sessions or their evidence.
                 columns = {row[1] for row in self.db.execute("PRAGMA table_info(sessions)")}
                 for name, definition in (
                     ("consent_generation", "INTEGER NOT NULL DEFAULT 1"),
@@ -131,12 +161,596 @@ class ComputerStore:
                 ):
                     if name not in columns:
                         self.db.execute(f"ALTER TABLE sessions ADD COLUMN {name} {definition}")
-                # R3 removes conversation restrictions, including persisted pre-R3 state.
                 self.db.execute("DROP TABLE IF EXISTS restrictions")
+                self._migrate_schema()
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
                 raise
+
+    def _create_base_schema(self) -> None:
+        """Create the historic generic schema only for an empty database."""
+        for statement in (
+            # These are SQLite DDL literals, deliberately not reformatted.  # noqa: E501
+            "CREATE TABLE sessions (session_id TEXT PRIMARY KEY, owner_id TEXT NOT NULL, channel_id TEXT NOT NULL, turn_id TEXT NOT NULL, host_id TEXT NOT NULL, generation INTEGER NOT NULL, state TEXT NOT NULL, app TEXT NOT NULL, created_at REAL NOT NULL, expires_at REAL NOT NULL, actions INTEGER NOT NULL DEFAULT 0)",  # noqa: E501
+            "CREATE UNIQUE INDEX single_active_computer ON sessions ((1)) WHERE state IN ('starting','active','paused','quarantined')",  # noqa: E501
+            "CREATE TABLE receipts (session_id TEXT NOT NULL, action_id TEXT NOT NULL, payload_hash TEXT NOT NULL, status TEXT NOT NULL, result TEXT NOT NULL, PRIMARY KEY(session_id,action_id))",  # noqa: E501
+            "CREATE TABLE session_cleanup (session_id TEXT PRIMARY KEY, result TEXT NOT NULL)",
+            "CREATE TABLE session_runtime (session_id TEXT PRIMARY KEY, descriptor TEXT NOT NULL)",
+            "CREATE TABLE session_recovery (session_id TEXT PRIMARY KEY, result TEXT NOT NULL)",
+            "CREATE TABLE evidence (evidence_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, name TEXT NOT NULL, kind TEXT NOT NULL, size INTEGER NOT NULL, digest TEXT NOT NULL, device INTEGER NOT NULL, inode INTEGER NOT NULL, expires_at REAL NOT NULL)",  # noqa: E501
+        ):
+            self.db.execute(statement)
+
+    @staticmethod
+    def _required_columns() -> dict[str, set[str]]:
+        return {
+            "sessions": {
+                "session_id", "owner_id", "channel_id", "turn_id", "host_id", "generation",
+                "state", "app", "created_at", "expires_at", "actions", "consent_generation",
+                "platform", "environment",
+            },
+            "receipts": {"session_id", "action_id", "payload_hash", "status", "result"},
+            "session_cleanup": {"session_id", "result"},
+            "session_runtime": {"session_id", "descriptor"},
+            "session_recovery": {"session_id", "result"},
+            "evidence": {
+                "evidence_id", "session_id", "name", "kind", "size", "digest", "device",
+                "inode", "expires_at",
+            },
+        }
+
+    def _validate_base_schema(self) -> None:
+        required = self._required_columns()
+        required["sessions"] -= {"consent_generation", "platform", "environment"}
+        self._validate_tables(required)
+
+    def _validate_tables(self, required: dict[str, set[str]]) -> None:
+        for table, columns in required.items():
+            found = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            if not columns <= found:
+                raise ComputerProvisioningError("storage_schema_unsupported")
+
+    def _validate_current_schema(self) -> None:
+        """Refuse partial current schemas rather than repairing durable state."""
+        required = self._required_columns()
+        required.update({
+            "session_backends": {"session_id", "backend"},
+            "session_output_grants": {
+                "grant_id",
+                "session_id",
+                "generation",
+                "consent_generation",
+                "output_name",
+                "source_id",
+                "application_identity",
+                "created_at",
+                "parent_grant_id",
+            },
+            "recovery_pending": {
+                "session_id",
+                "recovery_generation",
+                "grant_generation",
+                "stop_epoch",
+                "phase",
+                "reason",
+                "attempt",
+                "next_retry_at",
+                "old_grant",
+                "candidate_epoch",
+            },
+        })
+        self._validate_tables(required)
+        indexes = {
+            row[1]: tuple(
+                index_row[2] for index_row in self.db.execute(f"PRAGMA index_info({row[1]})")
+            )
+            for row in self.db.execute("PRAGMA index_list(session_output_grants)")
+        }
+        if indexes.get("session_output_grants_lineage") != (
+            "session_id", "generation", "consent_generation"
+        ):
+            raise ComputerProvisioningError("storage_schema_unsupported")
+
+    def _migrate_schema(self) -> None:
+        """Install the one shipped additive schema over the prior unversioned store."""
+        version = self.db.execute("PRAGMA user_version").fetchone()[0]
+        if version != 0:
+            raise ComputerProvisioningError("storage_schema_unsupported")
+        else:
+            self.db.execute("""
+                CREATE TABLE session_output_grants (
+                    grant_id INTEGER PRIMARY KEY, session_id TEXT NOT NULL,
+                    generation INTEGER NOT NULL, consent_generation INTEGER NOT NULL,
+                    output_name TEXT NOT NULL, source_id TEXT NOT NULL,
+                    application_identity TEXT NOT NULL,
+                    created_at REAL NOT NULL, parent_grant_id INTEGER,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id),
+                    FOREIGN KEY(parent_grant_id) REFERENCES session_output_grants(grant_id))
+                """)
+            self.db.execute(
+            "CREATE UNIQUE INDEX session_output_grants_lineage ON "
+            "session_output_grants(session_id, generation, consent_generation)"
+            )
+            self.db.execute(
+            "CREATE INDEX session_output_grants_session ON "
+            "session_output_grants(session_id, grant_id DESC)"
+            )
+            self.db.execute("""
+                CREATE TABLE recovery_pending (
+                    session_id TEXT PRIMARY KEY, recovery_generation INTEGER NOT NULL,
+                    grant_generation INTEGER NOT NULL, stop_epoch INTEGER NOT NULL,
+                    phase TEXT NOT NULL, reason TEXT NOT NULL, attempt INTEGER NOT NULL,
+                    next_retry_at REAL, old_grant TEXT NOT NULL, candidate_epoch TEXT,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id))
+                """)
+            self.db.execute("""
+                CREATE TABLE session_backends (
+                    session_id TEXT PRIMARY KEY, backend TEXT NOT NULL,
+                    FOREIGN KEY(session_id) REFERENCES sessions(session_id))
+                """)
+        self.db.execute(f"PRAGMA user_version={STORE_SCHEMA_VERSION}")
+        self._validate_current_schema()
+
+    @staticmethod
+    def _output_grant_values(
+        output_name: str, source_id: str, application_identity: dict
+    ) -> tuple[str, str, str]:
+        keys = ("pid", "uid", "start_ticks", "exe", "exe_identity")
+        if (
+            type(output_name) is not str
+            or not 1 <= len(output_name) <= 256
+            or output_name != output_name.strip()
+        ):
+            raise ComputerError("invalid_hyprland_output_grant")
+        if type(source_id) is not str or not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", source_id):
+            raise ComputerError("invalid_hyprland_output_grant")
+        if (
+            type(application_identity) is not dict
+            or set(application_identity) != set(keys)
+            or any(type(application_identity.get(key)) is not int for key in keys[:3])
+            or application_identity["pid"] <= 1
+            or application_identity["uid"] < 0
+            or application_identity["start_ticks"] <= 0
+            or type(application_identity.get("exe")) is not str
+            or not application_identity["exe"].startswith("/")
+            or type(application_identity.get("exe_identity")) is not list
+            or len(application_identity["exe_identity"]) != 2
+            or any(
+                type(value) is not int or value < 0
+                for value in application_identity["exe_identity"]
+            )
+        ):
+            raise ComputerError("invalid_hyprland_application_identity")
+        return output_name, source_id, json.dumps(
+            {key: application_identity[key] for key in keys},
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    @staticmethod
+    def _output_grant_row(row: sqlite3.Row) -> HyprlandOutputGrant:
+        return HyprlandOutputGrant(
+            row["grant_id"],
+            row["session_id"],
+            row["generation"],
+            row["consent_generation"],
+            row["output_name"],
+            row["source_id"],
+            json.loads(row["application_identity"]),
+            row["created_at"],
+            row["parent_grant_id"],
+        )
+
+    @staticmethod
+    def _recovery_pending_row(row: sqlite3.Row) -> RecoveryPending:
+        return RecoveryPending(
+            row["session_id"],
+            row["recovery_generation"],
+            row["grant_generation"],
+            row["stop_epoch"],
+            row["phase"],
+            row["reason"],
+            row["attempt"],
+            row["next_retry_at"],
+            json.loads(row["old_grant"]),
+            row["candidate_epoch"],
+        )
+
+    def record_hyprland_output_grant(
+        self, grant: SessionGrant, *, output_name: str, source_id: str, application_identity: dict
+    ) -> HyprlandOutputGrant:
+        """Persist one verified Wayland output binding, never live input authority."""
+        output_name, source_id, identity = self._output_grant_values(
+            output_name, source_id, application_identity
+        )
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.db.execute(
+                    "SELECT 1 FROM sessions WHERE session_id=? AND generation=? "
+                    "AND consent_generation=? AND state IN ('starting','active') "
+                    "AND platform='wayland' AND environment='existing_session' "
+                    "AND EXISTS (SELECT 1 FROM session_backends "
+                    "WHERE session_id=sessions.session_id "
+                    "AND backend='hyprland')",
+                    (grant.session_id, grant.generation, grant.consent_generation),
+                ).fetchone()
+                if current is None:
+                    raise ComputerError("grant_revoked")
+                cursor = self.db.execute(
+                    "INSERT INTO session_output_grants "
+                    "(session_id,generation,consent_generation,output_name,source_id,"
+                    "application_identity,created_at) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (
+                        grant.session_id,
+                        grant.generation,
+                        grant.consent_generation,
+                        output_name,
+                        source_id,
+                        identity,
+                        self.clock(),
+                    ),
+                )
+                row = self.db.execute(
+                    "SELECT * FROM session_output_grants WHERE grant_id=?", (cursor.lastrowid,)
+                ).fetchone()
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return self._output_grant_row(row)
+
+    def hyprland_output_grants(
+        self, session_id: str, *, limit: int = 16
+    ) -> tuple[HyprlandOutputGrant, ...]:
+        if type(limit) is not int or not 1 <= limit <= 64:
+            raise ComputerError("invalid_limit")
+        with self.lock:
+            rows = self.db.execute(
+                "SELECT * FROM session_output_grants WHERE session_id=? "
+                "ORDER BY grant_id DESC LIMIT ?",
+                (session_id, limit),
+            ).fetchall()
+        return tuple(self._output_grant_row(row) for row in rows)
+
+    def advance_hyprland_output_grant(
+        self,
+        paused_grant: SessionGrant,
+        *,
+        old_grant_id: int,
+        output_name: str,
+        source_id: str,
+        application_identity: dict,
+    ) -> HyprlandOutputGrant:
+        """Record the one successor for a durably fenced Hyprland handoff."""
+        output_name, source_id, identity = self._output_grant_values(
+            output_name, source_id, application_identity
+        )
+        if type(old_grant_id) is not int or old_grant_id <= 0:
+            raise ComputerError("invalid_hyprland_output_grant")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.db.execute(
+                    "SELECT * FROM sessions WHERE session_id=?", (paused_grant.session_id,)
+                ).fetchone()
+                valid = (
+                    current is not None
+                    and current["state"] == "paused"
+                    and current["generation"] == paused_grant.generation
+                    and current["consent_generation"] == paused_grant.consent_generation
+                    and current["platform"] == "wayland"
+                    and current["environment"] == "existing_session"
+                    and self.db.execute(
+                        "SELECT 1 FROM session_backends WHERE session_id=? AND backend='hyprland'",
+                        (paused_grant.session_id,),
+                    ).fetchone()
+                    is not None
+                )
+                handoff = self.db.execute(
+                    "SELECT * FROM recovery_pending WHERE session_id=? "
+                    "AND recovery_generation=? AND grant_generation=?",
+                    (paused_grant.session_id, paused_grant.generation, paused_grant.generation),
+                ).fetchone()
+                pending = self.db.execute(
+                    "SELECT 1 FROM receipts WHERE session_id=? AND status='pending' LIMIT 1",
+                    (paused_grant.session_id,),
+                ).fetchone()
+                cleanup = self.cleanup(paused_grant.session_id)
+                expected = {
+                    "complete": True,
+                    "stopped": True,
+                    "released": True,
+                    "applications_preserved": True,
+                    "input_revoked": True,
+                    "capture_revoked": True,
+                    "owned_devices": "hyprland_owned_connections_closed",
+                    "hyprland_owned_connections_closed": True,
+                    "receiver_release_verified": False,
+                }
+                if not valid:
+                    raise ComputerError("grant_revoked")
+                if handoff is None or handoff["phase"] != "hyprland_handoff_pending":
+                    raise ComputerError("hyprland_handoff_not_safe")
+                try:
+                    old_lineage = json.loads(handoff["old_grant"])
+                except (TypeError, ValueError) as exc:
+                    raise ComputerError("hyprland_handoff_not_safe") from exc
+                if old_lineage.get("grant_id") != old_grant_id:
+                    raise ComputerError("hyprland_handoff_not_safe")
+                old = self.db.execute(
+                    "SELECT 1 FROM session_output_grants WHERE grant_id=? AND session_id=? "
+                    "AND generation=? AND consent_generation=? AND source_id=?",
+                    (old_grant_id, paused_grant.session_id, old_lineage.get("generation"),
+                     old_lineage.get("consent_generation"), old_lineage.get("source_id")),
+                ).fetchone()
+                if (
+                    old is None
+                    or pending is not None
+                    or cleanup is None
+                    or any(cleanup.get(key) != value for key, value in expected.items())
+                ):
+                    raise ComputerError("hyprland_handoff_not_safe")
+                cursor = self.db.execute(
+                    "INSERT INTO session_output_grants (session_id,generation,consent_generation,"
+                    "output_name,source_id,application_identity,created_at,parent_grant_id) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (
+                        paused_grant.session_id,
+                        paused_grant.generation,
+                        paused_grant.consent_generation,
+                        output_name,
+                        source_id,
+                        identity,
+                        self.clock(),
+                        old_grant_id,
+                    ),
+                )
+                row = self.db.execute(
+                    "SELECT * FROM session_output_grants WHERE grant_id=?", (cursor.lastrowid,)
+                ).fetchone()
+                changed = self.db.execute(
+                    "DELETE FROM recovery_pending WHERE session_id=? AND recovery_generation=? "
+                    "AND grant_generation=? AND stop_epoch=? AND phase='hyprland_handoff_pending'",
+                    (paused_grant.session_id, paused_grant.generation, paused_grant.generation,
+                     handoff["stop_epoch"]),
+                ).rowcount
+                if not changed:
+                    raise ComputerError("hyprland_handoff_not_safe")
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return self._output_grant_row(row)
+
+    def begin_hyprland_handoff(
+        self, grant: SessionGrant, *, old_grant_id: int, recovery_generation: int, stop_epoch: int
+    ) -> SessionGrant:
+        """Atomically obsolete an active native binding before backend cleanup."""
+        if (
+            type(old_grant_id) is not int or old_grant_id <= 0
+            or type(recovery_generation) is not int or recovery_generation < 1
+            or type(stop_epoch) is not int or stop_epoch < 0
+        ):
+            raise ComputerError("invalid_hyprland_output_grant")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.db.execute(
+                    "SELECT * FROM sessions WHERE session_id=?", (grant.session_id,)
+                ).fetchone()
+                old = self.db.execute(
+                    "SELECT * FROM session_output_grants WHERE grant_id=? AND session_id=? "
+                    "AND grant_id=(SELECT MAX(grant_id) FROM session_output_grants "
+                    "WHERE session_id=?)",
+                    (old_grant_id, grant.session_id, grant.session_id),
+                ).fetchone()
+                backend = self.db.execute(
+                    "SELECT 1 FROM session_backends WHERE session_id=? AND backend='hyprland'",
+                    (grant.session_id,),
+                ).fetchone()
+                pending = self.db.execute(
+                    "SELECT 1 FROM recovery_pending WHERE session_id=?", (grant.session_id,)
+                ).fetchone()
+                if (
+                    current is None or current["state"] not in {"starting", "active"}
+                    or current["generation"] != grant.generation
+                    or current["consent_generation"] != grant.consent_generation
+                    or current["platform"] != "wayland"
+                    or current["environment"] != "existing_session"
+                    or old is None
+                    or backend is None
+                    or pending is not None or old["generation"] != grant.generation
+                    or old["consent_generation"] != grant.consent_generation
+                ):
+                    raise ComputerError("hyprland_handoff_not_safe")
+                lineage = {
+                    "grant_id": old["grant_id"], "generation": old["generation"],
+                    "consent_generation": old["consent_generation"],
+                    "output_name": old["output_name"],
+                    "source_id": old["source_id"],
+                    "application_identity": json.loads(old["application_identity"]),
+                }
+                paused_generation = grant.generation + 1
+                paused_consent = grant.consent_generation + 1
+                self.db.execute(
+                    "INSERT INTO recovery_pending VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (grant.session_id, paused_generation, paused_generation, stop_epoch,
+                     "hyprland_handoff_pending", "no_input_stale_output", recovery_generation,
+                     None, json.dumps(lineage, sort_keys=True, separators=(",", ":")), None),
+                )
+                changed = self.db.execute(
+                    "UPDATE sessions SET state='paused',generation=?,consent_generation=? "
+                    "WHERE session_id=? AND state IN ('starting','active') AND generation=? "
+                    "AND consent_generation=?",
+                    (paused_generation, paused_consent, grant.session_id, grant.generation,
+                     grant.consent_generation),
+                ).rowcount
+                if not changed:
+                    raise ComputerError("grant_revoked")
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return self.get_session(grant.session_id)
+
+    def set_recovery_pending(
+        self,
+        grant: SessionGrant,
+        *,
+        recovery_generation: int,
+        stop_epoch: int,
+        phase: str,
+        reason: str,
+        attempt: int,
+        next_retry_at: float | None,
+        old_grant: dict,
+        candidate_epoch: str | None = None,
+    ) -> RecoveryPending:
+        if (
+            type(recovery_generation) is not int
+            or recovery_generation < 1
+            or type(stop_epoch) is not int
+            or stop_epoch < 0
+            or type(phase) is not str
+            or not phase
+            or type(reason) is not str
+            or not reason
+            or type(attempt) is not int
+            or attempt < 0
+            or (next_retry_at is not None and type(next_retry_at) not in {int, float})
+            or (
+                candidate_epoch is not None
+                and (type(candidate_epoch) is not str or not candidate_epoch)
+            )
+        ):
+            raise ComputerError("invalid_recovery_pending")
+        try:
+            old = json.dumps(old_grant, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ComputerError("invalid_recovery_pending") from exc
+        if type(old_grant) is not dict or not old_grant or len(old.encode()) > 16384:
+            raise ComputerError("invalid_recovery_pending")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.db.execute(
+                    "SELECT * FROM sessions WHERE session_id=?", (grant.session_id,)
+                ).fetchone()
+                if (
+                    current is None
+                    or current["generation"] != grant.generation
+                    or current["consent_generation"] != grant.consent_generation
+                    or current["state"] not in {"starting", "active"}
+                    or self.db.execute(
+                        "SELECT 1 FROM session_backends WHERE session_id=? AND backend='hyprland'",
+                        (grant.session_id,),
+                    ).fetchone()
+                    is None
+                ):
+                    raise ComputerError("grant_revoked")
+                existing = self.db.execute(
+                    "SELECT recovery_generation, stop_epoch FROM recovery_pending "
+                    "WHERE session_id=?",
+                    (grant.session_id,),
+                ).fetchone()
+                if existing is not None and (
+                    recovery_generation <= existing["recovery_generation"]
+                    or stop_epoch <= existing["stop_epoch"]
+                ):
+                    raise ComputerError("stale_recovery_pending")
+                self.db.execute(
+                    "INSERT OR REPLACE INTO recovery_pending VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        grant.session_id,
+                        recovery_generation,
+                        grant.generation,
+                        stop_epoch,
+                        phase,
+                        reason,
+                        attempt,
+                        next_retry_at,
+                        old,
+                        candidate_epoch,
+                    ),
+                )
+                row = self.db.execute(
+                    "SELECT * FROM recovery_pending WHERE session_id=?", (grant.session_id,)
+                ).fetchone()
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return self._recovery_pending_row(row)
+
+    def get_recovery_pending(self, session_id: str) -> RecoveryPending | None:
+        with self.lock:
+            row = self.db.execute(
+                "SELECT * FROM recovery_pending WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return self._recovery_pending_row(row) if row else None
+
+    def clear_recovery_pending(
+        self, session_id: str, *, recovery_generation: int, grant_generation: int, stop_epoch: int
+    ) -> bool:
+        with self.lock:
+            return bool(
+                self.db.execute(
+                    "DELETE FROM recovery_pending WHERE session_id=? AND recovery_generation=? "
+                    "AND grant_generation=? AND stop_epoch=?",
+                    (session_id, recovery_generation, grant_generation, stop_epoch),
+                ).rowcount
+            )
+
+    def transition_recovery_pending(
+        self,
+        session_id: str,
+        *,
+        recovery_generation: int,
+        grant_generation: int,
+        stop_epoch: int,
+        phase: str,
+        reason: str,
+        attempt: int,
+        next_retry_at: float | None,
+        candidate_epoch: str | None = None,
+    ) -> RecoveryPending:
+        if (
+            type(phase) is not str
+            or not phase
+            or type(reason) is not str
+            or not reason
+            or type(attempt) is not int
+            or attempt < 0
+        ):
+            raise ComputerError("invalid_recovery_pending")
+        with self.lock:
+            cursor = self.db.execute(
+                "UPDATE recovery_pending SET phase=?,reason=?,attempt=?,next_retry_at=?,"
+                "candidate_epoch=? "
+                "WHERE session_id=? AND recovery_generation=? AND grant_generation=? "
+                "AND stop_epoch=?",
+                (
+                    phase,
+                    reason,
+                    attempt,
+                    next_retry_at,
+                    candidate_epoch,
+                    session_id,
+                    recovery_generation,
+                    grant_generation,
+                    stop_epoch,
+                ),
+            )
+            if not cursor.rowcount:
+                raise ComputerError("stale_recovery_pending")
+            row = self.db.execute(
+                "SELECT * FROM recovery_pending WHERE session_id=?", (session_id,)
+            ).fetchone()
+        return self._recovery_pending_row(row)
 
     def recover(self) -> None:
         """Only the singleton controller calls this; read-only consumers must not."""
@@ -170,6 +784,7 @@ class ComputerStore:
         *,
         platform="x11",
         environment="isolated",
+        backend="",
     ) -> SessionGrant:
         # Preserve the existing NOT NULL schema without making a desktop session
         # an application profile. Old attached rows remain readable on upgrade.
@@ -177,6 +792,14 @@ class ComputerStore:
             app = "attached"
         elif not isinstance(app, str) or not 1 <= len(app) <= 96:
             raise ComputerError("isolated_app_required")
+        if (
+            type(backend) is not str
+            or backend not in {"", "hyprland"}
+            or (
+                backend == "hyprland" and (platform, environment) != ("wayland", "existing_session")
+            )
+        ):
+            raise ComputerError("unsupported_backend_contract")
         now = self.clock()
         values = (
             uuid.uuid4().hex,
@@ -196,7 +819,19 @@ class ComputerStore:
         )
         try:
             with self.lock:
-                self.db.execute("INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values)
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    self.db.execute(
+                        "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values
+                    )
+                    if backend:
+                        self.db.execute(
+                            "INSERT INTO session_backends VALUES (?,?)", (values[0], backend)
+                        )
+                    self.db.execute("COMMIT")
+                except BaseException:
+                    self.db.execute("ROLLBACK")
+                    raise
         except sqlite3.IntegrityError as exc:
             raise ComputerError("session_busy") from exc
         return SessionGrant(*values)
@@ -342,8 +977,13 @@ class ComputerStore:
             devices
             if type(devices) is str
             and devices
-            in {"removed", "retained_inactive", "not_created", "portal_owned_connections_closed",
-                "hyprland_owned_connections_closed"}
+            in {
+                "removed",
+                "retained_inactive",
+                "not_created",
+                "portal_owned_connections_closed",
+                "hyprland_owned_connections_closed",
+            }
             else "unknown"
         )
         # Only persist documented reason codes, never backend prose or paths.
@@ -390,10 +1030,16 @@ class ComputerStore:
                 grant.platform == "wayland"
                 and receipt["hyprland_owned_connections_closed"] is True
                 and receipt["receiver_release_verified"] is False
-                and all(receipt[key] is True for key in (
-                    "stopped", "released", "applications_preserved",
-                    "input_revoked", "capture_revoked"
-                ))
+                and all(
+                    receipt[key] is True
+                    for key in (
+                        "stopped",
+                        "released",
+                        "applications_preserved",
+                        "input_revoked",
+                        "capture_revoked",
+                    )
+                )
             ):
                 clean = False
             if devices == "removed" and not all(

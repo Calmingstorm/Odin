@@ -199,6 +199,29 @@ class ComputerController:
 
         backend.runtime_identity_callback = persist
 
+    def _record_hyprland_start_grant(self, grant, live):
+        """Persist native target/output identity before this session reaches input."""
+        if (
+            live.capabilities is None
+            or live.capabilities.platform != "wayland"
+            or live.capabilities.environment != "existing_session"
+            or live.capabilities.backend != "hyprland"
+        ):
+            return None
+        binding = getattr(live.backend, "hyprland_handoff_binding", None)
+        if not isinstance(binding, dict) or set(binding) != {
+            "output_name", "source_id", "application_identity"
+        }:
+            raise ComputerError("hyprland_handoff_binding_unavailable")
+        if not isinstance(binding["source_id"], str) or not binding["source_id"]:
+            raise ComputerError("hyprland_handoff_binding_unavailable")
+        return self.store.record_hyprland_output_grant(
+            grant,
+            output_name=binding["output_name"],
+            source_id=binding["source_id"],
+            application_identity=binding["application_identity"],
+        )
+
     async def reconcile_recovery(self, context, session_id, generation):
         """Operator-only absence verification, never an input or cleanup actuator."""
         await self._auth(context, emergency=True)
@@ -837,7 +860,11 @@ class ComputerController:
                     raise ComputerError("target_selection_invalid")
                 selected = self._selection_binding(context, selected)
             grant = self.store.create_session(
-                context, app, platform=capabilities.platform, environment=capabilities.environment
+                context,
+                app,
+                platform=capabilities.platform,
+                environment=capabilities.environment,
+                backend=capabilities.backend or "",
             )
             try:
                 self._live[grant.session_id] = LiveSession(
@@ -875,6 +902,7 @@ class ComputerController:
                     or live.revoked
                 ):
                     raise ComputerError("grant_revoked")
+                self._record_hyprland_start_grant(grant, live)
                 grant = self.store.set_state(grant.session_id, "active")
                 self._watchdogs[grant.session_id] = _own_task(
                     asyncio.create_task(self._deadline(grant.session_id, MAX_TASK_SECONDS))
