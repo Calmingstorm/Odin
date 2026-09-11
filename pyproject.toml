@@ -5,7 +5,8 @@ description = "Odin — autonomous executor Discord bot, Heimdall-pattern with e
 requires-python = ">=3.11"
 license = "MIT"
 dependencies = [
-    "discord.py>=2.3,<3",
+    # Private transport reattachment is deliberately tested only against this layout.
+    "discord.py==2.7.1",
     "aiohttp>=3.9",
     "aiofiles>=24.0",
     "sqlalchemy[asyncio]>=2.0",

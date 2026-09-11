@@ -30,14 +30,14 @@ def _make_bot() -> OdinBot:
 
 
 class TestOdinBotClose:
-    """OdinBot.close() shuts down all attached components."""
+    """Terminal application shutdown shuts down all attached components."""
 
     @pytest.mark.asyncio
     async def test_close_no_components(self):
-        """close() works fine when no components are attached."""
+        """shutdown_application() works fine when no components are attached."""
         bot = _make_bot()
         with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock) as super_close:
-            await bot.close()
+            await bot.shutdown_application()
             super_close.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -48,24 +48,21 @@ class TestOdinBotClose:
         # than stop_loop("all"), which only set cancel events and left tasks
         # pending at process exit.
         bot.loop_manager.shutdown = AsyncMock()
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         bot.loop_manager.shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_close_stops_scheduler(self):
         bot = _make_bot()
         bot.scheduler = AsyncMock()
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         bot.scheduler.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_close_stops_health_server(self):
         bot = _make_bot()
         bot.health_server = AsyncMock()
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         bot.health_server.stop.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -77,8 +74,7 @@ class TestOdinBotClose:
         # in-place restart would carry them into the new image).
         bot = _make_bot()
         bot.tool_executor._process_registry = AsyncMock()
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         bot.tool_executor._process_registry.shutdown.assert_awaited_once()
 
     @pytest.mark.asyncio
@@ -87,31 +83,27 @@ class TestOdinBotClose:
         # tool ever used.
         bot = _make_bot()
         assert not hasattr(bot.tool_executor, "_process_registry")
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         assert not hasattr(bot.tool_executor, "_process_registry")
 
     @pytest.mark.asyncio
     async def test_close_tolerates_missing_tool_executor(self):
         bot = _make_bot()
         bot.tool_executor = None
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
 
     @pytest.mark.asyncio
     async def test_close_closes_knowledge_store(self):
         bot = _make_bot()
         bot.knowledge = MagicMock()
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         bot.knowledge.close.assert_called_once()
 
     @pytest.mark.asyncio
     async def test_close_saves_sessions(self):
         bot = _make_bot()
         bot.sessions = MagicMock()
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         bot.sessions.save_all.assert_called_once()
 
     @pytest.mark.asyncio
@@ -123,8 +115,7 @@ class TestOdinBotClose:
         bot.scheduler = AsyncMock()
         bot.scheduler.stop = AsyncMock(side_effect=RuntimeError("bang"))
         bot.sessions = MagicMock()
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
         # Despite errors in earlier components, sessions still saved
         bot.sessions.save_all.assert_called_once()
 
@@ -159,8 +150,7 @@ class TestOdinBotClose:
             side_effect=lambda: call_order.append("sessions")
         )
 
-        with patch.object(type(bot).__bases__[0], "close", new_callable=AsyncMock):
-            await bot.close()
+        await bot.shutdown_application()
 
         assert call_order == [
             "loop_manager",

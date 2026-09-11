@@ -12,6 +12,8 @@ surface is pinned by tests/characterization/test_facade_contract.py.
 
 from __future__ import annotations
 
+import asyncio
+import contextvars
 import os
 import time
 from typing import TYPE_CHECKING
@@ -32,6 +34,10 @@ if TYPE_CHECKING:  # health.server imports this module at runtime — cycle-free
     from ..health.server import HealthServer
 
 log = get_logger("discord")
+
+_callback_generation: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "discord_callback_generation", default=None
+)
 
 # Cog extensions to load on startup (carried over from the prior moderation-bot OdinBot).
 INITIAL_EXTENSIONS: tuple[str, ...] = (
@@ -79,6 +85,13 @@ class OdinBot(commands.Bot):
         # reconnect's on_ready retries only failed or newly seen scopes.
         self._synced_command_scopes: set[str] = set()
         self._command_snapshot: list | None = None
+        # The application outlives any Discord transport generation.
+        self._application_started = False
+        self._application_shutdown = False
+        self._application_start_lock = asyncio.Lock()
+        self._application_shutdown_task: asyncio.Task[None] | None = None
+        self._gateway_event_tasks: dict[int, set[asyncio.Task[object]]] = {}
+        self._delivery_application_id: int | None = None
 
         # ------------------------------------------------------------------
         # Stage 1: bot-independent services (wiring.build_services).
@@ -199,6 +212,11 @@ class OdinBot(commands.Bot):
         """Populate the test-webhook allowlist from the ALLOWED_WEBHOOK_IDS env var."""
         _init_allowed_webhook_ids_impl(os.environ.get("ALLOWED_WEBHOOK_IDS", ""))
 
+    def bind_connection_supervisor(self, supervisor) -> None:
+        """Install the gateway authority and its scheduler admission source."""
+        self.connection_supervisor = supervisor
+        self.scheduler.set_connection_state_provider(supervisor.connection_availability)
+
     def _log_startup_config(self) -> None:
         """Log configuration summary at startup to help users verify setup."""
         cfg = self.config
@@ -235,71 +253,164 @@ class OdinBot(commands.Bot):
         the audit log HMAC chain (if signing is enabled), then sets the bot
         ready bit on the dispatcher (if registered).
         """
-        # Startup diagnostics — never blocks startup, just logs what we found.
-        try:
-            report = self._run_startup_diagnostics(yaml_config=self.config)
-            self.startup_report = report
-            for r in report.results:
-                level = log.warning if not r.passed else log.info
-                msg = f"startup diagnostic [{r.name}]: {r.detail}"
-                if r.recommendation:
-                    msg += f" → {r.recommendation}"
-                level(msg)
-            failed = sum(1 for r in report.results if not r.passed)
-            if failed:
-                log.warning(
-                    "%d/%d startup diagnostic(s) failed — see preceding lines",
-                    failed,
-                    len(report.results),
-                )
-        except Exception:
-            log.exception("Startup diagnostics failed unexpectedly (non-fatal)")
+        await self.start_application()
 
-        # Resume HMAC chain so signing picks up after a restart
-        if self.audit_signer is not None:
+    async def start_application(self) -> None:
+        """Initialize process services once, independently of gateway attachment."""
+        async with self._application_start_lock:
+            if self._application_started:
+                return
+            if self._application_shutdown:
+                raise RuntimeError("cannot start an application after terminal shutdown")
+            # Do not publish started until required startup work completes.
+            # This keeps a failed initialization retryable.
+            if self.loop is discord.utils.MISSING:
+                await discord.Client._async_setup_hook(self)
             try:
-                await self.audit.initialize_chain()
+                report = self._run_startup_diagnostics(yaml_config=self.config)
+                self.startup_report = report
+                for r in report.results:
+                    level = log.warning if not r.passed else log.info
+                    msg = f"startup diagnostic [{r.name}]: {r.detail}"
+                    if r.recommendation:
+                        msg += f" → {r.recommendation}"
+                    level(msg)
+                failed = sum(1 for r in report.results if not r.passed)
+                if failed:
+                    log.warning(
+                        "%d/%d startup diagnostic(s) failed — see preceding lines",
+                        failed,
+                        len(report.results),
+                    )
             except Exception:
-                log.exception("Failed to initialize audit HMAC chain")
+                log.exception("Startup diagnostics failed unexpectedly (non-fatal)")
 
-        for ext in INITIAL_EXTENSIONS:
+            if self.audit_signer is not None:
+                try:
+                    await self.audit.initialize_chain()
+                except Exception:
+                    log.exception("Failed to initialize audit HMAC chain")
+
+            for ext in INITIAL_EXTENSIONS:
+                try:
+                    await self.load_extension(ext)
+                    log.info("Loaded extension %s", ext)
+                except commands.ExtensionError:
+                    log.exception("Failed to load extension %s", ext)
+
             try:
-                await self.load_extension(ext)
-                log.info("Loaded extension %s", ext)
-            except commands.ExtensionError:
-                log.exception("Failed to load extension %s", ext)
+                await self.usage_rollup.start()
+            except Exception:
+                log.exception("Usage backfill startup failed (non-fatal)")
 
-        # Usage backfill is supervised and bounded; start() returns before any
-        # trajectory or audit source scan, so upgrades never delay readiness.
-        try:
-            await self.usage_rollup.start()
-        except Exception:
-            log.exception("Usage backfill startup failed (non-fatal)")
+            await start_mcp(self)
 
-        # MCP: adopt desired state and launch supervised reconciliation.
-        # Network/process probes remain in background supervisors; optional
-        # integration readiness never delays the Discord gateway.
-        await start_mcp(self)
-
-        try:
-            await self.computer.start()
-        except Exception:
-            log.exception("Computer startup failed; desktop tools remain unavailable")
+            try:
+                await self.computer.start()
+            except Exception:
+                log.exception("Computer startup failed; desktop tools remain unavailable")
+            self._application_started = True
 
     async def close(self) -> None:
-        """Graceful shutdown: stop services, persist state, then disconnect.
+        """Close only this Discord transport generation.
 
-        Teardown order and the getattr guards live in
-        wiring.shutdown_services — the mirror of wiring.build_services.
+        ConnectionSupervisor uses this boundary for a deliberate detach.
+        Process services, cogs, command tree, HTTP/state identities and the
+        application remain alive until :meth:`shutdown_application`.
         """
-        log.info("Shutting down OdinBot…")
-        await shutdown_services(self)
-        await super().close()
-        log.info("OdinBot shutdown complete")
+        await discord.Client.close(self)
 
-    async def on_ready(self) -> None:
+    async def shutdown_application(self) -> None:
+        """Terminal process teardown, called exactly once by the entrypoint."""
+        self._application_shutdown = True
+        if self._application_shutdown_task is None:
+            async def shutdown() -> None:
+                log.info("Shutting down OdinBot…")
+                await shutdown_services(self)
+                await commands.Bot.close(self)
+                log.info("OdinBot shutdown complete")
+
+            self._application_shutdown_task = asyncio.create_task(
+                shutdown(), name="odin-application-shutdown"
+            )
+        await asyncio.shield(self._application_shutdown_task)
+
+    def dispatch(self, event_name: str, /, *args, **kwargs) -> None:
+        """Fence disconnect synchronously, before slow callbacks are queued."""
+        if event_name == "disconnect":
+            supervisor = getattr(self, "connection_supervisor", None)
+            if supervisor is not None:
+                supervisor.transport_disconnected(supervisor.callback_generation())
+        super().dispatch(event_name, *args, **kwargs)
+
+    def _schedule_event(self, coro, event_name, *args, **kwargs):
+        """Bind gateway callbacks to the generation that queued them."""
+        supervisor = getattr(self, "connection_supervisor", None)
+        if supervisor is None:
+            return super()._schedule_event(coro, event_name, *args, **kwargs)
+        expected_generation = supervisor.callback_generation()
+
+        async def generation_bound():
+            token = _callback_generation.set(expected_generation)
+            try:
+                await coro(*args, **kwargs)
+            finally:
+                _callback_generation.reset(token)
+
+        # Preserve discord.py's _run_event/on_error semantics and never alter
+        # listener signatures. Cogs may define on_ready without kwargs.
+        task = super()._schedule_event(generation_bound, event_name)
+        event_tasks = getattr(self, "_gateway_event_tasks", None)
+        if event_tasks is None:
+            event_tasks = self._gateway_event_tasks = {}
+        tasks = event_tasks.setdefault(expected_generation, set())
+        tasks.add(task)
+        task.add_done_callback(tasks.discard)
+        return task
+
+    async def _fence_delivery_application(self) -> None:
+        """Clear transport-local staged output on an application identity change."""
+        # Test doubles and a pre-login ClientState need not expose the public
+        # property backing field yet.
+        application_id = getattr(self._connection, "application_id", None)
+        if application_id is None or application_id == self._delivery_application_id:
+            return
+        previous = self._delivery_application_id
+        self._delivery_application_id = application_id
+        if previous is None:
+            return
+        pending_files = getattr(self.channel_state, "pending_files", None)
+        if pending_files is not None:
+            pending_files.clear()
+        # Process work remains alive, but it may not inherit presence/delivery
+        # bookkeeping from a distinct Discord application.
+        self.delivery.active_tasks = 0
+        await self.delivery.set_status(None, task_end=True)
+        log.warning(
+            "Discord application changed from %s to %s; staged deliveries cleared",
+            previous,
+            application_id,
+        )
+
+    def _owns_callback(self, expected_generation: int | None) -> bool:
+        supervisor = getattr(self, "connection_supervisor", None)
+        return (
+            supervisor is None
+            or expected_generation is None
+            or supervisor.owns(expected_generation)
+        )
+
+    async def on_ready(self, *, expected_generation: int | None = None) -> None:
+        if expected_generation is None:
+            expected_generation = _callback_generation.get()
+        if not self._owns_callback(expected_generation):
+            return
+        supervisor = getattr(self, "connection_supervisor", None)
         log.info("Logged in as %s (ID: %s)", self.user, self.user.id)  # type: ignore[union-attr]  # on_ready fires post-login
         log.info("Tools loaded: %d definitions", len(get_tool_definitions()))
+        await self._fence_delivery_application()
+        if not self._owns_callback(expected_generation):
+            return
         # Prune stale sessions loaded from disk.  load() reads ALL persisted
         # session files regardless of age; pruning here removes expired ones
         # immediately instead of waiting for the first user message.
@@ -307,6 +418,10 @@ class OdinBot(commands.Bot):
         if pruned:
             log.info("Startup: pruned %d stale sessions", pruned)
         await self._reconcile_application_commands()
+        if not self._owns_callback(expected_generation):
+            return
+        if supervisor is not None and expected_generation is not None:
+            supervisor.transport_ready(expected_generation)
         self.scheduler.start(
             self.scheduled_events._on_scheduled_task,
             self.scheduled_events._on_schedule_failure,
@@ -317,6 +432,25 @@ class OdinBot(commands.Bot):
 
     async def on_guild_join(self, guild: discord.Guild) -> None:
         await self._reconcile_application_commands(guilds=[guild])
+
+    async def on_disconnect(self, *, expected_generation: int | None = None) -> None:
+        if expected_generation is None:
+            expected_generation = _callback_generation.get()
+        supervisor = getattr(self, "connection_supervisor", None)
+        if supervisor is not None and expected_generation is not None:
+            supervisor.transport_disconnected(expected_generation)
+
+    async def on_resumed(self, *, expected_generation: int | None = None) -> None:
+        if expected_generation is None:
+            expected_generation = _callback_generation.get()
+        if not self._owns_callback(expected_generation):
+            return
+        await self._reconcile_application_commands()
+        if not self._owns_callback(expected_generation):
+            return
+        supervisor = getattr(self, "connection_supervisor", None)
+        if supervisor is not None and expected_generation is not None:
+            supervisor.transport_ready(expected_generation)
 
     async def _reconcile_application_commands(self, guilds=None) -> None:
         """Force Discord's registered commands to match the tree exactly.

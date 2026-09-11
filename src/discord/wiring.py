@@ -1075,6 +1075,29 @@ async def start_mcp(bot) -> None:
         log.exception("MCP startup failed (non-fatal; control plane remains up)")
 
 
+async def close_computer_once(bot) -> None:
+    """Release desktop authority once, including independent service teardown."""
+    existing = getattr(bot, "_computer_cleanup_task", None)
+    if existing is not None:
+        await asyncio.shield(existing)
+        return
+
+    async def close() -> None:
+        computer = getattr(bot, "computer", None)
+        if computer is None:
+            return
+        try:
+            await computer.close()
+        except Exception:
+            log.exception("Computer cleanup unverified")
+            from ..restart import block_reexec
+            block_reexec("computer cleanup unverified")
+
+    task = asyncio.create_task(close(), name="computer-cleanup")
+    bot._computer_cleanup_task = task
+    await asyncio.shield(task)
+
+
 async def shutdown_services(bot) -> None:
     """Stop services and persist state — moved verbatim from OdinBot.close().
 
@@ -1083,15 +1106,7 @@ async def shutdown_services(bot) -> None:
     work-producers before consumers, and persist user-visible state
     (sessions) last.
     """
-    computer = getattr(bot, "computer", None)
-    if computer is not None:
-        try:
-            await computer.close()
-        except Exception:
-            log.exception("Computer cleanup unverified")
-            from ..restart import block_reexec
-
-            block_reexec("computer cleanup unverified")
+    await close_computer_once(bot)
 
     channel_state = getattr(bot, "channel_state", None)
     if channel_state is not None:
