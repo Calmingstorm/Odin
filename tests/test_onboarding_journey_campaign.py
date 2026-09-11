@@ -8,6 +8,7 @@ replaced before they can leave loopback.
 from __future__ import annotations
 
 import base64
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
@@ -19,7 +20,13 @@ from aiohttp.client_exceptions import WSServerHandshakeError
 
 from src.config.environment import EnvironmentSource
 from src.config.initialization import InitializationStore, InstallationBinding
-from src.config.schema import Config, WebConfig, WebhookConfig, set_active_config_path
+from src.config.schema import (
+    Config,
+    WebConfig,
+    WebhookConfig,
+    active_config_path,
+    set_active_config_path,
+)
 from src.health.server import HealthServer
 from src.web.onboarding import OnboardingCoordinator
 
@@ -42,6 +49,8 @@ class _Supervisor:
 
 @pytest.fixture
 async def fresh_install(tmp_path: Path):
+    previous_config_path = active_config_path()
+    previous_discord_token = os.environ.get("DISCORD_TOKEN")
     config_path = tmp_path / "config.yml"
     config = Config(
         discord={"token": "${DISCORD_TOKEN}"},
@@ -94,7 +103,11 @@ async def fresh_install(tmp_path: Path):
         )
     finally:
         await server.stop()
-        set_active_config_path(None)
+        set_active_config_path(previous_config_path)
+        if previous_discord_token is None:
+            os.environ.pop("DISCORD_TOKEN", None)
+        else:
+            os.environ["DISCORD_TOKEN"] = previous_discord_token
 
 
 @pytest.mark.asyncio

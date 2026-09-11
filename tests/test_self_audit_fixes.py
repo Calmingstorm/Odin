@@ -62,15 +62,27 @@ class TestSetupCompleteGate:
         from aiohttp import web
         from aiohttp.test_utils import TestClient, TestServer
 
+        from src.config.environment import EnvironmentSource
+        from src.config.initialization import InitializationStore, InstallationBinding
+        from src.config.schema import active_config_path, set_active_config_path
         from src.web.api import create_api_routes
+        from src.web.onboarding import OnboardingCoordinator
 
-        # Work in a tmpdir so is_setup_needed can see pre-configured files.
-        monkeypatch.chdir(tmp_path)
-        (tmp_path / "config.yml").write_text(
-            "discord:\n  token: real-token\n"
-            "tools:\n  hosts:\n    localhost:\n      address: 127.0.0.1\n"
+        # Setup state is installation-bound and durable. A config/env token
+        # heuristic would let credential edits re-open setup, so establish a
+        # real completed installation instead.
+        config_path = tmp_path / "config.yml"
+        config_path.write_text("discord:\n  token: real-token\n")
+        private = tmp_path / "private"
+        private.mkdir(mode=0o700)
+        store = InitializationStore(
+            private / "initialization.json",
+            InstallationBinding("self-audit-setup-gate", config_path),
         )
-        (tmp_path / ".env").write_text("DISCORD_TOKEN=configured\n")
+        store.provision_fresh()
+        store.complete(lambda: None)
+        previous_config_path = active_config_path()
+        set_active_config_path(config_path)
 
         bot = MagicMock()
         bot.config = MagicMock()
@@ -78,17 +90,23 @@ class TestSetupCompleteGate:
         bot.config.tools.audit_log_path = str(tmp_path / "audit.jsonl")
         bot.tool_executor = MagicMock()
         bot.audit = MagicMock()
+        bot.onboarding = OnboardingCoordinator(
+            store, EnvironmentSource(tmp_path / "config.env"), True
+        )
 
         app = web.Application()
         app.router.add_routes(create_api_routes(bot))
-        async with TestClient(TestServer(app)) as client:
-            resp = await client.post(
-                "/api/setup/complete",
-                json={"discord_token": "new-token"},
-            )
-            assert resp.status == 409
-            data = await resp.json()
-            assert "setup already complete" in data["error"]
+        try:
+            async with TestClient(TestServer(app)) as client:
+                resp = await client.post(
+                    "/api/setup/complete",
+                    json={"discord_token": "new-token"},
+                )
+                assert resp.status == 409
+                data = await resp.json()
+                assert "setup already complete" in data["error"]
+        finally:
+            set_active_config_path(previous_config_path)
 
 
 # ====================================================================
