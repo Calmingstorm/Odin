@@ -155,15 +155,17 @@ class ComputerController:
             if inspect.isawaitable(result):
                 await result
 
-    def _selection_binding(self, context, selected):
+    def _selection_binding(self, context, selected, *, with_proof=False):
         binding = self._selection_bindings.get(selected["candidate_epoch"])
-        if binding is None or binding["expires_at"] < self.monotonic():
+        if binding is None or binding["expires_at"] <= self.monotonic():
             self._selection_bindings.pop(selected["candidate_epoch"], None)
             raise ComputerError("target_selection_stale")
         if (
             binding["owner_id"] != context.owner_id
             or binding["host_id"] != context.host_id
             or binding["turn_id"] != context.turn_id
+            or binding["channel_id"] != context.channel_id
+            or binding["surface"] != context.surface
         ):
             raise ComputerError("target_selection_forbidden")
         target = binding["targets"].get(selected["target_id"])
@@ -173,11 +175,12 @@ class ComputerController:
         if output_id != target["output_id"]:
             raise ComputerError("target_selection_invalid")
         self._selection_bindings.pop(selected["candidate_epoch"], None)
-        return {
+        native = {
             "target_id": target["native_target_id"],
             "output_id": output_id,
             "candidate_epoch": binding["native_epoch"],
         }
+        return (native, target.get("selection_proof")) if with_proof else native
 
     def _prepare_runtime(self, grant, backend):
         prepare = getattr(backend, "startup_descriptor", None)
@@ -440,6 +443,8 @@ class ComputerController:
         """
         if not self._recovery_enabled(live) or not self._no_input_pending(grant.session_id):
             return False
+        live.observations.clear()
+        self._delivered_observations.pop(grant.session_id, None)
         for attempt in range(_HYPRLAND_RECOVERY_ATTEMPTS):
             # This is deliberately a known-no-input path. A pending durable
             # receipt has an unknown outcome until its normal cleanup path says
@@ -795,6 +800,11 @@ class ComputerController:
                         "native_target_id": candidate["id"],
                         "output_id": candidate["output_id"],
                     }
+                    # Hyprland-only private evidence survives disposal of this
+                    # observational backend. Never serialize it in public rows.
+                    export_proof = getattr(backend, "export_selection_proof", None)
+                    if callable(export_proof):
+                        targets[target_id]["selection_proof"] = export_proof(candidate["id"])
                     public.append(
                         {
                             "target_id": target_id,
@@ -806,6 +816,8 @@ class ComputerController:
                     "owner_id": context.owner_id,
                     "host_id": context.host_id,
                     "turn_id": context.turn_id,
+                    "channel_id": context.channel_id,
+                    "surface": context.surface,
                     "expires_at": self.monotonic() + FRAME_FRESH_SECONDS,
                     "native_epoch": result["candidate_epoch"],
                     "targets": targets,
@@ -858,7 +870,9 @@ class ComputerController:
                     for value in selected.values()
                 ):
                     raise ComputerError("target_selection_invalid")
-                selected = self._selection_binding(context, selected)
+                selected, selection_proof = self._selection_binding(
+                    context, selected, with_proof=True
+                )
             grant = self.store.create_session(
                 context,
                 app,
@@ -877,7 +891,9 @@ class ComputerController:
                     WAYLAND_START_TIMEOUT_SECONDS if capabilities.platform == "wayland" else 20
                 )
                 await _bounded(
-                    backend.start(grant.session_id, selection=selected)
+                    backend.start(
+                        grant.session_id, selection=selected, selection_proof=selection_proof
+                    )
                     if selected
                     else backend.start(grant.session_id),
                     timeout,

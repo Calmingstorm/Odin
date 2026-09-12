@@ -29,7 +29,14 @@ from .hyprland_identity import (
     pin_connections,
     revalidate,
 )
-from .hyprland_scope import HyprlandGeometryUnsettled, HyprlandScopeProvider
+from .hyprland_scope import (
+    HyprlandGeometryUnsettled,
+    HyprlandScopeFailure,
+    HyprlandScopeProvider,
+    HyprlandSelectionProof,
+    selection_application_matches,
+    selection_output,
+)
 from .profile import validate_session
 from .wayland_backend import WaylandRuntimeBackend, _digest, _scope_binding
 from .wayland_guardian import trusted_binary
@@ -227,6 +234,7 @@ class HyprlandRuntimeBackend:
         ):
             raise ComputerError("hyprland_explicit_session_configuration_required")
         self.config, self.enabled = config, enabled
+        self._selection_proofs: dict[str, HyprlandSelectionProof] = {}
         # Backend family is immutable provenance, not input eligibility. Publish
         # it before startup so partial-start cleanup and emergency RELEASE-ALL
         # retain the right route even when native admission never completes.
@@ -374,7 +382,12 @@ class HyprlandRuntimeBackend:
             provider = await HyprlandScopeProvider.from_identity(
                 identity=identity, runtime_dir=resolved.runtime_dir
             )
-            return await provider.inventory_targets()
+            result = await provider.inventory_targets()
+            self._selection_proofs = {
+                candidate["id"]: provider.export_selection_proof(candidate["id"])
+                for candidate in result["candidates"]
+            }
+            return result
         except ComputerError:
             raise
         except Exception:
@@ -385,13 +398,19 @@ class HyprlandRuntimeBackend:
             if connection is not None:
                 connection.close()
 
+    def export_selection_proof(self, candidate_id):
+        proof = self._selection_proofs.get(candidate_id)
+        if proof is None or self._closed:
+            raise ComputerError("target_selection_invalid")
+        return copy.deepcopy(proof)
+
     def _metadata(self):
         data: dict[str, str | list[int]] = {"mapping_id": self.config.output_name}
         if self._output:
             data["size"] = [self._output.logical_width, self._output.logical_height]
         return data
 
-    async def start(self, session_id, *, selection=None):
+    async def start(self, session_id, *, selection=None, selection_proof=None):
         if not self.enabled or self._started or self._closed:
             raise ComputerError("hyprland_backend_not_startable")
         self.startup_descriptor(session_id)
@@ -402,7 +421,17 @@ class HyprlandRuntimeBackend:
                 or set(selection) != {"target_id", "output_id", "candidate_epoch"}
             ):
                 raise ComputerError("target_selection_invalid")
-            await self._open(selection=selection)
+            if (selection is None) != (selection_proof is None):
+                raise ComputerError("target_selection_invalid")
+            if selection is not None and (
+                type(selection_proof) is not HyprlandSelectionProof
+                or selection["target_id"] != selection_proof.candidate_id
+                or selection["output_id"] != selection_proof.output_id
+                or type(selection["candidate_epoch"]) is not int
+                or selection["candidate_epoch"] != selection_proof.topology_epoch
+            ):
+                raise ComputerError("target_selection_invalid")
+            await self._open(selection=selection, selection_proof=selection_proof)
             return {
                 "ok": True,
                 "session_id": session_id,
@@ -427,7 +456,7 @@ class HyprlandRuntimeBackend:
                 )
             ) from None
 
-    async def _open(self, *, selection=None):
+    async def _open(self, *, selection=None, selection_proof=None):
         from .hyprland_guardian import HyprlandGuardian
 
         trusted_binary(self.config.capture_binary)
@@ -468,6 +497,11 @@ class HyprlandRuntimeBackend:
                 trust=self.config.compositor_trust,
             )
             connection.close()
+            if selection is not None and (
+                type(selection_proof) is not HyprlandSelectionProof
+                or self._identity != selection_proof.compositor
+            ):
+                raise ComputerError("target_selection_changed")
             if self.config.managed_activation:
                 # Session startup is the only approved write path. Inventory/status
                 # remain observational and cannot reach this branch.
@@ -499,6 +533,8 @@ class HyprlandRuntimeBackend:
                 self._scope_provider = await HyprlandScopeProvider.from_identity(
                     identity=self._identity, runtime_dir=self.config.runtime_dir
                 )
+                self._scope_provider.import_selection_proof(selection_proof)
+                self._frame, self._captured_at = None, 0.0
                 selected = await self._scope_provider.focus_candidate(
                     candidate_id=selection["target_id"],
                     output_id=selection["output_id"],
@@ -532,8 +568,9 @@ class HyprlandRuntimeBackend:
             self._check_scope(scope)
             if selected is not None:
                 application = scope.get("application")
-                if type(application) is not dict or any(
-                    application.get(key) != value for key, value in selected["identity"].items()
+                if (
+                    not selection_application_matches(selected["identity"], application)
+                    or self._output != selection_output(selected["output_name"], selected["output"])
                 ):
                     raise ComputerError("target_selection_changed")
             self._guardian = HyprlandGuardian(
@@ -683,7 +720,10 @@ class HyprlandRuntimeBackend:
         return {
             "output_name": self._output.name,
             "source_id": self._selected,
-            "application_identity": copy.deepcopy(self._application_pin),
+            "application_identity": {
+                key: copy.deepcopy(self._application_pin[key])
+                for key in ("pid", "uid", "start_ticks", "exe", "exe_identity")
+            },
         }
 
     @property
@@ -705,6 +745,10 @@ class HyprlandRuntimeBackend:
     async def recover_focus(self, expected_application, *, context) -> bool:
         """Refocus only the selected native identity and invalidate old pixels."""
         del context
+        # Invalidate before even yielding for the lock. Cancellation/failure or
+        # an unavailable recovery must never leave old pixels input-eligible.
+        self._frame, self._captured_at = None, 0.0
+        self._fingerprint = None
         async with self._lock:
             self._active()
             if (
@@ -719,18 +763,22 @@ class HyprlandRuntimeBackend:
             selected = copy.deepcopy(self._selected_binding)
             if (
                 type(selected.get("output_name")) is not str
-                or type(selected.get("output")) is not str
+                or type(selected.get("output")) is not dict
                 or type(selected.get("identity")) is not dict
                 or selected["output_name"] != self.config.output_name
-                or selected["output"] != self._output.name
             ):
                 return False
             try:
+                if selection_output(selected["output_name"], selected["output"]) != self._output:
+                    return False
+                if not selection_application_matches(selected["identity"], self._application_pin):
+                    return False
                 assert self._identity is not None
                 await revalidate(self._identity, time.monotonic() + 3)
                 focused = await self._scope_provider.focus_bound_candidate(selected)
                 if (
                     focused["output_name"] != self.config.output_name
+                    or focused["instance_id"] != selected["instance_id"]
                     or focused["output"] != selected["output"]
                     or focused["identity"] != selected["identity"]
                 ):
@@ -747,7 +795,7 @@ class HyprlandRuntimeBackend:
                 self._scope, self._frame, self._captured_at = scope, None, 0.0
                 await revalidate(self._identity, time.monotonic() + 3)
                 return True
-            except (ComputerError, HyprlandGeometryUnsettled):
+            except (ComputerError, HyprlandScopeFailure):
                 self._frame = None
                 return False
 
@@ -862,7 +910,15 @@ class HyprlandRuntimeBackend:
 
     async def observe(self, crop=None):
         async with self._lock:
-            rendered, scope, captured_at = await self._capture_observation(crop)
+            try:
+                rendered, scope, captured_at = await self._capture_observation(crop)
+            except ComputerError as exc:
+                # Observation acquisition reports recoverable focus loss; the
+                # controller admits refocus only before input. Never remap lock/unknown evidence or
+                # watchdog/mid-action failures into recoverable focus loss.
+                if self._selected_binding is not None and exc.code == "hyprland_original_application_changed":
+                    raise ComputerError("input_focus_unavailable") from None
+                raise
             self._check_scope(scope)
             fingerprint = _digest([self._selected, self._generation, _binding(scope)])
             if fingerprint != self._fingerprint:

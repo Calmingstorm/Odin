@@ -225,11 +225,12 @@ struct FocusCandidate {
     std::string id, outputID, outputName, topologyDigest, app, title, startTicks;
     PHLWINDOWREF window;
     PHLMONITORREF monitor;
+    PHLWORKSPACEREF workspace;
     WP<CWLSurfaceResource> surface;
     std::shared_ptr<int> processFD;
     ProcessImage image;
     std::vector<odin_scope::NativeAncestor> ancestry;
-    Vector2D outputPos, outputSize, pixelSize;
+    Vector2D outputPos, outputSize, pixelSize, pos, size;
     float scale = 0;
     int transform = -1;
     pid_t pid = 0;
@@ -752,6 +753,16 @@ struct State {
         }
         return result > 0 ? result : -1;
     }
+    static bool requestedStartTicks(json_object* requested, const std::string& expected) {
+        // The provider returns the integer emitted in the inventory response.
+        // Keep that JSON type in the native proof; accepting a string would
+        // make this identity field depend on an ambiguous wire coercion.
+        json_object* value = nullptr;
+        if (!json_object_object_get_ex(requested, "start_ticks", &value) ||
+            json_object_get_type(value) != json_type_int) return false;
+        const auto ticks = json_object_get_int64(value);
+        return ticks > 0 && std::to_string(ticks) == expected;
+    }
     bool makeFocusCandidate(PHLWINDOW w, FocusCandidate& c) const {
         if (!environment() || !w || w->m_isX11 || !w->m_isMapped || !w->visible() || !w->wlSurface() || !w->resource() || w->m_monitor.expired() || !w->m_workspace) return false;
         auto m = w->m_monitor.lock(); std::vector<odin_scope::NativeAncestor> ancestry;
@@ -762,16 +773,22 @@ struct State {
         if (start.empty() || positiveInt64(start) < 1 || !image.valid() || fd < 0 || w->m_class.empty() || !safeFocusApplication(w->m_class, image.executable)) { if (fd >= 0) close(fd); return false; }
         for (double v : {m->m_position.x, m->m_position.y, m->m_size.x, m->m_size.y, m->m_pixelSize.x, m->m_pixelSize.y}) if (!std::isfinite(v) || std::floor(v) != v || std::abs(v) > 1000000) { close(fd); return false; }
         if (m->m_size.x <= 0 || m->m_size.y <= 0 || m->m_pixelSize.x <= 0 || m->m_pixelSize.y <= 0 || !std::isfinite(m->m_scale) || m->m_scale <= 0 || m->m_scale > 16 || int(m->m_transform) < 0 || int(m->m_transform) > 7) { close(fd); return false; }
-        c.window = w; c.monitor = m; c.surface = w->resource(); c.processFD = std::shared_ptr<int>(new int(fd), [](int* p) { close(*p); delete p; }); c.ancestry = std::move(ancestry); c.pid = c.ancestry.front().pid; c.uid = c.ancestry.front().uid; c.startTicks = start; c.image = image; c.app = w->m_class; c.title = w->m_title; c.outputName = m->m_name; c.outputPos = m->m_position; c.outputSize = m->m_size; c.pixelSize = m->m_pixelSize; c.scale = m->m_scale; c.transform = int(m->m_transform); return true;
+        const auto pos = w->m_realPosition->value(), size = w->m_realSize->value();
+        for (double v : {pos.x, pos.y, size.x, size.y}) if (!std::isfinite(v) || std::abs(v) > 1000000) { close(fd); return false; }
+        if (size.x <= 0 || size.y <= 0) { close(fd); return false; }
+        c.window = w; c.monitor = m; c.workspace = w->m_workspace; c.pos = pos; c.size = size; c.surface = w->resource(); c.processFD = std::shared_ptr<int>(new int(fd), [](int* p) { close(*p); delete p; }); c.ancestry = std::move(ancestry); c.pid = c.ancestry.front().pid; c.uid = c.ancestry.front().uid; c.startTicks = start; c.image = image; c.app = w->m_class; c.title = w->m_title; c.outputName = m->m_name; c.outputPos = m->m_position; c.outputSize = m->m_size; c.pixelSize = m->m_pixelSize; c.scale = m->m_scale; c.transform = int(m->m_transform); return true;
+    }
+    bool sameFocusCandidateState(const FocusCandidate& c) const {
+        if (!environment() || c.window.expired() || c.monitor.expired() || c.workspace.expired() || c.surface.expired() || !c.processFD || !c.image.valid() || ns() - c.created >= 30000000000LL) return false;
+        pollfd p{*c.processFD, POLLIN, 0}; auto w = c.window.lock(); auto m = c.monitor.lock(); std::vector<odin_scope::NativeAncestor> ancestry;
+        return poll(&p, 1, 0) == 0 && w && m && w->m_isMapped && w->visible() && !w->m_isX11 && w->wlSurface() && w->resource() == c.surface.lock() && w->m_monitor.lock() == m && w->m_workspace == c.workspace.lock() && w->m_realPosition->value() == c.pos && w->m_realSize->value() == c.size && w->m_class == c.app && safeFocusApplication(w->m_class, c.image.executable) && provenance(w, ancestry) && ancestry == c.ancestry && processStartTicks(c.pid) == c.startTicks && processImage(c.pid) == c.image && m->m_enabled && m->m_dpmsStatus && !m->m_isUnsafeFallback && !m->m_isBeingLeased && m->m_mirrorOf.expired() && m->m_name == c.outputName && m->m_position == c.outputPos && m->m_size == c.outputSize && m->m_pixelSize == c.pixelSize && m->m_scale == c.scale && int(m->m_transform) == c.transform;
     }
     bool sameFocusCandidate(const FocusCandidate& c) const {
-        if (!environment() || c.epoch != revision || c.window.expired() || c.monitor.expired() || c.surface.expired() || !c.processFD || !c.image.valid() || ns() - c.created >= 30000000000LL) return false;
-        pollfd p{*c.processFD, POLLIN, 0}; auto w = c.window.lock(); auto m = c.monitor.lock(); std::vector<odin_scope::NativeAncestor> ancestry;
-        return poll(&p, 1, 0) == 0 && w && m && w->m_isMapped && w->visible() && !w->m_isX11 && w->resource() == c.surface.lock() && provenance(w, ancestry) && ancestry == c.ancestry && processStartTicks(c.pid) == c.startTicks && processImage(c.pid) == c.image && m->m_name == c.outputName && m->m_position == c.outputPos && m->m_size == c.outputSize && m->m_pixelSize == c.pixelSize && m->m_scale == c.scale && int(m->m_transform) == c.transform;
+        return c.epoch == revision && sameFocusCandidateState(c);
     }
     J inventoryTargets() {
         if (!environment() || armed || inputHeld()) return status(false, "lock-or-input-held");
-        focusCandidates.clear(); auto j = status(); put(j.get(), "topology_epoch", int64_t(revision)); auto* result = json_object_new_array(); std::map<std::string, std::string> outputIDs;
+        focusCandidates.clear(); auto j = obj(); put(j.get(), "ok", true); put(j.get(), "version", int64_t(1)); put(j.get(), "instance_id", instanceID); put(j.get(), "topology_epoch", int64_t(revision)); auto* result = json_object_new_array(); std::map<std::string, std::string> outputIDs;
         std::set<const void*> outputs;
         for (const auto& w : g_pCompositor->m_windows) {
             if (focusCandidates.size() >= 32) break;
@@ -796,12 +813,16 @@ struct State {
         if (!json_object_object_get_ex(j, "topology_epoch", &epoch) || json_object_get_type(epoch) != json_type_int || uint64_t(json_object_get_int64(epoch)) != revision) return status(false, "stale-topology-epoch");
         const auto id = text(j, "candidate_id"), output = text(j, "output_id"); auto it = focusCandidates.find(id); json_object* requested = nullptr;
         if (!json_object_object_get_ex(j, "requested_identity", &requested) || json_object_get_type(requested) != json_type_object) return status(false, "requested-identity-required");
-        if (it == focusCandidates.end() || output.empty() || it->second.outputID != output || text(requested, "executable") != it->second.image.executable || text(requested, "start_ticks") != it->second.startTicks || !sameFocusCandidate(it->second)) { focusCandidates.clear(); return status(false, "stale-or-ineligible-candidate"); }
+        if (it == focusCandidates.end() || output.empty() || it->second.outputID != output || text(requested, "executable") != it->second.image.executable || !requestedStartTicks(requested, it->second.startTicks) || !sameFocusCandidate(it->second)) { focusCandidates.clear(); return status(false, "stale-or-ineligible-candidate"); }
         const auto candidate = it->second; auto w = candidate.window.lock(); focusCandidates.clear();
         Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
-        if (Desktop::focusState()->window() != w || Desktop::focusState()->monitor() != w->m_monitor.lock()) return status(false, "native-focus-not-confirmed");
+        // The synchronous focus notification may advance revision. Only the
+        // already measured, consumed candidate crosses that transition: repeat
+        // every lifetime, provenance and geometry check without reminting it.
+        // New requests must still match the current revision before any focus.
+        if (armed || inputHeld() || !sameFocusCandidateState(candidate) || Desktop::focusState()->window() != w || Desktop::focusState()->monitor() != candidate.monitor.lock()) return status(false, "native-focus-not-confirmed");
         auto response = obj(); put(response.get(), "ok", true); put(response.get(), "version", int64_t(1)); put(response.get(), "instance_id", instanceID);
-        put(response.get(), "candidate_id", id); put(response.get(), "output_id", output); put(response.get(), "output_name", candidate.outputName); put(response.get(), "topology_epoch", int64_t(revision)); put(response.get(), "topology_digest", candidate.topologyDigest);
+        put(response.get(), "candidate_id", id); put(response.get(), "output_id", output); put(response.get(), "output_name", candidate.outputName); put(response.get(), "topology_epoch", int64_t(candidate.epoch)); put(response.get(), "topology_digest", candidate.topologyDigest);
         auto outputGeometry = obj(); put(outputGeometry.get(), "x", int64_t(candidate.outputPos.x)); put(outputGeometry.get(), "y", int64_t(candidate.outputPos.y)); put(outputGeometry.get(), "width", int64_t(candidate.outputSize.x)); put(outputGeometry.get(), "height", int64_t(candidate.outputSize.y)); put(outputGeometry.get(), "pixel_width", int64_t(candidate.pixelSize.x)); put(outputGeometry.get(), "pixel_height", int64_t(candidate.pixelSize.y)); put(outputGeometry.get(), "scale", double(candidate.scale)); put(outputGeometry.get(), "transform", int64_t(candidate.transform)); json_object_object_add(response.get(), "output", outputGeometry.release());
         auto identity = obj(); put(identity.get(), "pid", int64_t(candidate.pid)); put(identity.get(), "uid", int64_t(candidate.uid)); put(identity.get(), "start_ticks", positiveInt64(candidate.startTicks)); put(identity.get(), "executable", candidate.image.executable); put(identity.get(), "exe_device", int64_t(candidate.image.device)); put(identity.get(), "exe_inode", int64_t(candidate.image.inode));
         json_object_object_add(response.get(), "identity", identity.release()); return response;

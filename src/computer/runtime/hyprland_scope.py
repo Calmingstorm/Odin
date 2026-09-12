@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
 import math
 import os
 import re
 import time
-from dataclasses import asdict
+from dataclasses import asdict, dataclass
 from typing import NoReturn
 
 from .hyprland_capture import ExplicitOutput
@@ -210,6 +211,101 @@ def _instance_status(row, identity: HyprlandIdentity) -> None:
         _fail("hyprland_scope_instance_status_invalid")
 
 
+def selection_output(name, geometry):
+    """Normalize native selection geometry without bool/int coercion."""
+    if type(geometry) is not dict or set(geometry) != {
+        "x", "y", "width", "height", "pixel_width", "pixel_height", "scale", "transform"
+    }:
+        _fail("hyprland_scope_selection_invalid")
+    scale = geometry["scale"]
+    if type(scale) not in {int, float} or not math.isfinite(scale) or not 0 < scale <= 16:
+        _fail("hyprland_scope_selection_invalid")
+    return ExplicitOutput(
+        name=name,
+        width=_integer(geometry, "pixel_width", 1, 16384),
+        height=_integer(geometry, "pixel_height", 1, 16384),
+        transform=_integer(geometry, "transform", 0, 7),
+        logical_x=_integer(geometry, "x", -(2**30), 2**30),
+        logical_y=_integer(geometry, "y", -(2**30), 2**30),
+        logical_width=_integer(geometry, "width", 1, 16384),
+        logical_height=_integer(geometry, "height", 1, 16384),
+    )
+
+
+def selection_application(identity):
+    """Native selection and snapshot encode the same process differently."""
+    if type(identity) is not dict or set(identity) != {
+        "pid", "uid", "start_ticks", "executable", "exe_device", "exe_inode"
+    }:
+        _fail("hyprland_scope_selection_invalid")
+    executable = _text(identity["executable"])
+    if not executable.startswith("/"):
+        _fail("hyprland_scope_selection_invalid")
+    return {
+        "pid": _integer(identity, "pid", 2, 2**31 - 1),
+        "uid": _integer(identity, "uid", 0, 2**32 - 1),
+        "start_ticks": _integer(identity, "start_ticks", 1, 2**63 - 1),
+        "exe": executable,
+        "exe_identity": [
+            _integer(identity, "exe_device", 1, 2**64 - 1),
+            _integer(identity, "exe_inode", 1, 2**64 - 1),
+        ],
+    }
+
+
+def selection_application_matches(identity, measured):
+    expected = selection_application(identity)
+    return (
+        type(measured) is dict
+        and all(type(measured.get(k)) is int for k in ("pid", "uid", "start_ticks"))
+        and type(measured.get("exe_identity")) is list
+        and all(type(v) is int for v in measured["exe_identity"])
+        and expected == {key: measured.get(key) for key in expected}
+    )
+
+
+@dataclass(frozen=True)
+class HyprlandSelectionProof:
+    """Private immutable handoff, with no sockets, providers or live refs.
+
+    The controller supplies owner/host/turn/TTL/one-use authorization. This
+    value supplies exact native evidence, never public tool input or output.
+    """
+
+    compositor: HyprlandIdentity
+    instance_id: str
+    candidate_id: str
+    output_id: str
+    topology_epoch: int
+    topology_digest: str
+    output: ExplicitOutput
+    scale: float
+    pid: int
+    uid: int
+    start_ticks: int
+    executable: str
+    exe_device: int
+    exe_inode: int
+
+    def candidate(self):
+        return {
+            "output_id": self.output_id,
+            "output_name": self.output.name,
+            "topology_digest": self.topology_digest,
+            "output": {
+                "x": self.output.logical_x, "y": self.output.logical_y,
+                "width": self.output.logical_width, "height": self.output.logical_height,
+                "pixel_width": self.output.width, "pixel_height": self.output.height,
+                "transform": self.output.transform, "scale": self.scale,
+            },
+            "identity": {
+                "pid": self.pid, "uid": self.uid, "start_ticks": self.start_ticks,
+                "executable": self.executable, "exe_device": self.exe_device,
+                "exe_inode": self.exe_inode,
+            },
+        }
+
+
 class HyprlandScopeProvider:
     """Kernel peer/start checks per request; backend pins executable separately."""
 
@@ -232,6 +328,9 @@ class HyprlandScopeProvider:
         self._inventory: dict[str, dict] = {}
         self._inventory_epoch = None
         self._inventory_instance = None
+        self._attested_identity: HyprlandIdentity | None = None
+        self._attested_instance: str | None = None
+        self._selection_imported = False
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -254,6 +353,8 @@ class HyprlandScopeProvider:
                 row = await provider._request({"op": "status"})
                 _instance_status(row, identity)
                 await revalidate(identity, deadline)
+                provider._attested_identity = copy.deepcopy(identity)
+                provider._attested_instance = row["instance_id"]
             return provider
         except BaseException:
             await provider.close()
@@ -480,6 +581,11 @@ class HyprlandScopeProvider:
                 _fail("hyprland_scope_selection_invalid")
             # Native candidate IDs are one-shot authority. Never retain an old
             # cache when a new inventory succeeds.
+            if (
+                getattr(self, "_attested_instance", None) is not None
+                and row["instance_id"] != self._attested_instance
+            ):
+                _fail("hyprland_scope_selection_invalid")
             candidate_ids, private, public = set(), {}, []
             for item in row["candidates"]:
                 if type(item) is not dict or set(item) != {
@@ -547,13 +653,15 @@ class HyprlandScopeProvider:
                 ):
                     _fail("hyprland_scope_selection_invalid")
                 candidate_ids.add(candidate_id)
+                selection_output(output_name, output)
+                selection_application(identity)
                 public.append({"id": candidate_id, "label": label, "output_id": output_id})
                 private[candidate_id] = {
                     "output_id": output_id,
                     "output_name": output_name,
                     "topology_digest": digest,
-                    "output": output,
-                    "identity": identity,
+                    "output": copy.deepcopy(output),
+                    "identity": copy.deepcopy(identity),
                 }
             self._inventory = private
             self._inventory_epoch, self._inventory_instance = (
@@ -566,6 +674,64 @@ class HyprlandScopeProvider:
                 "candidate_epoch": row["topology_epoch"],
                 "candidates": public,
             }
+
+    def export_selection_proof(self, candidate_id):
+        """Export only evidence from this attested, still-open inventory."""
+        candidate = self._inventory.get(candidate_id)
+        if (
+            self._closed or candidate is None or self._attested_identity is None
+            or self._attested_instance != self._inventory_instance
+            or type(self._inventory_instance) is not str
+            or self._inventory_epoch is None
+        ):
+            _fail("hyprland_scope_selection_invalid")
+        native = candidate["identity"]
+        if not selection_application_matches(
+            native, _process_identity(native["pid"], native["uid"])
+        ):
+            _fail("hyprland_scope_selection_invalid")
+        return HyprlandSelectionProof(
+            compositor=copy.deepcopy(self._attested_identity),
+            instance_id=self._inventory_instance,
+            candidate_id=candidate_id,
+            output_id=candidate["output_id"],
+            topology_epoch=self._inventory_epoch,
+            topology_digest=candidate["topology_digest"],
+            output=selection_output(candidate["output_name"], candidate["output"]),
+            scale=float(candidate["output"]["scale"]),
+            **copy.deepcopy(native),
+        )
+
+    def import_selection_proof(self, proof):
+        """Import the original candidate, never refresh or reselect a substitute."""
+        if (
+            type(proof) is not HyprlandSelectionProof or self._closed
+            or self._selection_imported or self._inventory
+            or proof.compositor != self._attested_identity
+            or proof.instance_id != self._attested_instance
+            or type(proof.candidate_id) is not str
+            or not _CANDIDATE_ID.fullmatch(proof.candidate_id)
+            or type(proof.output_id) is not str or not _OUTPUT.fullmatch(proof.output_id)
+            or type(proof.topology_epoch) is not int or proof.topology_epoch < 1
+            or type(proof.topology_digest) is not str
+            or not _DIGEST.fullmatch(proof.topology_digest)
+            or type(proof.output) is not ExplicitOutput
+        ):
+            _fail("hyprland_scope_selection_invalid")
+        candidate = proof.candidate()
+        selection_output(candidate["output_name"], candidate["output"])
+        application = selection_application(candidate["identity"])
+        if (
+            application["uid"] != self.expected_uid
+            or not selection_application_matches(
+                candidate["identity"], _process_identity(application["pid"], application["uid"])
+            )
+        ):
+            _fail("hyprland_scope_selection_invalid")
+        self._selection_imported = True
+        self._inventory = {proof.candidate_id: candidate}
+        self._inventory_epoch = proof.topology_epoch
+        self._inventory_instance = proof.instance_id
 
     async def focus_candidate(self, *, candidate_id, output_id, topology_epoch):
         if (
@@ -587,6 +753,8 @@ class HyprlandScopeProvider:
             ):
                 _fail("hyprland_scope_selection_invalid")
             requested = candidate["identity"]
+            # Ambiguous/cancelled focus is not replayable, even on this provider.
+            self._inventory = {}
             row = await self._request(
                 {
                     "op": "focus_candidate",
@@ -627,6 +795,8 @@ class HyprlandScopeProvider:
             ):
                 _fail("hyprland_scope_selection_invalid")
             identity = row.get("identity")
+            selection_output(row["output_name"], row["output"])
+            selection_application(identity)
             if identity != requested:
                 _fail("hyprland_scope_selection_invalid")
             return {
@@ -656,6 +826,8 @@ class HyprlandScopeProvider:
         # Native focus consumes its candidate map. Fresh inventory gives us a
         # fresh opaque output ID and requires the exact process/output proof.
         await self.inventory_targets()
+        if self._inventory_instance != binding["instance_id"]:
+            _fail("hyprland_scope_selection_invalid")
         for candidate_id, candidate in self._inventory.items():
             if (
                 candidate["output_name"] == binding["output_name"]
@@ -682,6 +854,7 @@ class HyprlandScopeProvider:
     async def close(self):
         async with self._lock:
             self._closed = True
+            self._inventory = {}
 
 
 HyprlandScopeClient = HyprlandScopeProvider

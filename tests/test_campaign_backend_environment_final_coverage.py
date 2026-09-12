@@ -203,12 +203,13 @@ async def test_hyprland_inventory_refuses_unavailable_and_closes_mocked_resource
     provider = SimpleNamespace(closed=False)
 
     async def inventory():
-        return [{"id": "opaque"}]
+        return {"candidate_epoch": 1, "candidates": [{"id": "opaque"}]}
 
     async def close():
         provider.closed = True
 
     provider.inventory_targets, provider.close = inventory, close
+    provider.export_selection_proof = lambda candidate_id: ("private-proof", candidate_id)
     resolved = SimpleNamespace(
         runtime_dir="/run/user/1000", wayland_display="wayland-1", instance_signature="instance",
         pid=42,
@@ -216,5 +217,7 @@ async def test_hyprland_inventory_refuses_unavailable_and_closes_mocked_resource
     monkeypatch.setattr(resolver, "resolve", AsyncMock(return_value=resolved))
     monkeypatch.setattr(hb, "pin_connections", AsyncMock(return_value=(object(), connection)))
     monkeypatch.setattr(hb.HyprlandScopeProvider, "from_identity", AsyncMock(return_value=provider))
-    assert await backend.inventory_targets() == [{"id": "opaque"}]
+    assert await backend.inventory_targets() == {
+        "candidate_epoch": 1, "candidates": [{"id": "opaque"}]
+    }
     assert connection.closed and provider.closed
