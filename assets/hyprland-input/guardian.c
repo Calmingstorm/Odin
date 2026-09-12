@@ -159,6 +159,14 @@ static bool synchronize(struct guardian *g, unsigned timeout_ms) {
 /* Bounded flat JSON reply parser: no duplicate fields, nesting, escapes,
  * overflows, non-boolean ok/armed, or unframed bytes. */
 struct scope_reply { bool ok, armed, have_ok, have_armed, have_keys, have_buttons, have_rejected, release_acknowledged, release_status_v1; uint64_t keys, buttons, rejected; const char *error; };
+/* Shared with scope_exchange, including its terminating NUL. Even an empty
+ * name with the shortest scalar takes four bytes ("":0), plus a comma per
+ * additional field and two braces: n fields need at least 5*n + 1 bytes.
+ * Thus every reply that fits the wire buffer also fits this duplicate index.
+ * Store offsets, not 64-byte name copies: 818 uint16_t entries = 1636 bytes,
+ * only 100 bytes more than the former, accidentally limiting 24-name table. */
+enum { SCOPE_RESPONSE_CAP = 4096, SCOPE_REPLY_MAX_FIELDS = (SCOPE_RESPONSE_CAP - 2) / 5 };
+_Static_assert(SCOPE_RESPONSE_CAP - 1 <= UINT16_MAX, "scope name offsets must fit");
 /* Fixed vocabulary only: never copy tokens, peer prose or application data. */
 static const char *scope_error_code(const char *value) {
     static const char *const codes[] = {
@@ -186,14 +194,25 @@ static bool json_string(const char **p, char *out, size_t cap) {
 }
 static bool parse_reply(const char *p, struct scope_reply *r) {
     memset(r, 0, sizeof *r);
-    char seen[24][64]; unsigned count = 0;
+    const char *response = p;
+    size_t length = 0;
+    while (length < SCOPE_RESPONSE_CAP && response[length]) ++length;
+    if (length == SCOPE_RESPONSE_CAP) return false;
+    uint16_t seen[SCOPE_REPLY_MAX_FIELDS]; unsigned count = 0;
     whitespace(&p); if (*p++ != '{') return false;
     whitespace(&p);
     while (*p != '}') {
         char name[64], value[512];
-        if (count == 24 || !json_string(&p, name, sizeof name)) return false;
-        for (unsigned i = 0; i < count; ++i) if (!strcmp(seen[i], name)) return false;
-        strcpy(seen[count++], name);
+        const char *field = p;
+        if (count == SCOPE_REPLY_MAX_FIELDS || !json_string(&p, name, sizeof name)) return false;
+        size_t name_length = strlen(name);
+        /* Prior names are validated, unescaped slices of this immutable reply.
+         * Include their closing quote in the equality check so prefixes do not
+         * collide. Each prior start precedes this complete name, keeping every
+         * comparison within the bounded reply, even for shorter prior names. */
+        for (unsigned i = 0; i < count; ++i)
+            if (!memcmp(response + seen[i], name, name_length) && response[seen[i] + name_length] == '"') return false;
+        seen[count++] = (uint16_t)(field + 1 - response);
         whitespace(&p); if (*p++ != ':') return false; whitespace(&p);
         bool boolean = false, truth = false, numeric = false, string = false; uint64_t number = 0;
         if (!strncmp(p, "true", 4)) { boolean = truth = true; p += 4; }
@@ -222,7 +241,7 @@ static bool parse_reply(const char *p, struct scope_reply *r) {
 }
 static bool scope_exchange(struct guardian *g, const char *request, struct scope_reply *reply) {
     if (g->scope_fd < 0) return false;
-    size_t length = strlen(request), sent = 0, used = 0; char response[4096];
+    size_t length = strlen(request), sent = 0, used = 0; char response[SCOPE_RESPONSE_CAP];
     /* Only cleanup gets a longer reply budget, after owned ups were submitted.
      * This never grants input or renews the 250 ms compositor scope lease. */
     uint64_t deadline = now_us() + (strstr(request, "\"release_all\"") ? 500000 : 50000);
