@@ -39,6 +39,7 @@ def native_scope(tmp_path_factory):
 struct guardian {
     int scope_fd;
     bool begun;
+    bool arm_definitively_refused;
     uint64_t scope_deadline, lease;
     char scope_token[129], arm_token[129];
     const char *scope_operation, *scope_error, *command_name, *reason;
@@ -47,7 +48,7 @@ struct guardian {
     const char *terminal_cause, *scope_outcome, *release_submission, *release_ack,
                *resource_closure;
     uint64_t rejected;
-    bool input_sent, release_sent, release_acknowledged;
+    bool input_sent, release_sent, release_acknowledged, release_status_v1;
     unsigned input_queued, input_submitted;
     unsigned planned, completed;
 };
@@ -161,9 +162,9 @@ int main(int argc, char **argv) {
         map_command(&g,argv[7]);
         g.input_sent=ok; g.release_sent=!ok; g.release_acknowledged=!ok;
         g.planned=3; g.completed=ok ? 3 : 0;
-        action_receipt(&g,ok ? "action_done" : "action_rejected",
-                       ok ? "completed" : "invalid-command");
-        assert(!g.reason);
+        const char *reason = g.reason ? g.reason : (ok ? "completed" : "invalid-command");
+        action_receipt(&g,ok ? "action_done" : "action_rejected", reason);
+        assert(!g.reason || !strcmp(g.reason,"scope-refused"));
     } else if (!strcmp(argv[1],"receipt-default")) {
         action_receipt(&g,"closed","orderly"); assert(!g.reason);
     } else { assert(!"unknown case"); }
@@ -285,7 +286,9 @@ def test_native_bind_produces_private_typed_receipt(
     assert receipt["diagnostics"] == {
         "phase": "complete" if ok else "release", "steps_planned": 3,
         "steps_completed": 3 if ok else 0, "release": "unknown" if ok else "confirmed",
-        "reason": "completed" if ok else "invalid-command",
+        "reason": ("completed" if ok else
+                   "scope-refused" if scope_outcome == "refused" else
+                   "invalid-command"),
     }
 
 

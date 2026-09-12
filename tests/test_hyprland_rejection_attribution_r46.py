@@ -40,8 +40,9 @@ struct guardian {
     void *display, *pointer, *keyboard, *state;
     bool keys[248], buttons[8], modifiers;
     bool disconnected, release_sent, release_acknowledged, release_status_v1;
+    bool arm_definitively_refused;
     const char *terminal_cause, *scope_outcome, *release_submission, *release_ack;
-    const char *reason, *scope_error;
+    const char *reason, *scope_operation, *scope_error;
     uint64_t rejected;
 };
 struct scope_reply {
@@ -91,6 +92,12 @@ int main(int argc, char **argv) {
     };
     if (counter_mode == 3) fail(&g, "scope-evidence-expired");
     if (counter_mode == 4) fail(&g, "controller-eof");
+    if (counter_mode == 5) {
+        bool first = release_all(&g), second = release_all(&g);
+        printf("%d %d %d %s\n", first, second, g.release_acknowledged,
+               g.release_ack ? g.release_ack : "none");
+        return 0;
+    }
     bool released = release_all(&g);
     printf("%d %s %s %s\n", released, g.reason ? g.reason : "none",
            g.terminal_cause ? g.terminal_cause : "none",
@@ -112,13 +119,13 @@ int main(int argc, char **argv) {
     # Matching count retains valid cleanup acknowledgement and no failure.
     (0, "1 none none none"),
     # Missing evidence is an invalid ACK, not a scope deadline.
-    (1, "1 scope-ack-invalid other scope-ack-invalid"),
+    (1, "0 scope-ack-invalid other scope-ack-invalid"),
     # Changed evidence identifies a rejected guard and maps to scope refusal.
     (2, "1 scope-rejected-input scope_refused scope-rejected-input"),
     # A true pre-existing deadline remains a timeout after matching cleanup.
     (3, "1 scope-evidence-expired scope_timeout none"),
     # Cleanup attribution cannot replace an earlier terminal cause.
-    (4, "1 controller-eof controller_eof scope-ack-invalid"),
+    (4, "0 controller-eof controller_eof scope-ack-invalid"),
 ])
 def test_extracted_release_counter_attribution(attribution_binary, mode, expected):
     result = subprocess.run(
@@ -127,3 +134,11 @@ def test_extracted_release_counter_attribution(attribution_binary, mode, expecte
                                     if k not in {"DISPLAY", "WAYLAND_DISPLAY"}},
     )
     assert result.stdout.strip() == expected
+
+
+def test_repeated_acknowledged_cleanup_stays_acknowledged(attribution_binary):
+    result = subprocess.run(
+        [str(attribution_binary), "5"], check=True, capture_output=True,
+        text=True, timeout=5,
+    )
+    assert result.stdout.strip() == "1 1 1 acknowledged"

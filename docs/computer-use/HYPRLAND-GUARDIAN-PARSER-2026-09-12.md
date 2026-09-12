@@ -104,7 +104,7 @@ guardian or receiver remains running; loopback SSH port 22226 is closed. Offline
 
 QEMU used a closed device policy, only KVM access, hidden host DRM/input paths,
 no host graphics/display sockets, no display backend, no passthrough and no host
-network/module changes. Aaron's same active seat0/tty7/:0 session remained intact.
+network/module changes. The same active seat0/tty7/:0 operator session remained intact.
 No desktop connection/input, Incus mutation, `/opt/odin` access/change, deploy,
 Odin restart or host reboot occurred. Ordinary CPU/RAM/I/O contention is not
 claimed impossible.

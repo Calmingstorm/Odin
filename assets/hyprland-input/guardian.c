@@ -68,6 +68,7 @@ struct guardian {
     struct xkb_state *state;
     bool keys[248], buttons[8], modifiers;
     bool ready, begun, action, input_sent, release_sent, release_acknowledged, release_status_v1;
+    bool arm_definitively_refused;
     bool disconnected, changed, gate_waiting, gate_allowed;
     /* Bounded transport evidence, never receiver or application proof. */
     const char *terminal_cause, *scope_outcome, *release_submission, *release_ack, *resource_closure;
@@ -90,6 +91,7 @@ static const char *cause_for_reason(const char *reason) {
     if (!strcmp(reason, "signal-cancel")) return "signal_cancel";
     if (!strcmp(reason, "scope-evidence-expired") || !strcmp(reason, "lease-expired")) return "scope_timeout";
     if (!strcmp(reason, "scope-rejected-input")) return "scope_refused";
+    if (!strcmp(reason, "scope-refused")) return "scope_refused";
     if (!strcmp(reason, "mapping-changed")) return "mapping_changed";
     if (!strcmp(reason, "invalid-command")) return "invalid_command";
     if (!strcmp(reason, "input-path-lost")) return "wayland_dispatch_failed";
@@ -290,6 +292,7 @@ static bool scope_call(struct guardian *g, const char *request, struct scope_rep
 }
 static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
     g->scope_operation = renew ? "renew" : "arm";
+    if (!renew) g->arm_definitively_refused = false;
     if (!g->scope_token[0]) { g->scope_error = "missing-scope-token"; return false; }
     uint64_t now = now_us();
     if (deadline <= now || deadline - now > 250000) { g->scope_error = "local-deadline-invalid"; return false; }
@@ -301,7 +304,14 @@ static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
     g->scope_token[0] = 0;
     struct scope_reply r = {0};
     if (!scope_call(g, request, &r)) {
-        if (g->scope_outcome && !strcmp(g->scope_outcome, "refused")) g->terminal_cause = "scope_refused";
+        if (g->scope_outcome && !strcmp(g->scope_outcome, "refused")) {
+            g->terminal_cause = "scope_refused";
+            if (!renew) g->arm_definitively_refused = true;
+            /* A complete native refusal is not malformed controller syntax.
+             * Preserve it as the outer terminal reason before command() returns
+             * false and the parser attempts to add invalid-command. */
+            fail(g, "scope-refused");
+        }
         else if (g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) g->terminal_cause = "scope_transport_failed";
         g->scope_error = g->scope_fd < 0 ? "scope-exchange-failed" :
             (r.error ? r.error : "scope-operation-refused");
@@ -671,6 +681,14 @@ static bool release_all(struct guardian *g) {
     g->release_sent=queued && !g->disconnected && wl_display_flush(g->display)>=0;
     g->release_submission = !queued ? "not_attempted" : g->release_sent ? "submitted" : "queued_not_submitted";
     if (g->release_sent) receipt(g,"release_sent","explicit-owned-release");
+    /* Only a complete refused arm proves this guardian never acquired scope.
+     * Ambiguous/malformed/lost arm replies still take the normal bounded
+     * cleanup path because native ownership may have been established. */
+    if (g->arm_definitively_refused) {
+        g->release_acknowledged = false;
+        g->release_ack = "not_attempted";
+        return false;
+    }
     struct scope_reply r = {0}; char id[49], ticks[32], request[192];
     bool tagged = g->release_status_v1 && own_start_ticks(ticks) && command_id(id);
     if (tagged) snprintf(request, sizeof request, "{\"op\":\"release_all\",\"command_id\":\"%s\",\"guardian_start_ticks\":\"%s\"}\n", id, ticks);
@@ -687,19 +705,25 @@ static bool release_all(struct guardian *g) {
         g->scope_outcome = initial_scope_outcome;
     }
     g->release_acknowledged=sync && ack && r.release_acknowledged && r.have_armed && !r.armed && r.have_keys && !r.keys && r.have_buttons && !r.buttons;
-    g->release_ack = g->release_acknowledged ? "acknowledged" :
-        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "refused")) ? "negative" :
-        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) ? "transport_lost" : "invalid_or_unconfirmed";
     /* A cleanup ACK must carry the same rejection counter observed while the
      * action was armed. Missing evidence is an invalid ACK; a changed count
      * identifies a rejected input guard. Neither weakens cleanup proof. */
     if (ack && !r.have_rejected) {
+        g->release_acknowledged = false;
+        g->scope_operation = "release_all";
         g->scope_error = "scope-ack-invalid";
         fail(g,"scope-ack-invalid");
     } else if (ack && r.rejected != g->rejected) {
+        /* The cleanup fields above may still prove no owned input remains.
+         * This operation label attributes only where the changed action
+         * rejection count was detected; it does not erase that cleanup ACK. */
+        g->scope_operation = "release_all";
         g->scope_error = "scope-rejected-input";
         fail(g,"scope-rejected-input");
     }
+    g->release_ack = g->release_acknowledged ? "acknowledged" :
+        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "refused")) ? "negative" :
+        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) ? "transport_lost" : "invalid_or_unconfirmed";
     return g->release_acknowledged;
 }
 static void action_receipt(struct guardian *g,const char *event,const char *reason) {
@@ -771,10 +795,13 @@ static bool command(struct guardian *g,char *line) {
     if (!strncmp(line,"B ",2)) {
         char *rest=line+2;uint64_t ms,deadline;
         if (g->begun||!integer(&rest,&ms,1,2000)||!integer(&rest,&deadline,1,UINT64_MAX)||rest) return false;
+        /* Failed new begins cannot inherit a prior action's cleanup truth. */
+        g->input_sent=g->release_sent=g->release_acknowledged=false;
+        g->release_submission=g->release_ack="not_attempted";
+        g->planned=g->completed=g->input_queued=g->input_submitted=0;
         uint64_t start=now_us();
         if (!scope_bind(g,false,deadline)) return false;
         g->lease=start+ms*1000;g->scope_deadline=deadline;g->begun=true;
-        g->input_sent=g->release_sent=g->release_acknowledged=false;g->planned=g->completed=0;
         receipt(g,"begun","nonrenewable-lease");return true;
     }
     if (!strncmp(line,"S ",2)) {

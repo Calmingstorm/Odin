@@ -41,6 +41,7 @@ from .policy import (
     observation_input,
     owned,
 )
+from .runtime.hyprland_scope import HyprlandGeometryUnsettled, HyprlandScopeFailure
 from .store import FRAME_MAX_PIXELS, ComputerStore, canonical_hash
 from .task_context import TaskContext, context_arguments
 
@@ -413,6 +414,69 @@ class ComputerController:
             _cancel_owned(task)
 
     @staticmethod
+    def _hyprland_continuity_failure(live, error):
+        """Missing native continuity is not proof of a restart, or a new grant."""
+        from .runtime.hyprland_errors import HyprlandDiagnosticError
+
+        return (
+            live.capabilities is not None
+            and live.capabilities.backend == "hyprland"
+            and (
+                isinstance(error, HyprlandDiagnosticError)
+                or isinstance(error, HyprlandScopeFailure)
+                and not isinstance(error, HyprlandGeometryUnsettled)
+                or isinstance(error, (TimeoutError, ConnectionError))
+                or isinstance(error, ComputerError) and error.code in {
+                    "hyprland_session_revoked", "hyprland_provider_owner_changed",
+                    "hyprland_explicit_output_changed", "hyprland_peer_unavailable",
+                    "hyprland_process_changed", "hyprland_peer_mismatch",
+                }
+            )
+        )
+
+    async def _quarantine_hyprland(self, grant, live, *, phase):
+        """Durably preserve task intent, never native authority or replay rights."""
+        self._fence(grant.session_id)
+        self._selection_bindings.clear()
+        if live.task_context is not None:
+            live.task_context.invalidate(phase)
+        # Surface handles, output ids, observations and application identity
+        # cannot cross this boundary. Descriptive hints are not attestations.
+        snapshot = {
+            "generation": grant.generation,
+            "consent_generation": grant.consent_generation,
+            "task_hints": (dict(live.task_context.hints) if live.task_context else {}),
+            "authorizes_input": False,
+        }
+        try:
+            pending = self.store.get_recovery_pending(grant.session_id)
+            if pending is None or pending.phase not in {
+                "unknown_release", "native_continuity_lost"
+            }:
+                self.store.begin_hyprland_reconciliation(
+                    grant, phase=phase, reason=phase, old_grant=snapshot,
+                )
+        finally:
+            # Failed persistence still requires native revocation. Cleanup
+            # cannot promote unknown release into permission for another task.
+            await self._stop(grant.session_id, "quarantined")
+
+    def _pending_reconciliation(self, grant):
+        pending = self.store.get_recovery_pending(grant.session_id)
+        if pending is None or pending.phase not in {"unknown_release", "native_continuity_lost"}:
+            return None
+        return {
+            "phase": pending.phase,
+            "reason": pending.reason,
+            "required": grant.state not in {"closed", "cancelled"},
+            "task_hints": deepcopy(pending.old_grant.get("task_hints", {})),
+            "authorizes_input": False,
+            "replay_allowed": False,
+            "next_action": "operator_reconcile_then_fresh_target_and_new_session",
+            "receiver_release_verified": False,
+        }
+
+    @staticmethod
     def _recovery_enabled(live):
         """A narrow Hyprland seam, never a generic callback binder."""
         backend = live.backend
@@ -551,6 +615,11 @@ class ComputerController:
         self._fence(sid)
         persistence_failed = False
         try:
+            pending = self.store.get_recovery_pending(sid)
+            if pending is not None:
+                # Unknown/future phases cannot opt out of reconciliation by
+                # failing an allowlist test. Only an explicit operator resolves.
+                state = "quarantined"
             grant = self.store.set_state(sid, "quarantined", revoke=True)
         except Exception:
             # Disk/SQLite failure is not permission to leave native authority
@@ -688,6 +757,11 @@ class ComputerController:
         )
         if profile is not None:
             result["application_profile"] = profile
+        pending = self._pending_reconciliation(grant)
+        if pending is not None:
+            result["native_reconciliation"] = pending
+            result.update(input_supported=False, input_readiness="inactive",
+                          input_blocker="fresh_target_and_renewed_consent_required")
         if live is not None:
             from .admission import InputAdmission
 
@@ -1088,7 +1162,12 @@ class ComputerController:
                 else live.backend.observe
             )
             raw = await _bounded(capture(**request), 5)
-        except ComputerError as exc:
+        except (ComputerError, TimeoutError, ConnectionError, HyprlandScopeFailure) as exc:
+            if self._hyprland_continuity_failure(live, exc):
+                await self._quarantine_hyprland(grant, live, phase="native_continuity_lost")
+                raise ComputerError("hyprland_fresh_target_required") from None
+            if not isinstance(exc, ComputerError):
+                raise
             if exc.code in {
                 "display_asleep",
                 "topology_changed",
@@ -1899,12 +1978,18 @@ class ComputerController:
                     # Receipt-storage failure must not skip required cleanup or
                     # turn a pending reservation into permission to replay.
                     if not known_release or isinstance(exc, asyncio.CancelledError):
-                        await self._stop(grant.session_id, "cancelled")
+                        if not known_release and live.capabilities.backend == "hyprland":
+                            await self._quarantine_hyprland(grant, live, phase="unknown_release")
+                        else:
+                            await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
                 return self.store.receipt(grant.session_id, inp["action_id"], payload_hash)
             if receipt["status"] == "unknown":
-                await self._stop(grant.session_id, "cancelled")
+                if live.capabilities.backend == "hyprland":
+                    await self._quarantine_hyprland(grant, live, phase="unknown_release")
+                else:
+                    await self._stop(grant.session_id, "cancelled")
             elif next_observation is not None:
                 return {**receipt, "next_observation": next_observation}
             return receipt

@@ -35,7 +35,7 @@ def test_non_schema_native_data_is_not_evidence(row):
 @pytest.mark.parametrize("command", ["none", "begin", "renew", "bind", "select",
                                      "pixel-permit", "action"])
 def test_all_native_command_enums_preserve_bounded_failure(command):
-    for operation in ("none", "arm", "renew"):
+    for operation in ("none", "arm", "renew", "release_all"):
         for error in module._SCOPE_ERRORS:
             detail = {"command": command, "scope_operation": operation, "scope_error": error}
             assert module.native_failure({"native_failure": detail}) == detail

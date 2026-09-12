@@ -2,6 +2,7 @@
 
 import hashlib
 import json
+import math
 import os
 import re
 import sqlite3
@@ -11,6 +12,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from typing import cast
 
 from .models import ComputerError, RequestContext, SessionGrant
 from .policy import MAX_TASK_SECONDS
@@ -134,8 +136,16 @@ class ComputerStore:
         if type(version) is not int or not 0 <= version <= STORE_SCHEMA_VERSION:
             raise ComputerProvisioningError("storage_schema_unsupported")
         if version == STORE_SCHEMA_VERSION:
-            self.db.execute("DROP TABLE IF EXISTS restrictions")
-            self._validate_current_schema()
+            with self.lock:
+                self.db.execute("BEGIN IMMEDIATE")
+                try:
+                    self._validate_current_schema(allow_obsolete_restrictions=True)
+                    self.db.execute("DROP TABLE IF EXISTS restrictions")
+                    self._validate_current_schema()
+                    self.db.execute("COMMIT")
+                except BaseException:
+                    self.db.execute("ROLLBACK")
+                    raise
             self.db.execute("PRAGMA journal_mode=WAL")
             self.db.execute("PRAGMA synchronous=FULL")
             return
@@ -203,15 +213,172 @@ class ComputerStore:
     def _validate_base_schema(self) -> None:
         required = self._required_columns()
         required["sessions"] -= {"consent_generation", "platform", "environment"}
-        self._validate_tables(required)
+        self._validate_tables(required, allow_session_upgrade_columns=True)
+        found_tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
+            )
+        }
+        permitted_tables = {frozenset(required), frozenset(set(required) | {"restrictions"})}
+        if frozenset(found_tables) not in permitted_tables:
+            raise ComputerProvisioningError("storage_schema_unsupported")
+        if "restrictions" in found_tables:
+            restrictions_shape = tuple(
+                (row[1], row[2], row[3], row[4], row[5])
+                for row in self.db.execute("PRAGMA table_info(restrictions)")
+            )
+            if restrictions_shape != (
+                ("owner_id", "TEXT", 1, None, 1),
+                ("channel_id", "TEXT", 1, None, 2),
+                ("turn_id", "TEXT", 1, None, 0),
+                ("created_at", "REAL", 1, None, 0),
+            ):
+                raise ComputerProvisioningError("storage_schema_unsupported")
+        if self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view') LIMIT 1"
+        ).fetchone():
+            raise ComputerProvisioningError("storage_schema_unsupported")
 
-    def _validate_tables(self, required: dict[str, set[str]]) -> None:
+        indexes = {
+            row[1]: (
+                row[2],
+                row[4],
+                tuple(
+                    (detail[1], detail[2], detail[3], detail[4], detail[5])
+                    for detail in self.db.execute(f"PRAGMA index_xinfo({row[1]})")
+                ),
+            )
+            for table in required
+            for row in self.db.execute(f"PRAGMA index_list({table})")
+            if not row[1].startswith("sqlite_autoindex_")
+        }
+        expected_index = (
+            1,
+            1,
+            ((-2, None, 0, "BINARY", 1), (-1, None, 0, "BINARY", 0)),
+        )
+        index_sql = self.db.execute(
+            "SELECT sql FROM sqlite_master WHERE type='index' AND name='single_active_computer'"
+        ).fetchone()
+        normalized_index_sql = " ".join(index_sql[0].split()) if index_sql and index_sql[0] else ""
+        expected_index_sql = (
+            "CREATE UNIQUE INDEX single_active_computer ON sessions ((1)) "
+            "WHERE state IN ('starting','active','paused','quarantined')"
+        )
+        if (
+            indexes != {"single_active_computer": expected_index}
+            or normalized_index_sql != expected_index_sql
+        ):
+            raise ComputerProvisioningError("storage_schema_unsupported")
+
+    @staticmethod
+    def _historic_schema_shapes() -> dict[str, tuple[tuple[str, str, int, str | None, int], ...]]:
+        """Exact schemas emitted before the first versioned computer-store migration."""
+        return {
+            "sessions": (
+                ("session_id", "TEXT", 0, None, 1),
+                ("owner_id", "TEXT", 1, None, 0),
+                ("channel_id", "TEXT", 1, None, 0),
+                ("turn_id", "TEXT", 1, None, 0),
+                ("host_id", "TEXT", 1, None, 0),
+                ("generation", "INTEGER", 1, None, 0),
+                ("state", "TEXT", 1, None, 0),
+                ("app", "TEXT", 1, None, 0),
+                ("created_at", "REAL", 1, None, 0),
+                ("expires_at", "REAL", 1, None, 0),
+                ("actions", "INTEGER", 1, "0", 0),
+            ),
+            "receipts": (
+                ("session_id", "TEXT", 1, None, 1),
+                ("action_id", "TEXT", 1, None, 2),
+                ("payload_hash", "TEXT", 1, None, 0),
+                ("status", "TEXT", 1, None, 0),
+                ("result", "TEXT", 1, None, 0),
+            ),
+            "session_cleanup": (
+                ("session_id", "TEXT", 0, None, 1),
+                ("result", "TEXT", 1, None, 0),
+            ),
+            "session_runtime": (
+                ("session_id", "TEXT", 0, None, 1),
+                ("descriptor", "TEXT", 1, None, 0),
+            ),
+            "session_recovery": (
+                ("session_id", "TEXT", 0, None, 1),
+                ("result", "TEXT", 1, None, 0),
+            ),
+            "evidence": (
+                ("evidence_id", "TEXT", 0, None, 1),
+                ("session_id", "TEXT", 1, None, 0),
+                ("name", "TEXT", 1, None, 0),
+                ("kind", "TEXT", 1, None, 0),
+                ("size", "INTEGER", 1, None, 0),
+                ("digest", "TEXT", 1, None, 0),
+                ("device", "INTEGER", 1, None, 0),
+                ("inode", "INTEGER", 1, None, 0),
+                ("expires_at", "REAL", 1, None, 0),
+            ),
+            "session_backends": (
+                ("session_id", "TEXT", 0, None, 1),
+                ("backend", "TEXT", 1, None, 0),
+            ),
+            "session_output_grants": (
+                ("grant_id", "INTEGER", 0, None, 1),
+                ("session_id", "TEXT", 1, None, 0),
+                ("generation", "INTEGER", 1, None, 0),
+                ("consent_generation", "INTEGER", 1, None, 0),
+                ("output_name", "TEXT", 1, None, 0),
+                ("source_id", "TEXT", 1, None, 0),
+                ("application_identity", "TEXT", 1, None, 0),
+                ("created_at", "REAL", 1, None, 0),
+                ("parent_grant_id", "INTEGER", 0, None, 0),
+            ),
+            "recovery_pending": (
+                ("session_id", "TEXT", 0, None, 1),
+                ("recovery_generation", "INTEGER", 1, None, 0),
+                ("grant_generation", "INTEGER", 1, None, 0),
+                ("stop_epoch", "INTEGER", 1, None, 0),
+                ("phase", "TEXT", 1, None, 0),
+                ("reason", "TEXT", 1, None, 0),
+                ("attempt", "INTEGER", 1, None, 0),
+                ("next_retry_at", "REAL", 0, None, 0),
+                ("old_grant", "TEXT", 1, None, 0),
+                ("candidate_epoch", "TEXT", 0, None, 0),
+            ),
+        }
+
+    def _validate_tables(
+        self,
+        required: dict[str, set[str]],
+        *,
+        allow_session_upgrade_columns: bool = False,
+    ) -> None:
+        historic = self._historic_schema_shapes()
+        upgrade_columns = {
+            "consent_generation": ("consent_generation", "INTEGER", 1, "1", 0),
+            "platform": ("platform", "TEXT", 1, "'x11'", 0),
+            "environment": ("environment", "TEXT", 1, "'isolated'", 0),
+        }
         for table, columns in required.items():
-            found = {row[1] for row in self.db.execute(f"PRAGMA table_info({table})")}
+            rows = self.db.execute(f"PRAGMA table_info({table})").fetchall()
+            shape = tuple((row[1], row[2], row[3], row[4], row[5]) for row in rows)
+            expected = historic.get(table)
+            if table == "sessions" and expected is not None:
+                upgraded = expected + tuple(upgrade_columns.values())
+                if allow_session_upgrade_columns:
+                    if shape not in {expected, upgraded}:
+                        raise ComputerProvisioningError("storage_schema_unsupported")
+                    expected = shape
+                else:
+                    expected = upgraded
+            if expected is not None and shape != expected:
+                raise ComputerProvisioningError("storage_schema_unsupported")
+            found = {row[1] for row in rows}
             if not columns <= found:
                 raise ComputerProvisioningError("storage_schema_unsupported")
 
-    def _validate_current_schema(self) -> None:
+    def _validate_current_schema(self, *, allow_obsolete_restrictions: bool = False) -> None:
         """Refuse partial current schemas rather than repairing durable state."""
         required = self._required_columns()
         required.update({
@@ -241,16 +408,183 @@ class ComputerStore:
             },
         })
         self._validate_tables(required)
-        indexes = {
-            row[1]: tuple(
-                index_row[2] for index_row in self.db.execute(f"PRAGMA index_info({row[1]})")
+        expected_tables = set(required)
+        found_tables = {
+            row[0]
+            for row in self.db.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'"
             )
-            for row in self.db.execute("PRAGMA index_list(session_output_grants)")
         }
-        if indexes.get("session_output_grants_lineage") != (
-            "session_id", "generation", "consent_generation"
-        ):
+        permitted_tables = {frozenset(expected_tables)}
+        if allow_obsolete_restrictions:
+            permitted_tables.add(frozenset(expected_tables | {"restrictions"}))
+        if frozenset(found_tables) not in permitted_tables:
             raise ComputerProvisioningError("storage_schema_unsupported")
+        if "restrictions" in found_tables:
+            restrictions_shape = tuple(
+                (row[1], row[2], row[3], row[4], row[5])
+                for row in self.db.execute("PRAGMA table_info(restrictions)")
+            )
+            if restrictions_shape != (
+                ("owner_id", "TEXT", 1, None, 1),
+                ("channel_id", "TEXT", 1, None, 2),
+                ("turn_id", "TEXT", 1, None, 0),
+                ("created_at", "REAL", 1, None, 0),
+            ):
+                raise ComputerProvisioningError("storage_schema_unsupported")
+        if self.db.execute(
+            "SELECT 1 FROM sqlite_master WHERE type IN ('trigger','view') LIMIT 1"
+        ).fetchone():
+            raise ComputerProvisioningError("storage_schema_unsupported")
+        indexes = {
+            row[1]: (
+                row[2],
+                row[4],
+                tuple(
+                    index_row[2]
+                    for index_row in self.db.execute(f"PRAGMA index_info({row[1]})")
+                ),
+            )
+            for table in required
+            for row in self.db.execute(f"PRAGMA index_list({table})")
+            if not row[1].startswith("sqlite_autoindex_")
+        }
+        expected_indexes = {
+            "single_active_computer": (1, 1, (None,)),
+            "session_output_grants_lineage": (
+                1,
+                0,
+                ("session_id", "generation", "consent_generation"),
+            ),
+            "session_output_grants_session": (0, 0, ("session_id", "grant_id")),
+        }
+        index_sql = {
+            row[0]: " ".join(row[1].split())
+            for row in self.db.execute(
+                "SELECT name,sql FROM sqlite_master WHERE type='index' "
+                "AND name NOT LIKE 'sqlite_autoindex_%'"
+            )
+        }
+        expected_index_sql = {
+            "single_active_computer": (
+                "CREATE UNIQUE INDEX single_active_computer ON sessions ((1)) "
+                "WHERE state IN ('starting','active','paused','quarantined')"
+            ),
+            "session_output_grants_lineage": (
+                "CREATE UNIQUE INDEX session_output_grants_lineage ON "
+                "session_output_grants(session_id, generation, consent_generation)"
+            ),
+            "session_output_grants_session": (
+                "CREATE INDEX session_output_grants_session ON "
+                "session_output_grants(session_id, grant_id DESC)"
+            ),
+        }
+        if indexes != expected_indexes or index_sql != expected_index_sql:
+            raise ComputerProvisioningError("storage_schema_unsupported")
+        expected_foreign_keys = {
+            "session_backends": {
+                ("sessions", "session_id", "session_id", "NO ACTION", "NO ACTION", "NONE")
+            },
+            "session_output_grants": {
+                (
+                    "sessions", "session_id", "session_id", "NO ACTION", "NO ACTION", "NONE"
+                ),
+                (
+                    "session_output_grants",
+                    "parent_grant_id",
+                    "grant_id",
+                    "NO ACTION",
+                    "NO ACTION",
+                    "NONE",
+                ),
+            },
+            "recovery_pending": {
+                ("sessions", "session_id", "session_id", "NO ACTION", "NO ACTION", "NONE")
+            },
+        }
+        for table, expected in expected_foreign_keys.items():
+            found = {
+                (row[2], row[3], row[4], row[5], row[6], row[7])
+                for row in self.db.execute(f"PRAGMA foreign_key_list({table})")
+            }
+            if found != expected:
+                raise ComputerProvisioningError("storage_schema_unsupported")
+        if self.db.execute("PRAGMA foreign_key_check").fetchone() is not None:
+            raise ComputerProvisioningError("storage_schema_unsupported")
+        for row in self.db.execute("SELECT * FROM recovery_pending"):
+            try:
+                pending = self._recovery_pending_row(row)
+                session = self.db.execute(
+                    "SELECT generation,consent_generation,state,platform,environment "
+                    "FROM sessions WHERE session_id=?",
+                    (pending.session_id,),
+                ).fetchone()
+                if session is None:
+                    raise ComputerError("invalid_recovery_pending")
+                if pending.phase in {
+                    "hyprland_handoff_pending", "native_continuity_lost", "unknown_release"
+                }:
+                    backend = self.db.execute(
+                        "SELECT backend FROM session_backends WHERE session_id=?",
+                        (pending.session_id,),
+                    ).fetchone()
+                    if (
+                        session["platform"] != "wayland"
+                        or session["environment"] != "existing_session"
+                        or backend is None
+                        or backend["backend"] != "hyprland"
+                    ):
+                        raise ComputerError("invalid_recovery_pending")
+                if pending.phase == "hyprland_handoff_pending":
+                    valid = (
+                        session["state"] == "paused"
+                        and pending.recovery_generation == session["generation"]
+                        and pending.grant_generation == session["generation"]
+                    )
+                elif pending.phase in {"native_continuity_lost", "unknown_release"}:
+                    fenced_generation = cast(int, pending.old_grant["generation"]) + 1
+                    fenced_consent_generation = (
+                        cast(int, pending.old_grant["consent_generation"]) + 1
+                    )
+                    lineage_advance = session["generation"] - fenced_generation
+                    resolution_row = self.db.execute(
+                        "SELECT result FROM session_recovery WHERE session_id=?",
+                        (pending.session_id,),
+                    ).fetchone()
+                    try:
+                        resolution = json.loads(resolution_row[0]) if resolution_row else None
+                    except (TypeError, ValueError):
+                        resolution = None
+                    resolved = (
+                        type(resolution) is dict
+                        and (
+                            resolution.get("status") == "absence_verified"
+                            and resolution.get("complete") is True
+                            or resolution.get("status") == "operator_acknowledged_unverified"
+                            and resolution.get("complete") is False
+                        )
+                    )
+                    valid = (
+                        (
+                            session["state"] == "quarantined"
+                            or session["state"] == "closed" and resolved
+                        )
+                        and pending.recovery_generation == fenced_generation
+                        and pending.grant_generation == fenced_generation
+                        and lineage_advance >= 0
+                        and session["consent_generation"] - fenced_consent_generation
+                        == lineage_advance
+                    )
+                else:
+                    valid = (
+                        session["state"] in {"starting", "active"}
+                        and pending.grant_generation == session["generation"]
+                        and pending.recovery_generation >= session["generation"]
+                    )
+                if not valid:
+                    raise ComputerError("invalid_recovery_pending")
+            except ComputerError as exc:
+                raise ComputerProvisioningError("storage_schema_unsupported") from exc
 
     def _migrate_schema(self) -> None:
         """Install the one shipped additive schema over the prior unversioned store."""
@@ -345,17 +679,116 @@ class ComputerStore:
 
     @staticmethod
     def _recovery_pending_row(row: sqlite3.Row) -> RecoveryPending:
+        try:
+            old_grant = json.loads(row["old_grant"])
+        except (TypeError, ValueError) as exc:
+            raise ComputerError("invalid_recovery_pending") from exc
+        phase = row["phase"]
+        reason = row["reason"]
+        integer_values = (
+            row["recovery_generation"],
+            row["grant_generation"],
+            row["stop_epoch"],
+            row["attempt"],
+        )
+        next_retry = row["next_retry_at"]
+        candidate = row["candidate_epoch"]
+        scalars_valid = (
+            type(row["session_id"]) is str
+            and bool(row["session_id"])
+            and all(type(value) is int for value in integer_values)
+            and row["recovery_generation"] >= 1
+            and row["grant_generation"] >= 1
+            and row["stop_epoch"] >= 0
+            and row["attempt"] >= 0
+            and (
+                next_retry is None
+                or type(next_retry) in {int, float}
+                and math.isfinite(next_retry)
+            )
+            and (candidate is None or type(candidate) is str and bool(candidate))
+        )
+        if phase in {"native_continuity_lost", "unknown_release"}:
+            valid = (
+                reason == phase
+                and ComputerStore._reconciliation_snapshot_valid(old_grant)
+                and row["stop_epoch"] >= 1
+                and row["attempt"] == 0
+                and next_retry is None
+                and candidate is None
+            )
+        elif phase == "hyprland_handoff_pending":
+            valid = (
+                reason == "no_input_stale_output"
+                and type(old_grant) is dict
+                and set(old_grant)
+                == {
+                    "grant_id",
+                    "generation",
+                    "consent_generation",
+                    "output_name",
+                    "source_id",
+                    "application_identity",
+                }
+                and type(old_grant.get("grant_id")) is int
+                and old_grant["grant_id"] >= 1
+                and type(old_grant.get("generation")) is int
+                and old_grant["generation"] >= 1
+                and type(old_grant.get("consent_generation")) is int
+                and old_grant["consent_generation"] >= 1
+                and row["attempt"] >= 1
+                and next_retry is None
+                and candidate is None
+            )
+        elif phase in {"probe", "retry"}:
+            valid = (
+                reason == "lost"
+                and type(old_grant) is dict
+                and set(old_grant) == {"id"}
+                and type(old_grant.get("id")) is int
+                and old_grant["id"] >= 1
+                and ((phase == "probe" and row["attempt"] == 0) or row["attempt"] >= 1)
+            )
+        else:
+            valid = False
+        if not scalars_valid or not valid:
+            raise ComputerError("invalid_recovery_pending")
         return RecoveryPending(
             row["session_id"],
             row["recovery_generation"],
             row["grant_generation"],
             row["stop_epoch"],
-            row["phase"],
-            row["reason"],
+            phase,
+            reason,
             row["attempt"],
             row["next_retry_at"],
-            json.loads(row["old_grant"]),
+            old_grant,
             row["candidate_epoch"],
+        )
+
+    @staticmethod
+    def _reconciliation_snapshot_valid(snapshot: object) -> bool:
+        if (
+            type(snapshot) is not dict
+            or set(snapshot)
+            != {"generation", "consent_generation", "task_hints", "authorizes_input"}
+            or type(snapshot.get("generation")) is not int
+            or snapshot["generation"] < 1
+            or type(snapshot.get("consent_generation")) is not int
+            or snapshot["consent_generation"] < 1
+            or type(snapshot.get("task_hints")) is not dict
+            or snapshot.get("authorizes_input") is not False
+        ):
+            return False
+        hints = snapshot["task_hints"]
+        return not set(hints) - {"goal", "tool", "color", "brush"} and not any(
+            type(value) is not str
+            or not 1 <= len(value) <= 160
+            or any(
+                ord(character) < 32 or 0xD800 <= ord(character) <= 0xDFFF
+                for character in value
+            )
+            for value in hints.values()
         )
 
     def record_hyprland_output_grant(
@@ -634,6 +1067,21 @@ class ComputerStore:
             raise ComputerError("invalid_recovery_pending") from exc
         if type(old_grant) is not dict or not old_grant or len(old.encode()) > 16384:
             raise ComputerError("invalid_recovery_pending")
+        candidate = {
+            "session_id": grant.session_id,
+            "recovery_generation": recovery_generation,
+            "grant_generation": grant.generation,
+            "stop_epoch": stop_epoch,
+            "phase": phase,
+            "reason": reason,
+            "attempt": attempt,
+            "next_retry_at": next_retry_at,
+            "old_grant": old,
+            "candidate_epoch": candidate_epoch,
+        }
+        # Validate the exact durable representation before opening a transaction.
+        # A typed API error after INSERT OR REPLACE would otherwise commit poison.
+        self._recovery_pending_row(cast(sqlite3.Row, candidate))
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -685,6 +1133,90 @@ class ComputerStore:
                 self.db.execute("ROLLBACK")
                 raise
         return self._recovery_pending_row(row)
+
+    def begin_hyprland_reconciliation(
+        self,
+        grant: SessionGrant,
+        *,
+        phase: str,
+        reason: str,
+        old_grant: dict,
+    ) -> SessionGrant:
+        """Atomically fence native uncertainty and retain its bounded recovery state."""
+        if phase not in {"native_continuity_lost", "unknown_release"} or reason != phase:
+            raise ComputerError("invalid_recovery_pending")
+        if (
+            not self._reconciliation_snapshot_valid(old_grant)
+            or old_grant.get("generation") != grant.generation
+            or old_grant.get("consent_generation") != grant.consent_generation
+        ):
+            raise ComputerError("invalid_recovery_pending")
+        try:
+            old = json.dumps(old_grant, sort_keys=True, separators=(",", ":"), allow_nan=False)
+        except (TypeError, ValueError) as exc:
+            raise ComputerError("invalid_recovery_pending") from exc
+        if len(old.encode()) > 16384:
+            raise ComputerError("invalid_recovery_pending")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.db.execute(
+                    "SELECT * FROM sessions WHERE session_id=?", (grant.session_id,)
+                ).fetchone()
+                backend = self.db.execute(
+                    "SELECT 1 FROM session_backends WHERE session_id=? AND backend='hyprland'",
+                    (grant.session_id,),
+                ).fetchone()
+                if (
+                    current is None
+                    or current["generation"] != grant.generation
+                    or current["consent_generation"] != grant.consent_generation
+                    or current["state"] not in {"starting", "active", "paused"}
+                    or current["platform"] != "wayland"
+                    or current["environment"] != "existing_session"
+                    or backend is None
+                ):
+                    raise ComputerError("grant_revoked")
+                existing = self.db.execute(
+                    "SELECT stop_epoch FROM recovery_pending WHERE session_id=?",
+                    (grant.session_id,),
+                ).fetchone()
+                generation = grant.generation + 1
+                stop_epoch = existing["stop_epoch"] + 1 if existing is not None else 1
+                self.db.execute(
+                    "INSERT OR REPLACE INTO recovery_pending VALUES (?,?,?,?,?,?,?,?,?,?)",
+                    (
+                        grant.session_id,
+                        generation,
+                        generation,
+                        stop_epoch,
+                        phase,
+                        reason,
+                        0,
+                        None,
+                        old,
+                        None,
+                    ),
+                )
+                changed = self.db.execute(
+                    "UPDATE sessions SET state='quarantined',generation=?,consent_generation=? "
+                    "WHERE session_id=? AND generation=? AND consent_generation=? "
+                    "AND state IN ('starting','active','paused')",
+                    (
+                        generation,
+                        grant.consent_generation + 1,
+                        grant.session_id,
+                        grant.generation,
+                        grant.consent_generation,
+                    ),
+                ).rowcount
+                if not changed:
+                    raise ComputerError("grant_revoked")
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return self.get_session(grant.session_id)
 
     def get_recovery_pending(self, session_id: str) -> RecoveryPending | None:
         with self.lock:

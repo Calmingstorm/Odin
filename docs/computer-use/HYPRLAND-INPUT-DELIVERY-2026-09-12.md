@@ -105,7 +105,7 @@ The fixed corpus exited **0**, with all three existing cases passing:
 
 Final companion counters: `accepted=4`, `rejected=0`, no owned keys/buttons,
 unarmed, `failed=false`, release acknowledged. These are guest observations,
-not claims about Aaron's workstation.
+not claims about the operator's workstation.
 
 Guest-tested source SHA-256:
 
@@ -145,12 +145,12 @@ Adjacent harness/receipt issues, reported rather than fixed:
 QEMU: six vCPUs, 8 GiB guest RAM, 11 GiB cgroup cap, CPU quota six cores,
 nice 10, idle I/O, plain `virtio-vga,blob=false`, `-display none`. Device policy
 allows KVM, not host DRM/input; namespaces hide host DRM/input, desktop sockets,
-Aaron's home and the live install. Runtime FD inventory had no host DRM/input
+the operator's home and the live install. Runtime FD inventory had no host DRM/input
 descriptors. No host graphics backend, passthrough, module, network, session,
 Incus, or live-install change was made.
 
 The guest compositor, receivers, guardians, and VM are stopped. Loopback SSH
 forward is closed. Offline `qemu-img check` found no errors. Lab allocation was
-4.5 GiB (4,774,379,520 bytes before final reports). Aaron's original c1 session
+4.5 GiB (4,774,379,520 bytes before final reports). The original operator c1 session
 remained active on seat0/tty7/:0, leader 1798. `odin.service` remained active with
 `NRestarts=0`. `/opt/odin` was not accessed or modified by this work.

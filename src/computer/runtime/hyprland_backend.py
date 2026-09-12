@@ -352,7 +352,13 @@ class HyprlandRuntimeBackend:
         )
 
     async def inventory_targets(self):
-        """Pre-grant native inventory. No capture, guardian, or input is started."""
+        """Prepare the pinned companion, then enumerate pre-grant native targets.
+
+        Inventory is an owner-authorized task, not a passive status request.  A
+        managed companion consequently has to be ready before its scope endpoint
+        can be used to enumerate a first selectable target.  This path still
+        does not create a guardian, focus a candidate, or grant input authority.
+        """
         if (
             not self.enabled
             or self._started
@@ -362,23 +368,34 @@ class HyprlandRuntimeBackend:
             raise ComputerError("target_inventory_unavailable")
         from .hyprland_discovery import HyprlandDiscoveryPolicy, HyprlandDiscoveryResolver
 
+        connection = provider = None
+        # A stale selection proof must never survive a failed preparation or a
+        # changed inventory.  The controller keeps its own bounded handoff, but
+        # this backend must not export an earlier candidate while it is alive.
+        self._selection_proofs.clear()
+        completed = False
+        # Resolution failures retain their existing public error semantics.  It
+        # has not yet reached an authenticated compositor or native endpoint.
         resolved = await HyprlandDiscoveryResolver(
             HyprlandDiscoveryPolicy(
                 self.config.expected_uid, self.config.runtime_dir, self.config.compositor_trust
             )
         ).resolve()
-        connection = provider = None
         try:
-            identity, connection = await pin_connections(
-                wayland_path=resolved.runtime_dir + "/" + resolved.wayland_display,
-                ipc_path=resolved.runtime_dir
+            ipc_path = (
+                resolved.runtime_dir
                 + "/hypr/"
                 + resolved.instance_signature
-                + "/.socket.sock",
+                + "/.socket.sock"
+            )
+            identity, connection = await pin_connections(
+                wayland_path=resolved.runtime_dir + "/" + resolved.wayland_display,
+                ipc_path=ipc_path,
                 expected_pid=resolved.pid,
                 expected_uid=self.config.expected_uid,
                 trust=self.config.compositor_trust,
             )
+            await self._prepare_plugin(identity, ipc_path=ipc_path)
             provider = await HyprlandScopeProvider.from_identity(
                 identity=identity, runtime_dir=resolved.runtime_dir
             )
@@ -387,6 +404,7 @@ class HyprlandRuntimeBackend:
                 candidate["id"]: provider.export_selection_proof(candidate["id"])
                 for candidate in result["candidates"]
             }
+            completed = True
             return result
         except ComputerError:
             raise
@@ -397,6 +415,40 @@ class HyprlandRuntimeBackend:
                 await provider.close()
             if connection is not None:
                 connection.close()
+            if not completed:
+                self._selection_proofs.clear()
+
+    async def _prepare_plugin(self, identity: HyprlandIdentity, *, ipc_path: str) -> None:
+        """Make the approved plugin ready for one already pinned compositor.
+
+        This deliberately accepts the identity returned by ``pin_connections``
+        rather than discovering or reconnecting an ambient compositor.  Callers
+        must do this before constructing a scope provider or any input path.
+        """
+        if not self.config.managed_activation:
+            return
+        from .hyprland_plugin import (
+            HyprlandPluginError,
+            HyprlandPluginIPC,
+            ManagedHyprlandPlugin,
+            ProcMappedPluginVerifier,
+            read_trusted_plugin_manifest,
+        )
+
+        try:
+            approval = read_trusted_plugin_manifest(
+                self.config.plugin_manifest_path or ""
+            ).approval
+            plugin_state = await ManagedHyprlandPlugin(
+                approval=approval,
+                identity=identity,
+                ipc=HyprlandPluginIPC(identity=identity, ipc_path=ipc_path),
+                mapped_verifier=ProcMappedPluginVerifier(),
+            ).activate(authorized_task=True)
+            if plugin_state.ready is not True:
+                raise HyprlandPluginError(plugin_state.code or "hyprland_plugin_unready")
+        except HyprlandPluginError as error:
+            raise ComputerError(str(error)) from None
 
     def export_selection_proof(self, candidate_id):
         proof = self._selection_proofs.get(candidate_id)
@@ -502,32 +554,7 @@ class HyprlandRuntimeBackend:
                 or self._identity != selection_proof.compositor
             ):
                 raise ComputerError("target_selection_changed")
-            if self.config.managed_activation:
-                # Session startup is the only approved write path. Inventory/status
-                # remain observational and cannot reach this branch.
-                from .hyprland_plugin import (
-                    HyprlandPluginError,
-                    HyprlandPluginIPC,
-                    ManagedHyprlandPlugin,
-                    ProcMappedPluginVerifier,
-                    read_trusted_plugin_manifest,
-                )
-
-                try:
-                    # Session start is the only manifest read/load path.
-                    approval = read_trusted_plugin_manifest(
-                        self.config.plugin_manifest_path or ""
-                    ).approval
-                    plugin_state = await ManagedHyprlandPlugin(
-                        approval=approval,
-                        identity=self._identity,
-                        ipc=HyprlandPluginIPC(identity=self._identity, ipc_path=self.config.ipc_path),
-                        mapped_verifier=ProcMappedPluginVerifier(),
-                    ).activate(authorized_task=True)
-                    if not plugin_state.ready:
-                        raise HyprlandPluginError(plugin_state.code or "hyprland_plugin_unready")
-                except HyprlandPluginError as error:
-                    raise ComputerError(str(error)) from None
+            await self._prepare_plugin(self._identity, ipc_path=self.config.ipc_path)
             selected = None
             if selection is not None:
                 self._scope_provider = await HyprlandScopeProvider.from_identity(

@@ -33,8 +33,12 @@ def _legacy_db(tmp_path, *, restriction=False):
     for ddl in LEGACY_DDL:
         conn.execute(ddl)
     if restriction:
-        conn.execute("CREATE TABLE restrictions (session_id TEXT PRIMARY KEY, rule TEXT NOT NULL)")
-        conn.execute("INSERT INTO restrictions VALUES ('legacy-session', 'old-known-rule')")
+        conn.execute(
+            "CREATE TABLE restrictions (owner_id TEXT NOT NULL, channel_id TEXT NOT NULL, "
+            "turn_id TEXT NOT NULL, created_at REAL NOT NULL, "
+            "PRIMARY KEY(owner_id,channel_id))"
+        )
+        conn.execute("INSERT INTO restrictions VALUES ('owner', 'channel', 'turn', 1.25)")
     conn.execute(
         "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?)",
         ("legacy-session", "owner", "channel", "turn", "host", 4, "closed", "drawing", 1.5, 9.5, 3),
@@ -152,7 +156,7 @@ def test_partial_version_one_is_rejected_without_logical_database_change(tmp_pat
     before = _dump(db)
     with pytest.raises(ComputerProvisioningError) as exc:
         _store(db, tmp_path)
-    assert exc.value.code == "storage_unavailable"
+    assert exc.value.code == "storage_schema_unsupported"
     assert _dump(db) == before
 
 
@@ -165,7 +169,7 @@ def test_future_version_is_rejected_without_logical_database_change(tmp_path):
     before = _dump(db)
     with pytest.raises(ComputerProvisioningError) as exc:
         _store(db, tmp_path)
-    assert exc.value.code == "storage_unavailable"
+    assert exc.value.code == "storage_schema_unsupported"
     assert _dump(db) == before
 
 

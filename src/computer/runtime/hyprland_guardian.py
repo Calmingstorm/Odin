@@ -110,7 +110,8 @@ def native_failure(row):
     command, operation, error = (raw.get(k) for k in ("command", "scope_operation", "scope_error"))
     if (type(command) is not str or command not in {
             "none", "begin", "renew", "bind", "select", "pixel-permit", "action"}
-            or type(operation) is not str or operation not in {"none", "arm", "renew"}
+            or type(operation) is not str
+            or operation not in {"none", "arm", "renew", "release_all"}
             or type(error) is not str or error not in _SCOPE_ERRORS):
         return None
     result: dict[str, Any] = {
