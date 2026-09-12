@@ -22,6 +22,7 @@ def test_owned_absolute_vertices_receive_frames_without_changing_other_routes(tm
     hook = "void onWarp(" + hook
     harness = r'''
 #include <cassert>
+#include <cmath>
 #include <memory>
 #include <string>
 #include <utility>
@@ -30,6 +31,8 @@ struct Vector2D {
     double x, y;
     Vector2D operator+(Vector2D b) const { return {x+b.x,y+b.y}; }
     Vector2D operator*(Vector2D b) const { return {x*b.x,y*b.y}; }
+    Vector2D floor() const { return {std::floor(x),std::floor(y)}; }
+    bool operator==(const Vector2D&) const = default;
 };
 struct Device {};
 struct Surface {};
@@ -43,8 +46,11 @@ struct IPointer { struct SMotionAbsoluteEvent {
     Vector2D absolute;
 }; };
 struct CInputManager {
+    Vector2D cursor{};
     std::vector<int> getKeysFromAllKBs() { return {}; }
     bool hasHeldButtons() { return false; }
+    Vector2D getMouseCoordsInternal() const { return cursor; }
+    void simulateMouseMovement() {}
 } inputManager;
 CInputManager* g_pInputManager=&inputManager;
 using WarpFn = void (*)(CInputManager*, IPointer::SMotionAbsoluteEvent);
@@ -63,6 +69,7 @@ struct State {
     struct { Vector2D outputPos{0,0}, outputSize{1,1}; Ref surface{rootSurface}; } bound;
     bool scope() { return allowed; }
     bool allow() { return allowed; }
+    void reject(const char*) { ++rejected; }
     bool point(Vector2D p) { return p.x>=0 && p.y>=0 && p.x<1000 && p.y<1000; }
     std::shared_ptr<Surface> destinationAt(Vector2D p) {
         return point(p) ? bound.surface.lock() : nullptr;
@@ -84,8 +91,8 @@ struct Seat {
 } seat;
 Seat* g_pSeatManager=&seat;
 unsigned originals=0;
-void originalWarp(CInputManager*, IPointer::SMotionAbsoluteEvent e) {
-    ++originals; seat.pending=e.absolute; seat.dirty=true;
+void originalWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent e) {
+    ++originals; manager->cursor=e.absolute; seat.pending=e.absolute; seat.dirty=true;
 }
 '''
     harness += hook

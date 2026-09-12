@@ -89,6 +89,7 @@ static const char *cause_for_reason(const char *reason) {
     if (!strcmp(reason, "controller-timeout")) return "controller_timeout";
     if (!strcmp(reason, "signal-cancel")) return "signal_cancel";
     if (!strcmp(reason, "scope-evidence-expired") || !strcmp(reason, "lease-expired")) return "scope_timeout";
+    if (!strcmp(reason, "scope-rejected-input")) return "scope_refused";
     if (!strcmp(reason, "mapping-changed")) return "mapping_changed";
     if (!strcmp(reason, "invalid-command")) return "invalid_command";
     if (!strcmp(reason, "input-path-lost")) return "wayland_dispatch_failed";
@@ -689,7 +690,16 @@ static bool release_all(struct guardian *g) {
     g->release_ack = g->release_acknowledged ? "acknowledged" :
         (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "refused")) ? "negative" :
         (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) ? "transport_lost" : "invalid_or_unconfirmed";
-    if (ack && (!r.have_rejected || r.rejected!=g->rejected)) fail(g,"scope-evidence-expired");
+    /* A cleanup ACK must carry the same rejection counter observed while the
+     * action was armed. Missing evidence is an invalid ACK; a changed count
+     * identifies a rejected input guard. Neither weakens cleanup proof. */
+    if (ack && !r.have_rejected) {
+        g->scope_error = "scope-ack-invalid";
+        fail(g,"scope-ack-invalid");
+    } else if (ack && r.rejected != g->rejected) {
+        g->scope_error = "scope-rejected-input";
+        fail(g,"scope-rejected-input");
+    }
     return g->release_acknowledged;
 }
 static void action_receipt(struct guardian *g,const char *event,const char *reason) {

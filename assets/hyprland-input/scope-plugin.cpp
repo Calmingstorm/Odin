@@ -279,6 +279,15 @@ struct State {
     bool lockTransition = false;
     int64_t deadline = 0;
     uint64_t accepted = 0, rejected = 0, revision = 1;
+    // Bounded diagnostic evidence only. Never used to grant scope or input.
+    // Preserve the first eight guards across revoke and teardown.
+    std::array<const char*, 8> rejectionGuards{};
+    uint64_t rejectionBase = 0;
+    void reject(const char* guard) noexcept {
+        const auto index = rejected - rejectionBase;
+        if (index < rejectionGuards.size()) rejectionGuards[index] = guard;
+        ++rejected;
+    }
     int legacyListener = -1, instanceListener = -1;
     wl_event_source *legacyListenerSource = nullptr, *instanceListenerSource = nullptr, *timer = nullptr;
     std::string legacySocketPath, instanceSocketPath, instanceID, compositorStartTicks, compositorBootID,
@@ -572,7 +581,9 @@ struct State {
     }
     bool allow() {
         if (scope()) { ++accepted; return true; }
-        ++rejected; revoke("scope-expired-or-changed"); return false;
+        reject(!armed ? "scope-not-armed" : failed ? "scope-release-failed" :
+               ns() >= deadline ? "scope-deadline-expired" : "scope-identity-or-state-changed");
+        revoke("scope-expired-or-changed"); return false;
     }
     void revoke(const char* why) noexcept {
         armed = false; deadline = 0; reason = why;
@@ -625,6 +636,11 @@ struct State {
         put(j.get(), "legacy_endpoint_status", legacyEndpointStatus);
         put(j.get(), "armed", armed); put(j.get(), "keys", int64_t(keys.size())); put(j.get(), "buttons", int64_t(buttons.size()));
         put(j.get(), "accepted", int64_t(accepted)); put(j.get(), "rejected", int64_t(rejected));
+        put(j.get(), "rejection_base", int64_t(rejectionBase));
+        put(j.get(), "rejection_overflow", rejected - rejectionBase > rejectionGuards.size());
+        for (size_t i = 0; i < rejectionGuards.size(); ++i)
+            put(j.get(), ("rejection_guard_" + std::to_string(i + 1)).c_str(),
+                std::string(rejectionGuards[i] ? rejectionGuards[i] : "none"));
         put(j.get(), "failed", failed); put(j.get(), "reason", reason); put(j.get(), "revision", int64_t(revision));
         put(j.get(), "release_submitted", !armed); put(j.get(), "release_acknowledged", !armed && !failed && keys.empty() && buttons.empty() && !ownedModifiers);
         put(j.get(), "receiver_proven", false);
@@ -893,6 +909,7 @@ struct State {
         if (inputHeld()) return status(false, "human-input-held");
         keyboard = k; pointer = p; guardianFD = peer.fd; bound = it->second; snapshots.erase(it);
         if (diagnosticToken != bound.token) { diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0; }
+        rejectionGuards.fill(nullptr); rejectionBase = rejected;
         deadline = expiry; armed = true; reason = "armed";
         return status();
     }
@@ -1015,7 +1032,7 @@ void onKey(CInputManager* manager, const IKeyboard::SKeyEvent& event, SP<IKeyboa
     if (!k) { original(manager, event, device); return; }
     if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.keys.erase(event.keycode)) { original(manager, event, device); return; }
     if (k != s.keyboard || !s.allow()) {
-        if (k != s.keyboard) ++s.rejected;
+        if (k != s.keyboard) s.reject("key-device-mismatch");
         // IKeyboard::updatePressed precedes this handler. Undo refused device
         // state, suppressing the unowned synthetic release at this same hook.
         if (event.state == WL_KEYBOARD_KEY_STATE_PRESSED)
@@ -1033,7 +1050,7 @@ void onMod(CInputManager* manager, SP<IKeyboard> device) {
     const auto& m = device->m_modifiersState;
     const bool zero = !(m.depressed || m.latched || m.locked || m.group);
     if (k == s.keyboard && zero && s.ownedModifiers) { s.ownedModifiers = false; original(manager, device); return; }
-    if (k != s.keyboard || !s.allow()) { if (k != s.keyboard) ++s.rejected; device->updateModifiers(0, 0, 0, 0); return; }
+    if (k != s.keyboard || !s.allow()) { if (k != s.keyboard) s.reject("modifier-device-mismatch"); device->updateModifiers(0, 0, 0, 0); return; }
     s.ownedModifiers = !zero; original(manager, device);
 }
 void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer> device) {
@@ -1043,29 +1060,29 @@ void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer>
     if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.erase(event.button)) {
         State::OwnedDispatch trace(s, false); original(manager, event, device); return;
     }
-    if (p != s.pointer || !s.allow()) { if (p != s.pointer) ++s.rejected; return; }
+    if (p != s.pointer || !s.allow()) { if (p != s.pointer) s.reject("button-device-mismatch"); return; }
     if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || !s.destinationAt(g_pPointerManager->position()) ||
-        s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.rejected; s.revoke("button-destination-refused"); return; }
+        s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { s.reject("button-destination-refused"); s.revoke("button-destination-refused"); return; }
     s.buttons.insert(event.button);
     State::OwnedDispatch trace(s, false); original(manager, event, device);
 }
 void onAxis(CInputManager* manager, IPointer::SAxisEvent event, SP<IPointer> device) {
     auto& s = *live; auto original = reinterpret_cast<AxisFn>(s.axisHook->m_original);
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
-    if (p != s.pointer) { ++s.rejected; return; }
+    if (p != s.pointer) { s.reject("axis-device-mismatch"); return; }
     if (!s.allow()) return;
-    if (!s.destinationAt(g_pPointerManager->position()) || s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.rejected; s.revoke("axis-destination-refused"); return; }
+    if (!s.destinationAt(g_pPointerManager->position()) || s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { s.reject("axis-destination-refused"); s.revoke("axis-destination-refused"); return; }
     original(manager, event, device);
 }
 void onMotion(CInputManager* manager, IPointer::SMotionEvent event) {
     auto& s = *live; auto original = reinterpret_cast<MotionFn>(s.motionHook->m_original);
     auto* p = s.find(event.device); if (!p) { original(manager, event); return; }
-    if (p != s.pointer) { ++s.rejected; return; }
+    if (p != s.pointer) { s.reject("motion-device-mismatch"); return; }
     if (!s.allow()) return;
     const auto pos = g_pPointerManager->position();
     if (!s.destination(s.bound, g_pSeatManager->m_state.pointerFocus.lock()) ||
         s.destinationAt(pos + event.delta) != g_pSeatManager->m_state.pointerFocus.lock() ||
-        s.destinationAt(pos + event.unaccel) != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.rejected; s.revoke("motion-destination-refused"); return; }
+        s.destinationAt(pos + event.unaccel) != g_pSeatManager->m_state.pointerFocus.lock()) { s.reject("motion-destination-refused"); s.revoke("motion-destination-refused"); return; }
     original(manager, event);
 }
 void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
@@ -1073,14 +1090,15 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
     Pointer* p = nullptr;
     for (auto& item : s.pointers) if (item->device.get() == event.device.get()) { p = item.get(); break; }
     if (!p) { original(manager, event); return; }
-    if (p != s.pointer) { ++s.rejected; return; }
+    if (p != s.pointer) { s.reject("warp-device-mismatch"); return; }
     if (!s.allow()) return;
     const Vector2D pos = s.bound.outputPos + event.absolute * s.bound.outputSize;
     const auto destination = s.destinationAt(pos);
     const bool positioning = g_pSeatManager->m_state.pointerFocus.lock() != destination;
     if (!destination || (positioning && (!s.keys.empty() || !s.buttons.empty() || s.ownedModifiers ||
         s.inputHeld()))) {
-        ++s.rejected; s.revoke("warp-destination-refused"); return;
+        s.reject(!destination ? "warp-destination-unknown" : "warp-positioning-input-held");
+        s.revoke("warp-destination-refused"); return;
     }
     State::OwnedDispatch trace(s, true);
     // Only this synchronous owned, no-held-input absolute positioning dispatch
@@ -1090,9 +1108,21 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
         Positioning(State& value, bool active) : state(value) { state.positioningBoundSurface = active; }
         ~Positioning() { state.positioningBoundSurface = false; }
     } positioningGuard(s, positioning);
+    const Vector2D prewarp = manager->getMouseCoordsInternal();
     original(manager, event);
+    // 0.55.2 skips absolute-warp processing when its floored target equals the
+    // cached cursor position. Reprocess only that stationary initial position
+    // through the normal non-refocusing path. This does not replay input, and
+    // requires the original one-shot surface gate and every other guard.
+    if (positioning && s.positioningBoundSurface && prewarp.floor() == pos.floor() && manager->getMouseCoordsInternal().floor() == pos.floor() &&
+        s.scope() && s.keys.empty() && s.buttons.empty() && !s.ownedModifiers && !s.inputHeld() &&
+        s.destinationAt(pos) == destination && g_pSeatManager->m_state.pointerFocus.lock() != destination)
+        manager->simulateMouseMovement();
     if (!s.scope() || g_pSeatManager->m_state.pointerFocus.lock() != destination || s.destinationAt(pos) != destination) {
-        ++s.rejected; s.revoke("warp-focus-postcondition-refused"); return;
+        s.reject(!s.scope() ? "warp-post-scope-changed" :
+                 g_pSeatManager->m_state.pointerFocus.lock() != destination ? "warp-post-pointer-focus-mismatch" :
+                 "warp-post-destination-changed");
+        s.revoke("warp-focus-postcondition-refused"); return;
     }
     // Pinned Hyprland 0.55.2 onMouseWarp sends motion but no seat frame.
     // Its onPointerFrame ignores virtual-pointer frames unless an axis is
