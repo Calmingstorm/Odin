@@ -236,7 +236,7 @@ def _instrument(module, scenario: _Scenario, events: list[str]):
         events.append("active.clear")
         runner._channel_state.clear_active_request(st._ch_id, st._req_id)
 
-    def wait_fingerprint(_st, _calls, _results):
+    def wait_fingerprint(_st, _calls, _results, *, elapsed_seconds=0):
         events.append("wait.fingerprint")
         return False
 
