@@ -7,6 +7,49 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 
+@pytest.hookimpl(tryfirst=True)
+def pytest_collection_modifyitems(config, items):
+    # Run before xdist appends @group to nodeids. Do not globally enable xdist:
+    # targeted debugging and the measurement baseline remain serial by default.
+    from tests.parallel_policy import NATIVE_DISPLAY_TESTS, PROCESS_GROUP, resource_modules
+
+    grouped = resource_modules(config.rootpath)
+    for item in items:
+        if item.path in grouped:
+            item.add_marker(pytest.mark.xdist_group(PROCESS_GROUP))
+    # Keep deadline-sensitive real display proofs behind the resource group's
+    # long tail, when the other workers have drained their CPU-heavy tests.
+    items.sort(key=lambda item: item.path.name in NATIVE_DISPLAY_TESTS)
+
+
+@pytest.fixture(autouse=True)
+def _native_display_runner_lock(request):
+    """One private native display proof at a time across both local CI jobs.
+
+    This is test orchestration only: never alters native deadlines, identity,
+    release checks or the active desktop. flock dies with its holder.
+    """
+    from tests.parallel_policy import NATIVE_DISPLAY_TESTS
+
+    if request.node.path.name not in NATIVE_DISPLAY_TESTS:
+        yield
+        return
+    import fcntl
+    import os
+    import stat
+
+    path = f"/tmp/odin-native-test-{os.getuid()}.lock"
+    fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+    try:
+        info = os.fstat(fd)
+        if info.st_uid != os.getuid() or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise RuntimeError("unsafe native-test lock")
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)
+
+
 @pytest.fixture
 def mock_bot():
     """A mock OdinBot with common attributes."""

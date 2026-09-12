@@ -337,7 +337,12 @@ class TestDispatcherRegister:
         assert t.id
         assert t.enabled is True
 
-    def test_register_with_all_fields(self):
+    def test_register_with_all_fields(self, monkeypatch):
+        # Registration-field semantics must not depend on a five-second mDNS
+        # lookup for jenkins.local. Keep the URL policy active, with fixed DNS.
+        monkeypatch.setattr("socket.getaddrinfo", lambda *a, **kw: [
+            (2, 1, 6, "", ("93.184.216.34", 443)),
+        ])
         d = OutboundWebhookDispatcher()
         t = d.register(
             name="jenkins",

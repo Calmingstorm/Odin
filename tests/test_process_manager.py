@@ -192,7 +192,7 @@ class TestPollWaitSeconds:
     async def test_running_process_waits_until_deadline(self):
         reg = ProcessRegistry()
         proc = await asyncio.create_subprocess_shell(
-            "sleep 30", stdout=asyncio.subprocess.PIPE,
+            "exec sleep 30", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
         )
         info = ProcessInfo(
@@ -371,7 +371,7 @@ class TestPollWaitSeconds:
     async def test_cancellation_aborts_wait_not_process(self):
         reg = ProcessRegistry()
         proc = await asyncio.create_subprocess_shell(
-            "sleep 30", stdout=asyncio.subprocess.PIPE,
+            "exec sleep 30", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
         )
         info = ProcessInfo(
@@ -825,8 +825,11 @@ class TestRaceFreeGroupTermination:
             finally:
                 _close_pinned(pinned)
         finally:
-            proc.kill()
-            await proc.wait()
+            # Both sleeps hold the pipe. Reap the exact owned session instead
+            # of killing only its shell and waiting five seconds for EOF.
+            from src.tools.ssh import terminate_process_tree
+
+            await terminate_process_tree(proc, grace=0.5)
 
     async def test_fork_on_term_descendant_cannot_escape(self):
         """Round-6 blocker #1 (Odin's repro): a TERM handler that forks a

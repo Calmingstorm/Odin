@@ -192,12 +192,13 @@ async def test_resolver_maps_identity_deadline():
 
 
 def test_runtime_inventory_enumerates_real_unix_sockets_with_narrow_fake_proc(
-    tmp_path, monkeypatch
+    tmp_path, tmp_path_factory, monkeypatch
 ):
     """Keep runtime artifacts real; only the otherwise hard-coded /proc is remapped."""
     uid = os.getuid()
-    root = tmp_path / "runtime"
-    root.mkdir(mode=0o700)
+    # AF_UNIX has a kernel path limit; xdist adds a worker path component.
+    root = tmp_path_factory.mktemp("ipc")
+    root.chmod(0o700)
     display_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
     display_socket.bind(str(root / "wayland-9"))
     hypr_socket_dir = root / "hypr" / "signature"
