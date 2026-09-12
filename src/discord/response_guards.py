@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import re
+import time
 from collections import deque
 
 from ..llm.secret_scrubber import scrub_output_secrets
@@ -641,6 +643,53 @@ _WAIT_MP_STATUS = re.compile(
     r"(?: uptime=\d+s)?(?: output_bytes=(\d+))?"
 )
 _WAIT_FP_PREFIX = "wait:"  # disjoint from argument fingerprints by prefix
+_BOUNDED_WAIT_PREFIX = "wait:bounded-process:"
+
+
+def bounded_process_wait_active(fingerprint: str) -> bool:
+    """A quiet wait is permitted, not progress, until its original deadline.
+
+    Kept outside the strict detector: only the lone-poll result path can
+    issue this marker. Re-evaluate on resume; never renew the deadline.
+    """
+    if not fingerprint.startswith(_BOUNDED_WAIT_PREFIX):
+        return False
+    try:
+        deadline = float(fingerprint.rsplit(":", 1)[1])
+    except ValueError:
+        return False
+    return math.isfinite(deadline) and 0 < deadline - time.time() <= 3600
+
+
+def _bounded_process_wait(tool_input: dict, text: str, elapsed_seconds: float) -> str:
+    """Require a real slow poll and native generation/deadline evidence.
+
+    Uptime, CPU use and silence are not progress. The process manager's
+    fixed one-hour lifetime is the bound, not a rolling quiet-period lease.
+    Legacy/error/page results and rapid polling retain the strict ladder.
+    """
+    requested = tool_input.get("wait_seconds", 0)
+    if (isinstance(requested, bool) or not isinstance(requested, (int, float))
+            or not 30 <= requested <= 120 or not 30 <= elapsed_seconds < math.inf):
+        return ""
+    header = _WAIT_MP_STATUS.match(text)
+    if header is None or header.group(2) != "running":
+        return ""
+    try:
+        meta = json.loads(text.rsplit("\n[output retention] ", 1)[1])
+        if (not isinstance(meta, dict) or meta.get("kind") != "process_output"
+                or meta.get("status") != "running" or meta.get("exit_code") is not None
+                or str(meta.get("pid")) != header.group(1)
+                or str(tool_input.get("pid")) != header.group(1)
+                or not re.fullmatch(r"[a-f0-9]{32}", str(meta.get("generation", "")))):
+            return ""
+        deadline = meta["lifetime_deadline"]
+        if isinstance(deadline, bool) or not isinstance(deadline, (int, float)):
+            return ""
+        fp = f"{_BOUNDED_WAIT_PREFIX}{meta['generation']}:{deadline}"
+        return fp if bounded_process_wait_active(fp) else ""
+    except (IndexError, KeyError, ValueError):
+        return ""
 
 
 def is_wait_iteration(tool_calls: list[dict]) -> bool:
@@ -657,16 +706,22 @@ def is_wait_iteration(tool_calls: list[dict]) -> bool:
     return False
 
 
-def wait_iteration_fingerprint(tool_name: str, tool_input: dict, result_text: str) -> str:
+def wait_iteration_fingerprint(
+    tool_name: str, tool_input: dict, result_text: str, *, elapsed_seconds: float = 0,
+) -> str:
     """Canonical semantic progress signature for one wait-class call.
 
     Volatile fields (uptime, runtimes, timestamps) are EXCLUDED — hashing
     them would make a genuinely hung target immortal. Status transitions
-    and output-byte growth count as progress; a frozen signature three
-    iterations running means nothing is happening.
+    and output-byte growth count as observable change. Silence is not proof
+    of stagnation: a measured slow native process poll can instead carry a
+    fixed-deadline permission marker, never a synthetic progress heartbeat.
     """
     text = result_text or ""
     if tool_name == "manage_process":
+        bounded = _bounded_process_wait(tool_input, text, elapsed_seconds)
+        if bounded:
+            return bounded
         m = _WAIT_MP_STATUS.search(text)
         if m:
             pid, status, exit_code, out_bytes = m.groups()
@@ -702,8 +757,11 @@ _WAIT_PROCESS_NUDGE = {
         "The process is still running but has produced NO new output since "
         "your last poll. Do not repeat the identical poll immediately: poll "
         "again with wait_seconds (60 is a good default), check on it a "
-        "different way (e.g. ps / CPU usage), do other useful work first, "
-        "or kill it if you judge it hung."
+        "different way (e.g. inspect its actual log), or report uncertainty. "
+        "Silence and CPU use do not prove a hang or progress. Slow native polls "
+        "may continue within the process's original one-hour deadline; that "
+        "deadline is never renewed. For future long jobs use streaming output, "
+        "or bash pipefail plus tee to retain a log without hiding progress."
     ),
 }
 
