@@ -20,6 +20,7 @@ asserts that before any deletion runs.
 
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import stat
@@ -278,11 +279,13 @@ async def test_background_process_uses_the_workspace(
     """`manage_process start` must not remain a second path to the incident."""
     ws = str(resolve_workspace(str(workspace), protected_roots=[str(fake_install)]))
     registry = ProcessRegistry(workspace=ws)
-    result = await registry.start("localhost", "pwd; sleep 0.2")
+    previous = set(registry._processes)
+    result = await registry.start("localhost", "pwd")
     assert "Started" in result or "PID" in result
-    import asyncio
-
-    await asyncio.sleep(0.6)
+    [pid] = set(registry._processes) - previous
+    process = registry._processes[pid]
+    await asyncio.wait_for(process._exit_task, timeout=5)
+    await asyncio.wait_for(process._reader_task, timeout=5)
     output = "".join("".join(info.output_buffer) for info in registry._processes.values())
     assert str(workspace) in output
     assert str(fake_install) not in output
@@ -462,10 +465,12 @@ async def test_executor_background_process_uses_the_workspace(
     assert callable(registry._workspace)
     assert registry._resolve_workspace() == str(workspace.resolve())
 
-    await registry.start("localhost", "pwd; sleep 0.2")
-    import asyncio
-
-    await asyncio.sleep(0.6)
+    previous = set(registry._processes)
+    await registry.start("localhost", "pwd")
+    [pid] = set(registry._processes) - previous
+    process = registry._processes[pid]
+    await asyncio.wait_for(process._exit_task, timeout=5)
+    await asyncio.wait_for(process._reader_task, timeout=5)
     output = "".join("".join(i.output_buffer) for i in registry._processes.values())
     assert str(workspace.resolve()) in output
     assert str(fake_install) not in output

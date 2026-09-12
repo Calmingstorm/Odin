@@ -106,17 +106,19 @@ class TestPersistence:
             ]
         )
         seen = {}
+        reflected = asyncio.Event()
 
         async def spy_reflection(
             content, tools_used, response, is_error, user_id, tool_details=None
         ):
             seen["tool_details"] = tool_details
             seen["tools_used"] = tools_used
+            reflected.set()
 
         bot.turn_recorder._operational_reflection = spy_reflection
         msg = FakeMessage("do it")
         await bot.pipeline.run(msg, "do it")
-        await asyncio.sleep(0.05)  # fire_and_forget task
+        await reflected.wait()
         assert seen["tools_used"] == ["parse_time"]
         assert seen["tool_details"] and seen["tool_details"][0]["tool"] == "parse_time"
         # And the per-channel stash was consumed

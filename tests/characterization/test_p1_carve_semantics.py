@@ -77,14 +77,19 @@ class TestCarveMutationSemantics:
             ]
         )
         completion_order: list[str] = []
+        slow_started = asyncio.Event()
+        release_slow = asyncio.Event()
 
         async def slow_parse_time(inp):
-            await asyncio.sleep(0.05)
+            slow_started.set()
+            await release_slow.wait()
             completion_order.append("parse_time")
             return "slow-result"
 
         async def fast_list_schedules():
+            await slow_started.wait()
             completion_order.append("list_schedules")
+            release_slow.set()
             return "fast-result"
 
         bot.scheduling_tools._handle_parse_time = slow_parse_time

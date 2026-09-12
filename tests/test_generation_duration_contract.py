@@ -1,4 +1,4 @@
-import asyncio
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -8,6 +8,7 @@ from src.agents.manager import _run_agent
 from src.llm.errors import LLMRequestError
 from src.llm.timing import elapsed_ms
 from src.tools.result_validator import ToolResult
+from src.trajectories.saver import TrajectoryTurn
 from tests.characterization.test_autonomous_loop import build as build_loop
 from tests.characterization.test_autonomous_loop import run_iteration
 from tests.characterization.test_chat_tool_loop import build, run_loop
@@ -20,12 +21,36 @@ from tests.test_usage_rollup import make_rollup, turn_record
 async def test_slow_tools_excluded_from_generation(entry, tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     records = []
+    now = 1_000
+
+    def monotonic_ns():
+        # Generation timing is a logical clock contract.  Advancing only from
+        # the tool stub proves that tool work is excluded without demanding a
+        # <60ms scheduler slice from a loaded test runner.
+        nonlocal now
+        sample = now
+        now += 1_000_000
+        return sample
+
+    clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time)})
+    clock.monotonic_ns = monotonic_ns
+    monkeypatch.setattr("src.llm.timing.time", clock)
+    monkeypatch.setattr("src.agents.manager.time", clock)
+
+    class TimedTurn(TrajectoryTurn):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, _started_ns=monotonic_ns())
+
+    # TrajectoryTurn captured its default factory at import time.  Put its
+    # end-to-end sample on the same controlled clock as production timing.
+    monkeypatch.setattr("src.trajectories.saver.TrajectoryTurn", TimedTurn)
 
     async def save(turn, **kwargs):
         records.append(turn)
 
     async def slow(*args, **kwargs):
-        await asyncio.sleep(.08)
+        nonlocal now
+        now += 80_000_000
         return "ok" if entry == "agent" else ToolResult(output="ok")
 
     saver = SimpleNamespace(enabled=True, save=save)
@@ -46,7 +71,7 @@ async def test_slow_tools_excluded_from_generation(entry, tmp_path, monkeypatch)
         else:
             await run_iteration(bot)
     turn = records[-1]
-    assert 0 < turn.iterations[0].duration_ms < 60
+    assert turn.iterations[0].duration_ms == 1
     assert turn.iterations[0].tool_duration_ms >= 70
     assert turn.total_duration_ms == sum(it.duration_ms for it in turn.iterations)
     assert turn.end_to_end_duration_ms >= 70

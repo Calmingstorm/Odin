@@ -279,7 +279,9 @@ class _SlowStopHealthServer(_FakeHealthServer):
 
     async def stop(self):
         self.stop_calls += 1
-        await asyncio.sleep(0.05)
+        # A scheduling yield is enough to make this a genuine suspended
+        # teardown; the shutdown barrier does not need a wall-clock margin.
+        await asyncio.sleep(0)
         self.stopped = True
 
 

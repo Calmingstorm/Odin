@@ -214,15 +214,25 @@ class TestProcessRegistryShutdown:
         assert registry._processes[pid].status == "killed"
 
     @pytest.mark.asyncio
-    async def test_shutdown_cancels_reader_tasks(self):
+    async def test_shutdown_cancels_reader_tasks(self, monkeypatch):
         registry = ProcessRegistry()
-        await registry.start("localhost", "echo hello && sleep 0.1")
-        pid = next(iter(registry._processes))
-        info = registry._processes[pid]
-        # Let the reader task start
-        await asyncio.sleep(0.2)
+        reader_started = asyncio.Event()
+        read_output = registry._read_output
 
-        await registry.shutdown()
+        async def reader(info):
+            reader_started.set()
+            await read_output(info)
+
+        monkeypatch.setattr(registry, "_read_output", reader)
+        previous = set(registry._processes)
+        await registry.start("localhost", "echo hello && sleep 60")
+        [pid] = set(registry._processes) - previous
+        info = registry._processes[pid]
+        try:
+            await asyncio.wait_for(reader_started.wait(), 5)
+            assert not info._reader_task.done()
+        finally:
+            await registry.shutdown()
 
         # Reader task should be done or cancelled
         if info._reader_task:
@@ -250,10 +260,17 @@ class TestProcessRegistryShutdown:
     @pytest.mark.asyncio
     async def test_shutdown_skips_already_finished(self):
         registry = ProcessRegistry()
+        previous = set(registry._processes)
         await registry.start("localhost", "echo done")
-        next(iter(registry._processes))
-        # Wait for it to finish naturally
-        await asyncio.sleep(0.5)
+        [pid] = set(registry._processes) - previous
+        info = registry._processes[pid]
+        try:
+            await asyncio.wait_for(info._exit_task, 5)
+            await asyncio.wait_for(info._reader_task, 5)
+            assert info.status == "completed"
+        except BaseException:
+            await registry.shutdown()
+            raise
 
         killed = await registry.shutdown()
         # Process already finished, so kill count should be 0

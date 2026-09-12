@@ -9,12 +9,12 @@ settlement.
 from __future__ import annotations
 
 import asyncio
-import time
 from types import SimpleNamespace
 
 import pytest
 
 import src.turn_state.durability as dur
+import src.turn_state.store as store_module
 from src.turn_state import TurnKey, TurnStateStore
 from src.turn_state.durability import TurnDurability
 
@@ -49,7 +49,13 @@ async def admit(store):
     return handle
 
 
-async def test_beats_keep_the_lease_alive_past_the_ttl(tmp_path):
+async def test_beats_keep_the_lease_alive_past_the_ttl(tmp_path, monkeypatch):
+    now = 1_700_000_000.0
+
+    def clock() -> float:
+        return now
+
+    monkeypatch.setattr(store_module, "time", SimpleNamespace(time=clock))
     store = make_store(tmp_path, ttl=0.3)
     handle = await admit(store)
 
@@ -59,31 +65,26 @@ async def test_beats_keep_the_lease_alive_past_the_ttl(tmp_path):
         ).fetchone()
         return float(value)
 
-    # Observe RENEWALS rather than sampling liveness at one instant: under
-    # coverage instrumentation a beat can land late, and an instantaneous
-    # "expires > now" check then fails for a lease that is being renewed
-    # perfectly well. The contract is that beats keep pushing the deadline
-    # out past the original TTL.
     original = expiry()  # the deadline the turn would die on unaided
     renewals = 0
-    renewed_past_original = False
-    last = original
-    deadline = time.monotonic() + 10.0
-    while time.monotonic() < deadline:
-        await asyncio.sleep(0.05)
-        current = expiry()
-        if current > last:
-            renewals += 1
-            last = current
-            if time.time() > original:
-                # A renewal recorded AFTER the original deadline had
-                # already passed: the lease outlived it because beats
-                # kept pushing it out.
-                renewed_past_original = True
-        if renewals >= 2 and renewed_past_original:
-            break
-    assert renewals >= 2, "heartbeat never renewed the lease twice"
-    assert renewed_past_original, "lease was never renewed past its first deadline"
+    renewed_twice = asyncio.Event()
+    loop = asyncio.get_running_loop()
+    real_heartbeat = store.heartbeat_sync
+
+    def heartbeat(lease) -> None:
+        nonlocal now, renewals
+        now += 0.2  # controlled UTC advances between real heartbeat writes
+        real_heartbeat(lease)
+        renewals += 1
+        if renewals == 2:
+            loop.call_soon_threadsafe(renewed_twice.set)
+
+    monkeypatch.setattr(store, "heartbeat_sync", heartbeat)
+    # Exercise the production task's actual timer, but synchronize on writes
+    # instead of guessing how many wall-clock milliseconds coverage consumes.
+    await asyncio.wait_for(renewed_twice.wait(), timeout=5)
+    assert now > original  # simulated UTC is beyond the original lease TTL
+    assert expiry() > now  # a real store renewal retained a live lease
 
     await handle.settle_terminal(cancelled=False, is_error=False)
     assert handle._heartbeat_task is None  # stopped on settlement

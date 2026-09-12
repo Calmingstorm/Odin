@@ -494,17 +494,17 @@ class TestRunBundleIntegration:
     @pytest.mark.asyncio
     async def test_concurrent_checks_respect_independent_timeouts(self):
         """Round 2 review — no shared-state timeout race across concurrent checks."""
-        observed: list[tuple[int, float]] = []
+        observed: list[int] = []
+        all_started = asyncio.Event()
+        started = 0
 
         async def timed_exec(addr, cmd, user, *, timeout, use_workspace=False):
-            t0 = asyncio.get_event_loop().time()
-            # Fast/slow checks finish at different times; neither should see
-            # the other's timeout bleed in.
-            if "fast" in cmd:
-                await asyncio.sleep(0.05)
-            else:
-                await asyncio.sleep(0.2)
-            observed.append((timeout, asyncio.get_event_loop().time() - t0))
+            nonlocal started
+            started += 1
+            if started == 3:
+                all_started.set()
+            await all_started.wait()
+            observed.append(timeout)
             return (0, "200")
 
         report = await run_bundle(
@@ -535,8 +535,7 @@ class TestRunBundleIntegration:
         )
         assert report.verdict == "pass"
         # Each exec saw its own distinct timeout (no mutation across checks).
-        timeouts_seen = [t for t, _ in observed]
-        assert set(timeouts_seen) == {3, 10, 5}
+        assert set(observed) == {3, 10, 5}
 
     @pytest.mark.asyncio
     async def test_max_parallel_bounds_concurrency(self):

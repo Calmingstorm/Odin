@@ -43,3 +43,27 @@ the exact count and any failures, not a proof that flakes cannot exist.
 
 Stream long-running commands. To retain a log, explicitly invoke Bash with
 `pipefail` and `tee`; `/bin/sh` does not necessarily support `pipefail`.
+
+## Deterministic time and concurrency
+
+- Lease, TTL, cooldown and accounting tests must control the clock at the
+  owning module, keeping the real store, state machine and expiry predicates.
+  Do not patch the shared standard-library `time.monotonic` object: that also
+  changes the event loop's clock. Keep accounting start and end samples on the
+  same clock, including dataclass default factories captured at import time.
+- Synchronize on task completion, an entered callback, a real write, or an
+  explicit event/barrier. A sleep is not evidence that another task started or
+  finished. Parallelism is proved by overlapping participants, not a wall-clock
+  speed threshold. Use bounded harness waits to diagnose deadlocks, not as
+  performance assertions. Invoke blocking thread events off the event loop;
+  notify asyncio events from worker threads with `call_soon_threadsafe`.
+- Keep actual subprocesses, SQLite locks, output drainage and process-death
+  assertions where those are the contract. Native input, kernel escalation and
+  receiver/transport deadline tests retain real time when simulating the clock
+  would stop proving the behavior. These are not claimed deterministic merely
+  because they passed under load.
+- Never fix a race by enlarging its deadline, loosening its assertion, dropping
+  expiry checks, suppressing warnings, or retrying unchanged failures into green.
+
+The final campaign sweep and remaining native timing boundaries are recorded in
+`docs/test-timing-sweep-2026-09-12.md`.

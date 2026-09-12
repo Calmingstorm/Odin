@@ -450,7 +450,7 @@ class TestAgentManagerWithStates:
             requester_id="u1", requester_name="user",
             iteration_callback=iter_cb, tool_executor_callback=tool_cb,
         )
-        await asyncio.sleep(0.05)
+        await mgr._agents[aid]._task
         agents = mgr.list()
         assert len(agents) >= 1
         a = [x for x in agents if x["id"] == aid][0]
@@ -471,7 +471,7 @@ class TestAgentManagerWithStates:
             requester_id="u1", requester_name="user",
             iteration_callback=iter_cb, tool_executor_callback=tool_cb,
         )
-        await asyncio.sleep(0.1)
+        await mgr._agents[aid]._task
         r = mgr.get_results(aid)
         assert r is not None
         assert "state" in r
@@ -519,7 +519,7 @@ class TestAgentManagerWithStates:
             requester_id="u1", requester_name="user",
             iteration_callback=iter_cb, tool_executor_callback=tool_cb,
         )
-        await asyncio.sleep(0.1)
+        await mgr._agents[aid]._task
         result = mgr.send(aid, "hello")
         assert "not running" in result.lower() or "Error" in result
 
@@ -1332,7 +1332,6 @@ class TestLoopBridgeCompat:
         assert len(ids) == 1
         assert not ids[0].startswith("Error")
 
-        await asyncio.sleep(0.1)
         results = await bridge.wait_and_collect("loop1", timeout=2)
         assert len(results) == 1
         r = list(results.values())[0]
@@ -1346,10 +1345,12 @@ class TestLoopBridgeCompat:
         bridge = LoopAgentBridge(mgr)
 
         call_count = 0
+        started = asyncio.Event()
         async def slow_iter(msgs, sys, tools, generation_state=None):
             nonlocal call_count
             call_count += 1
             if call_count == 1:
+                started.set()
                 await asyncio.sleep(5)
             return {"text": "done", "tool_calls": []}
 
@@ -1365,7 +1366,7 @@ class TestLoopBridgeCompat:
             iteration_callback=slow_iter,
             tool_executor_callback=tool_cb,
         )
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(started.wait(), timeout=1)
         active = bridge.get_active_loop_agents("loop2")
         assert len(active) == 1
         assert active[0]["status"] in {"running", "spawning", "ready", "executing"}
@@ -2003,10 +2004,7 @@ class TestExecutionProvenanceRetention:
             requester_id="u1", requester_name="user",
             iteration_callback=iter_cb, tool_executor_callback=tool_cb,
         )
-        for _ in range(40):
-            await asyncio.sleep(0.05)
-            if mgr._agents[aid].last_model:
-                break
+        await mgr._agents[aid]._task
         agent = mgr._agents[aid]
         assert agent.last_provider == "codex"
         assert agent.last_model == "gpt-5.6-luna"
@@ -2039,10 +2037,7 @@ class TestExecutionProvenanceRetention:
             requester_id="u1", requester_name="user",
             iteration_callback=_cb, tool_executor_callback=AsyncMock(return_value="ok"),
         )
-        for _ in range(60):
-            await asyncio.sleep(0.05)
-            if mgr._agents[aid].last_model == "gpt-5.6-sol":
-                break
+        await mgr._agents[aid]._task
         # the SECOND generation's provenance is what a surface must show
         assert mgr._agents[aid].last_model == "gpt-5.6-sol"
         assert mgr._agents[aid].last_reasoning_effort == "xhigh"
@@ -2097,10 +2092,7 @@ class TestIterationCapSnapshot:
             iteration_callback=_cb, tool_executor_callback=AsyncMock(return_value="ok"),
             max_iterations=3,
         )
-        for _ in range(60):
-            await asyncio.sleep(0.05)
-            if mgr._agents[aid].status != "running":
-                break
+        await mgr._agents[aid]._task
         assert mgr._agents[aid].max_iterations == 3
         assert calls["n"] <= 3  # never exceeded the snapshotted cap
         mgr.kill(aid)

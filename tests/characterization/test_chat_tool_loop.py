@@ -654,7 +654,7 @@ class TestLoopTermination:
         task = asyncio.create_task(run_loop(bot, msg))
         await asyncio.wait_for(started.wait(), timeout=1)
         bot.channel_state.cancel_events["99"].set()
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
 
         assert not task.done()
         assert not cancelled.is_set()

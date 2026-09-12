@@ -84,10 +84,12 @@ async def test_policy_publication_fenced_against_inflight_delivery():
     server, bot = production_server()
     identity = ApiTokenIdentity(token="synthetic-target", user_id="actor", tier="admin")
     published = asyncio.Event()
+    publication_attempted = asyncio.Event()
     entered = asyncio.Event()
     release = asyncio.Event()
 
     async def update(*args, **kwargs):
+        publication_attempted.set()
         published.set()
         return identity.model_copy(update={"tier": "user"})
 
@@ -111,6 +113,13 @@ async def test_policy_publication_fenced_against_inflight_delivery():
     ws = Socket()
     manager._clients.add(ws)
     manager._event_subscribers.add(ws)
+    original_policy_change = manager.policy_change
+
+    def tracked_policy_change(user_id):
+        publication_attempted.set()
+        return original_policy_change(user_id)
+
+    manager.policy_change = tracked_policy_change
     async with TestClient(TestServer(server._app)) as client:
         delivery = asyncio.create_task(manager.broadcast_event({"before": True}))
         await entered.wait()
@@ -118,7 +127,7 @@ async def test_policy_publication_fenced_against_inflight_delivery():
             "/api/tokens/actor", json={"tier": "user"},
             headers={"Authorization": "Bearer synthetic-admin"},
         ))
-        await asyncio.sleep(0.02)
+        await publication_attempted.wait()
         assert not published.is_set()
         release.set()
         await delivery

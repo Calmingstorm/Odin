@@ -889,7 +889,7 @@ class TestAgentManagerTrajectory:
         )
         assert not agent_id.startswith("Error")
 
-        await asyncio.sleep(0.2)
+        await mgr._agents[agent_id]._task
         entry = await saver.find_by_agent_id(agent_id)
         assert entry is not None
         assert entry["final_state"] == "completed"
@@ -909,7 +909,7 @@ class TestAgentManagerTrajectory:
             tool_executor_callback=tool_cb,
         )
         assert not agent_id.startswith("Error")
-        await asyncio.sleep(0.2)
+        await mgr._agents[agent_id]._task
         results = mgr.get_results(agent_id)
         assert results["status"] == "completed"
 

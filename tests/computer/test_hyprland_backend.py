@@ -206,16 +206,38 @@ async def test_locked_or_unknown_prevents_dispatch(backend, locked):
     assert not backend._guardian.commands
 
 
-async def test_scope_deadline_is_bounded(backend):
+async def test_scope_deadline_is_bounded(backend, monkeypatch):
+    class Clock:
+        now_ns = 1_000_000_000
+
+        def monotonic_ns(self):
+            return self.now_ns
+
+        def monotonic(self):
+            return self.now_ns / 1_000_000_000
+
+    clock = Clock()
+
     async def slow(_):
         await asyncio.sleep(1)
         return scope()
 
+    observed_timeouts = []
+
+    async def expires_without_a_result(pending, *, timeout):
+        observed_timeouts.append(timeout)
+        # Model the event loop reaching the supplied deadline.  The contract is
+        # the bounded wait passed to the loop, not scheduler latency in CI.
+        clock.now_ns += round(timeout * 1_000_000_000)
+        return set(), set(pending)
+
+    monkeypatch.setattr(hb, "time", clock)
+    monkeypatch.setattr(hb.asyncio, "wait", expires_without_a_result)
     backend._scope_provider.snapshot.side_effect = slow
-    started = time.monotonic()
     with pytest.raises(ComputerError, match="scope_evidence_expired"):
         await backend._action_scope(backend._metadata())
-    assert time.monotonic() - started < 0.5
+    assert observed_timeouts == [0.25]
+    assert clock.monotonic_ns() == 1_250_000_000
     await asyncio.sleep(0)
 
 
@@ -276,6 +298,17 @@ async def test_recovery_then_resume_does_not_reuse_dead_guardian(backend, monkey
 
 
 async def test_real_capture_path_uses_fenced_native_raster_and_durable_spawn(backend, monkeypatch):
+    class Clock:
+        now_ns = 2_000_000_000
+
+        def monotonic_ns(self):
+            return self.now_ns
+
+        def monotonic(self):
+            return self.now_ns / 1_000_000_000
+
+    clock = Clock()
+    monkeypatch.setattr(hb, "time", clock)
     backend.startup_descriptor("b" * 32)
     connection = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(hb, "connect_peer", AsyncMock(return_value=connection))
@@ -286,14 +319,18 @@ async def test_real_capture_path_uses_fenced_native_raster_and_durable_spawn(bac
         calls.append(kwargs)
         kwargs["on_spawn"]({"pid": 12345, "start_ticks": 1})
         before = await kwargs["scope"]()
+        clock.now_ns += 999_999_999
         after = await kwargs["scope"]()
         assert before.binding() == after.binding()
         return NativeFrame(backend._output, native().pixels, after)
 
+    backend._scope_provider.snapshot.side_effect = lambda _: scope(
+        observed_monotonic_ns=clock.monotonic_ns()
+    )
     monkeypatch.setattr(hb, "capture_explicit_output", capture)
     result, evidence, captured_at = await hb.HyprlandRuntimeBackend._capture(backend)
     assert result.metadata.width == 8 and evidence["locked"] is False
-    assert time.monotonic() - captured_at < 1
+    assert 0 <= clock.monotonic() - captured_at < 1
     assert calls[0]["wayland"] is connection
     assert calls[0]["output"].name == "DP-1"
     assert backend._descriptor["processes"] == [{"pid": 12345, "start_ticks": 1}]
