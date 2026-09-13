@@ -97,10 +97,16 @@ async def test_unknown_release_survives_clean_detach_restart_and_cannot_replay(n
     assert assessment["status"] == "operator_release_required"
     assert assessment["released"] is False
     assert assessment["resources_retired"] is False
-    # A later cooperative detach may finish local cleanup, but cannot erase
-    # the persisted unknown outcome or authorize replay.
+    # Confirmed local closure removed the adapter, not the unknown native outcome.
+    assert sid not in controller._live
+    assert live.backend._recovery_result.cleanup["local_resources_closed"] is True
+    # A subsequent stop has no adapter to detach and must not invent cleanup.
     await controller._stop(sid, "closed")
-    assert controller.store.cleanup(sid)["complete"] is True
+    assert controller.store.cleanup(sid) is None
+    assert controller.store.recovery_status(sid)["continuation_cancelled"] is True
+    assert controller.store.recovery_status(sid)["released"] is False
+    assert json.loads(controller.store.db.execute(
+        "SELECT result FROM receipts WHERE session_id=?", (sid,)).fetchone()[0]) == receipt
     controller.store.recover()
     assert controller.store.get_recovery_pending(sid) == pending
     assert controller.store.get_session(sid).state == "quarantined"
@@ -145,8 +151,8 @@ async def test_explicit_operator_reconciliation_frees_new_session_not_old_action
     sid = grant["session_id"]
     live = controller._live[sid]
     old = action(normal, grant)
-    # Only the original pinned incarnation's exit plus local resource closure
-    # permits retirement. Neither fact certifies release of its native ledger.
+    # Pinned incarnation exit plus local closure permits dropping the inactive
+    # adapter, not claiming native ledger release or native resource retirement.
     monkeypatch.setattr(live.backend._incarnation, "exited", lambda: True)
     monkeypatch.setattr(live.backend._guardian, "release_ack", False)
     local_close = AsyncMock(wraps=live.backend._guardian.close)
@@ -159,14 +165,16 @@ async def test_explicit_operator_reconciliation_frees_new_session_not_old_action
     cleanup = live.backend._recovery_result.cleanup
     assert cleanup["guardian_process_reaped"] is True
     assert cleanup["scope_connection_closed"] is True
-    assert cleanup["retirement_basis"] == "original_compositor_pidfd_exited"
-    assert cleanup["resources_retired"] is True
+    assert cleanup["original_compositor_exited"] is True
+    assert cleanup["local_resources_closed"] is True
+    assert cleanup["retirement_basis"] == "unproven"
+    assert cleanup["resources_retired"] is False
     assert cleanup["unknown_release"] is True
     assert cleanup["released"] is False and cleanup["release_ack"] is False
     assert cleanup["receiver_release_verified"] is False
     assessment = controller.store.recovery_status(sid)
     assert assessment["status"] == "operator_release_required"
-    assert assessment["resources_retired"] is True and assessment["released"] is False
+    assert assessment["resources_retired"] is False and assessment["released"] is False
     current = controller.store.get_session(sid)
     inspector = AsyncMock(return_value={"status": "attestation_eligible"})
     monkeypatch.setattr(recovery, "verify_reconciliation_prerequisites", inspector)
@@ -176,16 +184,33 @@ async def test_explicit_operator_reconciliation_frees_new_session_not_old_action
             generation=current.generation,
             acknowledgment=f"ACKNOWLEDGE UNVERIFIED CLEANUP {sid}",
         )
-    assert result["state"] == "closed"
+    assert result["state"] == "quarantined"
     assert result["recovery"]["complete"] is False
-    assert result["recovery"]["status"] == "operator_acknowledged_unverified"
+    assert result["recovery"]["status"] == "fresh_target_required"
+    assert result["recovery"]["released"] is False
+    assert result["recovery"]["resources_retired"] is False
+    assert result["recovery"]["external_cleanup_attestation"]["status"] == (
+        "operator_acknowledged_unverified")
     inspector.assert_awaited_once()
     historical = controller._public_session(controller.store.get_session(sid))
-    assert historical["native_reconciliation"]["required"] is False
+    assert historical["native_reconciliation"]["required"] is True
     before = json.loads(controller.store.db.execute(
         "SELECT result FROM receipts WHERE session_id=?", (sid,)).fetchone()[0])
-    new = await start(normal)
-    assert new["session_id"] != sid
+    # Attestation permits explicit successor lineage, never implicit fresh start
+    # or restoring the old action's authority. This store grant alone sends no input.
+    context = normal.service._context(normal.state)
+    with pytest.raises(ComputerError, match="session_busy"):
+        controller.store.create_session(context, platform="wayland",
+                                        environment="existing_session", backend="hyprland")
+    with pytest.raises(ComputerError, match="hyprland_fresh_target_required"):
+        await controller.session(context, {"operation": "start", "recovery_session_id": sid,
+                                           "recovery_generation": current.generation})
+    new = controller.store.create_session(
+        context, platform="wayland",
+        environment="existing_session", backend="hyprland",
+        recovery_session_id=sid, recovery_generation=current.generation)
+    assert new.session_id != sid
+    assert controller.store.hyprland_task_lineage(new.session_id) is not None
     await normal.runner._run_one_tool(normal.state, call("computer_act", **old))
     assert not normal.transports[-1].commands
     after = json.loads(controller.store.db.execute(
@@ -195,7 +220,11 @@ async def test_explicit_operator_reconciliation_frees_new_session_not_old_action
     try:
         assert reopened.get_session(sid).state == "closed"
         assert reopened.get_recovery_pending(sid).phase == "unknown_release"
-        assert reopened.recovery_status(sid)["status"] == "operator_acknowledged_unverified"
+        assert reopened.recovery_status(sid)["status"] == "native_reconciled"
+        assert reopened.recovery_status(sid)["released"] is False
+        assert reopened.recovery_status(sid)["resources_retired"] is False
+        assert reopened.recovery_status(sid)["external_cleanup_attestation"]["status"] == (
+            "operator_acknowledged_unverified")
     finally:
         reopened.close()
 
@@ -242,13 +271,18 @@ async def test_failed_native_cleanup_remains_fenced_not_falsely_reconciled(norma
     live = controller._live[sid]
     monkeypatch.setattr(live.backend, "observe", AsyncMock(
         side_effect=HyprlandScopeFailure("hyprland_provider_owner_changed")))
-    # No original-incarnation exit or ledger retirement is proven. Do not drop
-    # this adapter merely to make attestation or fresh-start paths work.
+    # Neither native release nor local closure is proven. Retain the adapter
+    # rather than discarding an owned resource to make attestation work.
+    guardian_close = live.backend._guardian.close
+    monkeypatch.setattr(live.backend._guardian, "close",
+                        AsyncMock(side_effect=OSError("local closure incomplete")))
     live.backend._release_failed = True
     try:
         await normal.runner._run_one_tool(normal.state, call("computer_observe", **grant))
         assert controller._live[sid] is live and live.revoked
         assert not live.backend.input_supported and live.backend._frame is None
+        assert live.backend._cleanup_evidence["guardian_process_reaped"] is False
+        assert live.backend._recovery_result.cleanup["local_resources_closed"] is False
         assert live.backend._cleanup_evidence["hyprland_owned_connections_closed"] is False
         assessment = controller.store.recovery_status(sid)
         assert assessment["complete"] is False and assessment["released"] is False
@@ -266,4 +300,5 @@ async def test_failed_native_cleanup_remains_fenced_not_falsely_reconciled(norma
         assert not normal.transports[0].commands
     finally:
         # Teardown removes only the injected local fault, never ledger evidence.
+        monkeypatch.setattr(live.backend._guardian, "close", guardian_close)
         live.backend._release_failed = False

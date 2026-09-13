@@ -302,12 +302,18 @@ struct State {
     // Never evict plugin-lifetime tombstones. Missing after reload is unknown.
     struct OwnerLedger {
         std::string id, guardianStart, recoveryStart, reconcileCommand, retireCommand;
+        // Private bearer plus kernel lifetime, neither alone authorizes adoption.
+        std::string recoveryCapability;
+        int recoveryPidfd = -1;
+        struct Adoption { pid_t oldPID, newPID; uid_t uid; std::string oldStart, newStart; };
+        std::map<std::string, Adoption> adoptions;
         pid_t guardianPID = 0, recoveryPID = 0;
         uid_t guardianUID = 0, recoveryUID = 0;
         Keyboard* keyboard = nullptr;
         Pointer* pointer = nullptr;
         bool revoked = false, retired = false, unknown = false, empty = true, ack = true;
         bool resourcesRetired = false, reconciled = false;
+        bool inputFenced = false;
     };
     std::string pluginEpoch = nonce();
     std::map<std::string, PHLWINDOWREF> windowLifetimes;
@@ -341,7 +347,10 @@ struct State {
         put(row.get(), "recovery_pid", int64_t(owner.recoveryPID)); put(row.get(), "recovery_uid", int64_t(owner.recoveryUID));
         put(row.get(), "recovery_start_ticks", owner.recoveryStart);
         put(row.get(), "owner_matched", true); put(row.get(), "revoked", owner.revoked);
+        put(row.get(), "guardian_input_fenced", owner.inputFenced);
         put(row.get(), "retired", owner.retired); put(row.get(), "native_resources_retired", owner.resourcesRetired);
+        put(row.get(), "retirement_evidence_version", int64_t(1));
+        put(row.get(), "retirement_evidence_kind", std::string(owner.resourcesRetired ? "exact-client-resources-destroyed" : "unavailable"));
         put(row.get(), "unknown_release", owner.unknown);
         const bool empty = owner.empty && (activeOwner != &owner || (!armed && keys.empty() && buttons.empty() && !ownedModifiers));
         put(row.get(), "ledger_empty", empty); put(row.get(), "release_ack", empty && owner.ack && !owner.unknown);
@@ -372,12 +381,61 @@ struct State {
                 const auto id = nonce();
                 OwnerLedger entry; entry.id = id; entry.guardianPID = pid; entry.guardianUID = uid; entry.guardianStart = ticks;
                 entry.recoveryPID = peer.pid; entry.recoveryUID = peer.uid; entry.recoveryStart = peer.startTicks;
+                entry.recoveryPidfd = fcntl(peer.pidfd, F_DUPFD_CLOEXEC, 0);
+                if (entry.recoveryPidfd < 0) return status(false, "owner-lifetime-unavailable");
+                entry.recoveryCapability = nonce();
                 owner = &owners.emplace(id, std::move(entry)).first->second;
             }
         } else {
             const auto it = owners.find(text(request, "ledger_id"));
             if (it == owners.end()) return status(false, "owner-ledger-missing");
             owner = &it->second;
+        }
+        if (op == "owner_reconnect" || op == "owner_reconnect_status") {
+            const auto command = text(request, "command_id");
+            json_object *pidValue = nullptr, *uidValue = nullptr, *guardianPID = nullptr, *guardianUID = nullptr;
+            const auto typedInt = [&](const char* key, json_object** value) {
+                return json_object_object_get_ex(request, key, value) && json_object_get_type(*value) == json_type_int;
+            };
+            if (command.empty() || command.size() > 128 || std::any_of(command.begin(), command.end(), [](unsigned char c) { return !(std::isalnum(c) || c == '-'); }) ||
+                !typedInt("recovery_pid", &pidValue) || !typedInt("recovery_uid", &uidValue) ||
+                !typedInt("guardian_pid", &guardianPID) || !typedInt("guardian_uid", &guardianUID) ||
+                json_object_get_int64(guardianPID) != owner->guardianPID || json_object_get_int64(guardianUID) != owner->guardianUID ||
+                text(request, "guardian_start_ticks") != owner->guardianStart ||
+                owner->recoveryCapability.empty() || text(request, "recovery_capability") != owner->recoveryCapability ||
+                peer.uid != owner->recoveryUID || json_object_get_int64(uidValue) != owner->recoveryUID)
+                return status(false, "owner-adoption-authority-refused");
+            const auto oldPID = json_object_get_int64(pidValue);
+            const auto oldStart = text(request, "recovery_start_ticks");
+            auto recorded = owner->adoptions.find(command);
+            if (op == "owner_reconnect_status") {
+                if (recorded == owner->adoptions.end()) return status(false, "owner-adoption-unknown");
+                const auto& a = recorded->second;
+                if (a.oldPID != oldPID || a.oldStart != oldStart || a.newPID != peer.pid || a.newStart != peer.startTicks ||
+                    a.uid != peer.uid || owner->recoveryPID != peer.pid || owner->recoveryStart != peer.startTicks)
+                    return status(false, "owner-adoption-query-refused");
+            } else {
+                if (recorded != owner->adoptions.end()) return status(false, "owner-adoption-query-required");
+                if (owner->adoptions.size() >= 128 || oldPID != owner->recoveryPID || oldStart != owner->recoveryStart)
+                    return status(false, "owner-adoption-original-refused");
+                pollfd oldLifetime{owner->recoveryPidfd, POLLIN, 0};
+                if (owner->recoveryPidfd < 0 || poll(&oldLifetime, 1, 0) != 1 || !(oldLifetime.revents & POLLIN) ||
+                    (oldLifetime.revents & (POLLERR | POLLNVAL)))
+                    return status(false, "owner-recovery-still-live-or-unproven");
+                const int successor = fcntl(peer.pidfd, F_DUPFD_CLOEXEC, 0);
+                if (successor < 0) return status(false, "owner-lifetime-unavailable");
+                owner->adoptions.emplace(command, OwnerLedger::Adoption{owner->recoveryPID, peer.pid, peer.uid, owner->recoveryStart, peer.startTicks});
+                close(owner->recoveryPidfd); owner->recoveryPidfd = successor;
+                owner->recoveryPID = peer.pid; owner->recoveryStart = peer.startTicks;
+                owner->inputFenced = true;
+                if (activeOwner == owner) armed = false;
+                // Fence guardian input without releasing or clearing evidence.
+                // Explicit reconciliation owns release, not this adoption ACK.
+            }
+            auto row = ownerStatus(*owner);
+            put(row.get(), "command_id", command); put(row.get(), "adoption_confirmed", true);
+            put(row.get(), "previous_recovery_pid", oldPID); put(row.get(), "previous_recovery_start_ticks", oldStart);
+            return row;
         }
         if (owner->recoveryPID != peer.pid || owner->recoveryUID != peer.uid || owner->recoveryStart != peer.startTicks)
             return status(false, "owner-recovery-peer-refused");
@@ -409,7 +467,9 @@ struct State {
                 }
             }
         }
-        auto row = ownerStatus(*owner); put(row.get(), "command_id", text(request, "command_id")); return row;
+        auto row = ownerStatus(*owner); put(row.get(), "command_id", text(request, "command_id"));
+        if (op == "owner_capture") put(row.get(), "recovery_capability", owner->recoveryCapability);
+        return row;
     }
     struct WireEvent {
         uint32_t opcode = 0, time = 0, button = 0, state = 0, resource = 0;
@@ -497,6 +557,7 @@ struct State {
         if (instanceListenerSource) wl_event_source_remove(instanceListenerSource);
         for (auto& [fd, peer] : peers) { if (peer->source) wl_event_source_remove(peer->source); close(fd); if (peer->pidfd >= 0) close(peer->pidfd); }
         peers.clear();
+        for (auto& [id, owner] : owners) if (owner.recoveryPidfd >= 0) close(owner.recoveryPidfd);
         if (legacyListener >= 0) close(legacyListener);
         if (instanceListener >= 0) close(instanceListener);
         if (!legacySocketPath.empty()) unlink(legacySocketPath.c_str());
@@ -692,6 +753,7 @@ struct State {
             g_pCompositor->vectorToWindowUnified(v, Desktop::View::ALLOW_FLOATING) == bound.window.lock();
     }
     bool allow() {
+        if (activeOwner && activeOwner->inputFenced) { reject("owner-recovery-fenced"); return false; }
         if (scope()) { ++accepted; return true; }
         reject(!armed ? "scope-not-armed" : failed ? "scope-release-failed" :
                ns() >= deadline ? "scope-deadline-expired" : "scope-identity-or-state-changed");
@@ -758,6 +820,9 @@ struct State {
         put(j.get(), "scope_protocol_version", int64_t(1));
         put(j.get(), "release_status_v1", true);
         put(j.get(), "owner_protocol_version", int64_t(1));
+        put(j.get(), "owner_reconnect_version", int64_t(1));
+        put(j.get(), "retirement_evidence_version", int64_t(1));
+        put(j.get(), "cross_compositor_retirement_supported", false);
         put(j.get(), "plugin_epoch", pluginEpoch);
         put(j.get(), "instance_id", instanceID);
         put(j.get(), "compositor_pid", int64_t(getpid()));
@@ -989,7 +1054,8 @@ struct State {
     }
     J request(Peer& peer, json_object* j) {
         const auto op = text(j, "op");
-        if (op == "owner_capture" || op == "owner_status" || op == "owner_reconcile" || op == "owner_retire")
+        if (op == "owner_capture" || op == "owner_status" || op == "owner_reconcile" || op == "owner_retire" ||
+            op == "owner_reconnect" || op == "owner_reconnect_status")
             return ownerRequest(peer, j, op);
         if (op == "status") return status();
         if (armed && !scope() && op != "release_status") revoke("request-scope-fence");
@@ -1047,7 +1113,7 @@ struct State {
         }
         if (armed) return status(false, "already-armed");
         auto* owner = guardianOwner(peer.pid, peer.startTicks);
-        if (owner && (owner->revoked || owner->retired || owner->unknown)) return status(false, "owner-admission-retired");
+        if (owner && (owner->revoked || owner->retired || owner->unknown || owner->inputFenced)) return status(false, "owner-admission-retired");
         auto it = snapshots.find(token);
         if (it == snapshots.end() || ns() - it->second.measured >= 250000000 || !same(it->second)) return status(false, "stale-snapshot");
         Keyboard* k = nullptr; Pointer* p = nullptr;
@@ -1197,7 +1263,7 @@ void onKey(CInputManager* manager, const IKeyboard::SKeyEvent& event, SP<IKeyboa
     if (s.draining) { original(manager, event, device); return; }
     auto* k = s.find(device);
     if (!k) { original(manager, event, device); return; }
-    if (k == s.keyboard && s.activeOwner && s.activeOwner->unknown) { s.reject("owner-release-unknown"); return; }
+    if (k == s.keyboard && s.activeOwner && (s.activeOwner->unknown || s.activeOwner->inputFenced)) { s.reject("owner-release-unknown-or-fenced"); return; }
     if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.keys.erase(event.keycode)) { original(manager, event, device); return; }
     if (k != s.keyboard || !s.allow()) {
         if (k != s.keyboard) s.reject("key-device-mismatch");
@@ -1215,7 +1281,7 @@ void onMod(CInputManager* manager, SP<IKeyboard> device) {
     auto& s = *live; auto original = reinterpret_cast<ModFn>(s.modHook->m_original);
     if (s.draining) { original(manager, device); return; }
     auto* k = s.find(device); if (!k) { original(manager, device); return; }
-    if (k == s.keyboard && s.activeOwner && s.activeOwner->unknown) { s.reject("owner-release-unknown"); return; }
+    if (k == s.keyboard && s.activeOwner && (s.activeOwner->unknown || s.activeOwner->inputFenced)) { s.reject("owner-release-unknown-or-fenced"); return; }
     const auto& m = device->m_modifiersState;
     const bool zero = !(m.depressed || m.latched || m.locked || m.group);
     if (k == s.keyboard && zero && s.ownedModifiers) { s.ownedModifiers = false; original(manager, device); return; }
@@ -1226,7 +1292,7 @@ void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer>
     auto& s = *live; auto original = reinterpret_cast<ButtonFn>(s.buttonHook->m_original);
     if (s.draining) { original(manager, event, device); return; }
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
-    if (p == s.pointer && s.activeOwner && s.activeOwner->unknown) { s.reject("owner-release-unknown"); return; }
+    if (p == s.pointer && s.activeOwner && (s.activeOwner->unknown || s.activeOwner->inputFenced)) { s.reject("owner-release-unknown-or-fenced"); return; }
     if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.erase(event.button)) {
         State::OwnedDispatch trace(s, false); original(manager, event, device); return;
     }

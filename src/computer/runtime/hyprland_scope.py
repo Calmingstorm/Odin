@@ -10,7 +10,7 @@ import math
 import os
 import re
 import time
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field, replace
 from typing import NoReturn
 
 from .hyprland_capture import ExplicitOutput
@@ -21,7 +21,9 @@ from .hyprland_errors import (
     classified_cause,
 )
 from .hyprland_identity import (
+    ExecutableTrust,
     HyprlandIdentity,
+    ProcessPin,
     _proc_start,
     _unique_object,
     connect_peer,
@@ -283,6 +285,66 @@ class HyprlandOwnerHandle:
     recovery_pid: int
     recovery_uid: int
     recovery_start_ticks: str
+    recovery_capability: str = field(default="", repr=False)
+
+
+def owner_handle_to_record(handle):
+    """Private store descriptor, never a public session view or admission grant."""
+    if type(handle) is not HyprlandOwnerHandle:
+        _fail("hyprland_owner_descriptor_invalid")
+    record = {"version": 2, "owner": asdict(handle)}
+    owner_handle_from_record(record)
+    return record
+
+
+def owner_handle_from_record(record):
+    """Strictly decode all trust/process pins; no discovery or trust-on-first-use."""
+    try:
+        if (type(record) is not dict or set(record) != {"version", "owner"}
+                or type(record["version"]) is not int or record["version"] != 2):
+            raise ValueError
+        owner = record["owner"]
+        if type(owner) is not dict or set(owner) != set(HyprlandOwnerHandle.__dataclass_fields__):
+            raise ValueError
+        compositor = owner["compositor"]
+        if type(compositor) is not dict or set(compositor) != {"process", "trust"}:
+            raise ValueError
+        process, trust = compositor["process"], compositor["trust"]
+        if (type(process) is not dict or set(process) != set(ProcessPin.__dataclass_fields__)
+                or type(trust) is not dict
+                or set(trust) != set(ExecutableTrust.__dataclass_fields__)):
+            raise ValueError
+        for key in ("pid", "uid", "start_ticks", "device", "inode", "size", "mtime_ns", "ctime_ns"):
+            maximum = 2**32 - 1 if key == "uid" else 2**64 - 1
+            if (type(process[key]) is not int
+                    or not (0 if key == "uid" else 1) <= process[key] <= maximum):
+                raise ValueError
+        if (not 1 < process["pid"] <= 2**31 - 1 or type(process["boot_id"]) is not str
+                or not re.fullmatch(r"[0-9a-f]{8}(?:-[0-9a-f]{4}){3}-[0-9a-f]{12}",
+                                    process["boot_id"])
+                or type(process["sha256"]) is not str or not _DIGEST.fullmatch(process["sha256"])):
+            raise ValueError
+        for role in ("guardian", "recovery"):
+            if (type(owner[f"{role}_pid"]) is not int or not 1 < owner[f"{role}_pid"] <= 2**31 - 1
+                    or type(owner[f"{role}_uid"]) is not int
+                    or not 0 <= owner[f"{role}_uid"] <= 2**32 - 1
+                    or type(owner[f"{role}_start_ticks"]) is not str
+                    or not re.fullmatch(r"[1-9][0-9]{0,18}", owner[f"{role}_start_ticks"])):
+                raise ValueError
+        if (owner["guardian_uid"] != process["uid"]
+                or owner["recovery_uid"] not in {0, process["uid"]}
+                or type(owner["instance_id"]) is not str
+                or not _INSTANCE_ID.fullmatch(owner["instance_id"])):
+            raise ValueError
+        for key in ("plugin_epoch", "ledger_id", "recovery_capability"):
+            if type(owner[key]) is not str or not re.fullmatch(r"[0-9a-f]{48}", owner[key]):
+                raise ValueError
+        identity = HyprlandIdentity(ProcessPin(**process), ExecutableTrust(**trust))
+        if identity.process.sha256 != identity.trust.sha256:
+            raise ValueError
+        return HyprlandOwnerHandle(**{**owner, "compositor": identity})
+    except (KeyError, TypeError, ValueError, HyprlandDiagnosticError):
+        _fail("hyprland_owner_descriptor_invalid")
 
 
 @dataclass(frozen=True)
@@ -447,7 +509,17 @@ class HyprlandScopeProvider:
                 or (command_id is not None
                     and (row.get("command_id") != command_id or not row["revoked"]))):
             _fail("hyprland_owner_reply_invalid")
-        return {**expected, **{key: row[key] for key in (
+        retirement = {}
+        if "retirement_evidence_version" in row:
+            kind = ("exact-client-resources-destroyed"
+                    if row["native_resources_retired"] else "unavailable")
+            if (type(row["retirement_evidence_version"]) is not int
+                    or row["retirement_evidence_version"] != 1
+                    or row.get("retirement_evidence_kind") != kind
+                    or (row["native_resources_retired"] and not row["retired"])):
+                _fail("hyprland_owner_retirement_reply_invalid")
+            retirement = {"retirement_evidence_version": 1, "retirement_evidence_kind": kind}
+        return {**expected, **retirement, **{key: row[key] for key in (
             "owner_matched", "ledger_empty", "release_ack", "revoked", "retired",
             "unknown_release", "native_resources_retired", "receiver_release_verified",
         )}, "command_id": command_id}
@@ -476,10 +548,17 @@ class HyprlandScopeProvider:
             ledger = row.get("ledger_id")
             if type(ledger) is not str or not re.fullmatch(r"[0-9a-f]{48}", ledger):
                 _fail("hyprland_owner_reply_invalid")
+            capability = row.get("recovery_capability", "")
+            if ((row.get("owner_reconnect_version") is not None or capability != "")
+                    and (type(row.get("owner_reconnect_version")) is not int
+                         or row["owner_reconnect_version"] != 1
+                         or type(capability) is not str
+                         or not re.fullmatch(r"[0-9a-f]{48}", capability))):
+                _fail("hyprland_owner_reconnect_unavailable")
             handle = HyprlandOwnerHandle(
                 copy.deepcopy(identity), instance, plugin, ledger, guardian["pid"],
                 guardian["uid"], str(guardian["start_ticks"]), recovery_pid,
-                recovery_uid, recovery_start,
+                recovery_uid, recovery_start, capability,
             )
             self._owner_reply(row, handle)
             if row["revoked"] or row["unknown_release"] or not row["ledger_empty"]:
@@ -511,8 +590,84 @@ class HyprlandScopeProvider:
     async def reconcile_owner(self, handle, *, command_id):
         return await self._owner_operation(handle, "owner_reconcile", command_id)
 
+    async def reconnect_owner(self, handle, *, command_id, query_only=False):
+        """Release-only adoption, not input authority or release evidence.
+
+        Persist original handle, command and successor BEFORE dispatch; persist
+        returned handle before reconciliation. Lost ACK is query-only, from the
+        same successor. Another successor after ambiguous transfer is refused.
+        """
+        async with self._lock:
+            owner_handle_to_record(handle)
+            identity, instance, plugin = self._owner_context()
+            if (handle.compositor != identity or handle.instance_id != instance
+                    or handle.plugin_epoch != plugin or type(query_only) is not bool
+                    or type(command_id) is not str
+                    or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", command_id)
+                    or os.geteuid() != handle.recovery_uid):
+                _fail("hyprland_owner_identity_invalid")
+            await revalidate(identity, time.monotonic() + 0.5)
+            status = await self._request({"op": "status"})
+            _instance_status(status, identity)
+            if (status.get("plugin_epoch") != plugin
+                    or type(status.get("owner_reconnect_version")) is not int
+                    or status["owner_reconnect_version"] != 1):
+                _fail("hyprland_owner_reconnect_unavailable")
+            successor = replace(handle, recovery_pid=os.getpid(),
+                                recovery_start_ticks=str(_proc_start(os.getpid(), os.geteuid())))
+            row = await self._request({
+                "op": "owner_reconnect_status" if query_only else "owner_reconnect",
+                "instance_id": instance, "plugin_epoch": plugin, "ledger_id": handle.ledger_id,
+                "recovery_capability": handle.recovery_capability, "command_id": command_id,
+                **{key: getattr(handle, key) for key in (
+                    "guardian_pid", "guardian_uid", "guardian_start_ticks",
+                    "recovery_pid", "recovery_uid", "recovery_start_ticks")},
+            })
+            self._owner_reply(row, successor)
+            if (row.get("command_id") != command_id or row.get("adoption_confirmed") is not True
+                    or row.get("guardian_input_fenced") is not True
+                    or type(row.get("previous_recovery_pid")) is not int
+                    or row["previous_recovery_pid"] != handle.recovery_pid
+                    or row.get("previous_recovery_start_ticks") != handle.recovery_start_ticks):
+                _fail("hyprland_owner_adoption_reply_invalid")
+            await revalidate(identity, time.monotonic() + 0.5)
+            return successor
+
     async def retire_owner(self, handle, *, command_id):
         return await self._owner_operation(handle, "owner_retire", command_id)
+
+    async def recovery_capabilities(self):
+        """Authenticated protocol negotiation, never runtime qualification."""
+        async with self._lock:
+            identity, instance, plugin = self._owner_context()
+            await revalidate(identity, time.monotonic() + 0.5)
+            row = await self._request({"op": "status"})
+            _instance_status(row, identity)
+            if row.get("instance_id") != instance or row.get("plugin_epoch") != plugin:
+                _fail("hyprland_owner_identity_invalid")
+            for key in ("owner_reconnect_version", "retirement_evidence_version"):
+                if type(row.get(key)) is not int or row[key] != 1:
+                    _fail("hyprland_owner_protocol_unavailable")
+            # This implementation has no witness surviving the old compositor.
+            # A peer unexpectedly claiming support is not an implemented protocol.
+            if row.get("cross_compositor_retirement_supported") is not False:
+                _fail("hyprland_retirement_protocol_unavailable")
+            await revalidate(identity, time.monotonic() + 0.5)
+            return {"owner_reconnect_version": 1, "retirement_evidence_version": 1,
+                    "cross_compositor_retirement_supported": False,
+                    "runtime_qualified": False}
+
+    async def prove_resource_absence(self, handle, *, command_id):
+        """A replacement plugin cannot testify to a lost plugin's ledger.
+
+        Explicit capability refusal, not an optional callback whose absence could
+        accidentally authorize a handoff. Compositor death is not release proof.
+        """
+        owner_handle_to_record(handle)
+        if type(command_id) is not str or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", command_id):
+            _fail("hyprland_owner_identity_invalid")
+        await self.recovery_capabilities()
+        _fail("hyprland_cross_compositor_retirement_unavailable")
 
     async def owner_status(self, handle, *, command_id):
         """Query a recorded transaction after lost acknowledgement, no mutation."""

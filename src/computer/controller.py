@@ -300,6 +300,76 @@ class ComputerController:
             grant = self.store.finish_recovery(grant, result)
             return self._public_session(grant)
 
+    async def reconcile_hyprland_owner(self, context, session_id, generation):
+        """Current authorized owner may reconcile a dead daemon's ledger, never its consent."""
+        from .runtime.hyprland_recovery import HyprlandRecoveryResult
+
+        await self._auth(context)
+        grant = self._grant(context, {"session_id": session_id, "generation": generation},
+                             same_turn=False)
+        if grant.state != "quarantined" or session_id in self._live:
+            raise ComputerError("hyprland_reconciliation_required")
+        async with self._actions:
+            if session_id in self._recoveries:
+                raise ComputerError("hyprland_recovery_pending")
+            await self._auth(context)
+            if self.store.get_session(session_id) != grant or session_id in self._live:
+                raise ComputerError("grant_revoked")
+            backend = self.backend_factory(None)
+            if inspect.isawaitable(backend):
+                backend = await backend
+            capabilities = getattr(backend, "capabilities", None)
+            if (type(capabilities) is not BackendCapabilities
+                    or capabilities.backend != "hyprland"
+                    or not callable(getattr(backend, "reconcile_durable_owner", None))):
+                await self._close_inventory_backend(backend)
+                raise ComputerError("hyprland_durable_owner_required")
+            await self._auth(context)
+            if self.store.get_session(session_id) != grant or session_id in self._live:
+                raise ComputerError("grant_revoked")
+            record, query_only = self.store.prepare_hyprland_reconnect(grant)
+
+            async def checkpoint():
+                await self._auth(context)
+                if (self.store.get_session(session_id) != grant
+                        or session_id in self._live
+                        or self._recoveries.get(session_id) is not asyncio.current_task()):
+                    raise ComputerError("grant_revoked")
+
+            def persist(descriptor):
+                self.store.persist_hyprland_reconnected_owner(
+                    grant, record["command_id"], descriptor)
+
+            def prepare_phase(phase):
+                return self.store.prepare_hyprland_reconnect_phase(
+                    grant, record["command_id"], phase)
+
+            task = _own_task(asyncio.create_task(backend.reconcile_durable_owner(
+                record["owner"], command_id=record["command_id"], query_only=query_only,
+                persist=persist, checkpoint=checkpoint, prepare_phase=prepare_phase)))
+            self._recoveries[session_id] = task
+            try:
+                result = await _bounded(task, 22)
+                await self._auth(context)
+                if self.store.get_session(session_id) != grant or session_id in self._live:
+                    raise ComputerError("grant_revoked")
+                if type(result) is not HyprlandRecoveryResult:
+                    raise ComputerError("hyprland_recovery_evidence_invalid")
+                cleanup = result.cleanup
+                released = (cleanup.get("released") is True
+                            and cleanup.get("release_ack") is True
+                            and cleanup.get("unknown_release") is False)
+                retired = cleanup.get("resources_retired") is True
+                self.store.record_hyprland_recovery_assessment(
+                    grant, state="fresh_target_required" if released and retired
+                    else "operator_release_required", released=released,
+                    resources_retired=retired)
+                return self._public_session(grant)
+            finally:
+                backend.abort_native_recovery()
+                if self._recoveries.get(session_id) is task:
+                    self._recoveries.pop(session_id, None)
+
     async def acknowledge_legacy_recovery(self, context, session_id, generation, acknowledgment):
         """Explicit human attestation archives legacy uncertainty, not a clean claim."""
         await self._auth(context, emergency=True)
@@ -617,7 +687,8 @@ class ComputerController:
                 fenced, state=("fresh_target_required" if released and retired
                                else "operator_release_required"),
                 released=released, resources_retired=retired)
-            if retired and result.state != "ready_for_replan":
+            if (retired or cleanup.get("local_resources_closed") is True) \
+                    and result.state != "ready_for_replan":
                 self._live.pop(sid, None)
                 timer = self._watchdogs.pop(sid, None)
                 if timer is not None:
@@ -798,6 +869,8 @@ class ComputerController:
         self._fence(sid)
         persistence_failed = False
         try:
+            if state in {"closed", "cancelled"}:
+                self.store.cancel_hyprland_continuation(sid)
             pending = self.store.get_recovery_pending(sid)
             if pending is not None:
                 # Unknown/future phases cannot opt out of reconciliation by
@@ -1314,6 +1387,9 @@ class ComputerController:
                     raise
                 return self._public_session(self.store.get_session(grant.session_id))
         if operation == "reconcile":
+            if grant.state == "quarantined" and grant.session_id not in self._live:
+                return await self.reconcile_hyprland_owner(
+                    context, grant.session_id, grant.generation)
             return await self.observe(
                 context, {"session_id": grant.session_id, "generation": grant.generation}
             )
@@ -1490,6 +1566,11 @@ class ComputerController:
         await self._auth(context)
         grant = self._grant(context, inp)
         async with self._actions:
+            live = self._active(grant)
+            if (hints is not None and live.capabilities is not None
+                    and live.capabilities.backend == "hyprland"):
+                self._task_context(live, hints)
+                self.store.persist_hyprland_task(grant, dict(live.task_context.hints))
             if "source_id" in inp:
                 source_id = inp["source_id"]
                 if not isinstance(source_id, str) or not 1 <= len(source_id) <= 128:

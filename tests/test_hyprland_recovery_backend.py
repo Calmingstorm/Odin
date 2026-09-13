@@ -31,7 +31,9 @@ def owner():
 def evidence(**changes):
     return dict(owner_matched=True, instance_id="i" * 48, plugin_epoch="e" * 48,
                 ledger_id="l" * 48, ledger_empty=True, release_ack=True, revoked=True,
-                unknown_release=False, retired=True, receiver_release_verified=False) | changes
+                unknown_release=False, retired=True, receiver_release_verified=False,
+                native_resources_retired=True, retirement_evidence_version=1,
+                retirement_evidence_kind="exact-client-resources-destroyed") | changes
 
 
 @pytest.fixture
@@ -127,14 +129,33 @@ async def test_replacement_identity_never_approximated(runtime, key):
     assert backend._paused and not backend.input_supported
 
 
-async def test_dead_incarnation_is_retirement_not_release(runtime):
+async def test_dead_incarnation_is_neither_native_retirement_nor_release(runtime):
     backend, provider, guardian = runtime
     backend._incarnation.exited = lambda: True
     provider.reconcile_owner.side_effect = OSError()
     provider.owner_status.side_effect = OSError()
     result = await backend.recover_native_authority(consent_generation=2, command_id="txn")
     assert result.state == "fresh_target_required"
-    assert result.cleanup["resources_retired"]
+    assert not result.cleanup["resources_retired"]
+    assert result.cleanup["original_compositor_exited"]
+    assert result.cleanup["local_resources_closed"]
+    assert result.cleanup["retirement_basis"] == "unproven"
+    assert result.cleanup["unknown_release"] and not result.cleanup["released"]
+    guardian.start.assert_not_awaited()
+
+
+@pytest.mark.parametrize("changes", [
+    {"native_resources_retired": False}, {"native_resources_retired": 1},
+    {"retirement_evidence_version": None}, {"retirement_evidence_version": True},
+    {"retirement_evidence_version": 2}, {"retirement_evidence_kind": "unavailable"},
+])
+async def test_retired_boolean_without_native_resource_proof_stays_unproven(runtime, changes):
+    backend, provider, guardian = runtime
+    row = evidence(release_ack=False, ledger_empty=False, unknown_release=True, **changes)
+    provider.reconcile_owner.return_value = provider.retire_owner.return_value = row
+    result = await backend.recover_native_authority(consent_generation=2, command_id="txn")
+    assert result.state == "operator_release_required"
+    assert not result.cleanup["resources_retired"]
     assert result.cleanup["unknown_release"] and not result.cleanup["released"]
     guardian.start.assert_not_awaited()
 

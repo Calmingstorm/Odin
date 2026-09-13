@@ -1,6 +1,6 @@
 # Unqualified Hyprland recovery build
 
-Starting revision: `738783e564dbdd5140e48c5c0e66124147d82787`.
+Completion scope: changes through `3972b34d` and its durable-recovery follow-up.
 This lane implements recovery without deploying or qualifying it on a desktop.
 `runtime_qualified` remains false. The real-machine procedure is
 [HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md](HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md).
@@ -12,27 +12,35 @@ This lane implements recovery without deploying or qualifying it on a desktop.
    rediscover a replacement desktop but cannot treat it as the old window.
    Reconciled predecessors support an explicitly selected successor through
    `recovery_session_id` and `recovery_generation`. Actual compositor death
-   normally leaves release unknown: that path retires provably dead resources,
-   remains quarantined, and requires operator reconciliation. Seamless automatic
-   compositor-restart task continuation is **not delivered**.
+   normally leaves release unknown. It records local closure separately and
+   preserves the task through explicit external-cleanup attestation into a fresh
+   selected successor. The user need not reconstruct task hints. Seamless automatic
+   cross-compositor native authority remains refused without a native witness.
 2. **Automatic durable handoff.** The exact surviving compositor/plugin/window
    and surface lifetime can move to a new scoped output generation after original
    owner release and closure. The controller persists the fence and command before
    native preparation, checks authority again, and commits the parent-linked
    successor with synchronous native activation inside the store transaction.
    Previous pixels are invalid; a new observation and plan are mandatory.
-3. **Reconnectable original ownership.** Before any arm, the backend registers
-   and persists an exact native owner. Reconciliation uses the original
-   compositor/plugin/ledger plus authenticated recovery-process incarnation.
-   Lost acknowledgements cause a status query, not release replay. Native
-   tombstones are bounded to 4096 and never evicted to admit another owner.
-   Reconnection after the controller process restarts remains unsupported;
-   persisted descriptors are evidence, not reconstructed authority.
+3. **Narrow durable takeover of original ownership.** Before any arm, the backend
+   registers and persists an exact native owner. A controller or recovery-daemon
+   restart may rehydrate **only** a persisted v2 descriptor with its exact secret
+   capability, original compositor/plugin/ledger, exact permitted successor
+   identity, and verified old-owner PID/start-tick exit. The provider attests the
+   original compositor/protocol, fences old guardian input, and gives the new
+   owner release-only reconciliation authority. Lost acknowledgements cause a
+   status query with the original durable transaction identity, not release replay.
+   The intended successor is persisted before dispatch and a successful successor
+   descriptor before reconciliation. Legacy descriptors, absent/wrong capability,
+   an active old owner, mismatched identity, changed compositor/plugin/ledger, or
+   an unavailable retained ledger refuse. Native tombstones are bounded to 4096
+   and never evicted to admit another owner.
 4. **Retirement separate from release.** The native protocol permanently fences
-   one owner and can retire its captured virtual client. A retained original
-   compositor pidfd plus confirmed local closure can establish old-resource
-   retirement after compositor death. Neither path upgrades unknown release or
-   receiver evidence. Unproven retirement retains the revoked adapter.
+   one owner and can retire its captured virtual client with a versioned native
+   destruction certificate. A retained original compositor pidfd proves only its
+   process exit, not native retirement or release. Confirmed local closure permits
+   dropping the inactive adapter while durable quarantine remains. Incomplete
+   local closure retains it. Neither case upgrades receiver evidence.
 
 ## Safety repairs found during integration
 
@@ -47,33 +55,57 @@ This lane implements recovery without deploying or qualifying it on a desktop.
 - Sticky native release uncertainty cannot be repaired by repeating RELEASE-ALL.
   The documented remedy is exact retirement where provable, external operator
   cleanup, and authenticated explicit reconciliation without a release claim.
+- Compositor death remains unqualified for native release proof. Resource absence
+  without an exact supported certificate remains false, and no universal receiver
+  release is claimed. After explicit external cleanup/attestation, a fresh
+  successor may carry task hints and lineage only. It must select a fresh target,
+  deliver fresh pixels, receive current consent and a new grant before new input.
+  No action, observation, grant, scope token, native authority, or result is
+  resurrected.
+
+## Operator surface
+
+There is no shell recovery driver. The release-only public operation is:
+
+```json
+{
+  "operation": "reconcile",
+  "session_id": "<durable-session-id>",
+  "generation": 7
+}
+```
+
+It does not resume a task or authorize input. It either performs the narrowly
+eligible durable-owner query/takeover-and-release flow, records an explicit
+operator-reconciliation boundary, or refuses. A post-compositor-death successor
+is an operator-created session with fresh target selection and observation, not an
+automatic continuation.
 
 ## Offline evidence
 
-Seven new test files contain **123 passing tests**:
+Final focused run: **178 passed**, exit zero, 5.35 seconds.
 
 | File under `tests/` | Count |
 | --- | ---: |
 | `test_hyprland_reconnect_protocol.py` | 34 |
 | `test_hyprland_reconnect_protocol_native.py` | 2 |
-| `test_hyprland_recovery_backend.py` | 45 |
+| `test_hyprland_recovery_backend.py` | 51 |
 | `test_hyprland_recovery_controller.py` | 24 |
 | `test_hyprland_recovery_end_to_end.py` | 14 |
 | `test_hyprland_recovery_store_atomic.py` | 2 |
 | `test_hyprland_recovery_tool_schema.py` | 2 |
+| `test_hyprland_durable_reconnect.py` | 34 |
+| `test_hyprland_durable_recovery.py` | 15 |
 
 These exercise injected transports, real SQLite transactions, actual
 controller/runtime persistence integration, and compiled extracted native
 ownership/window-lifetime methods. The complete plugin was not compiled against
 the pinned headers in this lane and no receiver or compositor runtime was used.
 
-The final local coverage run passed **17,564 tests**, skipped 32, and exited zero
-in 432.64 seconds. The unchanged ratchet reported zero findings and 92.7% total
-coverage (reported, not gated). Earlier runs failed on outdated protocol fixtures
-and a missing consent phrase; those failures were diagnosed and repaired, not
-skipped. Existing warnings remain visible. Local lint, type and configuration
-classification gates passed. The final plain suite and exact-head hosted gate
-results belong to the completion report, not an assumption in this document.
+The complete local coverage run passed **17,619 tests**, skipped 32, exit zero,
+433.73 seconds. The unchanged ratchet reported zero findings and 92.7% total
+coverage (reported, not gated). Existing warnings remain visible. The completion
+report records the separate plain suite and exact-head hosted gates.
 
 All 16 tracked `x11_*.py` files are byte-identical to `origin/master` at
 `ef119814afcaf6a19996f29f12fddf79a3aaa5f9`. No generic Wayland runtime file was
@@ -84,9 +116,10 @@ suite despite that byte-identity attestation.
 
 No application-assisted document restoration protocol, cross-incarnation window
 identity, replacement-ledger inference, automatic input replay, emergency unknown
-release override, controller-restart authority reconstruction, deployment, or
-qualification flag change. The qualification plan distinguishes supported
-positive cases from mandatory dead-ledger refusals and identifies the missing
-real-machine recovery orchestration driver rather than inventing an executable
-command. No workflow, gate, baseline, worker ceiling or lint/type configuration
-was weakened.
+release override, automatic controller-restart authority reconstruction, deployment,
+or qualification flag change. The narrow v2 durable takeover is not a generic
+restart recovery mechanism and grants release-only reconciliation, never task or
+input authority. The qualification plan distinguishes it from mandatory
+dead-ledger refusals and identifies the missing real-machine recovery orchestration
+driver rather than inventing an executable command. No workflow, gate, baseline,
+worker ceiling or lint/type configuration was weakened.

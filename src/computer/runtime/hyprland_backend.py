@@ -31,6 +31,7 @@ from .hyprland_identity import (
 )
 from .hyprland_recovery import (
     CompositorIncarnation,
+    HyprlandCrossIncarnationRecovery,
     HyprlandRecoveryResult,
     ledger_evidence,
 )
@@ -287,6 +288,7 @@ class HyprlandRuntimeBackend:
         self._recovery_running = False
         self._discovery_config = config
         self.recovery_identity_callback: Callable[[dict[str, Any]], None] | None = None
+        self._cross_incarnation = HyprlandCrossIncarnationRecovery()
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -1264,8 +1266,14 @@ class HyprlandRuntimeBackend:
         if (type(self._owner_handle) is not HyprlandOwnerHandle
                 or self.recovery_identity_callback is None or self._identity is None):
             raise ComputerError("hyprland_durable_owner_required")
+        if getattr(self._owner_handle, "recovery_capability", ""):
+            from .hyprland_scope import owner_handle_to_record
+
+            self.recovery_identity_callback(owner_handle_to_record(self._owner_handle))
+            return
         owner = asdict(self._owner_handle)
         owner.pop("compositor", None)
+        owner.pop("recovery_capability", None)
         process = self._identity.process
         self.recovery_identity_callback({
             "version": 1, "owner": owner,
@@ -1275,6 +1283,88 @@ class HyprlandRuntimeBackend:
                 "boot_id": process.boot_id,
             },
         })
+
+    async def reconcile_durable_owner(self, descriptor, *, command_id, query_only,
+                                      persist, checkpoint, prepare_phase):
+        """Rehydrate only the original release owner. Never start, focus or bind input."""
+        from .hyprland_scope import owner_handle_from_record, owner_handle_to_record
+
+        self._invalidate()
+        if self._started or self._closed:
+            raise ComputerError("hyprland_recovery_revoked")
+        handle = owner_handle_from_record(descriptor)
+        if (handle.compositor.trust != self.config.compositor_trust
+                or handle.compositor.process.uid != self.config.expected_uid):
+            raise ComputerError("hyprland_recovery_trust_changed")
+        self._identity = handle.compositor
+        self._owner_handle = handle
+        epoch = self._recovery_epoch
+
+        async def current():
+            await checkpoint()
+            self._recovery_current(epoch)
+
+        provider = None
+        cleanup = {"released": False, "release_ack": False, "unknown_release": True,
+                   "resources_retired": False, "receiver_release_verified": False}
+        try:
+            await current()
+            await revalidate(handle.compositor, time.monotonic() + 3)
+            await current()
+            provider = await HyprlandScopeProvider.from_identity(
+                identity=handle.compositor, runtime_dir=self.config.runtime_dir)
+            self._scope_provider = provider
+            await current()
+            try:
+                adopted = await provider.reconnect_owner(
+                    handle, command_id=command_id, query_only=query_only)
+            except Exception:
+                await current()
+                if query_only:
+                    raise
+                adopted = await provider.reconnect_owner(
+                    handle, command_id=command_id, query_only=True)
+            await current()
+            persist(owner_handle_to_record(adopted))
+            self._owner_handle = adopted
+            await current()
+            release_query_only = prepare_phase("reconcile")
+            try:
+                if release_query_only:
+                    row = await provider.owner_status(adopted, command_id=command_id + "-release")
+                else:
+                    row = await provider.reconcile_owner(adopted, command_id=command_id + "-release")
+            except Exception:
+                await current()
+                row = await provider.owner_status(adopted, command_id=command_id + "-release")
+            await current()
+            evidence = ledger_evidence(row, adopted)
+            retire_query_only = prepare_phase("retire")
+            try:
+                if retire_query_only:
+                    retired_row = await provider.owner_status(
+                        adopted, command_id=command_id + "-retire")
+                else:
+                    retired_row = await provider.retire_owner(
+                        adopted, command_id=command_id + "-retire")
+            except Exception:
+                await current()
+                retired_row = await provider.owner_status(adopted, command_id=command_id + "-retire")
+            await current()
+            retirement = ledger_evidence(retired_row, adopted)
+            cleanup.update(evidence)
+            cleanup.update(released=evidence["release_ack"],
+                           resources_retired=retirement["native_owner_retired"])
+            return HyprlandRecoveryResult(
+                "fresh_target_required" if cleanup["released"] and cleanup["resources_retired"]
+                else "operator_release_required", None, cleanup,
+                "hyprland_durable_owner_reconciled_no_task_resurrection")
+        finally:
+            self._invalidate()
+            if provider is not None:
+                await provider.close()
+            self._scope_provider = None
+            self._closed = True
 
     def _recovery_current(self, epoch):
         if self._closed or epoch != self._recovery_epoch:
@@ -1388,15 +1478,25 @@ class HyprlandRuntimeBackend:
         dead_incarnation = self._incarnation is not None and self._incarnation.exited()
         released = local_closed and evidence["release_ack"]
         retired = local_closed and (
-            evidence["native_owner_retired"] or evidence["release_ack"] or dead_incarnation
+            evidence["native_owner_retired"] or evidence["release_ack"]
         )
         cleanup.update(
             evidence, released=released, release_ack=released,
             unknown_release=not released, resources_retired=retired,
-            retirement_basis=("original_compositor_pidfd_exited" if dead_incarnation
-                              else "exact_native_owner_retired" if retired else "unproven"),
+            retirement_basis=("exact_native_owner_retired" if retired else "unproven"),
+            original_compositor_exited=dead_incarnation,
+            local_resources_closed=local_closed,
         )
         if not released or dead_incarnation:
+            if dead_incarnation and handle is not None:
+                async def checkpoint():
+                    self._recovery_current(epoch)
+
+                assessment = await self._cross_incarnation.reconcile(
+                    provider=provider, handle=handle, successor=None,
+                    command_id=command_id, checkpoint=checkpoint)
+                self._recovery_current(epoch)
+                cleanup["cross_incarnation_reason"] = assessment.reason
             if provider is not None:
                 await provider.close()
             if retired and self._incarnation is not None:

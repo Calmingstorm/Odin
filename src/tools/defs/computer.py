@@ -53,6 +53,10 @@ _DEFINITIONS = [
         "explicitly reports fresh_target_required, obtain inventory_targets and start with "
         "a fresh target plus recovery_session_id/recovery_generation to preserve task lineage. "
         "Those fields do not clear unknown release or authorize a replacement window. "
+        "For a quarantined Hyprland task after controller loss, reconcile performs "
+        "bounded release-only recovery from its durable original ownership record. "
+        "It never resumes input or repeats an action; inspect its result and establish "
+        "a fresh target. Status remains read-only. "
         "Never operate terminals, credential/security prompts or Odin's "
         "control plane.",
         {
@@ -65,6 +69,7 @@ _DEFINITIONS = [
                     "stop",
                     "pause",
                     "resume",
+                    "reconcile",
                     "cancel",
                     "close",
                     "export",

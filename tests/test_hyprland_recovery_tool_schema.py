@@ -8,6 +8,9 @@ def test_recovery_lineage_fields_are_optional_start_metadata():
     session = tools["computer_session"]
     schema = session["input_schema"]
     assert schema["required"] == ["operation"]
+    assert "reconcile" in schema["properties"]["operation"]["enum"]
+    assert "bounded release-only recovery" in session["description"]
+    assert "Status remains read-only" in session["description"]
     assert schema["properties"]["recovery_generation"]["minimum"] == 1
     assert schema["properties"]["recovery_session_id"]["maxLength"] == 128
     assert "Hyprland start only" in schema["properties"]["recovery_session_id"]["description"]

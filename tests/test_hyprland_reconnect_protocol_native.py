@@ -26,7 +26,11 @@ def test_native_owner_protocol_component(tmp_path):
 #include <json-c/json.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#include <sys/syscall.h>
+#include <sys/wait.h>
+#include <signal.h>
 #include <poll.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <climits>
 #include <cstdint>
@@ -129,6 +133,53 @@ int main() {
     put(req.get(), "plugin_epoch", full.pluginEpoch);
     assert(!boolean(full.ownerRequest(peer, req.get(), "owner_capture"), "ok"));
     assert(full.owners.size() == 4096);
+    // Real kernel pidfd lifetime, fake compositor edges only. Controller death
+    // permits exact capability adoption, never proves release or destroys input.
+    const pid_t child = fork(); assert(child >= 0);
+    if (child == 0) { for (;;) pause(); }
+    const int childFD = syscall(SYS_pidfd_open, child, 0); assert(childFD >= 0);
+    Peer predecessor{childFD, child, getuid(), "123"}; State durable;
+    auto adoption = obj(); put(adoption.get(), "instance_id", durable.instanceID);
+    put(adoption.get(), "plugin_epoch", durable.pluginEpoch);
+    put(adoption.get(), "guardian_pid", int64_t(getpid()));
+    put(adoption.get(), "guardian_uid", int64_t(getuid()));
+    put(adoption.get(), "guardian_start_ticks", std::string("123"));
+    auto saved = durable.ownerRequest(predecessor, adoption.get(), "owner_capture");
+    assert(boolean(saved, "ok")); const auto durableID = text(saved.get(), "ledger_id");
+    auto& durableOwner = durable.owners.at(durableID);
+    assert(fcntl(durableOwner.recoveryPidfd, F_GETFD) & FD_CLOEXEC);
+    durableOwner.unknown = true; durableOwner.ack = false; durableOwner.empty = false;
+    durable.activeOwner = &durableOwner; durable.armed = true;
+    put(adoption.get(), "ledger_id", durableID);
+    put(adoption.get(), "recovery_capability", text(saved.get(), "recovery_capability"));
+    put(adoption.get(), "recovery_pid", int64_t(child));
+    put(adoption.get(), "recovery_uid", int64_t(getuid()));
+    put(adoption.get(), "recovery_start_ticks", std::string("123"));
+    put(adoption.get(), "command_id", std::string("adoption-1"));
+    assert(!boolean(durable.ownerRequest(peer, adoption.get(), "owner_reconnect"), "ok"));
+    assert(durableOwner.recoveryPID == child && durable.releases == 0);
+    kill(child, SIGKILL); int childStatus = 0; assert(waitpid(child, &childStatus, 0) == child);
+    put(adoption.get(), "recovery_capability", std::string("wrong"));
+    assert(!boolean(durable.ownerRequest(peer, adoption.get(), "owner_reconnect"), "ok"));
+    put(adoption.get(), "recovery_capability", text(saved.get(), "recovery_capability"));
+    Peer wrongPrincipal = peer; wrongPrincipal.uid = getuid() + 1;
+    assert(!boolean(durable.ownerRequest(wrongPrincipal, adoption.get(), "owner_reconnect"), "ok"));
+    put(adoption.get(), "guardian_pid", int64_t(getpid() + 1));
+    assert(!boolean(durable.ownerRequest(peer, adoption.get(), "owner_reconnect"), "ok"));
+    put(adoption.get(), "guardian_pid", int64_t(getpid()));
+    auto adopted = durable.ownerRequest(peer, adoption.get(), "owner_reconnect");
+    assert(boolean(adopted, "adoption_confirmed") && boolean(adopted, "unknown_release"));
+    assert(!boolean(adopted, "release_ack") && !boolean(adopted, "receiver_release_verified"));
+    assert(durableOwner.recoveryPID == peer.pid && durable.releases == 0 && !durable.armed);
+    assert(durableOwner.inputFenced);
+    // Lost ACK: mutation cannot replay; only exact successor may query tombstone.
+    assert(!boolean(durable.ownerRequest(peer, adoption.get(), "owner_reconnect"), "ok"));
+    assert(boolean(durable.ownerRequest(peer, adoption.get(), "owner_reconnect_status"), "ok"));
+    assert(!boolean(durable.ownerRequest(foreign, adoption.get(), "owner_reconnect_status"), "ok"));
+    put(adoption.get(), "command_id", std::string("unknown"));
+    assert(!boolean(durable.ownerRequest(peer, adoption.get(), "owner_reconnect_status"), "ok"));
+    assert(durable.releases == 0 && durableOwner.unknown && !durableOwner.revoked);
+    close(childFD); close(durableOwner.recoveryPidfd);
     close(pipes[0]); close(pipes[1]);
 }
 '''

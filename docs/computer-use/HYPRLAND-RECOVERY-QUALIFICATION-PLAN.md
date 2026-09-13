@@ -11,11 +11,12 @@ This plan qualifies four bounded capabilities:
 1. task-lineage preservation and same-incarnation native recovery after proven
    release;
 2. automatic durable output-grant handoff;
-3. same-owner native ownership-ledger reconciliation; and
+3. persisted-descriptor durable-owner takeover and release-only reconciliation;
 4. incarnation-bound retirement after failed cleanup.
 
-It does **not** claim automatic recovery across compositor death. That boundary
-is intentionally fail-closed in the current controller path.
+It does **not** claim automatic recovery across compositor death. Durable task
+continuity after that boundary is an explicit operator-reconciliation flow, not a
+seamless session resurrection or native continuation.
 
 It is written for an operator who did not build the feature. Read it completely
 before starting. A diagnosed refusal is useful. Weakening a guard until the case
@@ -44,21 +45,22 @@ Keep these claims separate:
 | retirement | old input incarnation can never authorize or complete later input | release or receiver release |
 | fresh authority | a new durable grant and delivered observation under current consent | authority inherited from the retired incarnation |
 
-**The contract is task-lineage-continuous only where the current implementation
-can prove release and exact native continuity.** Compositor death destroys native
-object identity. A replacement window is not the original window. Same
-title/class, executable, PID, or appearance is insufficient. The backend may
-return `fresh_target_required` with a fresh inventory after the original
-compositor pidfd has exited, but the controller records
+**The contract is task-lineage-continuous only where its stated evidence exists.**
+Compositor death destroys native object identity. A replacement window is not the
+original window. Same title/class, executable, PID, or appearance is insufficient.
+The backend may return `fresh_target_required` with a fresh inventory after the
+original compositor pidfd has exited, but the controller records
 `operator_release_required` when `released` is false. A fresh inventory is not
-release proof and cannot advance that controller state. There is therefore no
-automatic compositor-restart continuation to qualify today.
+release proof and cannot advance that state.
 
-If a later operator-supervised flow starts a new session, it must use a fresh
-explicit inventory selection and observation. The selection fields are exactly
-`target_id`, `output_id`, and `candidate_epoch`, not a title/class match or a
-`selected_target` object. If application-assisted document identity is added
-later, qualify it separately; until then an ambiguous replacement refuses.
+After external cleanup and an explicit, authenticated operator attestation, a
+later operator-supervised flow may create a successor that carries only saved task
+hints and lineage. It must use a fresh explicit inventory selection and
+observation. The selection fields are exactly `target_id`, `output_id`, and
+`candidate_epoch`, not a title/class match or a `selected_target` object. The
+attestation is not native release proof or receiver proof. If application-assisted
+document identity is added later, qualify it separately; until then an ambiguous
+replacement refuses.
 
 No boolean is compositor proof. `ready`, `released`, `retired`, `clean`, process
 absence, or `runtime_qualified` is only a summarized claim. Retain the underlying
@@ -203,10 +205,35 @@ authority. The predecessor must have durable reconciled cleanup and be closed
 before any successor starts. Only descriptive task hints and lineage cross;
 observations, scope tokens, actions, live grants and consent do not.
 
-The native owner is PID-bound. A post-daemon restart is unsupported even when a
-durable owner descriptor remains on disk, because the descriptor cannot recreate
-the original peer PID/start-tick identity or live ownership ledger. It must refuse
-honestly rather than infer reconnection.
+The native owner is PID-bound. A controller or recovery-daemon restart is supported
+**only** for a persisted v2 descriptor and its matching capability, where the
+exact original compositor, plugin epoch, owner identity, and retained ledger still
+exist; the old recovery owner PID/start-tick must positively prove exited; and the
+authenticated successor has the exact permitted owner identity. The provider must
+attest the original compositor/protocol before takeover. A legacy descriptor,
+missing or mismatched capability, living predecessor, changed principal, changed
+compositor/plugin/ledger, or lost retained ledger refuses. Descriptor decoding
+restores identity data, not input authority.
+
+The supported public recovery operation is release-only reconciliation. There is
+no recovery-driver shell command. Use the computer-session API against a durable
+session with its current generation, for example:
+
+```json
+{
+  "operation": "reconcile",
+  "session_id": "<durable-session-id>",
+  "generation": 7
+}
+```
+
+This operation may query a lost acknowledgement and, when all exact takeover
+conditions hold, adopt the old native owner solely to reconcile/release it. It
+does not restore a grant, observation, action, consent, or task execution. A lost
+ACK is queried with the same durable command/transaction identity; it is never
+released again. Persist the intended successor and original descriptor before
+dispatch, and persist the successful successor descriptor before release
+reconciliation. If a second controller death leaves adoption ambiguous, refuse.
 
 ### Positive procedure: supported lineage after proven release
 
@@ -235,7 +262,7 @@ grounded in a new observation.
 action/tail replay; recovery without reconciled cleanup; loss of task hints; or
 input before a fresh observation.
 
-### Expected refusal: compositor death or dead owner ledger
+### Expected refusal and explicit successor: compositor death or dead owner ledger
 
 1. Record the original compositor pidfd and all owner identities, then stop only
    the disposable compositor. Do not retry the interrupted action.
@@ -245,13 +272,20 @@ input before a fresh observation.
 3. Confirm the controller records `operator_release_required` because
    `released=false`, even if `resources_retired=true`. A dead ledger or a fresh
    replacement inventory must not promote the state.
-4. Do not start a successor automatically. Preserve the evidence and use the
-   explicit operator remedy. Any later new session requires fresh
-   `target_id`/`output_id`/`candidate_epoch` selection and fresh pixels.
+4. Do not start a successor automatically. Preserve the evidence. If external
+   cleanup is performed, record authenticated operator attestation through the
+   explicit reconciliation flow. It remains an unverified attestation, not native
+   release or receiver proof.
+5. Only after that explicit reconciliation may an operator start a new successor
+   session with the preserved descriptive hints and parent lineage. Require fresh
+   `target_id`/`output_id`/`candidate_epoch` selection, fresh delivered pixels,
+   current consent, and a new grant before any action. Do not carry forward an
+   observation, scope token, action ID, native owner, or result.
 
 **Pass:** backend and controller states are both recorded with their different
-meanings, no replacement window is adopted, and no task/action continuation
-occurs. This is expected refusal evidence, not a failed attempt at automatic
+meanings; no replacement window is adopted automatically; no action is resumed or
+replayed; and any later successor is independently selected and authorized. This
+is expected refusal evidence plus explicit task-lineage continuity, not automatic
 compositor restart.
 
 ### Required refusals
@@ -334,9 +368,12 @@ without repeating mutation. These are not frozen per-operation receipts: later
 retirement can advance resource facts, while release uncertainty stays sticky.
 Repeated commands never
 emit again. Tombstones are capped at 4096 with no eviction; uncertainty is sticky.
-Reconciliation requires the original live owner process identity. A controller or
-native-owner daemon restart is unsupported, even with a durable descriptor: the
-descriptor is evidence, not a replacement PID-bound ledger or peer.
+Reconciliation requires the original compositor/plugin/ledger and exact original
+owner identity. Controller or recovery-daemon rehydration may take over only under
+the v2-descriptor/capability conditions specified in Piece 1, including verified
+old-owner exit. The successor fences old guardian input and replaces the retained
+pidfd, but gains release-only authority. Rehydration never makes a legacy
+descriptor usable and never reconstructs input authority.
 
 ### Positive procedures
 
@@ -349,20 +386,28 @@ command ID. Mutation count stays one; retained ledger evidence remains consisten
 receiver sees only the one
 required release.
 
-**Daemon-restart boundary:** restart the controller or native-owner daemon after
-the durable descriptor exists. It must refuse to reconnect to the old ledger,
-because the original owner PID/start-tick peer is gone or cannot be recreated.
-Record this as an honest unsupported result, not a pass inferred from the
-database.
+**Durable takeover:** persist a v2 descriptor/capability, then terminate the
+original recovery owner after recording its PID/start ticks. Start an eligible new
+owner and invoke release-only `operation: "reconcile"`. Prove the predecessor
+pidfd reports exit, the original compositor/plugin/ledger remains exact, the new
+owner is recorded before dispatch, and old guardian input is fenced. Then test
+stop through rehydration: stop must win, prevent task resurrection, and leave only
+the permitted release-only cleanup to finish.
+
+**Active-owner denial:** attempt the same takeover while the original recovery
+owner remains alive. It must refuse. Repeat for a legacy descriptor, absent/wrong
+capability, mismatched successor identity, changed compositor/plugin/ledger, and
+lost retained ledger. Database presence alone is never a pass.
 
 **Receiver evidence:** exact down-before-fault/up-after ordering for every held
 key/button, barrier after release, no duplicate event, and source attribution where
 supported. Production receipts stay receiver-unverified unless a separate trusted
 receiver-evidence ingestion path is reviewed.
 
-**Pass:** exact owner/ledger/command is recovered, one mutation occurs, ACK,
-empty-ledger, closure and receiver events are distinct, and input stays fenced
-until fresh authority.
+**Pass:** exact owner/ledger/command is recovered only under the v2 takeover
+conditions; one release mutation occurs at most; ACK, empty-ledger, closure and
+receiver events are distinct; and input stays fenced until independently created
+fresh authority.
 
 **Fail:** query side effects; untagged release route; ACK treated as receiver proof;
 lost ACK resend; replacement compositor receives old release; malformed response
@@ -387,18 +432,20 @@ instruct an operator to repeat it or assume its availability resolves quarantine
 Retire the exact owned resources where evidence permits, verify external cleanup
 on the supervised machine, then use the authenticated explicit reconciliation
 route. That route records **unverified operator attestation**, not native release
-or receiver proof. Missing retirement evidence keeps the adapter fenced and
-retained. A future emergency override needs a separate reviewed protocol; none is
+or receiver proof. Missing local-closure evidence keeps the adapter fenced and
+retained; confirmed local closure may discard the adapter without clearing durable
+native uncertainty. A future emergency override needs a separate reviewed protocol; none is
 implemented here.
 
 ### Implemented contract under test
 
 Retirement permanently makes one captured incarnation ineligible. Native retirement
 may destroy only its captured virtual-client pointer while surviving device identity
-still matches. Local resource retirement requires the **retained original pidfd**
-to report exit plus confirmed local guardian/scope closure, or exact native owner
-retirement plus that local closure. It is resource retirement only, separate from
-release, and does not upgrade uncertainty. Guardian death, PID absence, socket
+still matches. Native resource retirement requires the versioned exact-client
+destruction certificate and confirmed local closure. The **retained original pidfd**
+reports process exit only. Confirmed local guardian/scope closure is separately
+recorded and permits discarding an inactive adapter, not clearing quarantine.
+Neither fact upgrades release uncertainty. Guardian death, PID absence, socket
 closure, plugin death, replacement-compositor readiness, or a boolean alone is
 insufficient.
 
@@ -417,10 +464,12 @@ a new recovery session, explicit target and fresh pixels.
 
 **Original-compositor exit:** create unknown-release quarantine, retain the
 original compositor pidfd, stop that disposable compositor, and confirm both its
-pidfd exit and local guardian/scope closure. This may establish
-`resources_retired=true` with the original-compositor-pidfd basis. It must not
-establish `released=true`, native-owner retirement, action success, or receiver
-release. The controller therefore remains `operator_release_required`.
+pidfd exit and local guardian/scope closure. Expect `original_compositor_exited=true`
+and `local_resources_closed=true`, but `resources_retired=false`,
+`retirement_basis=unproven`, and `released=false`. It must not establish
+native-owner retirement, action success, or receiver release. The controller
+remains `operator_release_required` while the locally closed adapter can be
+discarded to permit the explicit external-cleanup attestation route.
 
 **Failed proof:** same-boot PID absence without the retained original pidfd,
 guardian SIGKILL, socket unlink, plugin disappearance, and replacement-compositor
@@ -453,9 +502,10 @@ neither is a receiver-release claim.
 Verify durable generation/consent/stop epoch advances before awaits; OOB stop does
 not wait on the action lock; late success cannot alter state; pause requires
 explicit resume; stop forbids task resume although release-only cleanup may finish;
-unknown release stays visible; and restart either queries the exact durable command
-where supported or refuses. It never repeats mutation or input. Define and record
-an acceptable OOB latency before the run. Reachability is not release evidence.
+unknown release stays visible; and rehydration either queries the exact durable
+command under the v2 takeover conditions or refuses. It never repeats mutation,
+input, or task execution. Define and record an acceptable OOB latency before the
+run. Reachability is not release evidence.
 
 ## Offline and native pre-gates
 
@@ -463,6 +513,7 @@ Run focused implementation tests named by the final diff, plus existing anchors:
 
 ```sh
 .venv/bin/python -m pytest -q --no-cov \
+  tests/test_hyprland_durable_reconnect.py \
   tests/test_hyprland_reconnect_protocol.py \
   tests/test_hyprland_reconnect_protocol_native.py \
   tests/test_hyprland_recovery_backend.py \
@@ -497,9 +548,11 @@ or missing scenarios remain failed or missing. Do not edit manifest/configuratio
 during a run to record a desired outcome.
 
 `runtime_qualified` may move only for the exact tuple after the supported positive
-procedures pass and compositor-death/dead-ledger cases record their required
-fail-closed refusal; all other refusal/race/cancellation/reboot boundaries fail
-closed; full tuple, orchestration and managed activation are separately
-demonstrated; X11 and portal gates pass on the same SHA; and an independent
-reviewer can reproduce every evidence-to-verdict decision. Until then the only
-honest value is false.
+procedures pass, including lost-ACK query/persistence, new-owner restart,
+active-owner denial, stop during rehydration, and repeated compositor-death task
+lineage through external cleanup/attestation and a fresh successor; compositor-
+death/dead-ledger cases must record their required fail-closed refusal. All other
+refusal/race/cancellation/reboot boundaries must fail closed; full tuple,
+orchestration and managed activation must be separately demonstrated; X11 and
+portal gates must pass on the same SHA; and an independent reviewer must reproduce
+every evidence-to-verdict decision. Until then the only honest value is false.

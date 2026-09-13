@@ -37,7 +37,12 @@ async def assert_revoked_owned_cleanup(controller, grant, backend):
         assert controller._live[sid].revoked
         assert not controller._live[sid].observations
     else:
-        assert backend._closed
+        result = backend._recovery_result
+        assert result is not None
+        assert result.cleanup["local_resources_closed"] is True
+        assert result.cleanup["guardian_process_reaped"] is True
+        assert result.cleanup["scope_connection_closed"] is True
+        assert controller.store.get_session(sid).state == "quarantined"
     with pytest.raises(ComputerError, match="hyprland_session_revoked"):
         await backend.observe()
 
