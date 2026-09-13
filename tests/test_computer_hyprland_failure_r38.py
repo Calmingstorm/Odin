@@ -23,6 +23,25 @@ DETAIL = {
 }
 
 
+async def assert_revoked_owned_cleanup(controller, grant, backend):
+    """A retained uncertain owner is safe only with input and capture fenced."""
+    sid = grant["session_id"]
+    assert not backend.input_supported and backend._paused
+    assert backend._frame is None
+    assert backend._cleanup_evidence["guardian_process_reaped"] is True
+    assert backend._cleanup_evidence["scope_connection_closed"] is True
+    assert not backend._guardian.alive
+    assert sid not in controller._delivered_observations
+    if sid in controller._live:
+        assert controller._live[sid].backend is backend
+        assert controller._live[sid].revoked
+        assert not controller._live[sid].observations
+    else:
+        assert backend._closed
+    with pytest.raises(ComputerError, match="hyprland_session_revoked"):
+        await backend.observe()
+
+
 @pytest.mark.parametrize("storage_failure", [False, True])
 async def test_native_refusal_durable_and_cleanup_even_when_storage_fails(
     normal, monkeypatch, storage_failure,
@@ -48,8 +67,7 @@ async def test_native_refusal_durable_and_cleanup_even_when_storage_fails(
         monkeypatch.setattr(store, "finish_action", broken)
     inp = action(normal, grant)
     await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
-    assert backend._closed
-    assert grant["session_id"] not in controller._live
+    await assert_revoked_owned_cleanup(controller, grant, backend)
     assert len(dispatched) == 1
     if not storage_failure:
         status, raw = store.db.execute(

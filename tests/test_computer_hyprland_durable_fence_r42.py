@@ -1,6 +1,7 @@
 """Integrated native-loss fences with fake OS transports and real durable store."""
 
 import json
+import re
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -51,7 +52,9 @@ async def test_native_continuity_loss_preserves_intent_not_authority(normal, mon
     assert pending.phase == "native_continuity_lost"
     assert pending.old_grant["task_hints"]["goal"] == "Finish the blue sketch"
     assert set(pending.old_grant) == {"generation", "consent_generation", "task_hints",
-                                      "authorizes_input"}
+                                      "authorizes_input", "recovery_command_id"}
+    assert re.fullmatch(r"[a-f0-9]{32}", pending.old_grant["recovery_command_id"])
+    assert pending.old_grant["authorizes_input"] is False
     status = controller._public_session(current)
     assert status["native_reconciliation"]["required"] is True
     assert status["input_supported"] is False
@@ -90,6 +93,13 @@ async def test_unknown_release_survives_clean_detach_restart_and_cannot_replay(n
     receipt = json.loads(raw)
     assert receipt["status"] == "unknown"
     assert receipt["execution"]["released"] is False
+    assessment = controller.store.recovery_status(sid)
+    assert assessment["status"] == "operator_release_required"
+    assert assessment["released"] is False
+    assert assessment["resources_retired"] is False
+    # A later cooperative detach may finish local cleanup, but cannot erase
+    # the persisted unknown outcome or authorize replay.
+    await controller._stop(sid, "closed")
     assert controller.store.cleanup(sid)["complete"] is True
     controller.store.recover()
     assert controller.store.get_recovery_pending(sid) == pending
@@ -135,9 +145,28 @@ async def test_explicit_operator_reconciliation_frees_new_session_not_old_action
     sid = grant["session_id"]
     live = controller._live[sid]
     old = action(normal, grant)
+    # Only the original pinned incarnation's exit plus local resource closure
+    # permits retirement. Neither fact certifies release of its native ledger.
+    monkeypatch.setattr(live.backend._incarnation, "exited", lambda: True)
+    monkeypatch.setattr(live.backend._guardian, "release_ack", False)
+    local_close = AsyncMock(wraps=live.backend._guardian.close)
+    monkeypatch.setattr(live.backend._guardian, "close", local_close)
     monkeypatch.setattr(live.backend, "act", AsyncMock(side_effect=ConnectionError()))
     await normal.runner._run_one_tool(normal.state, call("computer_act", **old))
     assert sid not in controller._live
+    local_close.assert_awaited_once()
+    assert not live.backend._guardian.alive
+    cleanup = live.backend._recovery_result.cleanup
+    assert cleanup["guardian_process_reaped"] is True
+    assert cleanup["scope_connection_closed"] is True
+    assert cleanup["retirement_basis"] == "original_compositor_pidfd_exited"
+    assert cleanup["resources_retired"] is True
+    assert cleanup["unknown_release"] is True
+    assert cleanup["released"] is False and cleanup["release_ack"] is False
+    assert cleanup["receiver_release_verified"] is False
+    assessment = controller.store.recovery_status(sid)
+    assert assessment["status"] == "operator_release_required"
+    assert assessment["resources_retired"] is True and assessment["released"] is False
     current = controller.store.get_session(sid)
     inspector = AsyncMock(return_value={"status": "attestation_eligible"})
     monkeypatch.setattr(recovery, "verify_reconciliation_prerequisites", inspector)
@@ -196,10 +225,11 @@ async def test_prior_handoff_cannot_hide_unknown_release(normal, monkeypatch):
         },
     )
     old = action(normal, grant)
-    monkeypatch.setattr(controller._live[sid].backend, "act",
-                        AsyncMock(side_effect=ConnectionError()))
-    await normal.runner._run_one_tool(normal.state, call("computer_act", **old))
-    assert controller.store.get_recovery_pending(sid).phase == "unknown_release"
+    dispatch = AsyncMock(side_effect=ConnectionError())
+    monkeypatch.setattr(controller._live[sid].backend, "act", dispatch)
+    result = await normal.runner._run_one_tool(normal.state, call("computer_act", **old))
+    assert dispatch.await_count == 1, result
+    assert controller.store.get_recovery_pending(sid).phase == "unknown_release", result
     await controller._stop(sid, "closed")
     assert controller.store.get_session(sid).state == "quarantined"
 
@@ -212,21 +242,28 @@ async def test_failed_native_cleanup_remains_fenced_not_falsely_reconciled(norma
     live = controller._live[sid]
     monkeypatch.setattr(live.backend, "observe", AsyncMock(
         side_effect=HyprlandScopeFailure("hyprland_provider_owner_changed")))
-    # Dead compositor cannot acknowledge old native releases. Do not drop this
-    # adapter merely to make the attestation endpoint or fresh-start path work.
+    # No original-incarnation exit or ledger retirement is proven. Do not drop
+    # this adapter merely to make attestation or fresh-start paths work.
     live.backend._release_failed = True
-    await normal.runner._run_one_tool(normal.state, call("computer_observe", **grant))
-    assert controller._live[sid] is live and live.revoked
-    assert controller.store.cleanup(sid)["complete"] is False
-    current = controller.store.get_session(sid)
-    with bound_operator(normal.bot, "alice", "browser"):
-        with pytest.raises(ComputerError, match="recovery_unavailable"):
-            await normal.manager.operator_reconcile(
-                owner_id="alice", web_session_id="browser", session_id=sid,
-                generation=current.generation,
-                acknowledgment=f"ACKNOWLEDGE UNVERIFIED CLEANUP {sid}",
-            )
-    assert controller.store.get_session(sid).state == "quarantined"
-    assert not normal.transports[0].commands
-    # Remove the synthetic fault only after proving refusal, for fixture teardown.
-    live.backend._release_failed = False
+    try:
+        await normal.runner._run_one_tool(normal.state, call("computer_observe", **grant))
+        assert controller._live[sid] is live and live.revoked
+        assert not live.backend.input_supported and live.backend._frame is None
+        assert live.backend._cleanup_evidence["hyprland_owned_connections_closed"] is False
+        assessment = controller.store.recovery_status(sid)
+        assert assessment["complete"] is False and assessment["released"] is False
+        assert assessment["resources_retired"] is False
+        assert assessment["receiver_release_verified"] is False
+        current = controller.store.get_session(sid)
+        with bound_operator(normal.bot, "alice", "browser"):
+            with pytest.raises(ComputerError, match="recovery_unavailable"):
+                await normal.manager.operator_reconcile(
+                    owner_id="alice", web_session_id="browser", session_id=sid,
+                    generation=current.generation,
+                    acknowledgment=f"ACKNOWLEDGE UNVERIFIED CLEANUP {sid}",
+                )
+        assert controller.store.get_session(sid).state == "quarantined"
+        assert not normal.transports[0].commands
+    finally:
+        # Teardown removes only the injected local fault, never ledger evidence.
+        live.backend._release_failed = False

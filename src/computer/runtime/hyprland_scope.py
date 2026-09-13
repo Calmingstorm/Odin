@@ -35,6 +35,7 @@ _TOKEN = re.compile(r"[0-9a-f]{32,128}")
 _INSTANCE_ID = re.compile(r"i1-[0-9a-f]{32}\Z")
 _CANDIDATE_ID = re.compile(r"c1-[0-9a-f]{32,128}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
+_WINDOW_ID = re.compile(r"w1-[0-9a-f]{48}-[0-9a-f]{48}\Z")
 
 
 class HyprlandScopeFailure(WaylandScopeFailure):  # noqa: N818
@@ -147,7 +148,11 @@ def _observation(row, name, started_ns):
         or token in parents
     ):
         _fail("hyprland_parent_chain_unverified")
+    lifetime = HyprlandScopeProvider._window_lifetime(row)
+    if lifetime and lifetime["window_id"] != token:
+        _fail("hyprland_scope_reply_invalid")
     return {
+        **lifetime,
         "output": asdict(explicit),
         "bounds": {"x": x, "y": y, "width": width, "height": height},
         "pid": _integer(focus, "pid", 2, 2**31 - 1),
@@ -265,6 +270,22 @@ def selection_application_matches(identity, measured):
 
 
 @dataclass(frozen=True)
+class HyprlandOwnerHandle:
+    """Private exact native ledger identity. Not a grant or receiver receipt."""
+
+    compositor: HyprlandIdentity
+    instance_id: str
+    plugin_epoch: str
+    ledger_id: str
+    guardian_pid: int
+    guardian_uid: int
+    guardian_start_ticks: str
+    recovery_pid: int
+    recovery_uid: int
+    recovery_start_ticks: str
+
+
+@dataclass(frozen=True)
 class HyprlandSelectionProof:
     """Private immutable handoff, with no sockets, providers or live refs.
 
@@ -286,9 +307,13 @@ class HyprlandSelectionProof:
     executable: str
     exe_device: int
     exe_inode: int
+    window_id: str = ""
+    plugin_epoch: str = ""
 
     def candidate(self):
         return {
+            **({"window_id": self.window_id, "plugin_epoch": self.plugin_epoch}
+               if self.window_id else {}),
             "output_id": self.output_id,
             "output_name": self.output.name,
             "topology_digest": self.topology_digest,
@@ -330,6 +355,7 @@ class HyprlandScopeProvider:
         self._inventory_instance = None
         self._attested_identity: HyprlandIdentity | None = None
         self._attested_instance: str | None = None
+        self._attested_plugin: str | None = None
         self._selection_imported = False
         self._lock = asyncio.Lock()
         self._closed = False
@@ -355,6 +381,7 @@ class HyprlandScopeProvider:
                 await revalidate(identity, deadline)
                 provider._attested_identity = copy.deepcopy(identity)
                 provider._attested_instance = row["instance_id"]
+                provider._attested_plugin = row.get("plugin_epoch")
             return provider
         except BaseException:
             await provider.close()
@@ -375,6 +402,121 @@ class HyprlandScopeProvider:
         async with self._lock:
             await self._request({"op": "status"})
             return self._identity()
+
+    async def attest_identity(self, identity: HyprlandIdentity):
+        """Attest a legacy constructed provider before enabling owner recovery."""
+        async with self._lock:
+            if (not isinstance(identity, HyprlandIdentity)
+                    or identity.process.pid != self.expected_compositor_pid
+                    or identity.process.uid != self.expected_uid):
+                _fail("hyprland_owner_identity_invalid")
+            await revalidate(identity, time.monotonic() + 0.5)
+            row = await self._request({"op": "status"})
+            _instance_status(row, identity)
+            self._attested_identity = copy.deepcopy(identity)
+            self._attested_instance = row["instance_id"]
+            self._attested_plugin = row.get("plugin_epoch")
+
+    def _owner_context(self):
+        if (self._attested_identity is None or self._attested_instance is None
+                or type(self._attested_plugin) is not str
+                or not re.fullmatch(r"[0-9a-f]{48}", self._attested_plugin)):
+            _fail("hyprland_owner_protocol_unavailable")
+        return self._attested_identity, self._attested_instance, self._attested_plugin
+
+    @staticmethod
+    def _owner_reply(row, handle, *, command_id=None):
+        _instance_status(row, handle.compositor)
+        expected = {
+            key: getattr(handle, key) for key in (
+                "instance_id", "plugin_epoch", "ledger_id", "guardian_pid", "guardian_uid",
+                "guardian_start_ticks", "recovery_pid", "recovery_uid", "recovery_start_ticks",
+            )
+        }
+        if (type(row.get("owner_protocol_version")) is not int
+                or row["owner_protocol_version"] != 1
+                or any(type(row.get(key)) is not type(value) or row[key] != value
+                       for key, value in expected.items())
+                or row.get("owner_matched") is not True
+                or any(type(row.get(key)) is not bool for key in (
+                    "ledger_empty", "release_ack", "revoked", "retired", "unknown_release",
+                    "native_resources_retired", "receiver_release_verified"))
+                or row["receiver_release_verified"] is not False
+                or (row["release_ack"] and (not row["ledger_empty"] or row["unknown_release"]))
+                or (row["retired"] and not row["revoked"])
+                or (command_id is not None
+                    and (row.get("command_id") != command_id or not row["revoked"]))):
+            _fail("hyprland_owner_reply_invalid")
+        return {**expected, **{key: row[key] for key in (
+            "owner_matched", "ledger_empty", "release_ack", "revoked", "retired",
+            "unknown_release", "native_resources_retired", "receiver_release_verified",
+        )}, "command_id": command_id}
+
+    async def capture_owner(self, guardian):
+        """Register before first arm; cancelled registration may be safely queried
+        again for the same live guardian and same authenticated recovery process.
+        """
+        async with self._lock:
+            identity, instance, plugin = self._owner_context()
+            if (type(guardian) is not dict or any(type(guardian.get(k)) is not int
+                                                for k in ("pid", "uid", "start_ticks"))
+                    or guardian["pid"] <= 1 or guardian["uid"] != identity.process.uid
+                    or guardian["start_ticks"] <= 0):
+                _fail("hyprland_owner_identity_invalid")
+            if _proc_start(guardian["pid"], guardian["uid"]) != guardian["start_ticks"]:
+                _fail("hyprland_owner_identity_invalid")
+            await revalidate(identity, time.monotonic() + 0.5)
+            recovery_pid, recovery_uid = os.getpid(), os.geteuid()
+            recovery_start = str(_proc_start(recovery_pid, recovery_uid))
+            row = await self._request({
+                "op": "owner_capture", "instance_id": instance, "plugin_epoch": plugin,
+                "guardian_pid": guardian["pid"], "guardian_uid": guardian["uid"],
+                "guardian_start_ticks": str(guardian["start_ticks"]),
+            })
+            ledger = row.get("ledger_id")
+            if type(ledger) is not str or not re.fullmatch(r"[0-9a-f]{48}", ledger):
+                _fail("hyprland_owner_reply_invalid")
+            handle = HyprlandOwnerHandle(
+                copy.deepcopy(identity), instance, plugin, ledger, guardian["pid"],
+                guardian["uid"], str(guardian["start_ticks"]), recovery_pid,
+                recovery_uid, recovery_start,
+            )
+            self._owner_reply(row, handle)
+            if row["revoked"] or row["unknown_release"] or not row["ledger_empty"]:
+                _fail("hyprland_owner_capture_late_or_retired")
+            await revalidate(identity, time.monotonic() + 0.5)
+            return handle
+
+    async def _owner_operation(self, handle, operation, command_id):
+        async with self._lock:
+            identity, instance, plugin = self._owner_context()
+            if (type(handle) is not HyprlandOwnerHandle or handle.compositor != identity
+                    or handle.instance_id != instance or handle.plugin_epoch != plugin
+                    or type(command_id) is not str
+                    or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", command_id)
+                    or handle.recovery_pid != os.getpid() or handle.recovery_uid != os.geteuid()
+                    or handle.recovery_start_ticks != str(_proc_start(os.getpid(), os.geteuid()))):
+                _fail("hyprland_owner_identity_invalid")
+            await revalidate(identity, time.monotonic() + 0.5)
+            # Cancellation is unknown locally. Native keeps the once-only result;
+            # retrying this exact handle cannot re-arm or repeat a release.
+            row = await self._request({
+                "op": operation, "instance_id": instance, "plugin_epoch": plugin,
+                "ledger_id": handle.ledger_id, "command_id": command_id,
+            })
+            result = self._owner_reply(row, handle, command_id=command_id)
+            await revalidate(identity, time.monotonic() + 0.5)
+            return result
+
+    async def reconcile_owner(self, handle, *, command_id):
+        return await self._owner_operation(handle, "owner_reconcile", command_id)
+
+    async def retire_owner(self, handle, *, command_id):
+        return await self._owner_operation(handle, "owner_retire", command_id)
+
+    async def owner_status(self, handle, *, command_id):
+        """Query a recorded transaction after lost acknowledgement, no mutation."""
+        return await self._owner_operation(handle, "owner_status", command_id)
 
     async def _request(self, request):
         if self._closed:
@@ -503,6 +645,9 @@ class HyprlandScopeProvider:
             if row.get("ok") is False:
                 self._unsettled(row, name, started)
             first = _observation(row, name, started)
+            if (getattr(self, "_attested_plugin", None) is not None
+                    and first.get("plugin_epoch") != self._attested_plugin):
+                _fail("hyprland_scope_plugin_incarnation_changed")
             if first["uid"] != self.expected_uid:
                 _fail("hyprland_application_identity_unavailable")
             try:
@@ -539,6 +684,7 @@ class HyprlandScopeProvider:
                 "bounds": first["bounds"],
                 "application": application,
                 "surface_token": first["focus_token"],
+                "plugin_epoch": first.get("plugin_epoch"),
                 "parent_tokens": first["parent_tokens"],
                 "parent_chain_verified": True,
                 "wm_class": first["wm_class"],
@@ -588,7 +734,7 @@ class HyprlandScopeProvider:
                 _fail("hyprland_scope_selection_invalid")
             candidate_ids, private, public = set(), {}, []
             for item in row["candidates"]:
-                if type(item) is not dict or set(item) != {
+                if type(item) is not dict or set(item) - {"window_id", "plugin_epoch"} != {
                     "id",
                     "label",
                     "output_id",
@@ -655,8 +801,13 @@ class HyprlandScopeProvider:
                 candidate_ids.add(candidate_id)
                 selection_output(output_name, output)
                 selection_application(identity)
+                lifetime = self._window_lifetime(item)
+                if (getattr(self, "_attested_plugin", None) is not None
+                        and lifetime.get("plugin_epoch") != self._attested_plugin):
+                    _fail("hyprland_scope_plugin_incarnation_changed")
                 public.append({"id": candidate_id, "label": label, "output_id": output_id})
                 private[candidate_id] = {
+                    **lifetime,
                     "output_id": output_id,
                     "output_name": output_name,
                     "topology_digest": digest,
@@ -699,6 +850,8 @@ class HyprlandScopeProvider:
             topology_digest=candidate["topology_digest"],
             output=selection_output(candidate["output_name"], candidate["output"]),
             scale=float(candidate["output"]["scale"]),
+            window_id=candidate.get("window_id", ""),
+            plugin_epoch=candidate.get("plugin_epoch", ""),
             **copy.deepcopy(native),
         )
 
@@ -719,6 +872,10 @@ class HyprlandScopeProvider:
         ):
             _fail("hyprland_scope_selection_invalid")
         candidate = proof.candidate()
+        lifetime = self._window_lifetime(candidate)
+        if (getattr(self, "_attested_plugin", None) is not None
+                and lifetime.get("plugin_epoch") != self._attested_plugin):
+            _fail("hyprland_scope_plugin_incarnation_changed")
         selection_output(candidate["output_name"], candidate["output"])
         application = selection_application(candidate["identity"])
         if (
@@ -768,7 +925,7 @@ class HyprlandScopeProvider:
                 }
             )
             if (
-                set(row)
+                set(row) - {"window_id", "plugin_epoch"}
                 != {
                     "ok",
                     "version",
@@ -799,7 +956,11 @@ class HyprlandScopeProvider:
             selection_application(identity)
             if identity != requested:
                 _fail("hyprland_scope_selection_invalid")
+            lifetime = self._window_lifetime(row)
+            if lifetime != self._window_lifetime(candidate):
+                _fail("hyprland_scope_selection_invalid")
             return {
+                **lifetime,
                 "id": candidate_id,
                 "instance_id": row["instance_id"],
                 "output_id": output_id,
@@ -810,9 +971,20 @@ class HyprlandScopeProvider:
                 "identity": identity,
             }
 
-    async def focus_bound_candidate(self, binding):
-        """Recover only a backend-private selected identity on its exact output."""
-        if type(binding) is not dict or set(binding) != {
+    @staticmethod
+    def _window_lifetime(row):
+        if "window_id" not in row and "plugin_epoch" not in row:
+            return {}  # old companion may select initially, but cannot recover
+        window, plugin = row.get("window_id"), row.get("plugin_epoch")
+        if (type(window) is not str or not _WINDOW_ID.fullmatch(window)
+                or type(plugin) is not str or not re.fullmatch(r"[0-9a-f]{48}", plugin)
+                or not window.startswith("w1-" + plugin + "-")):
+            _fail("hyprland_scope_selection_invalid")
+        return {"window_id": window, "plugin_epoch": plugin}
+
+    async def focus_bound_candidate(self, binding, *, allow_output_handoff=False):
+        """Recover exact live toplevel only. Process/title/output is not continuity."""
+        if type(binding) is not dict or set(binding) - {"window_id", "plugin_epoch"} != {
             "id",
             "instance_id",
             "output_id",
@@ -823,6 +995,9 @@ class HyprlandScopeProvider:
             "identity",
         }:
             _fail("hyprland_scope_selection_invalid")
+        lifetime = self._window_lifetime(binding)
+        if not lifetime:
+            _fail("hyprland_scope_window_continuity_unavailable")
         # Native focus consumes its candidate map. Fresh inventory gives us a
         # fresh opaque output ID and requires the exact process/output proof.
         await self.inventory_targets()
@@ -830,8 +1005,10 @@ class HyprlandScopeProvider:
             _fail("hyprland_scope_selection_invalid")
         for candidate_id, candidate in self._inventory.items():
             if (
-                candidate["output_name"] == binding["output_name"]
-                and candidate["output"] == binding["output"]
+                self._window_lifetime(candidate) == lifetime
+                and (allow_output_handoff or (
+                    candidate["output_name"] == binding["output_name"]
+                    and candidate["output"] == binding["output"]))
                 and candidate["identity"] == binding["identity"]
             ):
                 return await self.focus_candidate(

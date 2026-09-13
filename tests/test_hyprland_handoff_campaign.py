@@ -76,12 +76,17 @@ def test_backend_keeps_opaque_selected_output_as_delivered_source():
     backend._selected = "opaque-output-7"
     backend._output = SimpleNamespace(name="DP-1", oriented_size=(1920, 1080))
     backend._application_pin = _identity()
+    backend._selected_binding = {"window_id": "window-7", "plugin_epoch": "plugin-3"}
+    backend._identity = SimpleNamespace(digest="compositor-2")
 
     assert backend.sources()[0]["source_id"] == "opaque-output-7"
     assert backend.hyprland_handoff_binding == {
         "output_name": "DP-1",
         "source_id": "opaque-output-7",
         "application_identity": _identity(),
+        "window_id": "window-7",
+        "plugin_epoch": "plugin-3",
+        "compositor_digest": "compositor-2",
     }
 
 

@@ -10,7 +10,7 @@ import os
 import re
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from fractions import Fraction
 from typing import Any, cast
 
@@ -28,6 +28,11 @@ from .hyprland_identity import (
     connect_peer,
     pin_connections,
     revalidate,
+)
+from .hyprland_recovery import (
+    CompositorIncarnation,
+    HyprlandRecoveryResult,
+    ledger_evidence,
 )
 from .hyprland_scope import (
     HyprlandGeometryUnsettled,
@@ -212,7 +217,7 @@ class HyprlandRuntimeBackend:
         "receiver_release_verified": False,
         "residuals": list(RESIDUALS),
         "application_scope": "original_native_process_same_output_fresh_observed_own_dialogs",
-        "recovery": "operator_release_all_then_close_and_start_new_session",
+        "recovery": "exact_owner_reconcile_then_exact_native_target_fresh_observation_no_replay",
     }
 
     # Transport-neutral helpers: no portal access or compositor qualification.
@@ -273,6 +278,15 @@ class HyprlandRuntimeBackend:
         self._cleanup_task: asyncio.Task[bool] | None = None
         self._cleanup_evidence: dict[str, bool | list[str]] = {}
         self.lifecycle_reason: str | None = None
+        self._owner_handle: Any | None = None
+        self._incarnation: CompositorIncarnation | None = None
+        self._recovery_epoch = 0
+        self._prepared_recovery: tuple[int, int] | None = None
+        self._recovery_command_id: str | None = None
+        self._recovery_result: HyprlandRecoveryResult | None = None
+        self._recovery_running = False
+        self._discovery_config = config
+        self.recovery_identity_callback: Callable[[dict[str, Any]], None] | None = None
 
     def startup_descriptor(self, session_id):
         from .recovery import boot_id
@@ -549,6 +563,16 @@ class HyprlandRuntimeBackend:
                 trust=self.config.compositor_trust,
             )
             connection.close()
+            # Exit retires the old endpoint, never proves receiver release.
+            incarnation = CompositorIncarnation(self._identity.process.pid)
+            try:
+                await revalidate(self._identity, time.monotonic() + 3)
+            except BaseException:
+                incarnation.close()
+                raise
+            if self._incarnation is not None:
+                self._incarnation.close()
+            self._incarnation = incarnation
             if selection is not None and (
                 type(selection_proof) is not HyprlandSelectionProof
                 or self._identity != selection_proof.compositor
@@ -590,10 +614,12 @@ class HyprlandRuntimeBackend:
                 self._selected_binding = selected
             else:
                 self._scope_provider = self._new_provider()
+                await self._scope_provider.attest_identity(self._identity)
             scope, _ = await self._action_scope(self._metadata())
             self._output = self._checked_output(scope)
             self._check_scope(scope)
             if selected is not None:
+                self._check_selected_lifetime(scope, selected)
                 application = scope.get("application")
                 if (
                     not selection_application_matches(selected["identity"], application)
@@ -612,8 +638,14 @@ class HyprlandRuntimeBackend:
                 self._output.logical_width,
                 self._output.logical_height,
             )
+            self._owner_handle = await self._scope_provider.capture_owner(
+                self._guardian.owner_identity
+            )
+            self._persist_owner()
             scope, _ = await self._action_scope(self._metadata())
             self._check_scope(scope)
+            if selected is not None:
+                self._check_selected_lifetime(scope, selected)
             await self._guardian.bind_scope(scope)
             self._check_ready(await self._guardian.select(self.config.output_name))
             await revalidate(self._identity, time.monotonic() + 3)
@@ -638,7 +670,9 @@ class HyprlandRuntimeBackend:
                 "eligible",
                 "hyprland_best_effort_ready",
                 " ".join(RESIDUALS),
-                "Use supervised bounded actions; release-all then renewed consent recovers.",
+                "Use supervised bounded actions. Unknown release requires operator-verified "
+                "external cleanup and reconciliation; RELEASE-ALL cannot clear sticky unknown "
+                "ownership, and resource retirement is not release proof.",
                 compositor=CompositorIdentity(
                     "Hyprland",
                     self.config.compositor_trust.version,
@@ -656,6 +690,14 @@ class HyprlandRuntimeBackend:
         finally:
             if connection is not None:
                 connection.close()
+
+    @staticmethod
+    def _check_selected_lifetime(scope, selected):
+        if (any(type(selected.get(key)) is not str or not selected[key]
+                for key in ("window_id", "plugin_epoch"))
+                or scope.get("surface_token") != selected["window_id"]
+                or scope.get("plugin_epoch") != selected["plugin_epoch"]):
+            raise ComputerError("target_selection_changed")
 
     def _checked_output(self, scope):
         try:
@@ -747,6 +789,9 @@ class HyprlandRuntimeBackend:
         return {
             "output_name": self._output.name,
             "source_id": self._selected,
+            "plugin_epoch": (self._selected_binding or {}).get("plugin_epoch", ""),
+            "window_id": (self._selected_binding or {}).get("window_id", ""),
+            "compositor_digest": self._identity.digest if self._identity else "",
             "application_identity": {
                 key: copy.deepcopy(self._application_pin[key])
                 for key in ("pid", "uid", "start_ticks", "exe", "exe_identity")
@@ -1203,10 +1248,242 @@ class HyprlandRuntimeBackend:
         return receipt.get("release_ack") is True
 
     def _invalidate(self):
+        self._recovery_epoch += 1
+        self._prepared_recovery = None
         self._paused = True
         self.input_supported = False
         self._frame = self._scope = self._fingerprint = None
         self._revision += 1
+
+    def _persist_owner(self):
+        """Publication failure prevents arming, including replacement owners."""
+        from dataclasses import asdict
+
+        from .hyprland_scope import HyprlandOwnerHandle
+
+        if (type(self._owner_handle) is not HyprlandOwnerHandle
+                or self.recovery_identity_callback is None or self._identity is None):
+            raise ComputerError("hyprland_durable_owner_required")
+        owner = asdict(self._owner_handle)
+        owner.pop("compositor", None)
+        process = self._identity.process
+        self.recovery_identity_callback({
+            "version": 1, "owner": owner,
+            "compositor": {
+                "digest": self._identity.digest, "pid": process.pid,
+                "uid": process.uid, "start_ticks": process.start_ticks,
+                "boot_id": process.boot_id,
+            },
+        })
+
+    def _recovery_current(self, epoch):
+        if self._closed or epoch != self._recovery_epoch:
+            raise ComputerError("hyprland_recovery_revoked")
+
+    def abort_native_recovery(self):
+        """Synchronous authority fence, including late persistence failures."""
+        self._invalidate()
+
+    async def discover_replacement_targets(self):
+        """Inventory preserves intent, not old authority. Export no proofs."""
+        if self._discovery_config.discovery_mode != "auto":
+            return None
+        backend = HyprlandRuntimeBackend(config=self._discovery_config, enabled=self.enabled)
+        try:
+            return await asyncio.wait_for(backend.inventory_targets(), 8)
+        except Exception:
+            return None
+        finally:
+            backend._selection_proofs.clear()
+            backend._closed = True
+
+    async def recover_native_authority(self, *, consent_generation, command_id):
+        """Prepare suspended authority after durable controller fencing, no replay."""
+        if (type(consent_generation) is not int or consent_generation <= self._generation
+                or type(command_id) is not str
+                or not re.fullmatch(r"[A-Za-z0-9_-]{1,96}", command_id)):
+            raise ComputerError("hyprland_recovery_authority_invalid")
+        if self._recovery_running or self._closed:
+            raise ComputerError("hyprland_recovery_revoked")
+        if self._recovery_command_id == command_id and self._recovery_result is not None:
+            if (self._recovery_result.state == "ready_for_replan"
+                    and self._prepared_recovery != (consent_generation, self._recovery_epoch)):
+                raise ComputerError("hyprland_recovery_revoked")
+            return copy.deepcopy(self._recovery_result)
+        self._invalidate()
+        epoch = self._recovery_epoch
+        self._recovery_command_id = command_id
+        self._recovery_result = None
+        self._recovery_running = True
+        cleanup: dict[str, Any] = {
+            "released": False, "release_ack": False, "unknown_release": True,
+            "resources_retired": False, "retirement_basis": "unproven",
+            "receiver_release_verified": False,
+        }
+        try:
+            async with asyncio.timeout(20), self._stop_lock:
+                self._recovery_current(epoch)
+                result = await self._prepare_native_recovery(
+                    epoch, consent_generation, command_id, cleanup
+                )
+                self._recovery_current(epoch)
+                self._recovery_result = result
+                return copy.deepcopy(result)
+        except asyncio.CancelledError:
+            self._invalidate()
+            # An interrupted preparation may own a reconnect provider or fresh
+            # guardian. Retain the adapter; old cleanup cannot retire these.
+            cleanup["resources_retired"] = False
+            self._recovery_result = HyprlandRecoveryResult(
+                "operator_release_required", None, cleanup, "hyprland_recovery_cancelled",
+            )
+            raise
+        except Exception:
+            self._invalidate()
+            cleanup["resources_retired"] = False
+            result = HyprlandRecoveryResult(
+                "operator_release_required", None, cleanup, "hyprland_recovery_unverified",
+            )
+            self._recovery_result = result
+            return copy.deepcopy(result)
+        finally:
+            self._recovery_running = False
+
+    async def _prepare_native_recovery(self, epoch, generation, command_id, cleanup):
+        # Reaping is local closure evidence, never release evidence.
+        await self._cleanup()
+        self._recovery_current(epoch)
+        cleanup.update(copy.deepcopy(self._cleanup_evidence))
+        cleanup["guardian_close_release_ack"] = cleanup.get("release_ack") is True
+        cleanup.update(released=False, release_ack=False, unknown_release=True)
+        local_closed = (
+            cleanup.get("guardian_process_reaped") is True
+            and cleanup.get("scope_connection_closed") is True
+        )
+        old_identity, handle = self._identity, self._owner_handle
+        provider = None
+        evidence = ledger_evidence(None, handle)
+        try:
+            if old_identity is not None and handle is not None:
+                await revalidate(old_identity, time.monotonic() + 3)
+                provider = self._new_provider()
+                self._scope_provider = provider
+                await provider.attest_identity(old_identity)
+                try:
+                    row = await provider.reconcile_owner(handle, command_id=command_id)
+                except Exception:
+                    # Ambiguous request: reconnect query only, never resend a
+                    # release mutation to recover a lost acknowledgement.
+                    row = await provider.owner_status(handle, command_id=command_id)
+                self._recovery_current(epoch)
+                evidence = ledger_evidence(row, handle)
+                if not evidence["release_ack"]:
+                    row = await provider.retire_owner(handle, command_id=command_id)
+                    self._recovery_current(epoch)
+                    evidence = ledger_evidence(row, handle)
+        except Exception:
+            # No global RELEASE-ALL, replacement peer or death-as-release.
+            pass
+        self._recovery_current(epoch)
+        dead_incarnation = self._incarnation is not None and self._incarnation.exited()
+        released = local_closed and evidence["release_ack"]
+        retired = local_closed and (
+            evidence["native_owner_retired"] or evidence["release_ack"] or dead_incarnation
+        )
+        cleanup.update(
+            evidence, released=released, release_ack=released,
+            unknown_release=not released, resources_retired=retired,
+            retirement_basis=("original_compositor_pidfd_exited" if dead_incarnation
+                              else "exact_native_owner_retired" if retired else "unproven"),
+        )
+        if not released or dead_incarnation:
+            if provider is not None:
+                await provider.close()
+            if retired and self._incarnation is not None:
+                self._incarnation.close()
+                self._incarnation = None
+            inventory = await self.discover_replacement_targets() if dead_incarnation else None
+            self._recovery_current(epoch)
+            return HyprlandRecoveryResult(
+                "fresh_target_required" if dead_incarnation else "operator_release_required",
+                None, cleanup, "hyprland_original_target_continuity_unproven"
+                if dead_incarnation else "hyprland_operator_reconciliation_required", inventory,
+            )
+        assert provider is not None and old_identity is not None
+        self._scope_provider = provider
+        selected = self._selected_binding
+        if (type(selected) is not dict or not selected.get("window_id")
+                or not selected.get("plugin_epoch")):
+            await provider.close()
+            if retired and self._incarnation is not None:
+                self._incarnation.close()
+                self._incarnation = None
+            return HyprlandRecoveryResult(
+                "fresh_target_required", None, cleanup,
+                "hyprland_original_target_continuity_unproven",
+            )
+        await revalidate(old_identity, time.monotonic() + 3)
+        focused = await provider.focus_bound_candidate(selected, allow_output_handoff=True)
+        self._recovery_current(epoch)
+        if (any(focused.get(k) != selected.get(k)
+                for k in ("instance_id", "window_id", "plugin_epoch", "identity"))
+                or not selection_application_matches(focused["identity"], self._application_pin)):
+            raise ComputerError("hyprland_original_target_continuity_unproven")
+        self._output = selection_output(focused["output_name"], focused["output"])
+        self._output_pin = self._output
+        self.config = replace(self.config, output_name=focused["output_name"])
+        self._selected = focused["output_id"]
+        self._selected_binding = copy.deepcopy(focused)
+        # Old owner cleanup cannot certify resources allocated below.
+        cleanup["original_owner_release_ack"] = cleanup["release_ack"]
+        cleanup.update(released=False, release_ack=False, resources_retired=False,
+                       unknown_release=True, guardian_process_reaped=False,
+                       scope_connection_closed=False)
+        self._owner_handle = None
+        self._guardian = HyprlandGuardian(
+            self.config.guardian_binary, self.config.expected_uid, self._record_spawn
+        )
+        self._record_spawn(None)
+        await self._guardian.start(
+            self.config.wayland_path, self.config.output_name, provider.socket_path,
+            self.config.compositor_pid, self._output.logical_width, self._output.logical_height,
+        )
+        self._recovery_current(epoch)
+        self._owner_handle = await provider.capture_owner(self._guardian.owner_identity)
+        self._persist_owner()
+        self._recovery_current(epoch)
+        scope, _ = await self._action_scope(self._metadata())
+        self._check_scope(scope)
+        if (scope.get("surface_token") != focused["window_id"]
+                or scope.get("plugin_epoch") != focused["plugin_epoch"]):
+            raise ComputerError("hyprland_original_target_continuity_unproven")
+        await self._guardian.bind_scope(scope)
+        await revalidate(old_identity, time.monotonic() + 3)
+        self._recovery_current(epoch)
+        self._scope = scope
+        self._frame, self._captured_at, self._fingerprint = None, 0.0, None
+        self._prepared_recovery = (generation, epoch)
+        cleanup.update(released=True, release_ack=True, unknown_release=False,
+                       resources_retired=True, guardian_process_reaped=True,
+                       scope_connection_closed=True, cleanup_scope="original_owner")
+        return HyprlandRecoveryResult(
+            "ready_for_replan", self.hyprland_handoff_binding, cleanup,
+            "hyprland_fresh_observation_required",
+        )
+
+    def commit_native_recovery(self, *, consent_generation):
+        """No await between controller durable CAS and runtime activation."""
+        if (self._prepared_recovery != (consent_generation, self._recovery_epoch)
+                or self._closed or self._guardian is None or not self._guardian.alive):
+            raise ComputerError("hyprland_recovery_revoked")
+        self._generation = consent_generation
+        self._prepared_recovery = None
+        self._release_failed = False
+        self._cleanup_task = None
+        self._paused = False
+        self.input_supported = True
+        self.input_blocker = None
+        self._frame, self._captured_at = None, 0.0
 
     async def _cleanup_all(self) -> bool:
         captures = tuple(self._capture_jobs)
@@ -1296,6 +1573,11 @@ class HyprlandRuntimeBackend:
         }
 
     async def resume(self, *, consent_generation):
+        if self._owner_handle is not None:
+            # The historical resume path can only match process/output, not
+            # the exact selected native window. Use durable recovery handoff.
+            self._invalidate()
+            raise ComputerError("hyprland_native_recovery_required")
         if (
             self._closed
             or not self._paused
@@ -1327,6 +1609,9 @@ class HyprlandRuntimeBackend:
         self._invalidate()
         async with self._stop_lock:
             clean = await self._cleanup()
+        if clean and self._incarnation is not None:
+            self._incarnation.close()
+            self._incarnation = None
         return {
             "stopped": clean,
             "released": clean,

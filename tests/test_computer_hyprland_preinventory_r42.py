@@ -178,7 +178,7 @@ async def test_startup_prepares_before_constructing_a_scope_provider(monkeypatch
 
     def new_provider():
         calls.append("scope-open")
-        return SimpleNamespace()
+        return SimpleNamespace(attest_identity=AsyncMock())
 
     monkeypatch.setattr(hb, "trusted_binary", lambda _: None)
     monkeypatch.setattr(hb, "pin_connections", AsyncMock(return_value=(identity, connection)))
@@ -190,7 +190,12 @@ async def test_startup_prepares_before_constructing_a_scope_provider(monkeypatch
         AsyncMock(side_effect=ComputerError("scope stopped")),
     )
 
-    with pytest.raises(ComputerError, match="scope stopped"):
-        await backend._open()
-    assert calls.index("prepare") < calls.index("scope-open")
-    assert backend._guardian is None
+    try:
+        with pytest.raises(ComputerError, match="scope stopped"):
+            await backend._open()
+        assert calls.index("prepare") < calls.index("scope-open")
+        backend._scope_provider.attest_identity.assert_awaited_once_with(identity)
+        assert backend._guardian is None
+    finally:
+        if backend._incarnation is not None:
+            backend._incarnation.close()

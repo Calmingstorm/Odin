@@ -144,6 +144,12 @@ class HyprlandGuardian(WaylandGuardian):
         self._scope_binding: tuple[Any, ...] | None = None
         self._mapping_id: str | None = None
         self._spawning: asyncio.Task[asyncio.subprocess.Process] | None = None
+        self._owner_identity: dict[str, int] | None = None
+
+    @property
+    def owner_identity(self) -> dict[str, int] | None:
+        """Original spawn identity retained after death, never a PID lookup."""
+        return dict(self._owner_identity) if self._owner_identity is not None else None
 
     async def start(  # type: ignore[override]  # Native connector intentionally owns its sockets.
         self, wayland_path, mapping_id, scope_path, compositor_pid, logical_width, logical_height,
@@ -191,7 +197,9 @@ class HyprlandGuardian(WaylandGuardian):
                 raise HyprlandGuardianError("hyprland_guardian_revoked")
             from .recovery import process_identity
 
-            await self._identity(process_identity(self._child.pid))
+            identity = process_identity(self._child.pid)
+            self._owner_identity = {**identity, "uid": self.expected_uid}
+            await self._identity(identity)
             self._reader = asyncio.create_task(self._read())
             self._ready = await self._receive("ready", timeout=8)
             if (self._ready.get("scope_lease_v1") is not True

@@ -511,6 +511,11 @@ class ComputerStore:
                 raise ComputerProvisioningError("storage_schema_unsupported")
         if self.db.execute("PRAGMA foreign_key_check").fetchone() is not None:
             raise ComputerProvisioningError("storage_schema_unsupported")
+        for recovery_row in self.db.execute("SELECT session_id,result FROM session_recovery"):
+            try:
+                self._hyprland_recovery_record(recovery_row["session_id"])
+            except (ComputerError, ValueError, TypeError) as exc:
+                raise ComputerProvisioningError("storage_schema_unsupported") from exc
         for row in self.db.execute("SELECT * FROM recovery_pending"):
             try:
                 pending = self._recovery_pending_row(row)
@@ -562,6 +567,9 @@ class ComputerStore:
                             and resolution.get("complete") is True
                             or resolution.get("status") == "operator_acknowledged_unverified"
                             and resolution.get("complete") is False
+                            or resolution.get("status") == "native_reconciled"
+                            and resolution.get("released") is True
+                            and resolution.get("resources_retired") is True
                         )
                     )
                     valid = (
@@ -721,7 +729,7 @@ class ComputerStore:
             valid = (
                 reason == "no_input_stale_output"
                 and type(old_grant) is dict
-                and set(old_grant)
+                and set(old_grant) - {"recovery_command_id", "task_hints"}
                 == {
                     "grant_id",
                     "generation",
@@ -740,6 +748,13 @@ class ComputerStore:
                 and next_retry is None
                 and candidate is None
             )
+            if valid and ("recovery_command_id" in old_grant or "task_hints" in old_grant):
+                valid = ComputerStore._reconciliation_snapshot_valid({
+                    "generation": old_grant["generation"],
+                    "consent_generation": old_grant["consent_generation"],
+                    "task_hints": old_grant.get("task_hints"), "authorizes_input": False,
+                    "recovery_command_id": old_grant.get("recovery_command_id"),
+                })
         elif phase in {"probe", "retry"}:
             valid = (
                 reason == "lost"
@@ -770,8 +785,14 @@ class ComputerStore:
     def _reconciliation_snapshot_valid(snapshot: object) -> bool:
         if (
             type(snapshot) is not dict
-            or set(snapshot)
-            != {"generation", "consent_generation", "task_hints", "authorizes_input"}
+            or not {"generation", "consent_generation", "task_hints", "authorizes_input"}
+            <= set(snapshot)
+            or set(snapshot) - {"generation", "consent_generation", "task_hints",
+                                "authorizes_input", "recovery_command_id"}
+            or ("recovery_command_id" in snapshot and (
+                type(snapshot["recovery_command_id"]) is not str
+                or re.fullmatch(r"[a-f0-9]{32}", snapshot["recovery_command_id"]) is None
+            ))
             or type(snapshot.get("generation")) is not int
             or snapshot["generation"] < 1
             or type(snapshot.get("consent_generation")) is not int
@@ -857,6 +878,8 @@ class ComputerStore:
         output_name: str,
         source_id: str,
         application_identity: dict,
+        activate: bool = False,
+        commit_native=None,
     ) -> HyprlandOutputGrant:
         """Record the one successor for a durably fenced Hyprland handoff."""
         output_name, source_id, identity = self._output_grant_values(
@@ -953,6 +976,14 @@ class ComputerStore:
                 ).rowcount
                 if not changed:
                     raise ComputerError("hyprland_handoff_not_safe")
+                if activate:
+                    self.db.execute("UPDATE sessions SET state='active' WHERE session_id=?",
+                                    (paused_grant.session_id,))
+                if commit_native is not None:
+                    # Synchronous native activation participates in this CAS.
+                    # Native failure rolls back the successor; disk commit
+                    # failure is fenced by the controller before returning.
+                    commit_native()
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
@@ -960,7 +991,8 @@ class ComputerStore:
         return self._output_grant_row(row)
 
     def begin_hyprland_handoff(
-        self, grant: SessionGrant, *, old_grant_id: int, recovery_generation: int, stop_epoch: int
+        self, grant: SessionGrant, *, old_grant_id: int, recovery_generation: int, stop_epoch: int,
+        recovery_command_id: str | None = None, task_hints: dict | None = None,
     ) -> SessionGrant:
         """Atomically obsolete an active native binding before backend cleanup."""
         if (
@@ -969,6 +1001,12 @@ class ComputerStore:
             or type(stop_epoch) is not int or stop_epoch < 0
         ):
             raise ComputerError("invalid_hyprland_output_grant")
+        if recovery_command_id is not None and not self._reconciliation_snapshot_valid({
+            "generation": grant.generation, "consent_generation": grant.consent_generation,
+            "task_hints": task_hints or {}, "authorizes_input": False,
+            "recovery_command_id": recovery_command_id,
+        }):
+            raise ComputerError("invalid_recovery_pending")
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
             try:
@@ -989,15 +1027,15 @@ class ComputerStore:
                     "SELECT 1 FROM recovery_pending WHERE session_id=?", (grant.session_id,)
                 ).fetchone()
                 if (
-                    current is None or current["state"] not in {"starting", "active"}
+                    current is None or current["state"] not in {"starting", "active", "paused"}
                     or current["generation"] != grant.generation
                     or current["consent_generation"] != grant.consent_generation
                     or current["platform"] != "wayland"
                     or current["environment"] != "existing_session"
                     or old is None
                     or backend is None
-                    or pending is not None or old["generation"] != grant.generation
-                    or old["consent_generation"] != grant.consent_generation
+                    or pending is not None or old["generation"] > grant.generation
+                    or old["consent_generation"] > grant.consent_generation
                 ):
                     raise ComputerError("hyprland_handoff_not_safe")
                 lineage = {
@@ -1007,6 +1045,14 @@ class ComputerStore:
                     "source_id": old["source_id"],
                     "application_identity": json.loads(old["application_identity"]),
                 }
+                if recovery_command_id is not None:
+                    lineage.update(recovery_command_id=recovery_command_id,
+                                   task_hints=task_hints or {})
+                    recovery = self._hyprland_recovery_record(grant.session_id)
+                    if "native_owner" in recovery:
+                        recovery["recovery_owner"] = recovery["native_owner"]
+                        self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                        (grant.session_id, json.dumps(recovery, sort_keys=True)))
                 paused_generation = grant.generation + 1
                 paused_consent = grant.consent_generation + 1
                 self.db.execute(
@@ -1017,13 +1063,22 @@ class ComputerStore:
                 )
                 changed = self.db.execute(
                     "UPDATE sessions SET state='paused',generation=?,consent_generation=? "
-                    "WHERE session_id=? AND state IN ('starting','active') AND generation=? "
+                    "WHERE session_id=? AND state IN ('starting','active','paused') "
+                    "AND generation=? "
                     "AND consent_generation=?",
                     (paused_generation, paused_consent, grant.session_id, grant.generation,
                      grant.consent_generation),
                 ).rowcount
                 if not changed:
                     raise ComputerError("grant_revoked")
+                prior_cleanup = self.cleanup(grant.session_id)
+                if prior_cleanup is not None:
+                    history = self._hyprland_recovery_record(grant.session_id)
+                    history["pre_handoff_cleanup"] = prior_cleanup
+                    self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                    (grant.session_id, json.dumps(history, sort_keys=True)))
+                    self.db.execute("DELETE FROM session_cleanup WHERE session_id=?",
+                                    (grant.session_id,))
                 self.db.execute("COMMIT")
             except BaseException:
                 self.db.execute("ROLLBACK")
@@ -1181,6 +1236,11 @@ class ComputerStore:
                     "SELECT stop_epoch FROM recovery_pending WHERE session_id=?",
                     (grant.session_id,),
                 ).fetchone()
+                recovery = self._hyprland_recovery_record(grant.session_id)
+                if existing is None and "native_owner" in recovery:
+                    recovery["recovery_owner"] = recovery["native_owner"]
+                    self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                    (grant.session_id, json.dumps(recovery, sort_keys=True)))
                 generation = grant.generation + 1
                 stop_epoch = existing["stop_epoch"] + 1 if existing is not None else 1
                 self.db.execute(
@@ -1217,6 +1277,149 @@ class ComputerStore:
                 self.db.execute("ROLLBACK")
                 raise
         return self.get_session(grant.session_id)
+
+    @staticmethod
+    def _validate_hyprland_owner(descriptor):
+        if (type(descriptor) is not dict or set(descriptor) != {"version", "owner", "compositor"}
+                or type(descriptor["version"]) is not int or descriptor["version"] != 1):
+            raise ComputerError("invalid_runtime_identity")
+        owner, compositor = descriptor["owner"], descriptor["compositor"]
+        strings = {"instance_id", "plugin_epoch", "ledger_id",
+                   "guardian_start_ticks", "recovery_start_ticks"}
+        integers = {"guardian_pid", "guardian_uid", "recovery_pid", "recovery_uid"}
+        if (type(owner) is not dict or set(owner) != strings | integers
+                or any(type(owner[k]) is not str or not 1 <= len(owner[k]) <= 256
+                       or not re.fullmatch(r"[A-Za-z0-9_.:-]+", owner[k]) for k in strings)
+                or any(type(owner[k]) is not int or owner[k] < 0 for k in integers)
+                or owner["guardian_pid"] <= 1 or owner["recovery_pid"] <= 1
+                or not owner["guardian_start_ticks"].isdigit()
+                or not owner["recovery_start_ticks"].isdigit()
+                or type(compositor) is not dict
+                or set(compositor) != {"digest", "pid", "uid", "start_ticks", "boot_id"}
+                or any(type(compositor[k]) is not int or compositor[k] < 0
+                       for k in ("pid", "uid", "start_ticks"))
+                or compositor["pid"] <= 1 or compositor["start_ticks"] < 1
+                or any(type(compositor[k]) is not str or not 1 <= len(compositor[k]) <= 256
+                       or not re.fullmatch(r"[A-Za-z0-9_.:-]+", compositor[k])
+                       for k in ("digest", "boot_id"))):
+            raise ComputerError("invalid_runtime_identity")
+
+    def record_hyprland_recovery_assessment(self, grant: SessionGrant, *, state: str,
+                                          released: bool, resources_retired: bool) -> None:
+        """CAS a bounded assessment. Retirement is deliberately not clean release."""
+        if state not in {"fresh_target_required", "operator_release_required"}:
+            raise ComputerError("invalid_recovery_pending")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.get_session(grant.session_id)
+                pending = self.get_recovery_pending(grant.session_id)
+                if current != grant or current.state != "quarantined" or pending is None:
+                    raise ComputerError("grant_revoked")
+                receipt = self._hyprland_recovery_record(grant.session_id)
+                owner = receipt.get("recovery_owner", receipt.get("native_owner"))
+                if owner is None:
+                    raise ComputerError("hyprland_durable_owner_required")
+                receipt.update(status=state, complete=False, released=released is True,
+                               resources_retired=resources_retired is True,
+                               recovery_command_id=pending.old_grant.get("recovery_command_id"),
+                               recovery_generation=grant.generation,
+                               owner_digest=canonical_hash(owner),
+                               receiver_release_verified=False, runtime_qualified=False)
+                self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                (grant.session_id, json.dumps(receipt, sort_keys=True)))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+
+    def _hyprland_recovery_record(self, session_id: str) -> dict:
+        row = self.db.execute("SELECT result FROM session_recovery WHERE session_id=?",
+                              (session_id,)).fetchone()
+        result = json.loads(row[0]) if row else {}
+        if "native_owner" in result:
+            self._validate_hyprland_owner(result["native_owner"])
+        if "recovery_owner" in result:
+            self._validate_hyprland_owner(result["recovery_owner"])
+        if result.get("status") in {
+            "fresh_target_required", "operator_release_required", "native_reconciled"
+        }:
+            pending = self.get_recovery_pending(session_id)
+            owner = result.get("recovery_owner", result.get("native_owner"))
+            if (pending is None or owner is None
+                    or result.get("owner_digest") != canonical_hash(owner)
+                    or result.get("recovery_command_id") is None
+                    or result["recovery_command_id"]
+                    != pending.old_grant.get("recovery_command_id")
+                    or type(result.get("recovery_generation")) is not int
+                    or result["recovery_generation"] != pending.grant_generation
+                    or any(type(result.get(k)) is not bool for k in (
+                        "released", "resources_retired", "complete",
+                        "receiver_release_verified", "runtime_qualified"))
+                    or result["complete"] or result["receiver_release_verified"]
+                    or result["runtime_qualified"]
+                    or result["status"] in {"fresh_target_required", "native_reconciled"}
+                    and not (result["released"] and result["resources_retired"])):
+                raise ComputerError("invalid_recovery_pending")
+        return result
+
+    def record_hyprland_owner(self, grant: SessionGrant, descriptor: dict) -> None:
+        """Persist the opaque native ownership identity before the backend can arm."""
+        self._validate_hyprland_owner(descriptor)
+        try:
+            encoded = json.dumps(descriptor, sort_keys=True, allow_nan=False)
+        except (ValueError, TypeError) as exc:
+            raise ComputerError("invalid_runtime_identity") from exc
+        if type(descriptor) is not dict or not descriptor or len(encoded.encode()) > 8192:
+            raise ComputerError("invalid_runtime_identity")
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                current = self.get_session(grant.session_id)
+                if current != grant or current.state not in {"starting", "active", "paused"}:
+                    raise ComputerError("grant_revoked")
+                if self.db.execute(
+                    "SELECT 1 FROM session_backends WHERE session_id=? AND backend='hyprland'",
+                    (grant.session_id,),
+                ).fetchone() is None:
+                    raise ComputerError("unsupported_backend_contract")
+                receipt = self._hyprland_recovery_record(grant.session_id)
+                receipt["native_owner"] = descriptor
+                self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                (grant.session_id, json.dumps(receipt, sort_keys=True)))
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+
+    def hyprland_owner(self, session_id: str) -> dict | None:
+        with self.lock:
+            return self._hyprland_recovery_record(session_id).get("native_owner")
+
+    def hyprland_task_lineage(self, session_id: str) -> dict | None:
+        with self.lock:
+            return self._hyprland_recovery_record(session_id).get("task_lineage")
+
+    def _hyprland_predecessor(self, context, session_id, generation):
+        predecessor = self.get_session(session_id)
+        pending = self.get_recovery_pending(session_id)
+        assessment = self._hyprland_recovery_record(session_id)
+        if (predecessor.owner_id != context.owner_id or predecessor.host_id != context.host_id
+                or predecessor.channel_id != context.channel_id):
+            raise ComputerError("not_found")
+        if type(generation) is not int or generation != predecessor.generation:
+            raise ComputerError("stale_generation")
+        if (pending is None or predecessor.state != "quarantined"
+                or assessment.get("status") != "fresh_target_required"
+                or assessment.get("released") is not True
+                or assessment.get("resources_retired") is not True):
+            raise ComputerError("hyprland_reconciliation_required")
+        if (assessment.get("recovery_generation") != predecessor.generation
+                or assessment.get("recovery_command_id") is None
+                or assessment["recovery_command_id"]
+                != pending.old_grant.get("recovery_command_id")):
+            raise ComputerError("hyprland_reconciliation_required")
+        return predecessor, pending
 
     def get_recovery_pending(self, session_id: str) -> RecoveryPending | None:
         with self.lock:
@@ -1290,6 +1493,10 @@ class ComputerStore:
             self.db.execute("BEGIN IMMEDIATE")
             try:
                 for row in self.db.execute(
+                    "SELECT session_id FROM recovery_pending WHERE phase='hyprland_handoff_pending'"
+                ).fetchall():
+                    self.set_state(row[0], "quarantined", revoke=True)
+                for row in self.db.execute(
                     "SELECT session_id,action_id,result FROM receipts WHERE status='pending'"
                 ).fetchall():
                     result = json.loads(row[2])
@@ -1317,6 +1524,8 @@ class ComputerStore:
         platform="x11",
         environment="isolated",
         backend="",
+        recovery_session_id: str | None = None,
+        recovery_generation: int | None = None,
     ) -> SessionGrant:
         # Preserve the existing NOT NULL schema without making a desktop session
         # an application profile. Old attached rows remain readable on upgrade.
@@ -1353,9 +1562,31 @@ class ComputerStore:
             with self.lock:
                 self.db.execute("BEGIN IMMEDIATE")
                 try:
+                    predecessor = None
+                    if recovery_session_id is not None:
+                        if backend != "hyprland":
+                            raise ComputerError("unsupported_backend_contract")
+                        predecessor, pending = self._hyprland_predecessor(
+                            context, recovery_session_id, recovery_generation)
+                        self.db.execute(
+                            "UPDATE sessions SET state='closed',generation=generation+1,"
+                            "consent_generation=consent_generation+1 WHERE session_id=?",
+                            (predecessor.session_id,))
+                        prior = self._hyprland_recovery_record(predecessor.session_id)
+                        prior.update(status="native_reconciled", complete=False,
+                                     successor_session_id=values[0])
+                        self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                        (predecessor.session_id, json.dumps(prior, sort_keys=True)))
                     self.db.execute(
                         "INSERT INTO sessions VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)", values
                     )
+                    if predecessor is not None:
+                        lineage = {"predecessor_session_id": predecessor.session_id,
+                                   "task_hints": pending.old_grant.get("task_hints", {}),
+                                   "authorizes_input": False, "continuity": "explicit_fresh_target"}
+                        self.db.execute(
+                            "INSERT INTO session_recovery VALUES (?,?)",
+                            (values[0], json.dumps({"task_lineage": lineage}, sort_keys=True)))
                     if backend:
                         self.db.execute(
                             "INSERT INTO session_backends VALUES (?,?)", (values[0], backend)
@@ -1411,7 +1642,13 @@ class ComputerStore:
                 "SELECT result FROM session_recovery WHERE session_id=?", (session_id,)
             ).fetchone()
             if row:
-                return json.loads(row[0])
+                result = json.loads(row[0])
+                result.pop("native_owner", None)
+                result.pop("recovery_owner", None)
+                result.pop("owner_digest", None)
+                result.pop("pre_handoff_cleanup", None)
+                result.pop("recovery_command_id", None)
+                return result or None
             grant = self.get_session(session_id)
             if grant.state != "quarantined":
                 return None
@@ -1470,9 +1707,53 @@ class ComputerStore:
     def set_state(
         self, session_id: str, state: str, *, revoke: bool = False, turn_id: str | None = None
     ) -> SessionGrant:
+        # Hyprland may change both pending lineage and the session fence. A
+        # savepoint composes with stop/recover's existing outer transactions.
+        with self.lock:
+            # Backend identity is immutable for the session. Do not choose the
+            # transaction from a pending-row read that another connection can
+            # obsolete before _set_state re-reads it.
+            hyprland = self.db.execute(
+                "SELECT 1 FROM session_backends WHERE session_id=? AND backend='hyprland'",
+                (session_id,),
+            ).fetchone()
+            if hyprland is not None:
+                self.db.execute("SAVEPOINT hyprland_state_fence")
+                try:
+                    result = self._set_state(session_id, state, revoke=revoke, turn_id=turn_id)
+                    self.db.execute("RELEASE hyprland_state_fence")
+                    return result
+                except BaseException:
+                    self.db.execute("ROLLBACK TO hyprland_state_fence")
+                    self.db.execute("RELEASE hyprland_state_fence")
+                    raise
+            return self._set_state(session_id, state, revoke=revoke, turn_id=turn_id)
+
+    def _set_state(
+        self, session_id: str, state: str, *, revoke: bool = False, turn_id: str | None = None
+    ) -> SessionGrant:
         if state not in {"starting", "active", "paused", "cancelled", "closed", "quarantined"}:
             raise ComputerError("invalid_state")
         with self.lock:
+            pending = self.get_recovery_pending(session_id)
+            if pending is not None and pending.phase == "hyprland_handoff_pending" \
+                    and (state != "paused" or revoke):
+                # Explicit pause/stop/cancel wins over any late preparation.
+                current = self.get_session(session_id)
+                generation = current.generation + int(revoke)
+                consent = current.consent_generation + int(revoke)
+                snapshot = {"generation": generation - 1, "consent_generation": consent - 1,
+                            "task_hints": pending.old_grant.get("task_hints", {}),
+                            "authorizes_input": False}
+                command_id = pending.old_grant.get("recovery_command_id")
+                if command_id is not None:
+                    snapshot["recovery_command_id"] = command_id
+                self.db.execute(
+                    "UPDATE recovery_pending SET phase='native_continuity_lost',"
+                    "reason='native_continuity_lost',recovery_generation=?,grant_generation=?,"
+                    "stop_epoch=stop_epoch+1,attempt=0,old_grant=? WHERE session_id=?",
+                    (generation, generation, json.dumps(snapshot, sort_keys=True), session_id))
+                state = "quarantined"
             self.db.execute(
                 "UPDATE sessions SET state=?,generation=generation+?,"
                 "consent_generation=consent_generation+?,"

@@ -50,11 +50,13 @@ async def rig(tmp_path, monkeypatch):
     state = SimpleNamespace(
         instance="i1-" + "b" * 32, requests=[], guardians=[], backends=[],
         mutation=None, pin=pin, measured=measured, native=native, geometry=geometry,
+        plugin_epoch="f" * 48, ledger_id="e" * 48,
     )
     item = {
         "id": "c1-" + "a" * 32, "label": "Disposable fixture", "output_id": "o1-original",
         "output_name": "TEST-1", "topology_digest": "e" * 64,
-        "output": geometry, "identity": native,
+        "window_id": "w1-" + state.plugin_epoch + "-" + "d" * 48,
+        "plugin_epoch": state.plugin_epoch, "output": geometry, "identity": native,
     }
     state.item = item
 
@@ -82,6 +84,7 @@ async def rig(tmp_path, monkeypatch):
                 "compositor_uid": pin.process.uid,
                 "compositor_start_ticks": pin.process.start_ticks,
                 "boot_id": pin.process.boot_id, "companion_build_id": "f" * 64,
+                "plugin_epoch": state.plugin_epoch,
             }
         elif op == "inventory_targets":
             reply = {
@@ -96,6 +99,7 @@ async def rig(tmp_path, monkeypatch):
                 "candidate_id": item["id"], "output_id": item["output_id"],
                 "output_name": item["output_name"], "topology_epoch": 9,
                 "topology_digest": item["topology_digest"],
+                "window_id": item["window_id"], "plugin_epoch": state.plugin_epoch,
                 "output": copy.deepcopy(geometry), "identity": copy.deepcopy(native),
             }
             if state.mutation == "identity":
@@ -111,6 +115,7 @@ async def rig(tmp_path, monkeypatch):
             reply = {
                 "ok": True, "version": 1, "locked": False, "native_wayland": True,
                 "safe_focus": True, "measured_monotonic_ns": time.monotonic_ns(),
+                "window_id": item["window_id"], "plugin_epoch": state.plugin_epoch,
                 "token": "f" * 32, "output": {"name": "TEST-1", **out},
                 "focus": {
                     "x": out["x"], "y": 0, "width": 8, "height": 4,
@@ -119,6 +124,32 @@ async def rig(tmp_path, monkeypatch):
                     "token": "native-window", "parent_tokens": [], "parent_chain_verified": True,
                     "serial": 9, "wm_class": "fixture", "title": "Disposable fixture",
                 },
+            }
+            reply["focus"]["token"] = item["window_id"]
+        elif op == "owner_capture":
+            # Register the authenticated owner after spawn and before arm.
+            guardian = state.guardians[-1].owner_identity
+            assert request == {
+                "op": "owner_capture", "instance_id": state.instance,
+                "plugin_epoch": state.plugin_epoch,
+                "guardian_pid": guardian["pid"], "guardian_uid": guardian["uid"],
+                "guardian_start_ticks": str(guardian["start_ticks"]),
+            }
+            reply = {
+                "ok": True, "version": 1, "scope_protocol_version": 1,
+                "instance_id": state.instance, "compositor_pid": pin.process.pid,
+                "compositor_uid": pin.process.uid,
+                "compositor_start_ticks": pin.process.start_ticks,
+                "boot_id": pin.process.boot_id, "companion_build_id": "f" * 64,
+                "owner_protocol_version": 1, "plugin_epoch": state.plugin_epoch,
+                "ledger_id": state.ledger_id,
+                "guardian_pid": guardian["pid"], "guardian_uid": guardian["uid"],
+                "guardian_start_ticks": str(guardian["start_ticks"]),
+                "recovery_pid": os.getpid(), "recovery_uid": os.geteuid(),
+                "recovery_start_ticks": str(measured["start_ticks"]),
+                "owner_matched": True, "ledger_empty": True, "release_ack": True,
+                "revoked": False, "retired": False, "unknown_release": False,
+                "native_resources_retired": False, "receiver_release_verified": False,
             }
         else:
             raise AssertionError(request)
@@ -132,6 +163,10 @@ async def rig(tmp_path, monkeypatch):
             state.guardians.append(self)
             self.alive = True
             self.bound = []
+            self.owner_identity = {
+                "pid": measured["pid"], "uid": measured["uid"],
+                "start_ticks": measured["start_ticks"],
+            }
 
         async def start(self, *_):
             pass
@@ -213,6 +248,14 @@ async def test_two_backend_instances_import_original_native_candidate(rig):
     result = await rig.controller.session(context(), selected)
     assert result["state"] == "active"
     assert len(rig.backends) == 2 and len(rig.guardians) == 1
+    # Capture and durable persistence precede the first native scope binding.
+    operations = [r["op"] for r in rig.requests]
+    assert operations.index("owner_capture") < operations.index(
+        "snapshot", operations.index("owner_capture")
+    )
+    owner = rig.store.hyprland_owner(result["session_id"])
+    assert owner and owner["owner"]["ledger_id"] == rig.ledger_id
+    assert owner["owner"]["guardian_pid"] == rig.measured["pid"]
     assert [r["op"] for r in rig.requests].count("inventory_targets") == 1
     focus = next(r for r in rig.requests if r["op"] == "focus_candidate")
     assert focus == {

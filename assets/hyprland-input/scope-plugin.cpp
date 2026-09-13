@@ -222,7 +222,7 @@ struct Pointer {
     bool dead = false;
 };
 struct FocusCandidate {
-    std::string id, outputID, outputName, topologyDigest, app, title, startTicks;
+    std::string id, outputID, outputName, topologyDigest, app, title, startTicks, windowID;
     PHLWINDOWREF window;
     PHLMONITORREF monitor;
     PHLWORKSPACEREF workspace;
@@ -238,7 +238,7 @@ struct FocusCandidate {
     uint64_t epoch = 0;
     int64_t created = 0;
 };
-struct Peer { int fd = -1; int pidfd = -1; pid_t pid = 0; wl_event_source* source = nullptr; std::string input; };
+struct Peer { int fd = -1; int pidfd = -1; pid_t pid = 0; uid_t uid = 0; wl_event_source* source = nullptr; std::string input, startTicks; };
 struct State;
 State* live = nullptr;
 HANDLE handle = nullptr;
@@ -299,6 +299,118 @@ struct State {
         bool acknowledged = false;
         bool valid() const { return pid > 1 && !startTicks.empty() && !commandID.empty() && completed > 0; }
     } releaseReceipt;
+    // Never evict plugin-lifetime tombstones. Missing after reload is unknown.
+    struct OwnerLedger {
+        std::string id, guardianStart, recoveryStart, reconcileCommand, retireCommand;
+        pid_t guardianPID = 0, recoveryPID = 0;
+        uid_t guardianUID = 0, recoveryUID = 0;
+        Keyboard* keyboard = nullptr;
+        Pointer* pointer = nullptr;
+        bool revoked = false, retired = false, unknown = false, empty = true, ack = true;
+        bool resourcesRetired = false, reconciled = false;
+    };
+    std::string pluginEpoch = nonce();
+    std::map<std::string, PHLWINDOWREF> windowLifetimes;
+    std::map<std::string, WP<CWLSurfaceResource>> windowSurfaces;
+    std::string windowID(const PHLWINDOW& window) {
+        for (auto it = windowLifetimes.begin(); it != windowLifetimes.end();) {
+            if (it->second.expired() || windowSurfaces.at(it->first).expired()) {
+                windowSurfaces.erase(it->first); it = windowLifetimes.erase(it); continue;
+            }
+            if (it->second.lock() == window && windowSurfaces.at(it->first).lock() == window->resource()) return it->first;
+            ++it;
+        }
+        if (!window || windowLifetimes.size() >= 4096) throw std::runtime_error("window identity unavailable");
+        // Random birth identity, never an address. The live weak reference is
+        // compared before reuse, so allocator ABA and plugin reload cannot match.
+        const auto id = "w1-" + pluginEpoch + "-" + nonce();
+        windowLifetimes.emplace(id, window); windowSurfaces.emplace(id, window->resource()); return id;
+    }
+    std::map<std::string, OwnerLedger> owners;
+    OwnerLedger* activeOwner = nullptr;
+    OwnerLedger* guardianOwner(pid_t pid, const std::string& ticks) {
+        for (auto& [id, owner] : owners)
+            if (owner.guardianPID == pid && owner.guardianStart == ticks) return &owner;
+        return nullptr;
+    }
+    J ownerStatus(const OwnerLedger& owner) {
+        auto row = status();
+        put(row.get(), "ledger_id", owner.id);
+        put(row.get(), "guardian_pid", int64_t(owner.guardianPID)); put(row.get(), "guardian_uid", int64_t(owner.guardianUID));
+        put(row.get(), "guardian_start_ticks", owner.guardianStart);
+        put(row.get(), "recovery_pid", int64_t(owner.recoveryPID)); put(row.get(), "recovery_uid", int64_t(owner.recoveryUID));
+        put(row.get(), "recovery_start_ticks", owner.recoveryStart);
+        put(row.get(), "owner_matched", true); put(row.get(), "revoked", owner.revoked);
+        put(row.get(), "retired", owner.retired); put(row.get(), "native_resources_retired", owner.resourcesRetired);
+        put(row.get(), "unknown_release", owner.unknown);
+        const bool empty = owner.empty && (activeOwner != &owner || (!armed && keys.empty() && buttons.empty() && !ownedModifiers));
+        put(row.get(), "ledger_empty", empty); put(row.get(), "release_ack", empty && owner.ack && !owner.unknown);
+        put(row.get(), "receiver_release_verified", false);
+        return row;
+    }
+    J ownerRequest(Peer& peer, json_object* request, const std::string& op) {
+        pollfd lifetime{peer.pidfd, POLLIN, 0};
+        if (peer.pidfd < 0 || poll(&lifetime, 1, 0) != 0 || peer.startTicks.empty() || processStartTicks(peer.pid) != peer.startTicks ||
+            text(request, "instance_id") != instanceID || text(request, "plugin_epoch") != pluginEpoch)
+            return status(false, "owner-incarnation-refused");
+        OwnerLedger* owner = nullptr;
+        if (op == "owner_capture") {
+            json_object *pidValue = nullptr, *uidValue = nullptr;
+            if (!json_object_object_get_ex(request, "guardian_pid", &pidValue) || json_object_get_type(pidValue) != json_type_int ||
+                !json_object_object_get_ex(request, "guardian_uid", &uidValue) || json_object_get_type(uidValue) != json_type_int)
+                return status(false, "owner-identity-refused");
+            const auto pid = json_object_get_int64(pidValue), uid = json_object_get_int64(uidValue);
+            const auto ticks = text(request, "guardian_start_ticks");
+            struct stat st {};
+            if (pid <= 1 || pid > INT_MAX || uid != getuid() || ticks.empty() || processStartTicks(pid) != ticks ||
+                stat(("/proc/" + std::to_string(pid)).c_str(), &st) || st.st_uid != uid)
+                return status(false, "owner-identity-refused");
+            owner = guardianOwner(pid, ticks);
+            if (!owner) {
+                if (owners.size() >= 4096 || failed || (guardianFD >= 0 && peers.contains(guardianFD) && peers.at(guardianFD)->pid == pid))
+                    return status(false, "owner-ledger-cap-or-late-capture");
+                const auto id = nonce();
+                OwnerLedger entry; entry.id = id; entry.guardianPID = pid; entry.guardianUID = uid; entry.guardianStart = ticks;
+                entry.recoveryPID = peer.pid; entry.recoveryUID = peer.uid; entry.recoveryStart = peer.startTicks;
+                owner = &owners.emplace(id, std::move(entry)).first->second;
+            }
+        } else {
+            const auto it = owners.find(text(request, "ledger_id"));
+            if (it == owners.end()) return status(false, "owner-ledger-missing");
+            owner = &it->second;
+        }
+        if (owner->recoveryPID != peer.pid || owner->recoveryUID != peer.uid || owner->recoveryStart != peer.startTicks)
+            return status(false, "owner-recovery-peer-refused");
+        if (op == "owner_status") {
+            const auto command = text(request, "command_id");
+            if (command.empty() || (command != owner->reconcileCommand && command != owner->retireCommand))
+                return status(false, "owner-command-unknown");
+        }
+        if (op == "owner_reconcile" || op == "owner_retire") {
+            const auto command = text(request, "command_id");
+            if (command.empty() || command.size() > 128 || std::any_of(command.begin(), command.end(), [](unsigned char c) { return !(std::isalnum(c) || c == '-'); }))
+                return status(false, "owner-command-refused");
+            auto& recorded = op == "owner_retire" ? owner->retireCommand : owner->reconcileCommand;
+            if (!recorded.empty() && recorded != command) return status(false, "owner-command-conflict");
+            recorded = command; // persist in native ledger BEFORE mutation
+            // Fence BEFORE release. Lost replies retrieve this tombstone.
+            if (!owner->revoked) {
+                owner->revoked = true;
+                if (activeOwner == owner) revoke("owner-reconciliation");
+                owner->reconciled = true;
+            }
+            if (op == "owner_retire" && !owner->retired) {
+                owner->retired = true;
+                // Exact captured client only. Destruction is NOT release proof.
+                auto* k = owner->keyboard; auto* p = owner->pointer;
+                if (k && p && k->client == p->client) {
+                    if (!k->dead || !p->dead) wl_client_destroy(k->client);
+                    owner->resourcesRetired = k->dead && p->dead;
+                }
+            }
+        }
+        auto row = ownerStatus(*owner); put(row.get(), "command_id", text(request, "command_id")); return row;
+    }
     struct WireEvent {
         uint32_t opcode = 0, time = 0, button = 0, state = 0, resource = 0;
         int64_t monotonic = 0, dispatch = 0;
@@ -588,6 +700,23 @@ struct State {
     void revoke(const char* why) noexcept {
         armed = false; deadline = 0; reason = why;
         if (draining) return;
+        if (activeOwner && activeOwner->unknown) { failed = true; return; }
+        if (activeOwner && activeOwner->reconciled) return;
+        // EOF/lease expiry can precede the explicit reconnect request. They
+        // must not release an overlapping physical hold either. Hyprland does
+        // not expose per-device button ownership, so held buttons fail closed.
+        if (activeOwner && (!keys.empty() || !buttons.empty() || ownedModifiers)) {
+            bool overlap = !g_pInputManager || (!buttons.empty() && g_pInputManager->hasHeldButtons());
+            if (g_pInputManager) for (const auto& device : g_pInputManager->m_keyboards) {
+                if (!device) { overlap = true; break; }
+                if (keyboard && device == keyboard->device) continue;
+                for (const auto key : keys) if (device->getPressed(key)) overlap = true;
+                if (ownedModifiers)
+                    for (uint32_t key = 0; key <= KEY_MAX; ++key)
+                        if (device->getPressed(key)) overlap = true;
+            }
+            if (overlap) { activeOwner->unknown = true; activeOwner->ack = false; activeOwner->empty = false; failed = true; return; }
+        }
         draining = true;
         // Core removes hooks before dispatcher destruction. Never use a freed
         // trampoline here: enter restored methods or current hooks via signals.
@@ -614,6 +743,10 @@ struct State {
             } catch (...) { releaseFailed = true; }
         }
         failed = releaseFailed || !keys.empty() || !buttons.empty() || ownedModifiers;
+        if (activeOwner) {
+            activeOwner->empty = keys.empty() && buttons.empty() && !ownedModifiers;
+            activeOwner->ack = !failed; activeOwner->unknown = failed;
+        }
         draining = false;
         if (failed) std::fprintf(stderr, "[odin-scope] CRITICAL release failure; admission fenced\n");
     }
@@ -624,6 +757,8 @@ struct State {
         // ELF measurement: companion_build_id identifies the build inputs only.
         put(j.get(), "scope_protocol_version", int64_t(1));
         put(j.get(), "release_status_v1", true);
+        put(j.get(), "owner_protocol_version", int64_t(1));
+        put(j.get(), "plugin_epoch", pluginEpoch);
         put(j.get(), "instance_id", instanceID);
         put(j.get(), "compositor_pid", int64_t(getpid()));
         put(j.get(), "compositor_uid", int64_t(getuid()));
@@ -729,11 +864,17 @@ struct State {
         put(o.get(), "pixel_width", int64_t(b.pixelSize.x)); put(o.get(), "pixel_height", int64_t(b.pixelSize.y));
         put(o.get(), "scale", double(b.scale)); put(o.get(), "transform", int64_t(b.transform));
         json_object_object_add(j.get(), "output", o.release());
-        auto f = obj(); put(f.get(), "token", std::to_string(reinterpret_cast<uintptr_t>(w.get())));
+        auto f = obj(); put(f.get(), "token", windowID(w));
+        put(j.get(), "window_id", windowID(w)); put(j.get(), "plugin_epoch", pluginEpoch);
         put(f.get(), "serial", int64_t(revision)); put(f.get(), "pid", int64_t(b.pid)); put(f.get(), "wm_class", b.app); put(f.get(), "title", b.title);
         put(f.get(), "uid", int64_t(b.uid)); put(f.get(), "parent_chain_verified", true);
         auto* parents = json_object_new_array();
-        for (size_t i = 1; i < b.ancestry.size(); ++i) json_object_array_add(parents, json_object_new_string(std::to_string(b.ancestry[i].token).c_str()));
+        auto parent = w->m_xdgSurface->m_toplevel->m_parent.lock();
+        while (parent) {
+            if (parent->m_window.expired()) return status(false, "parent-lifetime-unavailable");
+            json_object_array_add(parents, json_object_new_string(windowID(parent->m_window.lock()).c_str()));
+            parent = parent->m_parent.lock();
+        }
         json_object_object_add(f.get(), "parent_tokens", parents);
         put(f.get(), "x", int64_t(b.pos.x)); put(f.get(), "y", int64_t(b.pos.y)); put(f.get(), "width", int64_t(b.size.x)); put(f.get(), "height", int64_t(b.size.y)); put(f.get(), "modal", b.modal);
         json_object_object_add(j.get(), "focus", f.release()); return j;
@@ -810,6 +951,7 @@ struct State {
             if (focusCandidates.size() >= 32) break;
             FocusCandidate c;
             if (!makeFocusCandidate(w, c)) continue;
+            c.windowID = windowID(w);
             const auto monitor = c.monitor.lock();
             if (!monitor || (outputs.find(monitor.get()) == outputs.end() && outputs.size() >= 16)) continue;
             const auto label = focusCandidateLabel(c);
@@ -817,6 +959,7 @@ struct State {
             outputs.insert(monitor.get()); c.id = "c1-" + nonce(); auto [outputIt, inserted] = outputIDs.emplace(c.outputName, "c1-" + nonce()); c.outputID = outputIt->second; c.epoch = revision; c.created = ns();
             c.topologyDigest = sha256Hex("odin-hyprland-topology-v1\\0" + c.outputName + "\\0" + std::to_string(int64_t(c.outputPos.x)) + "\\0" + std::to_string(int64_t(c.outputPos.y)) + "\\0" + std::to_string(int64_t(c.outputSize.x)) + "\\0" + std::to_string(int64_t(c.outputSize.y)) + "\\0" + std::to_string(int64_t(c.pixelSize.x)) + "\\0" + std::to_string(int64_t(c.pixelSize.y)) + "\\0" + std::to_string(c.scale) + "\\0" + std::to_string(c.transform));
             auto item = obj(); put(item.get(), "id", c.id); put(item.get(), "label", label); put(item.get(), "output_id", c.outputID); put(item.get(), "output_name", c.outputName); put(item.get(), "topology_digest", c.topologyDigest);
+            put(item.get(), "window_id", c.windowID); put(item.get(), "plugin_epoch", pluginEpoch);
             auto output = obj(); put(output.get(), "x", int64_t(c.outputPos.x)); put(output.get(), "y", int64_t(c.outputPos.y)); put(output.get(), "width", int64_t(c.outputSize.x)); put(output.get(), "height", int64_t(c.outputSize.y)); put(output.get(), "pixel_width", int64_t(c.pixelSize.x)); put(output.get(), "pixel_height", int64_t(c.pixelSize.y)); put(output.get(), "scale", double(c.scale)); put(output.get(), "transform", int64_t(c.transform)); json_object_object_add(item.get(), "output", output.release());
             auto identity = obj(); put(identity.get(), "pid", int64_t(c.pid)); put(identity.get(), "uid", int64_t(c.uid)); put(identity.get(), "start_ticks", positiveInt64(c.startTicks)); put(identity.get(), "executable", c.image.executable); put(identity.get(), "exe_device", int64_t(c.image.device)); put(identity.get(), "exe_inode", int64_t(c.image.inode));
             json_object_object_add(item.get(), "identity", identity.release()); json_object_array_add(result, item.release()); focusCandidates.emplace(c.id, std::move(c));
@@ -839,13 +982,17 @@ struct State {
         if (armed || inputHeld() || !sameFocusCandidateState(candidate) || Desktop::focusState()->window() != w || Desktop::focusState()->monitor() != candidate.monitor.lock()) return status(false, "native-focus-not-confirmed");
         auto response = obj(); put(response.get(), "ok", true); put(response.get(), "version", int64_t(1)); put(response.get(), "instance_id", instanceID);
         put(response.get(), "candidate_id", id); put(response.get(), "output_id", output); put(response.get(), "output_name", candidate.outputName); put(response.get(), "topology_epoch", int64_t(candidate.epoch)); put(response.get(), "topology_digest", candidate.topologyDigest);
+        put(response.get(), "window_id", candidate.windowID); put(response.get(), "plugin_epoch", pluginEpoch);
         auto outputGeometry = obj(); put(outputGeometry.get(), "x", int64_t(candidate.outputPos.x)); put(outputGeometry.get(), "y", int64_t(candidate.outputPos.y)); put(outputGeometry.get(), "width", int64_t(candidate.outputSize.x)); put(outputGeometry.get(), "height", int64_t(candidate.outputSize.y)); put(outputGeometry.get(), "pixel_width", int64_t(candidate.pixelSize.x)); put(outputGeometry.get(), "pixel_height", int64_t(candidate.pixelSize.y)); put(outputGeometry.get(), "scale", double(candidate.scale)); put(outputGeometry.get(), "transform", int64_t(candidate.transform)); json_object_object_add(response.get(), "output", outputGeometry.release());
         auto identity = obj(); put(identity.get(), "pid", int64_t(candidate.pid)); put(identity.get(), "uid", int64_t(candidate.uid)); put(identity.get(), "start_ticks", positiveInt64(candidate.startTicks)); put(identity.get(), "executable", candidate.image.executable); put(identity.get(), "exe_device", int64_t(candidate.image.device)); put(identity.get(), "exe_inode", int64_t(candidate.image.inode));
         json_object_object_add(response.get(), "identity", identity.release()); return response;
     }
     J request(Peer& peer, json_object* j) {
-        if (armed && !scope()) revoke("request-scope-fence");
         const auto op = text(j, "op");
+        if (op == "owner_capture" || op == "owner_status" || op == "owner_reconcile" || op == "owner_retire")
+            return ownerRequest(peer, j, op);
+        if (op == "status") return status();
+        if (armed && !scope() && op != "release_status") revoke("request-scope-fence");
         if (op == "snapshot") return snapshot(text(j, "output_name"));
         if (op == "inventory_targets") return inventoryTargets();
         if (op == "focus_candidate") return focusCandidate(j);
@@ -899,6 +1046,8 @@ struct State {
             deadline = expiry; return status();
         }
         if (armed) return status(false, "already-armed");
+        auto* owner = guardianOwner(peer.pid, peer.startTicks);
+        if (owner && (owner->revoked || owner->retired || owner->unknown)) return status(false, "owner-admission-retired");
         auto it = snapshots.find(token);
         if (it == snapshots.end() || ns() - it->second.measured >= 250000000 || !same(it->second)) return status(false, "stale-snapshot");
         Keyboard* k = nullptr; Pointer* p = nullptr;
@@ -907,6 +1056,18 @@ struct State {
         for (auto& x : pointers) if (!x->dead && x->client == k->client) { if (p) return status(false, "ambiguous-pointer"); p = x.get(); }
         if (!p || p->resource->m_boundOutput != it->second.monitor || p->device->m_boundOutput != it->second.monitor->m_name) return status(false, "missing-or-wrong-output-pointer");
         if (inputHeld()) return status(false, "human-input-held");
+        if (owner && ((owner->keyboard && owner->keyboard != k) || (owner->pointer && owner->pointer != p)))
+            return status(false, "owner-device-incarnation-changed");
+        if (!owner) {
+            // Legacy arms also own a tombstone, but cannot later manufacture
+            // recovery authority. The backend must register BEFORE first arm.
+            if (owners.size() >= 4096) return status(false, "owner-ledger-cap");
+            const auto id = nonce(); OwnerLedger entry; entry.id = id;
+            entry.guardianPID = peer.pid; entry.guardianUID = peer.uid; entry.guardianStart = peer.startTicks;
+            owner = &owners.emplace(id, std::move(entry)).first->second;
+        }
+        activeOwner = owner;
+        if (owner) { owner->keyboard = k; owner->pointer = p; owner->empty = false; owner->ack = false; }
         keyboard = k; pointer = p; guardianFD = peer.fd; bound = it->second; snapshots.erase(it);
         if (diagnosticToken != bound.token) { diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0; }
         rejectionGuards.fill(nullptr); rejectionBase = rejected;
@@ -941,7 +1102,11 @@ struct State {
             auto reply = valid ? request(p, req.get()) : status(false, "invalid-json");
             std::string out = json_object_to_json_string_ext(reply.get(), JSON_C_TO_STRING_PLAIN); out += '\n';
             if (send(fd, out.data(), out.size(), MSG_DONTWAIT | MSG_NOSIGNAL) != ssize_t(out.size())) drop(fd);
-        } catch (...) { revoke("request-exception"); drop(fd); }
+        } catch (...) {
+            // Dropping the actual guardian invokes its owned revoke. An error
+            // on a read/recovery socket must never release a different owner.
+            drop(fd);
+        }
         return 0;
     }
     int acceptListener(int fd) {
@@ -951,7 +1116,9 @@ struct State {
         // This method is State-owned.  The historical listener spelled the cap
         // as s.peers.size() >= 16; retain the same single shared peer budget.
         if (getsockopt(c, SOL_SOCKET, SO_PEERCRED, &credentials, &n) || n != sizeof(credentials) || (credentials.uid != getuid() && credentials.uid != 0) || credentials.pid <= 1 || peers.size() >= 16) { close(c); return 0; }
-        auto peer = std::make_unique<Peer>(); peer->fd = c; peer->pid = credentials.pid;
+        auto peer = std::make_unique<Peer>(); peer->fd = c; peer->pid = credentials.pid; peer->uid = credentials.uid;
+        peer->startTicks = processStartTicks(credentials.pid);
+        if (peer->startTicks.empty()) { close(c); return 0; }
         peer->pidfd = syscall(SYS_pidfd_open, credentials.pid, 0);
         if (peer->pidfd < 0) { close(c); return 0; }
         peer->source = wl_event_loop_add_fd(wl_display_get_event_loop(g_pCompositor->m_wlDisplay), c, WL_EVENT_READABLE, [](int peerFD, uint32_t mask, void* state) {
@@ -1030,6 +1197,7 @@ void onKey(CInputManager* manager, const IKeyboard::SKeyEvent& event, SP<IKeyboa
     if (s.draining) { original(manager, event, device); return; }
     auto* k = s.find(device);
     if (!k) { original(manager, event, device); return; }
+    if (k == s.keyboard && s.activeOwner && s.activeOwner->unknown) { s.reject("owner-release-unknown"); return; }
     if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.keys.erase(event.keycode)) { original(manager, event, device); return; }
     if (k != s.keyboard || !s.allow()) {
         if (k != s.keyboard) s.reject("key-device-mismatch");
@@ -1047,6 +1215,7 @@ void onMod(CInputManager* manager, SP<IKeyboard> device) {
     auto& s = *live; auto original = reinterpret_cast<ModFn>(s.modHook->m_original);
     if (s.draining) { original(manager, device); return; }
     auto* k = s.find(device); if (!k) { original(manager, device); return; }
+    if (k == s.keyboard && s.activeOwner && s.activeOwner->unknown) { s.reject("owner-release-unknown"); return; }
     const auto& m = device->m_modifiersState;
     const bool zero = !(m.depressed || m.latched || m.locked || m.group);
     if (k == s.keyboard && zero && s.ownedModifiers) { s.ownedModifiers = false; original(manager, device); return; }
@@ -1057,6 +1226,7 @@ void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer>
     auto& s = *live; auto original = reinterpret_cast<ButtonFn>(s.buttonHook->m_original);
     if (s.draining) { original(manager, event, device); return; }
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
+    if (p == s.pointer && s.activeOwner && s.activeOwner->unknown) { s.reject("owner-release-unknown"); return; }
     if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.erase(event.button)) {
         State::OwnedDispatch trace(s, false); original(manager, event, device); return;
     }

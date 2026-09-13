@@ -109,6 +109,7 @@ struct State {
     bool armed = false, held = false, environmentOK = true, provenanceOK = true;
     uintptr_t ancestryToken = 42;
     pid_t targetPID = 0;
+    // PRODUCTION_WINDOW_LIFETIMES
     bool environment() const { return environmentOK; }
     bool inputHeld() const { return held; }
     bool provenance(PHLWINDOW, std::vector<odin_scope::NativeAncestor>& out) const {
@@ -222,13 +223,20 @@ def selection_binary(tmp_path_factory):
     source = SOURCE.read_text()
     helpers = extract(source, "using J = ", "bool releaseCommandID(")
     candidate = extract(source, "struct FocusCandidate {", "struct Peer {")
+    window_lifetimes = extract(
+        source,
+        "    std::string pluginEpoch = nonce();",
+        "    std::map<std::string, OwnerLedger> owners;",
+    )
     methods = extract(
         source, "    static std::string lowercaseASCII(",
         "    J request(Peer& peer, json_object* j) {",
     )
     harness = NATIVE_FIXTURE.replace("// PRODUCTION_HELPERS", helpers).replace(
         "// PRODUCTION_CANDIDATE", candidate
-    ).replace("// PRODUCTION_METHODS", methods)
+    ).replace("// PRODUCTION_WINDOW_LIFETIMES", window_lifetimes).replace(
+        "// PRODUCTION_METHODS", methods
+    )
     directory = tmp_path_factory.mktemp("native-selection-contract")
     cpp, binary = directory / "selection.cpp", directory / "selection"
     cpp.write_text(harness)
@@ -321,6 +329,8 @@ def test_real_inventory_provider_request_and_focus_epoch(peer, mode, revision):
         result = await focus(provider, inventory)
         assert result["topology_epoch"] == inventory["candidate_epoch"] == 9
         assert result["identity"] == received[0]["candidates"][0]["identity"]
+        assert result["window_id"] == received[0]["candidates"][0]["window_id"]
+        assert result["plugin_epoch"] == received[0]["candidates"][0]["plugin_epoch"]
         assert type(sent[1]["requested_identity"]["start_ticks"]) is int
         assert sent[1]["requested_identity"]["start_ticks"] > 0
         assert peer.request({"op": "test_state"}) == {
@@ -408,6 +418,8 @@ def test_native_revalidates_same_measured_candidate_after_focus(peer, mode):
 @pytest.mark.parametrize("field,value", [
     ("topology_epoch", 10), ("output_id", "DP-WRONG"),
     ("candidate_id", "c1-" + "f" * 48), ("identity", {}),
+    ("window_id", "w1-" + "0" * 48 + "-" + "1" * 48),
+    ("plugin_epoch", "0" * 48),
 ])
 def test_provider_rejects_native_success_for_different_binding(peer, field, value):
     async def run():

@@ -146,6 +146,10 @@ class ComputerController:
         self._stop_locks: dict[str, asyncio.Lock] = {}
         self._stops: dict[str, asyncio.Task] = {}
         self._recoveries: dict[str, asyncio.Task] = {}
+        self._hyprland_recovery_epochs: dict[str, int] = {}
+        self._hyprland_preparations: dict[str, tuple] = {}
+        self._hyprland_bindings: dict[str, dict] = {}
+        self._hyprland_contexts: dict[str, RequestContext] = {}
         self._selection_bindings: dict[str, dict] = {}
         self.store.recover()
 
@@ -184,21 +188,57 @@ class ComputerController:
         return (native, target.get("selection_proof")) if with_proof else native
 
     def _prepare_runtime(self, grant, backend):
+        def recovery_preparing(live, current):
+            preparation = self._hyprland_preparations.get(grant.session_id)
+            return (
+                preparation is not None
+                and preparation[0] is live
+                and preparation[1] is backend
+                and preparation[2:] == (
+                    current.generation,
+                    self._hyprland_recovery_epochs.get(grant.session_id, 0),
+                )
+                and self._recoveries.get(grant.session_id) is asyncio.current_task()
+                and self.enabled
+                and self.monotonic() < live.deadline
+                and self.store.clock() < current.expires_at
+            )
+
+        capabilities = getattr(backend, "capabilities", None)
+        if capabilities is not None and capabilities.backend == "hyprland":
+            def persist_owner(descriptor):
+                live = self._live.get(grant.session_id)
+                current = self.store.get_session(grant.session_id)
+                if (live is None or live.backend is not backend
+                        or live.revoked and not recovery_preparing(live, current)):
+                    raise ComputerError("grant_revoked")
+                self.store.record_hyprland_owner(current, descriptor)
+
+            backend.recovery_identity_callback = persist_owner
         prepare = getattr(backend, "startup_descriptor", None)
         if prepare is None:
             return  # Legacy test adapters remain explicitly unrecoverable.
         self.store.record_runtime(grant, prepare(grant.session_id))
         launch_grant = grant
+        launch_preparation = None
 
         def persist(descriptor):
-            nonlocal launch_grant
+            nonlocal launch_grant, launch_preparation
             live = self._live.get(grant.session_id)
-            if live is None or live.revoked or live.backend is not backend:
+            current = self.store.get_session(grant.session_id)
+            if (live is None or live.backend is not backend
+                    or live.revoked and not recovery_preparing(live, current)):
                 raise ComputerError("grant_revoked")
             if descriptor.get("launch_pending") is True:
                 # A new spawn after an authorized resume may use its new grant;
                 # completion of an old spawn may never inherit that generation.
-                launch_grant = self.store.get_session(grant.session_id)
+                launch_grant = current
+                launch_preparation = self._hyprland_preparations.get(grant.session_id)
+            elif live.revoked and (
+                launch_grant.generation != current.generation
+                or launch_preparation is not self._hyprland_preparations.get(grant.session_id)
+            ):
+                raise ComputerError("grant_revoked")
             self.store.record_runtime(launch_grant, descriptor)
 
         backend.runtime_identity_callback = persist
@@ -213,18 +253,22 @@ class ComputerController:
         ):
             return None
         binding = getattr(live.backend, "hyprland_handoff_binding", None)
-        if not isinstance(binding, dict) or set(binding) != {
+        if not isinstance(binding, dict) or set(binding) - {
+            "plugin_epoch", "window_id", "compositor_digest"
+        } != {
             "output_name", "source_id", "application_identity"
         }:
             raise ComputerError("hyprland_handoff_binding_unavailable")
         if not isinstance(binding["source_id"], str) or not binding["source_id"]:
             raise ComputerError("hyprland_handoff_binding_unavailable")
-        return self.store.record_hyprland_output_grant(
+        recorded = self.store.record_hyprland_output_grant(
             grant,
             output_name=binding["output_name"],
             source_id=binding["source_id"],
             application_identity=binding["application_identity"],
         )
+        self._hyprland_bindings[grant.session_id] = deepcopy(binding)
+        return recorded
 
     async def reconcile_recovery(self, context, session_id, generation):
         """Operator-only absence verification, never an input or cleanup actuator."""
@@ -409,6 +453,13 @@ class ComputerController:
             live.observations.clear()
 
     def _cancel_focus_recovery(self, sid):
+        live = self._live.get(sid)
+        if live is not None and live.capabilities is not None \
+                and live.capabilities.backend == "hyprland":
+            self._hyprland_recovery_epochs[sid] = self._hyprland_recovery_epochs.get(sid, 0) + 1
+            abort = getattr(live.backend, "abort_native_recovery", None)
+            if callable(abort):
+                abort()
         task = self._recoveries.get(sid)
         if task is not None and not task.done():
             _cancel_owned(task)
@@ -436,6 +487,8 @@ class ComputerController:
 
     async def _quarantine_hyprland(self, grant, live, *, phase):
         """Durably preserve task intent, never native authority or replay rights."""
+        if callable(getattr(live.backend, "recover_native_authority", None)):
+            return await self._recover_hyprland_native(grant, live, phase=phase)
         self._fence(grant.session_id)
         self._selection_bindings.clear()
         if live.task_context is not None:
@@ -461,6 +514,131 @@ class ComputerController:
             # cannot promote unknown release into permission for another task.
             await self._stop(grant.session_id, "quarantined")
 
+    async def _recover_hyprland_native(self, grant, live: LiveSession, *, phase):
+        """One durable native recovery transaction, never an interrupted input replay."""
+        from .runtime.hyprland_recovery import HyprlandRecoveryResult
+
+        sid = grant.session_id
+        self._fence(sid)
+        epoch = self._hyprland_recovery_epochs.get(sid, 0)
+        self._selection_bindings.clear()
+        if live.task_context is not None:
+            live.task_context.invalidate(phase)
+        hints = dict(live.task_context.hints) if live.task_context else {}
+        command_id = uuid.uuid4().hex
+        snapshot = {"generation": grant.generation,
+                    "consent_generation": grant.consent_generation,
+                    "task_hints": hints, "authorizes_input": False,
+                    "recovery_command_id": command_id}
+        outputs = self.store.hyprland_output_grants(sid, limit=1)
+        original = self._hyprland_bindings.get(sid)
+        handoff = bool(phase != "unknown_release" and outputs
+                       and grant.state in {"active", "paused"}
+                       and self._no_input_pending(sid))
+        # No native reconciliation call before the command identifier is durable.
+        try:
+            if handoff:
+                fenced = self.store.begin_hyprland_handoff(
+                    grant, old_grant_id=outputs[0].grant_id,
+                    recovery_generation=grant.generation + 1, stop_epoch=grant.generation,
+                    recovery_command_id=command_id, task_hints=hints)
+            else:
+                fenced = self.store.begin_hyprland_reconciliation(
+                    grant, phase=phase, reason=phase, old_grant=snapshot)
+        except BaseException:
+            await self._stop(sid, "quarantined")
+            raise
+        task = _own_task(asyncio.create_task(live.backend.recover_native_authority(
+            consent_generation=fenced.consent_generation, command_id=command_id)))
+        self._recoveries[sid] = task
+        self._hyprland_preparations[sid] = (live, live.backend, fenced.generation, epoch)
+        result = None
+        try:
+            result = await _bounded(task, 22)
+            context = self._hyprland_contexts.get(sid)
+            if context is None:
+                raise ComputerError("hyprland_recovery_authority_unavailable")
+            await self._auth(context)
+            current = self.store.get_session(sid)
+            if (current != fenced or self._live.get(sid) is not live or not self.enabled
+                    or self._hyprland_recovery_epochs.get(sid, 0) != epoch):
+                raise ComputerError("grant_revoked")
+            if self.monotonic() >= live.deadline or self.store.clock() >= fenced.expires_at:
+                raise ComputerError("task_expired")
+            if type(result) is not HyprlandRecoveryResult:
+                raise ComputerError("hyprland_recovery_evidence_invalid")
+            cleanup = result.cleanup
+            released = (type(cleanup) is dict and cleanup.get("released") is True
+                        and cleanup.get("release_ack") is True
+                        and cleanup.get("unknown_release") is False)
+            retired = (type(cleanup) is dict and cleanup.get("resources_retired") is True
+                       and cleanup.get("guardian_process_reaped") is True
+                       and cleanup.get("scope_connection_closed") is True)
+            identity_keys = {"plugin_epoch", "window_id", "compositor_digest"}
+            exact_target = (
+                type(original) is dict and type(result.binding) is dict
+                and all(type(original.get(k)) is str and original[k]
+                        and result.binding.get(k) == original[k] for k in identity_keys)
+                and original.get("application_identity")
+                == result.binding.get("application_identity")
+            )
+            if (handoff and result.state == "ready_for_replan" and released and retired
+                    and exact_target and self._no_input_pending(sid)):
+                certificate = {
+                    "stopped": True, "released": True, "applications_preserved": True,
+                    "input_revoked": True, "capture_revoked": True,
+                    "owned_devices": "hyprland_owned_connections_closed",
+                    "hyprland_owned_connections_closed": True, "receiver_release_verified": False,
+                }
+                self.store.record_cleanup(sid, certificate, clean=True)
+                binding = result.binding
+                assert binding is not None
+                self.store.advance_hyprland_output_grant(
+                    fenced, old_grant_id=outputs[0].grant_id,
+                    output_name=binding["output_name"], source_id=binding["source_id"],
+                    application_identity=binding["application_identity"], activate=True,
+                    commit_native=lambda: live.backend.commit_native_recovery(
+                        consent_generation=fenced.consent_generation))
+                # No await between durable CAS, final native fence and activation.
+                self._hyprland_bindings[sid] = deepcopy(binding)
+                live.capabilities = live.backend.capabilities
+                live.revoked = False
+                return
+            if handoff:
+                snapshot.update(generation=fenced.generation,
+                                consent_generation=fenced.consent_generation)
+                fenced = self.store.begin_hyprland_reconciliation(
+                    fenced, phase=phase, reason=phase, old_grant=snapshot)
+            if result.state == "ready_for_replan":
+                # The old-owner certificate says nothing about the suspended
+                # replacement guardian allocated during a rejected preparation.
+                released = retired = False
+            self.store.record_hyprland_recovery_assessment(
+                fenced, state=("fresh_target_required" if released and retired
+                               else "operator_release_required"),
+                released=released, resources_retired=retired)
+            if retired and result.state != "ready_for_replan":
+                self._live.pop(sid, None)
+                timer = self._watchdogs.pop(sid, None)
+                if timer is not None:
+                    _cancel_owned(timer)
+        finally:
+            self._hyprland_preparations.pop(sid, None)
+            if self._recoveries.get(sid) is task:
+                self._recoveries.pop(sid, None)
+            # A cancelled/failed prepare never leaves a resumable paused grant.
+            if live.revoked:
+                abort = getattr(live.backend, "abort_native_recovery", None)
+                if callable(abort):
+                    abort()
+            current = self.store.get_session(sid)
+            if (live.revoked and current.generation == fenced.generation
+                    and current.state in {"paused", "active"}):
+                snapshot.update(generation=current.generation,
+                                consent_generation=current.consent_generation)
+                self.store.begin_hyprland_reconciliation(
+                    current, phase=phase, reason=phase, old_grant=snapshot)
+
     def _pending_reconciliation(self, grant):
         pending = self.store.get_recovery_pending(grant.session_id)
         if pending is None or pending.phase not in {"unknown_release", "native_continuity_lost"}:
@@ -472,7 +650,12 @@ class ComputerController:
             "task_hints": deepcopy(pending.old_grant.get("task_hints", {})),
             "authorizes_input": False,
             "replay_allowed": False,
-            "next_action": "operator_reconcile_then_fresh_target_and_new_session",
+            "next_action": (
+                "inventory_then_start_with_recovery_session_id_and_fresh_target"
+                if (self.store.recovery_status(grant.session_id) or {}).get("status")
+                == "fresh_target_required"
+                else "operator_reconcile_then_fresh_target_and_new_session"
+            ),
             "receiver_release_verified": False,
         }
 
@@ -829,6 +1012,8 @@ class ComputerController:
                 "target_id",
                 "output_id",
                 "candidate_epoch",
+                "recovery_session_id",
+                "recovery_generation",
             },
             {"operation"},
         )
@@ -902,7 +1087,8 @@ class ComputerController:
         if operation == "start":
             exact_keys(
                 inp,
-                {"operation", "app", "target_id", "output_id", "candidate_epoch"},
+                {"operation", "app", "target_id", "output_id", "candidate_epoch",
+                 "recovery_session_id", "recovery_generation"},
                 {"operation"},
             )
             app = inp.get("app")
@@ -933,6 +1119,15 @@ class ComputerController:
             }
             if selected and capabilities.backend != "hyprland":
                 raise ComputerError("target_selection_unsupported")
+            recovery_id = inp.get("recovery_session_id")
+            if "recovery_session_id" in inp or "recovery_generation" in inp:
+                if (type(recovery_id) is not str or not recovery_id
+                        or type(inp.get("recovery_generation")) is not int
+                        or not selected or capabilities.backend != "hyprland"
+                        or capabilities.environment != "existing_session"):
+                    raise ComputerError("hyprland_fresh_target_required")
+                if recovery_id in self._live:
+                    raise ComputerError("hyprland_reconciliation_required")
             if selected and set(selected) not in (
                 {"target_id", "candidate_epoch"},
                 {"target_id", "output_id", "candidate_epoch"},
@@ -953,11 +1148,21 @@ class ComputerController:
                 platform=capabilities.platform,
                 environment=capabilities.environment,
                 backend=capabilities.backend or "",
+                **({"recovery_session_id": recovery_id,
+                    "recovery_generation": inp["recovery_generation"]} if recovery_id else {}),
             )
             try:
                 self._live[grant.session_id] = LiveSession(
                     backend, self.monotonic() + MAX_TASK_SECONDS, capabilities=capabilities
                 )
+                if capabilities.backend == "hyprland":
+                    self._hyprland_contexts[grant.session_id] = context
+                if recovery_id:
+                    lineage = self.store.hyprland_task_lineage(grant.session_id)
+                    assert lineage is not None
+                    self._live[grant.session_id].task_context = TaskContext(
+                        hints=dict(lineage["task_hints"]), state="unverified",
+                        reason="explicit_fresh_target")
                 self._prepare_runtime(grant, backend)
                 # Wayland portal consent is interactive. Only this fixed backend
                 # family gets a longer startup window; input leases stay two seconds.
@@ -1039,6 +1244,22 @@ class ComputerController:
         if operation == "pause":
             return await self._pause(grant.session_id)
         if operation == "resume":
+            live = self._live.get(grant.session_id)
+            if (live is not None and live.capabilities is not None
+                    and live.capabilities.backend == "hyprland"
+                    and callable(getattr(live.backend, "recover_native_authority", None))):
+                if grant.state != "paused" or live.revoked:
+                    raise ComputerError("resume_unavailable")
+                self._hyprland_contexts[grant.session_id] = context
+                async with self._actions:
+                    current = self.store.get_session(grant.session_id)
+                    if current != grant or live.revoked:
+                        raise ComputerError("grant_revoked")
+                    grant = self.store.set_state(
+                        grant.session_id, "paused", turn_id=context.turn_id)
+                    await self._recover_hyprland_native(
+                        grant, live, phase="native_continuity_lost")
+                return self._public_session(self.store.get_session(grant.session_id))
             if grant.state != "paused" or grant.session_id not in self._live:
                 raise ComputerError("resume_unavailable")
             live = self._live[grant.session_id]
@@ -1165,6 +1386,8 @@ class ComputerController:
         except (ComputerError, TimeoutError, ConnectionError, HyprlandScopeFailure) as exc:
             if self._hyprland_continuity_failure(live, exc):
                 await self._quarantine_hyprland(grant, live, phase="native_continuity_lost")
+                if self.store.get_session(grant.session_id).state == "active":
+                    raise ComputerError("hyprland_recovered_fresh_observation_required") from None
                 raise ComputerError("hyprland_fresh_target_required") from None
             if not isinstance(exc, ComputerError):
                 raise
