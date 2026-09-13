@@ -40,12 +40,24 @@ def sandbox(tmp_path):
 echo "systemctl $*" >> "$TRACE"
 case "$1" in
   is-active) test -f "$ACTIVE" ;;
+  enable) [[ " $* " == *" --now "* ]] && touch "$ACTIVE" ;;
   stop) rm -f "$ACTIVE" ;;
   restart) test "${FAIL_RESTART:-0}" != 1; touch "$ACTIVE" ;;
 esac
 ''')
     for command in ("getent", "id", "chown", "groupadd", "useradd"):
         executable(bins / command, f'echo "{command} $*" >> "$TRACE"\n')
+    executable(bins / "runuser", '''
+echo "runuser $*" >> "$TRACE"
+args=("$@")
+for ((i=0; i<${#args[@]}; i++)); do
+  if [ "${args[$i]}" = "--" ]; then
+    "${args[@]:$((i+1))}"
+    exit $?
+  fi
+done
+exit 2
+''')
     executable(app / ".venv/bin/pip", '''
 echo "pip $*" >> "$TRACE"
 test "${FAIL_PIP:-0}" != 1
@@ -97,12 +109,36 @@ def test_upgrade_preserves_prior_active_state_and_enablement(sandbox, active):
     assert not (root / "var/lib/odin/.package-service-state").exists()
 
 
-def test_fresh_install_enables_but_does_not_start(sandbox):
+def test_fresh_install_enables_and_starts_loopback_bootstrap(sandbox):
     _, trace, state, invoke = sandbox
     assert invoke("postinstall", "configure").returncode == 0
-    assert "systemctl enable" in trace.read_text()
+    assert "systemctl enable --now odin.service" in trace.read_text()
     assert "systemctl restart" not in trace.read_text()
-    assert not state.exists()
+    # The fake systemctl models --now as activation. No real system service is
+    # touched by this relocated installer harness.
+    assert state.exists()
+
+
+def test_fresh_install_provisions_pending_initialization_record_as_service_user(sandbox):
+    _, trace, _, invoke = sandbox
+    assert invoke("postinstall", "configure").returncode == 0
+    calls = trace.read_text()
+    assert "runuser -u odin" in calls
+    assert "--provision-fresh-initialization" in calls
+    assert "systemctl enable --now odin.service" in calls
+
+
+def test_fresh_install_onboarding_message_preserves_public_key_not_private_key(sandbox):
+    root, _, _, invoke = sandbox
+    (root / "opt/odin/.ssh/id_ed25519").write_text("DO-NOT-PRINT-PRIVATE-KEY")
+    (root / "opt/odin/.ssh/id_ed25519.pub").write_text("PUBLIC-KEY-FIXTURE")
+    result = invoke("postinstall", "configure")
+    assert result.returncode == 0, result.stderr
+    assert "http://127.0.0.1:3000" in result.stdout
+    assert "loopback-only bootstrap context" in result.stdout
+    assert "DO-NOT-PRINT-PRIVATE-KEY" not in result.stdout
+    assert "PUBLIC-KEY-FIXTURE" in result.stdout
+    assert "sudo systemctl start odin" not in result.stdout
 
 
 @pytest.mark.parametrize("failure", ["FAIL_PIP", "FAIL_IMPORT", "FAIL_RESTART"])
@@ -147,7 +183,11 @@ def test_removal_after_failed_upgrade_cannot_replay_restart_intent(sandbox):
     assert not marker.exists()
     assert invoke("postinstall", "configure").returncode == 0
     assert not state.exists()
-    assert "systemctl restart" not in trace.read_text()
+    # Removal preserved configuration, so the later configure is an upgrade-like
+    # install. It must not replay the stale failed-upgrade restart intent.
+    calls = trace.read_text()
+    assert "systemctl restart odin.service" not in calls
+    assert "systemctl enable --now odin.service" not in calls
 
 
 @pytest.mark.parametrize("upgrade", [False, True])

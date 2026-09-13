@@ -23,10 +23,16 @@ def _executor() -> ToolExecutor:
 async def test_concurrent_tools_have_isolated_timeouts():
     ex = _executor()
     seen: dict[str, int | None] = {}
+    both_started = asyncio.Event()
+    started = 0
 
     def make_handler(name):
         async def _h(_inp):
-            await asyncio.sleep(0.05)  # force the two calls to interleave
+            nonlocal started
+            started += 1
+            if started == 2:
+                both_started.set()
+            await both_started.wait()
             seen[name] = _current_tool_timeout_ctx.get()
             return "ok"
 

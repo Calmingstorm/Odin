@@ -3,7 +3,7 @@
  * Toggle response enabled + require_mention per guild and channel.
  */
 import { api } from '../api.js';
-import { computed, onMounted, ref } from 'vue';
+import { computed, onMounted, onUnmounted, ref } from 'vue';
 import { DiscordUserCombobox, discordMemberDisplayName } from '../discord-user-combobox.js';
 import { guildBehaviorValue } from '../discord-config-policy.js';
 
@@ -18,6 +18,19 @@ export default {
           {{ loading ? 'Loading...' : 'Refresh' }}
         </button>
       </div>
+      <section class="hm-card mb-4">
+        <div class="flex items-center justify-between gap-3">
+          <div><h2 class="text-sm font-semibold text-gray-300">Gateway connection</h2>
+            <p class="text-xs text-gray-500">Saved credential: {{ connection.persisted ? 'present' : 'absent' }}. Runtime: {{ connection.active?.state || 'unknown' }}.</p></div>
+          <div class="flex gap-2"><button class="btn btn-ghost text-xs" @click="connectDiscord" :disabled="connectionBusy || !connection.persisted">Connect</button>
+            <button class="btn btn-ghost text-xs" @click="detachDiscord" :disabled="connectionBusy">Detach</button></div>
+        </div>
+        <form class="flex gap-2 mt-3" @submit.prevent="saveDiscordCredentials">
+          <input v-model="connectionToken" class="hm-input flex-1" type="password" autocomplete="off" spellcheck="false" placeholder="Discord bot token" :disabled="connectionBusy" />
+          <button class="btn btn-primary text-xs" :disabled="connectionBusy || !connectionToken">{{ connectionBusy ? 'Saving…' : 'Save and connect' }}</button>
+        </form>
+        <p v-if="connectionError" class="text-xs text-red-400 mt-2" role="alert">{{ connectionError }}</p>
+      </section>
       <p class="text-xs text-gray-500 mb-4">
         For ordinary conversational intake, allowed users and channels are absolute global gates; guild and channel settings cannot readmit a blocked message.
         Prefix commands use separate authorization, and explicitly allowed test webhooks bypass the user gate. Require-mention and bot-response behavior
@@ -192,6 +205,11 @@ export default {
 
   setup() {
     const guilds = ref([]);
+    const connection = ref({ persisted: false, active: { state: 'unknown' } });
+    const connectionToken = ref('');
+    const connectionBusy = ref(false);
+    const connectionError = ref(null);
+    let connectionPoll = null;
     const loading = ref(true);
     const error = ref(null);
     const expanded = ref({});
@@ -257,6 +275,25 @@ export default {
         if (showLoading && sequence === guildFetchSequence) loading.value = false;
       }
     }
+
+    async function fetchConnection() {
+      try { connection.value = await api.get('/api/discord/connection'); connectionError.value = null; }
+      catch (e) { connectionError.value = e.message; }
+    }
+
+    async function connectionOperation(operation, token = null) {
+      if (connectionBusy.value) return;
+      connectionBusy.value = true; connectionError.value = null;
+      try {
+        const body = { operation }; if (token !== null) body.token = token;
+        connection.value = await api.post('/api/discord/connection', body);
+        if (operation === 'credentials') connectionToken.value = '';
+      } catch (e) { connectionError.value = e.message || 'Connection update failed.'; }
+      finally { connectionBusy.value = false; }
+    }
+    function saveDiscordCredentials() { return connectionOperation('credentials', connectionToken.value); }
+    function connectDiscord() { return connectionOperation('connect'); }
+    function detachDiscord() { return connectionOperation('detach'); }
 
     async function fetchAll() {
       loading.value = true;
@@ -382,12 +419,14 @@ export default {
       }
     }
 
-    onMounted(fetchAll);
+    onMounted(() => { fetchAll(); fetchConnection(); connectionPoll = window.setInterval(fetchConnection, 5000); });
+    onUnmounted(() => { if (connectionPoll !== null) window.clearInterval(connectionPoll); connectionPoll = null; });
 
     return {
       guilds, loading, error, expanded, globalDraft, globalSaving, globalError, globalArrayInputs, globalMembers, globalListEditors, globalChanged,
       guildEnabled, guildMention, guildBots, hasOverride, toggleGuild,
       fetchAll, fetchGuilds, setGuildConfig, setChannelConfig, clearOverride, mutationPending, globalItemLabel, addGlobalItem, removeGlobalItem, saveGlobalDefaults,
+      connection, connectionToken, connectionBusy, connectionError, saveDiscordCredentials, connectDiscord, detachDiscord,
     };
   },
 };

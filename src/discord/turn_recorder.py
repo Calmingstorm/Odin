@@ -250,12 +250,9 @@ class TurnRecorder:
         if self._outbound_webhook_dispatcher is None:
             return
         try:
-            from ..notifications.outbound_webhooks import build_event_payload
-
-            full_payload = build_event_payload(event_type=event_type, data=payload)
             await self._outbound_webhook_dispatcher.dispatch_fire_and_forget(
                 event_type=event_type,
-                payload=full_payload,
+                data=payload,
             )
         except Exception:
             log.exception("Outbound webhook dispatch failed (non-fatal)")

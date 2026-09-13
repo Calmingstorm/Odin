@@ -32,8 +32,10 @@ def test_store_constructor_failure_releases_owned_resources(tmp_path, monkeypatc
     real_connect = sqlite3.connect
 
     class BrokenSchema(sqlite3.Connection):
-        def executescript(self, script):
-            raise sqlite3.OperationalError("schema initialization failed")
+        def execute(self, sql, parameters=()):
+            if sql == "BEGIN IMMEDIATE":
+                raise sqlite3.OperationalError("schema transaction failed")
+            return super().execute(sql, parameters)
 
     def tracked_connect(*args, **kwargs):
         if failure == "connect_failure":

@@ -515,6 +515,15 @@ FIELDS: dict[str, FieldSpec] = {
         "capture/input with no portal fallback. Hyprland input is best-effort: hard guardian "
         "SIGKILL may leave held input; release may clobber a simultaneous human same-button hold.",
     ),
+    "computer.hyprland_discovery_mode": FieldSpec(
+        label="Hyprland discovery mode",
+        apply_mode="restart",
+        restart_reason="The computer lifecycle snapshots its desktop target when it is "
+        "constructed; existing sessions retain their pinned or auto-discovery policy.",
+        description="Pinned requires every explicit compositor identity value. Auto "
+        "discovers only the runtime socket identity while retaining the approved "
+        "output and executable trust pins.",
+    ),
     "computer.hyprland_runtime_dir": FieldSpec(
         label="Hyprland runtime directory",
         description="Explicit desktop-owner runtime directory, e.g. /run/user/1000. "
@@ -578,6 +587,27 @@ FIELDS: dict[str, FieldSpec] = {
         description="Explicit absolute scope socket; empty uses "
         "runtime directory/odin-hyprland-scope.sock. "
         "Load the ABI-matched plugin once during operator setup; Odin never edits hyprland.conf.",
+    ),
+    "computer.hyprland_managed_activation": FieldSpec(
+        label="Hyprland managed activation",
+        apply_mode="restart",
+        restart_reason="The desktop lifecycle snapshots native activation policy at construction.",
+        description=(
+            "Permit session-start activation of one root-installed, "
+            "manifest-derived plugin."
+        ),
+    ),
+    "computer.hyprland_plugin_manifest": FieldSpec(
+        label="Hyprland plugin manifest",
+        apply_mode="restart",
+        restart_reason=(
+            "The desktop lifecycle snapshots the trusted manifest location "
+            "at construction."
+        ),
+        description=(
+            "Absolute root-owned build-identity manifest. Its plugin filename "
+            "selects the sibling artifact."
+        ),
     ),
     "timezone": FieldSpec(
         label="Timezone",

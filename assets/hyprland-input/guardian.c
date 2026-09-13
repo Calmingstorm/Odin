@@ -20,6 +20,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/random.h>
 #include <sys/prctl.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -66,18 +67,44 @@ struct guardian {
     struct xkb_keymap *keymap;
     struct xkb_state *state;
     bool keys[248], buttons[8], modifiers;
-    bool ready, begun, action, input_sent, release_sent, release_acknowledged;
+    bool ready, begun, action, input_sent, release_sent, release_acknowledged, release_status_v1;
+    bool arm_definitively_refused;
     bool disconnected, changed, gate_waiting, gate_allowed;
+    /* Bounded transport evidence, never receiver or application proof. */
+    const char *terminal_cause, *scope_outcome, *release_submission, *release_ack, *resource_closure;
+    unsigned input_queued, input_submitted;
     int scope_fd, parent_fd, status;
     pid_t parent_pid, compositor_pid;
+    uid_t uid;
     unsigned width, height, planned, completed, index, gate_serial;
     uint64_t lease, scope_deadline, idle, start, rejected;
-    char mapping[129], scope_token[129], arm_token[129];
+    char mapping[129], scope_path[108], compositor_start_ticks[32], scope_token[129], arm_token[129];
+    dev_t scope_dev;
+    ino_t scope_ino;
     const char *reason;
     const char *scope_operation, *scope_error, *command_name;
     struct event events[MAX_STEPS];
 };
-static void fail(struct guardian *g, const char *reason) { if (!g->reason) g->reason = reason; }
+static const char *cause_for_reason(const char *reason) {
+    if (!strcmp(reason, "controller-eof")) return "controller_eof";
+    if (!strcmp(reason, "controller-timeout")) return "controller_timeout";
+    if (!strcmp(reason, "signal-cancel")) return "signal_cancel";
+    if (!strcmp(reason, "scope-evidence-expired") || !strcmp(reason, "lease-expired")) return "scope_timeout";
+    if (!strcmp(reason, "scope-rejected-input")) return "scope_refused";
+    if (!strcmp(reason, "scope-refused")) return "scope_refused";
+    if (!strcmp(reason, "mapping-changed")) return "mapping_changed";
+    if (!strcmp(reason, "invalid-command")) return "invalid_command";
+    if (!strcmp(reason, "input-path-lost")) return "wayland_dispatch_failed";
+    return "other";
+}
+static void fail(struct guardian *g, const char *reason) {
+    if (!g->reason) {
+        g->reason = reason;
+        /* scope_bind records a more specific terminal cause before the legacy
+         * command parser labels the command invalid. Preserve that evidence. */
+        if (!g->terminal_cause) g->terminal_cause = cause_for_reason(reason);
+    }
+}
 /* stdout is nonblocking: a stalled controller must never stall owned release. */
 static bool emit(const char *line) {
     size_t n = strlen(line); ssize_t result = write(STDOUT_FILENO, line, n);
@@ -113,7 +140,9 @@ static int pump(struct guardian *g, int wait_ms) {
     if (fd.revents & (POLLERR | POLLHUP | POLLNVAL)) goto lost;
     return 0;
 lost:
-    g->disconnected = true; return -1;
+    g->disconnected = true;
+    if (!g->terminal_cause) g->terminal_cause = "wayland_dispatch_failed";
+    return -1;
 }
 static void synced(void *data, struct wl_callback *callback, uint32_t serial) {
     (void)callback; (void)serial; *(bool *)data = true;
@@ -132,7 +161,15 @@ static bool synchronize(struct guardian *g, unsigned timeout_ms) {
 }
 /* Bounded flat JSON reply parser: no duplicate fields, nesting, escapes,
  * overflows, non-boolean ok/armed, or unframed bytes. */
-struct scope_reply { bool ok, armed, have_ok, have_armed, have_keys, have_buttons, have_rejected, release_acknowledged; uint64_t keys, buttons, rejected; const char *error; };
+struct scope_reply { bool ok, armed, have_ok, have_armed, have_keys, have_buttons, have_rejected, release_acknowledged, release_status_v1; uint64_t keys, buttons, rejected; const char *error; };
+/* Shared with scope_exchange, including its terminating NUL. Even an empty
+ * name with the shortest scalar takes four bytes ("":0), plus a comma per
+ * additional field and two braces: n fields need at least 5*n + 1 bytes.
+ * Thus every reply that fits the wire buffer also fits this duplicate index.
+ * Store offsets, not 64-byte name copies: 818 uint16_t entries = 1636 bytes,
+ * only 100 bytes more than the former, accidentally limiting 24-name table. */
+enum { SCOPE_RESPONSE_CAP = 4096, SCOPE_REPLY_MAX_FIELDS = (SCOPE_RESPONSE_CAP - 2) / 5 };
+_Static_assert(SCOPE_RESPONSE_CAP - 1 <= UINT16_MAX, "scope name offsets must fit");
 /* Fixed vocabulary only: never copy tokens, peer prose or application data. */
 static const char *scope_error_code(const char *value) {
     static const char *const codes[] = {
@@ -160,14 +197,25 @@ static bool json_string(const char **p, char *out, size_t cap) {
 }
 static bool parse_reply(const char *p, struct scope_reply *r) {
     memset(r, 0, sizeof *r);
-    char seen[24][64]; unsigned count = 0;
+    const char *response = p;
+    size_t length = 0;
+    while (length < SCOPE_RESPONSE_CAP && response[length]) ++length;
+    if (length == SCOPE_RESPONSE_CAP) return false;
+    uint16_t seen[SCOPE_REPLY_MAX_FIELDS]; unsigned count = 0;
     whitespace(&p); if (*p++ != '{') return false;
     whitespace(&p);
     while (*p != '}') {
         char name[64], value[512];
-        if (count == 24 || !json_string(&p, name, sizeof name)) return false;
-        for (unsigned i = 0; i < count; ++i) if (!strcmp(seen[i], name)) return false;
-        strcpy(seen[count++], name);
+        const char *field = p;
+        if (count == SCOPE_REPLY_MAX_FIELDS || !json_string(&p, name, sizeof name)) return false;
+        size_t name_length = strlen(name);
+        /* Prior names are validated, unescaped slices of this immutable reply.
+         * Include their closing quote in the equality check so prefixes do not
+         * collide. Each prior start precedes this complete name, keeping every
+         * comparison within the bounded reply, even for shorter prior names. */
+        for (unsigned i = 0; i < count; ++i)
+            if (!memcmp(response + seen[i], name, name_length) && response[seen[i] + name_length] == '"') return false;
+        seen[count++] = (uint16_t)(field + 1 - response);
         whitespace(&p); if (*p++ != ':') return false; whitespace(&p);
         bool boolean = false, truth = false, numeric = false, string = false; uint64_t number = 0;
         if (!strncmp(p, "true", 4)) { boolean = truth = true; p += 4; }
@@ -181,6 +229,7 @@ static bool parse_reply(const char *p, struct scope_reply *r) {
         if (!strcmp(name, "ok")) { if (!boolean) return false; r->have_ok = true; r->ok = truth; }
         else if (!strcmp(name, "armed")) { if (!boolean) return false; r->have_armed = true; r->armed = truth; }
         else if (!strcmp(name, "release_acknowledged")) { if (!boolean) return false; r->release_acknowledged = truth; }
+        else if (!strcmp(name, "release_status_v1")) { if (!boolean) return false; r->release_status_v1 = truth; }
         else if (!strcmp(name, "keys")) { if (!numeric || number > 248) return false; r->have_keys = true; r->keys = number; }
         else if (!strcmp(name, "buttons")) { if (!numeric || number > 8) return false; r->have_buttons = true; r->buttons = number; }
         else if (!strcmp(name, "rejected")) { if (!numeric) return false; r->have_rejected = true; r->rejected = number; }
@@ -195,7 +244,7 @@ static bool parse_reply(const char *p, struct scope_reply *r) {
 }
 static bool scope_exchange(struct guardian *g, const char *request, struct scope_reply *reply) {
     if (g->scope_fd < 0) return false;
-    size_t length = strlen(request), sent = 0, used = 0; char response[4096];
+    size_t length = strlen(request), sent = 0, used = 0; char response[SCOPE_RESPONSE_CAP];
     /* Only cleanup gets a longer reply budget, after owned ups were submitted.
      * This never grants input or renews the 250 ms compositor scope lease. */
     uint64_t deadline = now_us() + (strstr(request, "\"release_all\"") ? 500000 : 50000);
@@ -231,14 +280,19 @@ static bool scope_call(struct guardian *g, const char *request, struct scope_rep
     /* A complete negative reply is a refused operation, not a lost stream.
      * In particular, a focus-revoked renewal must leave this connection alive
      * for explicit release acknowledgement. Callers still stop on refusal. */
-    if (scope_exchange(g, request, reply)) return reply->ok;
+    if (scope_exchange(g, request, reply)) {
+        g->scope_outcome = reply->ok ? "accepted" : "refused";
+        return reply->ok;
+    }
     /* Poison after ambiguous send: a late reply cannot acknowledge later work. */
     if (g->scope_fd >= 0) close(g->scope_fd);
     g->scope_fd = -1;
+    g->scope_outcome = "transport_lost";
     return false;
 }
 static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
     g->scope_operation = renew ? "renew" : "arm";
+    if (!renew) g->arm_definitively_refused = false;
     if (!g->scope_token[0]) { g->scope_error = "missing-scope-token"; return false; }
     uint64_t now = now_us();
     if (deadline <= now || deadline - now > 250000) { g->scope_error = "local-deadline-invalid"; return false; }
@@ -250,6 +304,15 @@ static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
     g->scope_token[0] = 0;
     struct scope_reply r = {0};
     if (!scope_call(g, request, &r)) {
+        if (g->scope_outcome && !strcmp(g->scope_outcome, "refused")) {
+            g->terminal_cause = "scope_refused";
+            if (!renew) g->arm_definitively_refused = true;
+            /* A complete native refusal is not malformed controller syntax.
+             * Preserve it as the outer terminal reason before command() returns
+             * false and the parser attempts to add invalid-command. */
+            fail(g, "scope-refused");
+        }
+        else if (g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) g->terminal_cause = "scope_transport_failed";
         g->scope_error = g->scope_fd < 0 ? "scope-exchange-failed" :
             (r.error ? r.error : "scope-operation-refused");
         return false;
@@ -285,6 +348,47 @@ static int connect_peer(const char *path, pid_t pid, uid_t uid, bool private) {
     return fd;
 bad:
     close(fd); return -1;
+}
+static bool process_start_ticks(pid_t pid, char out[32]) {
+    char stat_path[64];
+    if (snprintf(stat_path, sizeof stat_path, "/proc/%ld/stat", (long)pid) < 0) return false;
+    FILE *f = fopen(stat_path, "re"); char line[4096], *close, *p;
+    if (!f || !fgets(line, sizeof line, f)) { if (f) fclose(f); return false; }
+    fclose(f); close = strrchr(line, ')'); if (!close || close[1] != ' ') return false;
+    p = close + 2;
+    for (unsigned i = 0; i <= 19; ++i) {
+        while (*p == ' ') ++p;
+        char *start = p; while (*p && *p != ' ') ++p;
+        if (!*start || (i == 19 && (p - start >= 32 || strspn(start, "0123456789") != (size_t)(p - start)))) return false;
+        if (i == 19) { memcpy(out, start, (size_t)(p - start)); out[p - start] = 0; return true; }
+    }
+    return false;
+}
+static bool own_start_ticks(char out[32]) { return process_start_ticks(getpid(), out); }
+static bool connect_scope_peer(struct guardian *g, bool initial) {
+    struct stat st;
+    if (!path_socket(g->scope_path, g->uid, true) || stat(g->scope_path, &st)) return false;
+    if (!initial && (st.st_dev != g->scope_dev || st.st_ino != g->scope_ino)) return false;
+    char ticks[32];
+    if (!process_start_ticks(g->compositor_pid, ticks) ||
+        (!initial && strcmp(ticks, g->compositor_start_ticks))) return false;
+    int fd = connect_peer(g->scope_path, g->compositor_pid, g->uid, true);
+    if (fd < 0) return false;
+    if (stat(g->scope_path, &st) || (!initial && (st.st_dev != g->scope_dev || st.st_ino != g->scope_ino))) {
+        close(fd); return false;
+    }
+    if (initial) {
+        g->scope_dev = st.st_dev; g->scope_ino = st.st_ino;
+        strcpy(g->compositor_start_ticks, ticks);
+    }
+    g->scope_fd = fd;
+    return true;
+}
+static bool command_id(char out[49]) {
+    unsigned char bytes[24]; static const char hex[] = "0123456789abcdef";
+    if (getrandom(bytes, sizeof bytes, 0) != (ssize_t)sizeof bytes) return false;
+    for (size_t i = 0; i < sizeof bytes; ++i) { out[i * 2] = hex[bytes[i] >> 4]; out[i * 2 + 1] = hex[bytes[i] & 15]; }
+    out[48] = 0; return true;
 }
 static void output_geometry(void *data, struct wl_output *o, int32_t x, int32_t y, int32_t pw, int32_t ph, int32_t sub, const char *make, const char *model, int32_t transform) {
     (void)o; (void)x; (void)y; (void)pw; (void)ph; (void)sub; (void)make; (void)model;
@@ -575,16 +679,56 @@ static bool release_all(struct guardian *g) {
     bool sync=queued && synchronize(g,100);
     /* Buffered requests alone do not establish transport submission. */
     g->release_sent=queued && !g->disconnected && wl_display_flush(g->display)>=0;
+    g->release_submission = !queued ? "not_attempted" : g->release_sent ? "submitted" : "queued_not_submitted";
     if (g->release_sent) receipt(g,"release_sent","explicit-owned-release");
-    struct scope_reply r;
-    bool ack=scope_call(g,"{\"op\":\"release_all\"}\n",&r);
+    /* Only a complete refused arm proves this guardian never acquired scope.
+     * Ambiguous/malformed/lost arm replies still take the normal bounded
+     * cleanup path because native ownership may have been established. */
+    if (g->arm_definitively_refused) {
+        g->release_acknowledged = false;
+        g->release_ack = "not_attempted";
+        return false;
+    }
+    struct scope_reply r = {0}; char id[49], ticks[32], request[192];
+    bool tagged = g->release_status_v1 && own_start_ticks(ticks) && command_id(id);
+    if (tagged) snprintf(request, sizeof request, "{\"op\":\"release_all\",\"command_id\":\"%s\",\"guardian_start_ticks\":\"%s\"}\n", id, ticks);
+    else strcpy(request, "{\"op\":\"release_all\"}\n");
+    bool ack=scope_call(g,request,&r);
+    /* A complete release write with a lost ACK gets exactly one readonly lookup.
+     * It never retries release or creates an input-capable replacement lease. */
+    const char *initial_scope_outcome = g->scope_outcome;
+    if (!ack && tagged && initial_scope_outcome && !strcmp(initial_scope_outcome, "transport_lost")) {
+        if (connect_scope_peer(g, false)) {
+            snprintf(request, sizeof request, "{\"op\":\"release_status\",\"command_id\":\"%s\",\"guardian_start_ticks\":\"%s\"}\n", id, ticks);
+            ack = scope_call(g, request, &r);
+        }
+        g->scope_outcome = initial_scope_outcome;
+    }
     g->release_acknowledged=sync && ack && r.release_acknowledged && r.have_armed && !r.armed && r.have_keys && !r.keys && r.have_buttons && !r.buttons;
-    if (ack && (!r.have_rejected || r.rejected!=g->rejected)) fail(g,"scope-evidence-expired");
+    /* A cleanup ACK must carry the same rejection counter observed while the
+     * action was armed. Missing evidence is an invalid ACK; a changed count
+     * identifies a rejected input guard. Neither weakens cleanup proof. */
+    if (ack && !r.have_rejected) {
+        g->release_acknowledged = false;
+        g->scope_operation = "release_all";
+        g->scope_error = "scope-ack-invalid";
+        fail(g,"scope-ack-invalid");
+    } else if (ack && r.rejected != g->rejected) {
+        /* The cleanup fields above may still prove no owned input remains.
+         * This operation label attributes only where the changed action
+         * rejection count was detected; it does not erase that cleanup ACK. */
+        g->scope_operation = "release_all";
+        g->scope_error = "scope-rejected-input";
+        fail(g,"scope-rejected-input");
+    }
+    g->release_ack = g->release_acknowledged ? "acknowledged" :
+        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "refused")) ? "negative" :
+        (!ack && g->scope_outcome && !strcmp(g->scope_outcome, "transport_lost")) ? "transport_lost" : "invalid_or_unconfirmed";
     return g->release_acknowledged;
 }
 static void action_receipt(struct guardian *g,const char *event,const char *reason) {
     char line[1024];
-    snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"release_sent\":%s,\"release_acknowledged\":%s,\"receiver_proven\":false,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"},\"native_failure\":{\"command\":\"%s\",\"scope_operation\":\"%s\",\"scope_error\":\"%s\"}}\n",event,reason,g->input_sent?"true":"false",g->release_sent?"true":"false",g->release_acknowledged?"true":"false",!strcmp(event,"action_done")?"complete":"release",g->planned,g->completed,g->release_acknowledged?"confirmed":"unknown",reason,g->command_name?g->command_name:"none",g->scope_operation?g->scope_operation:"none",g->scope_error?g->scope_error:"none");
+    snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"release_sent\":%s,\"release_acknowledged\":%s,\"receiver_proven\":false,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"},\"native_failure\":{\"command\":\"%s\",\"scope_operation\":\"%s\",\"scope_error\":\"%s\",\"input_loss_v1\":{\"terminal_cause\":\"%s\",\"scope_outcome\":\"%s\",\"events_queued\":%u,\"events_submitted\":%u,\"release_submission\":\"%s\",\"release_ack\":\"%s\",\"resource_closure\":\"%s\"}}}\n",event,reason,g->input_sent?"true":"false",g->release_sent?"true":"false",g->release_acknowledged?"true":"false",!strcmp(event,"action_done")?"complete":"release",g->planned,g->completed,g->release_acknowledged?"confirmed":"unknown",reason,g->command_name?g->command_name:"none",g->scope_operation?g->scope_operation:"none",g->scope_error?g->scope_error:"none",g->terminal_cause?g->terminal_cause:"orderly",g->scope_outcome?g->scope_outcome:"not_attempted",g->input_queued,g->input_submitted,g->release_submission?g->release_submission:"not_attempted",g->release_ack?g->release_ack:"not_attempted",g->resource_closure?g->resource_closure:"not_started");
     if (!emit(line)) fail(g,"transport-error");
 }
 static void step(struct guardian *g) {
@@ -623,6 +767,9 @@ static void step(struct guardian *g) {
         zwlr_virtual_pointer_v1_frame(g->pointer);
     }
     ++g->index; ++g->completed; ++queued;
+    ++g->input_queued;
+    /* Submission means accepted by the Wayland transport, not delivery. */
+    if (wl_display_flush(g->display) >= 0) ++g->input_submitted;
     }
 }
 static bool command(struct guardian *g,char *line) {
@@ -648,10 +795,13 @@ static bool command(struct guardian *g,char *line) {
     if (!strncmp(line,"B ",2)) {
         char *rest=line+2;uint64_t ms,deadline;
         if (g->begun||!integer(&rest,&ms,1,2000)||!integer(&rest,&deadline,1,UINT64_MAX)||rest) return false;
+        /* Failed new begins cannot inherit a prior action's cleanup truth. */
+        g->input_sent=g->release_sent=g->release_acknowledged=false;
+        g->release_submission=g->release_ack="not_attempted";
+        g->planned=g->completed=g->input_queued=g->input_submitted=0;
         uint64_t start=now_us();
         if (!scope_bind(g,false,deadline)) return false;
         g->lease=start+ms*1000;g->scope_deadline=deadline;g->begun=true;
-        g->input_sent=g->release_sent=g->release_acknowledged=false;g->planned=g->completed=0;
         receipt(g,"begun","nonrenewable-lease");return true;
     }
     if (!strncmp(line,"S ",2)) {
@@ -684,20 +834,20 @@ static bool decimal(const char *s,uint64_t *out,uint64_t lo,uint64_t hi) {
 }
 int main(int argc,char **argv) {
     uint64_t pid,uid,width,height;
-    if (argc!=8||!decimal(argv[2],&pid,1,INT32_MAX)||!decimal(argv[3],&uid,0,UINT32_MAX)||uid!=getuid()||geteuid()!=getuid()||!mapping_valid(argv[4])||!decimal(argv[6],&width,1,32768)||!decimal(argv[7],&height,1,32768)) return 64;
+    if (argc!=8||!decimal(argv[2],&pid,1,INT32_MAX)||!decimal(argv[3],&uid,0,UINT32_MAX)||uid!=getuid()||geteuid()!=getuid()||!mapping_valid(argv[4])||strlen(argv[5]) >= sizeof(((struct guardian *)0)->scope_path)||!decimal(argv[6],&width,1,32768)||!decimal(argv[7],&height,1,32768)) return 64;
     struct guardian *g=calloc(1,sizeof *g);if (!g) return 70;
-    g->scope_fd=g->parent_fd=-1;g->parent_pid=getppid();g->compositor_pid=(pid_t)pid;
-    g->width=(unsigned)width;g->height=(unsigned)height;strcpy(g->mapping,argv[4]);
+    g->scope_fd=g->parent_fd=-1;g->parent_pid=getppid();g->compositor_pid=(pid_t)pid;g->uid=(uid_t)uid;
+    g->width=(unsigned)width;g->height=(unsigned)height;strcpy(g->mapping,argv[4]);strcpy(g->scope_path,argv[5]);
     struct sigaction sa={.sa_handler=on_signal};sigemptyset(&sa.sa_mask);
     sigaction(SIGTERM,&sa,NULL);sigaction(SIGINT,&sa,NULL);sigaction(SIGHUP,&sa,NULL);signal(SIGPIPE,SIG_IGN);
     if (prctl(PR_SET_PDEATHSIG,SIGTERM)||getppid()!=g->parent_pid) { free(g);return 65; }
     g->parent_fd=(int)syscall(SYS_pidfd_open,g->parent_pid,0);
     if (g->parent_fd<0) { free(g);return 65; }
     for (int f=0;f<=1;++f) { int flags=fcntl(f,F_GETFL);if (flags<0||fcntl(f,F_SETFL,flags|O_NONBLOCK)) { close(g->parent_fd);free(g);return 65; } }
-    g->scope_fd=connect_peer(argv[5],(pid_t)pid,(uid_t)uid,true);
+    if (!connect_scope_peer(g, true)) { fail(g,"input-path-lost");goto cleanup; }
     struct scope_reply registration;
     if (!scope_call(g,"{\"op\":\"status\"}\n",&registration)) { fail(g,"input-path-lost");goto cleanup; }
-    g->rejected=registration.rejected;
+    g->rejected=registration.rejected; g->release_status_v1=registration.release_status_v1;
     int fd=connect_peer(argv[1],(pid_t)pid,(uid_t)uid,false);
     if (fd<0) { fail(g,"input-path-lost");goto cleanup; }
     g->display=wl_display_connect_to_fd(fd);
@@ -739,15 +889,19 @@ int main(int argc,char **argv) {
     }
 cleanup:
     if (g->ready) (void)release_all(g);
-    action_receipt(g,"closed",g->reason?g->reason:"orderly");
     int status=g->ready&&g->release_acknowledged?0:1;
     if (g->pointer) zwlr_virtual_pointer_v1_destroy(g->pointer);
     if (g->keyboard) zwp_virtual_keyboard_v1_destroy(g->keyboard);
-    if (g->display) { (void)synchronize(g,50);wl_display_disconnect(g->display); }
+    if (g->display) { (void)synchronize(g,50);wl_display_disconnect(g->display); g->resource_closure="display_disconnected"; }
     if (g->scope_fd>=0) close(g->scope_fd);
     if (g->parent_fd>=0) close(g->parent_fd);
     if (g->state) xkb_state_unref(g->state);
     if (g->keymap) xkb_keymap_unref(g->keymap);
     if (g->xctx) xkb_context_unref(g->xctx);
+    g->resource_closure="complete";
+    /* The terminal receipt is intentionally emitted only after locally-owned
+     * Wayland and scope resources have been closed. This proves local closure,
+     * not compositor receipt of a previous release request. */
+    action_receipt(g,"closed",g->reason?g->reason:"orderly");
     free(g);return status;
 }

@@ -32,6 +32,7 @@ struct app {
     struct xdg_toplevel *toplevel;
     int width, height;
     bool done, failed;
+    uint32_t barrier_serial;
 };
 static volatile sig_atomic_t interrupted;
 static void stop_signal(int sig) { (void)sig; interrupted = 1; }
@@ -58,6 +59,16 @@ static void buffer_release(void *data, struct wl_buffer *buffer) {
     (void)data; wl_buffer_destroy(buffer);
 }
 static const struct wl_buffer_listener buffer_listener = { .release = buffer_release };
+static void barrier_done(void *data, struct wl_callback *callback, uint32_t serial) {
+    struct app *a = data; wl_callback_destroy(callback);
+    event_start("receiver_barrier");
+    printf(",\"barrier\":%u,\"callback_serial\":%u", ++a->barrier_serial, serial); event_end();
+}
+static const struct wl_callback_listener barrier_listener = { .done = barrier_done };
+static bool request_barrier(struct app *a) {
+    struct wl_callback *callback = wl_display_sync(a->display);
+    return callback && wl_callback_add_listener(callback, &barrier_listener, a) == 0;
+}
 static bool paint(struct app *a) {
     /* Hard bounds also guard stride/pool arithmetic against hostile configure sizes. */
     if (a->width < 1 || a->height < 1 || a->width > 4096 || a->height > 4096) return false;
@@ -245,12 +256,20 @@ int main(int argc, char **argv) {
         if (wl_display_prepare_read(a.display) != 0) continue;
         int flushed = wl_display_flush(a.display);
         if (flushed < 0 && errno != EAGAIN) { wl_display_cancel_read(a.display); a.failed = true; break; }
-        struct pollfd p = { .fd = wl_display_get_fd(a.display), .events = POLLIN | (flushed < 0 ? POLLOUT : 0) };
-        int rc = poll(&p, 1, 25);
-        if (rc > 0 && (p.revents & POLLIN)) {
+        struct pollfd p[2] = {{ .fd = wl_display_get_fd(a.display), .events = POLLIN | (flushed < 0 ? POLLOUT : 0) },
+                              { .fd = STDIN_FILENO, .events = POLLIN }};
+        int rc = poll(p, 2, 25);
+        if (rc > 0 && (p[0].revents & POLLIN)) {
             if (wl_display_read_events(a.display) < 0) { a.failed = true; break; }
         } else wl_display_cancel_read(a.display);
-        if ((rc < 0 && errno != EINTR) || (rc > 0 && (p.revents & (POLLERR | POLLHUP | POLLNVAL)))) { a.failed = true; break; }
+        if (rc > 0 && (p[1].revents & POLLIN)) {
+            unsigned char commands[64]; ssize_t n = read(STDIN_FILENO, commands, sizeof commands);
+            if (n < 0 && errno != EINTR && errno != EAGAIN) { a.failed = true; break; }
+            for (ssize_t i = 0; i < n; ++i)
+                if (commands[i] != 'D' || !request_barrier(&a)) { a.failed = true; break; }
+        }
+        if ((rc < 0 && errno != EINTR) || (rc > 0 &&
+                ((p[0].revents & (POLLERR | POLLHUP | POLLNVAL)) || (p[1].revents & (POLLERR | POLLNVAL))))) { a.failed = true; break; }
     }
     event_start("receiver_exit"); printf(",\"initialized\":%s,\"failed\":%s", initialized ? "true" : "false", a.failed ? "true" : "false"); event_end();
     wl_display_disconnect(a.display);

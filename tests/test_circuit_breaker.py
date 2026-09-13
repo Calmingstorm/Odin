@@ -5,11 +5,33 @@ CircuitOpenError, thread safety, and configuration.
 """
 from __future__ import annotations
 
-import time
+from types import SimpleNamespace
 
 import pytest
 
 from src.llm.circuit_breaker import CircuitBreaker, CircuitOpenError
+
+
+class _MonotonicClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def monotonic_clock(monkeypatch):
+    import src.llm.circuit_breaker as circuit_module
+
+    clock = _MonotonicClock()
+    monkeypatch.setattr(
+        circuit_module, "time", SimpleNamespace(monotonic=clock.monotonic)
+    )
+    return clock
 
 # ---------------------------------------------------------------------------
 # CircuitOpenError
@@ -115,32 +137,32 @@ class TestOpenState:
 # ---------------------------------------------------------------------------
 
 class TestHalfOpenState:
-    def test_transitions_to_half_open_after_timeout(self):
+    def test_transitions_to_half_open_after_timeout(self, monotonic_clock):
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.01)
         cb.record_failure()
         assert cb.state == "open"
-        time.sleep(0.02)
+        monotonic_clock.advance(0.01)
         assert cb.state == "half_open"
 
-    def test_check_allows_probe_when_half_open(self):
+    def test_check_allows_probe_when_half_open(self, monotonic_clock):
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.01)
         cb.record_failure()
-        time.sleep(0.02)
+        monotonic_clock.advance(0.01)
         # Should not raise — allows probe request
         cb.check()
 
-    def test_success_in_half_open_closes(self):
+    def test_success_in_half_open_closes(self, monotonic_clock):
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.01)
         cb.record_failure()
-        time.sleep(0.02)
+        monotonic_clock.advance(0.01)
         assert cb.state == "half_open"
         cb.record_success()
         assert cb.state == "closed"
 
-    def test_failure_in_half_open_reopens(self):
+    def test_failure_in_half_open_reopens(self, monotonic_clock):
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.01)
         cb.record_failure()
-        time.sleep(0.02)
+        monotonic_clock.advance(0.01)
         assert cb.state == "half_open"
         cb.record_failure()
         assert cb.state == "open"
@@ -151,24 +173,24 @@ class TestHalfOpenState:
 # ---------------------------------------------------------------------------
 
 class TestRecoveryCycles:
-    def test_multiple_open_close_cycles(self):
+    def test_multiple_open_close_cycles(self, monotonic_clock):
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.01)
 
         # Cycle 1: fail → open → half_open → success → closed
         cb.record_failure()
         assert cb.state == "open"
-        time.sleep(0.02)
+        monotonic_clock.advance(0.01)
         cb.record_success()
         assert cb.state == "closed"
 
         # Cycle 2: fail → open → half_open → success → closed
         cb.record_failure()
         assert cb.state == "open"
-        time.sleep(0.02)
+        monotonic_clock.advance(0.01)
         cb.record_success()
         assert cb.state == "closed"
 
-    def test_retry_after_decreases_over_time(self):
+    def test_retry_after_decreases_over_time(self, monotonic_clock):
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=1.0)
         cb.record_failure()
         try:
@@ -176,7 +198,7 @@ class TestRecoveryCycles:
         except CircuitOpenError as e:
             first = e.retry_after
 
-        time.sleep(0.1)
+        monotonic_clock.advance(0.1)
         try:
             cb.check()
         except CircuitOpenError as e:
@@ -207,10 +229,10 @@ class TestEdgeCases:
         cb.record_success()
         assert cb.state == "closed"
 
-    def test_retry_after_non_negative(self):
+    def test_retry_after_non_negative(self, monotonic_clock):
         cb = CircuitBreaker("test", failure_threshold=1, recovery_timeout=0.01)
         cb.record_failure()
-        time.sleep(0.02)  # Past recovery timeout
+        monotonic_clock.advance(0.01)  # Past recovery timeout
         # check() should not raise (half_open), so we verify via state
         cb.check()  # No error
 

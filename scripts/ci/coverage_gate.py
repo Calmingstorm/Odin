@@ -128,12 +128,12 @@ def evaluate(baseline: dict[str, dict], current: dict[str, dict]) -> list[str]:
 
 def run_coverage(json_out: Path) -> None:
     res = subprocess.run(
-        [sys.executable, "-m", "pytest", "-q", "--cov=src",
+        [sys.executable, "-m", "pytest", "-q", "-n", "6", "--dist", "loadgroup",
+         "--durations=25", "--cov=src",
          f"--cov-report=json:{json_out}"],
-        capture_output=True, text=True,
+        text=True,
     )
     if res.returncode != 0:
-        sys.stderr.write(res.stdout[-3000:] + res.stderr[-2000:])
         print("coverage-gate: test suite failed under coverage — failing closed",
               file=sys.stderr)
         raise SystemExit(2)

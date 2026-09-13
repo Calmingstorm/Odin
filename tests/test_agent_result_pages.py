@@ -39,7 +39,6 @@ async def finish(manager, saver, text):
                             "text": text, "tool_calls": [], "stop_reason": "end_turn"}),
                         tool_executor_callback=AsyncMock())
     await manager._agents[aid]._task
-    await asyncio.sleep(0)
     cleanup = manager._cleanup_tasks.pop(aid)
     cleanup.cancel()
     await asyncio.gather(cleanup, return_exceptions=True)

@@ -40,6 +40,8 @@ EXPECTED_ROUTES = [
     ("GET", "/api/config/meta", "get_config_meta"),
     ("POST", "/api/config/image-models", "update_image_model_intent"),
     ("PUT", "/api/config", "update_config"),
+    ("GET", "/api/discord/connection", "get_connection"),
+    ("POST", "/api/discord/connection", "update_connection"),
     ("POST", "/api/restart", "restart_odin"),
     ("POST", "/api/sessions/clear-all", "clear_all_sessions"),
     ("POST", "/api/reload", "reload_config"),
@@ -142,6 +144,7 @@ EXPECTED_ROUTES = [
     ),
     ("GET", "/api/knowledge/{source}/versions/{v1:\\d+}/diff/{v2:\\d+}", "diff_knowledge_versions"),
     ("POST", "/api/knowledge/import", "import_knowledge"),
+    ("GET", "/api/schedules/status", "schedules_status"),
     ("GET", "/api/schedules", "list_schedules"),
     ("POST", "/api/schedules", "create_schedule"),
     ("PUT", "/api/schedules/{schedule_id}", "update_schedule"),
@@ -273,7 +276,7 @@ class TestRouteTableParity:
     def test_exact_route_list_and_order(self):
         actual = _routes()
         expected = [tuple(e) for e in EXPECTED_ROUTES]
-        assert len(actual) == len(expected) == 225
+        assert len(actual) == len(expected) == 228
         # set equality first for a readable diff on failure
         missing = set(expected) - set(actual)
         added = set(actual) - set(expected)

@@ -14,9 +14,14 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 
-def _load_env() -> None:
-    """Load .env file from project root if it exists."""
-    env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+def _load_env(env_file: str | Path | None = None) -> None:
+    """Load one declared environment file, never an ambient request directory."""
+    configured = env_file if env_file is not None else os.environ.get("ODIN_ENV_FILE")
+    env_path = (
+        Path(os.path.abspath(os.fspath(Path(configured).expanduser())))
+        if configured
+        else Path(__file__).resolve().parent.parent.parent / ".env"
+    )
     if env_path.exists():
         load_dotenv(env_path)
 
@@ -33,9 +38,9 @@ class OdinConfig:
     log_level: str = "INFO"
 
     @classmethod
-    def from_env(cls) -> OdinConfig:
+    def from_env(cls, env_file: str | Path | None = None) -> OdinConfig:
         """Build config from environment variables."""
-        _load_env()
+        _load_env(env_file)
         return cls(
             token=os.getenv("DISCORD_TOKEN", os.getenv("ODIN_TOKEN", "")),
             log_level=os.getenv("ODIN_LOG_LEVEL", "INFO"),

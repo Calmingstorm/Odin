@@ -10,7 +10,7 @@ import pytest
 
 from src.computer.models import ComputerError
 from src.computer.runtime import hyprland_guardian as module
-from tests.test_computer_hyprland_failure_r38 import DETAIL
+from tests.test_computer_hyprland_failure_r38 import DETAIL, assert_revoked_owned_cleanup
 from tests.test_computer_hyprland_turnloop_r33 import (
     NativeTransport,
     action,
@@ -35,7 +35,7 @@ def test_non_schema_native_data_is_not_evidence(row):
 @pytest.mark.parametrize("command", ["none", "begin", "renew", "bind", "select",
                                      "pixel-permit", "action"])
 def test_all_native_command_enums_preserve_bounded_failure(command):
-    for operation in ("none", "arm", "renew"):
+    for operation in ("none", "arm", "renew", "release_all"):
         for error in module._SCOPE_ERRORS:
             detail = {"command": command, "scope_operation": operation, "scope_error": error}
             assert module.native_failure({"native_failure": detail}) == detail
@@ -179,7 +179,7 @@ async def test_store_refuses_malformed_detail_before_reservation_lookup(normal, 
 
 
 @pytest.mark.parametrize("storage_failure", [False, True])
-async def test_cancelled_dispatch_always_closes_and_never_replays(
+async def test_cancelled_dispatch_always_revokes_and_never_replays(
     normal, monkeypatch, storage_failure,
 ):
     grant = await start(normal)
@@ -204,8 +204,7 @@ async def test_cancelled_dispatch_always_closes_and_never_replays(
     else:
         with pytest.raises(asyncio.CancelledError):
             await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
-    assert backend._closed
-    assert grant["session_id"] not in controller._live
+    await assert_revoked_owned_cleanup(controller, grant, backend)
     monkeypatch.setattr(controller.store, "finish_action", original)
     await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
     assert dispatched == [1]
@@ -213,7 +212,7 @@ async def test_cancelled_dispatch_always_closes_and_never_replays(
 
 @pytest.mark.parametrize("details", [None, [], {}, {"native_failure": []},
                                      {"native_failure": {**DETAIL, "command": []}}])
-async def test_controller_drops_malformed_native_details_but_still_closes(
+async def test_controller_drops_malformed_native_details_but_still_revokes(
     normal, monkeypatch, details,
 ):
     grant = await start(normal)
@@ -235,4 +234,4 @@ async def test_controller_drops_malformed_native_details_but_still_closes(
     result = json.loads(raw)
     assert result["status"] == "unknown"
     assert "native_failure" not in result
-    assert backend._closed
+    await assert_revoked_owned_cleanup(controller, grant, backend)

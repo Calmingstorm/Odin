@@ -63,7 +63,7 @@ class ComputerLifecycle:
             or settings.wayland_uid is None
         ):
             raise ComputerProvisioningError("computer_target_incomplete")
-        if hyprland and not all((
+        if hyprland and settings.hyprland_discovery_mode == "pinned" and not all((
             settings.hyprland_runtime_dir, settings.hyprland_wayland_display,
             settings.hyprland_instance_signature, settings.hyprland_output_name,
             settings.hyprland_compositor_pid, settings.hyprland_compositor_executable,
@@ -72,6 +72,19 @@ class ComputerLifecycle:
             settings.hyprland_capture_binary,
         )):
             raise ComputerProvisioningError("computer_target_incomplete")
+        if hyprland and settings.hyprland_discovery_mode == "auto" and not all((
+            settings.hyprland_output_name, settings.hyprland_compositor_executable,
+            settings.hyprland_compositor_sha256, settings.hyprland_compositor_version,
+            settings.hyprland_compositor_commit, settings.hyprland_guardian_binary,
+            settings.hyprland_capture_binary,
+        )):
+            raise ComputerProvisioningError("computer_target_incomplete")
+        if (
+            hyprland
+            and settings.hyprland_managed_activation
+            and not settings.hyprland_plugin_manifest
+        ):
+            raise ComputerProvisioningError("hyprland_plugin_manifest_required")
         if (
             settings.platform == "x11"
             and settings.environment == "existing_session"

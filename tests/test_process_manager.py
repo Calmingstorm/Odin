@@ -7,8 +7,10 @@ from __future__ import annotations
 
 import asyncio
 import os
+import sys
 import time
 from collections import deque
+from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -21,6 +23,28 @@ from src.tools.process_manager import (
     ProcessInfo,
     ProcessRegistry,
 )
+
+
+async def _run_isolated_shutdown_probe(name: str) -> None:
+    """Keep real kernel cleanup proofs out of pytest's adopted-orphan set."""
+    helper = Path(__file__).with_name("helpers") / "process_manager_shutdown_isolation.py"
+    proc = await asyncio.create_subprocess_exec(
+        sys.executable, str(helper), name,
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.STDOUT,
+        start_new_session=True,
+    )
+    try:
+        output, _ = await asyncio.wait_for(
+            proc.communicate(), timeout=SHUTDOWN_REAP_TIMEOUT + 35,
+        )
+        assert proc.returncode == 0, output.decode("utf-8", "replace")
+    finally:
+        if proc.returncode is None:
+            # A timed-out probe is still our dedicated session. Reap its
+            # exact tree rather than allowing test cancellation to leak it.
+            from src.tools.ssh import terminate_process_tree
+
+            await asyncio.shield(terminate_process_tree(proc, grace=0.5))
 
 # ---------------------------------------------------------------------------
 # ProcessInfo
@@ -168,7 +192,7 @@ class TestPollWaitSeconds:
     async def test_running_process_waits_until_deadline(self):
         reg = ProcessRegistry()
         proc = await asyncio.create_subprocess_shell(
-            "sleep 30", stdout=asyncio.subprocess.PIPE,
+            "exec sleep 30", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
         )
         info = ProcessInfo(
@@ -347,7 +371,7 @@ class TestPollWaitSeconds:
     async def test_cancellation_aborts_wait_not_process(self):
         reg = ProcessRegistry()
         proc = await asyncio.create_subprocess_shell(
-            "sleep 30", stdout=asyncio.subprocess.PIPE,
+            "exec sleep 30", stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT, start_new_session=True,
         )
         info = ProcessInfo(
@@ -536,22 +560,28 @@ class TestProcessRegistryShutdown:
         assert killed == 0
 
     @pytest.mark.asyncio
-    async def test_shutdown_kills_running(self):
+    async def test_shutdown_requests_kill_for_running_mock_record(self, monkeypatch):
+        """A mock record has no OS session to prove empty.
+
+        This unit test owns only shutdown's dispatch decision.  Giving the
+        record PID 1 used to make its final-proof pass scan the real init
+        session, so unrelated suite subprocesses adopted by pytest's
+        subreaper could turn a mock assertion into a global-process test.
+        Real group-cleanup proof is covered below with dedicated sessions.
+        """
         reg = ProcessRegistry()
-        mock_proc = AsyncMock()
-        mock_proc.terminate = MagicMock()
-        mock_proc.kill = MagicMock()
-        mock_proc.wait = AsyncMock()
         info = ProcessInfo(
             pid=1,
             command="test",
             host="local",
             start_time=time.time(),
-            process=mock_proc,
         )
         reg._processes[1] = info
+        kill = AsyncMock(return_value="Process 1 killed.")
+        monkeypatch.setattr(reg, "kill", kill)
         killed = await reg.shutdown()
         assert killed == 1
+        kill.assert_awaited_once_with(1)
 
     @pytest.mark.asyncio
     async def test_shutdown_skips_completed(self):
@@ -735,47 +765,10 @@ class TestRound3Blockers:
         """PR #244 round-3 blocker #2: a wedged async reap must not strand
         the owned group across re-exec — shutdown hard-KILLs the group
         synchronously before cancelling the task."""
-
-        reg = ProcessRegistry()
-        proc = await asyncio.create_subprocess_shell(
-            "sleep 30", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
-        )
-        gate = asyncio.Event()  # never set — the wedged "reaper"
-
-        async def wedged():
-            await gate.wait()
-
-        info = ProcessInfo(
-            pid=proc.pid, command="sleep 30", host="local",
-            start_time=time.time(), status="completed", exit_code=0,
-            process=proc,
-        )
-        info._exit_task = asyncio.create_task(wedged())
-        reg._processes[proc.pid] = info
-        try:
-            start = time.monotonic()
-            await reg.shutdown()
-            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 10
-            # COMPLETION BARRIER (round-4 blocker #1): shutdown returns only
-            # after the cancellation landed, the leader was reaped, and the
-            # group provably dissolved.
-            assert info._exit_task.done()
-            assert proc.returncode is not None  # leader reaped, no zombie
-            # Ownership scan, not killpg: an adopted orphan lingers as a
-            # ZOMBIE until reaped, which killpg still reports as present
-            # though it is dead by every meaningful measure.
-            from src.tools.process_manager import _close_pinned, _scan_owned_members
-
-            pinned, complete = _scan_owned_members(proc.pid, leader_pid=proc.pid)
-            alive = len(pinned)
-            _close_pinned(pinned)
-            assert complete and alive == 0  # gone BEFORE shutdown returned
-        finally:
-            gate.set()
-            if proc.returncode is None:
-                proc.kill()
-            await proc.wait()
+        # The suite runner is a subreaper and can retain unrelated orphaned
+        # children from preceding modules. The helper owns a fresh orphan
+        # inventory, so its affirmative scan proves this session only.
+        await _run_isolated_shutdown_probe("wedged")
 
     async def test_zero_wait_poll_settles_when_returncode_beats_publication(self):
         """PR #244 round-3 blocker #3: returncode set but status not yet
@@ -832,8 +825,11 @@ class TestRaceFreeGroupTermination:
             finally:
                 _close_pinned(pinned)
         finally:
-            proc.kill()
-            await proc.wait()
+            # Both sleeps hold the pipe. Reap the exact owned session instead
+            # of killing only its shell and waiting five seconds for EOF.
+            from src.tools.ssh import terminate_process_tree
+
+            await terminate_process_tree(proc, grace=0.5)
 
     async def test_fork_on_term_descendant_cannot_escape(self):
         """Round-6 blocker #1 (Odin's repro): a TERM handler that forks a
@@ -963,49 +959,7 @@ class TestShutdownBarrier:
         """Round-5 blocker #1 (Odin's repro): a lifecycle task that
         SWALLOWS cancellation must not hold shutdown — the barrier is
         bounded by process state, never by awaiting the task."""
-        reg = ProcessRegistry()
-        resist = True  # cleared at teardown so the loop can close
-
-        async def immortal():
-            while True:
-                try:
-                    await asyncio.sleep(3600)
-                except asyncio.CancelledError:
-                    if not resist:
-                        raise
-                    continue  # refuses to die while under test
-
-        proc = await asyncio.create_subprocess_shell(
-            "sleep 30", stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.STDOUT, start_new_session=True,
-        )
-        info = ProcessInfo(
-            pid=proc.pid, command="sleep 30", host="local",
-            start_time=time.time(), status="completed", exit_code=0,
-            process=proc,
-        )
-        task = asyncio.create_task(immortal())
-        info._exit_task = task
-        reg._processes[proc.pid] = info
-        try:
-            start = time.monotonic()
-            await asyncio.wait_for(reg.shutdown(), timeout=SHUTDOWN_REAP_TIMEOUT + 20)
-            assert time.monotonic() - start < SHUTDOWN_REAP_TIMEOUT + 20
-            assert proc.returncode is not None  # leader reaped
-            from src.tools.process_manager import _scan_owned_members
-
-            pinned, complete = _scan_owned_members(proc.pid)
-            assert complete and not pinned  # group provably empty
-        finally:
-            resist = False
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                pass
-            if proc.returncode is None:
-                proc.kill()
-                await proc.wait()
+        await _run_isolated_shutdown_probe("resistant")
 
     async def test_barrier_reports_failure_when_scan_cannot_complete(
         self, monkeypatch

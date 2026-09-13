@@ -1958,6 +1958,7 @@ class ProcessRegistry:
             meta = {
                 "kind": "process_output", "pid": info.pid, "generation": info.generation,
                 "status": info.status, "exit_code": info.exit_code,
+                "lifetime_deadline": info.start_time + MAX_LIFETIME_SECONDS,
                 "emitted_bytes": info.total_output_bytes, "retained_bytes": info.retained_bytes,
                 "shown_intervals": [[shown_start, end]] if chunk else [], "shown_bytes": len(chunk),
                 "capture_limit_loss_bytes": max(0, info.total_output_bytes - OUTPUT_CAPTURE_BYTES),

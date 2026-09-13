@@ -679,21 +679,32 @@ def test_torn_suffix_present_at_discovery_is_ingested_after_completion(tmp_path)
         assert conn.execute("SELECT COUNT(*) FROM turn_facts").fetchone()[0] == 2
 
 
-def test_locked_store_construction_is_bounded(tmp_path):
+def test_locked_store_construction_is_bounded(tmp_path, monkeypatch):
     base = make_rollup(tmp_path)
     locker = base._connect()
     locker.execute("BEGIN EXCLUSIVE")
+    real_connect = sqlite3.connect
+    busy_timeouts = []
+
+    def connect(*args, **kwargs):
+        # Keep SQLite and the real exclusive-lock failure. Inspect the bound
+        # actually adopted by SQLite, not how quickly this worker is scheduled.
+        assert kwargs["timeout"] == 0.1
+        conn = real_connect(*args, **kwargs)
+        busy_timeouts.append(conn.execute("PRAGMA busy_timeout").fetchone()[0])
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", connect)
     try:
-        started = __import__("time").monotonic()
         second = UsageRollup(
             str(base.directory),
             trajectory_directory=str(base.trajectory_directory),
             agent_trajectory_directory=str(base.agent_trajectory_directory),
             audit=base.audit,
         )
-        elapsed = __import__("time").monotonic() - started
-        assert elapsed < 0.5
+        assert busy_timeouts == [100]
         assert second.available is False
+        assert "locked" in second.error.lower()
     finally:
         locker.rollback()
         locker.close()

@@ -386,11 +386,13 @@ See [`docs/skills.md`](docs/skills.md) for the skill contract and context API.
 
 ## Development and testing
 
-Python checks:
+Python checks (see [Development verification](docs/testing.md) for worker limits,
+resource isolation, and the local/CI testing policy):
 
 ```bash
 pip install -e ".[dev]"
-pytest -q
+make test
+make test-cov
 ruff check src tests
 ```
 

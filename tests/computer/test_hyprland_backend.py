@@ -2,6 +2,7 @@
 
 import asyncio
 import io
+import os
 import time
 from dataclasses import asdict, replace
 from types import SimpleNamespace
@@ -14,7 +15,8 @@ from src.computer.admission import CompositorIdentity, InputAdmission
 from src.computer.models import ComputerError
 from src.computer.runtime import hyprland_backend as hb
 from src.computer.runtime.hyprland_capture import ExplicitOutput, NativeFrame
-from src.computer.runtime.hyprland_identity import ExecutableTrust
+from src.computer.runtime.hyprland_identity import ExecutableTrust, HyprlandIdentity, ProcessPin
+from src.computer.runtime.hyprland_scope import HyprlandOwnerHandle
 
 
 def config(**kwargs):
@@ -206,16 +208,38 @@ async def test_locked_or_unknown_prevents_dispatch(backend, locked):
     assert not backend._guardian.commands
 
 
-async def test_scope_deadline_is_bounded(backend):
+async def test_scope_deadline_is_bounded(backend, monkeypatch):
+    class Clock:
+        now_ns = 1_000_000_000
+
+        def monotonic_ns(self):
+            return self.now_ns
+
+        def monotonic(self):
+            return self.now_ns / 1_000_000_000
+
+    clock = Clock()
+
     async def slow(_):
         await asyncio.sleep(1)
         return scope()
 
+    observed_timeouts = []
+
+    async def expires_without_a_result(pending, *, timeout):
+        observed_timeouts.append(timeout)
+        # Model the event loop reaching the supplied deadline.  The contract is
+        # the bounded wait passed to the loop, not scheduler latency in CI.
+        clock.now_ns += round(timeout * 1_000_000_000)
+        return set(), set(pending)
+
+    monkeypatch.setattr(hb, "time", clock)
+    monkeypatch.setattr(hb.asyncio, "wait", expires_without_a_result)
     backend._scope_provider.snapshot.side_effect = slow
-    started = time.monotonic()
     with pytest.raises(ComputerError, match="scope_evidence_expired"):
         await backend._action_scope(backend._metadata())
-    assert time.monotonic() - started < 0.5
+    assert observed_timeouts == [0.25]
+    assert clock.monotonic_ns() == 1_250_000_000
     await asyncio.sleep(0)
 
 
@@ -276,6 +300,17 @@ async def test_recovery_then_resume_does_not_reuse_dead_guardian(backend, monkey
 
 
 async def test_real_capture_path_uses_fenced_native_raster_and_durable_spawn(backend, monkeypatch):
+    class Clock:
+        now_ns = 2_000_000_000
+
+        def monotonic_ns(self):
+            return self.now_ns
+
+        def monotonic(self):
+            return self.now_ns / 1_000_000_000
+
+    clock = Clock()
+    monkeypatch.setattr(hb, "time", clock)
     backend.startup_descriptor("b" * 32)
     connection = SimpleNamespace(close=lambda: None)
     monkeypatch.setattr(hb, "connect_peer", AsyncMock(return_value=connection))
@@ -286,14 +321,18 @@ async def test_real_capture_path_uses_fenced_native_raster_and_durable_spawn(bac
         calls.append(kwargs)
         kwargs["on_spawn"]({"pid": 12345, "start_ticks": 1})
         before = await kwargs["scope"]()
+        clock.now_ns += 999_999_999
         after = await kwargs["scope"]()
         assert before.binding() == after.binding()
         return NativeFrame(backend._output, native().pixels, after)
 
+    backend._scope_provider.snapshot.side_effect = lambda _: scope(
+        observed_monotonic_ns=clock.monotonic_ns()
+    )
     monkeypatch.setattr(hb, "capture_explicit_output", capture)
     result, evidence, captured_at = await hb.HyprlandRuntimeBackend._capture(backend)
     assert result.metadata.width == 8 and evidence["locked"] is False
-    assert time.monotonic() - captured_at < 1
+    assert 0 <= clock.monotonic() - captured_at < 1
     assert calls[0]["wayland"] is connection
     assert calls[0]["output"].name == "DP-1"
     assert backend._descriptor["processes"] == [{"pid": 12345, "start_ticks": 1}]
@@ -346,19 +385,32 @@ async def test_start_observe_act_pause_resume_detach_contract(monkeypatch):
         async def start(self, path, mapping, scope_path, pid, width, height):
             events.append((path, mapping, scope_path, pid, width, height))
             self.on_spawn({"pid": 1234, "start_ticks": 56})
+            # Match the production guardian's immutable spawn identity. Native
+            # owner capture is mandatory before this fake can be armed.
+            self.owner_identity = {"pid": 1234, "uid": 1000, "start_ticks": 56}
             return {"width": width, "height": height}
 
     backend = hb.HyprlandRuntimeBackend(config=config(), enabled=True)
+    process = ProcessPin(4242, 1000, 99, "fixture-boot", 1, 2, 3, 4, 5, "f" * 64)
+    identity = HyprlandIdentity(process, config().compositor_trust)
+    owner = HyprlandOwnerHandle(
+        identity, "i1-" + "a" * 32, "b" * 48, "c" * 48,
+        1234, 1000, "56", os.getpid(), os.geteuid(), "1",
+    )
+    persisted_owners = []
 
     def provider():
-        return SimpleNamespace(snapshot=AsyncMock(side_effect=lambda _: scope()), close=AsyncMock())
+        return SimpleNamespace(
+            snapshot=AsyncMock(side_effect=lambda _: scope()), close=AsyncMock(),
+            attest_identity=AsyncMock(), capture_owner=AsyncMock(return_value=owner),
+        )
 
     monkeypatch.setattr(backend, "_new_provider", provider)
     monkeypatch.setattr(hyprland_guardian, "HyprlandGuardian", FakeGuardian)
     monkeypatch.setattr(hb, "trusted_binary", lambda path: None)
     monkeypatch.setattr(hb, "revalidate", AsyncMock())
+    monkeypatch.setattr(hb, "CompositorIncarnation", lambda _: SimpleNamespace(close=lambda: None))
     connection = SimpleNamespace(close=lambda: None)
-    identity = SimpleNamespace(digest="f" * 64)
     monkeypatch.setattr(hb, "pin_connections", AsyncMock(return_value=(identity, connection)))
     monkeypatch.setattr(hb, "connect_peer", AsyncMock(return_value=connection))
 
@@ -370,6 +422,7 @@ async def test_start_observe_act_pause_resume_detach_contract(monkeypatch):
     monkeypatch.setattr(hb, "capture_explicit_output", capture)
     descriptor_updates = []
     backend.runtime_identity_callback = descriptor_updates.append
+    backend.recovery_identity_callback = persisted_owners.append
     started = await backend.start("c" * 32)
     assert started["input_supported"] is True
     assert started["input_admission"]["probe_scope"] == "active_session"
@@ -378,13 +431,27 @@ async def test_start_observe_act_pause_resume_detach_contract(monkeypatch):
     assert events[0][-2:] == (80, 60)
     assert descriptor_updates[-1]["launch_pending"] is False
     assert descriptor_updates[-1]["no_persistent_devices"] is False
+    assert persisted_owners == [{
+        "version": 1,
+        "owner": {
+            "instance_id": "i1-" + "a" * 32, "plugin_epoch": "b" * 48,
+            "ledger_id": "c" * 48, "guardian_pid": 1234, "guardian_uid": 1000,
+            "guardian_start_ticks": "56", "recovery_pid": os.getpid(),
+            "recovery_uid": os.geteuid(), "recovery_start_ticks": "1",
+        },
+        "compositor": {
+            "digest": identity.digest, "pid": 4242, "uid": 1000,
+            "start_ticks": 99, "boot_id": "fixture-boot",
+        },
+    }]
     frame = await backend.observe()
     result = await backend.act(action(frame))
     assert result["status"] == "executed" and result["released"] is True
     assert (await backend.pause())["released"] is True
-    assert (await backend.resume(consent_generation=2))["resumed"] is True
-    resumed = await backend.observe()
-    assert resumed.source.consent_generation == 2
+    # Once a native owner has been captured, the old process/output-only resume
+    # path is forbidden.  Recovery must use the durable exact-window handoff.
+    with pytest.raises(ComputerError, match="hyprland_native_recovery_required"):
+        await backend.resume(consent_generation=2)
     stopped = await backend.detach()
     assert stopped["owned_devices"] == "hyprland_owned_connections_closed"
     assert stopped["hyprland_owned_connections_closed"] is True

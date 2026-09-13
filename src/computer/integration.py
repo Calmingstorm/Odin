@@ -1,4 +1,5 @@
 """Lazy foreground authority facade; no desktop imports until session start."""
+# ruff: noqa: E501
 
 from __future__ import annotations
 
@@ -94,15 +95,17 @@ class ComputerIntegration:
                 from .runtime.hyprland_identity import ExecutableTrust
 
                 s = self.settings
+                auto = getattr(s, "hyprland_discovery_mode", "pinned") == "auto"
+                runtime_dir = s.hyprland_runtime_dir or f"/run/user/{s.wayland_uid}"
                 return HyprlandRuntimeBackend(
                     enabled=self.enabled, environment=s.environment,
                     config=HyprlandSessionConfig(
                         expected_uid=s.wayland_uid,
-                        runtime_dir=s.hyprland_runtime_dir,
-                        wayland_display=s.hyprland_wayland_display,
-                        instance_signature=s.hyprland_instance_signature,
+                        runtime_dir=runtime_dir,
+                        wayland_display="" if auto else s.hyprland_wayland_display,
+                        instance_signature="" if auto else s.hyprland_instance_signature,
                         output_name=s.hyprland_output_name,
-                        compositor_pid=s.hyprland_compositor_pid,
+                        compositor_pid=None if auto else s.hyprland_compositor_pid,
                         compositor_trust=ExecutableTrust(
                             path=s.hyprland_compositor_executable,
                             sha256=s.hyprland_compositor_sha256,
@@ -112,8 +115,10 @@ class ComputerIntegration:
                         ),
                         guardian_binary=s.hyprland_guardian_binary,
                         capture_binary=s.hyprland_capture_binary,
-                        scope_socket=s.hyprland_scope_socket or (
-                            s.hyprland_runtime_dir + "/odin-hyprland-scope.sock"),
+                        scope_socket=s.hyprland_scope_socket or (runtime_dir + "/odin-hyprland-scope.sock"),
+                        discovery_mode="auto" if auto else "pinned",
+                        managed_activation=s.hyprland_managed_activation,
+                        plugin_manifest_path=s.hyprland_plugin_manifest or None,
                     ),
                 )
             from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig

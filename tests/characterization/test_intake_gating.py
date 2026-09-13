@@ -221,6 +221,26 @@ class TestBotMessageBuffering:
         await _wait_for_buffer(lambda: all(task.done() for task in flush_tasks))
         bot.pipeline.run.assert_not_awaited()
 
+    async def test_buffered_bot_messages_fail_closed_when_identity_is_lost(self):
+        bot = build(discord={"respond_to_bots": True, "require_mention": True})
+        bot.channel_state.bot_msg_buffer_delay = 0.02
+        guild = _FakeGuild()
+        ch = FakeChannel(id=99)
+        ch.guild = guild
+        other_bot = FakeAuthor(id=555, name="otherbot", bot=True)
+        await bot.on_message(
+            FakeMessage(
+                f"<@{BOT_USER_ID}> should not escape the fence",
+                author=other_bot,
+                channel=ch,
+                guild=guild,
+            )
+        )
+        bot._connection.user = None
+        flush_tasks = tuple(bot.channel_state.bot_msg_tasks.values())
+        await _wait_for_buffer(lambda: all(task.done() for task in flush_tasks))
+        bot.pipeline.run.assert_not_awaited()
+
 
 class TestBotAdmissionPreambleConsistency:
     """Bot admission and tool-loop provenance must use one resolution ladder."""

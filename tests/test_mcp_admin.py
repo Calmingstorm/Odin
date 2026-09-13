@@ -413,7 +413,7 @@ class TestMutationSerialization:
         one = asyncio.create_task(client.post("/api/mcp/servers", json=_server_body(name="one")))
         await entered.wait()
         two = asyncio.create_task(client.post("/api/mcp/servers", json=_server_body(name="two")))
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert not two.done(), "second mutation must wait for first reconcile"
         assert set(_disk(config_path)["mcp"]["servers"]) == {"one"}
         assert set(bot.config.mcp.servers) == {"one"}
@@ -439,7 +439,7 @@ class TestMutationSerialization:
         second = asyncio.create_task(
             client.put("/api/mcp/servers/fake", json={"tool_allowlist": ["echo"]})
         )
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert not second.done()
         assert _disk(config_path)["mcp"]["servers"]["fake"]["timeout_seconds"] == 31
         assert _disk(config_path)["mcp"]["servers"]["fake"]["tool_allowlist"] == []
@@ -463,7 +463,7 @@ class TestMutationSerialization:
         update = asyncio.create_task(
             client.put("/api/mcp/servers/fake", json={"timeout_seconds": 31})
         )
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert not update.done()
         assert _disk(config_path)["mcp"]["servers"] == {}
         release.set()
@@ -482,7 +482,7 @@ class TestMutationSerialization:
         add = asyncio.create_task(
             client.post("/api/mcp/servers", json=_server_body(name="after_off"))
         )
-        await asyncio.sleep(0.05)
+        await asyncio.sleep(0)
         assert not add.done()
         assert _disk(config_path)["mcp"]["servers"] == {}
         assert _disk(config_path)["mcp"]["enabled"] is False

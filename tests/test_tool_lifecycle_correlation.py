@@ -154,10 +154,8 @@ async def test_parallel_same_name_reverse_completion_and_reused_ids(tmp_path, ro
         if arguments["order"] == "slow":
             slow_started.set()
             await fast_done.wait()
-            await asyncio.sleep(0.01)
         else:
             await slow_started.wait()
-            fast_done.set()
         return ToolResult(output=arguments["order"], ok=True)
 
     runner._tool_executor.execute = execute
@@ -165,9 +163,16 @@ async def test_parallel_same_name_reverse_completion_and_reused_ids(tmp_path, ro
     slow, fast = block("slow"), block("fast")
     slow.input["order"], fast.input["order"] = "slow", "fast"
     for turn in ("turn-a", "turn-b"):
+        slow_started.clear()
+        fast_done.clear()
         token = set_turn(turn_id=turn, source=route)
         try:
-            await asyncio.gather(run(st, slow), run(st, fast))
+            async def finish_fast():
+                await run(st, fast)
+                # Release only after terminal persistence, not a guessed delay.
+                fast_done.set()
+
+            await asyncio.wait_for(asyncio.gather(run(st, slow), finish_fast()), timeout=10)
         finally:
             reset_turn(token)
     records = list(reversed(await runner._audit.search(limit=30)))
@@ -257,7 +262,7 @@ async def test_timeout_keeps_single_terminal_with_identity(
     assert await runner._audit.count_by_tool() == {"run_script": 1}
 
 
-async def test_foreground_timeout_during_start_audit_never_dispatches(tmp_path):
+async def test_foreground_timeout_during_start_audit_never_dispatches(tmp_path, monkeypatch):
     """The outer deadline may legitimately expire before executor entry."""
     runner, st, events = harness(tmp_path)
     st._cancel = asyncio.Event()
@@ -266,10 +271,26 @@ async def test_foreground_timeout_during_start_audit_never_dispatches(tmp_path):
 
     async def blocked_start_audit(*args, **kwargs):
         await real_log_event(*args, **kwargs)
+        start_persisted.set()
         await asyncio.Event().wait()
 
     runner._audit.log_event = blocked_start_audit
-    # Unlike the running-dispatch test, leave the production deadline untouched.
+    # Arm cancellation after persistence reaches the deliberate blockage.
+    # Filesystem latency is not the subject of this pre-dispatch test.
+    start_persisted = asyncio.Event()
+    real_wait_for = asyncio.wait_for
+
+    async def timeout_after_persistence(awaitable, timeout):
+        task = asyncio.ensure_future(awaitable)
+        try:
+            await real_wait_for(start_persisted.wait(), timeout=5)
+            return await real_wait_for(task, timeout=timeout)
+        finally:
+            if not task.done():
+                task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    monkeypatch.setattr("src.discord.tool_loop.asyncio.wait_for", timeout_after_persistence)
     token = set_turn(turn_id="turn-before-dispatch")
     try:
         result = await runner._run_one_tool_with_timeout(st, block(), 0.01)

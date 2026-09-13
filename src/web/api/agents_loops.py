@@ -23,6 +23,8 @@ from ._agent_display import agent_display_policy
 
 log = get_logger("web.api")
 
+_LOOP_RESTART_LOCKS: dict[str, asyncio.Lock] = {}
+
 def register_loops(routes: web.RouteTableDef, bot) -> None:
     """Autonomous loops (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -196,58 +198,64 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
     @routes.post("/api/loops/{loop_id}/restart")
     async def restart_loop(request: web.Request) -> web.Response:
         lid = request.match_info["loop_id"]
-        info = bot.loop_manager._loops.get(lid)
-        if not info:
-            return web.json_response({"error": "loop not found"}, status=404)
+        lock = _LOOP_RESTART_LOCKS.setdefault(lid, asyncio.Lock())
+        async with lock:
+            info = bot.loop_manager._loops.get(lid)
+            if not info:
+                return web.json_response({"error": "loop not found"}, status=404)
 
-        # Capture config before stopping
-        goal = info.goal
-        mode = info.mode
-        interval_seconds = info.interval_seconds
-        stop_condition = info.stop_condition
-        max_iterations = info.max_iterations
-        channel_id = info.channel_id
-        requester_id = info.requester_id
-        requester_name = info.requester_name
+            # Admit the replacement before changing the existing loop. A
+            # vanished/reused channel must not turn restart into stop.
+            channel_id = str(info.channel_id)
+            try:
+                channel = bot.get_channel(int(channel_id))
+            except (ValueError, TypeError):
+                channel = None
+            channel_identity = getattr(channel, "id", None)
+            if channel is None or (
+                isinstance(channel_identity, (str, int))
+                and str(channel_identity) != channel_id
+            ):
+                return web.json_response({"error": "channel not found"}, status=404)
+            if not all(isinstance(value, str) and value for value in (
+                info.goal, info.requester_id, info.requester_name,
+            )) or info.mode not in ("notify", "act", "silent"):
+                return web.json_response({"error": "loop configuration is invalid"}, status=400)
+            if (
+                not isinstance(info.interval_seconds, int)
+                or not isinstance(info.max_iterations, int)
+            ):
+                return web.json_response({"error": "loop configuration is invalid"}, status=400)
 
-        # Stop if running
-        if info.status == "running":
-            await bot.loop_manager.stop_loop(lid)
+            goal = info.goal
+            mode = info.mode
+            interval_seconds = info.interval_seconds
+            stop_condition = info.stop_condition
+            max_iterations = info.max_iterations
+            requester_id = info.requester_id
+            requester_name = info.requester_name
 
-        # Find the channel
-        try:
-            channel = bot.get_channel(int(channel_id))
-        except (ValueError, TypeError):
-            channel = None
-        if not channel:
-            return web.json_response({"error": "channel not found"}, status=404)
+            async def _iteration_cb(
+                prompt: str, ch: object, prev_context: str | None,
+                cancel_event: asyncio.Event,
+            ) -> str:
+                return await bot.tool_loop.run_autonomous(
+                    prompt, ch, prev_context, requester_id,
+                    cancel_event=cancel_event,
+                )
 
-        # Build iteration callback (same shape as the create route: the loop
-        # manager invokes it with the loop's cancel event, and run_autonomous
-        # needs that event for cooperative stop to reach a restarted loop).
-        async def _iteration_cb(
-            prompt: str, ch: object, prev_context: str | None,
-            cancel_event: asyncio.Event,
-        ) -> str:
-            return await bot.tool_loop.run_autonomous(
-                prompt, ch, prev_context, requester_id,
-                cancel_event=cancel_event,
+            if info.status == "running":
+                await bot.loop_manager.stop_loop(lid)
+
+            new_id = bot.loop_manager.start_loop(
+                goal=goal, channel=channel, requester_id=requester_id,
+                requester_name=requester_name, iteration_callback=_iteration_cb,
+                interval_seconds=interval_seconds, mode=mode,
+                stop_condition=stop_condition, max_iterations=max_iterations,
             )
-
-        new_id = bot.loop_manager.start_loop(
-            goal=goal,
-            channel=channel,
-            requester_id=requester_id,
-            requester_name=requester_name,
-            iteration_callback=_iteration_cb,
-            interval_seconds=interval_seconds,
-            mode=mode,
-            stop_condition=stop_condition,
-            max_iterations=max_iterations,
-        )
-        if new_id.startswith("Error"):
-            return web.json_response({"error": new_id}, status=400)
-        return web.json_response({"old_id": lid, "new_id": new_id}, status=201)
+            if new_id.startswith("Error"):
+                return web.json_response({"error": new_id}, status=400)
+            return web.json_response({"old_id": lid, "new_id": new_id}, status=201)
 
 
 def register_agents(routes: web.RouteTableDef, bot) -> None:

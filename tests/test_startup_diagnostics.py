@@ -154,8 +154,7 @@ class TestCheckDiscordToken:
         result = check_discord_token(cfg)
         assert result.passed is True
         assert result.name == "discord_token"
-        assert result.metadata["token_length"] == len(cfg.token)
-        assert "MTIzN" in result.metadata["token_prefix"]
+        assert result.metadata == {}
 
     def test_token_empty(self):
         cfg = MagicMock()
@@ -175,7 +174,7 @@ class TestCheckDiscordToken:
         cfg.token = "abc"
         result = check_discord_token(cfg)
         assert result.passed is True
-        assert result.metadata["token_prefix"] == "abc"
+        assert result.metadata == {}
 
 
 # ---------------------------------------------------------------------------
@@ -675,6 +674,38 @@ class TestRunStartupDiagnostics:
         report = run_startup_diagnostics(yaml_config=yaml_cfg)
         assert isinstance(report, StartupReport)
         assert len(report.results) >= 7  # 7 config checks + data_directories
+
+    def test_discord_token_prefers_resolved_yaml_config(self, tmp_path, monkeypatch):
+        """A supplied YAML config wins over an older resolved fallback."""
+        monkeypatch.chdir(tmp_path)
+        yaml_cfg = MagicMock()
+        yaml_cfg.discord = MagicMock()
+        yaml_cfg.discord.token = "resolved-config-token"
+        odin_cfg = MagicMock()
+        odin_cfg.token = "fallback-token"
+
+        report = run_startup_diagnostics(
+            yaml_config=yaml_cfg, odin_config=odin_cfg
+        )
+
+        result = next(r for r in report.results if r.name == "discord_token")
+        assert result.passed is True
+        assert result.metadata == {}
+
+    def test_discord_token_absent_from_resolved_yaml_is_a_warning_not_a_crash(
+        self, tmp_path, monkeypatch
+    ):
+        monkeypatch.chdir(tmp_path)
+        yaml_cfg = MagicMock()
+        yaml_cfg.discord = MagicMock()
+        yaml_cfg.discord.token = ""
+
+        report = run_startup_diagnostics(yaml_config=yaml_cfg)
+
+        result = next(r for r in report.results if r.name == "discord_token")
+        assert result.passed is False
+        assert "missing or empty" in result.detail
+        assert "crashed" not in result.detail.lower()
 
     def test_with_both_configs(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)

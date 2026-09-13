@@ -14,11 +14,41 @@ import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from ..models import ComputerError
+from .hyprland_errors import (
+    HyprlandDiagnosticError,
+    HyprlandFailureCause,
+    HyprlandFailureStage,
+    classified_cause,
+)
 
 
-class HyprlandIdentityError(ComputerError):
+class HyprlandIdentityError(HyprlandDiagnosticError):
     """Static failure codes only; never include socket paths or private replies."""
+
+    def __init__(self, code: str, *, stage=None, cause=None):
+        stage, cause = _STATIC_DIAGNOSTICS.get(
+            code, (stage or HyprlandFailureStage.PROCESS,
+                   cause or HyprlandFailureCause.UNAVAILABLE))
+        super().__init__(code, stage=stage, cause=cause)
+
+
+_STATIC_DIAGNOSTICS = {
+    "hyprland_invalid_expected_peer": (HyprlandFailureStage.PEER, HyprlandFailureCause.INVALID),
+    "hyprland_peer_mismatch": (HyprlandFailureStage.PEER, HyprlandFailureCause.MISMATCH),
+    "hyprland_peer_unavailable": (HyprlandFailureStage.PEER, HyprlandFailureCause.UNAVAILABLE),
+    "hyprland_process_changed": (HyprlandFailureStage.PROCESS, HyprlandFailureCause.CHANGED),
+    "hyprland_executable_changed": (HyprlandFailureStage.PROCESS, HyprlandFailureCause.CHANGED),
+    "hyprland_executable_untrusted": (HyprlandFailureStage.PROCESS, HyprlandFailureCause.MISMATCH),
+    "hyprland_identity_deadline": (HyprlandFailureStage.PROCESS, HyprlandFailureCause.TIMEOUT),
+    "hyprland_version_reply_invalid": (HyprlandFailureStage.PARSE, HyprlandFailureCause.INVALID),
+    "hyprland_explicit_socket_required": (
+        HyprlandFailureStage.SOCKET, HyprlandFailureCause.INVALID),
+}
+
+
+def _identity_error(code, stage, error=None, cause=None):
+    return HyprlandIdentityError(
+        code, stage=stage, cause=cause or classified_cause(error))
 
 
 @dataclass(frozen=True)
@@ -132,8 +162,10 @@ def measure_process(pid: int, uid: int, trust: ExecutableTrust, deadline: float)
             os.close(fd)
     except HyprlandIdentityError:
         raise
-    except (OSError, ValueError, IndexError, TypeError):
-        raise HyprlandIdentityError("hyprland_identity_unavailable") from None
+    except (OSError, ValueError, IndexError, TypeError) as exc:
+        raise _identity_error(
+            "hyprland_identity_unavailable", HyprlandFailureStage.PROCESS, exc
+        ) from None
 
 
 def peer_credentials(connection: socket.socket) -> tuple[int, int]:
@@ -144,8 +176,11 @@ def peer_credentials(connection: socket.socket) -> tuple[int, int]:
         if pid <= 1 or uid < 0:
             raise ValueError
         return pid, uid
-    except (OSError, ValueError, struct.error):
-        raise HyprlandIdentityError("hyprland_peer_unavailable") from None
+    except (OSError, ValueError, struct.error) as exc:
+        raise _identity_error(
+            "hyprland_peer_unavailable", HyprlandFailureStage.PEER, exc,
+            HyprlandFailureCause.INVALID if not isinstance(exc, OSError) else None,
+        ) from None
 
 
 async def connect_peer(path: str, pid: int, uid: int, deadline: float) -> socket.socket:
@@ -163,6 +198,13 @@ async def connect_peer(path: str, pid: int, uid: int, deadline: float) -> socket
         if peer_credentials(connection) != (pid, uid):
             raise HyprlandIdentityError("hyprland_peer_mismatch")
         return connection
+    except HyprlandIdentityError:
+        connection.close()
+        raise
+    except (OSError, TimeoutError) as exc:
+        connection.close()
+        raise _identity_error(
+            "hyprland_identity_transport_failed", HyprlandFailureStage.SOCKET, exc) from None
     except BaseException:
         connection.close()
         raise
@@ -178,16 +220,24 @@ def _unique_object(pairs):
 
 
 async def _version(connection: socket.socket, trust: ExecutableTrust, deadline: float):
-    loop = asyncio.get_running_loop()
-    await asyncio.wait_for(loop.sock_sendall(connection, b"j/version"), remaining(deadline))
-    reply = bytearray()
-    while True:
-        chunk = await asyncio.wait_for(loop.sock_recv(connection, 4096), remaining(deadline))
-        if not chunk:
-            break
-        reply.extend(chunk)
-        if len(reply) > 16384:
-            raise HyprlandIdentityError("hyprland_version_reply_invalid")
+    try:
+        loop = asyncio.get_running_loop()
+        await asyncio.wait_for(loop.sock_sendall(connection, b"j/version"), remaining(deadline))
+        reply = bytearray()
+        while True:
+            chunk = await asyncio.wait_for(loop.sock_recv(connection, 4096), remaining(deadline))
+            if not chunk:
+                break
+            reply.extend(chunk)
+            if len(reply) > 16384:
+                raise HyprlandIdentityError(
+                    "hyprland_version_reply_invalid", stage=HyprlandFailureStage.PARSE,
+                    cause=HyprlandFailureCause.INVALID)
+    except HyprlandIdentityError:
+        raise
+    except (OSError, TimeoutError) as exc:
+        raise _identity_error(
+            "hyprland_identity_transport_failed", HyprlandFailureStage.READ, exc) from None
     try:
         value = json.loads(reply, object_pairs_hook=_unique_object)
         if (
@@ -196,7 +246,9 @@ async def _version(connection: socket.socket, trust: ExecutableTrust, deadline: 
         ):
             raise ValueError
     except (ValueError, UnicodeError, RecursionError):
-        raise HyprlandIdentityError("hyprland_version_reply_invalid") from None
+        raise HyprlandIdentityError(
+            "hyprland_version_reply_invalid", stage=HyprlandFailureStage.PARSE,
+            cause=HyprlandFailureCause.INVALID) from None
 
 
 async def pin_connections(
@@ -228,8 +280,11 @@ async def pin_connections(
             raise HyprlandIdentityError("hyprland_process_changed")
         result, wayland = wayland, None
         return HyprlandIdentity(before, trust), result
-    except (OSError, TimeoutError):
-        raise HyprlandIdentityError("hyprland_identity_transport_failed") from None
+    except HyprlandIdentityError:
+        raise
+    except (OSError, TimeoutError) as exc:
+        raise _identity_error(
+            "hyprland_identity_transport_failed", HyprlandFailureStage.READ, exc) from None
     finally:
         if ipc is not None:
             ipc.close()

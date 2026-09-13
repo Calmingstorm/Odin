@@ -390,6 +390,13 @@ def _quota_lines(bot, now: float) -> list[str] | None:
 # --------------------------------------------------------------------------
 
 def register_commands(bot) -> None:
+    # One global set, not guild copies or user-installed commands in unrelated
+    # private/group channels. Existing user-ID authorization remains mandatory.
+    bot.tree.allowed_contexts = app_commands.AppCommandContext(
+        guild=True, dm_channel=True, private_channel=False,
+    )
+    bot.tree.allowed_installs = app_commands.AppInstallationType(guild=True, user=False)
+
     @bot.tree.command(name="status", description="Show Odin's runtime configuration and health")
     async def cmd_status(interaction: discord.Interaction) -> None:
         if not bot.intake.is_allowed_user(interaction.user):

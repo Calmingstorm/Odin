@@ -10,6 +10,23 @@ import pytest
 from src.config.schema import BulkheadConfig, ToolHost, ToolsConfig
 from src.tools.bulkhead import Bulkhead, BulkheadFullError, BulkheadRegistry
 
+
+async def wait_for_state(predicate, *tasks):
+    """Wait for evidence, with a harness fuse and owned-task cleanup on failure."""
+    try:
+        async with asyncio.timeout(10):
+            while not predicate():
+                for task in tasks:
+                    if task.done():
+                        task.result()
+                        pytest.fail("worker exited before the expected bulkhead state")
+                await asyncio.sleep(0)
+    except BaseException:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+
 # =====================================================================
 # Bulkhead core
 # =====================================================================
@@ -47,14 +64,16 @@ class TestBulkhead:
     async def test_reject_when_queue_full(self):
         bh = Bulkhead("test", max_concurrent=1, max_queued=1)
         gate = asyncio.Event()
+        active = asyncio.Event()
 
         async def _hold():
             async with bh.acquire():
+                active.set()
                 await gate.wait()
 
         # Fill the active slot
         hold_task = asyncio.create_task(_hold())
-        await asyncio.sleep(0.01)
+        await wait_for_state(active.is_set, hold_task)
         assert bh.active == 1
 
         # Fill the queue slot
@@ -63,7 +82,7 @@ class TestBulkhead:
                 pass
 
         queue_task = asyncio.create_task(_queue())
-        await asyncio.sleep(0.01)
+        await wait_for_state(lambda: bh.queued == 1, hold_task, queue_task)
         assert bh.queued == 1
 
         # Third should be rejected
@@ -126,7 +145,7 @@ class TestBulkhead:
                 await gate.wait()
 
         tasks = [asyncio.create_task(_worker()) for _ in range(5)]
-        await asyncio.sleep(0.05)
+        await wait_for_state(lambda: bh.active == 1 and bh.queued == 4, *tasks)
         assert bh.active == 1
         # All others queued without rejection
         assert bh.rejected == 0
@@ -312,18 +331,20 @@ class TestExecutorBulkheadIntegration:
         ex = ToolExecutor(config=cfg)
         ex.bulkheads.get("ssh")
         gate = asyncio.Event()
+        started = asyncio.Event()
 
         async def _slow_ssh(*a, **kw):
+            started.set()
             await gate.wait()
             return (0, "ok")
 
         with patch("src.tools.executor.run_ssh_command", side_effect=_slow_ssh):
             # Fill active slot
             t1 = asyncio.create_task(ex._exec_command("10.0.0.1", "cmd1"))
-            await asyncio.sleep(0.01)
+            await wait_for_state(started.is_set, t1)
             # Fill queue slot
             t2 = asyncio.create_task(ex._exec_command("10.0.0.1", "cmd2"))
-            await asyncio.sleep(0.01)
+            await wait_for_state(lambda: ex.bulkheads.get("ssh").queued == 1, t1, t2)
             # Third should get error (not exception)
             code, output = await ex._exec_command("10.0.0.1", "cmd3")
             assert code == 1
@@ -341,16 +362,18 @@ class TestExecutorBulkheadIntegration:
         )
         ex = ToolExecutor(config=cfg)
         gate = asyncio.Event()
+        started = asyncio.Event()
 
         async def _slow_local(*a, **kw):
+            started.set()
             await gate.wait()
             return (0, "ok")
 
         with patch("src.tools.executor.run_local_command", side_effect=_slow_local):
             t1 = asyncio.create_task(ex._exec_command("127.0.0.1", "cmd1"))
-            await asyncio.sleep(0.01)
+            await wait_for_state(started.is_set, t1)
             t2 = asyncio.create_task(ex._exec_command("localhost", "cmd2"))
-            await asyncio.sleep(0.01)
+            await wait_for_state(lambda: ex.bulkheads.get("subprocess").queued == 1, t1, t2)
             code, output = await ex._exec_command("localhost", "cmd3")
             assert code == 1
             assert "subprocess bulkhead full" in output
@@ -742,17 +765,19 @@ class TestIsolationSemantics:
         )
         ex = ToolExecutor(config=cfg)
         gate = asyncio.Event()
+        started = asyncio.Event()
 
         async def _slow_ssh(*a, **kw):
+            started.set()
             await gate.wait()
             return (0, "ok")
 
         with patch("src.tools.executor.run_ssh_command", side_effect=_slow_ssh):
             # Fill active + queue
             t1 = asyncio.create_task(ex._exec_command("10.0.0.1", "c1"))
-            await asyncio.sleep(0.01)
+            await wait_for_state(started.is_set, t1)
             t2 = asyncio.create_task(ex._exec_command("10.0.0.1", "c2"))
-            await asyncio.sleep(0.01)
+            await wait_for_state(lambda: ex.bulkheads.get("ssh").queued == 1, t1, t2)
 
             # run_command via execute() should return error string
             result = await ex.execute("run_command", {"host": "srv", "command": "c3"})

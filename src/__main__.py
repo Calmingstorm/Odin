@@ -16,7 +16,6 @@ import signal
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
-from pathlib import Path
 from typing import NoReturn
 
 from src import restart
@@ -519,24 +518,38 @@ def main() -> None:
         print(f"Odin {get_version()}")
         return
 
-    config_path = sys.argv[1] if len(sys.argv) > 1 else "config.yml"
-    if not Path(config_path).exists():
-        print(f"Config file not found: {config_path}")
+    from src.config.startup_context import (
+        parse_startup_arguments,
+        provision_initialization_parent,
+        resolve_startup_context,
+    )
+
+    args = parse_startup_arguments()
+    context = resolve_startup_context(
+        args.config, env_file=args.env_file, initialization_state=args.initialization_state
+    )
+    if not context.config_path.exists():
+        print(f"Config file not found: {context.config_path}")
         sys.exit(1)
+    # Existing ``data`` may intentionally be shared 0755. Only the dedicated
+    # terminal state parent is private; provisioning never traverses symlinks.
+    provision_initialization_parent(context.initialization_state_path)
 
     # Load .env before config.yml so ${DISCORD_TOKEN} substitution works
     from dotenv import load_dotenv
-    env_path = Path(".env")
-    if env_path.exists():
-        load_dotenv(env_path)
+    if context.environment_path.exists():
+        load_dotenv(context.environment_path)
 
     from src.config import load_config
     from src.discord.client import OdinBot
+    from src.discord.connection_supervisor import ConnectionSupervisor
+    from src.discord.discordpy_adapter import UnsupportedDiscordAttachmentError
     from src.discord.response_guards import scrub_response_secrets
+    from src.discord.wiring import close_computer_once
     from src.health import HealthServer
     from src.odin_log import get_logger
 
-    config = load_config(config_path)
+    config = load_config(context.config_path)
 
     import logging
     logging.basicConfig(
@@ -610,6 +623,43 @@ def main() -> None:
         grafana_alert_config=getattr(config, "grafana_alerts", None),
     )
     bot = OdinBot(config)
+    from src.web.bootstrap_policy import CredentialInventory
+    from src.web.onboarding import OnboardingCoordinator
+
+    # Missing records belong only to pre-onboarding installations. Derive their
+    # migration bind policy from the same validated static and dynamic credential
+    # sources HealthServer will use, not from credential-file existence.
+    static_usable = int(bool(getattr(config.web, "api_token", ""))) + sum(
+        int(bool(getattr(token, "token", ""))) for token in getattr(config.web, "api_tokens", ())
+    )
+    manager = getattr(bot, "api_token_manager", None)
+    dynamic_usable = (
+        manager.credential_inventory.dynamic_usable
+        if manager is not None and hasattr(manager, "credential_inventory") else 0
+    )
+    legacy_loopback_restricted = not CredentialInventory(
+        static_usable=static_usable, dynamic_usable=dynamic_usable
+    ).has_usable_auth
+    onboarding_store = context.onboarding_store()
+    # A missing record is a legacy installation, not a fresh setup. Migration
+    # occurs only after the real credential inventory establishes bind policy.
+    # Corrupt records stay recovery diagnostics while HTTP remains available.
+    onboarding_store.state(legacy_loopback_restricted=legacy_loopback_restricted)
+    onboarding = OnboardingCoordinator(
+        onboarding_store, context.environment_source(), legacy_loopback_restricted
+    )
+    bot.onboarding = onboarding
+    # Services outlive a Discord transport generation. Bootstrap HTTP remains
+    # useful when no gateway credential has been supplied.
+    bot.bind_connection_supervisor(ConnectionSupervisor(bot))
+    scheduler = getattr(bot, "scheduler", None)
+    if scheduler is not None and hasattr(scheduler, "set_connection_state_provider"):
+        # Install the strict generation-aware authority before HTTP routes can
+        # admit schedules. A merely constructed supervisor is deliberately not
+        # treated as connected by the scheduler.
+        scheduler.set_connection_state_provider(bot.connection_supervisor.connection_availability)
+    # Setup ingress must exist before REST routes are registered by set_bot().
+    health.attach_onboarding(onboarding)
     health.set_bot(bot)
 
     loop = asyncio.new_event_loop()
@@ -621,6 +671,7 @@ def main() -> None:
     # Restart=always kept the service recovering.
     exit_code = 0
     shutdown_task: asyncio.Task[None] | None = None
+    service_stopped: asyncio.Future[None] = loop.create_future()
 
     def request_shutdown() -> asyncio.Task[None]:
         """Create the shutdown task exactly once; repeat requests reuse it.
@@ -638,6 +689,7 @@ def main() -> None:
         try:
             if containment:
                 zombie_reaper.start()
+            await bot.start_application()
             await health.start()
 
             async def _webhook_send(channel_id: str, text: str) -> None:
@@ -663,8 +715,22 @@ def main() -> None:
                 loop.add_signal_handler(sig, handle_signal)
 
             health.set_ready(True)
-            log.info("Connecting to Discord…")
-            await bot.start(config.discord.token)
+            token = getattr(config.discord, "token", "")
+            if token:
+                log.info("Attaching Discord gateway…")
+                try:
+                    await bot.connection_supervisor.attach(token)
+                except UnsupportedDiscordAttachmentError as exc:
+                    # HTTP/bootstrap remains a useful recovery surface when a
+                    # discord.py upgrade makes the pinned adapter unsafe.
+                    log.error("Discord gateway unavailable: %s", exc)
+            else:
+                log.warning(
+                    "Discord token absent; HTTP/bootstrap remains available without a gateway"
+                )
+            # Signals own process shutdown; a gateway terminal state must not
+            # tear down the long-lived HTTP/bootstrap service.
+            await service_stopped
         except Exception as exc:
             exit_code = 1
             log.error("Fatal error: %s", exc, exc_info=True)
@@ -679,16 +745,13 @@ def main() -> None:
 
     async def shutdown() -> None:
         log.info("Shutting down…")
+        if not service_stopped.done():
+            service_stopped.set_result(None)
         # Desktop authority must not wait for browser/provider/model teardown.
-        computer = getattr(bot, "computer", None)
-        if computer is not None:
-            try:
-                await computer.close()
-            except Exception:
-                from .restart import block_reexec
-
-                block_reexec("computer cleanup unverified")
-                log.exception("Computer cleanup unverified")
+        try:
+            await close_computer_once(bot)
+        except Exception:
+            log.exception("Computer cleanup unverified")
         # Teardown order (PR #244 round-15 §3.3, step 1): stop the periodic
         # reaper FIRST. The final no-grace drain does NOT run here — it runs
         # in _finalize_loop, after remaining tasks, async generators and the
@@ -721,7 +784,11 @@ def main() -> None:
         except Exception:
             log.exception("sessions save error")
         try:
-            await bot.close()
+            await bot.connection_supervisor.close()
+        except Exception:
+            log.exception("Discord gateway detach error")
+        try:
+            await bot.shutdown_application()
         except Exception:
             log.exception("bot close error")
         try:

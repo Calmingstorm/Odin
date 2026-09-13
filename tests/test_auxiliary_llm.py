@@ -442,8 +442,16 @@ class TestLease:
         call = asyncio.create_task(client.chat([], "s", task="compaction"))
         await started.wait()
         # a drain started now must not close until the call finishes
+        drain_waiting = asyncio.Event()
+        idle_wait = client._idle.wait
+
+        async def observed_idle_wait():
+            drain_waiting.set()
+            await idle_wait()
+
+        client._idle.wait = observed_idle_wait
         drain = asyncio.create_task(client.drain_and_close())
-        await asyncio.sleep(0.05)
+        await asyncio.wait_for(drain_waiting.wait(), timeout=1)
         assert not drain.done()
         assert not aux.close.called
         release.set()
@@ -466,9 +474,17 @@ class TestLease:
         aux.chat = AsyncMock(side_effect=_long)
         call = asyncio.create_task(client.chat([], "s", task="compaction"))
         await started.wait()
+        drain_waiting = asyncio.Event()
+        idle_wait = client._idle.wait
+
+        async def observed_idle_wait():
+            drain_waiting.set()
+            await idle_wait()
+
+        client._idle.wait = observed_idle_wait
         drain = asyncio.create_task(client.drain_and_close())
-        # even well past any old 30s wall-clock cut, the session stays open
-        await asyncio.sleep(0.1)
+        # The wrapper has reached its idle wait and still cannot cut the lease.
+        await asyncio.wait_for(drain_waiting.wait(), timeout=1)
         assert not drain.done()
         assert not aux.close.called
         release.set()

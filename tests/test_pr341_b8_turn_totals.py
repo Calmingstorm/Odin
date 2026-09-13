@@ -1,5 +1,5 @@
-import asyncio
 import json
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -20,6 +20,27 @@ async def test_real_turn_to_jsonl_to_usage_has_generation_totals(
     tmp_path, monkeypatch, surface, failure,
 ):
     monkeypatch.chdir(tmp_path)
+    now = 1_000
+
+    def monotonic_ns():
+        # The contract is logical-generation time versus tool time, not a
+        # promise that a busy CI worker will schedule an 80ms sleep precisely.
+        nonlocal now
+        sample = now
+        now += 1_000_000
+        return sample
+
+    clock = SimpleNamespace(**{name: getattr(time, name) for name in dir(time)})
+    clock.monotonic_ns = monotonic_ns
+    monkeypatch.setattr("src.llm.timing.time", clock)
+
+    from src.trajectories.saver import TrajectoryTurn
+
+    class TimedTurn(TrajectoryTurn):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs, _started_ns=monotonic_ns())
+
+    monkeypatch.setattr("src.trajectories.saver.TrajectoryTurn", TimedTurn)
     rollup = make_rollup(tmp_path)
     saver = TrajectorySaver(str(tmp_path / "trajectories"), usage_observer=rollup)
     responses = ([LLMRequestError("invalid request")] * 5 if failure else [
@@ -30,7 +51,8 @@ async def test_real_turn_to_jsonl_to_usage_has_generation_totals(
     bot.turn_recorder._trajectory_saver = saver
 
     async def slow_tool(*args, **kwargs):
-        await asyncio.sleep(.08)
+        nonlocal now
+        now += 80_000_000
         return ToolResult(output="ok")
 
     bot.tool_executor.execute = slow_tool
@@ -56,7 +78,7 @@ async def test_real_turn_to_jsonl_to_usage_has_generation_totals(
         assert total == 0 and not record["iterations"]
         assert activity["duration_ms"] is None and activity["duration_samples"] == 0
     else:
-        assert total > 0
+        assert total == 2
         assert record["iterations"][0]["tool_duration_ms"] >= 70
         assert record["end_to_end_duration_ms"] >= total + 70
         assert activity["duration_ms"] == total and activity["duration_samples"] == 1

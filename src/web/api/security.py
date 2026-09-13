@@ -436,11 +436,14 @@ def register_api_tokens(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "token manager not available"}, status=503)
         uid = request.match_info["user_id"]
         ws_mgr = request.app.get("ws_manager")
-        if ws_mgr:
-            async with ws_mgr.policy_change(uid):
+        try:
+            if ws_mgr:
+                async with ws_mgr.policy_change(uid):
+                    deleted = await tm.delete_token(uid)
+            else:
                 deleted = await tm.delete_token(uid)
-        else:
-            deleted = await tm.delete_token(uid)
+        except PermissionError as exc:
+            return web.json_response({"error": str(exc)}, status=409)
         if not deleted:
             return web.json_response({"error": "token not found"}, status=404)
         sm = request.app.get("session_manager")
@@ -475,7 +478,25 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         tm = getattr(bot, "api_token_manager", None)
         has_any_token = api_token or bot.config.web.api_tokens or (tm and tm.list_tokens())
         if not has_any_token:
-            # No auth configured — dev mode, issue session anyway
+            # A fresh install has no UI credential by design. Do not turn an
+            # arbitrary value, including its Discord gateway token, into an
+            # administrator session before setup has installed one.
+            from ..onboarding import OnboardingCoordinator
+
+            onboarding = getattr(bot, "onboarding", None)
+            if isinstance(onboarding, OnboardingCoordinator):
+                state = await onboarding.state()
+                if state.setup_allowed:
+                    return web.json_response(
+                        {
+                            "error": "setup_required",
+                            "detail": "Configure a web API credential before signing in.",
+                        },
+                        status=409,
+                    )
+
+            # Explicit development compositions without initialization state
+            # retain their legacy unauthenticated local-session behavior.
             sm = request.app.get("session_manager")
             if sm:
                 sid, timeout = sm.create()

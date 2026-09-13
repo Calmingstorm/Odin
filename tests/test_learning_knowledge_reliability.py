@@ -125,9 +125,11 @@ async def test_delete_entry_async_not_resurrected_by_concurrent_reflection(tmp_p
     path = _store(tmp_path, [_entry("keep"), _entry("victim")])
     r = ConversationReflector(path)
 
+    text_fn_entered = asyncio.Event()
     release = asyncio.Event()
 
     async def _slow_text_fn(messages, system):
+        text_fn_entered.set()
         await release.wait()
         return "[]"  # no new entries
 
@@ -137,11 +139,11 @@ async def test_delete_entry_async_not_resurrected_by_concurrent_reflection(tmp_p
     reflect_task = asyncio.create_task(
         r._reflect("some conversation", full=True, user_ids=[]),
     )
-    await asyncio.sleep(0.05)  # let it acquire the lock
+    await text_fn_entered.wait()
 
     # Delete must block on the lock until the reflection finishes.
     del_task = asyncio.create_task(r.delete_entry_async("victim"))
-    await asyncio.sleep(0.05)
+    await asyncio.sleep(0)
     assert not del_task.done()  # blocked on the lock
 
     release.set()

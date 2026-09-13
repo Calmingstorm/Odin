@@ -20,6 +20,7 @@ import HistoryPage from './pages/history.js';
 import CapabilitiesPage from './pages/capabilities.js';
 import PersonalityPage from './pages/personality.js';
 import SystemPage from './pages/system.js';
+import SetupPage from './pages/setup.js';
 import { computed, createApp, nextTick, onMounted, onUnmounted, ref, watch } from 'vue';
 import { createRouter, createWebHashHistory } from 'vue-router';
 
@@ -145,6 +146,7 @@ const App = {
       <div class="brand-loader"><odin-icon name="brand" :size="28" /></div>
       <span class="sr-only">Loading application...</span>
     </div>
+    <setup-page v-else-if="authState === 'setup'" :on-complete="onSetupComplete" />
     <login-screen v-else-if="authState === 'login'" :on-login="onLogin" :session-expired="sessionExpired" />
     <div v-else class="app-shell">
       <aside ref="sidebarEl" class="hm-sidebar" :class="{ collapsed: sidebarCollapsed, 'mobile-open': mobileOpen }"
@@ -245,7 +247,7 @@ const App = {
     <confirm-host />
     <command-palette />`,
   setup() {
-    const authState = ref('checking'); // 'checking' | 'login' | 'ready'
+    const authState = ref('checking'); // 'checking' | 'setup' | 'login' | 'ready'
     const sessionExpired = ref(false);
     const sidebarCollapsed = ref(false);
     const mobileOpen = ref(false);
@@ -324,12 +326,34 @@ const App = {
       if (!isMobileViewport.value) mobileOpen.value = false;
     }
 
-    // Check auth on mount
+    // First-install mode is intentionally checked before auth/status. Do not
+    // start a socket, poll status, or load ordinary configuration while pending.
+    async function enterFromSetupState() {
+      try {
+        const setup = await api.get('/api/setup/status');
+        if (setup.mode === 'pending' || setup.needed === true) {
+          stopLive();
+          authState.value = 'setup';
+          return true;
+        }
+      } catch (error) {
+        // A completed installation may protect setup status behind normal auth.
+        // Its 401 is not evidence that setup is pending or that an existing
+        // authenticated flow is broken. api.check() below remains the authority.
+        if (error?.name !== 'AuthError') {
+          // Existing deployments without this endpoint retain their auth flow.
+        }
+      }
+      return false;
+    }
+
+    // Check setup state and then existing auth on mount.
     onMounted(async () => {
       document.addEventListener('keydown', onKeydown);
       mobileMedia = window.matchMedia('(max-width: 900px)');
       syncMobileViewport();
       mobileMedia.addEventListener('change', syncMobileViewport);
+      if (await enterFromSetupState()) return;
       const check = await api.check();
       if (check.ok) {
         authState.value = 'ready';
@@ -347,6 +371,25 @@ const App = {
       sessionExpired.value = false;
       authState.value = 'ready';
       startLive();
+    }
+
+    async function onSetupComplete() {
+      // Completion is durable but deliberately does not schedule a restart.
+      if (await enterFromSetupState()) return;
+      const check = await api.check();
+      if (check.ok) {
+        authState.value = 'ready';
+        startLive();
+      } else if (check.needsAuth) {
+        // Completing setup can enable Web API auth. Never present an
+        // unauthenticated client as working after that transition.
+        authState.value = 'login';
+      } else {
+        // Tokenless local setup is valid. Preserve the ordinary no-auth path
+        // when status is reachable without a credential.
+        authState.value = 'ready';
+        startLive();
+      }
     }
 
     async function logout() {
@@ -450,7 +493,7 @@ const App = {
       wsState, wsLatency, wsLabel, wsToast,
       botStatus, botUptime, navRoutes, navGroups,
       currentPage, currentSection, currentDescription, sidebarEl, mobileMenuButton, isMobileViewport,
-      onLogin, logout, toggleSidebar, toggleMobileNavigation, openPalette,
+      onLogin, onSetupComplete, logout, toggleSidebar, toggleMobileNavigation, openPalette,
     };
   },
 };
@@ -461,6 +504,7 @@ const App = {
 const app = createApp(App);
 app.component('odin-icon', OdinIcon);
 app.component('login-screen', LoginScreen);
+app.component('setup-page', SetupPage);
 app.component('toast-container', ToastContainer);
 app.component('confirm-host', ConfirmHost);
 app.component('command-palette', CommandPalette);

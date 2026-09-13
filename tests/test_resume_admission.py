@@ -252,6 +252,64 @@ class TestExplicitResume:
         assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
         assert len(h.released_workloads) == 1
 
+    @staticmethod
+    def _discord_error(error_type, *, code: int, status: int):
+        response = type("Response", (), {"status": status, "reason": "test", "headers": {}})()
+        return error_type(response, {"code": code, "message": "test"})
+
+    async def test_confirmed_not_found_is_terminal_but_fetch_outage_preserves_lease(self, tmp_path):
+        import discord
+
+        h, original = await suspend_turn(tmp_path)
+        key = tr.TurnKey("discord", str(original.channel.id), str(original.id))
+
+        async def missing(*_args):
+            raise self._discord_error(discord.NotFound, code=10008, status=404)
+
+        h.manager._fetch_message = missing
+        rebuilt, message, reason = await h.manager._validate_and_rebuild(
+            key, h.store.load_resumable_sync(key)
+        )
+
+        assert rebuilt is None and message is None
+        assert reason == "the original message is gone"
+        assert h.row()[0] == TurnStatus.TERMINAL_REJECTED
+
+        h2, original2 = await suspend_turn(tmp_path / "outage")
+        key2 = tr.TurnKey("discord", str(original2.channel.id), str(original2.id))
+
+        async def unavailable(*_args):
+            raise ConnectionError("gateway reset")
+
+        h2.manager._fetch_message = unavailable
+        rebuilt, message, reason = await h2.manager._validate_and_rebuild(
+            key2, h2.store.load_resumable_sync(key2)
+        )
+
+        assert rebuilt is None and message is None
+        assert reason == "the original message could not be fetched yet"
+        assert h2.row()[0] == TurnStatus.SUSPENDED
+        assert h2.released_workloads == []
+
+    async def test_fetch_permission_failure_is_truthful_and_keeps_turn_resumable(self, tmp_path):
+        import discord
+
+        h, original = await suspend_turn(tmp_path)
+        key = tr.TurnKey("discord", str(original.channel.id), str(original.id))
+
+        async def forbidden(*_args):
+            raise self._discord_error(discord.Forbidden, code=50013, status=403)
+
+        h.manager._fetch_message = forbidden
+        rebuilt, message, reason = await h.manager._validate_and_rebuild(
+            key, h.store.load_resumable_sync(key)
+        )
+
+        assert rebuilt is None and message is None
+        assert reason == "Discord currently denies access to the original message"
+        assert h.row()[0] == TurnStatus.SUSPENDED
+        assert h.released_workloads == []
+
     async def test_non_trigger_and_no_checkpoint_pass_through(self, tmp_path):
         h, original = await suspend_turn(tmp_path)
         assert await h.manager.try_explicit_resume(

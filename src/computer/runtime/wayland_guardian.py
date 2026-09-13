@@ -37,6 +37,7 @@ _ACTION_REASONS = frozenset(
         "scroll_capability_unavailable",
         "lease-expired",
         "scope-evidence-expired",
+        "scope-refused",
         "signal-cancel",
         "controller-timeout",
         "controller-eof",

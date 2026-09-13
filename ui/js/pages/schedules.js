@@ -9,6 +9,30 @@ import { formatTs, formatAge, formatDuration } from '../utils.js';
 import { computed, onMounted, onUnmounted, ref, watch } from 'vue';
 import { analyzeLocalDateTime, enforceExclusiveTiming } from '../schedule-time.js';
 
+const AVAILABILITY_POLL_MS = 5000;
+
+export function normalizeScheduleAvailability(status) {
+  const available = status?.available === true;
+  const reason = typeof status?.reason === 'string' ? status.reason : 'provider_error';
+  return { available, reason, epoch: Number.isInteger(status?.epoch) ? status.epoch : null };
+}
+
+export function scheduleAvailabilityMessage(status) {
+  if (status.available) return '';
+  switch (status.reason) {
+    case 'unavailable': return 'Scheduling is not configured.';
+    case 'connecting': return 'Scheduling is connecting.';
+    case 'disconnected': return 'Scheduling is disconnected.';
+    case 'provider_error': return 'Scheduling status provider failed.';
+    default: return 'Scheduling is unavailable.';
+  }
+}
+
+export function availabilityFromApiError(error) {
+  if (error?.status !== 503 || !error?.data?.connection) return null;
+  return normalizeScheduleAvailability(error.data.connection);
+}
+
 
 export default {
   template: `
@@ -19,13 +43,18 @@ export default {
           <p class="page-lede">Create, inspect, and run recurring or one-time automation.</p>
         </div>
         <div class="flex gap-2">
-          <button @click="showCreate = !showCreate" class="btn btn-primary text-xs">
+          <button @click="showCreate = !showCreate" class="btn btn-primary text-xs"
+                  :disabled="!schedulingAvailable">
             {{ showCreate ? 'Cancel' : 'New Schedule' }}
           </button>
           <button @click="fetchSchedules" class="btn btn-ghost text-xs" :disabled="loading">
             {{ loading ? 'Loading...' : 'Refresh' }}
           </button>
         </div>
+      </div>
+
+      <div v-if="!schedulingAvailable" class="hm-card border-yellow-900 mb-4 text-xs text-yellow-300" role="status">
+        {{ schedulingAvailabilityMessage }} Creation, immediate runs, and resume are disabled. Existing schedules and history remain available.
       </div>
 
       <!-- Create form -->
@@ -151,7 +180,7 @@ export default {
 
         <div v-if="createError" class="mb-3 text-red-400 text-sm">{{ createError }}</div>
 
-        <button @click="doCreate" class="btn btn-primary text-xs" :disabled="creating">
+        <button @click="doCreate" class="btn btn-primary text-xs" :disabled="creating || !schedulingAvailable">
           {{ creating ? 'Creating...' : 'Create' }}
         </button>
       </div>
@@ -251,12 +280,12 @@ export default {
               <td class="whitespace-nowrap">
                 <div class="flex gap-1">
                   <button @click="doTogglePause(s)" class="btn btn-ghost text-xs"
-                          :disabled="togglingId === s.id"
+                          :disabled="togglingId === s.id || (s.paused && !schedulingAvailable)"
                           :title="s.paused ? 'Resume this schedule' : 'Pause this schedule'">
                     {{ togglingId === s.id ? '...' : (s.paused ? 'Resume' : 'Pause') }}
                   </button>
                   <button @click="doRunNow(s.id)" class="btn btn-ghost text-xs"
-                          :disabled="runningId === s.id"
+                          :disabled="runningId === s.id || !schedulingAvailable"
                           title="Trigger this schedule immediately">
                     {{ runningId === s.id ? '...' : 'Run' }}
                   </button>
@@ -357,6 +386,12 @@ export default {
     const schedules = ref([]);
     const loading = ref(true);
     const error = ref(null);
+    const schedulingAvailability = ref(normalizeScheduleAvailability(null));
+    const schedulingAvailable = computed(() => schedulingAvailability.value.available);
+    const schedulingAvailabilityMessage = computed(
+      () => scheduleAvailabilityMessage(schedulingAvailability.value)
+    );
+    let availabilityPollTimer = null;
 
     // Create form
     const showCreate = ref(false);
@@ -492,6 +527,22 @@ export default {
       loading.value = false;
     }
 
+    async function fetchSchedulingAvailability() {
+      try {
+        schedulingAvailability.value = normalizeScheduleAvailability(
+          await api.get('/api/schedules/status')
+        );
+      } catch (e) {
+        schedulingAvailability.value = availabilityFromApiError(e)
+          || normalizeScheduleAvailability(null);
+      }
+    }
+
+    function captureAvailabilityError(e) {
+      const availability = availabilityFromApiError(e);
+      if (availability) schedulingAvailability.value = availability;
+    }
+
     async function toggleExpand(scheduleId) {
       if (expandedId.value === scheduleId) {
         expandedId.value = null;
@@ -522,6 +573,10 @@ export default {
 
     async function doCreate() {
       createError.value = null;
+      if (!schedulingAvailable.value) {
+        createError.value = scheduleAvailabilityMessage(schedulingAvailability.value);
+        return;
+      }
       const f = form.value;
       if (!f.description.trim()) { createError.value = 'Description is required'; return; }
       if (!f.channel_id.trim()) { createError.value = 'Channel ID is required'; return; }
@@ -589,12 +644,17 @@ export default {
         showCreate.value = false;
         await fetchSchedules();
       } catch (e) {
+        captureAvailabilityError(e);
         createError.value = e.message;
       }
       creating.value = false;
     }
 
     async function doRunNow(scheduleId) {
+      if (!schedulingAvailable.value) {
+        toast.error(scheduleAvailabilityMessage(schedulingAvailability.value));
+        return;
+      }
       runningId.value = scheduleId;
       try {
         const result = await api.post(`/api/schedules/${encodeURIComponent(scheduleId)}/run`);
@@ -606,12 +666,17 @@ export default {
         }
         await fetchSchedules();
       } catch (e) {
+        captureAvailabilityError(e);
         toast.error(e.message || 'Failed to trigger');
       }
       runningId.value = null;
     }
 
     async function doTogglePause(schedule) {
+      if (schedule.paused && !schedulingAvailable.value) {
+        toast.error(scheduleAvailabilityMessage(schedulingAvailability.value));
+        return;
+      }
       togglingId.value = schedule.id;
       const newState = !schedule.paused;
       try {
@@ -619,6 +684,7 @@ export default {
         toast.success(newState ? 'Schedule paused' : 'Schedule resumed');
         await fetchSchedules();
       } catch (e) {
+        captureAvailabilityError(e);
         toast.error(e.message || 'Failed to update schedule');
       }
       togglingId.value = null;
@@ -701,11 +767,18 @@ export default {
       deletingId.value = null;
     }
 
-    onMounted(() => { fetchSchedules(); });
-    onUnmounted(flushReportFormatTimers);
+    onMounted(() => {
+      fetchSchedules();
+      fetchSchedulingAvailability();
+      availabilityPollTimer = setInterval(fetchSchedulingAvailability, AVAILABILITY_POLL_MS);
+    });
+    onUnmounted(() => {
+      flushReportFormatTimers();
+      if (availabilityPollTimer) clearInterval(availabilityPollTimer);
+    });
 
     return {
-      schedules, loading, error,
+      schedules, loading, error, schedulingAvailable, schedulingAvailabilityMessage,
       showCreate, form, creating, createError, runAtUtcPreview,
       runAtAnalysis, runAtOccurrence,
       cronResult, validatingCron, cronPresets,
@@ -714,7 +787,7 @@ export default {
       cronCount, oneTimeCount, webhookCount, pausedCount, failingCount,
       formatTs, formatAge, formatFuture, formatMs, formatDuration,
       onCronInput, onRunAtInput, validateCron, toggleExpand,
-      fetchSchedules, doCreate, doRunNow, doTogglePause, doUpdateReportFormat, doResetFailures, doDelete,
+      fetchSchedules, fetchSchedulingAvailability, doCreate, doRunNow, doTogglePause, doUpdateReportFormat, doResetFailures, doDelete,
     };
   },
 };

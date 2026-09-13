@@ -107,6 +107,17 @@ class Native(Attached):
                 "owned_devices": "hyprland_owned_connections_closed",
                 "hyprland_owned_connections_closed": True, "receiver_release_verified": False}
 
+    @property
+    def hyprland_handoff_binding(self):
+        return {
+            "output_name": "DP-1",
+            "source_id": "fixture-opaque-source-1",
+            "application_identity": {
+                "pid": 42, "uid": 1000, "start_ticks": 9, "exe": "/usr/bin/xed",
+                "exe_identity": [1, 2],
+            },
+        }
+
 
 @pytest.mark.parametrize("released", [True, False])
 async def test_operator_recovery_fences_and_preserves_truth(tmp_path, released):

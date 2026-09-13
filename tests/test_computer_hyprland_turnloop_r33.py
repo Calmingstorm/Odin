@@ -1,6 +1,7 @@
 """Real normal-turn lifecycle/dispatch with synthetic OS transports, no desktop IO."""
 
 import json
+import os
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -9,6 +10,8 @@ import pytest
 from src.computer.models import ComputerError
 from src.computer.policy import DELIVERED_GROUNDING_SECONDS
 from src.computer.runtime import hyprland_backend as hb
+from src.computer.runtime.hyprland_identity import ExecutableTrust, HyprlandIdentity, ProcessPin
+from src.computer.runtime.hyprland_scope import HyprlandOwnerHandle
 from src.discord.native_tools.registry import NativeToolDispatcher
 from src.discord.tool_loop import ToolLoopRunner
 from tests.computer.test_hyprland_backend import Guardian, native, scope
@@ -32,11 +35,17 @@ class NativeTransport(Guardian):
 
     async def start(self, *args):
         self.on_spawn({"pid": 424242, "start_ticks": 777})
+        self.owner_identity = {"pid": 424242, "uid": 1000, "start_ticks": 777}
 
 
 @pytest.fixture
 async def normal(tmp_path, monkeypatch):
     transports, recovery = [], []
+    identity = HyprlandIdentity(
+        ProcessPin(123, 1000, 99, "fixture-boot", 1, 2, 3, 4, 5, "f" * 64),
+        ExecutableTrust("/usr/bin/Hyprland", "a" * 64, "0.54.2", "b" * 40),
+    )
+    owners = []
 
     def guardian(*args):
         transport = NativeTransport(*args)
@@ -45,7 +54,42 @@ async def normal(tmp_path, monkeypatch):
 
     class ScopeTransport:
         def __init__(self, **kwargs):
-            pass
+            self.identity = None
+
+        async def attest_identity(self, pinned):
+            assert pinned == identity
+            self.identity = pinned
+
+        async def capture_owner(self, guardian_identity):
+            assert self.identity == identity
+            assert guardian_identity == transports[-1].owner_identity
+            handle = HyprlandOwnerHandle(
+                identity, "i1-" + "a" * 32, "b" * 48,
+                f"{len(owners) + 1:048x}", guardian_identity["pid"],
+                guardian_identity["uid"], str(guardian_identity["start_ticks"]),
+                os.getpid(), os.geteuid(), "1",
+            )
+            owners.append(handle)
+            return handle
+
+        async def owner_status(self, handle, *, command_id):
+            assert self.identity == identity
+            assert handle in owners and command_id
+            # This transport has no native ledger evidence after a fault.
+            # A cooperative guardian close is not an owner reconciliation ACK.
+            return {
+                "instance_id": handle.instance_id, "plugin_epoch": handle.plugin_epoch,
+                "ledger_id": handle.ledger_id, "owner_matched": True,
+                "ledger_empty": False, "release_ack": False, "revoked": False,
+                "unknown_release": True, "receiver_release_verified": False,
+                "retired": False,
+            }
+
+        async def reconcile_owner(self, handle, *, command_id):
+            return await self.owner_status(handle, command_id=command_id)
+
+        async def retire_owner(self, handle, *, command_id):
+            return await self.owner_status(handle, command_id=command_id)
 
         async def snapshot(self, metadata):
             return scope()
@@ -64,7 +108,9 @@ async def normal(tmp_path, monkeypatch):
 
     monkeypatch.setattr(hb, "trusted_binary", lambda _: None)
     monkeypatch.setattr(hb, "pin_connections", AsyncMock(return_value=(
-        SimpleNamespace(digest="f" * 64), SimpleNamespace(close=lambda: None))))
+        identity, SimpleNamespace(close=lambda: None))))
+    monkeypatch.setattr(hb, "CompositorIncarnation", lambda pid: SimpleNamespace(
+        exited=lambda: False, close=lambda: None))
     monkeypatch.setattr(hb, "connect_peer", AsyncMock(
         return_value=SimpleNamespace(close=lambda: None)))
     monkeypatch.setattr(hb, "revalidate", AsyncMock())
@@ -104,6 +150,13 @@ async def start(normal):
     assert type(backend) is hb.HyprlandRuntimeBackend
     assert backend._started and backend.input_supported
     assert backend.runtime_identity_callback is not None
+    assert backend.recovery_identity_callback is not None
+    assert type(backend._identity) is HyprlandIdentity
+    assert type(backend._owner_handle) is HyprlandOwnerHandle
+    durable_owner = controller.store.hyprland_owner(session.session_id)
+    assert durable_owner["compositor"]["digest"] == backend._identity.digest
+    assert durable_owner["owner"]["ledger_id"] == backend._owner_handle.ledger_id
+    assert durable_owner["owner"]["guardian_start_ticks"] == "777"
     assert backend._descriptor["launch_pending"] is False
     assert {"pid": 424242, "start_ticks": 777} in backend._descriptor["processes"]
     assert controller.store.runtime_descriptor(session.session_id) == backend._descriptor
@@ -146,6 +199,24 @@ async def test_normal_factory_start_observe_act_delivery_and_no_replay(normal):
     result = await normal.runner._run_one_tool(normal.state, call("computer_act", **second))
     assert "Image loaded" in result["content"], result
     assert len(normal.transports[0].commands) == 2
+
+
+async def test_synthetic_faulted_ledger_does_not_certify_native_cleanup(normal):
+    from src.computer.runtime.hyprland_recovery import ledger_evidence
+
+    grant = await start(normal)
+    backend = normal.service.controller._live[grant["session_id"]].backend
+    provider, handle = backend._scope_provider, backend._owner_handle
+    # Even a successful local close is not native original-owner evidence.
+    assert (await backend.pause())["released"] is True
+    for method in (provider.reconcile_owner, provider.owner_status, provider.retire_owner):
+        row = await method(handle, command_id="faulted-ledger")
+        evidence = ledger_evidence(row, handle)
+        assert evidence["owner_matched"] is True
+        assert evidence["release_ack"] is False
+        assert evidence["unknown_release"] is True
+        assert evidence["native_owner_retired"] is False
+        assert evidence["receiver_release_verified"] is False
 
 
 async def test_unseen_observation_and_stale_delivered_frame_refused(normal, monkeypatch):

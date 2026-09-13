@@ -43,10 +43,20 @@ class _NoOpContextManager:
 
 
 class _WebSentMessage:
-    """Minimal sent-message stand-in (returned by channel.send)."""
+    """A web-visible sent message whose edits replace its captured content."""
+
+    def __init__(self, channel: _WebChannel, index: int | None) -> None:
+        self._channel = channel
+        self._index = index
 
     async def edit(self, **kwargs):
-        pass
+        if self._index is not None and "content" in kwargs:
+            self._channel.captured_messages[self._index] = kwargs["content"] or ""
+        return self
+
+
+class WebChannelSendError(RuntimeError):
+    """A virtual attachment could not be represented to the web caller."""
 
 
 class _WebChannel:
@@ -61,28 +71,34 @@ class _WebChannel:
         self.name = "web-chat"
         self.guild = None
         self.captured_files: list[dict] = []
+        # Keep message identity so streamed/progress updates replace rather
+        # than duplicate their initial text, just as Discord edits do.
+        self.captured_messages: list[str] = []
 
     def typing(self):
         return _NoOpContextManager()
 
     async def send(self, content=None, **kwargs) -> _WebSentMessage:
         import base64
-        # Capture file if provided
-        file = kwargs.get("file")
-        if file is not None:
+        pending_files = []
+        files = ([kwargs["file"]] if kwargs.get("file") is not None else [])
+        files.extend(kwargs.get("files") or [])
+        # Admit every attachment before recording the message. A failed
+        # capture must be visible to the tool as a failed send, never as an
+        # invented successful web delivery.
+        for file in files:
             try:
                 fp = file.fp
                 filename = getattr(file, "filename", "file")
                 if hasattr(fp, "seek"):
                     fp.seek(0)
-                data = fp.read(25 * 1024 * 1024 + 1)  # 25MB + 1 byte to detect overflow
+                data = fp.read(25 * 1024 * 1024 + 1)
+                if not isinstance(data, bytes):
+                    raise TypeError("attachment stream did not return bytes")
                 if len(data) > 25 * 1024 * 1024:
-                    log.warning("Web chat file %s exceeds 25MB, skipping", filename)
-                    data = None
-                if data:
-                    # Detect content type from filename
-                    ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
-                    content_type = {
+                    raise ValueError("attachment exceeds 25MB web limit")
+                ext = filename.rsplit(".", 1)[-1].lower() if "." in filename else ""
+                content_type = {
                         "png": "image/png", "jpg": "image/jpeg", "jpeg": "image/jpeg",
                         "gif": "image/gif", "webp": "image/webp", "svg": "image/svg+xml",
                         "pdf": "application/pdf", "txt": "text/plain", "json": "application/json",
@@ -91,23 +107,23 @@ class _WebChannel:
                         "tar": "application/x-tar", "gz": "application/gzip",
                         "csv": "text/csv", "xml": "application/xml", "yaml": "application/yaml",
                         "yml": "application/yaml", "md": "text/markdown",
-                    }.get(ext, "application/octet-stream")
-                    self.captured_files.append({
-                        "filename": filename,
-                        "content_type": content_type,
-                        "data": base64.b64encode(data).decode("ascii"),
-                        "size": len(data),
-                    })
+                }.get(ext, "application/octet-stream")
+                pending_files.append({
+                    "filename": filename,
+                    "content_type": content_type,
+                    "data": base64.b64encode(data).decode("ascii"),
+                    "size": len(data),
+                })
             except Exception as e:
                 log.warning("Failed to capture web chat file: %s", e)
+                raise WebChannelSendError(f"Failed to capture web attachment: {e}") from e
 
-        # Capture files (plural)
-        files = kwargs.get("files")
-        if files:
-            for f in files:
-                await self.send(file=f)
-
-        return _WebSentMessage()
+        self.captured_files.extend(pending_files)
+        index = None
+        if content is not None:
+            index = len(self.captured_messages)
+            self.captured_messages.append(str(content))
+        return _WebSentMessage(self, index)
 
     async def fetch_message(self, message_id: int):
         raise Exception("Cannot fetch messages in web chat")
@@ -269,7 +285,7 @@ async def _do_process_web_chat(
         )
 
         try:
-            response, _already_sent, is_error, tools_used, handoff = (
+            response, already_sent, is_error, tools_used, handoff = (
                 await bot.tool_loop.run(
                     # WebMessage is the documented duck-typed stand-in
                     # for discord.Message (see class docstring).
@@ -281,6 +297,11 @@ async def _do_process_web_chat(
             await bot.delivery.set_status(None, task_end=True)
 
         response = _scrub(response)
+        # A streamed/progress path has already delivered its own messages via
+        # the virtual channel. Returning the model's outer final as well would
+        # manufacture a duplicate which Discord callers never receive.
+        if already_sent:
+            response = "\n".join(web_channel.captured_messages)
 
         if not is_error:
             bot.sessions.add_message(channel_id, "assistant", response)

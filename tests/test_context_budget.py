@@ -70,7 +70,6 @@ class TestRegistryFloors:
             "gpt-5.4": 917_506,
             "gpt-5.5": 270_001,
             "gpt-5.4-mini": 262_146,
-            "gpt-5.3-codex-spark": 124_001,
         }
         assert CODEX_UNKNOWN_MODEL_INPUT_BUDGET == 272_000
 
@@ -117,8 +116,8 @@ class TestResolverDefaults:
         assert snap.primary_chars == 550_365
         assert snap.ladder == (385_255,)
 
-    def test_spark_not_lifted_by_legacy_floor(self):
-        snap = resolve_context_budget("gpt-5.3-codex-spark")
+    def test_small_override_not_lifted_by_legacy_floor(self):
+        snap = resolve_context_budget("future-small", overrides={"future-small": 124_001})
         # min(budget, max(272K, …)) can never RAISE a small budget.
         assert snap.working_budget == 124_001
         assert snap.primary_chars == 205_002
@@ -254,7 +253,7 @@ class TestResolverTotality:
 
     def test_rescue_ceiling_never_enlarges(self):
         # Models whose own rung is below 400K keep it (min semantics).
-        snap = resolve_context_budget("gpt-5.3-codex-spark")
+        snap = resolve_context_budget("future-small", overrides={"future-small": 124_001})
         assert snap.ladder == (143_501,)
         assert LEGACY_UTILIZATION_FLOOR_TOKENS == 272_000
 
