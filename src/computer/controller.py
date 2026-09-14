@@ -1274,6 +1274,7 @@ class ComputerController:
                 **({"recovery_session_id": recovery_id,
                     "recovery_generation": inp["recovery_generation"]} if recovery_id else {}),
             )
+            start_phase = "prepare_runtime"
             try:
                 self._live[grant.session_id] = LiveSession(
                     backend, self.monotonic() + MAX_TASK_SECONDS, capabilities=capabilities
@@ -1292,6 +1293,7 @@ class ComputerController:
                 timeout = (
                     WAYLAND_START_TIMEOUT_SECONDS if capabilities.platform == "wayland" else 20
                 )
+                start_phase = "backend_start"
                 await _bounded(
                     backend.start(
                         grant.session_id, selection=selected, selection_proof=selection_proof
@@ -1300,6 +1302,7 @@ class ComputerController:
                     else backend.start(grant.session_id),
                     timeout,
                 )
+                start_phase = "validate_attachment"
                 measured = getattr(backend, "capabilities", None)
                 if type(measured) is not BackendCapabilities or (
                     measured.platform,
@@ -1320,14 +1323,62 @@ class ComputerController:
                     or live.revoked
                 ):
                     raise ComputerError("grant_revoked")
+                start_phase = "persist_handoff"
                 self._record_hyprland_start_grant(grant, live)
                 grant = self.store.set_state(grant.session_id, "active")
                 self._watchdogs[grant.session_id] = _own_task(
                     asyncio.create_task(self._deadline(grant.session_id, MAX_TASK_SECONDS))
                 )
+                start_phase = "initial_capture"
                 async with self._actions:
                     await self._capture(grant)
             except (Exception, asyncio.CancelledError) as exc:
+                # Native errors can contain owner secrets: log no messages,
+                # traceback source lines, values, or locals.
+                frames = []
+                tb = exc.__traceback__
+                while tb is not None and len(frames) < 12:
+                    frames.append(tb.tb_frame.f_code.co_name[:64])
+                    tb = tb.tb_next
+                from .error_guidance import exception_reason
+                reason = exception_reason(exc)
+                _TASK_LOG.warning("computer start failed phase=%s reason=%s type=%s frames=%s",
+                                  start_phase, reason, type(exc).__name__[:64], frames)
+                retryable_capture = reason in {
+                    "hyprland_fresh_observation_required",
+                    "hyprland_capture_settle_budget_exhausted",
+                    "hyprland_snapshot_capacity", "hyprland_observation_changed",
+                    "hyprland_observation_expired", "stale_observation",
+                    "geometry_changed", "hyprland_focus_changed",
+                    "hyprland_focus_outside_source",
+                    "hyprland_capture_scope_changed",
+                    "hyprland_scope_unknown_locked_or_stale",
+                    "hyprland_native_focus_not_confirmed", "human_focus_changed",
+                    "input_focus_unavailable",
+                }
+                live = self._live.get(grant.session_id)
+                if (start_phase == "initial_capture" and retryable_capture
+                        and capabilities.backend == "hyprland"
+                        and live is not None and not live.revoked
+                        and not self._hyprland_continuity_failure(live, exc)):
+                    current = self.store.get_session(grant.session_id)
+                    if (current.state == "active"
+                            and current.generation == grant.generation
+                            and current.consent_generation == grant.consent_generation
+                            and self._no_input_pending(grant.session_id)
+                            and self.store.get_recovery_pending(grant.session_id) is None):
+                        # Start returns no pixels. Keep the coherent attachment,
+                        # but require explicit observe; never retain usable input.
+                        live.observations.clear()
+                        self._delivered_observations.pop(grant.session_id, None)
+                        if live.task_context is not None:
+                            live.task_context.invalidate("initial_capture")
+                        result = self._public_session(current)
+                        result.update({"reason": reason, "start_phase": start_phase,
+                                       "observation_required": True,
+                                       "next_action": "observe_fresh",
+                                       "replay_permitted": False})
+                        return result
                 await self._stop(grant.session_id, "cancelled")
                 if isinstance(exc, asyncio.CancelledError):
                     raise
@@ -1335,6 +1386,9 @@ class ComputerController:
 
                 if type(exc) is InputAdmissionError:
                     raise exc from None
+                if capabilities.backend == "hyprland" and isinstance(
+                        exc, (ComputerError, HyprlandScopeFailure)):
+                    raise ComputerError(f"{reason}: start_phase={start_phase}") from None
                 raise ComputerError("start_unavailable") from None
             return self._public_session(self.store.get_session(grant.session_id))
         if operation not in {
