@@ -33,6 +33,7 @@ from .policy import (
     MAX_ACTION_RPC_SECONDS,
     MAX_ACTIONS,
     MAX_TASK_SECONDS,
+    SELECTION_BINDING_SECONDS,
     STOP_TIMEOUT_SECONDS,
     WAYLAND_START_TIMEOUT_SECONDS,
     exact_keys,
@@ -1150,7 +1151,7 @@ class ComputerController:
                     "turn_id": context.turn_id,
                     "channel_id": context.channel_id,
                     "surface": context.surface,
-                    "expires_at": self.monotonic() + FRAME_FRESH_SECONDS,
+                    "expires_at": self.monotonic() + SELECTION_BINDING_SECONDS,
                     "native_epoch": result["candidate_epoch"],
                     "targets": targets,
                 }

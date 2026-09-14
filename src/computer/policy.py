@@ -12,6 +12,11 @@ MAX_POINTS = 256
 MAX_BATCH = 8
 FRAME_FRESH_SECONDS = 5.0
 DELIVERED_GROUNDING_SECONDS = 120.0
+# Selection binding must outlive a real observe->plan->select cycle: a thinking
+# model reads references and deliberates between target inventory and selection.
+# Frame freshness (5s) is re-checked independently at action time, so a generous
+# bounded window here does not loosen action/observation freshness.
+SELECTION_BINDING_SECONDS = 300.0
 STOP_TIMEOUT_SECONDS = 3.0
 # Existing-session teardown must allow the privileged capture alarm (5s),
 # wrapper exit and exact-identity census. Isolated stop keeps its original bound.
