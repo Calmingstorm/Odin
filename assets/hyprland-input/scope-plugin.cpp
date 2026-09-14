@@ -14,6 +14,7 @@
 #include <hyprland/src/protocols/SessionLock.hpp>
 #include <hyprland/src/protocols/XDGShell.hpp>
 #include <hyprland/src/protocols/core/Compositor.hpp>
+#include <hyprland/src/protocols/core/Subcompositor.hpp>
 #include <hyprland/src/event/EventBus.hpp>
 #include <json-c/json.h>
 #include <wayland-server-core.h>
@@ -185,6 +186,19 @@ struct PopupWatch {
     bool valid = true;
     std::vector<CHyprSignalListener> listeners;
 };
+struct SubsurfaceNode {
+    WP<CWLSurfaceResource> surface, parent;
+    WP<CWLSubsurfaceResource> role;
+    Vector2D position, size, offset;
+    int z = 0, scale = 0, transform = 0;
+    bool mapped = false;
+    bool operator==(const SubsurfaceNode& n) const {
+        return !surface.expired() && !parent.expired() && !role.expired() &&
+            surface.lock() == n.surface.lock() && parent.lock() == n.parent.lock() && role.lock() == n.role.lock() &&
+            position == n.position && size == n.size && offset == n.offset && z == n.z && scale == n.scale &&
+            transform == n.transform && mapped == n.mapped;
+    }
+};
 struct Snapshot {
     WP<CWLSurfaceResource> surface;
     WP<CWLSurfaceResource> pointerSurface;
@@ -201,6 +215,7 @@ struct Snapshot {
     ProcessImage image;
     std::vector<odin_scope::NativeAncestor> ancestry;
     std::vector<std::vector<odin_scope::PopupAncestor>> popups;
+    std::vector<SubsurfaceNode> subsurfaces;
     std::shared_ptr<PopupWatch> popupWatch;
     bool modal = false;
     uint64_t revision = 0;
@@ -681,7 +696,65 @@ struct State {
         }
         return result;
     }
+    bool subsurfaceInventory(const Snapshot& b, std::vector<SubsurfaceNode>& result) const {
+        result.clear();
+        if (b.surface.expired() || b.window.expired() || b.window->m_xdgSurface.expired() ||
+            b.window->m_xdgSurface->m_owner.expired()) return false;
+        std::vector<std::pair<SP<CWLSurfaceResource>, size_t>> pending{{b.surface.lock(), 0}};
+        const auto& candidates = b.window->m_xdgSurface->m_owner->m_surfaces;
+        if (candidates.size() > 256) return false;
+        for (const auto& candidate : candidates) {
+            if (candidate.expired() || candidate->m_popup.expired()) continue;
+            std::vector<odin_scope::PopupAncestor> chain;
+            auto surface = candidate->m_surface.lock();
+            if (popupChain(b, surface, chain) && std::find(b.popups.begin(), b.popups.end(), chain) != b.popups.end())
+                pending.emplace_back(surface, 0);
+        }
+        std::set<uintptr_t> seen;
+        for (size_t i = 0; i < pending.size(); ++i) {
+            auto [parent, depth] = pending[i];
+            if (!parent || !parent->good() || parent->client() != b.surface->client() ||
+                !seen.insert(reinterpret_cast<uintptr_t>(parent.get())).second ||
+                parent->m_subsurfaces.size() > 256) return false;
+            for (const auto& weak : parent->m_subsurfaces) {
+                auto sub = weak.lock();
+                if (!sub || !sub->good() || sub->m_parent.lock() != parent || depth >= 32 || result.size() >= 256) return false;
+                auto leaf = sub->m_surface.lock();
+                if (!leaf || !leaf->good() || leaf->client() != b.surface->client() || !leaf->m_role ||
+                    leaf->m_role->role() != SURFACE_ROLE_SUBSURFACE) return false;
+                auto* role = dynamic_cast<CSubsurfaceRole*>(leaf->m_role.get());
+                if (!role || role->m_subsurface.lock() != sub) return false;
+                // Capture every committed edge position. Their bounded chain
+                // determines the effective position without an unbounded helper.
+                const auto position = sub->m_position;
+                const auto& state = leaf->m_current;
+                for (double v : {position.x, position.y, state.size.x, state.size.y, state.offset.x, state.offset.y})
+                    if (!std::isfinite(v) || std::abs(v) > 1000000) return false;
+                result.push_back({leaf, parent, sub, position, state.size, state.offset, sub->m_zIndex,
+                    state.scale, int(state.transform), leaf->m_mapped});
+                pending.emplace_back(leaf, depth + 1);
+            }
+        }
+        return true;
+    }
     bool destination(const Snapshot& b, SP<CWLSurfaceResource> surface) const {
+        // Match the actual hit-test leaf, never substitute its root. Every edge
+        // must have been captured, be live and mapped, and retain its exact role.
+        std::set<uintptr_t> seen;
+        while (surface && surface->m_role && surface->m_role->role() == SURFACE_ROLE_SUBSURFACE) {
+            if (seen.size() >= 32 || !seen.insert(reinterpret_cast<uintptr_t>(surface.get())).second ||
+                !surface->good() || !surface->m_mapped || b.surface.expired() || surface->client() != b.surface->client()) return false;
+            const auto it = std::find_if(b.subsurfaces.begin(), b.subsurfaces.end(),
+                [&surface](const auto& node) { return node.surface.lock() == surface; });
+            if (it == b.subsurfaces.end() || !it->mapped || it->role.expired() || it->parent.expired()) return false;
+            auto* role = dynamic_cast<CSubsurfaceRole*>(surface->m_role.get());
+            auto sub = it->role.lock();
+            if (!role || role->m_subsurface.lock() != sub || !sub->good() || sub->m_surface.lock() != surface ||
+                sub->m_parent.lock() != it->parent.lock() || sub->m_position != it->position ||
+                sub->m_zIndex != it->z || surface->m_current.size != it->size || surface->m_current.offset != it->offset ||
+                surface->m_current.scale != it->scale || int(surface->m_current.transform) != it->transform) return false;
+            surface = it->parent.lock();
+        }
         std::vector<odin_scope::PopupAncestor> chain;
         if (!popupChain(b, surface, chain)) return false;
         return chain.size() == 1 || std::find(b.popups.begin(), b.popups.end(), chain) != b.popups.end();
@@ -692,6 +765,29 @@ struct State {
             b.window->m_xdgSurface->m_owner->m_surfaces.size() > 256) { b.popupWatch->valid = false; return; }
         const std::weak_ptr<PopupWatch> weak = b.popupWatch;
         const auto invalidate = [this, weak] { if (auto watch = weak.lock(); watch && watch->valid) { watch->valid = false; ++revision; } };
+        // Content commits are expected while painting. Only topology/lifecycle
+        // signals invalidate eagerly; same() compares effective geometry/state.
+        std::vector<SP<CWLSurfaceResource>> subParents{b.surface.lock()};
+        for (const auto& node : b.subsurfaces) {
+            if (node.surface.expired() || node.role.expired()) { invalidate(); return; }
+            auto surface = node.surface.lock();
+            subParents.push_back(surface);
+            b.popupWatch->listeners.emplace_back(surface->m_events.map.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(surface->m_events.unmap.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(surface->m_events.destroy.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(node.role->m_events.destroy.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(surface->m_events.commit.listen([node, invalidate] {
+                if (node.surface.expired() || node.role.expired()) { invalidate(); return; }
+                const auto surface = node.surface.lock();
+                const auto sub = node.role.lock();
+                if (sub->m_parent != node.parent || sub->m_position != node.position || sub->m_zIndex != node.z ||
+                    surface->m_current.size != node.size || surface->m_current.offset != node.offset ||
+                    surface->m_current.scale != node.scale || int(surface->m_current.transform) != node.transform)
+                    invalidate();
+            }));
+        }
+        for (const auto& surface : subParents)
+            b.popupWatch->listeners.emplace_back(surface->m_events.newSubsurface.listen([invalidate](SP<CWLSubsurfaceResource>) { invalidate(); }));
         b.popupWatch->listeners.emplace_back(b.window->m_xdgSurface->m_events.newPopup.listen([invalidate](SP<CXDGPopupResource>) { invalidate(); }));
         for (const auto& candidate : b.window->m_xdgSurface->m_owner->m_surfaces) {
             if (candidate.expired() || candidate->m_popup.expired()) continue;
@@ -701,6 +797,8 @@ struct State {
             // invalidate even unrelated popup changes; destination() still
             // requires the exact mapped, observed root ancestry.
             auto popup = candidate->m_popup.lock();
+            if (auto surface = candidate->m_surface.lock())
+                b.popupWatch->listeners.emplace_back(surface->m_events.newSubsurface.listen([invalidate](SP<CWLSubsurfaceResource>) { invalidate(); }));
             b.popupWatch->listeners.emplace_back(popup->m_events.reposition.listen(invalidate));
             b.popupWatch->listeners.emplace_back(popup->m_events.dismissed.listen(invalidate));
             b.popupWatch->listeners.emplace_back(popup->m_events.destroy.listen(invalidate));
@@ -726,6 +824,8 @@ struct State {
         if (!environment() || b.revision != revision || b.surface.expired() || b.window.expired() || b.monitor.expired()) return false;
         auto w = b.window.lock(); auto m = b.monitor.lock();
         std::vector<odin_scope::NativeAncestor> chain;
+        std::vector<SubsurfaceNode> subsurfaces;
+        if (!subsurfaceInventory(b, subsurfaces) || subsurfaces != b.subsurfaces) return false;
         if (!b.processFD || !b.image.valid() || !b.popupWatch || !b.popupWatch->valid || !provenance(w, chain) || chain != b.ancestry || popupInventory(b) != b.popups) return false;
         pollfd identity{*b.processFD, POLLIN, 0};
         if (poll(&identity, 1, 0) != 0) return false;
@@ -848,10 +948,15 @@ struct State {
         Snapshot target;
         if (Desktop::focusState()) target.window = Desktop::focusState()->window();
         if (!target.window.expired()) target.surface = target.window->resource();
+        target.popups = popupInventory(target);
+        const bool inventoryKnown = subsurfaceInventory(target, target.subsurfaces);
+        auto pointerSurface = g_pSeatManager ? g_pSeatManager->m_state.pointerFocus.lock() : nullptr;
         std::vector<odin_scope::PopupAncestor> pointerChain;
-        const bool pointerKnown = g_pSeatManager && popupChain(target, g_pSeatManager->m_state.pointerFocus.lock(), pointerChain);
-        put(j.get(), "current_pointer_role", std::string(pointerKnown ? (pointerChain.size() == 1 ? "root" : "owned-popup") : "other"));
-        put(j.get(), "pointer_popup_depth", int64_t(pointerKnown ? pointerChain.size() - 1 : 0));
+        const bool pointerKnown = inventoryKnown && destination(target, pointerSurface);
+        const bool subsurface = pointerKnown && pointerSurface->m_role->role() == SURFACE_ROLE_SUBSURFACE;
+        if (pointerKnown && !subsurface) popupChain(target, pointerSurface, pointerChain);
+        put(j.get(), "current_pointer_role", std::string(pointerKnown ? (subsurface ? "owned-subsurface" : (pointerChain.size() == 1 ? "root" : "owned-popup")) : "other"));
+        put(j.get(), "pointer_popup_depth", int64_t(!pointerChain.empty() ? pointerChain.size() - 1 : 0));
         return j;
     }
     J snapshot(const std::string& output) {
@@ -882,6 +987,7 @@ struct State {
         }
         b.surface = w->resource(); b.window = w; b.monitor = m;
         b.popups = popupInventory(b);
+        if (!subsurfaceInventory(b, b.subsurfaces)) return status(false, "subsurface-inventory-unknown-or-unbounded");
         if (b.popups != watchedPopups) { watchedPopups = b.popups; ++revision; }
         watchPopups(b);
         b.pos = w->m_realPosition->value(); b.size = w->m_realSize->value();
