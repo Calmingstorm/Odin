@@ -47,7 +47,7 @@ def expectation_arguments(expected):
 
 def execution_receipt(raw, result):
     """Preserve release even on missing verification; never forward native prose."""
-    from .error_guidance import _GROUP_PREFLIGHT
+    from .error_guidance import _GROUP_PREFLIGHT, safety_terminal
 
     raw = raw if type(raw) is dict else {}
     released = raw.get("released") is True
@@ -145,6 +145,10 @@ def execution_receipt(raw, result):
             }):
         result["reason"] = reason
         safe["reason"] = reason
+    # Keep negative nested safety evidence for every reason, not a special-case
+    # interruption allowlist. Do not forward raw native prose or large receipts.
+    if safety_terminal(raw):
+        result["verification"]["terminal"] = True
     path = raw.get("targeting_path")
     if type(path) is str and path in {
         "native_atspi_identity",

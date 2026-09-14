@@ -23,7 +23,7 @@ def test_normalized_clean_interruption_requests_fresh_observation():
     assert result["status"] == "interrupted"
     assert result["reason"] == "hyprland_dispatch_interrupted_after_release"
     assert result["execution"]["released"] is True
-    assert result["next_action"] == "observe_fresh"
+    assert result["next_action"] == "observe_and_reconcile"
     assert result["recoverable"] is True
     assert result["terminal"] is False
     assert result["replay_permitted"] is False
@@ -32,8 +32,8 @@ def test_normalized_clean_interruption_requests_fresh_observation():
 
 @pytest.mark.parametrize("negative", [
     {"released": False}, {"release_confirmed": False}, {"terminal": True},
-    {"uncertain_outcome": True}, {"state": "closed"}, {"state": "quarantined"},
-    {"state": "unknown"}, {"fresh_session_required": True},
+    {"uncertain_outcome": True}, {"state": "quarantined"},
+    {"state": "unknown"},
     {"cleanup": {"complete": False}}, {"held_input": True},
 ])
 def test_normalization_preserves_discontinuity_fence(negative):
@@ -59,7 +59,7 @@ def test_unknown_status_is_not_clean_interruption():
 
 @pytest.mark.parametrize("negative", [
     {"status": "unknown"}, {"released": False}, {"terminal": True},
-    {"state": "closed"}, {"held_input": True}, {"cleanup": {"complete": False}},
+    {"held_input": True}, {"cleanup": {"complete": False}},
 ])
 def test_nested_verification_contradictions_still_fence(negative):
     assert failure_guidance(receipt(verification=negative))["terminal"] is True
@@ -79,4 +79,5 @@ def test_all_effect_expectations_keep_safety_contradictions(kind, fact):
         source_id="source", source_revision=1, consent_generation=1))
     result = effect_receipt(receipt(**{fact: True}), observation, {"type": kind})
     assert result["verification"][fact] is True
-    assert failure_guidance(result)["terminal"] is True
+    # Fresh session is a continuity requirement, not evidence of held input.
+    assert failure_guidance(result)["terminal"] is (fact == "held_input")

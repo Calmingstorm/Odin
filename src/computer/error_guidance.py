@@ -58,26 +58,34 @@ def exception_reason(error: Exception) -> str:
     return "permission_denied" if isinstance(error, PermissionError) else "computer_rejected"
 
 
-def guidance(reason: str, *, terminal: bool = False) -> dict:
-    next_action = "operator_intervention_required"
+def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False) -> dict:
+    # A reason selects useful guidance, never establishes dispatch/release facts.
+    # Even familiar preflight codes can escape a later capture or batch step.
+    # Only affirmative receipt evidence may classify a failure as recoverable.
+    terminal = terminal or not safe_receipt
+    next_action = "operator_intervention_required" if terminal else "observe_fresh"
     instruction = (
         "Stop input. Have the operator inspect safety and release state. If release is "
         "unknown, the operator must RELEASE-ALL, close the fenced session, and start "
         "anew with renewed consent and fresh observation."
+        if terminal else
+        "The receipt establishes a safe input boundary. This is not task failure. "
+        "Observe once, inspect what happened, then CONTINUE the task with new action ids. "
+        "Do not assume the previous input was sent or released without a receipt."
     )
     if not terminal and reason == "hyprland_dispatch_interrupted_after_release":
         next_action = "observe_fresh"
         instruction = (
-            "Owned input release is confirmed, but dispatch was interrupted and the UI "
+            "When owned input release is confirmed, dispatch may still be interrupted and the UI "
             "effect is not established. Obtain and inspect fresh pixels and their binding "
             "before planning a DIFFERENT action. If paused, explicitly resume using the "
             "current session generation before observing. Never repeat the interrupted action. "
-            "This clean interruption does not require operator input-release intervention."
+            "A confirmed-clean interruption does not require operator input-release intervention."
         )
     elif not terminal and reason == "effect_unknown_reconcile_no_replay":
         next_action = "inspect_session_and_reconcile_effect"
         instruction = (
-            "Input release is confirmed, but the action's effect is uncertain. Read session "
+            "A released action can still have an uncertain effect. Read session "
             "status, obtain fresh pixels, and inspect what actually happened before planning "
             "a DIFFERENT action. If the released session was closed, inventory and start a "
             "fresh authorized session first; if paused, explicitly resume with current "
@@ -113,7 +121,7 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
     elif not terminal and reason in _GROUP_PREFLIGHT:
         next_action = "observe_fresh"
         instruction = (
-            "No requested input was dispatched. The observed application target is stale, "
+            "The observed application target is stale, "
             "occluded, or not currently eligible. Observe and inspect the current pixels and "
             "binding before choosing a new action. Do not act through another application's "
             "window or a desktop panel."
@@ -130,6 +138,11 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
             "crop and verify the application and target. Do not steal focus."
         )
     recoverable = next_action != "operator_intervention_required"
+    if recoverable:
+        instruction += (
+            " This is not task failure. Inspect fresh evidence, then CONTINUE the task "
+            "with new action ids."
+        )
     return {
         "recoverable": recoverable,
         "terminal": not recoverable,
@@ -141,6 +154,90 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
     }
 
 
+def _receipt_nodes(value, local_release=False):
+    """Walk nested batch and cleanup receipts, excluding observation payloads."""
+    if isinstance(value, dict):
+        execution = value.get("execution")
+        local_release = local_release or (
+            value.get("released") is True or value.get("release_confirmed") is True
+            or isinstance(execution, dict) and execution.get("released") is True
+        )
+        yield value, local_release
+        for key, child in value.items():
+            if key in {"execution", "verification", "cleanup", "diagnostics",
+                       "receipt", "receipts", "steps", "results", "release"}:
+                yield from _receipt_nodes(child, local_release)
+    elif isinstance(value, (list, tuple)):
+        for child in value:
+            yield from _receipt_nodes(child)
+
+
+def safety_terminal(result: dict) -> bool:
+    """Negative safety evidence wins, regardless of reason or sibling releases."""
+    for item, local_release in _receipt_nodes(result):
+        # Present but malformed safety evidence is not equivalent to absence.
+        for key in ("released", "release_confirmed", "release_ack", "held_input",
+                    "unknown_release", "uncertain_outcome", "terminal"):
+            if key in item and type(item[key]) is not bool:
+                return True
+        if "release" in item and not isinstance(item["release"], dict) and (
+            item["release"] not in ("confirmed", "released", "complete", "completed")
+        ):
+            return True
+        if (
+            item.get("released") is False
+            or item.get("release_confirmed") is False
+            or item.get("release_ack") is False and not local_release
+            or item.get("held_input") is True
+            or item.get("unknown_release") is True
+            or item.get("uncertain_outcome") is True
+            or item.get("terminal") is True
+            or "state" in item and item["state"] not in (
+                "starting", "active", "paused", "closed", "cancelled", "fresh_target_required",
+            )
+            or "status" in item and item["status"] not in (
+                "executed", "verified", "not_satisfied", "interrupted", "unavailable",
+                "rejected", "failed", "satisfied", "visual_review_required", "complete",
+                "completed", "ok", "success", "released", "confirmed",
+            )
+            or item.get("release") in ("unknown", "held", "failed", "unconfirmed")
+        ):
+            return True
+        cleanup = item.get("cleanup")
+        if isinstance(cleanup, dict) and (
+            cleanup.get("complete") is not True
+            or cleanup.get("status") in ("failed", "incomplete", "unknown")
+        ):
+            return True
+        if cleanup in (False, "failed", "incomplete", "unknown"):
+            return True
+    return False
+
+
+def safe_input_receipt(result: dict) -> bool:
+    """Require affirmative aggregate release or non-dispatch, not missing risk."""
+    if safety_terminal(result):
+        return False
+    execution = result.get("execution")
+    cleanup = result.get("cleanup")
+    aggregates = [result]
+    if isinstance(execution, dict):
+        aggregates.append(execution)
+    if isinstance(cleanup, dict) and cleanup.get("complete") is True:
+        aggregates.append(cleanup)
+    if any(item.get("released") is True or item.get("release_confirmed") is True
+           for item in aggregates):
+        return True
+    # A not-sent suffix or contradictory top-level flag cannot settle an earlier
+    # sent step. Without independent release, all present dispatch evidence must
+    # agree with the aggregate non-dispatch receipt.
+    for item, _ in _receipt_nodes(result):
+        if any(key in item and item[key] is not False for key in ("injected", "sent")):
+            return False
+    return any(item.get("injected") is False or item.get("sent") is False
+               for item in aggregates)
+
+
 def failure_guidance(result: dict, *, terminal: bool = False) -> dict:
     """Keep native reasons and receipts intact, adding a conservative summary."""
     evidence = result.get("verification")
@@ -148,37 +245,34 @@ def failure_guidance(result: dict, *, terminal: bool = False) -> dict:
     reason = result.get("reason") or evidence.get("reason") or result.get("error")
     if not isinstance(reason, str):
         reason = "computer_not_satisfied"
-    # Unknown outcome/release takes precedence over any recoverable stale reason.
-    execution = result.get("execution")
-    released_effect_unknown = (
-        reason in {"effect_unknown_reconcile_no_replay",
-                   "hyprland_dispatch_interrupted_after_release"}
-        and (isinstance(execution, dict) and execution.get("released") is True
-             or result.get("released") is True or result.get("release_confirmed") is True)
-    )
-    if isinstance(execution, dict):
-        terminal = terminal or execution.get("released") is False
-    for item in (result, evidence):
-        cleanup = item.get("cleanup")
-        terminal = terminal or item.get("status") in {"unknown", "interrupted"} and not (
-            released_effect_unknown and item.get("status") == "interrupted"
-        )
-        terminal = terminal or item.get("state") in {
-            "unknown", "quarantined", "closed", "cancelled",
-        }
-        terminal = terminal or item.get("fresh_session_required") is True
-        terminal = terminal or item.get("held_input") is True
-        terminal = terminal or item.get("uncertain_outcome") is True
-        terminal = terminal or item.get("release_confirmed") is False
-        # Native ACK and receiver proof are diagnostics, not a second safety
-        # verdict over authoritative local cleanup. Never override actual
-        # uncertainty/held-input or an explicitly failed release above.
-        local_release = (
-            item.get("released") is True or item.get("release_confirmed") is True
-            or isinstance(execution, dict) and execution.get("released") is True
-        )
-        terminal = terminal or item.get("released") is False
-        terminal = terminal or item.get("release_ack") is False and not local_release
-        terminal = terminal or item.get("terminal") is True
-        terminal = terminal or (isinstance(cleanup, dict) and cleanup.get("complete") is not True)
-    return {**result, **guidance(reason, terminal=terminal)}
+    terminal = terminal or safety_terminal(result)
+    summary = guidance(reason, terminal=terminal, safe_receipt=safe_input_receipt(result))
+    if not summary["terminal"]:
+        for source in (result, evidence, result.get("diagnostics")):
+            if (isinstance(source, dict) and isinstance(source.get("next_action"), str)
+                    and source["next_action"] not in {
+                        "", "stop", "operator_intervention_required",
+                    }):
+                summary["next_action"] = source["next_action"]
+                break
+        execution = result.get("execution")
+        if (result.get("released") is True or result.get("release_confirmed") is True
+                or isinstance(execution, dict) and execution.get("released") is True):
+            summary["instruction"] = (
+                "Owned input is cleanly released according to the receipt. "
+                + summary["instruction"]
+            )
+        elif (result.get("injected") is False or result.get("sent") is False
+              or isinstance(execution, dict) and (
+                  execution.get("injected") is False or execution.get("sent") is False
+              )):
+            summary["instruction"] = (
+                "The previous requested input was not sent. " + summary["instruction"]
+            )
+        if (result.get("fresh_session_required") is True
+                or result.get("state") in {"closed", "cancelled"}):
+            summary["instruction"] += (
+                " Obtain a fresh authorized session before observing; "
+                "do not act on the closed binding."
+            )
+    return {**result, **summary}

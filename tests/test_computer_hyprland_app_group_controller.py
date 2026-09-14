@@ -104,7 +104,7 @@ async def test_native_prepare_delivers_new_pixels_without_original_click(normal,
     "hyprland_fresh_observation_required",
 ])
 def test_group_handshake_guidance_never_replays_or_requires_release_intervention(reason):
-    result = guidance(reason)
+    result = guidance(reason, safe_receipt=True)
     assert result["recoverable"] and not result["terminal"]
     assert result["replay_permitted"] is False
     assert guidance(reason, terminal=True)["terminal"]

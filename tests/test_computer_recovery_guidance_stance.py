@@ -6,12 +6,13 @@ from src.computer.error_guidance import failure_guidance, guidance
 
 @pytest.mark.parametrize("reason", ["stale_generation", "resume_unavailable"])
 def test_session_state_error_requests_status_not_unconditional_operator(reason):
-    result = guidance(reason)
+    result = guidance(reason, safe_receipt=True)
     assert result["next_action"] == "inspect_session_status"
     assert result["recoverable"] is True
     assert result["replay_permitted"] is False
     assert "quarantined" in result["instruction"]
     assert guidance(reason, terminal=True)["terminal"] is True
+    assert guidance(reason)["terminal"] is True
 
 
 def test_missing_native_ack_does_not_override_confirmed_local_release():

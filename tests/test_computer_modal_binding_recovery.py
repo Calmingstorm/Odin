@@ -11,7 +11,7 @@ import pytest
 
 from src.computer.integration import ComputerIntegration
 from src.computer.models import ComputerError
-from tests.test_computer_keyboard_grounding_r6 import fixture
+from tests.test_computer_keyboard_grounding_r6 import fixture, raster
 from tests.test_computer_native_vision_r5 import client, serving
 
 
@@ -68,6 +68,11 @@ async def test_delivered_ctrl_n_dialog_create_binding(tmp_path, monkeypatch, dri
                 return image
 
         action.update(operation="key", key="ctrl+n")
+        # This fixture relabels an X11 adapter, not a real native Hyprland
+        # attachment. It tests modal delivery, not permission to ignore raster
+        # drift. Genuine Hyprland redraw tolerance is covered with the actual
+        # adapter by test_computer_native_keyboard_focus_class.py.
+        state["image"] = raster(0)
         image = await deliver("computer_act", action, "open-dialog")
         receipt = image["__computer_action_receipt__"]
         assert receipt["execution"]["injected"] is True

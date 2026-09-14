@@ -15,7 +15,7 @@ from pathlib import Path
 
 from ..tools.output_authorization import tool_scope_allows
 from ..tools.result_validator import ToolResult
-from .error_guidance import exception_reason, failure_guidance, guidance
+from .error_guidance import exception_reason, failure_guidance, guidance, safety_terminal
 from .models import RequestContext
 
 logger = logging.getLogger(__name__)
@@ -258,7 +258,7 @@ class ComputerIntegration:
             result = await method(grant.context, values)
             if isinstance(result, dict) and (
                 result.get("status") in {"unknown", "interrupted", "unavailable", "not_satisfied", "rejected", "failed"}
-                or result.get("state") in {"unknown", "quarantined"}
+                or safety_terminal(result)
                 or result.get("uncertain_outcome") is True
                 or (isinstance(result.get("cleanup"), dict) and result["cleanup"].get("complete") is not True)
             ):
@@ -266,11 +266,8 @@ class ComputerIntegration:
             clean_interruption = (
                 isinstance(result, dict)
                 and result.get("status") == "interrupted"
-                and result.get("reason") == "hyprland_dispatch_interrupted_after_release"
                 and result.get("recoverable") is True
                 and result.get("terminal") is False
-                and isinstance(result.get("execution"), dict)
-                and result["execution"].get("released") is True
             )
             if (
                 name == "computer_act"
@@ -313,15 +310,7 @@ class ComputerIntegration:
                     raise ComputerError("invalid_observation_response") from None
                 grant.images.append(image)
                 return image
-            unknown = isinstance(result, dict) and (
-                (result.get("status") in {"unknown", "interrupted"} and not clean_interruption)
-                or result.get("state") in {"unknown", "quarantined"}
-                or (
-                    isinstance(result.get("cleanup"), dict)
-                    and result["cleanup"].get("complete") is not True
-                )
-                or result.get("uncertain_outcome") is True
-            )
+            unknown = isinstance(result, dict) and safety_terminal(result)
             rejected = clean_interruption or isinstance(result, dict) and result.get("status") in {
                 "unavailable",
                 "not_satisfied",

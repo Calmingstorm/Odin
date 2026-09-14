@@ -8,6 +8,7 @@ caret blink. This is visual stability evidence, not element semantics.
 from io import BytesIO
 
 from .models import ComputerError
+from .policy import FRAME_FRESH_SECONDS, observation_input
 
 STROKE_OPERATIONS = frozenset({"drag", "polyline"})
 POINTER_OPERATIONS = frozenset(
@@ -25,6 +26,64 @@ TARGET_RADIUS = 24
 MAX_CHANGED_FRACTION = 0.02
 MAX_CHANGED_PIXELS = 48
 CHANNEL_TOLERANCE = 12
+
+
+def native_keyboard_focus_trusted(grant, live, original, current, *, now):
+    """Raster exemption only, never permission to dispatch or re-arm input.
+
+    The native Hyprland adapter authenticates ownership, native focus and modal
+    membership at capture, encoding their binding in source_revision. Require
+    that actual adapter's current frame, not a backend/platform label supplied
+    by another adapter. Exact geometry includes source, scope, focus and modal.
+    Callers still enforce authorization, delivery, deadlines and native leases.
+    """
+    capabilities = live.capabilities
+    if (
+        capabilities is None
+        or live.revoked
+        or grant.environment != "existing_session"
+        or capabilities.environment != grant.environment
+        or capabilities.platform != grant.platform
+        or original.geometry != current.geometry
+        or not 0 <= now - current.captured_at <= FRAME_FRESH_SECONDS
+    ):
+        return False
+    try:
+        observation_input(grant, live, original)
+        observation_input(grant, live, current)
+    except ComputerError:
+        return False
+    if capabilities.platform == "x11":
+        return True
+    if capabilities.platform != "wayland" or capabilities.backend != "hyprland":
+        return False
+    from .runtime.hyprland_backend import HyprlandRuntimeBackend
+
+    backend = live.backend
+    if not isinstance(backend, HyprlandRuntimeBackend):
+        return False
+    frame = backend._frame
+    scope = backend._scope
+    return (
+        not backend._paused
+        and not backend._closed
+        and not backend._release_failed
+        and backend._owner_handle is not None
+        and frame is not None
+        and isinstance(scope, dict)
+        and scope.get("authenticated") is True
+        and scope.get("native_wayland") is True
+        and scope.get("safe_focus") is True
+        and frame.source == current.source
+        and frame.scope == current.scope
+        and frame.width == current.width
+        and frame.height == current.height
+        and frame.delivered_to_source == current.delivered_to_source
+        and frame.focused is True
+        and frame.modal == current.modal
+        and frame.modal_kind == current.modal_kind
+        and (current.modal is None or current.modal_kind == "safe_application")
+    )
 
 
 def pointer_anchor(action):

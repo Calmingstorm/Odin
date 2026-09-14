@@ -25,13 +25,29 @@ def test_facade_uses_actual_converter_not_stale_model_allowlist():
 async def test_known_failure_is_not_reported_as_success_or_uncertain(status, monkeypatch):
     service, state = facade(), dispatch_state()
     monkeypatch.setattr("src.computer.integration.require_vision", lambda _: None)
-    service.controller.act.return_value = {"status": status, "reason": "fixture_refusal"}
+    service.controller.act.return_value = {
+        "status": status, "reason": "fixture_refusal",
+        "execution": {"injected": False, "released": True},
+    }
     block = call("computer_act")
     with service.foreground(state, block):
         result = await service._tool(block.name, block.input)
     assert result.ok is False
     assert result.error == "computer_not_satisfied"
     assert not result.uncertain_outcome
+
+
+@pytest.mark.parametrize("status", ["unavailable", "not_satisfied", "rejected", "failed"])
+async def test_failure_without_execution_evidence_remains_fenced(status, monkeypatch):
+    service, state = facade(), dispatch_state()
+    monkeypatch.setattr("src.computer.integration.require_vision", lambda _: None)
+    service.controller.act.return_value = {"status": status, "reason": "fixture_refusal"}
+    block = call("computer_act")
+    with service.foreground(state, block):
+        result = await service._tool(block.name, block.input)
+    assert result.ok is False
+    assert result.error == "outcome_unknown"
+    assert result.uncertain_outcome
 
 
 async def test_pause_remains_available_without_native_vision():

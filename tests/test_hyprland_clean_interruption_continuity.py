@@ -59,7 +59,10 @@ async def test_clean_partial_field_reobserves_same_session_then_new_stroke(
     assert receipt["reason"] == "hyprland_dispatch_interrupted_after_release", result
     assert receipt["execution"]["released"] is True
     assert "Image loaded" in result["content"], result
-    assert '"next_action":"observe_fresh"' in result["content"], result
+    # Preserve the controller's specific next action rather than overwriting it
+    # with the presentation layer's generic observation recommendation.
+    assert receipt["diagnostics"]["next_action"] == "observe_and_reconcile"
+    assert '"next_action":"observe_and_reconcile"' in result["content"], result
     assert controller.store.get_session(sid).state == "active"
     assert controller.store.get_session(sid).generation == rig.grant["generation"]
     assert backend.input_readiness == "ready"

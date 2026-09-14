@@ -12,7 +12,7 @@ def test_confirmed_release_unknown_effect_reconciles_without_replay():
                          "next_action": "start_fresh_session_and_reconcile"},
     })
     assert result["recoverable"] is True
-    assert result["next_action"] == "inspect_session_and_reconcile_effect"
+    assert result["next_action"] == "start_fresh_session_and_reconcile"
     assert result["replay_permitted"] is False
     assert result["status"] == "interrupted"
     assert "DIFFERENT action" in result["instruction"]

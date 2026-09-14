@@ -1,5 +1,6 @@
 """Normal service and Discord loop classification, with synthetic OS I/O only."""
 
+import json
 from copy import deepcopy
 from unittest.mock import AsyncMock
 
@@ -15,6 +16,42 @@ def receipt():
         "reason": "hyprland_dispatch_interrupted_after_release",
         "execution": {"injected": True, "released": True},
     }
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("pixels", [False, True])
+@pytest.mark.parametrize("status", ["not_satisfied", "interrupted"])
+async def test_sequence_interruption_preserves_recovery_in_text_and_pixels(
+        normal, monkeypatch, pixels, status):
+    grant = await start(normal)
+    await observe(normal, grant)
+    request = action(normal, grant)
+    controller = normal.service.controller
+    next_action = "inspect_interruption_then_plan_new_action_ids"
+
+    async def interrupted(context, values):
+        result = {"status": status, "reason": "sequence_visual_target_changed",
+                  "verification": {"status": "interrupted", "next_action": next_action},
+                  "execution": {"injected": False, "released": True}}
+        if pixels:
+            result["next_observation"] = await controller.observe(context, grant)
+        return result
+
+    monkeypatch.setattr(controller, "act", interrupted)
+    block = call("computer_act", **request)
+    with normal.service.foreground(normal.state, block):
+        delivered = await normal.service._tool(block.name, request)
+    if pixels:
+        receipt = delivered["__computer_action_receipt__"]
+        assert receipt["status"] == "not_satisfied"
+    else:
+        assert delivered.ok is False
+        assert delivered.uncertain_outcome is False
+        assert delivered.error == "computer_not_satisfied"
+        receipt = json.loads(delivered.output)
+    assert receipt["next_action"] == next_action
+    assert receipt["recoverable"] is True
+    assert receipt["terminal"] is False
 
 
 CONTRADICTIONS = [
@@ -39,8 +76,11 @@ async def test_service_clean_interruption_is_failed_not_unknown(normal, monkeypa
     with normal.service.foreground(normal.state, block):
         delivered = await normal.service._tool(block.name, request)
     assert delivered.ok is False
-    assert delivered.uncertain_outcome is bool(changes)
-    assert delivered.error == ("outcome_unknown" if changes else "computer_not_satisfied")
+    unsafe = bool(changes) and changes not in (
+        {"state": "closed"}, {"reason": "different_interruption"},
+    )
+    assert delivered.uncertain_outcome is unsafe
+    assert delivered.error == ("outcome_unknown" if unsafe else "computer_not_satisfied")
 
 
 @pytest.mark.asyncio
