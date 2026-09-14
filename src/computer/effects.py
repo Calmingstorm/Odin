@@ -107,6 +107,22 @@ def execution_receipt(raw, result):
     if result["status"] in {"interrupted", "unknown"}:
         safe["next_action"] = "stop" if not released else "observe_and_reconcile"
     result["diagnostics"] = safe
+    # Preserve only bounded, known pre-input native refusal codes. Stripping
+    # these into backend_refused makes a harmless stale frame look like an
+    # unknown release to the caller. No raw native messages cross this boundary.
+    if (raw.get("status") == "unavailable" and injected is False and released
+            and phase == "preflight" and reason in {
+                "hyprland_observation_changed",
+                "hyprland_observation_expired",
+                "hyprland_fresh_application_observation_required",
+                "hyprland_focus_changed_before_dispatch",
+                "hyprland_focus_changed",
+                "hyprland_scope_evidence_expired",
+                "hyprland_capture_settle_budget_exhausted",
+                "hyprland_capture_scope_changed",
+            }):
+        result["reason"] = reason
+        safe["reason"] = reason
     path = raw.get("targeting_path")
     if type(path) is str and path in {
         "native_atspi_identity",

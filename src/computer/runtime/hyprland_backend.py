@@ -1130,7 +1130,12 @@ class HyprlandRuntimeBackend:
                 raise ComputerError("hyprland_fresh_application_observation_required")
             command = self._command(action, frame, scope)
             rendered, fresh, _ = await self._capture(self._crop)
-            stable = rendered.png == frame.image_bytes
+            # Keyboard input targets the authenticated native focus, not a
+            # screenshot pixel. Caret/clock/repaint changes must not veto Tab or
+            # typing. Exact binding (including ABA serial/output) and render
+            # geometry are still checked below and again before dispatch.
+            # Pointer operations retain their existing raster/anchor checks.
+            stable = action["type"] in {"key", "type"} or rendered.png == frame.image_bytes
             if not stable and action["type"] in {
                 "click",
                 "double_click",

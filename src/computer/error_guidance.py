@@ -19,6 +19,7 @@ _OBSERVATION = frozenset({
     "wayland_scope_evidence_expired",
     "hyprland_fresh_application_observation_required", "hyprland_observation_expired",
     "hyprland_observation_changed", "hyprland_capture_settle_budget_exhausted",
+    "hyprland_scope_evidence_expired", "hyprland_capture_scope_changed",
     "hyprland_fractional_or_unknown_geometry", "hyprland_snapshot_capacity",
 })
 _FOCUS = frozenset({
