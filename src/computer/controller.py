@@ -1040,6 +1040,16 @@ class ComputerController:
                 result["input_limits"] = deepcopy(limits)
         return result
 
+    @staticmethod
+    def _model_observation_seconds(live, default=DELIVERED_GROUNDING_SECONDS):
+        """Model reasoning budget only, never capture freshness or native leases."""
+        if live.capabilities is not None and live.capabilities.backend == "hyprland":
+            value = getattr(live.backend, "observation_valid_seconds", None)
+            # Trusted backend policy, bounded defensively; bool/NaN/inf are invalid.
+            if type(value) in (int, float) and 0 < value <= 300:
+                return value
+        return default
+
     def _input_status(self, live, grant):
         limits = getattr(live.backend, "input_limits", {})
         if live.revoked:
@@ -1060,7 +1070,7 @@ class ComputerController:
             not live.observations
             or not 0
             <= self.monotonic() - next(reversed(live.observations.values())).captured_at
-            <= FRAME_FRESH_SECONDS
+            <= self._model_observation_seconds(live, FRAME_FRESH_SECONDS)
         ):
             supported, readiness, blocker = (
                 False,
@@ -1143,6 +1153,8 @@ class ComputerController:
                             "target_id": target_id,
                             "label": candidate["label"],
                             "output_id": candidate["output_id"],
+                            **({"output_name": candidate["output_name"]}
+                               if isinstance(candidate.get("output_name"), str) else {}),
                         }
                     )
                 self._selection_bindings[epoch] = {
@@ -1837,7 +1849,7 @@ class ComputerController:
         obs = live.observations.get(observation_id)
         if (
             obs is None
-            or not 0 <= self.monotonic() - obs.captured_at <= DELIVERED_GROUNDING_SECONDS
+            or not 0 <= self.monotonic() - obs.captured_at <= self._model_observation_seconds(live)
         ):
             raise ComputerError("stale_observation")
         observation_input(grant, live, obs)
@@ -1854,7 +1866,7 @@ class ComputerController:
             for _ in range(3):
                 if current.geometry == obs.geometry:
                     break
-                if self.monotonic() - obs.captured_at >= DELIVERED_GROUNDING_SECONDS - 0.15:
+                if self.monotonic() - obs.captured_at >= self._model_observation_seconds(live) - 0.15:
                     break
                 await asyncio.sleep(0.15)
                 self._active(grant)
@@ -1863,7 +1875,7 @@ class ComputerController:
                     break
         now = self.monotonic()
         if (
-            not 0 <= now - obs.captured_at <= DELIVERED_GROUNDING_SECONDS
+            not 0 <= now - obs.captured_at <= self._model_observation_seconds(live)
             or not 0 <= now - current.captured_at <= FRAME_FRESH_SECONDS
         ):
             raise ComputerError("stale_observation")
@@ -2041,7 +2053,7 @@ class ComputerController:
             await self._auth(context)
             self._active(grant)
             if (
-                not 0 <= self.monotonic() - original.captured_at <= DELIVERED_GROUNDING_SECONDS
+                not 0 <= self.monotonic() - original.captured_at <= self._model_observation_seconds(live)
                 or not 0 <= self.monotonic() - current.captured_at <= FRAME_FRESH_SECONDS
             ):
                 raise ComputerError("stale_observation")

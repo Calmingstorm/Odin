@@ -38,6 +38,27 @@ _INSTANCE_ID = re.compile(r"i1-[0-9a-f]{32}\Z")
 _CANDIDATE_ID = re.compile(r"c1-[0-9a-f]{32,128}\Z")
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _WINDOW_ID = re.compile(r"w1-[0-9a-f]{48}-[0-9a-f]{48}\Z")
+# Only documented static compositor reasons may cross the public boundary.
+_NATIVE_REFUSALS = frozenset({
+    "lock-or-input-held", "stale-topology-epoch", "requested-identity-required",
+    "stale-or-ineligible-candidate", "native-focus-not-confirmed",
+    "lock-or-unknown-state", "unknown-or-nonnative-focus",
+    "foreign-or-unknown-toplevel-provenance", "native-process-lifetime-unavailable",
+    "native-process-image-unavailable", "fractional-or-unknown-geometry",
+    "focus-not-contained-or-ambiguous", "snapshot-capacity", "parent-lifetime-unavailable",
+    "owner-incarnation-refused", "owner-identity-refused", "owner-ledger-cap-or-late-capture",
+    "owner-lifetime-unavailable", "owner-ledger-missing", "owner-adoption-authority-refused",
+    "owner-adoption-unknown", "owner-adoption-query-refused", "owner-adoption-query-required",
+    "owner-adoption-original-refused", "owner-recovery-still-live-or-unproven",
+    "owner-recovery-peer-refused", "owner-command-unknown", "owner-command-refused",
+    "owner-command-conflict", "release-status-unknown", "release-command-refused",
+    "diagnostic-token-refused", "diagnostic-snapshot-refused", "unknown-operation",
+    "absolute-scope-deadline-required", "invalid-lease-or-cleanup-failed",
+    "renew-binding-refused", "already-armed", "owner-admission-retired", "stale-snapshot",
+    "ambiguous-keyboard", "missing-guardian-keyboard", "ambiguous-pointer",
+    "missing-or-wrong-output-pointer", "human-input-held", "owner-device-incarnation-changed",
+    "owner-ledger-cap", "invalid-json",
+})
 
 
 class HyprlandScopeFailure(WaylandScopeFailure):  # noqa: N818
@@ -704,6 +725,8 @@ class HyprlandScopeProvider:
                 and row.get("ok") is False
                 and row.get("error") == "window-geometry-unsettled"
             ):
+                if type(row.get("error")) is str and row["error"] in _NATIVE_REFUSALS:
+                    _fail("hyprland_" + row["error"].replace("-", "_"))
                 _fail()
             return row
         except HyprlandScopeFailure:
@@ -960,7 +983,8 @@ class HyprlandScopeProvider:
                 if (getattr(self, "_attested_plugin", None) is not None
                         and lifetime.get("plugin_epoch") != self._attested_plugin):
                     _fail("hyprland_scope_plugin_incarnation_changed")
-                public.append({"id": candidate_id, "label": label, "output_id": output_id})
+                public.append({"id": candidate_id, "label": label, "output_id": output_id,
+                               "output_name": output_name})
                 private[candidate_id] = {
                     **lifetime,
                     "output_id": output_id,
@@ -1080,7 +1104,7 @@ class HyprlandScopeProvider:
                 }
             )
             if (
-                set(row) - {"window_id", "plugin_epoch"}
+                set(row) - {"window_id", "plugin_epoch", "diagnostic_geometry_changed", "diagnostic_animating"}
                 != {
                     "ok",
                     "version",
@@ -1104,6 +1128,9 @@ class HyprlandScopeProvider:
                 or row.get("output_name") != candidate["output_name"]
                 or row.get("topology_digest") != candidate["topology_digest"]
                 or row.get("output") != candidate["output"]
+                or any(type(row[key]) is not bool for key in (
+                    "diagnostic_geometry_changed", "diagnostic_animating"
+                ) if key in row)
             ):
                 _fail("hyprland_scope_selection_invalid")
             identity = row.get("identity")

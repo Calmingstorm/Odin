@@ -69,6 +69,8 @@ struct guardian {
     bool keys[248], buttons[8], modifiers;
     bool ready, begun, action, input_sent, release_sent, release_acknowledged, release_status_v1;
     bool arm_definitively_refused;
+    /* Lifetime evidence: never reset between actions or after failed exchanges. */
+    bool arm_attempted, input_ever_attempted, release_not_required;
     bool disconnected, changed, gate_waiting, gate_allowed;
     /* Bounded transport evidence, never receiver or application proof. */
     const char *terminal_cause, *scope_outcome, *release_submission, *release_ack, *resource_closure;
@@ -303,6 +305,8 @@ static bool scope_bind(struct guardian *g, bool renew, uint64_t deadline) {
     snprintf(request, sizeof request, "{\"op\":\"%s\",\"token\":\"%s\",\"lease_ms\":%u,\"deadline_monotonic_ns\":%llu}\n", renew ? "renew" : "arm", g->arm_token, lease_ms, (unsigned long long)(deadline * 1000));
     g->scope_token[0] = 0;
     struct scope_reply r = {0};
+    /* Mark before transport: a lost/partial write or reply is ambiguous. */
+    if (!renew) { g->arm_attempted = true; g->release_not_required = false; }
     if (!scope_call(g, request, &r)) {
         if (g->scope_outcome && !strcmp(g->scope_outcome, "refused")) {
             g->terminal_cause = "scope_refused";
@@ -668,6 +672,14 @@ static void button(struct guardian *g,unsigned b,bool down) {
 }
 /* Cleanup never requires live focus/scope authority. */
 static bool release_all(struct guardian *g) {
+    if (g->ready && !g->arm_attempted && !g->input_ever_attempted) {
+        /* owner_capture is not arm. No plugin release authority was acquired;
+         * do not submit a bogus release or manufacture a native ACK. */
+        g->release_not_required = true;
+        g->release_sent = g->release_acknowledged = false;
+        g->release_submission = g->release_ack = "not_attempted";
+        return true;
+    }
     bool queued=!g->disconnected && g->pointer && g->keyboard;
     if (queued) {
         for (unsigned b=272;b<=279;++b) if (g->buttons[b-272]) button(g,b,false);
@@ -727,8 +739,17 @@ static bool release_all(struct guardian *g) {
     return g->release_acknowledged;
 }
 static void action_receipt(struct guardian *g,const char *event,const char *reason) {
-    char line[1024];
+    char line[1536];
     snprintf(line,sizeof line,"{\"event\":\"%s\",\"reason\":\"%s\",\"input_was_sent\":%s,\"release_sent\":%s,\"release_acknowledged\":%s,\"receiver_proven\":false,\"diagnostics\":{\"phase\":\"%s\",\"steps_planned\":%u,\"steps_completed\":%u,\"release\":\"%s\",\"reason\":\"%s\"},\"native_failure\":{\"command\":\"%s\",\"scope_operation\":\"%s\",\"scope_error\":\"%s\",\"input_loss_v1\":{\"terminal_cause\":\"%s\",\"scope_outcome\":\"%s\",\"events_queued\":%u,\"events_submitted\":%u,\"release_submission\":\"%s\",\"release_ack\":\"%s\",\"resource_closure\":\"%s\"}}}\n",event,reason,g->input_sent?"true":"false",g->release_sent?"true":"false",g->release_acknowledged?"true":"false",!strcmp(event,"action_done")?"complete":"release",g->planned,g->completed,g->release_acknowledged?"confirmed":"unknown",reason,g->command_name?g->command_name:"none",g->scope_operation?g->scope_operation:"none",g->scope_error?g->scope_error:"none",g->terminal_cause?g->terminal_cause:"orderly",g->scope_outcome?g->scope_outcome:"not_attempted",g->input_queued,g->input_submitted,g->release_submission?g->release_submission:"not_attempted",g->release_ack?g->release_ack:"not_attempted",g->resource_closure?g->resource_closure:"not_started");
+    if (!strcmp(event,"closed")) {
+        size_t n = strlen(line);
+        if (n < 2 || line[n-2] != '}') { fail(g,"transport-error"); return; }
+        snprintf(line+n-2,sizeof line-n+2,
+            ",\"prearm_cleanup_v1\":{\"ready\":%s,\"arm_attempted\":%s,\"input_ever_attempted\":%s,\"release_not_required\":%s,\"resources_closed\":%s}}\n",
+            g->ready?"true":"false",g->arm_attempted?"true":"false",
+            g->input_ever_attempted?"true":"false",g->release_not_required?"true":"false",
+            g->resource_closure && !strcmp(g->resource_closure,"complete")?"true":"false");
+    }
     if (!emit(line)) fail(g,"transport-error");
 }
 static void step(struct guardian *g) {
@@ -756,6 +777,7 @@ static void step(struct guardian *g) {
         g->gate_allowed=false; ++g->index; ++g->completed; return;
     }
     g->input_sent=true;
+    g->input_ever_attempted=true;
     if (e->kind==KEY) key(g,e->code,e->down);
     else if (e->kind==BUTTON) button(g,e->code,e->down);
     else if (e->kind==MOVE) {
@@ -889,7 +911,7 @@ int main(int argc,char **argv) {
     }
 cleanup:
     if (g->ready) (void)release_all(g);
-    int status=g->ready&&g->release_acknowledged?0:1;
+    int status=g->ready&&(g->release_acknowledged||g->release_not_required)?0:1;
     if (g->pointer) zwlr_virtual_pointer_v1_destroy(g->pointer);
     if (g->keyboard) zwp_virtual_keyboard_v1_destroy(g->keyboard);
     if (g->display) { (void)synchronize(g,50);wl_display_disconnect(g->display); g->resource_closure="display_disconnected"; }

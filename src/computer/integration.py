@@ -7,6 +7,7 @@ import asyncio
 import contextvars
 import hashlib
 import json
+import logging
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -15,6 +16,9 @@ from pathlib import Path
 from ..tools.output_authorization import tool_scope_allows
 from ..tools.result_validator import ToolResult
 from .models import RequestContext
+from .error_guidance import exception_reason, failure_guidance, guidance
+
+logger = logging.getLogger(__name__)
 
 COMPUTER_TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 NONVISUAL_OPERATIONS = frozenset({"stop", "cancel", "close", "status", "pause"})
@@ -231,7 +235,7 @@ class ComputerIntegration:
         grant = _grant.get()
         if grant is None or not self.grant_allows(name, grant.context.owner_id, grant.conversation):
             return ToolResult(
-                "Permission denied: no foreground computer grant.",
+                json.dumps({"status": "rejected", "reason": "permission_denied", **guidance("permission_denied")}),
                 ok=False,
                 error="permission_denied",
                 tool_name=name,
@@ -240,7 +244,7 @@ class ComputerIntegration:
             not isinstance(values, dict) or values.get("operation") != grant.nonvisual_operation
         ):
             return ToolResult(
-                "Permission denied: computer operation changed.",
+                json.dumps({"status": "rejected", "reason": "permission_denied", **guidance("permission_denied")}),
                 ok=False,
                 error="permission_denied",
                 tool_name=name,
@@ -252,6 +256,13 @@ class ComputerIntegration:
         }[name]
         try:
             result = await method(grant.context, values)
+            if isinstance(result, dict) and (
+                result.get("status") in {"unknown", "interrupted", "unavailable", "not_satisfied", "rejected", "failed"}
+                or result.get("state") in {"unknown", "quarantined"}
+                or result.get("uncertain_outcome") is True
+                or (isinstance(result.get("cleanup"), dict) and result["cleanup"].get("complete") is not True)
+            ):
+                result = failure_guidance(result)
             if (
                 name == "computer_act"
                 and isinstance(result, dict)
@@ -322,16 +333,29 @@ class ComputerIntegration:
         except Exception as exc:
             from .models import ComputerError
 
-            if isinstance(exc, (ComputerError, PermissionError)):
+            from .runtime.hyprland_scope import HyprlandScopeFailure
+
+            if isinstance(exc, (ComputerError, PermissionError, HyprlandScopeFailure)):
+                from .admission import InputAdmissionError
+
+                reason = exception_reason(exc)
+                rejection = {"status": "rejected", "reason": reason, **guidance(reason)}
+                if isinstance(exc, InputAdmissionError):
+                    rejection["input_admission"] = exc.admission.public()
                 return ToolResult(
-                    "Computer request rejected: " + str(exc),
+                    json.dumps(rejection, ensure_ascii=True),
                     ok=False,
                     error="computer_rejected",
                     tool_name=name,
                 )
-            await self.stop_context(grant.context)
+            # Never log exception text/traceback: native errors can contain secrets.
+            logger.error("Unexpected computer tool failure; stopping context (details suppressed)")
+            try:
+                await self.stop_context(grant.context)
+            except Exception:
+                logger.error("Computer failure cleanup failed; operator release required (details suppressed)")
             return ToolResult(
-                "Computer outcome unknown; reconcile with fresh evidence. Do not replay.",
+                json.dumps({"status": "unknown", "reason": "outcome_unknown", **guidance("outcome_unknown", terminal=True)}),
                 ok=False,
                 error="outcome_unknown",
                 uncertain_outcome=True,

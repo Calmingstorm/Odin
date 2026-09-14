@@ -286,10 +286,44 @@ class HyprlandGuardian(WaylandGuardian):
             # acknowledgement. Expose that distinction explicitly to admission.
             return {**receipt, "release_ack": True, "release_not_required": True,
                     "native_release_acknowledged": False, "receiver_release_verified": False}
+        terminal = self._last_terminal
+        evidence = terminal.get("prearm_cleanup_v1")
+        expected = {"ready": True, "arm_attempted": False,
+                    "input_ever_attempted": False, "release_not_required": True,
+                    "resources_closed": True}
+        # Vacuous cleanup is a lifetime native fact plus successful owner reap,
+        # never a compositor release ACK. Reject absent/coerced/partial evidence.
+        prearm = (
+            type(evidence) is dict and evidence.keys() == expected.keys()
+            and all(evidence[key] is value for key, value in expected.items())
+            and terminal.get("event") == "closed"
+            and terminal.get("input_was_sent") is False
+            and terminal.get("release_sent") is False
+            and terminal.get("release_acknowledged") is False
+            and receipt.get("process_reaped") is True
+            and self._child.returncode == 0 and self._closed_receipt
+        )
+        if prearm:
+            return {**receipt, "release_submitted": False,
+                    "release_ack": True, "release_not_required": True,
+                    "native_release_acknowledged": False,
+                    "receiver_release_verified": False}
+        failure = native_failure(terminal)
+        loss = failure.get("input_loss_v1", {}) if failure else {}
+        # Preserve a native release ACK independently of action failure.
+        native_ack = (
+            self._closed_receipt and terminal.get("event") == "closed"
+            and terminal.get("release_sent") is True
+            and terminal.get("release_acknowledged") is True
+            and loss.get("release_submission") == "submitted"
+            and loss.get("release_ack") == "acknowledged"
+            and loss.get("resource_closure") == "complete"
+        )
         return {**receipt,
-                "release_ack": bool(receipt.get("release_submitted")
-                                    and self._last_terminal.get("release_acknowledged") is True),
-                "native_release_acknowledged": bool(receipt.get("release_submitted")
-                    and self._last_terminal.get("release_acknowledged") is True),
+                "release_ack": bool(native_ack and receipt.get("process_reaped") is True),
+                "native_release_acknowledged": bool(native_ack),
+                "native_release_submitted": terminal.get("release_sent") is True,
+                "transport_clean": not self._failed,
+                "guardian_exit_code": self._child.returncode,
                 "release_not_required": False,
                 "receiver_release_verified": False}

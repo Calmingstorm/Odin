@@ -6,9 +6,11 @@ from __future__ import annotations
 import asyncio
 import copy
 import hashlib
+import logging
 import os
 import re
 import time
+import traceback
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from fractions import Fraction
@@ -205,6 +207,9 @@ class _GroundedCommandEncoder(WaylandRuntimeBackend):
 
 class HyprlandRuntimeBackend:
     startup_timeout_seconds = 30
+    # Model deliberation is not a native-input lease. Every dispatch still
+    # recaptures pixels and revalidates exact scope under the 250 ms lease.
+    observation_valid_seconds = 300
     recovery_supported = False
     input_supported = False
     input_blocker: str | None = "hyprland_session_not_ready"
@@ -484,6 +489,8 @@ class HyprlandRuntimeBackend:
         self.startup_descriptor(session_id)
         self._started = True
         try:
+            if self.config.discovery_mode == "auto" and selection is None:
+                raise ComputerError("target_selection_required")
             if selection is not None and (
                 type(selection) is not dict
                 or set(selection) != {"target_id", "output_id", "candidate_epoch"}
@@ -511,10 +518,19 @@ class HyprlandRuntimeBackend:
                 "sources": self.sources(),
             }
         except BaseException as exc:
+            if not isinstance(exc, (ComputerError, HyprlandScopeFailure, asyncio.CancelledError)):
+                logging.getLogger(__name__).error(
+                    "Unexpected Hyprland native start failure: type=%s frames=%s",
+                    type(exc).__name__,
+                    [(os.path.basename(frame.filename), frame.lineno, frame.name)
+                     for frame in traceback.extract_tb(exc.__traceback__)],
+                )
             await self.stop()
             if isinstance(exc, asyncio.CancelledError):
                 raise
-            code = exc.code if isinstance(exc, ComputerError) else "hyprland_native_start_failed"
+            code = (exc.code if isinstance(exc, ComputerError) else
+                    str(exc) if isinstance(exc, HyprlandScopeFailure) else
+                    "hyprland_native_start_failed")
             raise InputAdmissionError(
                 InputAdmission(
                     "refused",
@@ -777,7 +793,7 @@ class HyprlandRuntimeBackend:
         return [
             {
                 "source_id": self._selected,
-                "label": "Explicitly granted Hyprland output",
+                "label": self._output.name if self._output else self.config.output_name,
                 "width": width,
                 "height": height,
             }
@@ -804,7 +820,7 @@ class HyprlandRuntimeBackend:
     def input_readiness(self):
         if self._closed or self._paused or not self.input_supported:
             return "inactive"
-        if self._frame is None or not 0 <= time.monotonic() - self._captured_at <= 5:
+        if self._frame is None or not 0 <= time.monotonic() - self._captured_at <= self.observation_valid_seconds:
             return "observation_required"
         return "ready"
 
@@ -986,6 +1002,18 @@ class HyprlandRuntimeBackend:
         async with self._lock:
             try:
                 rendered, scope, captured_at = await self._capture_observation(crop)
+            except HyprlandScopeFailure as exc:
+                # Transient observed focus/geometry is not loss of compositor
+                # ownership. Surface the reason, never launch native recovery.
+                if str(exc) in {
+                    "hyprland_unknown_or_nonnative_focus",
+                    "hyprland_fractional_or_unknown_geometry",
+                    "hyprland_focus_not_contained_or_ambiguous",
+                    "hyprland_snapshot_capacity",
+                    "hyprland_lock_or_unknown_state",
+                }:
+                    raise ComputerError(str(exc)) from None
+                raise
             except ComputerError as exc:
                 # Observation acquisition reports recoverable focus loss; the
                 # controller admits refocus only before input. Never remap lock/unknown evidence or
@@ -1071,7 +1099,7 @@ class HyprlandRuntimeBackend:
                 or frame is None
                 or scope is None
                 or not frame.focused
-                or not 0 <= time.monotonic() - self._captured_at <= 5
+                or not 0 <= time.monotonic() - self._captured_at <= self.observation_valid_seconds
             ):
                 raise ComputerError("hyprland_fresh_application_observation_required")
             command = self._command(action, frame, scope)
@@ -1110,7 +1138,7 @@ class HyprlandRuntimeBackend:
                 raise ComputerError("hyprland_focus_changed_before_dispatch")
             await self._guardian.bind_scope(fresh)
             self._active()
-            if not 0 <= time.monotonic() - self._captured_at <= 5:
+            if not 0 <= time.monotonic() - self._captured_at <= self.observation_valid_seconds:
                 raise ComputerError("hyprland_observation_expired")
             self._frame = None
             lease, generation = [deadline], self._generation
