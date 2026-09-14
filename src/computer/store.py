@@ -1867,6 +1867,23 @@ class ComputerStore:
                     if acknowledged and pending is not None and owner is not None:
                         candidate = {"external_cleanup_attestation": receipt}
                         if self._external_cleanup_attested(candidate):
+                            if prior.get("continuation_cancelled") is True:
+                                # Close only the cancelled fence. Preserve native
+                                # evidence and historical pending lineage verbatim;
+                                # external attestation is not native release proof.
+                                prior.update(
+                                    pre_external_cleanup_status={
+                                        "status": prior.get("status"),
+                                        "complete": prior.get("complete")},
+                                    external_cleanup_attestation=receipt,
+                                    status="operator_acknowledged_unverified",
+                                    complete=False)
+                                self.db.execute(
+                                    "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                    (grant.session_id, json.dumps(prior, sort_keys=True)))
+                                self.set_state(grant.session_id, "closed", revoke=True)
+                                self.db.execute("COMMIT")
+                                return self.get_session(grant.session_id)
                             prior.update(
                                 external_cleanup_attestation=receipt,
                                 status="fresh_target_required", complete=False,

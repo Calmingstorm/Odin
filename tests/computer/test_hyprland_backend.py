@@ -128,6 +128,44 @@ async def test_default_disabled():
         await backend.start("a" * 32)
 
 
+async def test_terminal_local_release_requires_fresh_session_without_fake_ack(backend):
+    frame = await backend.observe()
+    backend._guardian.act = AsyncMock(side_effect=ComputerError("terminal_delivery_unknown"))
+    backend._guardian.close = AsyncMock(return_value={
+        "release_ack": False, "release_confirmed": True, "process_reaped": True})
+    receipt = await backend.act(action(frame))
+    assert receipt["status"] == "interrupted"
+    assert receipt["injected"] is None
+    assert receipt["released"] is True
+    assert receipt["fresh_session_required"] is True
+    assert backend._paused and not backend.input_supported
+    cleanup = await backend.pause()
+    assert cleanup["released"] is True
+    assert cleanup["release_confirmed"] is True
+    assert cleanup["release_ack"] is False
+
+
+async def test_pixel_field_ignores_unrelated_raster_change(backend, monkeypatch):
+    backend._output = replace(output(), width=80, height=60)
+    backend._scope_provider.snapshot.side_effect = lambda _: scope(backend._output)
+    frame = await backend.observe()
+    changed = bytearray(native(backend._output).pixels)
+    changed[-4:] = bytes([255, 255, 255, 0])
+
+    async def capture(crop=None):
+        rendered = hb._render_native(NativeFrame(backend._output, bytes(changed), None), crop)
+        return rendered, scope(backend._output), time.monotonic()
+
+    monkeypatch.setattr(backend, "_capture", capture)
+    inp = action(frame, type="replace_field_pixels",
+        region={"x": 1, "y": 1, "width": 9, "height": 9}, text="22")
+    inp.pop("x")
+    inp.pop("y")
+    receipt = await backend.act(inp)
+    assert receipt["status"] == "executed"
+    assert len(backend._guardian.commands) == 1
+
+
 def test_descriptor_does_not_claim_process_absence_proves_release():
     backend = hb.HyprlandRuntimeBackend(config=config())
     descriptor = backend.startup_descriptor("a" * 32)
@@ -195,16 +233,18 @@ async def test_action_executes_after_guard_and_retires_observation(backend):
     assert backend._guardian.commands == ["P 272 25.00000000 25.00000000"]
     assert backend._guardian.bound
     assert backend._frame is None
-    with pytest.raises(ComputerError, match="fresh_application"):
-        await backend.act(action(frame))
+    refused = await backend.act(action(frame))
+    assert refused["status"] == "unavailable"
+    assert refused["injected"] is False and refused["released"] is True
 
 
 @pytest.mark.parametrize("locked", [None, True, "false"])
 async def test_locked_or_unknown_prevents_dispatch(backend, locked):
     frame = await backend.observe()
     backend._scope_provider.snapshot.side_effect = lambda _: scope(locked=locked)
-    with pytest.raises(ComputerError, match="unknown_locked_or_stale"):
-        await backend.act(action(frame))
+    refused = await backend.act(action(frame))
+    assert refused["status"] == "unavailable"
+    assert refused["injected"] is False and refused["released"] is True
     assert not backend._guardian.commands
 
 

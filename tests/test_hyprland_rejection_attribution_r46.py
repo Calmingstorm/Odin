@@ -41,6 +41,7 @@ struct guardian {
     bool keys[248], buttons[8], modifiers;
     bool disconnected, release_sent, release_acknowledged, release_status_v1;
     bool arm_definitively_refused;
+    bool ready, arm_attempted, input_ever_attempted, release_not_required;
     const char *terminal_cause, *scope_outcome, *release_submission, *release_ack;
     const char *reason, *scope_operation, *scope_error;
     uint64_t rejected;

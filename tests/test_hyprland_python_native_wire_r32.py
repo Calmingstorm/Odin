@@ -136,6 +136,9 @@ async def test_joined_close_propagates_native_ack(native, ack):
             receipt = await guardian.close()
             assert receipt["release_ack"] is ack
             assert receipt["native_release_acknowledged"] is ack
+            assert receipt["release_confirmed"] is True
+            assert receipt["owned_release_v1"] == {
+                "release_sent": True, "ledger_empty": True, "resources_closed": True}
             assert receipt["receiver_release_verified"] is False
             assert peer.buttons() == [(272, 1), (272, 0)]
         finally:

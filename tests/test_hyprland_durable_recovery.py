@@ -160,7 +160,15 @@ def test_external_cleanup_keeps_unknown_and_lineage_through_successor_reopen(rec
 def test_stop_prevents_attested_task_resurrection(recovered):
     _, store, grant, context, _, _ = recovered
     store.cancel_hyprland_continuation(grant.session_id)
+    assert store.cleanup(grant.session_id) is None
+    original = grant
     grant = attest(store, grant)
+    assert grant.state == "closed"
+    assert grant.generation == original.generation + 1
+    assert grant.consent_generation == original.consent_generation + 1
+    assert store.cleanup(grant.session_id) is None
+    with pytest.raises(ComputerError, match="stale_generation"):
+        attest(store, original)
     with pytest.raises(ComputerError, match="hyprland_reconciliation_required"):
         store.create_session(context, platform="wayland", environment="existing_session",
                              backend="hyprland", recovery_session_id=grant.session_id,
@@ -184,6 +192,7 @@ async def test_cleanup_after_stop_preserves_pending_history_across_reopen(
     assert stopped.generation > pending.grant_generation == grant.generation
     assert store.get_recovery_pending(sid) == pending
     assert store.recovery_status(sid)["continuation_cancelled"] is True
+    prior_assessment = store.recovery_status(sid)
 
     # Historical lineage is not permission for a stale caller to finish cleanup.
     # Both writers must still CAS the current session generation.
@@ -197,19 +206,32 @@ async def test_cleanup_after_stop_preserves_pending_history_across_reopen(
     else:
         with pytest.raises(ComputerError, match="stale_generation"):
             attest(store, grant)
-        attest(store, stopped)
+        stopped = attest(store, stopped)
+        assert stopped.state == "closed"
         provider.reconnect_owner.assert_not_awaited()
 
     assessment = store.recovery_status(sid)
-    assert assessment["status"] == "fresh_target_required"
-    assert assessment["recovery_generation"] == pending.grant_generation
-    assert store._hyprland_recovery_record(sid)["recovery_command_id"] == (
-        pending.old_grant["recovery_command_id"])
+    if cleanup == "native":
+        assert assessment["status"] == "fresh_target_required"
+        assert assessment["recovery_generation"] == pending.grant_generation
+        assert store._hyprland_recovery_record(sid)["recovery_command_id"] == (
+            pending.old_grant["recovery_command_id"])
+        assert assessment["released"] is True
+        assert assessment["resources_retired"] is True
+        assert assessment["receiver_release_verified"] is False
+        assert assessment["runtime_qualified"] is False
+    else:
+        assert assessment["external_cleanup_attestation"]["complete"] is False
+        assert assessment["pre_external_cleanup_status"] == {
+            "status": prior_assessment.get("status"),
+            "complete": prior_assessment.get("complete")}
+        assert {k: v for k, v in assessment.items() if k not in {
+            "pre_external_cleanup_status", "external_cleanup_attestation",
+            "status", "complete"}} == {
+                k: v for k, v in prior_assessment.items() if k not in {"status", "complete"}}
+        assert assessment["status"] == "operator_acknowledged_unverified"
+        assert assessment["complete"] is False
     assert assessment["continuation_cancelled"] is True
-    assert assessment["released"] is (cleanup == "native")
-    assert assessment["resources_retired"] is (cleanup == "native")
-    assert assessment["receiver_release_verified"] is False
-    assert assessment["runtime_qualified"] is False
     assert not backend.input_supported and not controller._live
 
     path = Path(store.db.execute("PRAGMA database_list").fetchone()[2])

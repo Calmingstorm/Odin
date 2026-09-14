@@ -671,6 +671,12 @@ static void button(struct guardian *g,unsigned b,bool down) {
     zwlr_virtual_pointer_v1_frame(g->pointer);
 }
 /* Cleanup never requires live focus/scope authority. */
+static bool own_ledger_empty(struct guardian *g) {
+    if (g->modifiers) return false;
+    for (unsigned b=0;b<8;++b) if (g->buttons[b]) return false;
+    for (unsigned k=0;k<248;++k) if (g->keys[k]) return false;
+    return true;
+}
 static bool release_all(struct guardian *g) {
     if (g->ready && !g->arm_attempted && !g->input_ever_attempted) {
         /* owner_capture is not arm. No plugin release authority was acquired;
@@ -750,6 +756,12 @@ static void action_receipt(struct guardian *g,const char *event,const char *reas
             g->input_ever_attempted?"true":"false",g->release_not_required?"true":"false",
             g->resource_closure && !strcmp(g->resource_closure,"complete")?"true":"false");
     }
+    size_t n = strlen(line);
+    if (n < 2 || line[n-2] != '}') { fail(g,"transport-error"); return; }
+    snprintf(line+n-2,sizeof line-n+2,
+        ",\"owned_release_v1\":{\"release_sent\":%s,\"ledger_empty\":%s,\"resources_closed\":%s},\"receiver_release_verified\":false}\n",
+        g->release_sent?"true":"false",own_ledger_empty(g)?"true":"false",
+        g->resource_closure && !strcmp(g->resource_closure,"complete")?"true":"false");
     if (!emit(line)) fail(g,"transport-error");
 }
 static void step(struct guardian *g) {
@@ -911,7 +923,8 @@ int main(int argc,char **argv) {
     }
 cleanup:
     if (g->ready) (void)release_all(g);
-    int status=g->ready&&(g->release_acknowledged||g->release_not_required)?0:1;
+    int status=g->ready&&(g->release_acknowledged||g->release_not_required||
+        (g->release_sent && own_ledger_empty(g)))?0:1;
     if (g->pointer) zwlr_virtual_pointer_v1_destroy(g->pointer);
     if (g->keyboard) zwp_virtual_keyboard_v1_destroy(g->keyboard);
     if (g->display) { (void)synchronize(g,50);wl_display_disconnect(g->display); g->resource_closure="display_disconnected"; }

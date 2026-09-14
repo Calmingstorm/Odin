@@ -1691,19 +1691,31 @@ class ComputerController:
         # can remove _live before settlement, but must not erase its provenance.
         if capabilities is not None and capabilities.backend == "hyprland":
             execution = result.get("execution", {})
+            release_basis = result.pop("release_basis", None)
             result["input_safety"] = {
                 "backend": "hyprland",
                 "guarantee": "best_effort",
                 "release_basis": (
                     "not_required_no_input_sent"
                     if execution.get("injected") is False and execution.get("released") is True
+                    else "guardian_ledger_drained"
+                    if execution.get("released") is True
+                    and release_basis == "guardian_ledger_drained"
                     else "cooperative_native_ack"
                     if execution.get("released") is True
                     else "unconfirmed"
                 ),
                 "receiver_release_verified": False,
                 "limitations": capabilities.public()["limitations"],
-                "recovery": "operator_release_all_then_close_and_start_new_session",
+                "recovery": (
+                    "start_fresh_session_and_reconcile_no_replay"
+                    if result.get("verification", {}).get("next_action")
+                    == "start_fresh_session_and_reconcile"
+                    else
+                    "fresh_observation_and_replan_no_replay"
+                    if execution.get("released") is True
+                    else "operator_release_all_then_close_and_start_new_session"
+                ),
             }
         return self.store.finish_action(session_id, action_id, result)
 
@@ -2081,6 +2093,15 @@ class ComputerController:
                 # Settle release before any later capture/auth/metadata failure.
                 settled_result = execution_receipt(raw, {"status": "unknown"})
                 settled_result = effect_receipt(raw, current, dispatch_inp["expect"], target)
+                if (
+                    live.capabilities is not None and live.capabilities.backend == "hyprland"
+                    and type(raw) is dict
+                    and raw.get("release_basis") in {
+                        "guardian_ledger_drained", "cooperative_native_ack",
+                        "not_required_no_input_sent",
+                    }
+                ):
+                    settled_result["release_basis"] = raw["release_basis"]
                 stroke_effect(
                     settled_result, dispatch_inp, before_image, None, binding_matches=False
                 )
@@ -2089,6 +2110,22 @@ class ComputerController:
                 self._active(grant)
                 visual = inp["expect"]["type"] != "pointer_at"
                 result = settled_result
+                if (live.capabilities.backend == "hyprland"
+                        and raw.get("fresh_session_required") is True
+                        and result["execution"]["released"] is True):
+                    # A drained, retired guardian is safe to detach, not ready
+                    # for another observation/action. Never replay unknown input.
+                    await self._stop(grant.session_id, "closed")
+                    closed = self.store.get_session(grant.session_id).state == "closed"
+                    result["verification"].update(
+                        status="unavailable",
+                        next_action=("start_fresh_session_and_reconcile" if closed
+                                     else "operator_release_required"),
+                    )
+                    result["diagnostics"].update(replay_allowed=False)
+                    return self._finish_action(
+                        live.capabilities, grant.session_id, inp["action_id"], result
+                    )
                 if result["status"] not in {"unknown", "unavailable"}:
                     crop = (
                         asdict(current.frame_metadata.crop)

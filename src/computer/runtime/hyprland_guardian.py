@@ -129,6 +129,23 @@ def native_failure(row):
     return result
 
 
+def owned_release_v1(row, *, closed):
+    """Strict local ownership evidence, never a compositor or receiver ACK."""
+    if type(row) is not dict:
+        return False
+    evidence = row.get("owned_release_v1")
+    return bool(
+        type(evidence) is dict
+        and set(evidence) == {"release_sent", "ledger_empty", "resources_closed"}
+        and all(type(value) is bool for value in evidence.values())
+        and evidence["release_sent"] is True and evidence["ledger_empty"] is True
+        and evidence["resources_closed"] is closed
+        and row.get("release_sent") is True
+        and row.get("receiver_release_verified") is False
+        and row.get("event") == ("closed" if closed else "action_done")
+    )
+
+
 def _path(value):
     if (type(value) is not str or not value.startswith("/")
             or len(os.fsencode(value)) > 107 or any(ord(c) < 32 for c in value)):
@@ -263,7 +280,8 @@ class HyprlandGuardian(WaylandGuardian):
                 failure,
             )
             raise
-        receipt["release_ack"] = receipt.pop("release_acknowledged", False) is True
+        receipt["release_ack"] = (receipt.pop("release_acknowledged", False) is True
+                                  and owned_release_v1(receipt, closed=False))
         receipt["receiver_release_verified"] = False
         return receipt
 
@@ -313,14 +331,24 @@ class HyprlandGuardian(WaylandGuardian):
         # Preserve a native release ACK independently of action failure.
         native_ack = (
             self._closed_receipt and terminal.get("event") == "closed"
+            and owned_release_v1(terminal, closed=True)
             and terminal.get("release_sent") is True
             and terminal.get("release_acknowledged") is True
             and loss.get("release_submission") == "submitted"
             and loss.get("release_ack") == "acknowledged"
             and loss.get("resource_closure") == "complete"
         )
+        local_release = bool(
+            self._closed_receipt and owned_release_v1(terminal, closed=True)
+            and loss.get("release_submission") == "submitted"
+            and loss.get("resource_closure") == "complete"
+            and receipt.get("process_reaped") is True
+        )
         return {**receipt,
                 "release_ack": bool(native_ack and receipt.get("process_reaped") is True),
+                # Local ownership only, never compositor or receiver proof.
+                "release_confirmed": local_release,
+                "owned_release_v1": terminal.get("owned_release_v1") if local_release else None,
                 "native_release_acknowledged": bool(native_ack),
                 "native_release_submitted": terminal.get("release_sent") is True,
                 "transport_clean": not self._failed,

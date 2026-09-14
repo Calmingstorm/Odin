@@ -219,7 +219,7 @@ class HyprlandRuntimeBackend:
         "key_chords": "owned_virtual_us_keymap",
         "accessibility": "unavailable_pixel_targeting_only",
         "scope": "authenticated_hyprland_explicit_output_app",
-        "release": "hyprland_best_effort_cooperative_ack",
+        "release": "hyprland_best_effort_ack_or_drained_guardian_ledger",
         "receiver_release_verified": False,
         "residuals": list(RESIDUALS),
         "application_scope": "original_native_process_same_output_fresh_observed_own_dialogs",
@@ -688,9 +688,12 @@ class HyprlandRuntimeBackend:
                 "eligible",
                 "hyprland_best_effort_ready",
                 " ".join(RESIDUALS),
-                "Use supervised bounded actions. Unknown release requires operator-verified "
-                "external cleanup and reconciliation; RELEASE-ALL cannot clear sticky unknown "
-                "ownership, and resource retirement is not release proof.",
+                "Use supervised bounded actions. Successful release submission plus an empty "
+                "guardian ledger and closed resources confirms local release even without a "
+                "compositor ACK. It is OK to proceed from fresh observations; if the guardian "
+                "closed, start a fresh session and inspect the current result without replay. "
+                "Only held input, failed submission, or missing release evidence requires "
+                "operator cleanup. Resource retirement alone is not release proof.",
                 compositor=CompositorIdentity(
                     "Hyprland",
                     self.config.compositor_trust.version,
@@ -1088,6 +1091,28 @@ class HyprlandRuntimeBackend:
             self._release_failed |= not self._release_ack(result)
 
     async def act(self, action):
+        # The marker is invocation-local: only failures before dispatch can prove
+        # this request sent no input. Never wash away a prior uncertain release.
+        dispatch = [False]
+        previously_uncertain = self._release_failed
+        try:
+            return await self._act(action, dispatch)
+        except Exception as exc:
+            if dispatch[0] or previously_uncertain or self._release_failed:
+                raise
+            self._frame = None
+            code = getattr(exc, "code", None)
+            if not isinstance(code, str) or not code.startswith("hyprland_"):
+                code = "hyprland_preflight_failed"
+            logging.getLogger(__name__).warning("Hyprland preflight refused before input: %s", code)
+            return {
+                "status": "unavailable", "injected": False, "released": True,
+                "reason": code,
+                "release_basis": "not_required_no_input_sent",
+                "diagnostics": {"phase": "preflight"},
+            }
+
+    async def _act(self, action, dispatch):
         async with self._lock:
             self._active()
             assert self._guardian is not None and self._identity is not None
@@ -1112,10 +1137,16 @@ class HyprlandRuntimeBackend:
                 "middle_click",
                 "scroll",
                 "polyline",
+                "replace_field_pixels",
             }:
                 from ..grounding import pointer_target_stable
 
+                region = action.get("region")
                 anchor = (
+                    (region["x"] + (region["width"] - 1) // 2,
+                     region["y"] + (region["height"] - 1) // 2)
+                    if action["type"] == "replace_field_pixels"
+                    else
                     action["points"][0]
                     if action["type"] == "polyline"
                     else (action["x"], action["y"])
@@ -1142,6 +1173,7 @@ class HyprlandRuntimeBackend:
                 raise ComputerError("hyprland_observation_expired")
             self._frame = None
             lease, generation = [deadline], self._generation
+            dispatch[0] = True
             watchdog = asyncio.create_task(self._watch_action(fresh, generation, lease))
             self._jobs.add(watchdog)
 
@@ -1186,7 +1218,10 @@ class HyprlandRuntimeBackend:
                         if action["type"] in {"type", "key"}
                         else "observed_pixel_coordinates"
                     ),
-                    "release_basis": "hyprland_cooperative_native_ack_best_effort",
+                    "release_basis": (
+                        "cooperative_native_ack" if delivered.get("release_ack") is True
+                        else "guardian_ledger_drained"
+                    ),
                     "receiver_release_verified": False,
                     "residuals": list(RESIDUALS),
                     "application_provenance": canonical_application_provenance(scope),
@@ -1216,6 +1251,18 @@ class HyprlandRuntimeBackend:
                 self.input_supported = False
                 cleanup = await self._guardian.close()
                 self._release_failed |= not self._release_ack(cleanup)
+                if not self._release_failed and isinstance(exc, Exception):
+                    return {
+                        "status": "interrupted", "injected": None, "released": True,
+                        "fresh_session_required": True,
+                        "reason": "hyprland_dispatch_interrupted_after_release",
+                        "release_basis": (
+                            "cooperative_native_ack" if cleanup.get("release_ack") is True
+                            else "guardian_ledger_drained"
+                        ),
+                        "receiver_release_verified": False,
+                        "diagnostics": {"phase": "dispatch", "replay_safe": False},
+                    }
                 raise
             finally:
                 watchdog.cancel()
@@ -1275,7 +1322,10 @@ class HyprlandRuntimeBackend:
 
     @staticmethod
     def _release_ack(receipt):
-        return receipt.get("release_ack") is True
+        return (
+            receipt.get("release_ack") is True
+            or receipt.get("release_confirmed") is True
+        ) and receipt.get("unknown_release") is not True
 
     def _invalidate(self):
         self._recovery_epoch += 1
@@ -1627,10 +1677,12 @@ class HyprlandRuntimeBackend:
         if jobs:
             await asyncio.gather(*jobs, return_exceptions=True)
         released = reaped = self._guardian is None
+        native_ack = False
         if self._guardian:
             try:
                 result = await asyncio.wait_for(self._guardian.close(), 4)
                 released, reaped = self._release_ack(result), result.get("process_reaped") is True
+                native_ack = result.get("release_ack") is True
             except (Exception, asyncio.CancelledError):
                 released = reaped = False
         scope_closed = self._scope_provider is None
@@ -1646,7 +1698,8 @@ class HyprlandRuntimeBackend:
             "guardian_process_reaped": reaped,
             "scope_connection_closed": scope_closed,
             "hyprland_owned_connections_closed": clean,
-            "release_ack": released,
+            "release_ack": native_ack,
+            "release_confirmed": released,
             "receiver_release_verified": False,
             "residuals": list(RESIDUALS),
         }

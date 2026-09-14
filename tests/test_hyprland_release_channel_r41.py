@@ -38,7 +38,8 @@ def native_scope(tmp_path_factory):
 #include <unistd.h>
 struct guardian {
     int scope_fd;
-    bool begun;
+    bool begun, ready, arm_attempted, input_ever_attempted, release_not_required;
+    bool modifiers, keys[248], buttons[8];
     bool arm_definitively_refused;
     uint64_t scope_deadline, lease;
     char scope_token[129], arm_token[129];
@@ -82,7 +83,8 @@ static void fail(struct guardian *g,const char *reason) { g->reason=reason; }
 #define send controlled_send
 #define recv controlled_recv
 '''
-    harness += helpers + receipt
+    ledger = source[source.index("static bool own_ledger_empty("):source.index("static bool release_all(")]
+    harness += helpers + ledger + receipt
     harness += "\nstatic void map_command(struct guardian *g,char *line) {\n" + mapping + "}\n"
     harness += r'''
 #undef poll

@@ -33,7 +33,12 @@ def safety(receipt, basis):
     assert value["release_basis"] == basis
     assert value["receiver_release_verified"] is False
     assert value["limitations"]
-    assert value["recovery"] == "operator_release_all_then_close_and_start_new_session"
+    assert value["recovery"] == (
+        "operator_release_all_then_close_and_start_new_session"
+        if basis == "unconfirmed" else "start_fresh_session_and_reconcile_no_replay"
+        if receipt.get("verification", {}).get("next_action") == "start_fresh_session_and_reconcile"
+        else "fresh_observation_and_replan_no_replay"
+    )
 
 
 @pytest.mark.parametrize("kind", ["sequence", "strokes"])
@@ -67,7 +72,7 @@ async def test_batch_step_and_aggregate_durable_safety_and_replay(normal, kind):
 
 
 @pytest.mark.parametrize("outcome,basis", [
-    ("no_input", "not_required_no_input_sent"), ("unknown", "unconfirmed"),
+    ("no_input", "not_required_no_input_sent"), ("unknown", "cooperative_native_ack"),
 ])
 async def test_native_outcome_release_basis_is_durable(normal, monkeypatch, outcome, basis):
     grant = await start(normal)
@@ -87,7 +92,12 @@ async def test_native_outcome_release_basis_is_durable(normal, monkeypatch, outc
     await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
     receipt = durable(normal, grant, "first")
     safety(receipt, basis)
-    assert receipt["execution"]["released"] is (outcome == "no_input")
+    # The fixture close confirms release even when the action ACK is missing.
+    assert receipt["execution"]["released"] is True
+    if outcome == "unknown":
+        assert normal.service.controller.store.get_session(grant["session_id"]).state == "closed"
+        assert receipt["verification"]["next_action"] == "start_fresh_session_and_reconcile"
+        assert grant["session_id"] not in normal.service.controller._live
     await normal.runner._run_one_tool(normal.state, call("computer_act", **inp))
     assert len(normal.transports[0].commands) == 1
     assert durable(normal, grant, "first") == receipt
@@ -112,13 +122,34 @@ async def test_normal_native_targeting_paths(normal, operation, fields, target):
     safety(receipt, "cooperative_native_ack")
 
 
+async def test_ledger_only_terminal_release_closes_and_allows_new_session(normal):
+    from unittest.mock import AsyncMock
+
+    grant = await start(normal)
+    await observe(normal, grant)
+    backend = normal.service.controller._live[grant["session_id"]].backend
+    backend._guardian.act = AsyncMock(return_value={"event": "action_done", "release_ack": False})
+    backend._guardian.close = AsyncMock(return_value={
+        "release_ack": False, "release_confirmed": True, "process_reaped": True})
+    await normal.runner._run_one_tool(normal.state, call("computer_act", **action(normal, grant)))
+    receipt = durable(normal, grant, "first")
+    assert receipt["status"] == "interrupted"
+    assert receipt["execution"]["injected"] is None
+    assert receipt["verification"]["next_action"] == "start_fresh_session_and_reconcile"
+    assert receipt["input_safety"]["release_basis"] == "guardian_ledger_drained"
+    assert normal.service.controller.store.get_session(grant["session_id"]).state == "closed"
+    assert grant["session_id"] not in normal.service.controller._live
+    fresh = await start(normal)
+    assert fresh["session_id"] != grant["session_id"]
+
+
 async def test_normal_readiness_stale_and_paused(normal, monkeypatch):
     grant = await start(normal)
     backend = normal.service.controller._live[grant["session_id"]].backend
     assert backend.input_readiness == "ready"  # Normal start captures a frame.
     await observe(normal, grant)
     assert backend.input_readiness == "ready"
-    monkeypatch.setattr(backend, "_captured_at", backend._captured_at - 6)
+    monkeypatch.setattr(backend, "_captured_at", backend._captured_at - backend.observation_valid_seconds - 1)
     assert backend.input_readiness == "observation_required"
     await normal.runner._run_one_tool(
         normal.state, call("computer_session", operation="pause", **grant))
