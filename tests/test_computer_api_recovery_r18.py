@@ -154,3 +154,28 @@ async def test_reconcile_preserves_operator_auth(kwargs, status):
     async with client(RecoveryController(), **kwargs) as c:
         response = await c.post("/api/computer/reconcile", json=body_for("reconcile"))
         assert response.status == status
+
+
+@pytest.mark.asyncio
+async def test_local_cleanup_distinct_from_historical_receiver_uncertainty():
+    class LocallyReleased(RecoveryController):
+        async def operator_reconcile(self, acknowledgment, **kwargs):
+            result = await super().operator_reconcile(acknowledgment, **kwargs)
+            result["recovery"].update(
+                local_recovery_status="locally_released", local_cleanup_complete=True,
+                admission_blocked=False, receiver_release_verified=False,
+                private_owner="must-not-escape")
+            return result
+
+    async with client(LocallyReleased()) as c:
+        response = await c.post("/api/computer/reconcile", json=body_for("reconcile"))
+        assert response.status == 200
+        body = await response.json()
+        recovery = body["recovery"]
+        assert recovery["status"] == "operator_acknowledged_unverified"
+        assert recovery["complete"] is False
+        assert recovery["local_recovery_status"] == "locally_released"
+        assert recovery["local_cleanup_complete"] is True
+        assert recovery["admission_blocked"] is False
+        assert recovery["receiver_release_verified"] is False
+        assert "must-not-escape" not in str(body)

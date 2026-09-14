@@ -1834,6 +1834,12 @@ class ComputerStore:
                 result.pop("pre_handoff_cleanup", None)
                 result.pop("recovery_command_id", None)
                 result.pop("durable_reconnect", None)
+                result.pop("resolved_recovery_pending", None)
+                if (result.get("local_recovery_status") == "locally_released"
+                        and self._local_cleanup_verified(
+                            self.get_session(session_id), self._hyprland_recovery_record(session_id))):
+                    result["local_cleanup_complete"] = True
+                    result["admission_blocked"] = False
                 return result or None
             grant = self.get_session(session_id)
             if grant.state != "quarantined":
@@ -1846,6 +1852,66 @@ class ComputerStore:
             "reason": "controller_lost" if identity else "legacy_runtime_identity_missing",
             "complete": False,
         }
+
+    def _local_cleanup_verified(self, grant, result):
+        from .runtime.local_recovery import local_cleanup_verified
+
+        pending = self.get_recovery_pending(grant.session_id)
+        if pending is None:
+            archive = result.get("resolved_recovery_pending")
+            if (type(archive) is dict and archive.get("status") == "locally_released"
+                    and type(archive.get("historical_record")) is dict):
+                pending = self._recovery_pending_row(archive["historical_record"])
+        backend = self.db.execute(
+            "SELECT backend FROM session_backends WHERE session_id=?", (grant.session_id,)
+        ).fetchone()
+        if (pending is None or pending.session_id != grant.session_id
+                or backend is None or backend[0] != "hyprland"
+                or grant.platform != "wayland" or grant.environment != "existing_session"
+                or pending.phase not in {"unknown_release", "native_continuity_lost"}):
+            return False
+        return local_cleanup_verified(
+            result, session_id=grant.session_id, generation=pending.grant_generation,
+            command_id=pending.old_grant.get("recovery_command_id"), now=self.clock())
+
+    def resolve_closed_local_recovery(self, grant):
+        """Atomically archive the pending fence with a terminal local-release status.
+
+        The active row is removed only after its complete historical representation
+        is retained in the same transaction. No historical outcome is rewritten.
+        """
+        with self.lock:
+            self.db.execute("BEGIN IMMEDIATE")
+            try:
+                if self.get_session(grant.session_id) != grant or grant.state != "closed":
+                    raise ComputerError("stale_generation")
+                prior = self._hyprland_recovery_record(grant.session_id)
+                if (prior.get("local_recovery_status") == "locally_released"
+                        and self.get_recovery_pending(grant.session_id) is None
+                        and self._local_cleanup_verified(grant, prior)):
+                    self.db.execute("COMMIT")
+                    return grant
+                if not self._local_cleanup_verified(grant, prior):
+                    raise ComputerError("recovery_unavailable")
+                row = self.db.execute("SELECT * FROM recovery_pending WHERE session_id=?",
+                                      (grant.session_id,)).fetchone()
+                prior["resolved_recovery_pending"] = {
+                    "status": "locally_released", "historical_record": dict(row)}
+                prior["local_recovery_status"] = "locally_released"
+                self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
+                                (grant.session_id, json.dumps(prior, sort_keys=True)))
+                deleted = self.db.execute(
+                    "DELETE FROM recovery_pending WHERE session_id=? AND recovery_generation=? "
+                    "AND grant_generation=? AND stop_epoch=?",
+                    (grant.session_id, row["recovery_generation"], row["grant_generation"],
+                     row["stop_epoch"])).rowcount
+                if deleted != 1:
+                    raise ComputerError("stale_recovery_pending")
+                self.db.execute("COMMIT")
+            except BaseException:
+                self.db.execute("ROLLBACK")
+                raise
+        return grant
 
     def finish_recovery(self, grant: SessionGrant, result: dict, *, acknowledged=False):
         """CAS prevents delayed inspection from clearing another runtime generation."""
@@ -1883,7 +1949,10 @@ class ComputerStore:
                                     (grant.session_id, json.dumps(prior, sort_keys=True)))
                                 self.set_state(grant.session_id, "closed", revoke=True)
                                 self.db.execute("COMMIT")
-                                return self.get_session(grant.session_id)
+                                closed = self.get_session(grant.session_id)
+                                if self._local_cleanup_verified(closed, prior):
+                                    return self.resolve_closed_local_recovery(closed)
+                                return closed
                             prior.update(
                                 external_cleanup_attestation=receipt,
                                 status="fresh_target_required", complete=False,

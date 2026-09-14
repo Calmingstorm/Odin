@@ -282,6 +282,9 @@ class ComputerController:
         if type(generation) is not int or grant.generation != generation:
             raise ComputerError("stale_generation")
         async with self._stop_locks.setdefault(session_id, asyncio.Lock()):
+            if grant.state == "closed" and session_id not in self._live:
+                grant = self.store.resolve_closed_local_recovery(grant)
+                return self._public_session(grant)
             if session_id in self._live or grant.state != "quarantined":
                 raise ComputerError("recovery_unavailable")
             descriptor = self.store.runtime_descriptor(session_id)
@@ -308,6 +311,11 @@ class ComputerController:
         await self._auth(context)
         grant = self._grant(context, {"session_id": session_id, "generation": generation},
                              same_turn=False)
+        if grant.state == "closed" and session_id not in self._live:
+            async with self._stop_locks.setdefault(session_id, asyncio.Lock()):
+                await self._auth(context)
+                grant = self.store.resolve_closed_local_recovery(grant)
+                return self._public_session(grant)
         if grant.state != "quarantined" or session_id in self._live:
             raise ComputerError("hyprland_reconciliation_required")
         async with self._actions:
@@ -434,6 +442,9 @@ class ComputerController:
                 raise ComputerError("not_found")
             if type(generation) is not int or grant.generation != generation:
                 raise ComputerError("stale_generation")
+            if grant.state == "closed" and session_id not in self._live:
+                grant = self.store.resolve_closed_local_recovery(grant)
+                return self._reconciliation_status(grant)
             if (
                 session_id in self._live
                 or grant.state != "quarantined"
@@ -1400,7 +1411,7 @@ class ComputerController:
                     raise
                 return self._public_session(self.store.get_session(grant.session_id))
         if operation == "reconcile":
-            if grant.state == "quarantined" and grant.session_id not in self._live:
+            if grant.state in {"quarantined", "closed"} and grant.session_id not in self._live:
                 return await self.reconcile_hyprland_owner(
                     context, grant.session_id, grant.generation)
             return await self.observe(
