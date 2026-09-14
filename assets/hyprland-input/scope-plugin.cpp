@@ -219,6 +219,18 @@ struct Snapshot {
     std::shared_ptr<PopupWatch> popupWatch;
     bool modal = false;
     uint64_t revision = 0;
+    std::string groupToken;
+    uint64_t groupEpoch = 0;
+};
+struct ApplicationGroup {
+    odin_scope::ApplicationIdentity identity;
+    std::shared_ptr<int> processFD;
+    PHLMONITORREF monitor;
+    Vector2D outputPos, outputSize, pixelSize;
+    float scale = 0;
+    int transform = -1;
+    std::map<std::string, PHLWINDOWREF> members;
+    uint64_t epoch = 1;
 };
 struct Keyboard {
     SP<CVirtualKeyboardV1Resource> resource;
@@ -285,6 +297,7 @@ struct State {
     std::map<int, std::unique_ptr<Peer>> peers;
     std::map<std::string, Snapshot> snapshots;
     std::map<std::string, FocusCandidate> focusCandidates;
+    std::map<std::string, ApplicationGroup> applicationGroups;
     Keyboard* keyboard = nullptr;
     Pointer* pointer = nullptr;
     int guardianFD = -1;
@@ -822,6 +835,11 @@ struct State {
     }
     bool same(const Snapshot& b) const {
         if (!environment() || b.revision != revision || b.surface.expired() || b.window.expired() || b.monitor.expired()) return false;
+        if (!b.groupToken.empty()) {
+            const auto it = applicationGroups.find(b.groupToken);
+            if (it == applicationGroups.end() || it->second.epoch != b.groupEpoch ||
+                !groupMember(it->second, b.window.lock())) return false;
+        }
         auto w = b.window.lock(); auto m = b.monitor.lock();
         std::vector<odin_scope::NativeAncestor> chain;
         std::vector<SubsurfaceNode> subsurfaces;
@@ -959,8 +977,36 @@ struct State {
         put(j.get(), "pointer_popup_depth", int64_t(!pointerChain.empty() ? pointerChain.size() - 1 : 0));
         return j;
     }
-    J snapshot(const std::string& output) {
+    odin_scope::ApplicationIdentity applicationIdentity(PHLWINDOW w) const {
+        std::vector<odin_scope::NativeAncestor> ancestry;
+        if (!w || w->m_isX11 || !w->m_isMapped || !w->visible() || !w->resource() ||
+            !w->resource()->good() || w->m_monitor.expired() || !provenance(w, ancestry)) return {};
+        const auto image = processImage(ancestry.front().pid);
+        return {reinterpret_cast<uintptr_t>(w->resource()->client()), ancestry.front().pid,
+            ancestry.front().uid, processStartTicks(ancestry.front().pid), image.executable,
+            pluginEpoch + ":" + instanceID, w->m_monitor->m_name, image.device, image.inode};
+    }
+    bool groupIdentity(const ApplicationGroup& group, PHLWINDOW w) const {
+        if (!group.processFD || group.monitor.expired() || !w || w->m_monitor != group.monitor) return false;
+        pollfd lifetime{*group.processFD, POLLIN, 0};
+        const auto m = group.monitor.lock();
+        return poll(&lifetime, 1, 0) == 0 && m->m_position == group.outputPos &&
+            m->m_size == group.outputSize && m->m_pixelSize == group.pixelSize &&
+            m->m_scale == group.scale && int(m->m_transform) == group.transform &&
+            odin_scope::same_application(group.identity, applicationIdentity(w));
+    }
+    bool groupMember(const ApplicationGroup& group, PHLWINDOW w) const {
+        if (!groupIdentity(group, w)) return false;
+        // Weak window identities prevent address/client reuse from reviving membership.
+        return std::any_of(group.members.begin(), group.members.end(), [&](const auto& entry) {
+            return !entry.second.expired() && entry.second.lock() == w;
+        });
+    }
+    J snapshot(const std::string& output, const std::string& groupToken = {}, bool refreshGroup = false) {
         if (!environment()) return status(false, "lock-or-unknown-state");
+        if (refreshGroup && !odin_scope::group_refresh_allowed(armed, failed, !keys.empty(), !buttons.empty(),
+                ownedModifiers, activeOwner && (activeOwner->unknown || activeOwner->inputFenced), true))
+            return status(false, "application-group-refresh-not-released");
         Snapshot b; auto w = Desktop::focusState()->window(); auto m = Desktop::focusState()->monitor();
         if (!w || !m || output.empty() || m->m_name != output || w->m_isX11 || !w->m_isMapped || !w->visible() || !w->wlSurface())
             return status(false, "unknown-or-nonnative-focus");
@@ -971,6 +1017,59 @@ struct State {
         b.processFD = std::shared_ptr<int>(new int(processFD), [](int* fd) { close(*fd); delete fd; });
         b.startTicks = processStartTicks(b.pid); b.image = processImage(b.pid);
         if (b.startTicks.empty() || !b.image.valid()) return status(false, "native-process-image-unavailable");
+        ApplicationGroup nextGroup;
+        std::string selectedGroup = groupToken;
+        if (refreshGroup && groupToken.empty() && !armed) {
+            // Reuse a proven live application/output group across clean starts.
+            // Never evict a paused live group merely to make room for another.
+            std::erase_if(applicationGroups, [&](const auto& entry) {
+                return std::none_of(entry.second.members.begin(), entry.second.members.end(), [&](const auto& member) {
+                    return !member.second.expired() && groupIdentity(entry.second, member.second.lock());
+                });
+            });
+            for (const auto& [token, group] : applicationGroups) {
+                if (groupIdentity(group, w)) { selectedGroup = token; nextGroup = group; break; }
+            }
+        }
+        if (!groupToken.empty()) {
+            const auto it = applicationGroups.find(groupToken);
+            if (it == applicationGroups.end() || !groupIdentity(it->second, w)) return status(false, "application-group-identity-refused");
+            nextGroup = it->second;
+        }
+        if (refreshGroup) {
+            bool continuity = selectedGroup.empty();
+            for (const auto& [id, member] : nextGroup.members)
+                continuity |= !member.expired() && groupIdentity(nextGroup, member.lock());
+            if (!odin_scope::group_refresh_allowed(armed, failed, !keys.empty(), !buttons.empty(),
+                    ownedModifiers, activeOwner && (activeOwner->unknown || activeOwner->inputFenced), continuity))
+                return status(false, "application-group-refresh-not-released");
+            if (selectedGroup.empty()) {
+                if (applicationGroups.size() >= 64) return status(false, "application-group-capacity");
+                nextGroup.identity = applicationIdentity(w); nextGroup.processFD = b.processFD;
+                nextGroup.monitor = m; nextGroup.outputPos = m->m_position; nextGroup.outputSize = m->m_size;
+                nextGroup.pixelSize = m->m_pixelSize; nextGroup.scale = m->m_scale; nextGroup.transform = int(m->m_transform);
+                selectedGroup = nonce();
+            }
+            std::map<std::string, PHLWINDOWREF> members;
+            std::vector<std::string> ids;
+            for (const auto& member : g_pCompositor->m_windows) {
+                if (!groupIdentity(nextGroup, member)) continue;
+                const auto pos = member->m_realPosition->value(), size = member->m_realSize->value();
+                if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || !std::isfinite(size.x) || !std::isfinite(size.y) ||
+                    size.x <= 0 || size.y <= 0 || pos.x < m->m_position.x || pos.y < m->m_position.y ||
+                    pos.x + size.x > m->m_position.x + m->m_size.x || pos.y + size.y > m->m_position.y + m->m_size.y) continue;
+                auto id = windowID(member); members.emplace(id, member); ids.push_back(id);
+                if (ids.size() > 32) return status(false, "application-group-unbounded");
+            }
+            if (!odin_scope::bounded_group_members(ids, windowID(w))) return status(false, "application-group-member-refused");
+            bool changed = members.size() != nextGroup.members.size();
+            for (const auto& [id, member] : members) changed |= !nextGroup.members.contains(id);
+            if (!nextGroup.members.empty() && changed) ++nextGroup.epoch;
+            nextGroup.members = std::move(members);
+        }
+        if (!selectedGroup.empty()) {
+            if (!groupMember(nextGroup, w)) return status(false, "application-group-member-refused");
+        }
         b.modal = b.ancestry.size() > 1 || w->m_isFloating;
         // Cursor need not enter a newly focused dialog for observation/keyboard.
         // Its independently measured focus stays immutable for the whole lease.
@@ -1027,8 +1126,21 @@ struct State {
         b.token = nonce(); b.measured = ns();
         std::erase_if(snapshots, [](const auto& entry) { return ns() - entry.second.measured >= 250000000; });
         if (snapshots.size() >= 64) return status(false, "snapshot-capacity");
+        // Commit inventory only after a complete valid observation. Never mutate
+        // the leased bound target, and never grant membership from an event hook.
+        if (!selectedGroup.empty()) {
+            if (refreshGroup) applicationGroups.insert_or_assign(selectedGroup, nextGroup);
+            b.groupToken = selectedGroup; b.groupEpoch = nextGroup.epoch;
+        }
         snapshots.emplace(b.token, b);
         auto j = status(); put(j.get(), "token", b.token); put(j.get(), "measured_monotonic_ns", b.measured); put(j.get(), "locked", false);
+        if (!b.groupToken.empty()) {
+            auto group = obj(); put(group.get(), "token", b.groupToken); put(group.get(), "epoch", int64_t(b.groupEpoch));
+            auto* members = json_object_new_array();
+            for (const auto& [id, member] : nextGroup.members) json_object_array_add(members, json_object_new_string(id.c_str()));
+            json_object_object_add(group.get(), "member_tokens", members);
+            json_object_object_add(j.get(), "application_group", group.release());
+        }
         put(j.get(), "safe_focus", true); put(j.get(), "native_wayland", true);
         auto o = obj(); put(o.get(), "name", m->m_name); put(o.get(), "x", int64_t(b.outputPos.x)); put(o.get(), "y", int64_t(b.outputPos.y));
         put(o.get(), "width", int64_t(b.outputSize.x)); put(o.get(), "height", int64_t(b.outputSize.y));
@@ -1222,6 +1334,64 @@ struct State {
         auto identity = obj(); put(identity.get(), "pid", int64_t(candidate.pid)); put(identity.get(), "uid", int64_t(candidate.uid)); put(identity.get(), "start_ticks", positiveInt64(candidate.startTicks)); put(identity.get(), "executable", candidate.image.executable); put(identity.get(), "exe_device", int64_t(candidate.image.device)); put(identity.get(), "exe_inode", int64_t(candidate.image.inode));
         json_object_object_add(response.get(), "identity", identity.release()); return response;
     }
+    J prepareGroupTarget(json_object* j) {
+        // This is a BETWEEN-action focus operation, never an event-hook escape.
+        // Consume no click and admit no new member. A changed target requires
+        // the caller to deliver fresh pixels and obtain a new explicit action.
+        if (!environment() || inputHeld() || !odin_scope::group_refresh_allowed(
+                armed, failed, !keys.empty(), !buttons.empty(), ownedModifiers,
+                activeOwner && (activeOwner->unknown || activeOwner->inputFenced), true))
+            return status(false, "application-group-target-not-released");
+        json_object *epoch = nullptr, *jx = nullptr, *jy = nullptr;
+        if (!json_object_object_get_ex(j, "group_epoch", &epoch) || json_object_get_type(epoch) != json_type_int ||
+            !json_object_object_get_ex(j, "x", &jx) || !json_object_object_get_ex(j, "y", &jy) ||
+            (json_object_get_type(jx) != json_type_int && json_object_get_type(jx) != json_type_double) ||
+            (json_object_get_type(jy) != json_type_int && json_object_get_type(jy) != json_type_double))
+            return status(false, "application-group-target-fields");
+        const auto it = snapshots.find(text(j, "target_token"));
+        if (it == snapshots.end() || ns() - it->second.measured >= 250000000 || !same(it->second))
+            return status(false, "stale-snapshot");
+        const auto before = it->second;
+        const auto group = applicationGroups.find(text(j, "group_token"));
+        if (group == applicationGroups.end() || !odin_scope::group_target_binding(
+                before.groupEpoch, group->second.epoch, json_object_get_int64(epoch), before.groupToken, group->first))
+            return status(false, "application-group-target-epoch");
+        const Vector2D pos{json_object_get_double(jx), json_object_get_double(jy)};
+        if (!std::isfinite(pos.x) || !std::isfinite(pos.y) || pos.x < before.outputPos.x || pos.y < before.outputPos.y ||
+            pos.x >= before.outputPos.x + before.outputSize.x || pos.y >= before.outputPos.y + before.outputSize.y)
+            return status(false, "application-group-target-output");
+        // Refuse upper layer-shell surfaces rather than focusing a window
+        // through an overlay or panel. Lower layers cannot cover a window.
+        for (const size_t layer : {size_t(2), size_t(3)}) {
+            Vector2D local; PHLLS hit;
+            if (g_pCompositor->vectorToLayerSurface(pos, &before.monitor->m_layerSurfaceLayers[layer], &local, &hit))
+                return status(false, "application-group-target-layer-surface");
+        }
+        // Compositor stacking determines the destination, not map iteration or
+        // the requested member's rectangle (which may be behind a dialog).
+        auto w = g_pCompositor->vectorToWindowUnified(pos, Desktop::View::ALLOW_FLOATING);
+        if (!groupMember(group->second, w)) return status(false, "application-group-target-unknown");
+        Snapshot destinationProof;
+        destinationProof.window = w; destinationProof.surface = w->resource();
+        destinationProof.popups = popupInventory(destinationProof);
+        Vector2D local;
+        const auto surface = g_pCompositor->vectorWindowToSurface(pos, w, local);
+        if (!subsurfaceInventory(destinationProof, destinationProof.subsurfaces) || !destination(destinationProof, surface))
+            return status(false, "application-group-target-surface");
+        const bool changed = w != before.window.lock();
+        if (changed) {
+            FocusCandidate candidate;
+            if (!makeFocusCandidate(w, candidate)) return status(false, "application-group-target-ineligible");
+            candidate.created = ns();
+            Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
+            if (armed || inputHeld() || !sameFocusCandidateState(candidate) || !groupMember(group->second, w) ||
+                Desktop::focusState()->window() != w || Desktop::focusState()->monitor() != before.monitor.lock())
+                return status(false, "application-group-target-focus-unconfirmed");
+        }
+        auto response = snapshot(before.monitor->m_name, before.groupToken, false);
+        put(response.get(), "target_changed", changed);
+        return response;
+    }
     J request(Peer& peer, json_object* j) {
         const auto op = text(j, "op");
         if (op == "owner_capture" || op == "owner_status" || op == "owner_reconcile" || op == "owner_retire" ||
@@ -1229,7 +1399,17 @@ struct State {
             return ownerRequest(peer, j, op);
         if (op == "status") return status();
         if (armed && !scope() && op != "release_status") revoke("request-scope-fence");
-        if (op == "snapshot") return snapshot(text(j, "output_name"));
+        if (op == "snapshot") {
+            json_object* refresh = nullptr;
+            json_object* group = nullptr;
+            if (json_object_object_get_ex(j, "group_token", &group) &&
+                (json_object_get_type(group) != json_type_string || !releaseCommandID(text(j, "group_token"))))
+                return status(false, "application-group-token-type");
+            const bool hasRefresh = json_object_object_get_ex(j, "refresh_group", &refresh);
+            if (hasRefresh && json_object_get_type(refresh) != json_type_boolean) return status(false, "application-group-refresh-type");
+            return snapshot(text(j, "output_name"), text(j, "group_token"), hasRefresh && json_object_get_boolean(refresh));
+        }
+        if (op == "prepare_group_target") return prepareGroupTarget(j);
         if (op == "inventory_targets") return inventoryTargets();
         if (op == "focus_candidate") return focusCandidate(j);
         if (op == "status") return status();

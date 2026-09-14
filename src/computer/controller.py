@@ -2044,16 +2044,64 @@ class ComputerController:
             original = live.observations.get(inp["observation_id"])
             if original is None:
                 raise ComputerError("stale_observation")
-            # Unexpected modals pause, never become an implicit consent grant.
+            # A modal never becomes implicit input consent. On Hyprland a
+            # missing/stale modal acknowledgement is a pre-input binding error,
+            # not lost native continuity. Keep the clean session usable for a
+            # fresh observation instead of invoking restart recovery.
             try:
                 action_payload(inp, original)
             except ComputerError as exc:
                 if exc.code == "unexpected_modal":
+                    if live.capabilities.backend == "hyprland":
+                        raise ComputerError("hyprland_fresh_modal_binding_required") from None
                     await self._pause(grant.session_id)
                 raise
+            group_before = deepcopy(getattr(live.backend, "application_window_group", None))
             try:
                 current = await self.validate_action_binding(grant, inp["observation_id"])
             except ComputerError as exc:
+                fresh = next(iter(live.observations.values()), None)
+                if (
+                    live.capabilities.backend == "hyprland"
+                    and exc.code == "stale_source_binding"
+                    and group_before is not None
+                    and group_before == getattr(live.backend, "application_window_group", None)
+                    and fresh is not None
+                    and fresh.observation_id != original.observation_id
+                    and fresh.focused
+                    and fresh.source.source_id == original.source.source_id
+                    and fresh.scope == original.scope
+                    and 0 <= self.monotonic() - fresh.captured_at <= FRAME_FRESH_SECONDS
+                ):
+                    # Observation captured another exact member of the SAME
+                    # authenticated application group. Nothing was dispatched.
+                    # Deliver that binding; never refocus the original window,
+                    # replay this action, or enter restart-continuity recovery.
+                    await self._auth(context)
+                    self._active(grant)
+                    existing = self.store.begin_action(
+                        grant, inp["action_id"], payload_hash, MAX_ACTIONS
+                    )
+                    if existing is not None:
+                        return existing
+                    receipt = self._finish_action(
+                        live.capabilities, grant.session_id, inp["action_id"], {
+                            "status": "unavailable",
+                            "reason": "hyprland_application_group_target_changed",
+                            "execution": {"injected": False, "sent": False, "released": True},
+                            "verification": {
+                                "status": "unavailable",
+                                "reason": "hyprland_application_group_target_changed",
+                                "target_application_matches": True,
+                                "evidence_id": fresh.evidence_id,
+                            },
+                        },
+                    )
+                    image, _ = self.store.read_evidence(context, fresh.evidence_id)
+                    return {
+                        **receipt,
+                        "next_observation": self._observation_response(live, grant, fresh, image),
+                    }
                 if any(
                     obs.modal is not None
                     and (
@@ -2231,6 +2279,31 @@ class ComputerController:
                 self._active(grant)
                 visual = inp["expect"]["type"] != "pointer_at"
                 result = settled_result
+                if (
+                    live.capabilities.backend == "hyprland"
+                    and result["status"] == "unavailable"
+                    and result.get("reason") == "hyprland_application_group_target_changed"
+                    and result["execution"].get("injected") is False
+                    and result["execution"].get("released") is True
+                    and group_before is not None
+                    and group_before == getattr(live.backend, "application_window_group", None)
+                ):
+                    # Native preparation focused an already captured sibling,
+                    # but sent none of the requested action. New pixels are the
+                    # only way to authorize its next action. Never resume this
+                    # pending click/stroke against the newly selected member.
+                    receipt = self._finish_action(
+                        live.capabilities, grant.session_id, inp["action_id"], result)
+                    try:
+                        after, image = await self._capture(grant)
+                        await self._auth(context)
+                        self._active(grant)
+                    except ComputerError:
+                        return receipt
+                    return {
+                        **receipt,
+                        "next_observation": self._observation_response(live, grant, after, image),
+                    }
                 if (live.capabilities.backend == "hyprland"
                         and raw.get("fresh_session_required") is True
                         and result["execution"]["released"] is True):
@@ -2345,11 +2418,27 @@ class ComputerController:
                         "dialog_appeared",
                         "menu_appeared",
                     } and measured_appearance(result)
+                    member_transition = result["verification"].get(
+                        "application_group_transition", {})
+                    group_transition = (
+                        live.capabilities.backend == "hyprland"
+                        and inp["expect"]["type"] == "visual_change"
+                        and group_before is not None
+                        and group_before == getattr(live.backend, "application_window_group", None)
+                        and member_transition.get("method")
+                        == "native_application_group_member_transition"
+                        and member_transition.get("changed") is True
+                        and result["execution"].get("released") is True
+                    )
+                    expected_transition = expected_transition or group_transition
                     if (
                         expected_transition
                         and result["verification"].get("target_application_matches") is True
                         and provenance is not None
-                        and getattr(live.backend, "application_provenance", None) == provenance
+                        and (
+                            group_transition
+                            or getattr(live.backend, "application_provenance", None) == provenance
+                        )
                     ):
                         binding_matches = (
                             after.source.source_id == current.source.source_id

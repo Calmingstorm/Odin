@@ -354,6 +354,12 @@ async def test_actual_open_publishes_owner_before_scope_binding(runtime, monkeyp
     backend._guardian = None
     backend._owner_handle = None
     backend._selected_binding = None
+    provider.refresh_application_group = AsyncMock(return_value=scope(
+        plugin_epoch="e" * 48))
+    provider.export_application_group = lambda: (
+        {"token": "g" * 48, "epoch": 1, "member_tokens": ["main"]},
+        {"application": scope()["application"], "plugin_epoch": "e" * 48},
+    )
     guardian.select = AsyncMock(return_value={"width": 80, "height": 60})
     async def bind(_):
         ordering.append("bind")
@@ -377,4 +383,5 @@ async def test_actual_open_publishes_owner_before_scope_binding(runtime, monkeyp
             await backend._open()
         assert ordering == ["persist"]
     provider.attest_identity.assert_awaited_once_with(identity())
+    provider.refresh_application_group.assert_awaited_once()
     provider.capture_owner.assert_awaited_once_with(guardian.owner_identity)

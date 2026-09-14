@@ -162,6 +162,13 @@ class HyprlandGuardian(WaylandGuardian):
         self._mapping_id: str | None = None
         self._spawning: asyncio.Task[asyncio.subprocess.Process] | None = None
         self._owner_identity: dict[str, int] | None = None
+        self._group_refresh_clean = True
+
+    @property
+    def application_group_refresh_ready(self):
+        """Local release proof only; native independently checks its exact ledger."""
+        return (self.alive and not self._active and not self._closing
+                and self._group_refresh_clean)
 
     @property
     def owner_identity(self) -> dict[str, int] | None:
@@ -261,6 +268,7 @@ class HyprlandGuardian(WaylandGuardian):
                 or not time.monotonic_ns() < scope_deadline_ns <= self._scope_deadline):
             raise HyprlandGuardianError("hyprland_guardian_scope_expired")
         try:
+            self._group_refresh_clean = False
             receipt = await super().act(
                 command, pixel_guard=pixel_guard, scope_deadline_ns=scope_deadline_ns)
         except Exception as exc:
@@ -283,6 +291,7 @@ class HyprlandGuardian(WaylandGuardian):
         receipt["release_ack"] = (receipt.pop("release_acknowledged", False) is True
                                   and owned_release_v1(receipt, closed=False))
         receipt["receiver_release_verified"] = False
+        self._group_refresh_clean = owned_release_v1(receipt, closed=False)
         return receipt
 
     async def close(self):

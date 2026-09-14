@@ -155,7 +155,20 @@ async def test_initial_selection_refuses_same_process_sibling_at_each_scope_seam
 ):
     state = rig
     original = hb.HyprlandRuntimeBackend._action_scope
+    # Startup now obtains its first scope from the mandatory group capture;
+    # the second scope is still checked after the guardian owner is published.
+    # Neither seam may silently replace the explicitly selected initial window.
+    from src.computer.runtime.hyprland_scope import HyprlandScopeProvider
+    original_refresh = HyprlandScopeProvider.refresh_application_group
     calls = 0
+
+    async def shifted_refresh(provider, *args, **kwargs):
+        nonlocal calls
+        snapshot = await original_refresh(provider, *args, **kwargs)
+        calls += 1
+        if calls == seam:
+            snapshot[changed] = "different-native-lifetime"
+        return snapshot
 
     async def shifted(backend, *args, **kwargs):
         nonlocal calls
@@ -166,6 +179,7 @@ async def test_initial_selection_refuses_same_process_sibling_at_each_scope_seam
         return snapshot, deadline
 
     monkeypatch.setattr(hb.HyprlandRuntimeBackend, "_action_scope", shifted)
+    monkeypatch.setattr(HyprlandScopeProvider, "refresh_application_group", shifted_refresh)
     selected = await inventory(state)
     with pytest.raises(ComputerError):
         await state.controller.session(context(), selected)

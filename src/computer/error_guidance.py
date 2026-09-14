@@ -21,6 +21,7 @@ _OBSERVATION = frozenset({
     "hyprland_observation_changed", "hyprland_capture_settle_budget_exhausted",
     "hyprland_scope_evidence_expired", "hyprland_capture_scope_changed",
     "hyprland_fractional_or_unknown_geometry", "hyprland_snapshot_capacity",
+    "hyprland_fresh_observation_required", "hyprland_application_group_target_changed",
 })
 _FOCUS = frozenset({
     "input_focus_unavailable", "hyprland_focus_changed",
@@ -30,6 +31,13 @@ _FOCUS = frozenset({
 })
 _SESSION_STATE = frozenset({
     "stale_generation", "resume_unavailable", "hyprland_resume_retryable",
+})
+_GROUP_PREFLIGHT = frozenset({
+    "hyprland_stale_snapshot", "hyprland_application_group_target_epoch",
+    "hyprland_application_group_member_refused", "hyprland_application_group_target_output",
+    "hyprland_application_group_target_layer_surface", "hyprland_application_group_target_unknown",
+    "hyprland_application_group_target_surface", "hyprland_application_group_target_ineligible",
+    "hyprland_application_group_target_focus_unconfirmed",
 })
 
 
@@ -67,10 +75,12 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
             "generation. Never repeat the uncertain action. Effect uncertainty alone does "
             "not require operator input-release intervention."
         )
-    elif not terminal and reason == "unexpected_dialog_transition":
+    elif not terminal and reason in {
+        "unexpected_dialog_transition", "hyprland_fresh_modal_binding_required",
+    }:
         next_action = "inspect_returned_view_and_use_new_modal_binding"
         instruction = (
-            "The previous input completed but changed the dialog. Inspect the returned "
+            "The dialog requires a fresh explicit binding. Inspect the returned "
             "pixels and use that NEW observation and its exact expected_modal for a new "
             "action. If no current pixels were returned, observe again. Never repeat the "
             "dialog-opening action."
@@ -90,6 +100,14 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
             "Refresh target inventory and reselect the intended application on its actual "
             "monitor. Never relocate the application or move it to another monitor. "
             "Obtain a fresh observation before planning new input."
+        )
+    elif not terminal and reason in _GROUP_PREFLIGHT:
+        next_action = "observe_fresh"
+        instruction = (
+            "No requested input was dispatched. The observed application target is stale, "
+            "occluded, or not currently eligible. Observe and inspect the current pixels and "
+            "binding before choosing a new action. Do not act through another application's "
+            "window or a desktop panel."
         )
     elif not terminal and reason in _OBSERVATION:
         next_action = "observe_fresh"

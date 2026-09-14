@@ -47,6 +47,8 @@ def expectation_arguments(expected):
 
 def execution_receipt(raw, result):
     """Preserve release even on missing verification; never forward native prose."""
+    from .error_guidance import _GROUP_PREFLIGHT
+
     raw = raw if type(raw) is dict else {}
     released = raw.get("released") is True
     injected = raw.get("injected") if type(raw.get("injected")) is bool else None
@@ -111,7 +113,7 @@ def execution_receipt(raw, result):
     # these into backend_refused makes a harmless stale frame look like an
     # unknown release to the caller. No raw native messages cross this boundary.
     if (raw.get("status") == "unavailable" and injected is False and released
-            and phase == "preflight" and reason in {
+            and phase == "preflight" and reason in _GROUP_PREFLIGHT | {
                 "hyprland_observation_changed",
                 "hyprland_observation_expired",
                 "hyprland_fresh_application_observation_required",
@@ -120,6 +122,7 @@ def execution_receipt(raw, result):
                 "hyprland_scope_evidence_expired",
                 "hyprland_capture_settle_budget_exhausted",
                 "hyprland_capture_scope_changed",
+                "hyprland_application_group_target_changed",
             }):
         result["reason"] = reason
         safe["reason"] = reason
@@ -178,6 +181,25 @@ def effect_receipt(raw, observation, expected, target=None):
         and evidence.get(key) == getattr(observation.source, key)
         for key in ("source_id", "source_revision", "consent_generation")
     )
+    group_transition = evidence.get("application_group_transition")
+    if (
+        native_binding and same_app
+        and result["execution"]["released"]
+        and result["execution"]["injected"] is True
+        and result["status"] not in {"unknown", "interrupted", "unavailable"}
+        and type(group_transition) is dict
+        and group_transition.get("method") == "native_application_group_member_transition"
+        and all(type(group_transition.get(key)) is str
+                and 1 <= len(group_transition[key]) <= 128 for key in ("before", "after"))
+        and group_transition["before"] != group_transition["after"]
+    ):
+        # A focused member transition is not proof a dialog was newly mapped.
+        # Expose only that distinction, never the private native member IDs.
+        result["verification"]["application_group_transition"] = {
+            "method": "native_application_group_member_transition",
+            "changed": True,
+            "newly_mapped": "unmeasured",
+        }
     transition = evidence.get("transition")
     if (
         native_binding

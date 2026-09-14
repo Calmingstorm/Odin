@@ -8,7 +8,6 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.computer.models import ComputerError
-from src.computer.policy import DELIVERED_GROUNDING_SECONDS
 from src.computer.runtime import hyprland_backend as hb
 from src.computer.runtime.hyprland_identity import ExecutableTrust, HyprlandIdentity, ProcessPin
 from src.computer.runtime.hyprland_scope import HyprlandOwnerHandle
@@ -93,6 +92,16 @@ async def normal(tmp_path, monkeypatch):
 
         async def snapshot(self, metadata):
             return scope()
+
+        async def refresh_application_group(self, metadata):
+            return await self.snapshot(metadata)
+
+        async def prepare_group_target(self, metadata, current, x, y):
+            return {**await self.snapshot(metadata), "target_changed": False}
+
+        def export_application_group(self):
+            return ({"token": "d" * 48, "epoch": 1, "member_tokens": ["main"]},
+                    {"application": scope()["application"], "plugin_epoch": "b" * 48})
 
         async def close(self):
             pass
@@ -235,7 +244,8 @@ async def test_unseen_observation_and_stale_delivered_frame_refused(normal, monk
     stale = action(normal, grant)
     obs = controller._live[grant["session_id"]].observations[stale["observation_id"]]
     monkeypatch.setattr(controller, "monotonic",
-                        lambda: obs.captured_at + DELIVERED_GROUNDING_SECONDS + 1)
+                        lambda: obs.captured_at + controller._model_observation_seconds(
+                            controller._live[grant["session_id"]]) + 1)
     result = await normal.runner._run_one_tool(normal.state, call("computer_act", **stale))
     assert "stale_observation" in result["content"], result
     assert not normal.transports[0].commands
@@ -368,7 +378,7 @@ async def test_native_receipt_durably_discloses_best_effort_and_recovery(normal)
     assert safety["guarantee"] == "best_effort"
     assert safety["release_basis"] == "cooperative_native_ack"
     assert safety["receiver_release_verified"] is False
-    assert safety["recovery"] == "operator_release_all_then_close_and_start_new_session"
+    assert safety["recovery"] == "fresh_observation_and_replan_no_replay"
     assert safety["limitations"]
     assert len(normal.transports[0].commands) == 1
 

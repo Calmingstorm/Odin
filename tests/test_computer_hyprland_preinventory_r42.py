@@ -178,7 +178,10 @@ async def test_startup_prepares_before_constructing_a_scope_provider(monkeypatch
 
     def new_provider():
         calls.append("scope-open")
-        return SimpleNamespace(attest_identity=AsyncMock())
+        return SimpleNamespace(
+            attest_identity=AsyncMock(),
+            refresh_application_group=AsyncMock(side_effect=ComputerError("scope stopped")),
+        )
 
     monkeypatch.setattr(hb, "trusted_binary", lambda _: None)
     monkeypatch.setattr(hb, "pin_connections", AsyncMock(return_value=(identity, connection)))
@@ -195,6 +198,7 @@ async def test_startup_prepares_before_constructing_a_scope_provider(monkeypatch
             await backend._open()
         assert calls.index("prepare") < calls.index("scope-open")
         backend._scope_provider.attest_identity.assert_awaited_once_with(identity)
+        backend._scope_provider.refresh_application_group.assert_awaited_once()
         assert backend._guardian is None
     finally:
         if backend._incarnation is not None:

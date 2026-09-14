@@ -58,7 +58,13 @@ using Clock = std::chrono::steady_clock;
 // PRODUCTION_HELPERS
 template<class T> using WP = std::weak_ptr<T>;
 struct Vector2D { double x = 0, y = 0; bool operator==(const Vector2D&) const = default; };
-struct Animated { Vector2D v; Vector2D value() const { return v; } };
+// Settled geometry: changing v changes the layout goal as well as its value.
+struct Animated {
+    Vector2D v;
+    Vector2D value() const { return v; }
+    Vector2D goal() const { return v; }
+    bool isBeingAnimated() const { return false; }
+};
 struct CWLSurfaceResource {};
 struct CWorkspace {};
 struct Monitor {
@@ -70,7 +76,7 @@ struct Monitor {
     int m_transform = 0;
 };
 struct Window {
-    bool m_isX11 = false, m_isMapped = true, visible_ = true, wl_ = true;
+    bool m_isX11 = false, m_isMapped = true, visible_ = true, wl_ = true, m_isFloating = false;
     WP<Monitor> m_monitor;
     std::shared_ptr<CWorkspace> m_workspace = std::make_shared<CWorkspace>();
     std::shared_ptr<CWLSurfaceResource> surface = std::make_shared<CWLSurfaceResource>();
@@ -230,7 +236,9 @@ def selection_binary(tmp_path_factory):
     )
     methods = extract(
         source, "    static std::string lowercaseASCII(",
-        "    J request(Peer& peer, json_object* j) {",
+        # Inventory/focus contract only. The following group-target dispatcher
+        # has its own application-group native harness and snapshot doubles.
+        "    J prepareGroupTarget(json_object* j) {",
     )
     harness = NATIVE_FIXTURE.replace("// PRODUCTION_HELPERS", helpers).replace(
         "// PRODUCTION_CANDIDATE", candidate

@@ -52,6 +52,7 @@ def native(out=None, shade=0):
 
 class Guardian:
     alive = True
+    application_group_refresh_ready = True
     ready = {"timed_polyline": True, "bounded_clicks": True, "pointer_modifiers_v1": True,
              "pixel_fields_v1": True}
 
@@ -485,6 +486,12 @@ async def test_start_observe_act_pause_resume_detach_contract(monkeypatch):
 
     def provider():
         return SimpleNamespace(
+            prepare_group_target=AsyncMock(side_effect=lambda *args: {
+                **scope(), "target_changed": False}),
+            refresh_application_group=AsyncMock(side_effect=lambda _: scope()),
+            export_application_group=lambda: (
+                {"token": "d" * 48, "epoch": 1, "member_tokens": ["main"]},
+                {"application": scope()["application"], "plugin_epoch": "b" * 48}),
             snapshot=AsyncMock(side_effect=lambda _: scope()), close=AsyncMock(),
             attest_identity=AsyncMock(), capture_owner=AsyncMock(return_value=owner),
         )

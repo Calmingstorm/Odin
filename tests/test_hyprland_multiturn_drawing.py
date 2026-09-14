@@ -38,13 +38,28 @@ async def drawing(normal, monkeypatch):
     async def focused(self, binding, **kwargs):
         return copy.deepcopy(selected)
 
+    group_proof = (
+        {"token": "g" * 48, "epoch": 1,
+         "member_tokens": ["canvas-root", "[REDACTED]"]},
+        {"application": scope()["application"], "plugin_epoch": "b" * 48},
+    )
+
+    def export_group(self):
+        return copy.deepcopy(group_proof)
+
+    def import_group(self, proof):
+        assert proof == group_proof
+
+    backend._application_group_proof = copy.deepcopy(group_proof)
+
     async def snapshot(self, metadata):
-        return scope(plugin_epoch="b" * 48, native_scope_serial=scene["serial"],
+        return dict(scope(plugin_epoch="b" * 48, native_scope_serial=scene["serial"],
             surface_token="new-document" if scene["modal"] else "canvas-root",
             parent_tokens=["canvas-root"] if scene["modal"] else [], modal=scene["modal"],
             modal_kind="safe_application" if scene["modal"] else None,
             modal_title_digest="e" * 64 if scene["modal"] else None,
-            bounds_digest=f'{scene["serial"]:064x}')
+            bounds_digest=f'{scene["serial"]:064x}'),
+            application_group=copy.deepcopy(group_proof[0]))
 
     async def capture(**kwargs):
         await kwargs["scope"]()
@@ -79,6 +94,8 @@ async def drawing(normal, monkeypatch):
         return transport
 
     monkeypatch.setattr(provider_class, "snapshot", snapshot)
+    monkeypatch.setattr(provider_class, "export_application_group", export_group)
+    monkeypatch.setattr(provider_class, "import_application_group", import_group, raising=False)
     monkeypatch.setattr(provider_class, "focus_bound_candidate", focused, raising=False)
     monkeypatch.setattr(hb, "capture_explicit_output", capture)
     monkeypatch.setattr(hb, "HyprlandGuardian", guardian)

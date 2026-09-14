@@ -6,6 +6,41 @@ int main(int argc, char** argv) {
     assert(state.popupChain(b,f.nested.surface,chain) && chain.size()==3);
     b.popups=state.popupInventory(b); assert(b.popups.size()==2);
     assert(state.destination(b,f.nested.surface));
+    if (scenario.starts_with("subsurface-")) {
+        auto leaf=std::make_shared<CWLSurfaceResource>();
+        auto sub=std::make_shared<CWLSubsurfaceResource>();
+        auto role=std::make_shared<CSubsurfaceRole>();
+        leaf->m_role=role; role->m_subsurface=sub;
+        sub->m_surface=leaf; sub->m_parent=f.nested.surface;
+        f.nested.surface->m_subsurfaces.push_back(sub);
+        assert(!state.destination(b,leaf)); // never admit an uncaptured leaf
+        assert(state.subsurfaceInventory(b,b.subsurfaces));
+        assert(b.subsurfaces.size()==1 && state.destination(b,leaf));
+        state.watchPopups(b);
+        leaf->m_events.commit.emit(); assert(b.popupWatch->valid);
+        if (scenario=="subsurface-position") {
+            sub->m_position.x++;
+            assert(!state.destination(b,leaf));
+            leaf->m_events.commit.emit();
+            sub->m_position.x--;
+        } else if (scenario=="subsurface-client") {
+            leaf->owner=reinterpret_cast<void*>(100);
+            assert(!state.destination(b,leaf));
+            std::vector<SubsurfaceNode> fresh;
+            assert(!state.subsurfaceInventory(b,fresh));
+            return 0;
+        } else if (scenario=="subsurface-new") {
+            leaf->m_events.newSubsurface.emit(sub);
+        } else if (scenario=="subsurface-unmap") {
+            leaf->m_mapped=false; leaf->m_events.unmap.emit();
+            assert(!state.destination(b,leaf));
+            leaf->m_mapped=true;
+        } else assert(false);
+        assert(!b.popupWatch->valid && state.revision==1);
+        // Restoring the state does not resurrect a revoked capture.
+        leaf->m_events.commit.emit(); assert(!b.popupWatch->valid);
+        return 0;
+    }
     if (scenario=="ancestry") {
         auto refuses=[&]{ assert(!state.popupChain(b,f.nested.surface,chain)); };
         f.nested.surface->owner=reinterpret_cast<void*>(100); refuses(); f.nested.surface->owner=f.owner->owner;

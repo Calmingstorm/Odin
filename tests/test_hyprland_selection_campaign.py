@@ -75,7 +75,7 @@ async def test_inventory_hides_identity_and_focus_requires_native_fresh_pin(monk
     monkeypatch.setattr(provider, "_request", request)
     public = await provider.inventory_targets()
     assert public["candidates"] == [
-        {"id": "c1-" + "a" * 32, "label": "Drawing", "output_id": "DP-1"}
+        {"id": "c1-" + "a" * 32, "label": "Drawing", "output_id": "DP-1", "output_name": "DP-1"}
     ]
     assert await provider.focus_candidate(
         candidate_id="c1-" + "a" * 32, output_id="DP-1", topology_epoch=9

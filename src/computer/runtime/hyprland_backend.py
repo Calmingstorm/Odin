@@ -145,7 +145,8 @@ class HyprlandSessionConfig:
 
 def _binding(scope):
     # Tokens change each snapshot; monotonic serial catches lock/focus/output ABA.
-    return (_scope_binding(scope), scope.get("native_scope_serial"), scope.get("output"))
+    return (_scope_binding(scope), scope.get("native_scope_serial"), scope.get("output"),
+            scope.get("application_group"))
 
 
 def _render_native(frame, crop):
@@ -269,6 +270,7 @@ class HyprlandRuntimeBackend:
         self._output: ExplicitOutput | None = None
         # Preserve original authority over pause/resume and frame invalidation.
         self._application_pin: dict[str, Any] | None = None
+        self._application_group_proof = None
         self._output_pin: ExplicitOutput | None = None
         self._descriptor: dict[str, Any] | None = None
         self.runtime_identity_callback: Callable[[dict[str, Any]], None] | None = None
@@ -634,7 +636,8 @@ class HyprlandRuntimeBackend:
             else:
                 self._scope_provider = self._new_provider()
                 await self._scope_provider.attest_identity(self._identity)
-            scope, _ = await self._action_scope(self._metadata())
+            scope = await self._scope_provider.refresh_application_group(self._metadata())
+            self._application_group_proof = self._scope_provider.export_application_group()
             self._output = self._checked_output(scope)
             self._check_scope(scope)
             if selected is not None:
@@ -845,6 +848,20 @@ class HyprlandRuntimeBackend:
         self._fingerprint = None
         async with self._lock:
             self._active()
+            if self._application_group_proof is not None:
+                # Never focus a remembered temporary dialog (or silently switch
+                # the user back to the original main window). Native refresh
+                # can validate the currently focused surviving group member.
+                try:
+                    await self._refresh_application_group()
+                    scope, _ = await self._action_scope(self._metadata())
+                    self._check_scope(scope)
+                    if canonical_application_provenance(scope) != expected_application:
+                        return False
+                    self._scope = scope
+                    return True
+                except (ComputerError, HyprlandScopeFailure):
+                    return False
             if (
                 self._selected_binding is None
                 or self._scope_provider is None
@@ -896,6 +913,23 @@ class HyprlandRuntimeBackend:
     @property
     def application_provenance(self):
         return canonical_application_provenance(self._scope)
+
+    @property
+    def application_window_group(self):
+        """Stable sanitized group identity, independent of selected member/epoch."""
+        proof = self._application_group_proof
+        return _digest([proof[0]["token"], proof[1]]) if proof is not None else None
+
+    async def _refresh_application_group(self):
+        if self._application_group_proof is None:
+            return  # Legacy injected test backends have no group authority.
+        if (self._release_failed or self._jobs or self._guardian is None
+                or not self._guardian.application_group_refresh_ready):
+            raise ComputerError("hyprland_owned_cleanup_unverified")
+        assert self._scope_provider is not None
+        scope = await self._scope_provider.refresh_application_group(self._metadata())
+        self._check_scope(scope)
+        self._application_group_proof = self._scope_provider.export_application_group()
 
     async def _capture(self, crop=None):
         self._active()
@@ -977,6 +1011,10 @@ class HyprlandRuntimeBackend:
                     if generation != self._generation:
                         raise ComputerError("hyprland_generation_revoked")
                     try:
+                        # Opening a dialog may animate during membership capture
+                        # too. Settle the full read-only handshake, not just the
+                        # raster following it. No action/lease is retried here.
+                        await self._refresh_application_group()
                         return await self._capture(crop)
                     except HyprlandGeometryUnsettled as exc:
                         if application is None or output is None or compositor is None:
@@ -1076,6 +1114,10 @@ class HyprlandRuntimeBackend:
                 await asyncio.sleep(min(0.05, max(0, (lease[0] - time.monotonic_ns()) / 1e9)))
                 self._active()
                 fresh, deadline = await self._action_scope(self._metadata(), deadline_ns=lease[0])
+                if (self._application_group_proof is not None
+                        and generation == self._generation and not self._paused and not self._closed
+                        and self._guardian.application_group_refresh_ready):
+                    return  # Terminal release completed while snapshot was in flight.
                 self._check_scope(fresh)
                 if generation != self._generation or _binding(fresh) != _binding(original):
                     raise ComputerError("hyprland_focus_changed")
@@ -1085,6 +1127,10 @@ class HyprlandRuntimeBackend:
         except asyncio.CancelledError:
             raise
         except Exception:
+            if (self._application_group_proof is not None
+                    and generation == self._generation and not self._paused and not self._closed
+                    and self._guardian.application_group_refresh_ready):
+                return  # Post-release focus changes require fresh pixels, not held-input cleanup.
             self._paused = True
             self._frame = None
             self.input_supported = False
@@ -1102,7 +1148,9 @@ class HyprlandRuntimeBackend:
             if dispatch[0] or previously_uncertain or self._release_failed:
                 raise
             self._frame = None
-            code = getattr(exc, "code", None)
+            from ..error_guidance import exception_reason
+
+            code = exception_reason(exc)
             if not isinstance(code, str) or not code.startswith("hyprland_"):
                 code = "hyprland_preflight_failed"
             logging.getLogger(__name__).warning("Hyprland preflight refused before input: %s", code)
@@ -1128,6 +1176,31 @@ class HyprlandRuntimeBackend:
                 or not 0 <= time.monotonic() - self._captured_at <= self.observation_valid_seconds
             ):
                 raise ComputerError("hyprland_fresh_application_observation_required")
+            if self._application_group_proof is not None and action["type"] not in {"key", "type"}:
+                if not self._guardian.application_group_refresh_ready:
+                    raise ComputerError("hyprland_owned_cleanup_unverified")
+                region = action.get("region")
+                point = ([(region["x"] + (region["width"] - 1) // 2),
+                          (region["y"] + (region["height"] - 1) // 2)]
+                         if region is not None else action["points"][0]
+                         if action["type"] == "polyline" else [action["x"], action["y"]])
+                if len(point) != 2 or any(type(v) is not int for v in point):
+                    raise ComputerError("hyprland_invalid_point")
+                x, y = frame.source.input_point(
+                    frame.delivered_to_source, *point, frame.width, frame.height)
+                current, _ = await self._action_scope(self._metadata())
+                self._check_scope(current)
+                if _binding(current) != _binding(scope):
+                    raise ComputerError("hyprland_observation_changed")
+                prepared = await self._scope_provider.prepare_group_target(
+                    self._metadata(), current,
+                    float(x + self._output.logical_x), float(y + self._output.logical_y))
+                self._check_scope(prepared)
+                if prepared["target_changed"]:
+                    self._frame = None
+                    raise ComputerError("hyprland_application_group_target_changed")
+                if _binding(prepared) != _binding(current):
+                    raise ComputerError("hyprland_observation_changed")
             command = self._command(action, frame, scope)
             rendered, fresh, _ = await self._capture(self._crop)
             # Keyboard input targets the authenticated native focus, not a
@@ -1288,6 +1361,17 @@ class HyprlandRuntimeBackend:
                 self._jobs.discard(watchdog)
             try:
                 after, after_scope, _ = await self._capture_observation(self._crop)
+                before_group = scope.get("application_group")
+                after_group = after_scope.get("application_group")
+                if (before_group is not None and after_group is not None
+                        and before_group["token"] == after_group["token"]
+                        and scope["application"] == after_scope["application"]
+                        and scope["source_digest"] == after_scope["source_digest"]
+                        and scope.get("surface_token") != after_scope.get("surface_token")):
+                    receipt["postcondition"]["application_group_transition"] = {
+                        "method": "native_application_group_member_transition",
+                        "before": scope["surface_token"], "after": after_scope["surface_token"],
+                    }
                 receipt["postcondition"].update(
                     status="observed",
                     method="raster_digest_after_release",
@@ -1831,10 +1915,21 @@ class HyprlandRuntimeBackend:
         self._cleanup_task = None
         try:
             await provider.attest_identity(identity)
-            focused = await provider.focus_bound_candidate(selected)
+            if self._application_group_proof is not None:
+                provider.import_application_group(self._application_group_proof)
+                resumed_scope = await provider.refresh_application_group(self._metadata())
+                self._check_scope(resumed_scope)
+                self._application_group_proof = provider.export_application_group()
+                # Native group lifetime survives the temporary selected dialog.
+                # No focus command and no derivation of new authority from focus.
+                focused = {**selected, "window_id": resumed_scope["surface_token"]}
+            else:
+                focused = await provider.focus_bound_candidate(selected)
             self._recovery_current(epoch)
             if (any(focused.get(k) != selected.get(k)
-                    for k in ("instance_id", "window_id", "plugin_epoch", "identity"))
+                    for k in (("instance_id", "plugin_epoch", "identity")
+                              if self._application_group_proof is not None else
+                              ("instance_id", "window_id", "plugin_epoch", "identity")))
                     or not selection_application_matches(focused["identity"], self._application_pin)):
                 raise ComputerError("hyprland_original_target_changed")
             output = selection_output(focused["output_name"], focused["output"])
@@ -1866,6 +1961,8 @@ class HyprlandRuntimeBackend:
             )
             if scope.get("plugin_epoch") != focused["plugin_epoch"]:
                 raise ComputerError("hyprland_original_target_changed")
+            if self._application_group_proof is not None:
+                child_matches = False  # Second snapshot must retain the exact fresh member.
             if not (root_matches or child_matches):
                 # Another focused window is not proof our selected root died.
                 raise ComputerError("input_focus_unavailable")

@@ -117,6 +117,10 @@ async def rig(tmp_path, monkeypatch):
                 "safe_focus": True, "measured_monotonic_ns": time.monotonic_ns(),
                 "window_id": item["window_id"], "plugin_epoch": state.plugin_epoch,
                 "token": "f" * 32, "output": {"name": "TEST-1", **out},
+                "application_group": {
+                    "token": "a" * 48, "epoch": 1,
+                    "member_tokens": [item["window_id"]],
+                },
                 "focus": {
                     "x": out["x"], "y": 0, "width": 8, "height": 4,
                     "pid": getattr(state, "foreign_pid", None) or native["pid"],
@@ -163,6 +167,7 @@ async def rig(tmp_path, monkeypatch):
             state.guardians.append(self)
             self.alive = True
             self.bound = []
+            self.application_group_refresh_ready = True
             self.owner_identity = {
                 "pid": measured["pid"], "uid": measured["uid"],
                 "start_ticks": measured["start_ticks"],
@@ -367,7 +372,7 @@ async def test_provider_cancelled_focus_consumes_candidate(rig, monkeypatch):
         await provider.close()
 
 
-async def test_real_snapshot_focus_loss_invokes_controller_recovery_and_fresh_revision(rig):
+async def test_real_snapshot_foreign_focus_refuses_recovery_until_member_returns(rig):
     result = await rig.controller.session(context(), await inventory(rig))
     sid = result["session_id"]
     backend = rig.backends[1]
@@ -379,14 +384,24 @@ async def test_real_snapshot_focus_loss_invokes_controller_recovery_and_fresh_re
     foreign = subprocess.Popen(["/usr/bin/sleep", "60"])
     try:
         rig.foreign_pid = foreign.pid
+        with pytest.raises(ComputerError, match="hyprland_fresh_observation_required"):
+            await rig.controller.observe(context(), {
+                "session_id": sid, "generation": result["generation"],
+            })
+        assert backend._frame is None
+        assert [r["op"] for r in rig.requests].count("focus_candidate") == 1
+        rig.foreign_pid = None
         fresh = await rig.controller.observe(context(), {
             "session_id": sid, "generation": result["generation"],
         })
-        assert fresh["source"]["source_revision"] > old_revision
+        # Returning to the unchanged member does not change source geometry;
+        # fresh pixels/observation identity, not an invented revision, fence input.
+        assert fresh["source"]["source_revision"] == old_revision
+        assert fresh["observation_id"] not in old_ids
         assert backend._frame is not old_frame
         assert not old_ids.intersection(live.observations)
         assert sid not in rig.controller._delivered_observations
-        assert [r["op"] for r in rig.requests].count("focus_candidate") == 2
+        assert [r["op"] for r in rig.requests].count("focus_candidate") == 1
         assert backend._application_pin == rig.measured
     finally:
         foreign.terminate()
@@ -399,16 +414,17 @@ async def test_recover_invalidates_before_first_yield_on_all_outcomes(rig, monke
     backend = rig.backends[1]
     assert backend._frame is not None and backend._captured_at > 0
 
-    async def focus(_):
+    async def refresh(_):
         assert backend._frame is None and backend._captured_at == 0
         assert backend._fingerprint is None
         if failure == "cancel":
             raise asyncio.CancelledError
         if failure == "error":
             raise HyprlandScopeFailure()
-        return backend._selected_binding | {"output_name": "wrong"}
+        # A well-formed group refresh can still yield a foreign output scope.
+        return backend._scope | {"output": backend._scope["output"] | {"name": "wrong"}}
 
-    monkeypatch.setattr(backend._scope_provider, "focus_bound_candidate", focus)
+    monkeypatch.setattr(backend._scope_provider, "refresh_application_group", refresh)
     if failure == "cancel":
         with pytest.raises(asyncio.CancelledError):
             await backend.recover_focus(backend.application_provenance, context=context())

@@ -98,8 +98,9 @@ async def test_predispatch_unsettled_is_not_retried_or_injected(normal, monkeypa
     monkeypatch.setattr(backend, "_capture", failed)
     # The controller independently refreshes observations before dispatch;
     # isolate the backend's actual input predispatch check, not that read path.
-    with pytest.raises(HyprlandGeometryUnsettled, match="window-geometry-unsettled"):
-        await backend.act(first)
+    refused = await backend.act(first)
+    assert refused["status"] == "unavailable"
+    assert refused["injected"] is False and refused["released"] is True
     assert len(calls) == 1
     assert not normal.transports[0].commands
 
@@ -159,8 +160,9 @@ async def test_capture_scope_changed_retries_new_native_capture_and_proof(normal
 
     async def snapshot(metadata):
         proofs.append(len(captures))
-        # Change after the first native capture proof, then stay stable.
-        return scope(native_scope_serial=1 if len(proofs) == 1 else 2)
+        # The first proof now captures application-group membership. Change
+        # after the first raster's native proof, then stay stable.
+        return scope(native_scope_serial=1 if len(proofs) <= 2 else 2)
 
     async def capture(**kwargs):
         captures.append("capture")
@@ -171,7 +173,7 @@ async def test_capture_scope_changed_retries_new_native_capture_and_proof(normal
     monkeypatch.setattr(hb, "capture_explicit_output", capture)
     await observe(normal, grant)
     assert len(captures) == 2
-    assert len(proofs) == 4
+    assert len(proofs) == 6  # group + two raster proofs per capture attempt
     assert backend._scope["native_scope_serial"] == 2
     assert not normal.transports[0].commands
 

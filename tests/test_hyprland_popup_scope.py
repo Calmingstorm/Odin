@@ -12,6 +12,9 @@ def extracted_popup_binary(tmp_path_factory):
     """Execute verbatim production methods with protocol/signal boundary doubles."""
     directory = tmp_path_factory.mktemp("popup-production")
     production = (ROOT / "assets/hyprland-input/scope-plugin.cpp").read_text()
+    (directory / "native_popup_subsurface_node.hpp").write_text(
+        production[production.index("struct SubsurfaceNode {"):
+                   production.index("struct Snapshot {")])
     methods = production[production.index("    bool popupChain("):
                          production.index("    SP<CWLSurfaceResource> destinationAt(")]
     source = directory / "popup.cpp"
@@ -20,6 +23,7 @@ def extracted_popup_binary(tmp_path_factory):
                       '\n};\n#include "native_popup_cases.hpp"\n')
     binary = directory / "popup"
     subprocess.run(["c++", "-std=c++23", "-Wall", "-Wextra", "-Werror",
+                    "-I", str(directory),
                     "-I", str(ROOT / "tests"), "-I", str(ROOT / "assets/hyprland-input"),
                     str(source), "-o", str(binary)], check=True)
     return binary
@@ -29,6 +33,7 @@ def extracted_popup_binary(tmp_path_factory):
     "ancestry", "bounds", "map-unmap", "geometry", "placement", "reposition",
     "dismissed", "popup-destroy", "surface-destroy", "unmap", "root-new",
     "nested-new", "expired-popup", "retired-watch", "unrelated",
+    "subsurface-position", "subsurface-client", "subsurface-new", "subsurface-unmap",
 ])
 def test_extracted_production_popup_methods(extracted_popup_binary, scenario):
     subprocess.run([str(extracted_popup_binary), scenario], check=True)

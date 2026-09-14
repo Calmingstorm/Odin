@@ -11,7 +11,7 @@ import os
 import re
 import time
 from dataclasses import asdict, dataclass, field, replace
-from typing import NoReturn
+from typing import Any, NoReturn
 
 from .hyprland_capture import ExplicitOutput
 from .hyprland_errors import (
@@ -58,6 +58,14 @@ _NATIVE_REFUSALS = frozenset({
     "ambiguous-keyboard", "missing-guardian-keyboard", "ambiguous-pointer",
     "missing-or-wrong-output-pointer", "human-input-held", "owner-device-incarnation-changed",
     "owner-ledger-cap", "invalid-json",
+    "application-group-identity-refused", "application-group-refresh-not-released",
+    "application-group-capacity", "application-group-unbounded",
+    "application-group-member-refused", "application-group-refresh-type",
+    "application-group-target-not-released", "application-group-target-fields",
+    "application-group-target-epoch", "application-group-target-output",
+    "application-group-target-layer-surface", "application-group-target-unknown",
+    "application-group-target-surface", "application-group-target-ineligible",
+    "application-group-target-focus-unconfirmed",
 })
 
 
@@ -292,6 +300,22 @@ def selection_application_matches(identity, measured):
     )
 
 
+def application_group(row, *, surface_token):
+    """Decode bounded native membership; titles/classes/xdg parents are not authority."""
+    if (type(row) is not dict or set(row) != {"token", "epoch", "member_tokens"}
+            or type(row.get("token")) is not str
+            or not re.fullmatch(r"[0-9a-f]{48}", row["token"])
+            or type(row.get("epoch")) is not int or not 1 <= row["epoch"] < 2**63
+            or type(row.get("member_tokens")) is not list
+            or not 1 <= len(row["member_tokens"]) <= 128
+            or any(type(v) is not str or not _WINDOW_ID.fullmatch(v)
+                   for v in row["member_tokens"])
+            or len(set(row["member_tokens"])) != len(row["member_tokens"])
+            or surface_token not in row["member_tokens"]):
+        _fail("hyprland_application_group_invalid")
+    return copy.deepcopy(row)
+
+
 @dataclass(frozen=True)
 class HyprlandOwnerHandle:
     """Private exact native ledger identity. Not a grant or receiver receipt."""
@@ -440,6 +464,8 @@ class HyprlandScopeProvider:
         self._attested_instance: str | None = None
         self._attested_plugin: str | None = None
         self._selection_imported = False
+        self._application_group = None
+        self._group_authority = None
         self._lock = asyncio.Lock()
         self._closed = False
 
@@ -811,7 +837,36 @@ class HyprlandScopeProvider:
             application=application, compositor=compositor, output=asdict(explicit)
         )
 
-    async def snapshot(self, source_metadata):
+    def export_application_group(self):
+        """Private process-local pause handoff, never a new grant or public input."""
+        if self._application_group is None:
+            return None
+        return copy.deepcopy((self._application_group, self._group_authority))
+
+    def import_application_group(self, proof):
+        if self._application_group is not None or type(proof) is not tuple or len(proof) != 2:
+            _fail("hyprland_application_group_invalid")
+        group, authority = proof
+        if type(group) is not dict or not group.get("member_tokens") or type(authority) is not dict:
+            _fail("hyprland_application_group_invalid")
+        self._application_group = application_group(group, surface_token=group["member_tokens"][0])
+        self._group_authority = copy.deepcopy(authority)
+
+    async def refresh_application_group(self, source_metadata):
+        """Explicit between-action handshake. Native refuses armed/nonempty/failed ledger."""
+        return await self.snapshot(source_metadata, refresh_group=True)
+
+    async def prepare_group_target(self, source_metadata, scope, x, y):
+        group = self._application_group
+        if group is None or scope.get("application_group") != group:
+            _fail("hyprland_application_group_changed")
+        return await self.snapshot(source_metadata, _prepare={
+            "op": "prepare_group_target", "group_token": group["token"],
+            "group_epoch": group["epoch"], "target_token": scope["native_scope_token"],
+            "x": x, "y": y,
+        })
+
+    async def snapshot(self, source_metadata, *, refresh_group=False, _prepare=None):
         if type(source_metadata) is not dict:
             _fail("hyprland_explicit_output_required")
         name = source_metadata.get("mapping_id")
@@ -819,7 +874,20 @@ class HyprlandScopeProvider:
             _fail("hyprland_explicit_output_required")
         async with self._lock:
             started = time.monotonic_ns()
-            row = await self._request({"op": "snapshot", "output_name": name})
+            request: dict[str, Any] = {"op": "snapshot", "output_name": name}
+            prior = self._application_group
+            if prior is not None:
+                request["group_token"] = prior["token"]
+            if refresh_group:
+                request["refresh_group"] = True
+            if _prepare is not None:
+                request = _prepare
+            row = await self._request(request)
+            target_changed = None
+            if _prepare is not None and row.get("ok") is True:
+                target_changed = row.pop("target_changed", None)
+                if type(target_changed) is not bool:
+                    _fail("hyprland_application_group_invalid")
             if row.get("ok") is False:
                 self._unsettled(row, name, started)
             first = _observation(row, name, started)
@@ -833,8 +901,26 @@ class HyprlandScopeProvider:
             except (OSError, RuntimeError, ValueError, IndexError, StopIteration):
                 _fail("hyprland_application_identity_unavailable")
             compositor = self._identity()
+            group = None
+            if refresh_group or prior is not None or "application_group" in row:
+                group = application_group(row.get("application_group"),
+                                          surface_token=first["focus_token"])
+                authority = {"application": application, "compositor": compositor,
+                             "output": first["output"], "plugin_epoch": first.get("plugin_epoch")}
+                if (not authority["plugin_epoch"]
+                        or (prior is not None and (
+                            group["token"] != prior["token"]
+                            or group["epoch"] < prior["epoch"]
+                            or (not refresh_group and group != prior)
+                            or (group["epoch"] == prior["epoch"] and group != prior)))
+                        or (self._group_authority is not None
+                            and authority != self._group_authority)):
+                    _fail("hyprland_application_group_changed")
             if time.monotonic_ns() - started >= LEASE_NS:
                 _fail("hyprland_scope_unknown_locked_or_stale")
+            if group is not None:
+                self._application_group = copy.deepcopy(group)
+                self._group_authority = copy.deepcopy(authority)
             source_digest = _digest(first["output"])
             focus_digest = _digest(
                 {
@@ -846,10 +932,13 @@ class HyprlandScopeProvider:
                     "uid": first["uid"],
                     "parents": first["parent_tokens"],
                     "modal": first["modal"],
+                    **({"application_group": group} if group is not None else {}),
                 }
             )
             return {
+                **({"application_group": group} if group is not None else {}),
                 "authenticated": True,
+                **({"target_changed": target_changed} if target_changed is not None else {}),
                 "native_wayland": True,
                 "safe_focus": True,
                 "locked": False,
@@ -1104,7 +1193,8 @@ class HyprlandScopeProvider:
                 }
             )
             if (
-                set(row) - {"window_id", "plugin_epoch", "diagnostic_geometry_changed", "diagnostic_animating"}
+                set(row) - {"window_id", "plugin_epoch", "diagnostic_geometry_changed",
+                            "diagnostic_animating"}
                 != {
                     "ok",
                     "version",

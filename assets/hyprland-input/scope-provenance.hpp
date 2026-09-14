@@ -4,7 +4,35 @@
 #include <vector>
 #include <array>
 #include <cmath>
+#include <string>
 namespace odin_scope {
+struct ApplicationIdentity {
+    uintptr_t client = 0;
+    int64_t pid = 0, uid = -1;
+    std::string startTicks, executable, incarnation, output;
+    uint64_t device = 0, inode = 0;
+    bool operator==(const ApplicationIdentity&) const = default;
+};
+inline bool same_application(const ApplicationIdentity& a, const ApplicationIdentity& b) {
+    return a.client && a.pid > 1 && a.uid >= 0 && !a.startTicks.empty() &&
+        !a.executable.empty() && !a.incarnation.empty() && !a.output.empty() &&
+        a.device && a.inode && a == b;
+}
+inline bool group_refresh_allowed(bool armed, bool failed, bool keys, bool buttons,
+                                  bool modifiers, bool unknown, bool continuity) {
+    return !armed && !failed && !keys && !buttons && !modifiers && !unknown && continuity;
+}
+inline bool group_target_binding(uint64_t capturedEpoch, uint64_t liveEpoch, int64_t requestedEpoch,
+                                 const std::string& capturedToken, const std::string& liveToken) {
+    return requestedEpoch > 0 && capturedEpoch == liveEpoch &&
+        uint64_t(requestedEpoch) == liveEpoch && !capturedToken.empty() && capturedToken == liveToken;
+}
+inline bool bounded_group_members(const std::vector<std::string>& members, const std::string& selected) {
+    if (members.empty() || members.size() > 32 || selected.empty()) return false;
+    std::set<std::string> seen;
+    for (const auto& member : members) if (member.empty() || !seen.insert(member).second) return false;
+    return seen.contains(selected);
+}
 struct NativeAncestor {
     uintptr_t token;
     int64_t pid, uid;

@@ -53,8 +53,10 @@ async def test_own_dialog_new_class_fresh_frame_then_return_canvas(backend, pare
         return hb._render_native(native(), crop), copy.deepcopy(current), time.monotonic()
 
     backend._capture = capture
-    with pytest.raises(ComputerError, match="observation_changed"):
-        await backend.act(action(first))
+    refused = await backend.act(action(first))
+    assert refused["status"] == "unavailable"
+    assert refused["reason"] == "hyprland_observation_changed"
+    assert refused["injected"] is False and refused["released"] is True
     assert not backend._guardian.commands and not backend._guardian.bound
     dialog = await backend.observe()
     assert dialog.modal_kind == "safe_application"
@@ -81,8 +83,10 @@ def test_initial_dialog_and_reused_address_keep_modal_candidate():
 async def test_unseen_dialog_cannot_rebind_without_frame(backend):
     await backend.observe()
     backend._frame = None
-    with pytest.raises(ComputerError, match="fresh_application"):
-        await backend.act({"type": "key", "key": "Return"})
+    refused = await backend.act({"type": "key", "key": "Return"})
+    assert refused["status"] == "unavailable"
+    assert refused["reason"] == "hyprland_fresh_application_observation_required"
+    assert refused["injected"] is False and refused["released"] is True
     assert backend._guardian.bound == [] and backend._guardian.commands == []
 
 
