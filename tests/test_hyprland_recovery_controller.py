@@ -189,15 +189,95 @@ def test_corrupted_durable_owner_is_rejected_on_schema_validation(rig):
 
 
 @pytest.mark.asyncio
-async def test_paused_resume_uses_durable_recovery_not_legacy_reopen(rig):
+async def test_clean_pause_resume_does_not_manufacture_native_discontinuity(rig, monkeypatch):
     controller, store, context, grant, live, committed, _ = rig
     install(rig)
-    paused = store.set_state(grant.session_id, "paused", revoke=True)
+    resumed = []
+
+    async def pause():
+        return {"released": True}
+
+    async def resume(*, consent_generation):
+        resumed.append(consent_generation)
+
+    async def capture(*args, **kwargs):
+        return SimpleNamespace(modal=None), None
+
+    live.backend.pause = pause
+    live.backend.resume = resume
+    monkeypatch.setattr(controller, "_capture", capture)
+    await controller._pause(grant.session_id)
+    paused = store.get_session(grant.session_id)
     result = await controller.session(context, {"operation": "resume",
         "session_id": grant.session_id, "generation": paused.generation})
     assert result["state"] == "active"
-    assert committed == [{"consent_generation": 3}]
+    assert resumed == [3] and committed == []
+    assert store.get_recovery_pending(grant.session_id) is None
     assert not live.revoked
+
+
+@pytest.mark.asyncio
+async def test_resume_actual_identity_loss_enters_recovery(rig):
+    controller, store, context, grant, live, committed, _ = rig
+    install(rig)
+
+    async def resume(**kwargs):
+        raise ComputerError("hyprland_original_target_changed")
+
+    live.backend.resume = resume
+    paused = store.set_state(grant.session_id, "paused", revoke=True)
+    with pytest.raises(ComputerError, match="hyprland_fresh_observation_required"):
+        await controller.session(context, {"operation": "resume",
+            "session_id": grant.session_id, "generation": paused.generation})
+    assert committed  # Native reconciliation, never legacy reopening or replay.
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("clean", [True, False])
+async def test_resume_transient_failure_retains_pause_only_with_clean_rollback(rig, clean):
+    controller, store, context, grant, live, committed, _ = rig
+    install(rig)
+
+    async def resume(**kwargs):
+        raise TimeoutError()
+
+    async def detach():
+        return {"stopped": clean}
+
+    live.backend.resume = resume
+    live.backend.detach = detach
+    live.backend.normal_resume_retryable = clean
+    paused = store.set_state(grant.session_id, "paused", revoke=True)
+    with pytest.raises((ComputerError, TimeoutError)):
+        await controller.session(context, {"operation": "resume",
+            "session_id": grant.session_id, "generation": paused.generation})
+    current = store.get_session(grant.session_id)
+    if clean:
+        assert current.state == "paused" and current.generation == paused.generation + 1
+        assert not live.revoked
+    else:
+        assert current.state != "active" and live.revoked
+    assert not committed and not live.observations
+
+
+@pytest.mark.asyncio
+async def test_capture_timeout_invalidates_frames_without_recovery(rig):
+    controller, store, _, grant, live, committed, _ = rig
+    install(rig)
+    live.observations["old"] = object()
+    controller._delivered_observations[grant.session_id] = "old"
+
+    async def observe(**kwargs):
+        raise TimeoutError()
+
+    live.backend.observe = observe
+    with pytest.raises(ComputerError, match="hyprland_fresh_observation_required"):
+        await controller._capture(grant)
+    assert not live.observations
+    assert grant.session_id not in controller._delivered_observations
+    assert store.get_session(grant.session_id) == grant
+    assert store.get_recovery_pending(grant.session_id) is None
+    assert not committed
 
 
 @pytest.mark.asyncio

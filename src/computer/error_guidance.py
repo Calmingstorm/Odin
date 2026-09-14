@@ -26,6 +26,9 @@ _FOCUS = frozenset({
     "human_focus_changed",
     "hyprland_native_focus_not_confirmed", "hyprland_unknown_or_nonnative_focus",
 })
+_SESSION_STATE = frozenset({
+    "stale_generation", "resume_unavailable", "hyprland_resume_retryable",
+})
 
 
 def exception_reason(error: Exception) -> str:
@@ -60,6 +63,15 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
             "action. If no current pixels were returned, observe again. Never repeat the "
             "dialog-opening action."
         )
+    elif not terminal and reason in _SESSION_STATE:
+        next_action = "inspect_session_status"
+        instruction = (
+            "Read current session status. If it is cleanly paused, resume using its current "
+            "generation, then obtain and inspect a fresh observation. If it is active, use "
+            "its current generation for a fresh observation. Closed/cancelled sessions need "
+            "a fresh authorized start; quarantined or uncertain-release sessions still need "
+            "safety reconciliation. A stale generation alone does not establish held input."
+        )
     elif not terminal and reason in _SELECTION:
         next_action = "refresh_inventory_and_reselect_target"
         instruction = (
@@ -69,7 +81,9 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
         )
     elif not terminal and reason in _OBSERVATION:
         next_action = "observe_fresh"
-        instruction = "Observe again and inspect the new pixels and binding before planning new input."
+        instruction = (
+            "Observe again and inspect the new pixels and binding before planning new input."
+        )
     elif not terminal and reason in _FOCUS:
         next_action = "observe_intended_application"
         instruction = (
@@ -81,7 +95,9 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
         "recoverable": recoverable,
         "terminal": not recoverable,
         "next_action": next_action,
-        "instruction": instruction + " Do not replay the previous action or reuse stale coordinates.",
+        "instruction": (
+            instruction + " Do not replay the previous action or reuse stale coordinates."
+        ),
         "replay_permitted": False,
     }
 
@@ -103,7 +119,15 @@ def failure_guidance(result: dict, *, terminal: bool = False) -> dict:
         terminal = terminal or item.get("state") in {"unknown", "quarantined"}
         terminal = terminal or item.get("uncertain_outcome") is True
         terminal = terminal or item.get("release_confirmed") is False
-        terminal = terminal or item.get("release_ack") is False or item.get("released") is False
+        # Native ACK and receiver proof are diagnostics, not a second safety
+        # verdict over authoritative local cleanup. Never override actual
+        # uncertainty/held-input or an explicitly failed release above.
+        local_release = (
+            item.get("released") is True or item.get("release_confirmed") is True
+            or isinstance(execution, dict) and execution.get("released") is True
+        )
+        terminal = terminal or item.get("released") is False
+        terminal = terminal or item.get("release_ack") is False and not local_release
         terminal = terminal or item.get("terminal") is True
         terminal = terminal or (isinstance(cleanup, dict) and cleanup.get("complete") is not True)
     return {**result, **guidance(reason, terminal=terminal)}

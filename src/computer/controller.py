@@ -42,7 +42,7 @@ from .policy import (
     observation_input,
     owned,
 )
-from .runtime.hyprland_scope import HyprlandGeometryUnsettled, HyprlandScopeFailure
+from .runtime.hyprland_scope import HyprlandScopeFailure
 from .store import FRAME_MAX_PIXELS, ComputerStore, canonical_hash
 from .task_context import TaskContext, context_arguments
 
@@ -548,23 +548,31 @@ class ComputerController:
 
     @staticmethod
     def _hyprland_continuity_failure(live, error):
-        """Missing native continuity is not proof of a restart, or a new grant."""
-        from .runtime.hyprland_errors import HyprlandDiagnosticError
+        """Only affirmative identity loss should enter native recovery."""
+        from .runtime.hyprland_errors import HyprlandFailureCause, HyprlandFailureStage
 
+        # Transport, parsing, settling and optional receiver proof failures
+        # refuse the operation, but do not attest a restart. Unknown release
+        # remains independently fenced by action and cleanup paths.
+        if live.capabilities is None or live.capabilities.backend != "hyprland":
+            return False
+        code = error.code if isinstance(error, ComputerError) else (
+            error.args[0] if isinstance(error, HyprlandScopeFailure) and error.args else None
+        )
+        if code in {
+            "hyprland_provider_owner_changed", "hyprland_explicit_output_changed",
+            "hyprland_process_changed", "hyprland_peer_mismatch",
+            "hyprland_original_application_changed", "hyprland_compositor_exited",
+            "hyprland_original_target_changed", "hyprland_scope_plugin_incarnation_changed",
+        }:
+            return True
+        stage = getattr(error, "stage", None)
+        cause = getattr(error, "cause", None)
         return (
-            live.capabilities is not None
-            and live.capabilities.backend == "hyprland"
-            and (
-                isinstance(error, HyprlandDiagnosticError)
-                or isinstance(error, HyprlandScopeFailure)
-                and not isinstance(error, HyprlandGeometryUnsettled)
-                or isinstance(error, (TimeoutError, ConnectionError))
-                or isinstance(error, ComputerError) and error.code in {
-                    "hyprland_session_revoked", "hyprland_provider_owner_changed",
-                    "hyprland_explicit_output_changed", "hyprland_peer_unavailable",
-                    "hyprland_process_changed", "hyprland_peer_mismatch",
-                }
-            )
+            stage == HyprlandFailureStage.PROCESS
+            and cause in {HyprlandFailureCause.MISSING, HyprlandFailureCause.CHANGED}
+            or stage in {HyprlandFailureStage.SOCKET, HyprlandFailureStage.PEER}
+            and cause in {HyprlandFailureCause.CHANGED, HyprlandFailureCause.MISMATCH}
         )
 
     async def _quarantine_hyprland(self, grant, live, *, phase):
@@ -1006,6 +1014,24 @@ class ComputerController:
             and grant.state in {"starting", "active", "paused", "quarantined"}
         ):
             owned(context, grant)
+            live = self._live.get(grant.session_id)
+            if (
+                live is not None and not live.revoked
+                and live.capabilities is not None
+                and live.capabilities.backend == "hyprland"
+                and grant.state in {"active", "paused"}
+                and self.monotonic() < live.deadline
+                and self.store.clock() < grant.expires_at
+                and self.store.get_recovery_pending(grant.session_id) is None
+            ):
+                # A Discord completion boundary is not compositor death or
+                # cancellation. Release owned input, retain only paused task
+                # identity until its original deadline. A new turn still needs
+                # explicit resume, renewed generation and delivered pixels.
+                if (grant.state == "paused"
+                        and getattr(live.backend, "normal_resume_retryable", False) is True):
+                    return self._public_session(grant)
+                return await self._pause(grant.session_id)
             return await self._stop(grant.session_id, "cancelled")
         return None
 
@@ -1341,22 +1367,6 @@ class ComputerController:
         if operation == "pause":
             return await self._pause(grant.session_id)
         if operation == "resume":
-            live = self._live.get(grant.session_id)
-            if (live is not None and live.capabilities is not None
-                    and live.capabilities.backend == "hyprland"
-                    and callable(getattr(live.backend, "recover_native_authority", None))):
-                if grant.state != "paused" or live.revoked:
-                    raise ComputerError("resume_unavailable")
-                self._hyprland_contexts[grant.session_id] = context
-                async with self._actions:
-                    current = self.store.get_session(grant.session_id)
-                    if current != grant or live.revoked:
-                        raise ComputerError("grant_revoked")
-                    grant = self.store.set_state(
-                        grant.session_id, "paused", turn_id=context.turn_id)
-                    await self._recover_hyprland_native(
-                        grant, live, phase="native_continuity_lost")
-                return self._public_session(self.store.get_session(grant.session_id))
             if grant.state != "paused" or grant.session_id not in self._live:
                 raise ComputerError("resume_unavailable")
             live = self._live[grant.session_id]
@@ -1406,7 +1416,38 @@ class ComputerController:
                     grant = self.store.set_state(grant.session_id, "active")
                     obs, _ = await self._capture(grant, acknowledge_modal=True)
                     live.modal_identity = obs.modal
-                except (Exception, asyncio.CancelledError):
+                except (Exception, asyncio.CancelledError) as exc:
+                    if self._hyprland_continuity_failure(live, exc):
+                        self._hyprland_contexts[grant.session_id] = context
+                        await self._quarantine_hyprland(
+                            grant, live, phase="native_continuity_lost")
+                        raise ComputerError("hyprland_fresh_observation_required") from None
+                    if (
+                        not isinstance(exc, asyncio.CancelledError)
+                        and live.capabilities.backend == "hyprland"
+                        and self.store.get_session(grant.session_id) == grant
+                        and grant.state == "active"
+                        and not live.revoked
+                    ):
+                        # Rearm succeeded, but its first observation did not.
+                        # No user action was sent here. Explicitly pause and
+                        # require the backend's clean release receipt rather
+                        # than cancelling an otherwise continuous drawing.
+                        await self._pause(grant.session_id)
+                        grant = self.store.get_session(grant.session_id)
+                    if (
+                        not isinstance(exc, asyncio.CancelledError)
+                        and live.capabilities.backend == "hyprland"
+                        and getattr(live.backend, "normal_resume_retryable", False) is True
+                        and self.store.get_session(grant.session_id) == grant
+                        and grant.state == "paused"
+                        and not live.revoked
+                    ):
+                        # Rollback proved owned input released and helpers closed.
+                        # Keep the NEW paused grant, never replay the failed resume.
+                        live.observations.clear()
+                        self._delivered_observations.pop(grant.session_id, None)
+                        raise ComputerError("hyprland_resume_retryable") from None
                     await self._stop(grant.session_id, "cancelled")
                     raise
                 return self._public_session(self.store.get_session(grant.session_id))
@@ -1484,12 +1525,17 @@ class ComputerController:
             )
             raw = await _bounded(capture(**request), 5)
         except (ComputerError, TimeoutError, ConnectionError, HyprlandScopeFailure) as exc:
+            # Failed capture never authorizes reuse of an older frame.
+            live.observations.clear()
+            self._delivered_observations.pop(grant.session_id, None)
             if self._hyprland_continuity_failure(live, exc):
                 await self._quarantine_hyprland(grant, live, phase="native_continuity_lost")
                 if self.store.get_session(grant.session_id).state == "active":
                     raise ComputerError("hyprland_recovered_fresh_observation_required") from None
                 raise ComputerError("hyprland_fresh_target_required") from None
             if not isinstance(exc, ComputerError):
+                if live.capabilities is not None and live.capabilities.backend == "hyprland":
+                    raise ComputerError("hyprland_fresh_observation_required") from None
                 raise
             if exc.code in {
                 "display_asleep",
@@ -1889,7 +1935,8 @@ class ComputerController:
             for _ in range(3):
                 if current.geometry == obs.geometry:
                     break
-                if self.monotonic() - obs.captured_at >= self._model_observation_seconds(live) - 0.15:
+                if (self.monotonic() - obs.captured_at
+                        >= self._model_observation_seconds(live) - 0.15):
                     break
                 await asyncio.sleep(0.15)
                 self._active(grant)
@@ -1953,7 +2000,15 @@ class ComputerController:
             try:
                 current = await self.validate_action_binding(grant, inp["observation_id"])
             except ComputerError as exc:
-                if any(obs.modal is not None for obs in live.observations.values()):
+                if any(
+                    obs.modal is not None
+                    and (
+                        live.capabilities.backend != "hyprland"
+                        or obs.modal != original.modal
+                        or inp.get("expected_modal") != obs.modal
+                    )
+                    for obs in live.observations.values()
+                ):
                     await self._pause(grant.session_id)
                 elif grant.environment == "existing_session" and exc.code in {
                     "stale_source_binding", "input_focus_unavailable"
@@ -2076,7 +2131,8 @@ class ComputerController:
             await self._auth(context)
             self._active(grant)
             if (
-                not 0 <= self.monotonic() - original.captured_at <= self._model_observation_seconds(live)
+                not 0 <= self.monotonic() - original.captured_at
+                <= self._model_observation_seconds(live)
                 or not 0 <= self.monotonic() - current.captured_at <= FRAME_FRESH_SECONDS
             ):
                 raise ComputerError("stale_observation")

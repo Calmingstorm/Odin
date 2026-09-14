@@ -282,6 +282,7 @@ class HyprlandRuntimeBackend:
         self._capture_jobs: set[asyncio.Task[NativeFrame]] = set()
         self._release_failed = False
         self._cleanup_task: asyncio.Task[bool] | None = None
+        self._clean_pause_epoch: int | None = None
         self._cleanup_evidence: dict[str, bool | list[str]] = {}
         self.lifecycle_reason: str | None = None
         self._owner_handle: Any | None = None
@@ -1329,6 +1330,7 @@ class HyprlandRuntimeBackend:
 
     def _invalidate(self):
         self._recovery_epoch += 1
+        self._clean_pause_epoch = None
         self._prepared_recovery = None
         self._paused = True
         self.input_supported = False
@@ -1711,9 +1713,15 @@ class HyprlandRuntimeBackend:
         return await asyncio.shield(self._cleanup_task)
 
     async def pause(self):
+        if (self._paused and self._clean_pause_epoch == self._recovery_epoch
+                and not self._release_failed):
+            return {"paused": True, "input_revoked": True, "capture_revoked": True,
+                    "released": True, **self._cleanup_evidence}
         self._invalidate()
         async with self._stop_lock:
             clean = await self._cleanup()
+            if clean:
+                self._clean_pause_epoch = self._recovery_epoch
         return {
             "paused": True,
             "input_revoked": True,
@@ -1754,11 +1762,6 @@ class HyprlandRuntimeBackend:
         }
 
     async def resume(self, *, consent_generation):
-        if self._owner_handle is not None:
-            # The historical resume path can only match process/output, not
-            # the exact selected native window. Use durable recovery handoff.
-            self._invalidate()
-            raise ComputerError("hyprland_native_recovery_required")
         if (
             self._closed
             or not self._paused
@@ -1768,6 +1771,10 @@ class HyprlandRuntimeBackend:
         ):
             raise ComputerError("hyprland_renewed_session_consent_required")
         async with self._stop_lock:
+            if self._owner_handle is not None or self._selected_binding is not None:
+                await self._resume_clean_native(consent_generation)
+                return {"resumed": True, "capture_only": False,
+                        "input_admission": self.input_admission.public()}
             if not await self._cleanup():
                 raise ComputerError("hyprland_owned_cleanup_unverified")
             self._generation = consent_generation
@@ -1784,6 +1791,94 @@ class HyprlandRuntimeBackend:
             "capture_only": False,
             "input_admission": self.input_admission.public(),
         }
+
+    async def _resume_clean_native(self, generation):
+        """Rearm acknowledged local teardown without replay or owner recovery."""
+        if (self._clean_pause_epoch != self._recovery_epoch
+                or self._release_failed
+                or self._cleanup_evidence.get("hyprland_owned_connections_closed") is not True):
+            raise ComputerError("hyprland_owned_cleanup_unverified")
+        epoch = self._recovery_epoch
+        identity, selected = self._identity, self._selected_binding
+        if identity is None or not selected or not selected.get("window_id"):
+            raise ComputerError("hyprland_original_target_continuity_unproven")
+        if self._incarnation is not None and self._incarnation.exited():
+            raise ComputerError("hyprland_compositor_exited")
+        await revalidate(identity, time.monotonic() + 3)
+        self._recovery_current(epoch)
+        provider = self._new_provider()
+        # Successful close of the old helper must not be queried twice.
+        self._guardian = None
+        self._scope_provider = provider
+        self._clean_pause_epoch = None
+        self._cleanup_task = None
+        try:
+            await provider.attest_identity(identity)
+            focused = await provider.focus_bound_candidate(selected)
+            self._recovery_current(epoch)
+            if (any(focused.get(k) != selected.get(k)
+                    for k in ("instance_id", "window_id", "plugin_epoch", "identity"))
+                    or not selection_application_matches(focused["identity"], self._application_pin)):
+                raise ComputerError("hyprland_original_target_changed")
+            output = selection_output(focused["output_name"], focused["output"])
+            if output != self._output_pin:
+                raise ComputerError("hyprland_explicit_output_changed")
+            self._selected_binding = copy.deepcopy(focused)
+            self._selected = focused["output_id"]
+            self._owner_handle = None
+            guardian = HyprlandGuardian(
+                self.config.guardian_binary, self.config.expected_uid, self._record_spawn)
+            self._guardian = guardian
+            self._record_spawn(None)
+            await guardian.start(
+                self.config.wayland_path, self.config.output_name, provider.socket_path,
+                self.config.compositor_pid, output.logical_width, output.logical_height)
+            self._recovery_current(epoch)
+            self._owner_handle = await provider.capture_owner(guardian.owner_identity)
+            self._persist_owner()
+            self._recovery_current(epoch)
+            scope, _ = await self._action_scope(self._metadata())
+            self._check_scope(scope)
+            # Same-process native dialogs are fresh scope, not destruction of
+            # the root target just verified by focus_bound_candidate.
+            root_matches = scope.get("surface_token") == focused["window_id"]
+            child_matches = (
+                scope.get("modal") is True
+                and scope.get("parent_chain_verified") is True
+                and focused["window_id"] in scope.get("parent_tokens", [])
+            )
+            if scope.get("plugin_epoch") != focused["plugin_epoch"]:
+                raise ComputerError("hyprland_original_target_changed")
+            if not (root_matches or child_matches):
+                # Another focused window is not proof our selected root died.
+                raise ComputerError("input_focus_unavailable")
+            await guardian.bind_scope(scope)
+            await revalidate(identity, time.monotonic() + 3)
+            self._recovery_current(epoch)
+            if self._incarnation is not None and self._incarnation.exited():
+                raise ComputerError("hyprland_compositor_exited")
+            self._generation = generation
+            self._scope = scope
+            self._frame, self._captured_at, self._fingerprint = None, 0.0, None
+            self._paused = False
+            self.input_supported = True
+            self.input_blocker = None
+        except BaseException:
+            self._invalidate()
+            clean = await self._cleanup()
+            if clean:
+                self._clean_pause_epoch = self._recovery_epoch
+            raise
+
+    @property
+    def normal_resume_retryable(self):
+        """Only acknowledged paused resources permit another consent attempt."""
+        return (
+            not self._closed and self._paused and not self.input_supported
+            and not self._release_failed
+            and self._clean_pause_epoch == self._recovery_epoch
+            and self._cleanup_evidence.get("hyprland_owned_connections_closed") is True
+        )
 
     async def detach(self):
         self._closed = True

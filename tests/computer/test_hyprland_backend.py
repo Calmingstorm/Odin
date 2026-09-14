@@ -488,9 +488,11 @@ async def test_start_observe_act_pause_resume_detach_contract(monkeypatch):
     result = await backend.act(action(frame))
     assert result["status"] == "executed" and result["released"] is True
     assert (await backend.pause())["released"] is True
-    # Once a native owner has been captured, the old process/output-only resume
-    # path is forbidden.  Recovery must use the durable exact-window handoff.
-    with pytest.raises(ComputerError, match="hyprland_native_recovery_required"):
+    # Clean pause is necessary, not sufficient: this legacy startup fixture
+    # never selected an exact native target. Process/output pins alone must
+    # still not authorize rearming a captured owner.
+    assert backend._selected_binding is None
+    with pytest.raises(ComputerError, match="hyprland_original_target_continuity_unproven"):
         await backend.resume(consent_generation=2)
     stopped = await backend.detach()
     assert stopped["owned_devices"] == "hyprland_owned_connections_closed"

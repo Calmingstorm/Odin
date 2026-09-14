@@ -294,11 +294,19 @@ def test_owner_publication_exact_private_descriptor(runtime):
     assert "compositor" not in rows[0]["owner"]
 
 
-async def test_legacy_resume_refuses_captured_native_owner(runtime):
-    backend, _, _ = runtime
-    with pytest.raises(ComputerError, match="native_recovery_required"):
+async def test_native_resume_requires_pause_then_clean_receipt(runtime):
+    backend, provider, guardian = runtime
+    # A captured owner alone neither permits resume nor mandates recovery.
+    # Active input must first be paused; invalidation without acknowledged
+    # local teardown is not a clean pause receipt.
+    with pytest.raises(ComputerError, match="hyprland_renewed_session_consent_required"):
+        await backend.resume(consent_generation=2)
+    backend._invalidate()
+    with pytest.raises(ComputerError, match="hyprland_owned_cleanup_unverified"):
         await backend.resume(consent_generation=2)
     assert backend._paused and not backend.input_supported
+    guardian.start.assert_not_awaited()
+    provider.focus_bound_candidate.assert_not_awaited()
 
 
 def test_guardian_retains_original_identity_not_current_pid():

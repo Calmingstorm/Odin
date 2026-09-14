@@ -26,11 +26,7 @@ def _reopen_store(store):
     HyprlandIdentityError("hyprland_process_changed"),
     HyprlandIdentityError("hyprland_peer_mismatch"),
     HyprlandScopeFailure("hyprland_provider_owner_changed"),
-    HyprlandScopeFailure("hyprland_scope_eof"),
     ComputerError("hyprland_provider_owner_changed"),
-    ComputerError("hyprland_session_revoked"),
-    TimeoutError(),
-    ConnectionError(),
 ])
 async def test_native_continuity_loss_preserves_intent_not_authority(normal, monkeypatch, failure):
     grant = await start(normal)
@@ -115,12 +111,17 @@ async def test_unknown_release_survives_clean_detach_restart_and_cannot_replay(n
     assert not normal.transports[0].commands
 
 
-async def test_focus_loss_does_not_become_compositor_loss(normal, monkeypatch):
+@pytest.mark.parametrize("failure", [
+    ComputerError("input_focus_unavailable"),
+    HyprlandScopeFailure("hyprland_scope_eof"),
+    ComputerError("hyprland_session_revoked"), TimeoutError(), ConnectionError(),
+])
+async def test_uncertain_capture_does_not_become_compositor_loss(normal, monkeypatch, failure):
     grant = await start(normal)
     controller = normal.service.controller
     live = controller._live[grant["session_id"]]
     monkeypatch.setattr(live.backend, "observe", AsyncMock(
-        side_effect=ComputerError("input_focus_unavailable")))
+        side_effect=failure))
     await normal.runner._run_one_tool(normal.state, call("computer_observe", **grant))
     assert controller.store.get_recovery_pending(grant["session_id"]) is None
     assert controller.store.get_session(grant["session_id"]).state == "active"
@@ -130,7 +131,8 @@ async def test_fence_persistence_failure_still_revokes_and_detaches(normal, monk
     grant = await start(normal)
     controller = normal.service.controller
     live = controller._live[grant["session_id"]]
-    monkeypatch.setattr(live.backend, "observe", AsyncMock(side_effect=ConnectionError()))
+    monkeypatch.setattr(live.backend, "observe", AsyncMock(
+        side_effect=ComputerError("hyprland_process_changed")))
 
     def fail(*args, **kwargs):
         raise OSError("disk unavailable")
