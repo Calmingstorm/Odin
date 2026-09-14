@@ -58,6 +58,25 @@ def execution_receipt(raw, result):
         result.update(status="unknown", reason="input_release_unknown")
     elif result["status"] == "unknown":
         result.update(status="interrupted", reason="effect_unknown_reconcile_no_replay")
+    if (released and raw.get("status") == "interrupted"
+            and raw.get("reason") == "hyprland_dispatch_interrupted_after_release"):
+        # Preserve this bounded native interruption reason through visual/pointer
+        # normalization. It proves neither completion nor replay safety.
+        result.update(status="interrupted", reason=raw["reason"])
+        result["verification"] = {"status": "unavailable"}
+        # Retain bounded safety facts INSIDE the persisted verification schema,
+        # not new top-level fields rejected by Store.finish_action. Other
+        # backends keep their existing receipt contract unchanged.
+        safety = result["verification"]
+        for key in ("terminal", "uncertain_outcome", "fresh_session_required", "held_input"):
+            if raw.get(key) is True:
+                safety[key] = True
+        if raw.get("release_confirmed") is False:
+            safety["release_confirmed"] = False
+        if raw.get("state") in {"unknown", "quarantined", "closed", "cancelled"}:
+            safety["state"] = raw["state"]
+        if type(raw.get("cleanup")) is dict and raw["cleanup"].get("complete") is not True:
+            safety["cleanup"] = {"complete": False}
     diagnostics = raw.get("diagnostics", {})
     diagnostics = diagnostics if type(diagnostics) is dict else {}
     planned, completed = (diagnostics.get(k) for k in ("steps_planned", "steps_completed"))
@@ -213,6 +232,11 @@ def effect_receipt(raw, observation, expected, target=None):
             key: transition[key] for key in ("method", "appeared", "kind")
         }
     if kind == "visual_change":
+        return result
+    if result.get("reason") == "hyprland_dispatch_interrupted_after_release":
+        # Preserve the safety facts above for region/dialog/field expectations
+        # too. An interrupted plan has no measured effect to promote below.
+        result["verification"]["type"] = kind
         return result
     native_transition = result["verification"].get("native_transition")
     result["verification"] = {

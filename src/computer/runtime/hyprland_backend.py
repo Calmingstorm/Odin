@@ -285,6 +285,8 @@ class HyprlandRuntimeBackend:
         self._release_failed = False
         self._cleanup_task: asyncio.Task[bool] | None = None
         self._clean_pause_epoch: int | None = None
+        self._observe_rearm: tuple[int, int] | None = None
+        self._observe_rearming = False
         self._cleanup_evidence: dict[str, bool | list[str]] = {}
         self.lifecycle_reason: str | None = None
         self._owner_handle: Any | None = None
@@ -1042,6 +1044,28 @@ class HyprlandRuntimeBackend:
 
     async def observe(self, crop=None):
         async with self._lock:
+            if self._observe_rearm is not None:
+                generation, epoch = self._observe_rearm
+                self._observe_rearm = None
+                if (self._closed or self._release_failed or generation != self._generation
+                        or epoch != self._recovery_epoch):
+                    raise ComputerError("hyprland_session_revoked")
+                # A partial action is never replayed. Retire its confirmed-clean
+                # owner, then use the existing same-incarnation/group handshake
+                # to prepare capture under this still-authorized session. No
+                # focus command, new target grant, or input is issued here.
+                self._observe_rearming = True
+                try:
+                    cleanup = await self.pause()
+                    if cleanup.get("released") is not True:
+                        raise ComputerError("hyprland_owned_cleanup_unverified")
+                    async with self._stop_lock:
+                        if (self._closed or self._generation != generation
+                                or self._recovery_epoch != epoch + 1):
+                            raise ComputerError("hyprland_session_revoked")
+                        await self._resume_clean_native(generation)
+                finally:
+                    self._observe_rearming = False
             try:
                 rendered, scope, captured_at = await self._capture_observation(crop)
             except HyprlandScopeFailure as exc:
@@ -1126,11 +1150,15 @@ class HyprlandRuntimeBackend:
                 lease[0] = deadline
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
             if (self._application_group_proof is not None
                     and generation == self._generation and not self._paused and not self._closed
                     and self._guardian.application_group_refresh_ready):
                 return  # Post-release focus changes require fresh pixels, not held-input cleanup.
+            from ..error_guidance import exception_reason
+
+            logging.getLogger(__name__).warning(
+                "Hyprland action watchdog stopped: %s", exception_reason(exc))
             self._paused = True
             self._frame = None
             self.input_supported = False
@@ -1252,16 +1280,26 @@ class HyprlandRuntimeBackend:
                 raise ComputerError("hyprland_observation_expired")
             self._frame = None
             lease, generation = [deadline], self._generation
+            action_epoch = self._recovery_epoch
             dispatch[0] = True
             watchdog = asyncio.create_task(self._watch_action(fresh, generation, lease))
             self._jobs.add(watchdog)
 
             async def pixel_guard():
                 self._active()
-                current, _ = await self._action_scope(self._metadata(), deadline_ns=lease[0])
-                self._check_scope(current)
-                if generation != self._generation or _binding(current) != _binding(scope):
-                    raise ComputerError("hyprland_focus_changed")
+                if generation != self._generation:
+                    raise ComputerError("hyprland_generation_revoked")
+                if self._release_failed or self.input_admission.state != "eligible":
+                    raise ComputerError("hyprland_owned_cleanup_unverified")
+                if time.monotonic_ns() >= lease[0]:
+                    raise ComputerError("hyprland_scope_evidence_expired")
+                # Hyprland verifies same(bound) before EVERY native event,
+                # including keys/buttons. Its watchdog still checks the full
+                # Python binding and renews the bounded lease. A second snapshot
+                # RPC per field-plan gate adds contention/deadline failures but
+                # no native authority. This permit is liveness only: no raster
+                # equality, target rebinding, or lease extension. Other Wayland
+                # backends keep their own per-gate scope checks unchanged.
 
             try:
                 if time.monotonic_ns() >= lease[0]:
@@ -1338,11 +1376,21 @@ class HyprlandRuntimeBackend:
                     terminal = terminal if type(terminal) is dict else {}
                     failure = native_failure({**terminal, **details})
                     sent = details.get("input_was_sent", terminal.get("input_was_sent"))
+                    same_session = (
+                        cleanup.get("process_reaped") is True
+                        and self._application_group_proof is not None
+                        and self._selected_binding is not None
+                        and self._identity is not None and not self._closed
+                        and generation == self._generation
+                        and action_epoch == self._recovery_epoch
+                    )
+                    if same_session:
+                        self._observe_rearm = (generation, self._recovery_epoch)
                     return {
                         "status": "interrupted",
                         "injected": sent if type(sent) is bool else None,
                         "released": True,
-                        "fresh_session_required": True,
+                        "fresh_session_required": not same_session,
                         "reason": "hyprland_dispatch_interrupted_after_release",
                         "release_basis": (
                             "cooperative_native_ack" if cleanup.get("release_ack") is True
@@ -1431,6 +1479,7 @@ class HyprlandRuntimeBackend:
 
     def _invalidate(self):
         self._recovery_epoch += 1
+        self._observe_rearm = None
         self._clean_pause_epoch = None
         self._prepared_recovery = None
         self._paused = True
@@ -1815,7 +1864,7 @@ class HyprlandRuntimeBackend:
 
     async def pause(self):
         if (self._paused and self._clean_pause_epoch == self._recovery_epoch
-                and not self._release_failed):
+                and not self._release_failed and not self._observe_rearming):
             return {"paused": True, "input_revoked": True, "capture_revoked": True,
                     "released": True, **self._cleanup_evidence}
         self._invalidate()

@@ -267,10 +267,27 @@ class HyprlandGuardian(WaylandGuardian):
         if (type(scope_deadline_ns) is not int
                 or not time.monotonic_ns() < scope_deadline_ns <= self._scope_deadline):
             raise HyprlandGuardianError("hyprland_guardian_scope_expired")
+        permit_reason = None
+
+        async def checked_permit():
+            nonlocal permit_reason
+            try:
+                await pixel_guard()
+            except Exception as exc:
+                from ..error_guidance import exception_reason
+
+                reason = exception_reason(exc)
+                permit_reason = reason if reason in {
+                    "hyprland_session_revoked", "hyprland_generation_revoked",
+                    "hyprland_owned_cleanup_unverified", "hyprland_scope_evidence_expired",
+                } else "hyprland_pixel_permit_failed"
+                raise
+
         try:
             self._group_refresh_clean = False
             receipt = await super().act(
-                command, pixel_guard=pixel_guard, scope_deadline_ns=scope_deadline_ns)
+                command, pixel_guard=checked_permit if pixel_guard is not None else None,
+                scope_deadline_ns=scope_deadline_ns)
         except Exception as exc:
             # Controller receipts conservatively collapse dispatch exceptions.
             # Preserve bounded native facts in the journal, never commands,
@@ -278,6 +295,10 @@ class HyprlandGuardian(WaylandGuardian):
             failure = native_failure(self._last_terminal)
             if isinstance(exc, WaylandGuardianError) and failure is not None:
                 exc.details = {**getattr(exc, "details", {}), "native_failure": failure}
+            if isinstance(exc, WaylandGuardianError) and permit_reason is not None:
+                exc.details = {**getattr(exc, "details", {}), "permit_reason": permit_reason}
+            if permit_reason is not None:
+                log.warning("Hyprland field permit refused: %s", permit_reason)
             log.warning(
                 "Hyprland native action failed: diagnostics=%s input_was_sent=%s "
                 "release_sent=%s release_acknowledged=%s native_failure=%s",

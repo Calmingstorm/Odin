@@ -15,8 +15,8 @@ from pathlib import Path
 
 from ..tools.output_authorization import tool_scope_allows
 from ..tools.result_validator import ToolResult
-from .models import RequestContext
 from .error_guidance import exception_reason, failure_guidance, guidance
+from .models import RequestContext
 
 logger = logging.getLogger(__name__)
 
@@ -263,6 +263,15 @@ class ComputerIntegration:
                 or (isinstance(result.get("cleanup"), dict) and result["cleanup"].get("complete") is not True)
             ):
                 result = failure_guidance(result)
+            clean_interruption = (
+                isinstance(result, dict)
+                and result.get("status") == "interrupted"
+                and result.get("reason") == "hyprland_dispatch_interrupted_after_release"
+                and result.get("recoverable") is True
+                and result.get("terminal") is False
+                and isinstance(result.get("execution"), dict)
+                and result["execution"].get("released") is True
+            )
             if (
                 name == "computer_act"
                 and isinstance(result, dict)
@@ -273,6 +282,11 @@ class ComputerIntegration:
                 # reissue pixels or authorize a subsequent action.
                 observation = result["next_observation"]
                 receipt = {k: v for k, v in result.items() if k != "next_observation"}
+                if clean_interruption:
+                    # The existing image-delivery loop treats every interrupted
+                    # transport status as unknown. Publish a settled failure at
+                    # that boundary, retaining the native status and evidence.
+                    receipt = {**receipt, "status": "not_satisfied", "native_status": "interrupted"}
                 try:
                     image = self.output_image(observation)
                 except (ValueError, TypeError, KeyError):
@@ -300,7 +314,7 @@ class ComputerIntegration:
                 grant.images.append(image)
                 return image
             unknown = isinstance(result, dict) and (
-                result.get("status") in {"unknown", "interrupted"}
+                (result.get("status") in {"unknown", "interrupted"} and not clean_interruption)
                 or result.get("state") in {"unknown", "quarantined"}
                 or (
                     isinstance(result.get("cleanup"), dict)
@@ -308,7 +322,7 @@ class ComputerIntegration:
                 )
                 or result.get("uncertain_outcome") is True
             )
-            rejected = isinstance(result, dict) and result.get("status") in {
+            rejected = clean_interruption or isinstance(result, dict) and result.get("status") in {
                 "unavailable",
                 "not_satisfied",
                 "rejected",
@@ -332,7 +346,6 @@ class ComputerIntegration:
             raise
         except Exception as exc:
             from .models import ComputerError
-
             from .runtime.hyprland_scope import HyprlandScopeFailure
 
             if isinstance(exc, (ComputerError, PermissionError, HyprlandScopeFailure)):

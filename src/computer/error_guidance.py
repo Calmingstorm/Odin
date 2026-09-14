@@ -65,7 +65,16 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
         "unknown, the operator must RELEASE-ALL, close the fenced session, and start "
         "anew with renewed consent and fresh observation."
     )
-    if not terminal and reason == "effect_unknown_reconcile_no_replay":
+    if not terminal and reason == "hyprland_dispatch_interrupted_after_release":
+        next_action = "observe_fresh"
+        instruction = (
+            "Owned input release is confirmed, but dispatch was interrupted and the UI "
+            "effect is not established. Obtain and inspect fresh pixels and their binding "
+            "before planning a DIFFERENT action. If paused, explicitly resume using the "
+            "current session generation before observing. Never repeat the interrupted action. "
+            "This clean interruption does not require operator input-release intervention."
+        )
+    elif not terminal and reason == "effect_unknown_reconcile_no_replay":
         next_action = "inspect_session_and_reconcile_effect"
         instruction = (
             "Input release is confirmed, but the action's effect is uncertain. Read session "
@@ -142,8 +151,10 @@ def failure_guidance(result: dict, *, terminal: bool = False) -> dict:
     # Unknown outcome/release takes precedence over any recoverable stale reason.
     execution = result.get("execution")
     released_effect_unknown = (
-        reason == "effect_unknown_reconcile_no_replay"
-        and isinstance(execution, dict) and execution.get("released") is True
+        reason in {"effect_unknown_reconcile_no_replay",
+                   "hyprland_dispatch_interrupted_after_release"}
+        and (isinstance(execution, dict) and execution.get("released") is True
+             or result.get("released") is True or result.get("release_confirmed") is True)
     )
     if isinstance(execution, dict):
         terminal = terminal or execution.get("released") is False
@@ -152,7 +163,11 @@ def failure_guidance(result: dict, *, terminal: bool = False) -> dict:
         terminal = terminal or item.get("status") in {"unknown", "interrupted"} and not (
             released_effect_unknown and item.get("status") == "interrupted"
         )
-        terminal = terminal or item.get("state") in {"unknown", "quarantined"}
+        terminal = terminal or item.get("state") in {
+            "unknown", "quarantined", "closed", "cancelled",
+        }
+        terminal = terminal or item.get("fresh_session_required") is True
+        terminal = terminal or item.get("held_input") is True
         terminal = terminal or item.get("uncertain_outcome") is True
         terminal = terminal or item.get("release_confirmed") is False
         # Native ACK and receiver proof are diagnostics, not a second safety
