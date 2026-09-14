@@ -2149,7 +2149,7 @@ class ComputerController:
             # clocks/carets elsewhere in the screenshot. Source/focus still match
             # exactly above; native pointer-hit checks remain before injection.
             attached_keyboard = (
-                grant.platform == "x11"
+                (grant.platform == "x11" or live.capabilities.backend == "hyprland")
                 and grant.environment == "existing_session"
                 and inp["operation"] in {"type", "key"}
             )

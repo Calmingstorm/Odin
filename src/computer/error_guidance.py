@@ -14,6 +14,7 @@ _SELECTION = frozenset({
 })
 _OBSERVATION = frozenset({
     "stale_observation", "stale_source_binding", "geometry_changed",
+    "visual_target_changed", "sequence_visual_target_changed",
     "observation_expired", "wayland_scope_evidence_stale",
     "wayland_scope_evidence_expired",
     "hyprland_fresh_application_observation_required", "hyprland_observation_expired",
