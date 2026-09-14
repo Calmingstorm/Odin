@@ -250,6 +250,10 @@ int main(int argc, char **argv) {
             a.toplevel = xdg_surface_get_toplevel(a.xdg_surface);
             xdg_toplevel_add_listener(a.toplevel, &toplevel_listener, &a);
             xdg_toplevel_set_title(a.toplevel, argv[2]); xdg_toplevel_set_app_id(a.toplevel, argv[2]);
+            /* Fixed-size native top-level floats from first map on pinned Hyprland.
+             * Never map tiled and then float: that already perturbs real windows. */
+            xdg_toplevel_set_min_size(a.toplevel, 800, 600);
+            xdg_toplevel_set_max_size(a.toplevel, 800, 600);
             wl_surface_commit(a.surface); initialized = true;
             event_start("receiver_created"); printf(",\"title\":"); json_string(argv[2]); printf(",\"app_id\":"); json_string(argv[2]); event_end();
         }

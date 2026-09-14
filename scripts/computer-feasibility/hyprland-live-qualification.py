@@ -225,7 +225,10 @@ class Harness:
         s=os.lstat(self.a.scope_socket)
         req((s.st_dev,s.st_ino,s.st_uid)==self.scope_identity,"scope socket changed")
         row=scope(self.a.scope_socket,self.pid,self.uid,value)
-        if ok:req(row.get("ok") is True,f"scope refused {value['op']}")
+        if value['op'] == 'focus_candidate' or row.get('ok') is not True:
+            with (self.logs/'scope-replies.jsonl').open('a') as f:
+                f.write(json.dumps(redact({'op':value['op'],'reply':row},self.tokens))+'\n')
+        if ok:req(row.get("ok") is True,f"scope refused {value['op']}: {row.get('error',row.get('reason'))}")
         return row
     def manifest_check(self):
         p=Path(self.a.manifest);req(p.is_absolute(),"manifest path not absolute")
@@ -271,6 +274,10 @@ class Harness:
         wait(lambda:p.poll()is not None or any(x.get("event")=="surface_commit" for x in events(path)),
              3,"receiver did not map")
         req(p.poll()is None,"receiver exited at startup")
+        clients=json.loads(subprocess.check_output(['hyprctl','-j','clients'],text=True))
+        own=[c for c in clients if c.get('pid')==p.pid]
+        if len(own)!=1 or own[0].get('floating') is not True:
+            self.stop(p);raise Refusal('receiver must float from first map')
         wait(lambda:any(x.get("event")=="keyboard_enter" and x.get("own_surface") is True for x in events(path)),
              3,"receiver did not gain native keyboard focus")
         time.sleep(.10)  # Initial map/configure settles before read-only inventory.
@@ -294,7 +301,17 @@ class Harness:
         req(pin(p.pid,self.uid)==identity,"receiver changed across focus")
         return identity
     def snapshot(self,identity):
-        began=time.monotonic_ns();r=self.call({"op":"snapshot","output_name":self.a.output_name},True)
+        deadline=time.monotonic()+3
+        while True:
+            began=time.monotonic_ns();r=self.call({"op":"snapshot","output_name":self.a.output_name})
+            if r.get('ok') is True:break
+            req(r.get('error')=='window-geometry-unsettled' and
+                r.get('focus',{}).get('pid')==identity['pid'] and
+                r.get('focus',{}).get('uid')==self.uid and
+                r.get('output',{}).get('name')==self.a.output_name and
+                time.monotonic()<deadline, f"snapshot refused: {r.get('error')}")
+            req(pin(identity['pid'],self.uid)==identity,'receiver changed while settling')
+            time.sleep(.02)  # Observation only. No action retry or token reuse.
         now=time.monotonic_ns();tok=r.get("token");measured=r.get("measured_monotonic_ns")
         req(r.get("locked")is False and r.get("native_wayland")is True and r.get("safe_focus")is True,
             "unsafe snapshot")
@@ -358,6 +375,7 @@ class Harness:
             req(pin(p.pid,self.uid)==identity,"receiver changed across positive release")
             result["terminal_cleanup"]=g.close_verified()
             result.update(passed=True,receiver_buttons=buttons,plugin_status=self.clean())
+            print('positive_click PASS: receiver BTN_LEFT down/up; native cleanup acknowledged',flush=True)
         finally:
             if g:g.cleanup(sent)
             if p:self.stop(p)
@@ -426,6 +444,13 @@ class Harness:
     def run(self):
         code=1
         try:
+            if os.environ.get('ODIN_FIX_PHASE') == 'diagnostic':
+                p,path=self.launch('diagnostic')
+                try:
+                    self.select(p)
+                    self.report.update(passed=True,focus_probe_only=True)
+                    return 0
+                finally:self.stop(p)
             self.positive();self.stale()
             if self.a.include_sigterm_stroke:self.sigterm()
             self.report["passed"]=all(x.get("passed")is True for x in self.report["cases"]);code=0 if self.report["passed"]else 1

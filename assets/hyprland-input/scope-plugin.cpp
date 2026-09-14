@@ -230,7 +230,7 @@ struct FocusCandidate {
     std::shared_ptr<int> processFD;
     ProcessImage image;
     std::vector<odin_scope::NativeAncestor> ancestry;
-    Vector2D outputPos, outputSize, pixelSize, pos, size;
+    Vector2D outputPos, outputSize, pixelSize, pos, size, goalPos, goalSize;
     float scale = 0;
     int transform = -1;
     pid_t pid = 0;
@@ -998,12 +998,28 @@ struct State {
         const auto pos = w->m_realPosition->value(), size = w->m_realSize->value();
         for (double v : {pos.x, pos.y, size.x, size.y}) if (!std::isfinite(v) || std::abs(v) > 1000000) { close(fd); return false; }
         if (size.x <= 0 || size.y <= 0) { close(fd); return false; }
-        c.window = w; c.monitor = m; c.workspace = w->m_workspace; c.pos = pos; c.size = size; c.surface = w->resource(); c.processFD = std::shared_ptr<int>(new int(fd), [](int* p) { close(*p); delete p; }); c.ancestry = std::move(ancestry); c.pid = c.ancestry.front().pid; c.uid = c.ancestry.front().uid; c.startTicks = start; c.image = image; c.app = w->m_class; c.title = w->m_title; c.outputName = m->m_name; c.outputPos = m->m_position; c.outputSize = m->m_size; c.pixelSize = m->m_pixelSize; c.scale = m->m_scale; c.transform = int(m->m_transform); return true;
+        c.window = w; c.monitor = m; c.workspace = w->m_workspace; c.pos = pos; c.size = size; c.goalPos = w->m_realPosition->goal(); c.goalSize = w->m_realSize->goal(); c.surface = w->resource(); c.processFD = std::shared_ptr<int>(new int(fd), [](int* p) { close(*p); delete p; }); c.ancestry = std::move(ancestry); c.pid = c.ancestry.front().pid; c.uid = c.ancestry.front().uid; c.startTicks = start; c.image = image; c.app = w->m_class; c.title = w->m_title; c.outputName = m->m_name; c.outputPos = m->m_position; c.outputSize = m->m_size; c.pixelSize = m->m_pixelSize; c.scale = m->m_scale; c.transform = int(m->m_transform); return true;
+    }
+    static bool focusGeometryConverging(const FocusCandidate& c, PHLWINDOW w) {
+        // Focus selection does not inject pointer coordinates. Permit animation
+        // towards the SAME measured layout goal, not a retargeted move/resize.
+        // Pixel snapshots and armed input keep their separate freshness fences.
+        if (!w || w->m_realPosition->goal() != c.goalPos || w->m_realSize->goal() != c.goalSize)
+            return false;
+        const auto pos = w->m_realPosition->value(), size = w->m_realSize->value();
+        if (size.x <= 0 || size.y <= 0 || c.goalSize.x <= 0 || c.goalSize.y <= 0) return false;
+        const auto converging = [](double before, double now, double goal) {
+            return std::isfinite(before) && std::isfinite(now) && std::isfinite(goal) &&
+                std::abs(now) <= 1000000 && std::abs(goal) <= 1000000 &&
+                std::abs(now - goal) <= std::abs(before - goal);
+        };
+        return converging(c.pos.x, pos.x, c.goalPos.x) && converging(c.pos.y, pos.y, c.goalPos.y) &&
+            converging(c.size.x, size.x, c.goalSize.x) && converging(c.size.y, size.y, c.goalSize.y);
     }
     bool sameFocusCandidateState(const FocusCandidate& c) const {
         if (!environment() || c.window.expired() || c.monitor.expired() || c.workspace.expired() || c.surface.expired() || !c.processFD || !c.image.valid() || ns() - c.created >= 30000000000LL) return false;
         pollfd p{*c.processFD, POLLIN, 0}; auto w = c.window.lock(); auto m = c.monitor.lock(); std::vector<odin_scope::NativeAncestor> ancestry;
-        return poll(&p, 1, 0) == 0 && w && m && w->m_isMapped && w->visible() && !w->m_isX11 && w->wlSurface() && w->resource() == c.surface.lock() && w->m_monitor.lock() == m && w->m_workspace == c.workspace.lock() && w->m_realPosition->value() == c.pos && w->m_realSize->value() == c.size && w->m_class == c.app && safeFocusApplication(w->m_class, c.image.executable) && provenance(w, ancestry) && ancestry == c.ancestry && processStartTicks(c.pid) == c.startTicks && processImage(c.pid) == c.image && m->m_enabled && m->m_dpmsStatus && !m->m_isUnsafeFallback && !m->m_isBeingLeased && m->m_mirrorOf.expired() && m->m_name == c.outputName && m->m_position == c.outputPos && m->m_size == c.outputSize && m->m_pixelSize == c.pixelSize && m->m_scale == c.scale && int(m->m_transform) == c.transform;
+        return poll(&p, 1, 0) == 0 && w && m && w->m_isMapped && w->visible() && !w->m_isX11 && w->wlSurface() && w->resource() == c.surface.lock() && w->m_monitor.lock() == m && w->m_workspace == c.workspace.lock() && focusGeometryConverging(c, w) && w->m_class == c.app && safeFocusApplication(w->m_class, c.image.executable) && provenance(w, ancestry) && ancestry == c.ancestry && processStartTicks(c.pid) == c.startTicks && processImage(c.pid) == c.image && m->m_enabled && m->m_dpmsStatus && !m->m_isUnsafeFallback && !m->m_isBeingLeased && m->m_mirrorOf.expired() && m->m_name == c.outputName && m->m_position == c.outputPos && m->m_size == c.outputSize && m->m_pixelSize == c.pixelSize && m->m_scale == c.scale && int(m->m_transform) == c.transform;
     }
     bool sameFocusCandidate(const FocusCandidate& c) const {
         return c.epoch == revision && sameFocusCandidateState(c);
@@ -1037,7 +1053,53 @@ struct State {
         if (!json_object_object_get_ex(j, "topology_epoch", &epoch) || json_object_get_type(epoch) != json_type_int || uint64_t(json_object_get_int64(epoch)) != revision) return status(false, "stale-topology-epoch");
         const auto id = text(j, "candidate_id"), output = text(j, "output_id"); auto it = focusCandidates.find(id); json_object* requested = nullptr;
         if (!json_object_object_get_ex(j, "requested_identity", &requested) || json_object_get_type(requested) != json_type_object) return status(false, "requested-identity-required");
-        if (it == focusCandidates.end() || output.empty() || it->second.outputID != output || text(requested, "executable") != it->second.image.executable || !requestedStartTicks(requested, it->second.startTicks) || !sameFocusCandidate(it->second)) { focusCandidates.clear(); return status(false, "stale-or-ineligible-candidate"); }
+        if (it == focusCandidates.end() || output.empty() || it->second.outputID != output || text(requested, "executable") != it->second.image.executable || !requestedStartTicks(requested, it->second.startTicks) || !sameFocusCandidate(it->second)) {
+            // Temporary observation-only diagnostic. The admission predicate above
+            // is deliberately byte-for-byte unchanged; no retry or guard bypass.
+            auto reply = status(false, "stale-or-ineligible-candidate");
+            auto d = obj(); put(d.get(), "candidate_present", it != focusCandidates.end());
+            if (it != focusCandidates.end()) {
+                const auto& c = it->second; auto w = c.window.lock(); auto m = c.monitor.lock();
+                put(d.get(), "output_id_equal", !output.empty() && c.outputID == output);
+                put(d.get(), "requested_executable_equal", text(requested, "executable") == c.image.executable);
+                put(d.get(), "requested_start_ticks_equal", requestedStartTicks(requested, c.startTicks));
+                put(d.get(), "epoch_equal", c.epoch == revision);
+                put(d.get(), "environment", environment());
+                put(d.get(), "window_alive", bool(w)); put(d.get(), "monitor_alive", bool(m));
+                put(d.get(), "workspace_alive", !c.workspace.expired()); put(d.get(), "surface_alive", !c.surface.expired());
+                put(d.get(), "image_valid", c.image.valid()); put(d.get(), "age_ns", ns() - c.created);
+                put(d.get(), "process_fd_present", bool(c.processFD));
+                if (c.processFD) { pollfd p{*c.processFD, POLLIN, 0}; put(d.get(), "process_alive", poll(&p, 1, 0) == 0); }
+                if (w && m) {
+                    std::vector<odin_scope::NativeAncestor> ancestry;
+                    put(d.get(), "mapped", w->m_isMapped); put(d.get(), "visible", w->visible());
+                    put(d.get(), "native", !w->m_isX11); put(d.get(), "wl_surface_present", bool(w->wlSurface()));
+                    put(d.get(), "surface_equal", w->resource() == c.surface.lock());
+                    put(d.get(), "monitor_equal", w->m_monitor.lock() == m);
+                    put(d.get(), "workspace_equal", w->m_workspace == c.workspace.lock());
+                    put(d.get(), "position_equal", w->m_realPosition->value() == c.pos);
+                    put(d.get(), "size_equal", w->m_realSize->value() == c.size);
+                    put(d.get(), "position_animating", w->m_realPosition->isBeingAnimated());
+                    put(d.get(), "size_animating", w->m_realSize->isBeingAnimated());
+                    put(d.get(), "floating", w->m_isFloating);
+                    auto geom = [](const Vector2D& pos, const Vector2D& size) { auto g = obj(); put(g.get(), "x", double(pos.x)); put(g.get(), "y", double(pos.y)); put(g.get(), "width", double(size.x)); put(g.get(), "height", double(size.y)); return g; };
+                    json_object_object_add(d.get(), "captured_geometry", geom(c.pos, c.size).release());
+                    json_object_object_add(d.get(), "current_geometry", geom(w->m_realPosition->value(), w->m_realSize->value()).release());
+                    json_object_object_add(d.get(), "goal_geometry", geom(w->m_realPosition->goal(), w->m_realSize->goal()).release());
+                    put(d.get(), "app_equal", w->m_class == c.app);
+                    put(d.get(), "safe_app", safeFocusApplication(w->m_class, c.image.executable));
+                    put(d.get(), "provenance_valid", provenance(w, ancestry)); put(d.get(), "ancestry_equal", ancestry == c.ancestry);
+                    put(d.get(), "process_start_equal", processStartTicks(c.pid) == c.startTicks);
+                    put(d.get(), "process_image_equal", processImage(c.pid) == c.image);
+                    put(d.get(), "output_enabled", m->m_enabled); put(d.get(), "output_dpms", m->m_dpmsStatus);
+                    put(d.get(), "output_safe", !m->m_isUnsafeFallback && !m->m_isBeingLeased && m->m_mirrorOf.expired());
+                    put(d.get(), "output_name_equal", m->m_name == c.outputName);
+                    put(d.get(), "output_geometry_equal", m->m_position == c.outputPos && m->m_size == c.outputSize && m->m_pixelSize == c.pixelSize && m->m_scale == c.scale && int(m->m_transform) == c.transform);
+                }
+            }
+            json_object_object_add(reply.get(), "candidate_diagnostic", d.release());
+            focusCandidates.clear(); return reply;
+        }
         const auto candidate = it->second; auto w = candidate.window.lock(); focusCandidates.clear();
         Desktop::focusState()->fullWindowFocus(w, Desktop::FOCUS_REASON_OTHER);
         // The synchronous focus notification may advance revision. Only the
@@ -1048,6 +1110,8 @@ struct State {
         auto response = obj(); put(response.get(), "ok", true); put(response.get(), "version", int64_t(1)); put(response.get(), "instance_id", instanceID);
         put(response.get(), "candidate_id", id); put(response.get(), "output_id", output); put(response.get(), "output_name", candidate.outputName); put(response.get(), "topology_epoch", int64_t(candidate.epoch)); put(response.get(), "topology_digest", candidate.topologyDigest);
         put(response.get(), "window_id", candidate.windowID); put(response.get(), "plugin_epoch", pluginEpoch);
+        put(response.get(), "diagnostic_geometry_changed", w->m_realPosition->value() != candidate.pos || w->m_realSize->value() != candidate.size);
+        put(response.get(), "diagnostic_animating", w->m_realPosition->isBeingAnimated() || w->m_realSize->isBeingAnimated());
         auto outputGeometry = obj(); put(outputGeometry.get(), "x", int64_t(candidate.outputPos.x)); put(outputGeometry.get(), "y", int64_t(candidate.outputPos.y)); put(outputGeometry.get(), "width", int64_t(candidate.outputSize.x)); put(outputGeometry.get(), "height", int64_t(candidate.outputSize.y)); put(outputGeometry.get(), "pixel_width", int64_t(candidate.pixelSize.x)); put(outputGeometry.get(), "pixel_height", int64_t(candidate.pixelSize.y)); put(outputGeometry.get(), "scale", double(candidate.scale)); put(outputGeometry.get(), "transform", int64_t(candidate.transform)); json_object_object_add(response.get(), "output", outputGeometry.release());
         auto identity = obj(); put(identity.get(), "pid", int64_t(candidate.pid)); put(identity.get(), "uid", int64_t(candidate.uid)); put(identity.get(), "start_ticks", positiveInt64(candidate.startTicks)); put(identity.get(), "executable", candidate.image.executable); put(identity.get(), "exe_device", int64_t(candidate.image.device)); put(identity.get(), "exe_inode", int64_t(candidate.image.inode));
         json_object_object_add(response.get(), "identity", identity.release()); return response;
