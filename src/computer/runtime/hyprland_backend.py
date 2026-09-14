@@ -23,7 +23,7 @@ from ..provenance import canonical_application_provenance
 from ..render import render_frame, source_allocation_bytes
 from ..vision import FrameCrop
 from .hyprland_capture import ExplicitOutput, NativeFrame, ScopeProof, capture_explicit_output
-from .hyprland_guardian import HyprlandGuardian
+from .hyprland_guardian import HyprlandGuardian, native_failure
 from .hyprland_identity import (
     ExecutableTrust,
     HyprlandIdentity,
@@ -1258,8 +1258,17 @@ class HyprlandRuntimeBackend:
                 cleanup = await self._guardian.close()
                 self._release_failed |= not self._release_ack(cleanup)
                 if not self._release_failed and isinstance(exc, Exception):
+                    # Native exceptions may carry already-sanitized terminal facts
+                    # inside native_failure. Revalidate them at this boundary;
+                    # sent input is not proof the requested action completed.
+                    terminal = details.get("native_failure", {})
+                    terminal = terminal if type(terminal) is dict else {}
+                    failure = native_failure({**terminal, **details})
+                    sent = details.get("input_was_sent", terminal.get("input_was_sent"))
                     return {
-                        "status": "interrupted", "injected": None, "released": True,
+                        "status": "interrupted",
+                        "injected": sent if type(sent) is bool else None,
+                        "released": True,
                         "fresh_session_required": True,
                         "reason": "hyprland_dispatch_interrupted_after_release",
                         "release_basis": (
@@ -1267,7 +1276,10 @@ class HyprlandRuntimeBackend:
                             else "guardian_ledger_drained"
                         ),
                         "receiver_release_verified": False,
-                        "diagnostics": {"phase": "dispatch", "replay_safe": False},
+                        "diagnostics": {
+                            "phase": "dispatch", "replay_safe": False,
+                            **({"native_failure": failure} if failure is not None else {}),
+                        },
                     }
                 raise
             finally:

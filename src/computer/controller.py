@@ -2244,6 +2244,16 @@ class ComputerController:
                                      else "operator_release_required"),
                     )
                     result["diagnostics"].update(replay_allowed=False)
+                    # Preserve bounded terminal facts after effects normalization.
+                    # These explain partial dispatch, never prove UI completion.
+                    from .runtime.hyprland_guardian import native_failure
+                    diagnostics = raw.get("diagnostics")
+                    native = (diagnostics.get("native_failure")
+                              if type(diagnostics) is dict else None)
+                    if type(native) is dict:
+                        failure = native_failure({**native, "native_failure": native})
+                        if failure is not None:
+                            result["diagnostics"]["native_failure"] = failure
                     return self._finish_action(
                         live.capabilities, grant.session_id, inp["action_id"], result
                     )

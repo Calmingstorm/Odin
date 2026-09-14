@@ -145,6 +145,50 @@ async def test_terminal_local_release_requires_fresh_session_without_fake_ack(ba
     assert cleanup["release_ack"] is False
 
 
+@pytest.mark.parametrize("nested", [False, True])
+async def test_partial_native_dispatch_preserves_sent_and_sanitized_failure(backend, nested):
+    frame = await backend.observe()
+    failure = {
+        "command": "action", "scope_operation": "release_all",
+        "scope_error": "scope-rejected-input", "input_was_sent": True,
+        "release_sent": True, "release_acknowledged": True,
+        "secret": "must-not-escape",
+    }
+    exc = ComputerError("terminal_delivery_unknown")
+    exc.details = {"native_failure": failure}
+    if not nested:
+        exc.details["input_was_sent"] = True
+    backend._guardian.act = AsyncMock(side_effect=exc)
+    backend._guardian.close = AsyncMock(return_value={
+        "release_ack": False, "release_confirmed": True, "process_reaped": True})
+    receipt = await backend.act(action(frame))
+    assert receipt["status"] == "interrupted"
+    assert receipt["injected"] is True
+    assert receipt["released"] is True
+    assert receipt["fresh_session_required"] is True
+    assert receipt["diagnostics"]["native_failure"] == {
+        key: value for key, value in failure.items() if key != "secret"}
+    assert receipt["diagnostics"]["replay_safe"] is False
+    backend._guardian.act.assert_awaited_once()
+    blocked = await backend.act(action(frame))
+    assert blocked["injected"] is False
+    assert blocked["status"] == "unavailable"
+    backend._guardian.act.assert_awaited_once()
+
+
+async def test_partial_native_dispatch_unknown_release_remains_fenced(backend):
+    frame = await backend.observe()
+    exc = ComputerError("terminal_delivery_unknown")
+    exc.details = {"input_was_sent": True, "release_acknowledged": True}
+    backend._guardian.act = AsyncMock(side_effect=exc)
+    backend._guardian.close = AsyncMock(return_value={
+        "release_ack": False, "release_confirmed": False, "process_reaped": True})
+    with pytest.raises(ComputerError, match="terminal_delivery_unknown"):
+        await backend.act(action(frame))
+    assert backend._release_failed and not backend.input_supported
+    backend._guardian.act.assert_awaited_once()
+
+
 async def test_pixel_field_ignores_unrelated_raster_change(backend, monkeypatch):
     backend._output = replace(output(), width=80, height=60)
     backend._scope_provider.snapshot.side_effect = lambda _: scope(backend._output)

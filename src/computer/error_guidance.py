@@ -57,7 +57,17 @@ def guidance(reason: str, *, terminal: bool = False) -> dict:
         "unknown, the operator must RELEASE-ALL, close the fenced session, and start "
         "anew with renewed consent and fresh observation."
     )
-    if not terminal and reason == "unexpected_dialog_transition":
+    if not terminal and reason == "effect_unknown_reconcile_no_replay":
+        next_action = "inspect_session_and_reconcile_effect"
+        instruction = (
+            "Input release is confirmed, but the action's effect is uncertain. Read session "
+            "status, obtain fresh pixels, and inspect what actually happened before planning "
+            "a DIFFERENT action. If the released session was closed, inventory and start a "
+            "fresh authorized session first; if paused, explicitly resume with current "
+            "generation. Never repeat the uncertain action. Effect uncertainty alone does "
+            "not require operator input-release intervention."
+        )
+    elif not terminal and reason == "unexpected_dialog_transition":
         next_action = "inspect_returned_view_and_use_new_modal_binding"
         instruction = (
             "The previous input completed but changed the dialog. Inspect the returned "
@@ -113,11 +123,17 @@ def failure_guidance(result: dict, *, terminal: bool = False) -> dict:
         reason = "computer_not_satisfied"
     # Unknown outcome/release takes precedence over any recoverable stale reason.
     execution = result.get("execution")
+    released_effect_unknown = (
+        reason == "effect_unknown_reconcile_no_replay"
+        and isinstance(execution, dict) and execution.get("released") is True
+    )
     if isinstance(execution, dict):
         terminal = terminal or execution.get("released") is False
     for item in (result, evidence):
         cleanup = item.get("cleanup")
-        terminal = terminal or item.get("status") in {"unknown", "interrupted"}
+        terminal = terminal or item.get("status") in {"unknown", "interrupted"} and not (
+            released_effect_unknown and item.get("status") == "interrupted"
+        )
         terminal = terminal or item.get("state") in {"unknown", "quarantined"}
         terminal = terminal or item.get("uncertain_outcome") is True
         terminal = terminal or item.get("release_confirmed") is False
