@@ -39,6 +39,9 @@ log = get_logger("discord")
 _callback_generation: contextvars.ContextVar[int | None] = contextvars.ContextVar(
     "discord_callback_generation", default=None
 )
+_callback_transition: contextvars.ContextVar[int | None] = contextvars.ContextVar(
+    "discord_callback_transition", default=None
+)
 
 # Cog extensions to load on startup (carried over from the prior moderation-bot OdinBot).
 INITIAL_EXTENSIONS: tuple[str, ...] = (
@@ -340,10 +343,14 @@ class OdinBot(commands.Bot):
 
     def dispatch(self, event_name: str, /, *args, **kwargs) -> None:
         """Fence disconnect synchronously, before slow callbacks are queued."""
-        if event_name == "disconnect":
+        if event_name in {"ready", "resumed", "disconnect"}:
             supervisor = getattr(self, "connection_supervisor", None)
             if supervisor is not None:
-                supervisor.transport_disconnected(supervisor.callback_generation())
+                generation = supervisor.callback_generation()
+                if event_name == "disconnect":
+                    supervisor.transport_disconnected(generation)
+                else:
+                    supervisor.begin_transition(generation)
         super().dispatch(event_name, *args, **kwargs)
 
     def _schedule_event(self, coro, event_name, *args, **kwargs):
@@ -352,13 +359,16 @@ class OdinBot(commands.Bot):
         if supervisor is None:
             return super()._schedule_event(coro, event_name, *args, **kwargs)
         expected_generation = supervisor.callback_generation()
+        expected_transition = supervisor.callback_transition()
 
         async def generation_bound():
+            transition_token = _callback_transition.set(expected_transition)
             token = _callback_generation.set(expected_generation)
             try:
                 await coro(*args, **kwargs)
             finally:
                 _callback_generation.reset(token)
+                _callback_transition.reset(transition_token)
 
         # Preserve discord.py's _run_event/on_error semantics and never alter
         # listener signatures. Cogs may define on_ready without kwargs.
@@ -395,24 +405,34 @@ class OdinBot(commands.Bot):
             application_id,
         )
 
-    def _owns_callback(self, expected_generation: int | None) -> bool:
+    def _owns_callback(
+        self, expected_generation: int | None, expected_transition: int | None = None
+    ) -> bool:
         supervisor = getattr(self, "connection_supervisor", None)
         return (
             supervisor is None
             or expected_generation is None
-            or supervisor.owns(expected_generation)
+            or supervisor.owns(expected_generation, expected_transition)
         )
+
+    def _ready_transition(self) -> int | None:
+        transition = _callback_transition.get()
+        supervisor = getattr(self, "connection_supervisor", None)
+        if transition is None and supervisor is not None:
+            transition = supervisor.callback_transition()
+        return transition
 
     async def on_ready(self, *, expected_generation: int | None = None) -> None:
         if expected_generation is None:
             expected_generation = _callback_generation.get()
-        if not self._owns_callback(expected_generation):
+        expected_transition = self._ready_transition()
+        if not self._owns_callback(expected_generation, expected_transition):
             return
         supervisor = getattr(self, "connection_supervisor", None)
         log.info("Logged in as %s (ID: %s)", self.user, self.user.id)  # type: ignore[union-attr]  # on_ready fires post-login
         log.info("Tools loaded: %d definitions", len(get_tool_definitions()))
         await self._fence_delivery_application()
-        if not self._owns_callback(expected_generation):
+        if not self._owns_callback(expected_generation, expected_transition):
             return
         # Prune stale sessions loaded from disk.  load() reads ALL persisted
         # session files regardless of age; pruning here removes expired ones
@@ -421,10 +441,10 @@ class OdinBot(commands.Bot):
         if pruned:
             log.info("Startup: pruned %d stale sessions", pruned)
         await self._reconcile_application_commands()
-        if not self._owns_callback(expected_generation):
+        if not self._owns_callback(expected_generation, expected_transition):
             return
         if supervisor is not None and expected_generation is not None:
-            supervisor.transport_ready(expected_generation)
+            supervisor.transport_ready(expected_generation, expected_transition)
         self.scheduler.start(
             self.scheduled_events._on_scheduled_task,
             self.scheduled_events._on_schedule_failure,
@@ -441,19 +461,20 @@ class OdinBot(commands.Bot):
             expected_generation = _callback_generation.get()
         supervisor = getattr(self, "connection_supervisor", None)
         if supervisor is not None and expected_generation is not None:
-            supervisor.transport_disconnected(expected_generation)
+            supervisor.transport_disconnected(expected_generation, _callback_transition.get())
 
     async def on_resumed(self, *, expected_generation: int | None = None) -> None:
         if expected_generation is None:
             expected_generation = _callback_generation.get()
-        if not self._owns_callback(expected_generation):
+        expected_transition = self._ready_transition()
+        if not self._owns_callback(expected_generation, expected_transition):
             return
         await self._reconcile_application_commands()
-        if not self._owns_callback(expected_generation):
+        if not self._owns_callback(expected_generation, expected_transition):
             return
         supervisor = getattr(self, "connection_supervisor", None)
         if supervisor is not None and expected_generation is not None:
-            supervisor.transport_ready(expected_generation)
+            supervisor.transport_ready(expected_generation, expected_transition)
 
     async def _reconcile_application_commands(self, guilds=None) -> None:
         """Force Discord's registered commands to match the tree exactly.

@@ -25,10 +25,13 @@ class Supervisor:
     def callback_generation(self):
         return self.generation
 
-    def owns(self, generation):
+    def callback_transition(self):
+        return 0
+
+    def owns(self, generation, transition=None):
         return generation in self.owned
 
-    def transport_ready(self, generation):
+    def transport_ready(self, generation, transition=None):
         self.ready.append(generation)
 
 

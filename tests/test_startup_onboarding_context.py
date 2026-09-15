@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import os
 
+import pytest
+
 from src.config.initialization import InitializationError, InitializationMode
 from src.config.startup_context import (
     default_environment_path,
@@ -41,6 +43,7 @@ def test_source_config_symlink_is_canonical_but_declared_env_remains_logical(tmp
     context = resolve_startup_context(declared)
 
     assert context.config_path == real.resolve()
+    assert context.config_launch_path == declared.absolute()
     assert context.environment_path == real.parent / ".env"
 
 
@@ -200,3 +203,60 @@ def test_cli_refuses_provision_without_explicit_flag():
         assert "provision-fresh-initialization" in str(exc)
     else:  # pragma: no cover - the safety gate must remain mandatory
         raise AssertionError("missing explicit provision flag was accepted")
+
+
+@pytest.mark.parametrize("directory_alias", [False, True])
+def test_main_preserves_launch_alias_for_workspace_protection(
+    tmp_path, monkeypatch, directory_alias
+):
+    """Exercise the real startup/load path, stopping before service construction."""
+    import sys
+
+    import src.config
+    from src.__main__ import main
+    from src.config import schema
+    from src.tools.workspace import (
+        WorkspaceError,
+        command_protected_roots,
+        provision_workspace,
+    )
+
+    real_dir = tmp_path / "real"
+    real_dir.mkdir()
+    real_file = real_dir / "config.yml"
+    real_file.write_text("discord:\n  token: ''\n", encoding="utf-8")
+    alias_dir = tmp_path / "alias"
+    if directory_alias:
+        alias_dir.symlink_to(real_dir, target_is_directory=True)
+    else:
+        alias_dir.mkdir()
+        (alias_dir / "config.yml").symlink_to(real_file)
+    alias = alias_dir / "config.yml"
+    monkeypatch.chdir(tmp_path)
+    argv = ["odin", "--config", "alias/config.yml"]
+    monkeypatch.setattr(sys, "argv", argv)
+    # Restore both independent process globals, including any prior lexical alias.
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", None)
+    monkeypatch.setattr(schema, "_LAUNCH_CONFIG_PATH", None)
+    real_load = src.config.load_config
+
+    class LoadedError(Exception):
+        pass
+
+    def load_and_stop(path):
+        real_load(path)
+        raise LoadedError
+
+    monkeypatch.setattr(src.config, "load_config", load_and_stop)
+    with pytest.raises(LoadedError):
+        main()
+
+    assert schema.active_config_path() == real_file.resolve()
+    assert schema.active_config_launch_path() == alias
+    roots = command_protected_roots(tmp_path / "install")
+    assert str(real_dir) in roots
+    assert str(alias_dir) in roots
+    with pytest.raises(WorkspaceError, match="symlink" if directory_alias else "overlap"):
+        provision_workspace(str(alias_dir), protected_roots=roots)
+    assert alias.is_file()
+    assert sys.argv == argv, "re-exec must retain the original launch arguments"

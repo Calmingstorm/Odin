@@ -57,6 +57,10 @@ class DiscordPyReattachmentAdapter:
             raise RuntimeError("cannot retire discord.py from its own gateway task")
         await self.close_transport()
         if gateway_task is not None:
+            # Closing sockets does not wake discord.py's reconnect backoff.
+            # Stop the owned connect loop before resetting its transport state.
+            if not gateway_task.done():
+                gateway_task.cancel()
             try:
                 await asyncio.shield(gateway_task)
             except asyncio.CancelledError:

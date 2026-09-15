@@ -549,7 +549,7 @@ def main() -> None:
     from src.health import HealthServer
     from src.odin_log import get_logger
 
-    config = load_config(context.config_path)
+    config = load_config(context.config_launch_path)
 
     import logging
     logging.basicConfig(

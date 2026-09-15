@@ -1131,6 +1131,8 @@ class Scheduler:
             log.warning(
                 "Schedule %s is already executing — skipping overlapping fire", sid,
             )
+            if reservation is not None:
+                self._gate_reservations.pop(reservation, None)
             return False
         self._in_flight.add(sid)
         try:

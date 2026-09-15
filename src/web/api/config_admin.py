@@ -196,6 +196,11 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
         return web.json_response({
             "status": "ok", "mode": "complete", "persisted": result.persisted,
             "discord": discord,
+            "restart_required": list(result.restart_required),
+            "message": (
+                "Setup saved. Restart Odin to apply: " + ", ".join(result.restart_required)
+                if result.restart_required else "Setup saved."
+            ),
         })
 
 

@@ -94,6 +94,7 @@ class StartupContext:
     config_path: Path
     environment_path: Path
     initialization_state_path: Path
+    config_launch_path: Path
 
     def onboarding_store(self) -> InitializationStore:
         return InitializationStore(
@@ -112,13 +113,15 @@ def resolve_startup_context(
     initialization_state: str | Path | None = None,
 ) -> StartupContext:
     """Resolve supported inputs once, independently of later CWD changes."""
-    # Config persistence atomically replaces files, so its canonical path is
-    # the installation identity. Other inputs retain their declared symlink.
-    config = Path(config_path).expanduser().resolve()
+    # The canonical path binds persistence/setup identity. Keep the lexical
+    # launch alias separately: re-exec replays it, so workspace protection must
+    # protect both the alias and its target through load_config's existing path.
+    launch = _absolute(config_path)
+    config = launch.resolve()
     env = _absolute(env_file) if env_file is not None else default_environment_path(config)
     state = (_absolute(initialization_state) if initialization_state is not None
              else default_initialization_state_path(config))
-    return StartupContext(config, env, state)
+    return StartupContext(config, env, state, launch)
 
 
 def parse_startup_arguments(argv: Sequence[str] | None = None) -> argparse.Namespace:

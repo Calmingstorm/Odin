@@ -122,6 +122,10 @@ export default {
         } else {
           statusMessage.value = result.message || 'Setup saved. Ready to sign in.';
         }
+        if (result.restart_required?.length) {
+          const notice = result.message || `Restart Odin to apply: ${result.restart_required.join(', ')}`;
+          if (!statusMessage.value.includes(notice)) statusMessage.value += ` ${notice}`;
+        }
         completed.value = true;
       } catch (e) {
         error.value = e.message || 'Setup could not be saved.';

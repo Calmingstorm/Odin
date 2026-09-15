@@ -1,3 +1,4 @@
+import asyncio
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -97,6 +98,36 @@ async def test_run_now_connection_change_after_reservation_rolls_back(tmp_path, 
     restored = scheduler.list_all()[0]
     assert effects == []
     assert restored["last_run"] is None
+    assert scheduler._gate_reservations == {}
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_overlapping_run_cleans_only_its_own_reservation(tmp_path):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def callback(_schedule):
+        started.set()
+        await release.wait()
+
+    scheduler.start(callback)
+    schedule = await scheduler.add(
+        "overlap", "reminder", "1", run_at="2030-01-01T00:00:00Z",
+    )
+    active = asyncio.create_task(scheduler.run_now(schedule["id"]))
+    await started.wait()
+    active_reservations = dict(scheduler._gate_reservations)
+    assert len(active_reservations) == 1
+
+    rejected = await scheduler.run_now(schedule["id"])
+
+    assert rejected["status"] == "skipped"
+    assert scheduler._gate_reservations == active_reservations
+
+    release.set()
+    assert (await active)["status"] == "success"
     assert scheduler._gate_reservations == {}
     await scheduler.stop()
 

@@ -43,6 +43,7 @@ class OnboardingSubmitResult:
     config_committed: bool = False
     environment_committed: bool = False
     initialization_complete: bool = False
+    restart_required: tuple[str, ...] = ()
 
 
 @dataclass(slots=True)
@@ -59,6 +60,7 @@ class OnboardingCoordinator:
     environment_source: EnvironmentSource
     legacy_loopback_restricted: bool
     _lock: asyncio.Lock = field(default_factory=asyncio.Lock, init=False, repr=False)
+    _restart_required: tuple[str, ...] = field(default=(), init=False, repr=False)
 
     async def state(self):
         return await asyncio.to_thread(
@@ -119,6 +121,31 @@ class OnboardingCoordinator:
                 except Exception as exc:
                     raise OnboardingError("setup configuration is invalid") from exc
                 changes = submitted_leaves(updates, candidate.model_dump(), Config)
+                if discord_token is not None:
+                    # The runtime candidate carries the submitted secret, but
+                    # startup reads YAML, not an implicit DISCORD_TOKEN override.
+                    # Bind every accepted prior spelling (blank, literal or
+                    # reference) to the environment leaf that setup owns.
+                    changes.append((("discord", "token"), "${DISCORD_TOKEN}"))
+
+                # These components are constructed by startup wiring. Publishing
+                # bot.config does not rebuild them. Keep setup deliberately
+                # narrow: report an operator restart, never schedule one here.
+                restart_required = list(self._restart_required)
+                before_config = bot.config.model_dump()
+                after_config = candidate.model_dump()
+                for change in changes:
+                    path = change[0]
+                    if path[0] not in {"timezone", "tools", "browser"}:
+                        continue
+                    before: Any = before_config
+                    after: Any = after_config
+                    for segment in path:
+                        before = before[segment]
+                        after = after[segment]
+                    name = ".".join(path)
+                    if before != after and name not in restart_required:
+                        restart_required.append(name)
 
                 # One settled synchronous publisher runs under the durable
                 # initialization lock.  _run_settled waits for its worker even
@@ -150,6 +177,10 @@ class OnboardingCoordinator:
                     self.initialization_store.complete(files)
 
                 write_error, cancelled = await _run_settled(publish)
+                if config_committed:
+                    # A pending partial publication can be retried without
+                    # resubmitting these leaves. Do not lose its restart notice.
+                    self._restart_required = tuple(restart_required)
                 observed = await self.state()
                 if write_error is not None:
                     # Config/env publication can fail after a file commit, and
@@ -219,5 +250,6 @@ class OnboardingCoordinator:
                     config_committed=config_committed,
                     environment_committed=environment_committed,
                     initialization_complete=True,
+                    restart_required=self._restart_required,
                 )
 

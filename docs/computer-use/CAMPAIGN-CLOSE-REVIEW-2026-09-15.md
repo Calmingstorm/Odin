@@ -114,5 +114,32 @@ cleanup at `1173-1176`. A blocked real `run_now` plus three overlaps left three
 reservations after all executions finished, with no in-flight task. Clean only
 the rejected execution's reservation; preserve the running task's ownership.
 
-The two P1 findings block an unconditional merge-readiness recommendation.
-Authorize core remediation separately or explicitly decide their disposition.
+The two P1 findings blocked an unconditional merge-readiness recommendation at
+the review snapshot. All six received separate authorization on 2026-09-15 and
+were addressed in the follow-up below; the original findings remain as history.
+
+## Authorized six-defect follow-up
+
+Based on `3ed6b2e9`. Changes stay in campaign-added startup, gateway ownership,
+onboarding and scheduler-reservation paths. Existing master overlap behavior,
+configuration loading and workspace protection are not redesigned.
+
+| Finding | Correction | Regression evidence |
+|---|---|---|
+| Lexical launch alias | Keep canonical setup identity and a separate lexical launch path; pass the latter through the existing configuration loader. Original restart arguments remain intact. | Real `main()` / `load_config()` probes for file and directory symlinks failed before the fix, then preserved both protected roots and rejected alias workspaces. |
+| Stale ready callback | Capture within-generation transition ownership before dispatch and recheck after awaited reconciliation; repeated disconnects invalidate older readiness. | Controlled ready/resumed callbacks cannot reverse a later disconnect; a delayed disconnect cannot reverse a newer resume. Queued-event and direct-callback variants fail before the fix. |
+| Credential binding | Persist `${DISCORD_TOKEN}` in the submitted YAML leaf and the secret only in the declared environment source. | Fresh environment reloads cover blank, literal, standard-reference and custom-reference YAML; unsubmitted placeholders remain unchanged. |
+| Unapplied setup settings | Explicitly return affected restart-required fields through setup HTTP and display the notice alongside gateway outcomes. No automatic restart. | Real stores and HTTP responses retain old host/browser/timezone consumers while reporting the restart. Tests also cover partial-publication retry and UI notices. |
+| Reconnect retirement | Cancel the owned gateway task after transport closure, before settling and resetting it. | Real discord.py connect loop with a mocked network failure and a controlled backoff that never elapses now retires through cancellation. |
+| Overlap metadata | Remove only the rejected execution's reservation before returning from the existing overlap guard. | Blocked real `run_now` retains its reservation during overlap rejection, then leaves neither reservation nor in-flight ownership after completion. |
+
+Regressions are in `test_startup_onboarding_context.py`,
+`test_gateway_transition_regressions.py`,
+`test_onboarding_durable_binding_restart.py`, and
+`test_scheduler_gate_races_campaign.py`. Each defect has recorded pre-fix failure
+and post-fix success. These are isolated software tests, not live Discord,
+process re-exec, or desktop qualification. Final full-suite and hosted gate
+verdicts belong to the exact follow-up commit's CI records.
+
+No deployments, external-machine access, workflow/CI-script changes, coverage
+baseline updates, or lint/type configuration changes accompany this follow-up.

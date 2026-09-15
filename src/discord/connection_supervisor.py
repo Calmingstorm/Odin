@@ -36,6 +36,7 @@ class ConnectionSupervisor:
         self._state = "detached"
         self._detail = "no Discord token attached"
         self._connection_epoch = 0
+        self._transition = 0
         self._closed = False
 
     def status(self) -> ConnectionStatus:
@@ -97,22 +98,37 @@ class ConnectionSupervisor:
         """Capture ownership when discord.py schedules an event callback."""
         return self._generation
 
-    def transport_ready(self, expected_generation: int) -> ConnectionStatus:
+    def callback_transition(self) -> int:
+        """Capture event ordering independently of public availability changes."""
+        return self._transition
+
+    def begin_transition(self, expected_generation: int) -> None:
+        """Fence older callbacks synchronously when a transport event arrives."""
+        if self.owns(expected_generation):
+            self._transition += 1
+
+    def transport_ready(
+        self, expected_generation: int, expected_transition: int | None = None
+    ) -> ConnectionStatus:
         """Record ready only for the currently owned, live generation."""
-        if (expected_generation == self._generation and self._task is not None
-                and not self._task.done() and not self._closed):
+        if self.owns(expected_generation, expected_transition):
             self._set_state("connected", "Discord gateway ready")
         return self.status()
 
-    def transport_disconnected(self, expected_generation: int) -> ConnectionStatus:
+    def transport_disconnected(
+        self, expected_generation: int, expected_transition: int | None = None
+    ) -> ConnectionStatus:
         """Record a library disconnect without allowing it to rearm ownership."""
-        if (expected_generation == self._generation and self._task is not None
-                and not self._task.done() and not self._closed):
+        if self.owns(expected_generation, expected_transition):
+            if expected_transition is None:
+                # Each event invalidates older readiness, even if already disconnected.
+                self.begin_transition(expected_generation)
             self._set_state("disconnected", "Discord gateway disconnected")
         return self.status()
 
-    def owns(self, expected_generation: int) -> bool:
+    def owns(self, expected_generation: int, expected_transition: int | None = None) -> bool:
         return (expected_generation == self._generation and self._task is not None
+                and (expected_transition is None or expected_transition == self._transition)
                 and not self._task.done() and not self._closed)
 
     async def _detach_locked(self) -> None:
