@@ -1235,8 +1235,9 @@ class ComputerUseConfig(BaseModel):
     wayland_guardian_binary: str = "/usr/libexec/odin-computer-wayland-input"
     # Portal defaults remain unchanged. Hyprland is explicit, never a fallback.
     wayland_backend: Literal["portal", "hyprland"] = "portal"
-    # Existing installations retain explicit pins until the operator opts in.
-    hyprland_discovery_mode: Literal["pinned", "auto"] = "pinned"
+    # Discover reboot-scoped identifiers inside the explicitly trusted UID/build.
+    # Persisted explicit "pinned" configurations remain pinned.
+    hyprland_discovery_mode: Literal["pinned", "auto"] = "auto"
     hyprland_runtime_dir: str = ""
     hyprland_wayland_display: str = ""
     hyprland_instance_signature: str = ""
@@ -1250,9 +1251,10 @@ class ComputerUseConfig(BaseModel):
     hyprland_guardian_binary: str = "/usr/local/libexec/odin-hyprland-input"
     hyprland_capture_binary: str = "/usr/local/libexec/odin-hyprland-capture"
     hyprland_scope_socket: str = ""
-    hyprland_managed_activation: bool = False
-    # Root-installed build identity. The sibling artifact name comes only from it.
-    hyprland_plugin_manifest: str = ""
+    # First native inventory/start loads the approved plugin; false is manual mode.
+    hyprland_managed_activation: bool = True
+    # Existing optional-package/source-installer location, not a mutable ELF alias.
+    hyprland_plugin_manifest: str = "/usr/local/share/doc/odin-hyprland/build-identity.json"
 
     @field_validator("hyprland_runtime_dir", "hyprland_compositor_executable",
                      "hyprland_scope_socket", "hyprland_guardian_binary", "hyprland_capture_binary",

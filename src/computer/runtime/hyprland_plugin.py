@@ -27,6 +27,8 @@ _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40,64}\Z")
 _BUILD_ID = re.compile(r"[0-9a-f]{64}\Z")
 _MANIFEST_MAX_BYTES = 16 * 1024
+_INSTALLED_MANIFEST = Path("/usr/local/share/doc/odin-hyprland/build-identity.json")
+_INSTALLED_PLUGIN_ROOT = Path("/usr/local/lib/odin")
 
 
 class HyprlandPluginError(RuntimeError):
@@ -42,7 +44,12 @@ class _TrustedPluginManifest:
 
 
 def read_trusted_plugin_manifest(manifest_path: str) -> _TrustedPluginManifest:
-    """Read one root-owned identity and derive its sibling content-addressed ELF."""
+    """Read build/load approval, not recovery qualification, from a trusted file.
+
+    The shipped documentation manifest names the ELF in the fixed installation
+    root. Other manifests use a sibling ELF; neither layout accepts an arbitrary
+    artifact path from JSON. Both roots retain all ownership and integrity checks.
+    """
     if type(manifest_path) is not str or not manifest_path:
         raise HyprlandPluginError("hyprland_plugin_manifest_required")
     path = Path(manifest_path)
@@ -71,17 +78,18 @@ def read_trusted_plugin_manifest(manifest_path: str) -> _TrustedPluginManifest:
                 or any(getattr(before, key) != getattr(current, key) for key in identity_keys)):
             raise ValueError
         value = json.loads(raw.decode("utf-8"), object_pairs_hook=_unique_object)
-        required = {"schema", "hyprland_version", "hyprland_commit", "runtime_qualified",
+        required = {"schema", "hyprland_version", "hyprland_commit", "auto_management_approved",
                     "companion_build_id", "plugin_sha256", "plugin_filename"}
         optional = {
             "wayland_protocols_version", "wayland_protocols_commit",
-            "hyprwayland_scanner_commit", "runtime_loaded",
+            "hyprwayland_scanner_commit", "runtime_loaded", "runtime_qualified",
         }
         if (
             type(value) is not dict or not required <= set(value)
             or set(value) - required - optional
-            or type(value["schema"]) is not int or value["schema"] != 1
-            or value["runtime_qualified"] is not True
+            or type(value["schema"]) is not int or value["schema"] != 2
+            or value["auto_management_approved"] is not True
+            or ("runtime_qualified" in value and type(value["runtime_qualified"]) is not bool)
         ):
             raise ValueError
         filename = value["plugin_filename"]
@@ -89,11 +97,12 @@ def read_trusted_plugin_manifest(manifest_path: str) -> _TrustedPluginManifest:
             r"odin-hyprland-scope-[0-9a-f]{64}\.so", filename
         ):
             raise ValueError
-        artifact = str(path.parent / filename)
-        # Compilation and mapped-image identity are not runtime qualification.
-        # A provisioned qualification record must explicitly approve this tuple.
+        root = _INSTALLED_PLUGIN_ROOT if path == _INSTALLED_MANIFEST else path.parent
+        artifact = str(root / filename)
+        # Build approval authorizes only managed loading of this exact tuple.
+        # Any runtime_qualified metadata is deliberately not consumed as authority.
         approval = PluginApproval.from_manifest(artifact, value)
-        approval.verify_artifact(approved_root=str(path.parent))
+        approval.verify_artifact(approved_root=str(root))
         return _TrustedPluginManifest(artifact, approval)
     except (OSError, ValueError, TypeError, UnicodeError, RecursionError, HyprlandPluginError):
         raise HyprlandPluginError("hyprland_plugin_manifest_invalid") from None
@@ -191,14 +200,14 @@ class HyprlandPluginIPC:
 
 @dataclass(frozen=True)
 class PluginApproval:
-    """Operator-approved tuple for one immutable plugin image and compositor ABI."""
+    """Build/load-approved immutable image and ABI; never recovery authority."""
 
     path: str
     sha256: str
     hyprland_version: str
     hyprland_commit: str
     companion_build_id: str
-    runtime_qualified: bool
+    auto_management_approved: bool
 
     def __post_init__(self) -> None:
         filename = f"odin-hyprland-scope-{self.sha256}.so"
@@ -211,23 +220,25 @@ class PluginApproval:
             or type(self.hyprland_commit) is not str or not _COMMIT.fullmatch(self.hyprland_commit)
             or type(self.companion_build_id) is not str
             or not _BUILD_ID.fullmatch(self.companion_build_id)
-            or self.runtime_qualified is not True
+            or self.auto_management_approved is not True
         ):
             raise HyprlandPluginError("hyprland_plugin_approved_tuple_required")
 
     @classmethod
     def from_manifest(cls, path: str, manifest: dict[str, Any]) -> PluginApproval:
-        """Accept only the qualified manifest fields, never a mutable alias."""
+        """Accept explicit build approval fields, never recovery metadata or an alias."""
         if type(manifest) is not dict:
             raise HyprlandPluginError("hyprland_plugin_manifest_invalid")
         try:
+            if type(manifest.get("schema")) is not int or manifest["schema"] != 2:
+                raise ValueError
             approval = cls(
                 path=path,
                 sha256=manifest["plugin_sha256"],
                 hyprland_version=manifest["hyprland_version"],
                 hyprland_commit=manifest["hyprland_commit"],
                 companion_build_id=manifest["companion_build_id"],
-                runtime_qualified=manifest["runtime_qualified"],
+                auto_management_approved=manifest["auto_management_approved"],
             )
             if manifest.get("plugin_filename") != Path(path).name:
                 raise ValueError

@@ -17,9 +17,12 @@ from tests.test_computer_attached_controller_r5 import Attached
 
 
 def settings(**updates):
+    # These synthetic transports use a preselected target and an already prepared
+    # companion, rather than exercising discovery or managed plugin activation.
     return ComputerUseConfig(**{
         "enabled": True, "platform": "wayland", "environment": "existing_session",
         "wayland_backend": "hyprland", "wayland_uid": 1000,
+        "hyprland_discovery_mode": "pinned", "hyprland_managed_activation": False,
         "hyprland_runtime_dir": "/run/user/1000", "hyprland_wayland_display": "wayland-1",
         "hyprland_instance_signature": "approved_instance", "hyprland_output_name": "DP-1",
         "hyprland_compositor_pid": 123, "hyprland_compositor_executable": "/usr/bin/Hyprland",

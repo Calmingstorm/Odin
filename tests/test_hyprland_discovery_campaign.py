@@ -54,6 +54,33 @@ def test_auto_integration_constructs_unresolved_backend_without_desktop_io():
     assert backend.config.wayland_display == backend.config.instance_signature == ""
 
 
+def test_new_defaults_discover_reboot_identifiers_and_manage_plugin():
+    defaults = ComputerUseConfig()
+    assert defaults.hyprland_discovery_mode == "auto"
+    assert defaults.hyprland_managed_activation is True
+    assert defaults.hyprland_plugin_manifest == (
+        "/usr/local/share/doc/odin-hyprland/build-identity.json"
+    )
+    settings = config(hyprland_compositor_pid=1369,
+                      hyprland_instance_signature="stale", hyprland_wayland_display="old")
+    integration = ComputerIntegration(
+        SimpleNamespace(config=SimpleNamespace(computer=settings)),
+        controller=object(), settings=settings,
+    )
+    backend = integration._backend()
+    assert backend.config.compositor_pid is None
+    assert backend.config.instance_signature == backend.config.wayland_display == ""
+    assert backend.config.managed_activation is True
+    assert backend.config.plugin_manifest_path == defaults.hyprland_plugin_manifest
+
+
+def test_explicit_manual_activation_optout_survives_config_roundtrip():
+    settings = config(hyprland_discovery_mode="pinned", hyprland_managed_activation=False)
+    restored = ComputerUseConfig.model_validate(settings.model_dump())
+    assert restored.hyprland_discovery_mode == "pinned"
+    assert restored.hyprland_managed_activation is False
+
+
 def test_pinned_and_x11_do_not_require_auto_fields():
     pinned = config(
         hyprland_discovery_mode="pinned",

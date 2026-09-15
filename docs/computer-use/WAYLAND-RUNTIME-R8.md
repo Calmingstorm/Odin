@@ -38,8 +38,13 @@ Eval or portal-name impersonation. No app_id/title-only authorization.
 Guardian child owns only new C asset and tests. Children do not commit or edit
 shared files; parent runtime agent owns backend and sole index/commits.
 
-Never test destructive held-button owner EOF in a human compositor. Disposable
-native-headless behavior qualifies same native input implementation only, not
+**Historical test boundary, clarified 2026-09-15:** this R8 work did not authorize
+held-button owner-EOF fault injection on the operator's active compositor. A held
+button or compositor restart is not inherently destructive; separately authorized
+Hyprland qualification follows the KVM-lab and supervised-venue requirements in
+[HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md](HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md).
+That correction does not extend the R8 evidence or change portal admission.
+Disposable native-headless behavior qualifies same native input implementation only, not
 physical concurrency or another active hardware instance. Live orderly down/up
 does not test EOF defect. Unknown stack/backend/probe/source/focus denies input.
 

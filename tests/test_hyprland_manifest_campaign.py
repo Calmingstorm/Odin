@@ -40,10 +40,11 @@ def _manifest(tmp_path, **overrides):
     artifact = tmp_path / f"odin-hyprland-scope-{digest}.so"
     artifact.write_bytes(payload)
     value = {
-        "schema": 1,
+        "schema": 2,
         "hyprland_version": "0.55.2",
         "hyprland_commit": "a" * 40,
-        "runtime_qualified": True,
+        "auto_management_approved": True,
+        "runtime_qualified": False,
         "companion_build_id": "b" * 64,
         "plugin_sha256": digest,
         "plugin_filename": artifact.name,
@@ -61,13 +62,17 @@ def _manifest(tmp_path, **overrides):
 @pytest.mark.parametrize(
     ("field", "replacement"),
     [
-        ("runtime_qualified", False),
+        ("auto_management_approved", False),
+        ("auto_management_approved", 1),
         ("runtime_qualified", 1),
         ("schema", True),
+        ("schema", 1),
     ],
-    ids=("runtime-qualified-false", "runtime-qualified-boolwrong", "schema-bool"),
+    ids=(
+        "approval-false", "approval-boolwrong", "qualification-boolwrong", "schema-bool", "legacy",
+    ),
 )
-def test_read_trusted_plugin_manifest_rejects_unqualified_or_boolean_schema(
+def test_read_trusted_plugin_manifest_rejects_unapproved_or_invalid_schema(
     tmp_path, monkeypatch, field, replacement
 ):
     manifest, _artifact, _value = _manifest(tmp_path, **{field: replacement})
@@ -83,11 +88,11 @@ def test_read_trusted_plugin_manifest_rejects_unqualified_or_boolean_schema(
         read_trusted_plugin_manifest(str(manifest))
 
     # Artifact verification is downstream of parse/trust validation.  An
-    # unqualified manifest must never reach an activation-capable approval.
+    # unapproved manifest must never reach an activation-capable approval.
     assert verified == []
 
 
-def test_read_trusted_plugin_manifest_accepts_explicit_qualification_and_build_metadata(
+def test_read_trusted_plugin_manifest_accepts_build_approval_without_recovery_qualification(
     tmp_path, monkeypatch
 ):
     manifest, artifact, _value = _manifest(tmp_path)
@@ -102,5 +107,6 @@ def test_read_trusted_plugin_manifest_accepts_explicit_qualification_and_build_m
     trusted = read_trusted_plugin_manifest(str(manifest))
 
     assert trusted.path == str(artifact)
-    assert trusted.approval.runtime_qualified is True
+    assert trusted.approval.auto_management_approved is True
+    assert not hasattr(trusted.approval, "runtime_qualified")
     assert verified == [(str(artifact), str(tmp_path))]

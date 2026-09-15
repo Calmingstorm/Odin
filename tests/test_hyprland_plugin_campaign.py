@@ -25,7 +25,7 @@ from src.computer.runtime.hyprland_plugin import (
 def approval(tmp_path):
     root = tmp_path / "odin"
     root.mkdir()
-    payload = b"qualified plugin fixture"
+    payload = b"build-approved plugin fixture"
     digest = hashlib.sha256(payload).hexdigest()
     path = root / f"odin-hyprland-scope-{digest}.so"
     path.write_bytes(payload)
@@ -156,7 +156,7 @@ async def test_mapped_and_companion_identity_make_runtime_ready(tmp_path, monkey
     assert state == type(state)(True, True)
 
 
-def test_manifest_and_artifact_require_qualified_immutable_root_owned_tuple(tmp_path):
+def test_manifest_and_artifact_require_build_approved_immutable_root_owned_tuple(tmp_path):
     approved, root = approval(tmp_path)
     # Test process normally owns this fixture, which is intentionally not good enough.
     with pytest.raises(HyprlandPluginError, match="artifact_untrusted"):
@@ -336,10 +336,11 @@ def _root_owned_lstat(monkeypatch):
 def test_trusted_manifest_accepts_real_immutable_content_addressed_artifact(tmp_path, monkeypatch):
     approved, root = approval(tmp_path)
     manifest = {
-        "schema": 1,
+        "schema": 2,
         "hyprland_version": approved.hyprland_version,
         "hyprland_commit": approved.hyprland_commit,
-        "runtime_qualified": True,
+        "auto_management_approved": True,
+        "runtime_qualified": False,
         "companion_build_id": approved.companion_build_id,
         "plugin_sha256": approved.sha256,
         "plugin_filename": os.path.basename(approved.path),

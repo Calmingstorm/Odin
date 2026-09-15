@@ -50,6 +50,17 @@ single-use checks remain; channel and request surface also bind selection.
 
 ## Isolated lab result
 
+**Superseding venue correction, 2026-09-15:** the failures below describe these
+specific Incus/nested-compositor attempts, not the availability of all isolated
+venues. The owner records a working KVM lab built on 2026-09-12 at
+`/mnt/storage/hyprland-lab/`, with `/dev/kvm`, `kvm_amd`,
+`build-clean-pinned.sh`, `collect-guest-evidence.sh`, and `guest-evidence/`.
+That lab is the intended fault-test venue under
+[HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md](HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md).
+This supersedes the venue-establishment steps 1-2 in the historical next-session
+order, not the recorded failures or missing recovery evidence. Verify current
+isolation and tuple identity before execution; no new runtime result is claimed.
+
 No usable isolated Hyprland compositor was established. Incus was active, but
 its existing default ZFS storage pool was **unavailable**. No lab container was
 created; the existing stopped container was neither started nor changed.

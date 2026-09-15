@@ -6,6 +6,18 @@ fast-forwarded from master before branching. Branch: `feat/isolated-computer-use
 > live in OPERATOR.md. Past app restrictions and named machine artifacts are not
 > current capability gates or consent for another user's session.
 
+**Safety/venue correction, 2026-09-15:** the historical restrictions below record
+what those particular tasks authorized. They are not a permanent ban on
+owner-approved workstation fault tests. For current Hyprland recovery
+qualification, use the KVM lab and the corrected prerequisites in
+[HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md](HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md).
+The campaign's Krita paintings are disposable test artifacts, not personal user
+work; unsaved status alone does not prohibit their use. Compositor restarts, held
+input and an agreed reboot are recovery inconveniences, not data destruction.
+Broad process kills and destruction of user data remain forbidden. This correction
+does not alter historical measurements, backend-specific evidence limits, or grant
+new runtime/deployment permission.
+
 Authority: the operator's build authorization recorded in the review document of
 2026-09-06. No deployment, restart of Odin, master merge, tag, or release pipeline.
 

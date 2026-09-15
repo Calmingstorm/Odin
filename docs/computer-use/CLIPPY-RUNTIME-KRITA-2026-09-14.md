@@ -14,6 +14,12 @@ The patched production ComputerController and Hyprland backend attached to the e
 
 The stroke remains in a new unsaved test document. No existing user document was overwritten.
 
+**Artifact clarification, 2026-09-15:** The owner confirmed that Krita was installed
+for testing and the paintings in this campaign are our test artifacts, not
+personal user documents. Their unsaved state is not a blanket bar to authorized
+fault qualification. Unrelated user work remains protected. See the corrected
+[qualification safety and venue plan](HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md).
+
 ## Fixes
 
 Runtime startup rejected successful focus replies because two optional diagnostic booleans were not accepted by its strict schema. That scope exception was mislabeled as an unexpected start failure. Runtime fixes preserve the real static reason, expose actionable recovery guidance, distinguish model deliberation from the short native input lease, and truthfully report pre-arm cleanup and native release acknowledgement separately from action success.
@@ -30,7 +36,7 @@ Shipping plugin SHA256:
 Shipping companion build identity:
 `cd9a146f6844cecf36af013effa9b1621b7565459f478de8852ce395911e3ad3`
 
-Built with the repository shipping script against the target's Hyprland 0.55.2 headers. The running plugin was replaced with this fixed build. No compositor restart or destructive scenario was performed. The first replacement attempt used the resolved path while Hyprland had registered the symlink spelling; it did not unload the original and duplicate load was refused. The second used the registered spelling, verified removal, then loaded and verified the fixed image. No input occurred during replacement.
+Built with the repository shipping script against the target's Hyprland 0.55.2 headers. The running plugin was replaced with this fixed build. No compositor restart or fault-injection scenario was performed. The first replacement attempt used the resolved path while Hyprland had registered the symlink spelling; it did not unload the original and duplicate load was refused. The second used the registered spelling, verified removal, then loaded and verified the fixed image. No input occurred during replacement.
 
 The target bot service was restarted once after the runtime test to import the Python fixes. The replacement process logged into Discord; HTTP health returned status ok and WebUI returned 200. config.yml checksum remained unchanged. At that checkpoint, the remote deployment checkout HEAD was intentionally not changed; source edits were present on disk and required normal clean-deploy reconciliation with the committed branch. This historical report does not establish the current deployment state.
 

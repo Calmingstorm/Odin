@@ -48,5 +48,7 @@ if [ -e "$build/$plugin_name" ]; then
 else
     cp "$build/odin-hyprland-scope.so" "$build/$plugin_name"
 fi
-printf '{"schema":1,"hyprland_version":"0.55.2","hyprland_commit":"%s","runtime_qualified":false,"companion_build_id":"%s","plugin_sha256":"%s","plugin_filename":"%s"}\n' "$pin" "$build_id" "$plugin_sha" "$plugin_name" > "$build/build-identity.json"
+# Build/load approval only: installed root ownership and exact artifact/ABI pins
+# remain mandatory. This is NOT an attestation of recovery-after-fault behavior.
+printf '{"schema":2,"hyprland_version":"0.55.2","hyprland_commit":"%s","auto_management_approved":true,"runtime_qualified":false,"companion_build_id":"%s","plugin_sha256":"%s","plugin_filename":"%s"}\n' "$pin" "$build_id" "$plugin_sha" "$plugin_name" > "$build/build-identity.json"
 printf '%s\n' "$build/odin-hyprland-input" "$build/$plugin_name"

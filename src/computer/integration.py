@@ -99,7 +99,7 @@ class ComputerIntegration:
                 from .runtime.hyprland_identity import ExecutableTrust
 
                 s = self.settings
-                auto = getattr(s, "hyprland_discovery_mode", "pinned") == "auto"
+                auto = getattr(s, "hyprland_discovery_mode", "auto") == "auto"
                 runtime_dir = s.hyprland_runtime_dir or f"/run/user/{s.wayland_uid}"
                 return HyprlandRuntimeBackend(
                     enabled=self.enabled, environment=s.environment,

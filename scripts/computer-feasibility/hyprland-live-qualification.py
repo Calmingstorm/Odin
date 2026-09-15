@@ -234,7 +234,8 @@ class Harness:
         p=Path(self.a.manifest);req(p.is_absolute(),"manifest path not absolute")
         m=json.loads(p.read_text());bid=m.get("companion_build_id");sha=m.get("plugin_sha256")
         name=m.get("plugin_filename")
-        req(m.get("schema")==1 and m.get("hyprland_version")=="0.55.2" and
+        req(type(m.get("schema")) is int and m["schema"] in (1, 2) and
+            m.get("hyprland_version")=="0.55.2" and
             m.get("hyprland_commit")=="39d7e209c79d451efab1b21151d5938289da838d",
             "manifest pinned Hyprland identity mismatch")
         req(m.get("runtime_qualified") is False,"manifest runtime_qualified is not false")

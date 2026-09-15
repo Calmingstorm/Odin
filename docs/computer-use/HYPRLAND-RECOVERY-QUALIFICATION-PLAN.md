@@ -2,9 +2,10 @@
 
 Status: **design and execution plan only**. The recovery implementation is not
 runtime-qualified. `runtime_qualified` remains `false` until every applicable
-gate below has recorded passing evidence on a supervised, disposable Hyprland
-machine. Offline tests, successful compilation, native ACKs, and manifest
-booleans cannot substitute for compositor and receiver evidence.
+gate below has recorded passing evidence in an authorized Hyprland test
+environment meeting the venue prerequisites below. Offline tests, successful
+compilation, native ACKs, and manifest booleans cannot substitute for compositor
+and receiver evidence.
 
 This plan qualifies four bounded capabilities:
 
@@ -24,15 +25,55 @@ turns green is not.
 
 ## Safety boundary and exact claims
 
-Run destructive cases only on a dedicated machine, or a VM with no host DRM,
-input-device, display-socket, or GPU passthrough. A person must be present with an
-independent stop path. Do not run compositor restart, held-input kill, transport
-fault, or reboot cases through an unattended remote session. The current remote
-workstation cannot satisfy this prerequisite.
+**Correction, 2026-09-15:** the earlier version incorrectly treated test paintings
+as personal user data, generalized one unavailable-owner incident into a standing
+remote-session prohibition, and called ordinary recovery inconveniences
+"destructive." Those premises are superseded here; no new runtime test or
+qualification result is asserted by this documentation correction.
 
-Never use an active personal desktop as the receiver. Never fault-test an unsaved
-document. Never use broad process kills. Record exact PIDs/start ticks first and
-signal only disposable processes named by the test.
+Compositor restarts, temporarily held input, and asking the owner to reboot are
+minor operational inconveniences in an agreed test session, not data destruction.
+They still require a bounded plan and cleanup evidence. Reserve "destructive" for
+actual destruction of data or hardware state. Do not destroy user data, use broad
+process kills, or affect unrelated applications to make a test pass. Record exact
+PIDs/start ticks before fault injection, recheck identity before signaling, and
+signal only the test-owned processes named in the plan.
+
+The Krita paintings referenced by this campaign are our test artifacts; Krita was
+installed for testing. A new or identified disposable test document may be used
+even if unsaved. That does not make arbitrary unsaved user documents disposable:
+identify the test artifacts, preserve required evidence, and protect unrelated
+user work before any interruption. Application-preserving detach remains the
+ordinary task contract, not a ban on explicitly authorized fault tests.
+
+## Intended venue and supervision
+
+**Use the KVM lab at `/mnt/storage/hyprland-lab/` for the fault cases.** The owner's
+2026-09-15 correction records that it was built on 2026-09-12, with `/dev/kvm`
+available, `kvm_amd` loaded, `build-clean-pinned.sh`,
+`collect-guest-evidence.sh`, and retained `guest-evidence/`. The earlier failed
+Incus/nested-compositor attempts are historical evidence, not proof that this lab
+is unavailable. These are reported prerequisites, not a fresh inspection or proof
+that the recovery matrix passed.
+
+Before execution, verify the guest has no host DRM, input-device, display-socket,
+or GPU passthrough; verify the exact compositor/helper/plugin tuple, receiver and
+independent stop path. Use a guest snapshot or equivalent reset point and retain
+evidence outside the state being reset. For a reboot case, reboot the guest, not
+its host. Dedicated test hardware is another suitable venue.
+
+A remote workstation is not categorically excluded. The workstation owner is normally
+present for most of the day; one 4am absence does not describe the normal session.
+An owner-approved supervised test there is possible when the owner or designated
+operator is reachable for the run, understands the interruption and recovery
+steps, and has an independent stop/recovery path that survives loss of desktop
+focus or compositor access. Protect unrelated work and agree the scope first.
+Pause fault execution if the person or independent path becomes unavailable;
+reschedule that run rather than declaring the workstation permanently unsuitable.
+The KVM lab remains the intended venue, and this plan alone grants no permission
+to restart a workstation or inject input.
+
+## Evidence boundaries
 
 Keep these claims separate:
 
@@ -66,20 +107,25 @@ No boolean is compositor proof. `ready`, `released`, `retired`, `clean`, process
 absence, or `runtime_qualified` is only a summarized claim. Retain the underlying
 authenticated record and independent receiver events.
 
-## Qualification artifact versus production trust
+## Recovery evidence versus automatic-loading trust
 
-The source build emits `runtime_qualified: false`. Production
-`read_trusted_plugin_manifest` and `PluginApproval` reject tuples not already
-qualified. **Do not flip the field to make managed loading or testing work.** That
-would turn the desired conclusion into a prerequisite.
+**Superseding trust correction, 2026-09-15:** fresh-session startup after a boot
+does not require recovery qualification. `runtime_qualified` is not an autoload
+gate and must not be flipped to make loading work. The schema-2 manifest's
+`auto_management_approved: true` attests build/load trust only; exact artifact,
+mapped-image, companion-build and compositor checks remain mandatory. See
+[HYPRLAND-AUTOLOAD-TRUST.md](HYPRLAND-AUTOLOAD-TRUST.md) for that separate contract.
+Automatic discovery and managed loading do not authorize desktop input or assert
+any of this plan's four recovery capabilities. Explicit manual/pinned opt-outs
+remain available.
 
-Initial qualification uses an operator-reviewed, deliberately loaded test artifact
-in the supervised disposable compositor, following the existing manual harness.
-This is qualification mode, not production managed activation. Record immutable
+The source build still emits `runtime_qualified: false`; recovery evidence remains
+missing until the applicable matrix actually runs and passes. This plan adds no
+qualification workflow or automatic promotion. An authorized lab run may use the
+approved automatic-loading path or the deliberate manual harness. Record immutable
 plugin ELF digest, companion build ID, exact Hyprland version/commit, headers and
-dependency ABI; prove mapped image and executing companion agree. Only after the
-complete tuple passes may a separately reviewed provisioning change approve that
-exact tuple. Then repeat managed activation and normal lifecycle restart cases
+dependency ABI; prove mapped image and executing companion agree. Demonstrate
+managed activation and normal lifecycle cases separately from fault recovery,
 without weakening policy. Do not treat a compositor replacement as recovered task
 continuity.
 Guardian-only or extracted native fixtures qualify parser/state-machine behavior,
@@ -96,14 +142,17 @@ git rev-parse HEAD
 
 Required environment:
 
-- dedicated supervised Hyprland hardware or an isolated guest;
+- the isolated KVM guest (intended), dedicated test hardware, or an explicitly
+  approved supervised workstation meeting the venue requirements above;
+- a reachable owner/operator and an agreed interruption/recovery plan;
 - exact supported Hyprland build and matching development headers;
 - one named output, and two outputs for handoff cases;
 - repository native receiver and a harmless disposable receiver window;
 - tested WebUI/OOB stop independent of desktop focus and action lock;
 - monotonic compositor/plugin/guardian/receiver logs;
 - boot ID, `/proc/<pid>/stat`, peer credentials and mapped-image inspection;
-- fresh computer state plus a backup before every destructive scenario.
+- fresh computer state before each fault scenario, a guest reset point where
+  applicable, retained evidence, and backups of any non-disposable work at risk.
 
 Build inert artifacts without contacting the desktop. Create a unique output
 directory for each run; do not delete a prior build directory as part of this
@@ -120,9 +169,9 @@ sha256sum "$build"/odin-hyprland-input \
 python3 -m json.tool "$build/build-identity.json"
 ```
 
-The manifest is expected to remain false during qualification. Install/load only
-through the supervised procedure for the disposable machine. Do not bless an
-unqualified artifact through normal production admission. Do not overwrite a
+Recovery qualification remains false during this work; independent build/load
+approval may permit automatic loading without it. Install/load only approved,
+identity-verified artifacts in the authorized test environment. Do not overwrite a
 mapped ELF or use the compatibility symlink as mapped-image evidence.
 
 Run the existing narrow receiver prerequisite with fresh values, never identities
@@ -457,7 +506,8 @@ handle/command. Verify only the captured virtual client is destroyed, old author
 cannot return, and release/receiver certainty remains what was actually observed.
 
 **Host reboot boundary:** create unknown-release quarantine and preserve evidence,
-then reboot only the dedicated machine. Prove boot ID changed and old volatile
+then reboot only the test guest or separately approved test machine, never the
+lab host as a shortcut. Prove boot ID changed and old volatile
 resources cannot survive. Retire historical authority without claiming action or
 receiver success. Do not resurrect the old session/action. Any continuation needs
 a new recovery session, explicit target and fresh pixels.
@@ -541,6 +591,10 @@ treat filename identity alone as enough: shared lifecycle, persistence, API and
 cancellation must pass.
 
 ## Final decision record
+
+This section specifies future recovery-evidence review, not an implemented
+qualification/promotion workflow and not a prerequisite for automatic loading or
+a fresh session after boot. No recovery capability is promoted by this change.
 
 Produce a reviewed matrix with one row per scenario: candidate SHA, tuple,
 environment, evidence path, exit status, verdict, reviewer and limitations. Failed

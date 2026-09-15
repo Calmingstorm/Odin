@@ -92,5 +92,9 @@ After deployment, the authorized operator must issue the ordinary Discord drawin
 document, multiple picture elements, natural completion pause, explicit resumed
 continuation, then a second new picture/session. Inspect actual pixels and
 retained receipts and check no quarantine/unknown release. Do not substitute the
-diagnostic probe or synthetic regression for this acceptance test. No destructive
-compositor scenarios are authorized or needed.
+diagnostic probe or synthetic regression for this acceptance test. No compositor
+fault-injection scenarios were authorized or needed for this acceptance task.
+This task-specific boundary does not prohibit separately authorized qualification;
+the intended venue and protections are in
+[HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md](HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md).
+Compositor interruption itself is an operational inconvenience, not destruction.
