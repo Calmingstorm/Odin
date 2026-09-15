@@ -105,7 +105,13 @@ _INVENTORY_SAFE_REASONS = frozenset(_STATIC_DIAGNOSTICS) | frozenset(
 
 
 def _inventory_failure(error: BaseException, phase: str) -> BaseException:
-    """Log static metadata only and return the safe public/cancellation error."""
+    """Log static metadata and sanitize the public inventory boundary.
+
+    Unexpected exceptions deliberately do not propagate raw messages: resolver
+    and transport errors can contain credentials or private paths. Preserve
+    their phase/type/frame diagnostics, while cancellation/control exceptions
+    retain their original semantics. Cleanup never replaces a primary error.
+    """
     from .hyprland_discovery import HyprlandDiscoveryError
 
     reason = "target_inventory_unavailable"

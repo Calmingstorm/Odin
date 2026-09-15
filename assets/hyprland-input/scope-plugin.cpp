@@ -1196,8 +1196,10 @@ struct State {
             if (!groupMember(nextGroup, w)) return status(false, "application-group-member-refused");
         }
         b.modal = b.ancestry.size() > 1 || w->m_isFloating;
-        // Cursor need not enter a newly focused dialog for observation/keyboard.
-        // Its independently measured focus stays immutable for the whole lease.
+        // A resting cursor may be outside this application, even on another
+        // output. Capture its focus independently; it is not target authority.
+        // same() fences unexpected changes, while onWarp admits only a checked
+        // one-shot entry into the observed target before pointer input.
         b.pointerSurface = g_pSeatManager->m_state.pointerFocus;
         if (watchedWindow != w || watchedMonitor != m) {
             targetListeners.clear(); watchedWindow = w; watchedMonitor = m;
@@ -1364,7 +1366,14 @@ struct State {
             converging(c.size.x, size.x, c.goalSize.x) && converging(c.size.y, size.y, c.goalSize.y);
     }
     bool sameFocusCandidateState(const FocusCandidate& c) const {
-        if (!environment() || c.window.expired() || c.monitor.expired() || c.workspace.expired() || c.surface.expired() || !c.processFD || !c.image.valid() || ns() - c.created >= 30000000000LL) return false;
+        // Identity selection must survive model deliberation (matching the
+        // Python 300s selection binding), not borrow a pixel-freshness budget.
+        // This is not a renewable lease: validate the same captured identity,
+        // ancestry, process, layout goal and output below, before AND after focus.
+        // Snapshots and armed input retain their separate, short freshness gates.
+        constexpr int64_t candidateLifetimeNs = 300000000000LL;
+        const auto now = ns();
+        if (!environment() || c.window.expired() || c.monitor.expired() || c.workspace.expired() || c.surface.expired() || !c.processFD || !c.image.valid() || now < c.created || now - c.created >= candidateLifetimeNs) return false;
         pollfd p{*c.processFD, POLLIN, 0}; auto w = c.window.lock(); auto m = c.monitor.lock(); std::vector<odin_scope::NativeAncestor> ancestry;
         return poll(&p, 1, 0) == 0 && w && m && w->m_isMapped && w->visible() && !w->m_isX11 && w->wlSurface() && w->resource() == c.surface.lock() && w->m_monitor.lock() == m && w->m_workspace == c.workspace.lock() && focusGeometryConverging(c, w) && w->m_class == c.app && safeFocusApplication(w->m_class, c.image.executable) && provenance(w, ancestry) && ancestry == c.ancestry && processStartTicks(c.pid) == c.startTicks && processImage(c.pid) == c.image && m->m_enabled && m->m_dpmsStatus && !m->m_isUnsafeFallback && !m->m_isBeingLeased && m->m_mirrorOf.expired() && m->m_name == c.outputName && m->m_position == c.outputPos && m->m_size == c.outputSize && m->m_pixelSize == c.pixelSize && m->m_scale == c.scale && int(m->m_transform) == c.transform;
     }

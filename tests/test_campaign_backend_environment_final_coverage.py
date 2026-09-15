@@ -185,7 +185,9 @@ async def test_hyprland_recovery_selection_identity_shape_fails_closed():
     assert await backend.recover_focus({}, context={}) is False
 
 
-async def test_hyprland_inventory_refuses_unavailable_and_closes_mocked_resources(monkeypatch):
+async def test_hyprland_inventory_refuses_unavailable_and_closes_mocked_resources(
+    monkeypatch, caplog,
+):
     disabled = hb.HyprlandRuntimeBackend(config=_config(), enabled=False)
     with pytest.raises(ComputerError, match="target_inventory_unavailable"):
         await disabled.inventory_targets()
@@ -195,8 +197,15 @@ async def test_hyprland_inventory_refuses_unavailable_and_closes_mocked_resource
     )
     resolver = hyprland_discovery.HyprlandDiscoveryResolver
     monkeypatch.setattr(resolver, "resolve", AsyncMock(side_effect=RuntimeError("no native")))
-    with pytest.raises(RuntimeError, match="no native"):
+    # Inventory is a public tool boundary: unexpected native exceptions may
+    # contain private paths/tokens. Preserve the sanitized fd68cf10 contract,
+    # including useful phase/type/frame evidence, not raw exception text.
+    with pytest.raises(ComputerError, match="^target_inventory_unavailable$") as caught:
         await backend.inventory_targets()
+    assert caught.value.__suppress_context__
+    assert "phase=resolve reason=target_inventory_unavailable type=RuntimeError" in caplog.text
+    assert "no native" not in caplog.text
+    assert backend._selection_proofs == {}
 
     connection = SimpleNamespace(closed=False)
     connection.close = lambda: setattr(connection, "closed", True)

@@ -1,6 +1,6 @@
 """Extracted native selection + production Python provider, not live qualification.
 
-Compositor objects and environment/provenance acquisition are fake. The entire
+Compositor objects, monotonic clock and environment/provenance acquisition are fake. The entire
 selection-method block, candidate struct, JSON helpers and Linux /proc/pidfd
 checks are production code. No display or input device is contacted.
 """
@@ -58,12 +58,14 @@ using Clock = std::chrono::steady_clock;
 // PRODUCTION_HELPERS
 template<class T> using WP = std::weak_ptr<T>;
 struct Vector2D { double x = 0, y = 0; bool operator==(const Vector2D&) const = default; };
-// Settled geometry: changing v changes the layout goal as well as its value.
+// Settled geometry tracks v; animation can retain an independent layout goal.
 struct Animated {
     Vector2D v;
+    Vector2D g;
+    bool animated = false;
     Vector2D value() const { return v; }
-    Vector2D goal() const { return v; }
-    bool isBeingAnimated() const { return false; }
+    Vector2D goal() const { return animated ? g : v; }
+    bool isBeingAnimated() const { return animated; }
 };
 struct CWLSurfaceResource {};
 struct CWorkspace {};
@@ -152,6 +154,22 @@ int main() {
     int focusCalls = 0;
     auto mutate = [&](const std::string& what) {
         if (what == "window_position") window->m_realPosition->v.x += 1;
+        else if (what == "start_animation") {
+            window->m_realPosition->g = {110,120};
+            window->m_realSize->g = {400,300};
+            window->m_realPosition->animated = window->m_realSize->animated = true;
+        }
+        else if (what == "converge") {
+            window->m_realPosition->v = {60.5,70.5};
+            window->m_realSize->v = {350.5,250.5};
+        }
+        else if (what == "settle") {
+            window->m_realPosition->v = window->m_realPosition->g;
+            window->m_realSize->v = window->m_realSize->g;
+            window->m_realPosition->animated = window->m_realSize->animated = false;
+        }
+        else if (what == "diverge") window->m_realPosition->v.x -= 1;
+        else if (what == "retarget") window->m_realPosition->g.x += 1;
         else if (what == "window_size") window->m_realSize->v.x += 1;
         else if (what == "output_position") monitor->m_position.x += 1;
         else if (what == "output_size") monitor->m_size.x += 1;
@@ -188,7 +206,7 @@ int main() {
         else if (what == "stale_epoch") ++state.revision;
         else if (what == "consumed") state.focusCandidates.clear();
         else if (what == "expired")
-            for (auto& [id,c] : state.focusCandidates) c.created -= 30000000001LL;
+            testNow += 300000000001LL;
         else if (what == "stale_ticks")
             for (auto& [id,c] : state.focusCandidates) c.startTicks = "1";
         else if (what == "stale_image") for (auto& [id,c] : state.focusCandidates) ++c.image.inode;
@@ -214,6 +232,11 @@ int main() {
         else if (op == "test_focus_mode") {
             mode = text(request.get(), "mode"); put(result.get(), "ok", true);
         }
+        else if (op == "test_advance_clock") {
+            json_object* elapsed = nullptr;
+            if (!json_object_object_get_ex(request.get(), "ns", &elapsed)) return 5;
+            testNow += json_object_get_int64(elapsed); put(result.get(), "ok", true);
+        }
         else if (op == "test_state") {
             put(result.get(), "revision", int64_t(state.revision));
             put(result.get(), "focus_calls", int64_t(focusCalls));
@@ -231,6 +254,16 @@ int main() {
 def selection_binary(tmp_path_factory):
     source = SOURCE.read_text()
     helpers = extract(source, "using J = ", "bool releaseCommandID(")
+    # Exercise the production lifetime comparison deterministically, including
+    # the exact nanosecond boundary. Do not sleep or contact a compositor.
+    clock = (
+        "int64_t ns() { return std::chrono::duration_cast<std::chrono::nanoseconds>"
+        "(Clock::now().time_since_epoch()).count(); }"
+    )
+    assert helpers.count(clock) == 1
+    helpers = helpers.replace(
+        clock, "int64_t testNow = 1000000000LL; int64_t ns() { return testNow; }"
+    )
     candidate = extract(source, "struct FocusCandidate {", "struct Peer {")
     window_lifetimes = extract(
         source,
@@ -398,12 +431,14 @@ STATE_CHANGES = [
 ]
 
 
+@pytest.mark.parametrize("age_seconds", [0, 37, 43, 299])
 @pytest.mark.parametrize("mode", STATE_CHANGES + [
     "stale_epoch", "consumed", "expired", "stale_ticks", "stale_image",
 ])
-def test_native_revalidates_before_focus(peer, mode):
+def test_native_revalidates_before_focus(peer, mode, age_seconds):
     async def run():
         provider, inventory, _, received = await joined_provider(peer)
+        peer.request({"op": "test_advance_clock", "ns": age_seconds * 1_000_000_000})
         peer.request({"op": "test_mutate", "mode": mode})
         with pytest.raises(HyprlandScopeFailure):
             await focus(provider, inventory)
@@ -412,10 +447,12 @@ def test_native_revalidates_before_focus(peer, mode):
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("mode", STATE_CHANGES + ["wrong_focus", "wrong_focus_monitor"])
-def test_native_revalidates_same_measured_candidate_after_focus(peer, mode):
+@pytest.mark.parametrize("age_seconds", [0, 37, 43, 299])
+@pytest.mark.parametrize("mode", STATE_CHANGES + ["wrong_focus", "wrong_focus_monitor", "expired"])
+def test_native_revalidates_same_measured_candidate_after_focus(peer, mode, age_seconds):
     async def run():
         provider, inventory, _, received = await joined_provider(peer)
+        peer.request({"op": "test_advance_clock", "ns": age_seconds * 1_000_000_000})
         peer.request({"op": "test_focus_mode", "mode": mode})
         with pytest.raises(HyprlandScopeFailure):
             await focus(provider, inventory)
@@ -423,6 +460,54 @@ def test_native_revalidates_same_measured_candidate_after_focus(peer, mode):
         assert peer.request({"op": "test_state"}) == {
             "revision": 10, "focus_calls": 1, "candidates": 0,
         }
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("age_ns,accepted", [
+    (0, True), (6_000_000_000, True), (29_000_000_000, True),
+    (30_000_000_000, True), (37_000_000_000, True), (43_000_000_000, True),
+    (299_999_999_999, True), (300_000_000_000, False),
+    (300_000_000_001, False), (301_000_000_000, False), (-1, False),
+])
+def test_native_candidate_deliberation_lifetime(peer, age_ns, accepted):
+    async def run():
+        provider, inventory, _, received = await joined_provider(peer)
+        original = copy.deepcopy(received[0]["candidates"][0])
+        peer.request({"op": "test_advance_clock", "ns": age_ns})
+        if accepted:
+            result = await focus(provider, inventory)
+            assert result["window_id"] == original["window_id"]
+            assert result["identity"] == received[0]["candidates"][0]["identity"]
+            assert result["output_id"] == original["output_id"]
+        else:
+            with pytest.raises(HyprlandScopeFailure):
+                await focus(provider, inventory)
+            assert received[-1]["reason"] == "stale-or-ineligible-candidate"
+        assert peer.request({"op": "test_state"})["focus_calls"] == int(accepted)
+        assert peer.request({"op": "test_state"})["candidates"] == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("age_seconds", [6, 37, 43, 299])
+@pytest.mark.parametrize("mode,accepted", [
+    ("converge", True), ("settle", True), ("diverge", False), ("retarget", False),
+])
+def test_deliberation_preserves_same_layout_goal_animation_contract(
+    peer, age_seconds, mode, accepted,
+):
+    async def run():
+        peer.request({"op": "test_mutate", "mode": "start_animation"})
+        provider, inventory, _, received = await joined_provider(peer)
+        peer.request({"op": "test_advance_clock", "ns": age_seconds * 1_000_000_000})
+        peer.request({"op": "test_mutate", "mode": mode})
+        if accepted:
+            result = await focus(provider, inventory)
+            assert result["window_id"] == received[0]["candidates"][0]["window_id"]
+            assert received[-1]["diagnostic_geometry_changed"] is True
+        else:
+            with pytest.raises(HyprlandScopeFailure):
+                await focus(provider, inventory)
+        assert peer.request({"op": "test_state"})["focus_calls"] == int(accepted)
     asyncio.run(run())
 
 
