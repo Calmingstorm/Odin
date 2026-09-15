@@ -66,6 +66,8 @@ _NATIVE_REFUSALS = frozenset({
     "application-group-target-layer-surface", "application-group-target-unknown",
     "application-group-target-surface", "application-group-target-ineligible",
     "application-group-target-focus-unconfirmed",
+    "inventory-environment-unavailable", "inventory-scope-armed",
+    "inventory-seat-button-held", "inventory-device-input-held-or-unavailable",
 })
 
 

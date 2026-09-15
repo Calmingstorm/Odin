@@ -118,6 +118,9 @@ struct State {
     // PRODUCTION_WINDOW_LIFETIMES
     bool environment() const { return environmentOK; }
     bool inputHeld() const { return held; }
+    // Inventory now distinguishes core aggregate buttons from other input.
+    bool hasHeldButtons() const { return held; }
+    const State* g_pInputManager = this;
     bool provenance(PHLWINDOW, std::vector<odin_scope::NativeAncestor>& out) const {
         out = {{ancestryToken, targetPID, int64_t(getuid())}}; return provenanceOK;
     }

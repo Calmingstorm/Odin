@@ -1372,7 +1372,13 @@ struct State {
         return c.epoch == revision && sameFocusCandidateState(c);
     }
     J inventoryTargets() {
-        if (!environment() || armed || inputHeld()) return status(false, "lock-or-input-held");
+        // Read-only pre-grant inventory must report the actual blocker. In
+        // particular, Hyprland's aggregate button list outlives a plugin reload;
+        // an empty NEW owner ledger cannot prove that old entry safe to erase.
+        if (!environment()) return status(false, "inventory-environment-unavailable");
+        if (armed) return status(false, "inventory-scope-armed");
+        if (g_pInputManager->hasHeldButtons()) return status(false, "inventory-seat-button-held");
+        if (inputHeld()) return status(false, "inventory-device-input-held-or-unavailable");
         focusCandidates.clear(); auto j = obj(); put(j.get(), "ok", true); put(j.get(), "version", int64_t(1)); put(j.get(), "instance_id", instanceID); put(j.get(), "topology_epoch", int64_t(revision)); auto* result = json_object_new_array(); std::map<std::string, std::string> outputIDs;
         std::set<const void*> outputs;
         for (const auto& w : g_pCompositor->m_windows) {

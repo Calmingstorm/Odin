@@ -23,8 +23,14 @@ from ..provenance import canonical_application_provenance
 from ..render import render_frame, source_allocation_bytes
 from ..vision import FrameCrop
 from .hyprland_capture import ExplicitOutput, NativeFrame, ScopeProof, capture_explicit_output
+from .hyprland_errors import (
+    HyprlandDiagnosticError,
+    HyprlandFailureCause,
+    HyprlandFailureStage,
+)
 from .hyprland_guardian import HyprlandGuardian, native_failure
 from .hyprland_identity import (
+    _STATIC_DIAGNOSTICS,
     ExecutableTrust,
     HyprlandIdentity,
     connect_peer,
@@ -38,6 +44,7 @@ from .hyprland_recovery import (
     ledger_evidence,
 )
 from .hyprland_scope import (
+    _NATIVE_REFUSALS,
     HyprlandGeometryUnsettled,
     HyprlandScopeFailure,
     HyprlandScopeProvider,
@@ -57,6 +64,96 @@ RESIDUALS = (
     "Same-process native dialogs require fresh observations; XWayland and foreign parents "
     "are not supported.",
 )
+
+
+# Reuse native refusal/identity vocabularies. A code-shaped message alone is not
+# safe: these supplements are the static Python preparation/discovery reasons.
+_INVENTORY_SAFE_REASONS = frozenset(_STATIC_DIAGNOSTICS) | frozenset(
+    "hyprland_" + reason.replace("-", "_") for reason in _NATIVE_REFUSALS
+) | frozenset({
+    "target_inventory_unavailable", "target_selection_invalid",
+    "hyprland_explicit_build_trust_required", "hyprland_identity_unavailable",
+    "hyprland_identity_transport_failed", "hyprland_identity_invalid_budget",
+    "hyprland_scope_unavailable", "hyprland_scope_reply_invalid",
+    "hyprland_scope_unknown_locked_or_stale", "hyprland_focus_outside_source",
+    "hyprland_parent_chain_unverified", "hyprland_explicit_session_required",
+    "hyprland_scope_instance_status_invalid", "hyprland_scope_selection_invalid",
+    "hyprland_application_group_invalid", "hyprland_owner_descriptor_invalid",
+    "hyprland_provider_owner_changed", "hyprland_owner_identity_invalid",
+    "hyprland_owner_protocol_unavailable", "hyprland_owner_reply_invalid",
+    "hyprland_owner_retirement_reply_invalid", "hyprland_owner_reconnect_unavailable",
+    "hyprland_owner_capture_late_or_retired", "hyprland_owner_adoption_reply_invalid",
+    "hyprland_retirement_protocol_unavailable", "hyprland_cross_compositor_retirement_unavailable",
+    "hyprland_scope_closed", "hyprland_application_identity_unavailable",
+    "hyprland_application_group_changed", "hyprland_explicit_output_required",
+    "hyprland_scope_plugin_incarnation_changed", "hyprland_scope_window_continuity_unavailable",
+    "window-geometry-unsettled",
+    "hyprland_discovery_deadline", "hyprland_discovery_runtime_untrusted",
+    "hyprland_discovery_policy_invalid", "hyprland_discovery_runtime_unavailable",
+    "hyprland_discovery_candidate_limit", "hyprland_discovery_hint_invalid",
+    "hyprland_discovery_not_found", "hyprland_discovery_ambiguous", "hyprland_discovery_unavailable",
+    "hyprland_plugin_manifest_required", "hyprland_plugin_manifest_untrusted",
+    "hyprland_plugin_manifest_invalid", "hyprland_plugin_identity_required",
+    "hyprland_plugin_reply_invalid", "hyprland_plugin_ipc_unavailable",
+    "hyprland_plugin_command_refused", "hyprland_plugin_load_unconfirmed",
+    "hyprland_plugin_instance_status_invalid", "hyprland_plugin_approved_tuple_required",
+    "hyprland_plugin_artifact_untrusted", "hyprland_plugin_mapped_image_unavailable",
+    "hyprland_plugin_mapped_image_unverified", "hyprland_plugin_compositor_pin_mismatch",
+    "hyprland_plugin_task_authorization_required", "hyprland_plugin_runtime_unqualified",
+    "hyprland_plugin_companion_identity_mismatch", "hyprland_plugin_unready",
+})
+
+
+def _inventory_failure(error: BaseException, phase: str) -> BaseException:
+    """Log static metadata only and return the safe public/cancellation error."""
+    from .hyprland_discovery import HyprlandDiscoveryError
+
+    reason = "target_inventory_unavailable"
+    if isinstance(error, (ComputerError, HyprlandDiscoveryError)):
+        candidate = error.code
+    elif isinstance(error, HyprlandScopeFailure):
+        candidate = error.args[0] if len(error.args) == 1 else None
+    else:
+        candidate = None
+    if type(candidate) is str and candidate in _INVENTORY_SAFE_REASONS:
+        reason = candidate
+    stage = cause = "unavailable"
+    if isinstance(error, (HyprlandDiagnosticError, HyprlandScopeFailure)):
+        if type(error.stage) is HyprlandFailureStage:
+            stage = error.stage.value
+        if type(error.cause) is HyprlandFailureCause:
+            cause = error.cause.value
+    name = type(error).__name__
+    safe_type = name if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", name) else "Exception"
+    frames = []
+    if not isinstance(error, (ComputerError, HyprlandScopeFailure,
+                              HyprlandDiscoveryError, asyncio.CancelledError)):
+        # Walk code metadata only, not source lines, exception text, or locals.
+        for frame, lineno in traceback.walk_tb(error.__traceback__):
+            filename = os.path.basename(frame.f_code.co_filename)
+            function = frame.f_code.co_name
+            frames.append((
+                filename if re.fullmatch(r"[A-Za-z0-9_.-]{1,100}", filename) else "unknown",
+                lineno,
+                function if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,79}", function) else "unknown",
+            ))
+            frames = frames[-8:]
+    logging.getLogger(__name__).warning(
+        "Hyprland target inventory failed: phase=%s reason=%s type=%s stage=%s cause=%s frames=%s",
+        phase, "cancelled" if isinstance(error, asyncio.CancelledError) else reason,
+        safe_type, stage, cause, frames,
+    )
+    if not isinstance(error, Exception):
+        return error  # Cancellation and process-control exceptions retain their semantics.
+    if isinstance(error, HyprlandDiscoveryError) and reason != "target_inventory_unavailable":
+        return HyprlandDiscoveryError(reason)
+    if isinstance(error, (HyprlandDiagnosticError, HyprlandScopeFailure)):
+        return HyprlandDiagnosticError(
+            reason,
+            stage=error.stage if type(error.stage) is HyprlandFailureStage else HyprlandFailureStage.READ,
+            cause=error.cause if type(error.cause) is HyprlandFailureCause else HyprlandFailureCause.UNAVAILABLE,
+        )
+    return ComputerError(reason)
 
 
 @dataclass(frozen=True)
@@ -385,6 +482,8 @@ class HyprlandRuntimeBackend:
         can be used to enumerate a first selectable target.  This path still
         does not create a guardian, focus a candidate, or grant input authority.
         """
+        # Even admission or discovery failure must revoke old selection evidence.
+        self._selection_proofs.clear()
         if (
             not self.enabled
             or self._started
@@ -395,19 +494,18 @@ class HyprlandRuntimeBackend:
         from .hyprland_discovery import HyprlandDiscoveryPolicy, HyprlandDiscoveryResolver
 
         connection = provider = None
-        # A stale selection proof must never survive a failed preparation or a
-        # changed inventory.  The controller keeps its own bounded handoff, but
-        # this backend must not export an earlier candidate while it is alive.
-        self._selection_proofs.clear()
-        completed = False
-        # Resolution failures retain their existing public error semantics.  It
-        # has not yet reached an authenticated compositor or native endpoint.
-        resolved = await HyprlandDiscoveryResolver(
-            HyprlandDiscoveryPolicy(
-                self.config.expected_uid, self.config.runtime_dir, self.config.compositor_trust
-            )
-        ).resolve()
+        failed = False
+        primary_cancelled = False
+        phase = "resolve"
         try:
+            # Known discovery refusals retain their distinct public exception
+            # semantics, but now share sanitized phase diagnostics.
+            resolved = await HyprlandDiscoveryResolver(
+                HyprlandDiscoveryPolicy(
+                    self.config.expected_uid, self.config.runtime_dir, self.config.compositor_trust
+                )
+            ).resolve()
+            phase = "pin_connections"
             ipc_path = (
                 resolved.runtime_dir
                 + "/hypr/"
@@ -421,28 +519,51 @@ class HyprlandRuntimeBackend:
                 expected_uid=self.config.expected_uid,
                 trust=self.config.compositor_trust,
             )
+            phase = "prepare_plugin"
             await self._prepare_plugin(identity, ipc_path=ipc_path)
+            phase = "open_provider"
             provider = await HyprlandScopeProvider.from_identity(
                 identity=identity, runtime_dir=resolved.runtime_dir
             )
+            phase = "inventory_targets"
             result = await provider.inventory_targets()
-            self._selection_proofs = {
+            phase = "export_selection_proofs"
+            proofs = {
                 candidate["id"]: provider.export_selection_proof(candidate["id"])
                 for candidate in result["candidates"]
             }
-            completed = True
-            return result
-        except ComputerError:
-            raise
-        except Exception:
-            raise ComputerError("target_inventory_unavailable") from None
+        except BaseException as error:
+            failed = True
+            primary_cancelled = isinstance(error, asyncio.CancelledError)
+            raise _inventory_failure(error, phase) from None
         finally:
+            cleanup_error = None
             if provider is not None:
-                await provider.close()
+                try:
+                    await provider.close()
+                except BaseException as error:
+                    cleanup_error = _inventory_failure(error, "close_provider")
             if connection is not None:
-                connection.close()
-            if not completed:
+                try:
+                    connection.close()
+                except BaseException as error:
+                    connection_error = _inventory_failure(error, "close_connection")
+                    if cleanup_error is None or (
+                        isinstance(connection_error, asyncio.CancelledError)
+                        and not isinstance(cleanup_error, asyncio.CancelledError)
+                    ):
+                        cleanup_error = connection_error
+            if failed or cleanup_error is not None:
                 self._selection_proofs.clear()
+            # Ordinary cleanup errors never mask the primary failure/cancellation.
+            # A newly delivered cancellation still aborts the operation. Even a
+            # cleanup-only failure invalidates this inventory transaction.
+            if cleanup_error is not None and (
+                not failed or (isinstance(cleanup_error, asyncio.CancelledError) and not primary_cancelled)
+            ):
+                raise cleanup_error from None
+        self._selection_proofs = proofs
+        return result
 
     async def _prepare_plugin(self, identity: HyprlandIdentity, *, ipc_path: str) -> None:
         """Make the approved plugin ready for one already pinned compositor.

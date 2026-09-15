@@ -73,7 +73,29 @@ def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False)
         "Observe once, inspect what happened, then CONTINUE the task with new action ids. "
         "Do not assume the previous input was sent or released without a receipt."
     )
-    if not terminal and reason == "hyprland_dispatch_interrupted_after_release":
+    if reason == "hyprland_inventory_seat_button_held":
+        instruction = (
+            "Inventory sent no input. Hyprland still records a pressed pointer button; "
+            "an empty plugin ledger does not clear the compositor's aggregate ledger. "
+            "Have the desktop owner release held buttons. If an old interrupted action "
+            "left the button stuck, the owner can deliberately press and release that "
+            "button over a neutral area without dragging, then request fresh inventory. "
+            "This can deliver an outstanding release to the application. Do not synthesize "
+            "an unattributed release, erase the compositor ledger, or restart/reload just "
+            "to clear this state. Plugin reload alone does not clear it."
+        )
+    elif reason in {
+        "hyprland_inventory_scope_armed", "hyprland_inventory_environment_unavailable",
+        "hyprland_inventory_device_input_held_or_unavailable", "hyprland_lock_or_input_held",
+    }:
+        instruction = (
+            "Inventory sent no input. Check the reported native preflight blocker: "
+            "active input scope, desktop lock/input constraint, or held/unavailable device "
+            "state. Let the desktop owner finish input or unlock normally, then request "
+            "fresh inventory. Do not infer a quarantined session or require a compositor "
+            "restart from this inventory refusal. Do not force-release another device."
+        )
+    elif not terminal and reason == "hyprland_dispatch_interrupted_after_release":
         next_action = "observe_fresh"
         instruction = (
             "When owned input release is confirmed, dispatch may still be interrupted and the UI "
