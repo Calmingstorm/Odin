@@ -15,7 +15,7 @@ def test_device_hold_predicate_ignores_stale_seat_output_not_live_inputs(tmp_pat
     source = (ROOT / "assets/hyprland-input/scope-plugin.cpp").read_text()
     helper = "    bool inputHeld() const {" + source.split(
         "    bool inputHeld() const {", 1
-    )[1].split("    bool provenance(", 1)[0]
+    )[1].split("    bool pendingIntent(", 1)[0]
     harness = r'''
 #include <cassert>
 #include <cstdint>

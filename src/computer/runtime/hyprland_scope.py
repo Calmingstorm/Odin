@@ -68,6 +68,7 @@ _NATIVE_REFUSALS = frozenset({
     "application-group-target-focus-unconfirmed",
     "inventory-environment-unavailable", "inventory-scope-armed",
     "inventory-seat-button-held", "inventory-device-input-held-or-unavailable",
+    "inventory-owned-recovery-pending", "owned-recovery-pending",
 })
 
 
@@ -969,7 +970,11 @@ class HyprlandScopeProvider:
             }
 
     async def inventory_targets(self):
-        """Read native candidates only. This never captures or creates input."""
+        """Read candidates after native attributed-release recovery, if needed.
+
+        No new presses or capture are authorized. Native recovery may release
+        exactly journaled outstanding inputs after checking device state.
+        """
         async with self._lock:
             row = await self._request({"op": "inventory_targets"})
             if (

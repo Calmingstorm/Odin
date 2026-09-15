@@ -26,21 +26,30 @@ def release_native(tmp_path_factory):
 #include <stdexcept>
 #include <algorithm>
 #include "scope-provenance.hpp"
+#ifndef KEY_MAX
 constexpr uint32_t KEY_MAX=767;
+#endif
 constexpr uint32_t WL_KEYBOARD_KEY_STATE_RELEASED=0, WL_KEYBOARD_KEY_STATE_PRESSED=1,
                   WL_POINTER_BUTTON_STATE_RELEASED=0, WL_POINTER_BUTTON_STATE_PRESSED=1;
 template<class T> using SP=std::shared_ptr<T>;
 struct IKeyboard {
+ bool m_enabled=true;
  struct SKeyEvent { uint32_t timeMs,keycode,state; };
  struct SModifiersEvent {};
  struct { uint32_t depressed=0,latched=0,locked=0,group=0; } m_modifiersState;
  std::set<uint32_t> pressed;
  bool getPressed(uint32_t code) { return pressed.contains(code); }
+ void updatePressed(uint32_t code,bool state){
+  if(state)pressed.insert(code);else pressed.erase(code);
+ }
  void updateModifiers(uint32_t a,uint32_t b,uint32_t c,uint32_t d){m_modifiersState={a,b,c,d};}
 };
 struct IPointer { struct SButtonEvent { uint32_t timeMs,button,state; }; };
+void witnessed(char,uint32_t);
 struct KeySignal { SP<IKeyboard> device; bool fail=false;
- void emit(IKeyboard::SKeyEvent e) { if(!fail) device->pressed.erase(e.keycode); }
+ void emit(IKeyboard::SKeyEvent e) {
+  if(!fail) {device->pressed.erase(e.keycode);witnessed('k',e.keycode);}
+ }
 };
 struct ModSignal { SP<IKeyboard> device;
  void emit(IKeyboard::SModifiersEvent) { device->m_modifiersState={}; }
@@ -72,7 +81,36 @@ struct State {
   Keyboard* keyboard=nullptr; Pointer* pointer=nullptr;
  } owner;
  Owner* activeOwner=&owner;
- bool armed=true,draining=false,ownedModifiers=false,failed=false;
+ bool armed=true,draining=false,ownedModifiers=false,failed=false,recovering=false;
+ bool recoveryEntry=false;
+ IKeyboard* recoveryKeyboard=nullptr;
+ struct ReleaseWitness {char kind;uint32_t code;bool accepted=false;};
+ ReleaseWitness* releaseWitness=nullptr;
+ struct WitnessFrame {
+  State& s;ReleaseWitness value;ReleaseWitness* prior;
+  WitnessFrame(State& state,char kind,uint32_t code):
+   s(state),value{kind,code},prior(s.releaseWitness){s.releaseWitness=&value;}
+  ~WitnessFrame(){s.releaseWitness=prior;}
+ };
+ struct Journal {
+  bool release(char,uint32_t){return true;}
+  bool invalidate(){return true;}
+  bool ready(){return true;}
+  bool poisoned(){return false;}
+  bool hasPending(){return false;}
+  std::set<uint32_t> heldModifiers(){return {};}
+ } recovery;
+ bool pendingIntent(char,uint32_t){return true;}
+ void foreignInput(){}
+ bool finishKeyRelease(uint32_t code,bool delivered){
+  if(delivered)keys.erase(code);
+  return delivered;
+ }
+ bool finishButtonRelease(uint32_t code,bool delivered){
+  if(delivered)buttons.erase(code);
+  return delivered;
+ }
+ bool finishModifierRelease(){ownedModifiers=false;return true;}
  struct PopupWatch { bool action=true; };
  struct { SP<PopupWatch> popupWatch=std::make_shared<PopupWatch>(); } bound;
  bool buttonOwnershipKnown=true,foreignButtonActivity=false;
@@ -91,12 +129,18 @@ struct State {
 ''' + revoke + r'''
 };
 State* live;
+void witnessed(char kind,uint32_t code){
+ if(live->releaseWitness&&live->releaseWitness->kind==kind&&live->releaseWitness->code==code)
+  live->releaseWitness->accepted=true;
+}
 unsigned forwardedKeys=0,forwardedMods=0;
-void originalKey(CInputManager*,const IKeyboard::SKeyEvent&,SP<IKeyboard>){++forwardedKeys;}
+void originalKey(CInputManager*,const IKeyboard::SKeyEvent& e,SP<IKeyboard>){
+ ++forwardedKeys;if(!e.state)witnessed('k',e.keycode);
+}
 void originalMod(CInputManager*,SP<IKeyboard>){++forwardedMods;}
 void original(CInputManager* m,IPointer::SButtonEvent e,SP<IPointer>){
  if(e.state) m->held.push_back(e.button);
- else std::erase(m->held,e.button);
+ else {std::erase(m->held,e.button);witnessed('b',e.button);}
 }
 ''' + key_mod + button + r'''
 void CInputManager::onMouseButton(IPointer::SButtonEvent e,SP<IPointer> p){onButton(this,e,p);}

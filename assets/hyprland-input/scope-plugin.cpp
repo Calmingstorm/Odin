@@ -282,12 +282,30 @@ using FocusFn = void (*)(CSeatManager*, SP<CWLSurfaceResource>);
 using PointerFocusFn = void (*)(CSeatManager*, SP<CWLSurfaceResource>, const Vector2D&);
 using NewPointerFn = void (*)(CInputManager*, SP<CVirtualPointerV1Resource>);
 using GeometryFn = void (*)(Desktop::View::CWindow*);
+using KeyBindFn = bool (*)(CKeybindManager*, std::any, SP<IKeyboard>);
+using MouseBindFn = bool (*)(CKeybindManager*, const IPointer::SButtonEvent&, SP<IPointer>);
+using PressedFn = bool (*)(IKeyboard*, uint32_t, bool);
 
 struct State {
     CFunctionHook *keyHook = nullptr, *modHook = nullptr, *buttonHook = nullptr, *axisHook = nullptr;
     CFunctionHook *motionHook = nullptr, *warpHook = nullptr, *focusHook = nullptr, *pointerFocusHook = nullptr;
     CFunctionHook* newPointerHook = nullptr;
     CFunctionHook* geometryHook = nullptr;
+    CFunctionHook *keyBindHook = nullptr, *mouseBindHook = nullptr;
+    // Source-pinned device transition, not access to a private aggregate list.
+    // The same method precedes onKeyboardKey in the normal virtual source path.
+    PressedFn updateDevicePressed = nullptr;
+    odin_scope::RecoveryJournal recovery;
+    bool recovering = false;
+    IKeyboard* recoveryKeyboard = nullptr;
+    bool recoveryEntry = false;
+    struct ReleaseWitness { char kind; uint32_t code; bool accepted = false; };
+    ReleaseWitness* releaseWitness = nullptr;
+    struct WitnessFrame {
+        State& state; ReleaseWitness value; ReleaseWitness* previous;
+        WitnessFrame(State& s, char kind, uint32_t code) : state(s), value{kind, code}, previous(s.releaseWitness) { s.releaseWitness = &value; }
+        ~WitnessFrame() { state.releaseWitness = previous; }
+    };
     CHyprSignalListener newKeyboard, newPointer, newLock;
     std::vector<CHyprSignalListener> epochListeners;
     std::vector<CHyprSignalListener> targetListeners;
@@ -654,6 +672,30 @@ struct State {
         }
         return false;
     }
+    bool pendingIntent(char kind, uint32_t code) {
+        if (!recovery.ready() || recovery.poisoned() || !keyboard ||
+            !recovery.bindSource(keyboard->pid, processStartTicks(keyboard->pid))) return false;
+        const auto result = recovery.preparePress(kind, code);
+        return result == odin_scope::RecoveryJournal::PressResult::Fresh ||
+            (kind == 'm' && result == odin_scope::RecoveryJournal::PressResult::AlreadyPending);
+    }
+    void foreignInput() {
+        if (recovery.ready() && recovery.hasPending()) recovery.invalidate();
+    }
+    bool finishKeyRelease(uint32_t code, bool delivered) {
+        if (!delivered || !recovery.release('k', code)) return false;
+        keys.erase(code); return true;
+    }
+    bool finishButtonRelease(uint32_t code, bool delivered) {
+        if (!delivered || !recovery.release('b', code)) return false;
+        buttons.erase(code); return true;
+    }
+    bool finishModifierRelease() {
+        for (const auto field : recovery.heldModifiers())
+            if (!recovery.release('m', field)) return false;
+        ownedModifiers = false; return true;
+    }
+    bool recoverPending();
     bool provenance(PHLWINDOW w, std::vector<odin_scope::NativeAncestor>& chain) const {
         chain.clear();
         if (!w || w->m_isX11 || w->m_xdgSurface.expired() || w->m_xdgSurface->m_toplevel.expired()) return false;
@@ -995,13 +1037,13 @@ struct State {
         for (const auto key : pendingKeys) {
             try {
                 if (!keyboard) throw std::runtime_error("missing keyboard");
+                WitnessFrame witness(*this, 'k', key);
                 keyboard->resource->m_events.key.emit(IKeyboard::SKeyEvent{.timeMs = ms(), .keycode = key, .state = WL_KEYBOARD_KEY_STATE_RELEASED});
-                if (keyboard->device->getPressed(key)) releaseFailed = true;
-                else keys.erase(key);
+                if (keyboard->device->getPressed(key) || !finishKeyRelease(key, witness.value.accepted)) releaseFailed = true;
             } catch (...) { releaseFailed = true; }
         }
         if (ownedModifiers && keyboard) {
-            try { keyboard->resource->m_events.modifiers.emit(IKeyboard::SModifiersEvent{}); ownedModifiers = false; }
+            try { keyboard->resource->m_events.modifiers.emit(IKeyboard::SModifiersEvent{}); if (!keyboard->device->m_enabled || !finishModifierRelease()) releaseFailed = true; }
             catch (...) { releaseFailed = true; }
         }
         const auto pendingButtons = buttons;
@@ -1010,8 +1052,9 @@ struct State {
                 if (!pointer) throw std::runtime_error("missing pointer");
                 if (activeOwner && (!buttonOwnershipKnown || foreignButtonActivity))
                     throw std::runtime_error("button ownership changed during drain");
+                WitnessFrame witness(*this, 'b', button);
                 g_pInputManager->onMouseButton(IPointer::SButtonEvent{.timeMs = ms(), .button = button, .state = WL_POINTER_BUTTON_STATE_RELEASED}, pointer->device);
-                buttons.erase(button);
+                if (!finishButtonRelease(button, witness.value.accepted)) releaseFailed = true;
             } catch (...) { releaseFailed = true; }
         }
         failed = releaseFailed || !keys.empty() || !buttons.empty() || ownedModifiers;
@@ -1381,6 +1424,7 @@ struct State {
         return c.epoch == revision && sameFocusCandidateState(c);
     }
     J inventoryTargets() {
+        if (!recoverPending()) return status(false, "inventory-owned-recovery-pending");
         // Read-only pre-grant inventory must report the actual blocker. In
         // particular, Hyprland's aggregate button list outlives a plugin reload;
         // an empty NEW owner ledger cannot prove that old entry safe to erase.
@@ -1410,6 +1454,7 @@ struct State {
         put(j.get(), "topology_digest", sha256Hex("odin-hyprland-inventory-v1\\0" + std::to_string(revision) + "\\0" + std::to_string(focusCandidates.size()))); json_object_object_add(j.get(), "candidates", result); return j;
     }
     J focusCandidate(json_object* j) {
+        if (!recoverPending()) return status(false, "owned-recovery-pending");
         json_object* epoch = nullptr;
         if (!environment() || armed || inputHeld()) return status(false, "lock-or-input-held");
         if (!json_object_object_get_ex(j, "topology_epoch", &epoch) || json_object_get_type(epoch) != json_type_int || uint64_t(json_object_get_int64(epoch)) != revision) return status(false, "stale-topology-epoch");
@@ -1728,6 +1773,7 @@ struct State {
         // Derived solely from this process and boot identity.  Start ticks fence
         // PID reuse; boot_id is returned for the caller's existing identity pin.
         instanceID = "i1-" + instanceToken(compositorBootID, compositorStartTicks);
+        if (!recovery.open(runtime, instanceID)) throw std::runtime_error("durable input journal unavailable");
         const std::string instancePath = std::string(runtime) + "/odin-hyprland-scope-" + instanceID + ".sock";
         const std::string legacyPath = std::string(runtime) + "/odin-hyprland-scope.sock";
         instanceListener = bindListener(instancePath, instanceListenerSource);
@@ -1754,13 +1800,125 @@ struct State {
     }
 };
 
+bool State::recoverPending() {
+    // Evidence is intent/normal native delivery, not a receiver ACK. evdev is
+    // read-only and necessarily a snapshot, not an exclusion lock. While this
+    // plugin lives, foreign hooks poison overlapping attribution durably. An
+    // unload observation gap cannot reconstruct past human activity; recovery
+    // still requires this compositor's exact intent and all currently visible
+    // physical/protocol devices released. A new compositor gets a distinct WAL.
+    if (!recovery.ready() || recovery.poisoned()) return false;
+    if (!recovery.hasPending()) return true;
+    if (armed || draining || recovering || !environment()) return false;
+    // Requested admission only, never plugin startup or a background timer.
+    SP<IKeyboard> source;
+    for (const auto& device : g_pInputManager->m_keyboards) {
+        if (!device) return false;
+        if (device->isVirtual() && device->getClient()) {
+            pid_t pid = 0; uid_t uid = 0; gid_t gid = 0;
+            wl_client_get_credentials(device->getClient(), &pid, &uid, &gid);
+            if (uid == getuid() && pid == recovery.sourcePID() &&
+                processStartTicks(pid) == recovery.sourceStartTicks()) {
+                if (source) return false;
+                source = device;
+            }
+        }
+    }
+    // Protocol holds are invisible to evdev; preserve all foreign device state.
+    for (const auto& device : g_pInputManager->m_keyboards) {
+        if (device == source) continue;
+        for (uint32_t code = 0; code <= KEY_MAX; ++code)
+            if (device->getPressed(code)) return false;
+        const auto& mods = device->m_modifiersState;
+        if (mods.depressed || mods.latched || mods.locked || mods.group) return false;
+    }
+    auto dispatchKeyboard = source ? source : g_pSeatManager->m_keyboard.lock();
+    if ((!recovery.heldKeys().empty() || !recovery.heldModifiers().empty()) &&
+        (!dispatchKeyboard || !dispatchKeyboard->m_enabled || !dispatchKeyboard->m_allowed ||
+         g_pInputManager->shouldIgnoreVirtualKeyboard(dispatchKeyboard))) return false;
+    recovering = true; draining = true;
+    recoveryKeyboard = dispatchKeyboard.get();
+    bool ok = true;
+    try {
+        for (const auto code : recovery.heldKeys()) {
+            if (!environment() || recovery.poisoned() || !odin_scope::physicalInputsReleased()) { ok = false; break; }
+            if (source) {
+                if (!updateDevicePressed) { ok = false; break; }
+                updateDevicePressed(source.get(), code, false);
+            }
+            WitnessFrame witness(*this, 'k', code);
+            recoveryEntry = true;
+            g_pInputManager->onKeyboardKey(IKeyboard::SKeyEvent{.timeMs = ms(), .keycode = code, .state = WL_KEYBOARD_KEY_STATE_RELEASED}, dispatchKeyboard);
+            if (!finishKeyRelease(code, witness.value.accepted)) { ok = false; break; }
+        }
+        if (ok && !recovery.heldModifiers().empty()) {
+            if (!environment() || recovery.poisoned() || !odin_scope::physicalInputsReleased()) ok = false;
+            else {
+                recoveryEntry = true;
+                if (source) source->updateModifiers(0, 0, 0, 0);
+                recoveryEntry = true;
+                g_pInputManager->onKeyboardMod(dispatchKeyboard);
+                const auto& mods = dispatchKeyboard->m_modifiersState;
+                ok = !(mods.depressed || mods.latched || mods.locked || mods.group) && finishModifierRelease();
+            }
+        }
+        if (ok) for (const auto code : recovery.heldButtons()) {
+            if (!environment() || recovery.poisoned() || !odin_scope::physicalInputsReleased()) { ok = false; break; }
+            // An intent committed before a crash preceding DOWN can be a ghost.
+            // With no aggregate button there is no native hold left to release.
+            if (!g_pInputManager->hasHeldButtons()) {
+                if (!finishButtonRelease(code, true)) { ok = false; break; }
+                continue;
+            }
+            WitnessFrame witness(*this, 'b', code);
+            recoveryEntry = true;
+            g_pInputManager->onMouseButton(IPointer::SButtonEvent{.timeMs = ms(), .button = code, .state = WL_POINTER_BUTTON_STATE_RELEASED}, nullptr);
+            if (!finishButtonRelease(code, witness.value.accepted)) { ok = false; break; }
+        }
+    } catch (...) { ok = false; }
+    draining = false; recovering = false; recoveryEntry = false; recoveryKeyboard = nullptr;
+    if (!ok || recovery.hasPending() || !keys.empty() || !buttons.empty() || ownedModifiers) return false;
+    failed = false;
+    if (activeOwner) {
+        activeOwner->empty = true; activeOwner->ack = true; activeOwner->unknown = false;
+        activeOwner->inputFenced = true; activeOwner->revoked = true;
+    }
+    return true;
+}
+
+// Witness only, preserving normal release keybind execution and its return.
+bool onKeyBind(CKeybindManager* manager, std::any raw, SP<IKeyboard> device) {
+    auto& s = *live;
+    const auto* event = std::any_cast<IKeyboard::SKeyEvent>(&raw);
+    const bool match = event && s.releaseWitness && s.releaseWitness->kind == 'k' &&
+        s.releaseWitness->code == event->keycode && event->state == WL_KEYBOARD_KEY_STATE_RELEASED;
+    const bool result = reinterpret_cast<KeyBindFn>(s.keyBindHook->m_original)(manager, raw, device);
+    if (match) s.releaseWitness->accepted = true;
+    return result;
+}
+bool onMouseBind(CKeybindManager* manager, const IPointer::SButtonEvent& event, SP<IPointer> device) {
+    auto& s = *live;
+    const bool match = s.releaseWitness && s.releaseWitness->kind == 'b' &&
+        s.releaseWitness->code == event.button && event.state == WL_POINTER_BUTTON_STATE_RELEASED;
+    const bool result = reinterpret_cast<MouseBindFn>(s.mouseBindHook->m_original)(manager, event, device);
+    if (match) s.releaseWitness->accepted = true;
+    return result;
+}
 void onKey(CInputManager* manager, const IKeyboard::SKeyEvent& event, SP<IKeyboard> device) {
     auto& s = *live; auto original = reinterpret_cast<KeyFn>(s.keyHook->m_original);
+    const bool recoveryEvent = s.recovering && s.recoveryEntry && device.get() == s.recoveryKeyboard &&
+        s.releaseWitness && s.releaseWitness->kind == 'k' && s.releaseWitness->code == event.keycode && event.state == WL_KEYBOARD_KEY_STATE_RELEASED;
+    if (recoveryEvent) s.recoveryEntry = false;
+    else if (!s.keyboard || device != s.keyboard->device) s.foreignInput();
     if (s.draining) { original(manager, event, device); return; }
     auto* k = s.find(device);
     if (!k) { original(manager, event, device); return; }
     if (k == s.keyboard && s.activeOwner && (s.activeOwner->unknown || s.activeOwner->inputFenced)) { s.reject("owner-release-unknown-or-fenced"); return; }
-    if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.keys.erase(event.keycode)) { original(manager, event, device); return; }
+    if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.keys.contains(event.keycode)) {
+        State::WitnessFrame witness(s, 'k', event.keycode);
+        original(manager, event, device);
+        s.finishKeyRelease(event.keycode, witness.value.accepted); return;
+    }
     if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.cleanInactiveOwner()) return;
     if (k != s.keyboard || !s.allow()) {
         if (k != s.keyboard) s.reject("key-device-mismatch");
@@ -1770,29 +1928,54 @@ void onKey(CInputManager* manager, const IKeyboard::SKeyEvent& event, SP<IKeyboa
             k->resource->m_events.key.emit(IKeyboard::SKeyEvent{.timeMs = ms(), .keycode = event.keycode, .state = WL_KEYBOARD_KEY_STATE_RELEASED});
         return;
     }
-    if (event.state == WL_KEYBOARD_KEY_STATE_PRESSED) s.keys.insert(event.keycode);
+    if (event.state == WL_KEYBOARD_KEY_STATE_PRESSED) {
+        if (!s.pendingIntent('k', event.keycode)) {
+            s.reject("durable-key-intent-refused");
+            if (!s.keys.contains(event.keycode))
+                k->resource->m_events.key.emit(IKeyboard::SKeyEvent{.timeMs = ms(), .keycode = event.keycode, .state = WL_KEYBOARD_KEY_STATE_RELEASED});
+            return;
+        }
+        s.keys.insert(event.keycode);
+    }
     else return;
     original(manager, event, device);
 }
 void onMod(CInputManager* manager, SP<IKeyboard> device) {
     auto& s = *live; auto original = reinterpret_cast<ModFn>(s.modHook->m_original);
+    const bool recoveryEvent = s.recovering && s.recoveryEntry && device.get() == s.recoveryKeyboard;
+    if (recoveryEvent) s.recoveryEntry = false;
+    else if (!s.keyboard || device != s.keyboard->device) s.foreignInput();
     if (s.draining) { original(manager, device); return; }
     auto* k = s.find(device); if (!k) { original(manager, device); return; }
     if (k == s.keyboard && s.activeOwner && (s.activeOwner->unknown || s.activeOwner->inputFenced)) { s.reject("owner-release-unknown-or-fenced"); return; }
     const auto& m = device->m_modifiersState;
     const bool zero = !(m.depressed || m.latched || m.locked || m.group);
-    if (k == s.keyboard && zero && s.ownedModifiers) { s.ownedModifiers = false; original(manager, device); return; }
+    if (k == s.keyboard && zero && s.ownedModifiers) {
+        original(manager, device);
+        if (device->m_enabled) s.finishModifierRelease();
+        return;
+    }
     if (k == s.keyboard && zero && s.cleanInactiveOwner()) return;
     if (k != s.keyboard || !s.allow()) { if (k != s.keyboard) s.reject("modifier-device-mismatch"); device->updateModifiers(0, 0, 0, 0); return; }
+    const std::array<uint32_t, 4> fields{m.depressed, m.latched, m.locked, m.group};
+    for (uint32_t field = 0; field < fields.size(); ++field)
+        if (fields[field] && !s.pendingIntent('m', field)) {
+            s.reject("durable-modifier-intent-refused"); device->updateModifiers(0, 0, 0, 0); return;
+        }
     s.ownedModifiers = !zero; original(manager, device);
+    if (zero && device->m_enabled) s.finishModifierRelease();
 }
 void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer> device) {
     auto& s = *live; auto original = reinterpret_cast<ButtonFn>(s.buttonHook->m_original);
+    const bool recoveryEvent = s.recovering && s.recoveryEntry && !device && s.releaseWitness &&
+        s.releaseWitness->kind == 'b' && s.releaseWitness->code == event.button && event.state == WL_POINTER_BUTTON_STATE_RELEASED;
+    if (recoveryEvent) s.recoveryEntry = false;
+    else if (!s.pointer || device != s.pointer->device) s.foreignInput();
     // Observe before passthrough (including physical devices and drain-time
     // reentrancy). Never swallow a human event or infer ownership from a
     // same-code aggregate release. One foreign event poisons this lease's
     // exclusive-button proof until another clean arm, not until an arbitrary up.
-    if (s.buttonOwnershipKnown && (!s.pointer || device != s.pointer->device))
+    if (!recoveryEvent && s.buttonOwnershipKnown && (!s.pointer || device != s.pointer->device))
         s.foreignButtonActivity = true;
     if (s.draining) { original(manager, event, device); return; }
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
@@ -1803,13 +1986,16 @@ void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer>
         // revoke's synthetic up. Keep the ledger intact for explicit recovery.
         s.reject("button-release-ownership-unknown"); s.revoke("button-release-ownership-unknown"); return;
     }
-    if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.erase(event.button)) {
-        State::OwnedDispatch trace(s, false); original(manager, event, device); return;
+    if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.contains(event.button)) {
+        State::WitnessFrame witness(s, 'b', event.button);
+        State::OwnedDispatch trace(s, false); original(manager, event, device);
+        s.finishButtonRelease(event.button, witness.value.accepted); return;
     }
     if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.cleanInactiveOwner()) return;
     if (p != s.pointer || !s.allow()) { if (p != s.pointer) s.reject("button-device-mismatch"); return; }
     if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || !s.destinationAt(g_pPointerManager->position()) ||
         s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { s.reject("button-destination-refused"); s.revoke("button-destination-refused"); return; }
+    if (!s.pendingIntent('b', event.button)) { s.reject("durable-button-intent-refused"); return; }
     s.buttons.insert(event.button);
     State::OwnedDispatch trace(s, false); original(manager, event, device);
 }
@@ -1972,11 +2158,19 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE pluginHandle) {
         return SDispatchResult{.success = !owner->failed, .error = owner->failed ? "owned release failed" : "owned input released"};
     })) throw std::runtime_error("Odin state owner registration failed");
     auto* s = live;
+    for (const auto& match : HyprlandAPI::findFunctionsByName(handle, "updatePressed")) {
+        if (match.demangled.find("IKeyboard::updatePressed(") == std::string::npos) continue;
+        if (s->updateDevicePressed) throw std::runtime_error("ambiguous pinned device transition");
+        s->updateDevicePressed = reinterpret_cast<PressedFn>(match.address);
+    }
+    if (!s->updateDevicePressed) throw std::runtime_error("missing pinned device transition");
     s->protocolLogger = wl_display_add_protocol_logger(g_pCompositor->m_wlDisplay, State::protocolEvent, s);
     if (!s->protocolLogger) throw std::runtime_error("Odin private protocol logger registration failed");
     s->keyHook = hook("onKeyboardKey", "CInputManager::onKeyboardKey(", reinterpret_cast<void*>(onKey));
     s->modHook = hook("onKeyboardMod", "CInputManager::onKeyboardMod(", reinterpret_cast<void*>(onMod));
     s->buttonHook = hook("onMouseButton", "CInputManager::onMouseButton(", reinterpret_cast<void*>(onButton));
+    s->keyBindHook = hook("onKeyEvent", "CKeybindManager::onKeyEvent(", reinterpret_cast<void*>(onKeyBind));
+    s->mouseBindHook = hook("onMouseEvent", "CKeybindManager::onMouseEvent(", reinterpret_cast<void*>(onMouseBind));
     s->axisHook = hook("onMouseWheel", "CInputManager::onMouseWheel(", reinterpret_cast<void*>(onAxis));
     s->motionHook = hook("onMouseMoved", "CInputManager::onMouseMoved(", reinterpret_cast<void*>(onMotion));
     s->warpHook = hook("onMouseWarp", "CInputManager::onMouseWarp(", reinterpret_cast<void*>(onWarp));
@@ -2019,4 +2213,9 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE pluginHandle) {
     s->startSocket();
     return {"odin-hyprland-scope", "Authenticated compositor-loop scope; best-effort owned release", "Odin", "1.0.0"};
 }
-APICALL EXPORT void PLUGIN_EXIT() { /* dispatcher owner handles both teardown paths */ }
+APICALL EXPORT void PLUGIN_EXIT() {
+    // The normal unload callback precedes removal of function hooks. Complete
+    // owned UPs while acceptance witnesses still exist. Automatic ejection can
+    // skip this callback; its destructor retains uncertain durable evidence.
+    if (live) live->revoke("plugin-exit");
+}

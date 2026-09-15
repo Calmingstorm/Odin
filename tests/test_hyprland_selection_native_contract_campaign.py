@@ -120,6 +120,9 @@ struct State {
     // PRODUCTION_WINDOW_LIFETIMES
     bool environment() const { return environmentOK; }
     bool inputHeld() const { return held; }
+    // Selection tests isolate identity/freshness after recovery admission.
+    // Actual recovery and refusals execute in precise_recovery_native tests.
+    bool recoverPending() { return true; }
     // Inventory now distinguishes core aggregate buttons from other input.
     bool hasHeldButtons() const { return held; }
     const State* g_pInputManager = this;

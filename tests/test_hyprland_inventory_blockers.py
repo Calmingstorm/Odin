@@ -14,6 +14,7 @@ from tests.test_computer_hyprland_scope_r32 import server
     "inventory-environment-unavailable", "inventory-scope-armed",
     "inventory-seat-button-held", "inventory-device-input-held-or-unavailable",
     "lock-or-input-held",
+    "inventory-owned-recovery-pending", "owned-recovery-pending",
 ])
 async def test_native_inventory_refusal_reaches_caller(tmp_path, reason):
     def reply(request):
@@ -33,15 +34,16 @@ async def test_native_inventory_refusal_reaches_caller(tmp_path, reason):
 def test_seat_button_guidance_does_not_prescribe_reload_or_unowned_release():
     result = guidance("hyprland_inventory_seat_button_held")
     assert result["terminal"] and not result["replay_permitted"]
-    assert "owner can deliberately press and release" in result["instruction"]
+    assert "durably attributed outstanding releases" in result["instruction"]
     assert "Plugin reload alone does not clear it" in result["instruction"]
-    assert "outstanding release" in result["instruction"]
+    assert "never injects a new press or replays an action" in result["instruction"]
+    assert "unrecorded hold cannot be attributed retroactively" in result["instruction"]
     assert "RELEASE-ALL" not in result["instruction"]
 
 
 def test_compiled_inventory_guards_preserve_all_refusals_without_mutation(tmp_path):
-    # Compile the actual production guard body with read-only manager doubles.
-    # Replacing a guard with a mutation cannot compile against these doubles.
+    # With no pending owned intent, the production guards stay read-only.
+    # Actual recovery mutation is covered by precise_recovery_native separately.
     root = Path(__file__).resolve().parents[1]
     source = (root / "assets/hyprland-input/scope-plugin.cpp").read_text()
     body = source.split("    J inventoryTargets() {", 1)[1]
@@ -58,6 +60,7 @@ struct Inventory {
     const Manager* const g_pInputManager;
     bool environment() const { return ready; }
     bool inputHeld() const { return held; }
+    bool recoverPending() const { return true; } // Empty, healthy owned journal.
     std::string status(bool, const char* error) const { return error; }
     std::string inventoryTargets() const {
 ''' + guards + r'''

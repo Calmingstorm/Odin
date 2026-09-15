@@ -73,25 +73,35 @@ def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False)
         "Observe once, inspect what happened, then CONTINUE the task with new action ids. "
         "Do not assume the previous input was sent or released without a receipt."
     )
-    if reason == "hyprland_inventory_seat_button_held":
+    if reason in {"hyprland_inventory_owned_recovery_pending", "hyprland_owned_recovery_pending"}:
+        terminal = True
+        next_action = "inspect_release_evidence"
         instruction = (
-            "Inventory sent no input. Hyprland still records a pressed pointer button; "
-            "an empty plugin ledger does not clear the compositor's aggregate ledger. "
-            "Have the desktop owner release held buttons. If an old interrupted action "
-            "left the button stuck, the owner can deliberately press and release that "
-            "button over a neutral area without dragging, then request fresh inventory. "
-            "This can deliver an outstanding release to the application. Do not synthesize "
-            "an unattributed release, erase the compositor ledger, or restart/reload just "
-            "to clear this state. Plugin reload alone does not clear it."
+            "Attributed native recovery did not establish clean release. No new press "
+            "or action replay was authorized. Pending injection evidence is retained. "
+            "Inspect the native journal and physical-device availability/held state; "
+            "when temporary input is clear, request fresh inventory to retry only the "
+            "outstanding releases. Do not erase evidence or manufacture ownership."
+        )
+    elif reason == "hyprland_inventory_seat_button_held":
+        instruction = (
+            "Hyprland still records a pressed pointer button after native recovery "
+            "preflight. Recovery may send only durably attributed outstanding releases "
+            "when device state is clear; it never injects a new press or replays an action. "
+            "An unrecorded hold cannot be attributed retroactively. Do not synthesize "
+            "an unattributed release or erase the compositor ledger. Check the native "
+            "release evidence and held/device-access state before further input. "
+            "Plugin reload alone does not clear it."
         )
     elif reason in {
         "hyprland_inventory_scope_armed", "hyprland_inventory_environment_unavailable",
         "hyprland_inventory_device_input_held_or_unavailable", "hyprland_lock_or_input_held",
     }:
         instruction = (
-            "Inventory sent no input. Check the reported native preflight blocker: "
+            "No new action press was authorized. Check the native preflight blocker: "
             "active input scope, desktop lock/input constraint, or held/unavailable device "
-            "state. Let the desktop owner finish input or unlock normally, then request "
+            "state. Recovery releases only durably attributed outstanding inputs when "
+            "device state is clear. Let human input finish or unlock normally, then request "
             "fresh inventory. Do not infer a quarantined session or require a compositor "
             "restart from this inventory refusal. Do not force-release another device."
         )
