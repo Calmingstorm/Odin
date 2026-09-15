@@ -1,9 +1,10 @@
 # Hyprland recovery qualification plan
 
-Status: **design and execution plan only**. The recovery implementation is not
-runtime-qualified. `runtime_qualified` remains `false` until every applicable
-gate below has recorded passing evidence in an authorized Hyprland test
-environment meeting the venue prerequisites below. Offline tests, successful
+Status: **execution plan with capability-scoped evidence requirements**. The
+recovery implementation is not blanket runtime-qualified. Record independently
+reviewable verdicts per capability and exact tuple; production recovery receipts
+retain `runtime_qualified=false` and `receiver_release_verified=false`. Their
+storage contract rejects either field becoming true. Offline tests, successful
 compilation, native ACKs, and manifest booleans cannot substitute for compositor
 and receiver evidence.
 
@@ -222,7 +223,9 @@ Every pass requires:
 - no uncertain action or sequence tail is replayed, even under a new ID;
 - late old-generation callbacks cannot hand off, focus, capture or input;
 - current owner/host/task/consent authority is rechecked;
-- fresh explicit target selection and delivered pixels precede new input;
+- replacement/successor targets require fresh explicit selection and delivered
+  pixels before input; automatic handoff of the exact surviving native window
+  requires a fresh authenticated binding and delivered pixels, not title matching;
 - ACK, receiver evidence, retirement and action outcome remain separate; and
 - pause/stop wins at every wait and never self-resumes.
 
@@ -310,6 +313,15 @@ grounded in a new observation.
 **Fail:** current focus/same-title adoption; old grant/observation reuse; old
 action/tail replay; recovery without reconciled cleanup; loss of task hints; or
 input before a fresh observation.
+
+**Controller admission distinction:** the current controller admits automatic
+replanning only outside the `unknown_release` phase, with no pending input and a
+durable output grant. A backend `ready_for_replan` after a held-action interruption
+does not establish controller activation: that rejected preparation remains
+operator-required. Record backend and controller outcomes separately. Use an idle,
+same-incarnation transport interruption for the automatic positive case; retain
+the held-action case as a release/fencing test rather than silently changing its
+expected outcome to automatic continuation.
 
 ### Expected refusal and explicit successor: compositor death or dead owner ledger
 
@@ -512,6 +524,13 @@ resources cannot survive. Retire historical authority without claiming action or
 receiver success. Do not resurrect the old session/action. Any continuation needs
 a new recovery session, explicit target and fresh pixels.
 
+Changed-boot obsolescence is not the cross-compositor native resource-absence
+certificate. The current provider has no production absence producer/verifier,
+and backend recovery supplies no successor to that coordinator. A guest can test
+the required refusal and fresh startup, but cannot qualify this missing positive
+capability by changing a flag. This is missing implementation, not missing GPU
+hardware. Same-incarnation exact-client retirement is a separate supported path.
+
 **Original-compositor exit:** create unknown-release quarantine, retain the
 original compositor pidfd, stop that disposable compositor, and confirm both its
 pidfd exit and local guardian/scope closure. Expect `original_compositor_exited=true`
@@ -601,7 +620,8 @@ environment, evidence path, exit status, verdict, reviewer and limitations. Fail
 or missing scenarios remain failed or missing. Do not edit manifest/configuration
 during a run to record a desired outcome.
 
-`runtime_qualified` may move only for the exact tuple after the supported positive
+The aggregate recovery qualification decision may pass only for the exact tuple
+after the supported positive
 procedures pass, including lost-ACK query/persistence, new-owner restart,
 active-owner denial, stop during rehydration, and repeated compositor-death task
 lineage through external cleanup/attestation and a fresh successor; compositor-
@@ -609,4 +629,12 @@ death/dead-ledger cases must record their required fail-closed refusal. All othe
 refusal/race/cancellation/reboot boundaries must fail closed; full tuple,
 orchestration and managed activation must be separately demonstrated; X11 and
 portal gates must pass on the same SHA; and an independent reviewer must reproduce
-every evidence-to-verdict decision. Until then the only honest value is false.
+every evidence-to-verdict decision. Until then the aggregate decision is false.
+
+There is currently no implemented per-capability flag-promotion API. Capability
+verdicts belong in the reviewed evidence report, not invented manifest keys or
+runtime receipt edits. Build/load approval remains separate. Do not set
+`HyprlandRetirementCapability.runtime_qualified` while its native producer/verifier
+is absent, and do not change production receiver-verification fields based on a
+test receiver log. A passed expected-refusal case qualifies that boundary only,
+not the positive capability which was refused.

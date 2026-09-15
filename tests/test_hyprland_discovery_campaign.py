@@ -2,7 +2,7 @@
 import os
 import socket
 import tempfile
-from contextlib import ExitStack
+from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -240,8 +240,10 @@ def runtime_sockets():
         yield root, bind
 
 
+@pytest.mark.parametrize("stale_first", [True, False])
+@pytest.mark.parametrize("stale_kind", ["missing", "file", "symlink", "unsafe_socket", "unsafe_dir", "inaccessible"])
 def test_runtime_inventory_enumerates_real_unix_sockets_with_narrow_fake_proc(
-    tmp_path, runtime_sockets, monkeypatch
+    tmp_path, runtime_sockets, monkeypatch, stale_first, stale_kind
 ):
     """Keep runtime artifacts real; only the otherwise hard-coded /proc is remapped."""
     uid = os.getuid()
@@ -253,13 +255,37 @@ def test_runtime_inventory_enumerates_real_unix_sockets_with_narrow_fake_proc(
     hypr_socket_dir.mkdir(mode=0o700)
     hypr_socket_dir.chmod(0o700)
     bind("hypr/signature/.socket.sock")
+    stale_dir = root / "hypr" / "stale"
+    stale_dir.mkdir(mode=0o700)
+    stale_dir.chmod(0o700)
+    stale_socket = stale_dir / ".socket.sock"
+    if stale_kind == "file":
+        stale_socket.touch(mode=0o600)
+    elif stale_kind == "symlink":
+        stale_socket.symlink_to(hypr_socket_dir / ".socket.sock")
+    elif stale_kind in {"unsafe_socket", "unsafe_dir"}:
+        bind("hypr/stale/.socket.sock")
+        (stale_socket if stale_kind == "unsafe_socket" else stale_dir).chmod(0o777)
     proc = tmp_path / "proc"
     (proc / "42").mkdir(parents=True)
     real_scandir = discovery.os.scandir
     real_readlink = discovery.os.readlink
+    real_stat = discovery.os.stat
 
+    @contextmanager
     def scandir(path):
-        return real_scandir(proc if str(path) == "/proc" else path)
+        with real_scandir(proc if str(path) == "/proc" else path) as entries:
+            if str(path) == str(root / "hypr"):
+                # Real DirEntry objects and real missing sockets, with both
+                # orders guaranteed independently of filesystem enumeration.
+                yield iter(sorted(entries, key=lambda entry: entry.name == "stale", reverse=stale_first))
+            else:
+                yield entries
+
+    def checked_stat(path, *args, **kwargs):
+        if stale_kind == "inaccessible" and str(path) == str(stale_socket):
+            raise PermissionError("candidate cannot be inspected")
+        return real_stat(path, *args, **kwargs)
 
     def readlink(path):
         if str(path) == "/proc/42/exe":
@@ -269,12 +295,14 @@ def test_runtime_inventory_enumerates_real_unix_sockets_with_narrow_fake_proc(
     monkeypatch.setattr(discovery, "stable_runtime_root", lambda _uid: str(root))
     monkeypatch.setattr(discovery.os, "scandir", scandir)
     monkeypatch.setattr(discovery.os, "readlink", readlink)
+    monkeypatch.setattr(discovery.os, "stat", checked_stat)
     policy = HyprlandDiscoveryPolicy(
         uid, str(root), ExecutableTrust("/usr/bin/Hyprland", "a" * 64, "0.54.2", "b" * 40)
     )
-    assert runtime_inventory(policy, discovery.time.monotonic() + 1) == (
+    expected = () if stale_kind == "inaccessible" else (
         HyprlandCandidateHint(42, str(root), "wayland-9", "signature"),
     )
+    assert runtime_inventory(policy, discovery.time.monotonic() + 1) == expected
 
 
 def test_runtime_inventory_fails_closed_for_deadline_and_socket_permissions(runtime_sockets, monkeypatch):

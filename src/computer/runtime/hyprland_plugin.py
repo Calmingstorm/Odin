@@ -22,6 +22,12 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from .hyprland_identity import HyprlandIdentity, _unique_object, connect_peer, revalidate
+from .hyprland_scope import (
+    HyprlandScopeFailure,
+    HyprlandScopeProvider,
+    _instance_status,
+    instance_scope_socket,
+)
 
 _DIGEST = re.compile(r"[0-9a-f]{64}\Z")
 _COMMIT = re.compile(r"[0-9a-f]{40,64}\Z")
@@ -156,26 +162,77 @@ class HyprlandPluginIPC:
             connection.close()
 
     async def loaded_plugins(self) -> tuple[str, ...]:
+        """Join native registration with kernel mappings, never a name-as-path claim."""
         try:
-            value = json.loads(await self._request(b"j/plugins"), object_pairs_hook=_unique_object)
-            rows = value.get("plugins") if type(value) is dict else None
+            rows = json.loads(
+                await self._request(b"j/plugin list"), object_pairs_hook=_unique_object
+            )
             if type(rows) is not list or len(rows) > 128:
                 raise ValueError
-            result = []
+            scope_count = 0
+            handles = set()
             for row in rows:
-                path = row.get("path") if type(row) is dict else None
-                if type(path) is not str or not path.startswith("/") or len(path) > 4096:
+                if (type(row) is not dict
+                        or set(row) != {"name", "author", "handle", "version", "description"}
+                        or any(type(v) is not str or len(v) > 4096 or "\x00" in v
+                               or any(0xD800 <= ord(c) <= 0xDFFF for c in v)
+                               for v in row.values())
+                        or not re.fullmatch(r"[0-9a-f]{1,16}", row["handle"])
+                        or int(row["handle"], 16) == 0 or row["handle"] in handles):
                     raise ValueError
-                result.append(path)
-            return tuple(result)
+                handles.add(row["handle"])
+                scope_count += row["name"] == "odin-hyprland-scope"
+            # Hyprland 0.55.2 publishes dlopen handles, NOT paths. A handle is not
+            # a mapped address. Obtain paths independently from the pinned process.
+            await revalidate(self.identity, time.monotonic() + 0.5)
+            paths = self._mapped_scope_paths()
+            await revalidate(self.identity, time.monotonic() + 0.5)
+            if scope_count > 1 or bool(scope_count) != bool(paths) or len(paths) > 1:
+                raise ValueError
+            return paths
         except (ValueError, TypeError, UnicodeError, RecursionError):
             raise HyprlandPluginError("hyprland_plugin_reply_invalid") from None
 
+    def _mapped_scope_paths(self) -> tuple[str, ...]:
+        if os.geteuid() != 0:
+            raise HyprlandPluginError("hyprland_plugin_mapped_image_unavailable")
+        try:
+            proc = Path("/proc") / str(self.identity.process.pid)
+            with open(proc / "maps", "rb") as maps:
+                raw = maps.read(1024 * 1024 + 1)
+            if len(raw) > 1024 * 1024:
+                raise ValueError
+            paths = set()
+            for line in raw.split(b"\n"):
+                match = ProcMappedPluginVerifier._MAP.fullmatch(line)
+                if match is None:
+                    continue
+                path = os.fsdecode(match.group(1))
+                if not Path(path).name.startswith("odin-hyprland-scope"):
+                    continue
+                # proc escapes newlines ambiguously; never unescape or accept a
+                # deleted marker, even if a literal lookalike exists on disk.
+                if "\\" in path or path.endswith(" (deleted)"):
+                    raise ValueError
+                # Deleted/replaced images, aliases and ambiguous mappings fail
+                # closed. Readiness separately hashes the exact map_files image.
+                artifact = os.stat(path, follow_symlinks=False)
+                mapped = os.stat(proc / "map_files" / line.split(None, 1)[0].decode("ascii"))
+                if (not stat.S_ISREG(artifact.st_mode)
+                        or (artifact.st_dev, artifact.st_ino) != (mapped.st_dev, mapped.st_ino)):
+                    raise ValueError
+                paths.add(path)
+            return tuple(sorted(paths))
+        except (OSError, UnicodeError, ValueError):
+            raise HyprlandPluginError("hyprland_plugin_mapped_image_unverified") from None
+
     async def load_fixed_plugin(self, path: str) -> None:
-        if type(path) is not str or not path.startswith("/") or "\x00" in path or "\n" in path:
+        if (type(path) is not str or not path.startswith("/")
+                or not re.fullmatch(r"/[A-Za-z0-9_./-]+", path)
+                or any(part in {"", ".", ".."} for part in path.split("/")[1:])):
             raise HyprlandPluginError("hyprland_plugin_command_refused")
         # Hyprland's plugin command endpoint accepts this exact command grammar.
-        reply = await self._request(b"plugin load " + path.encode("ascii"))
+        reply = await self._request(b"/plugin load " + path.encode("ascii"))
         if len(reply) > 1024 or reply.strip() not in {b"ok", b"OK"}:
             raise HyprlandPluginError("hyprland_plugin_load_unconfirmed")
 
@@ -183,19 +240,34 @@ class HyprlandPluginIPC:
         """Read the companion's instance-scoped build identity, never a digest claim."""
         if type(path) is not str or not path.startswith("/") or "\x00" in path:
             raise HyprlandPluginError("hyprland_plugin_command_refused")
+        provider = None
         try:
-            value = json.loads(
-                await self._request(b"j/odin-plugin-status"), object_pairs_hook=_unique_object
+            command_path = Path(self.ipc_path)
+            if command_path.name != ".socket.sock" or command_path.parent.parent.name != "hypr":
+                raise ValueError
+            endpoint = instance_scope_socket(self.identity, str(command_path.parent.parent.parent))
+            await revalidate(self.identity, time.monotonic() + 0.5)
+            provider = HyprlandScopeProvider(
+                socket_path=endpoint, expected_uid=self.identity.process.uid,
+                expected_compositor_pid=self.identity.process.pid,
             )
-            if type(value) is not dict or set(value) != {"path", "companion_build_id"}:
+            value = await provider._request({"op": "status"})
+            _instance_status(value, self.identity)
+            # Native status binds incarnation and build, not an on-disk path.
+            # Reject type coercions and an unrelated syntactically valid instance.
+            if (value["instance_id"] != Path(endpoint).name.removeprefix(
+                    "odin-hyprland-scope-").removesuffix(".sock")
+                    or any(type(value.get(key)) is not int for key in (
+                        "version", "scope_protocol_version", "compositor_pid", "compositor_uid"))
+                    or type(value.get("compositor_start_ticks")) not in {int, str}):
                 raise ValueError
-            actual_path, build_id = value["path"], value["companion_build_id"]
-            if (actual_path != path or type(build_id) is not str
-                    or not _BUILD_ID.fullmatch(build_id)):
-                raise ValueError
-            return build_id
-        except (ValueError, TypeError, UnicodeError, RecursionError):
+            await revalidate(self.identity, time.monotonic() + 0.5)
+            return value["companion_build_id"]
+        except (ValueError, TypeError, UnicodeError, RecursionError, HyprlandScopeFailure):
             raise HyprlandPluginError("hyprland_plugin_instance_status_invalid") from None
+        finally:
+            if provider is not None:
+                await provider.close()
 
 
 @dataclass(frozen=True)
@@ -301,7 +373,8 @@ class PluginState:
 class ProcMappedPluginVerifier:
     """Root-only verifier for the exact file mapped by the pinned compositor."""
 
-    _MAP = re.compile(r"^[0-9a-f]+-[0-9a-f]+\s+\S+\s+\S+\s+\S+\s+\S+\s+(/.*)$")
+    # Pathnames in proc are filesystem bytes, not necessarily ASCII or UTF-8.
+    _MAP = re.compile(rb"^[0-9a-f]+-[0-9a-f]+\s+\S+\s+\S+\s+\S+\s+\S+\s+(/.*)$")
 
     def __init__(self, *, proc_root: str = "/proc", geteuid=os.geteuid) -> None:
         self.proc_root, self._geteuid = proc_root, geteuid
@@ -316,10 +389,16 @@ class ProcMappedPluginVerifier:
             if len(raw) > 1024 * 1024:
                 raise ValueError
             candidates: list[str] = []
-            for line in raw.decode("ascii").splitlines():
+            for line in raw.split(b"\n"):
                 match = self._MAP.fullmatch(line)
-                if match is not None and match.group(1) == approval.path:
-                    candidates.append(line.split(None, 1)[0])
+                if match is None:
+                    continue
+                path = os.fsdecode(match.group(1))
+                if (Path(path).name.startswith("odin-hyprland-scope")
+                        and ("\\" in path or path.endswith(" (deleted)"))):
+                    raise ValueError
+                if path == approval.path:
+                    candidates.append(line.split(None, 1)[0].decode("ascii"))
             for address in candidates:
                 mapped = Path(self.proc_root) / str(pid) / "map_files" / address
                 mapped_stat = os.stat(mapped)
@@ -340,6 +419,7 @@ class ManagedHyprlandPlugin:
     """Serializes one approved load and never retries an uncertain load command."""
 
     _locks: dict[tuple[int, str, tuple[str, str, str, str, str]], asyncio.Lock] = {}
+    _load_attempted: set[tuple[str, tuple[str, str, str, str, str]]] = set()
 
     def __init__(
         self, *, approval: PluginApproval, identity: HyprlandIdentity,
@@ -370,10 +450,14 @@ class ManagedHyprlandPlugin:
             raise HyprlandPluginError("hyprland_plugin_task_authorization_required")
         self.approval.verify_artifact()
         key = (id(asyncio.get_running_loop()), self.identity.digest, self.approval.pin)
+        attempt_key = (self.identity.digest, self.approval.pin)
         lock = self._locks.setdefault(key, asyncio.Lock())
         async with lock:
             inventory = await self.ipc.loaded_plugins()
             if self.approval.path not in inventory:
+                if inventory or attempt_key in self._load_attempted:
+                    raise HyprlandPluginError("hyprland_plugin_load_unconfirmed")
+                self._load_attempted.add(attempt_key)
                 try:
                     await self.ipc.load_fixed_plugin(self.approval.path)
                 except Exception:

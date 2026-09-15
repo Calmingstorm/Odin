@@ -37,6 +37,21 @@ blind resend. Readiness still fails if mapped-image or companion identity cannot
 be proved. Native target selection, current consent and fresh observation are
 separate requirements; auto-loading does not grant input authority.
 
+The pinned Hyprland 0.55.2 command protocol is `j/plugin list`, whose response is
+an array of registration metadata, not filesystem paths. The adapter joins that
+registration with the pinned process's actual `maps`/`map_files` identities;
+neither a plugin name nor a `dlopen` handle supplies path authority. Loading uses
+`/plugin load <approved-path>`. Executing companion identity is read from the
+authenticated, incarnation-derived native scope endpoint, not a fictional
+HyprCtl status command. Root mapped-image inspection is required even when the
+configured compositor UID is an ordinary desktop user.
+
+An unconfirmed load remains fenced against replay within the running manager
+process, including later manager instances. This is not a durable load-attempt
+journal across an Odin process restart. After compositor replacement, discovery
+ignores an old instance directory only when its command socket is absent;
+permission and other inspection errors still fail closed.
+
 Schema-1 manifests are intentionally not silently promoted: their recovery boolean
 did not explicitly attest build auto-management. Rebuild and provision the schema-2
 manifest alongside its matching artifact through the normal reviewed deployment
@@ -45,4 +60,5 @@ install, load, or contact a desktop, and this change does not deploy anything.
 
 Fresh-install configuration uses auto discovery and managed activation. Explicit
 manual opt-out remains available with `hyprland_managed_activation: false`.
-No lab qualification workflow or new recovery override is introduced here.
+The guest qualification drivers under `scripts/computer-feasibility/` collect
+bounded evidence separately. They introduce no production qualification override.

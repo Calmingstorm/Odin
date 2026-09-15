@@ -177,7 +177,7 @@ async def test_native_adapter_has_only_fixed_hyprland_plugin_grammar(tmp_path, m
 
     monkeypatch.setattr(adapter, "_request", request)
     await adapter.load_fixed_plugin(approved.path)
-    assert seen == [b"plugin load " + approved.path.encode("ascii")]
+    assert seen == [b"/plugin load " + approved.path.encode("ascii")]
     with pytest.raises(HyprlandPluginError, match="command_refused"):
         await adapter.load_fixed_plugin("/safe.so\nkeyword exec dangerous")
 
@@ -287,7 +287,7 @@ async def test_native_ipc_uses_real_private_unix_socket_and_peer_credentials(tmp
         await task
     finally:
         server.close()
-    assert received == [b"plugin load " + approved.path.encode("ascii")]
+    assert received == [b"/plugin load " + approved.path.encode("ascii")]
 
 
 @pytest.mark.asyncio
@@ -316,7 +316,7 @@ async def test_native_ipc_lost_reply_does_not_retry_the_write(tmp_path, monkeypa
         await task
     finally:
         server.close()
-    assert writes == [b"plugin load " + approved.path.encode("ascii")]
+    assert writes == [b"/plugin load " + approved.path.encode("ascii")]
 
 
 def _root_owned_lstat(monkeypatch):
@@ -361,25 +361,16 @@ def test_trusted_manifest_accepts_real_immutable_content_addressed_artifact(tmp_
 async def test_native_ipc_parses_successful_json_responses(tmp_path, monkeypatch):
     approved, _ = approval(tmp_path)
     adapter = HyprlandPluginIPC(identity=identity(approved), ipc_path="/tmp/hypr.sock")
-    replies = iter(
-        [
-            b'{"plugins": [{"path": "/one.so"}, {"path": "/two.so"}]}',
-            (
-                b'{"path": "'
-                + approved.path.encode("ascii")
-                + b'", "companion_build_id": "'
-                + b"b" * 64
-                + b'"}'
-            ),
-        ]
-    )
 
-    async def request(_command):
-        return next(replies)
+    async def request(command):
+        assert command == b"j/plugin list"
+        return (b'[{"name":"odin-hyprland-scope","author":"Odin",'
+                b'"handle":"1234","version":"1.0.0","description":"scope"}]')
 
     monkeypatch.setattr(adapter, "_request", request)
-    assert await adapter.loaded_plugins() == ("/one.so", "/two.so")
-    assert await adapter.plugin_instance_status(approved.path) == "b" * 64
+    monkeypatch.setattr(plugin, "revalidate", lambda *_args: asyncio.sleep(0))
+    monkeypatch.setattr(adapter, "_mapped_scope_paths", lambda: (approved.path,))
+    assert await adapter.loaded_plugins() == (approved.path,)
 
 
 @pytest.mark.asyncio
@@ -402,10 +393,12 @@ async def test_manager_reports_missing_load_and_companion_mismatch(tmp_path, mon
             return "c" * 64
 
     verifier = type("Verifier", (), {"verify": lambda *_args, **_kwargs: None})()
+    existing = WrongCompanion(approved.path)
+    existing.loaded.append(approved.path)
     manager = ManagedHyprlandPlugin(
         approval=approved,
         identity=identity(approved),
-        ipc=WrongCompanion(approved.path),
+        ipc=existing,
         mapped_verifier=verifier,
     )
     state = await manager.activate(authorized_task=True)

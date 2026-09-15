@@ -138,7 +138,14 @@ def runtime_inventory(
                         and not child.st_mode & 0o022
                     ):
                         socket_path = os.path.join(hypr, entry.name, ".socket.sock")
-                        socket_stat = os.stat(socket_path, follow_symlinks=False)
+                        try:
+                            socket_stat = os.stat(socket_path, follow_symlinks=False)
+                        except FileNotFoundError:
+                            # Restarted compositors can leave their instance
+                            # directories behind after removing the sockets.
+                            # Only absence is a dead hint; other I/O failures
+                            # still fail the inventory closed below.
+                            continue
                         if (
                             not stat.S_ISSOCK(socket_stat.st_mode)
                             or socket_stat.st_uid != policy.expected_uid
