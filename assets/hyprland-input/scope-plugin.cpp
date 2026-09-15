@@ -368,6 +368,10 @@ struct State {
         bool revoked = false, retired = false, unknown = false, empty = true, ack = true;
         bool resourcesRetired = false, reconciled = false;
         bool inputFenced = false;
+        bool everArmed = false;
+        // Sealed before admission, never a successor's account of an old ledger.
+        std::string resourceInventory;
+        wl_client* resourceClient = nullptr;
     };
     std::string pluginEpoch = nonce();
     std::map<std::string, PHLWINDOWREF> windowLifetimes;
@@ -409,6 +413,18 @@ struct State {
         const bool empty = owner.empty && (activeOwner != &owner || (!armed && keys.empty() && buttons.empty() && !ownedModifiers));
         put(row.get(), "ledger_empty", empty); put(row.get(), "release_ack", empty && owner.ack && !owner.unknown);
         put(row.get(), "receiver_release_verified", false);
+        if (!owner.resourceInventory.empty()) {
+            auto witness = obj();
+            put(witness.get(), "version", int64_t(1));
+            put(witness.get(), "resource_model", std::string("wayland-process-local-v1"));
+            put(witness.get(), "inventory_id", owner.resourceInventory);
+            put(witness.get(), "keyboard_count", int64_t(1));
+            put(witness.get(), "pointer_count", int64_t(1));
+            put(witness.get(), "persistent_devices", false);
+            put(witness.get(), "kernel_devices", false);
+            put(witness.get(), "endpoint_semantics", std::string("original-process-protocol-dispatch"));
+            json_object_object_add(row.get(), "resource_containment", witness.release());
+        }
         return row;
     }
     J ownerRequest(Peer& peer, json_object* request, const std::string& op) {
@@ -493,6 +509,37 @@ struct State {
         }
         if (owner->recoveryPID != peer.pid || owner->recoveryUID != peer.uid || owner->recoveryStart != peer.startTicks)
             return status(false, "owner-recovery-peer-refused");
+        if (op == "capture_resource_containment") {
+            if (owner->revoked || owner->retired || owner->unknown || owner->everArmed || !owner->empty || activeOwner == owner)
+                return status(false, "resource-containment-late");
+            Keyboard* k = nullptr; Pointer* p = nullptr;
+            for (auto& x : keyboards) if (!x->dead && x->pid == owner->guardianPID) {
+                if (k) return status(false, "ambiguous-keyboard");
+                k = x.get();
+            }
+            for (auto& x : pointers) if (!x->dead && x->pid == owner->guardianPID) {
+                if (p) return status(false, "ambiguous-pointer");
+                p = x.get();
+            }
+            if (!k || !p || !k->client || k->client != p->client || !k->device || !p->device ||
+                !k->device->isVirtual() || !p->device->isVirtual())
+                return status(false, "resource-containment-unavailable");
+            pid_t pid = 0; uid_t uid = 0; gid_t gid = 0;
+            wl_client_get_credentials(k->client, &pid, &uid, &gid);
+            const int connection = wl_client_get_fd(k->client);
+            const int flags = connection < 0 ? -1 : fcntl(connection, F_GETFD);
+            if (pid != owner->guardianPID || uid != owner->guardianUID ||
+                processStartTicks(pid) != owner->guardianStart || flags < 0 || !(flags & FD_CLOEXEC))
+                return status(false, "resource-containment-unavailable");
+            if (!owner->resourceInventory.empty() &&
+                (owner->keyboard != k || owner->pointer != p || owner->resourceClient != k->client))
+                return status(false, "owner-device-incarnation-changed");
+            if (owner->resourceInventory.empty()) {
+                owner->keyboard = k; owner->pointer = p; owner->resourceClient = k->client;
+                owner->resourceInventory = nonce();
+            }
+            return ownerStatus(*owner);
+        }
         if (op == "owner_status") {
             const auto command = text(request, "command_id");
             if (command.empty() || (command != owner->reconcileCommand && command != owner->retireCommand))
@@ -1102,7 +1149,9 @@ struct State {
         put(j.get(), "owner_protocol_version", int64_t(1));
         put(j.get(), "owner_reconnect_version", int64_t(1));
         put(j.get(), "retirement_evidence_version", int64_t(1));
-        put(j.get(), "cross_compositor_retirement_supported", false);
+        put(j.get(), "cross_compositor_retirement_supported", true);
+        put(j.get(), "resource_containment_version", int64_t(1));
+        put(j.get(), "resource_model", std::string("wayland-process-local-v1"));
         put(j.get(), "plugin_epoch", pluginEpoch);
         put(j.get(), "instance_id", instanceID);
         put(j.get(), "compositor_pid", int64_t(getpid()));
@@ -1538,7 +1587,7 @@ struct State {
     J request(Peer& peer, json_object* j) {
         const auto op = text(j, "op");
         if (op == "owner_capture" || op == "owner_status" || op == "owner_reconcile" || op == "owner_retire" ||
-            op == "owner_reconnect" || op == "owner_reconnect_status")
+            op == "owner_reconnect" || op == "owner_reconnect_status" || op == "capture_resource_containment")
             return ownerRequest(peer, j, op);
         if (op == "status") return status();
         if (armed && !scope() && op != "release_status") revoke("request-scope-fence");
@@ -1616,6 +1665,8 @@ struct State {
         if (inputHeld()) return status(false, "human-input-held");
         if (owner && ((owner->keyboard && owner->keyboard != k) || (owner->pointer && owner->pointer != p)))
             return status(false, "owner-device-incarnation-changed");
+        if (owner && !owner->resourceInventory.empty() && owner->resourceClient != k->client)
+            return status(false, "owner-device-incarnation-changed");
         if (!owner) {
             // Legacy arms also own a tombstone, but cannot later manufacture
             // recovery authority. The backend must register BEFORE first arm.
@@ -1625,7 +1676,7 @@ struct State {
             owner = &owners.emplace(id, std::move(entry)).first->second;
         }
         activeOwner = owner;
-        if (owner) { owner->keyboard = k; owner->pointer = p; owner->empty = false; owner->ack = false; }
+        if (owner) { owner->keyboard = k; owner->pointer = p; owner->empty = false; owner->ack = false; owner->everArmed = true; }
         keyboard = k; pointer = p; guardianFD = peer.fd; bound = it->second; snapshots.erase(it);
         buttonOwnershipKnown = true; foreignButtonActivity = false;
         if (diagnosticToken != bound.token) { diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0; }

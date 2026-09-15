@@ -231,7 +231,10 @@ async def test_prepare_without_window_proof_never_starts_guardian(recovery, monk
     incarnation = backend._incarnation
     backend._selected_binding = None
     backend._cross_incarnation = SimpleNamespace(reconcile=AsyncMock(
-        return_value=SimpleNamespace(reason="cross_compositor_retirement_unavailable")))
+        return_value=hb.HyprlandRecoveryResult(
+            "operator_release_required", None,
+            {"released": False, "resources_retired": False},
+            "cross_compositor_retirement_unavailable")))
     inventory = AsyncMock(return_value={"targets": []})
     monkeypatch.setattr(backend, "discover_replacement_targets", inventory)
     result = await backend.recover_native_authority(consent_generation=2, command_id="prepare")

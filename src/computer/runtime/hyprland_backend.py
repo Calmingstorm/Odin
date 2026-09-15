@@ -394,6 +394,10 @@ class HyprlandRuntimeBackend:
         self._cleanup_evidence: dict[str, bool | list[str]] = {}
         self.lifecycle_reason: str | None = None
         self._owner_handle: Any | None = None
+        # Original containment and live-opened pidfds survive provider cleanup.
+        # Never reconstruct this authority from stored process descriptors.
+        self._resource_witness: Any | None = None
+        self._containment_build_id: str | None = None
         self._incarnation: CompositorIncarnation | None = None
         self._recovery_epoch = 0
         self._prepared_recovery: tuple[int, int] | None = None
@@ -601,6 +605,7 @@ class HyprlandRuntimeBackend:
             ).activate(authorized_task=True)
             if plugin_state.ready is not True:
                 raise HyprlandPluginError(plugin_state.code or "hyprland_plugin_unready")
+            self._containment_build_id = approval.companion_build_id
         except HyprlandPluginError as error:
             raise ComputerError(str(error)) from None
 
@@ -790,9 +795,11 @@ class HyprlandRuntimeBackend:
                 self._output.logical_width,
                 self._output.logical_height,
             )
+            self._authorize_resource_provider(self._scope_provider)
             self._owner_handle = await self._scope_provider.capture_owner(
                 self._guardian.owner_identity
             )
+            await self._capture_resource_witness(self._scope_provider)
             self._persist_owner()
             scope, _ = await self._action_scope(self._metadata())
             self._check_scope(scope)
@@ -1617,6 +1624,32 @@ class HyprlandRuntimeBackend:
         self._frame = self._scope = self._fingerprint = None
         self._revision += 1
 
+    def _authorize_resource_provider(self, provider):
+        if self._containment_build_id is not None:
+            provider.authorize_resource_containment(
+                companion_build_id=self._containment_build_id)
+
+    async def _capture_resource_witness(self, provider):
+        self._authorize_resource_provider(provider)
+        capture = getattr(provider, "capture_resource_witness", None)
+        # Legacy adapters cannot produce cross-incarnation evidence. Native
+        # capture failure prevents arming rather than silently dropping evidence.
+        witness = await capture(self._owner_handle) if callable(capture) else None
+        if isinstance(provider, HyprlandScopeProvider) and witness is not None:
+            from .hyprland_absence import ResourceContainmentWitness
+
+            if type(witness) is not ResourceContainmentWitness:
+                raise ComputerError("hyprland_resource_witness_invalid")
+        previous = self._resource_witness
+        self._resource_witness = witness
+        if previous is not None and previous is not witness:
+            previous.close()
+
+    def _close_resource_witness(self):
+        witness, self._resource_witness = self._resource_witness, None
+        if witness is not None:
+            witness.close()
+
     def _persist_owner(self):
         """Publication failure prevents arming, including replacement owners."""
         from dataclasses import asdict
@@ -1734,6 +1767,22 @@ class HyprlandRuntimeBackend:
         """Synchronous authority fence, including late persistence failures."""
         self._invalidate()
 
+    async def discover_successor_identity(self):
+        """Pin one compositor independently, without selecting or focusing a window."""
+        if self._discovery_config.discovery_mode != "auto":
+            return None
+        from .hyprland_discovery import HyprlandDiscoveryPolicy, HyprlandDiscoveryResolver
+
+        config = self._discovery_config
+        resolved = await HyprlandDiscoveryResolver(HyprlandDiscoveryPolicy(
+            config.expected_uid, config.runtime_dir, config.compositor_trust)).resolve()
+        successor = resolved.identity
+        if (self._identity is None or successor.digest == self._identity.digest
+                or successor.process.boot_id != self._identity.process.boot_id):
+            return None
+        await revalidate(successor, time.monotonic() + 3)
+        return successor
+
     async def discover_replacement_targets(self):
         """Inventory preserves intent, not old authority. Export no proofs."""
         if self._discovery_config.discovery_mode != "auto":
@@ -1798,6 +1847,14 @@ class HyprlandRuntimeBackend:
             return copy.deepcopy(result)
         finally:
             self._recovery_running = False
+            if (self._recovery_result is not None
+                    and self._recovery_result.state != "ready_for_replan"):
+                # A terminal assessment cannot retry original input. Disposing
+                # retained kernel references does not certify resource retirement.
+                self._close_resource_witness()
+                if self._incarnation is not None:
+                    self._incarnation.close()
+                    self._incarnation = None
 
     async def _prepare_native_recovery(self, epoch, generation, command_id, cleanup):
         # Reaping is local closure evidence, never release evidence.
@@ -1848,26 +1905,41 @@ class HyprlandRuntimeBackend:
             local_resources_closed=local_closed,
         )
         if not released or dead_incarnation:
+            assessment = None
             if dead_incarnation and handle is not None:
                 async def checkpoint():
                     self._recovery_current(epoch)
 
+                successor = None
+                if local_closed and self._resource_witness is not None:
+                    try:
+                        successor = await self.discover_successor_identity()
+                    except Exception:
+                        pass
+                    self._recovery_current(epoch)
                 assessment = await self._cross_incarnation.reconcile(
-                    provider=provider, handle=handle, successor=None,
-                    command_id=command_id, checkpoint=checkpoint)
+                    provider=self._resource_witness, handle=handle, successor=successor,
+                    command_id=command_id, checkpoint=checkpoint,
+                    local_closure_confirmed=local_closed)
                 self._recovery_current(epoch)
                 cleanup["cross_incarnation_reason"] = assessment.reason
+                if assessment.runtime_qualified is True:
+                    cleanup.update(assessment.cleanup)
+                    retired = cleanup["resources_retired"] is True
             if provider is not None:
                 await provider.close()
             if retired and self._incarnation is not None:
                 self._incarnation.close()
                 self._incarnation = None
+            if retired:
+                self._close_resource_witness()
             inventory = await self.discover_replacement_targets() if dead_incarnation else None
             self._recovery_current(epoch)
             return HyprlandRecoveryResult(
                 "fresh_target_required" if dead_incarnation else "operator_release_required",
                 None, cleanup, "hyprland_original_target_continuity_unproven"
                 if dead_incarnation else "hyprland_operator_reconciliation_required", inventory,
+                runtime_qualified=assessment is not None and assessment.runtime_qualified is True,
             )
         assert provider is not None and old_identity is not None
         self._scope_provider = provider
@@ -1909,7 +1981,9 @@ class HyprlandRuntimeBackend:
             self.config.compositor_pid, self._output.logical_width, self._output.logical_height,
         )
         self._recovery_current(epoch)
+        self._authorize_resource_provider(provider)
         self._owner_handle = await provider.capture_owner(self._guardian.owner_identity)
+        await self._capture_resource_witness(provider)
         self._persist_owner()
         self._recovery_current(epoch)
         scope, _ = await self._action_scope(self._metadata())
@@ -1951,8 +2025,21 @@ class HyprlandRuntimeBackend:
             job.cancel()
         if captures:
             await asyncio.gather(*captures, return_exceptions=True)
-        for scope_job in tuple(self._scope_jobs):
+        scope_jobs = tuple(self._scope_jobs)
+        for scope_job in scope_jobs:
             scope_job.cancel()
+        # Scope RPC cancellation is cooperative.  Do not let a provider task
+        # that ignores cancellation indefinitely block guardian/provider
+        # retirement, but do not claim its connection closed until it settles.
+        if scope_jobs:
+            done, _ = await asyncio.wait(scope_jobs, timeout=0.5)
+            for scope_job in done:
+                if not scope_job.cancelled():
+                    try:
+                        scope_job.exception()
+                    except asyncio.CancelledError:
+                        pass
+        scope_jobs_closed = all(scope_job.done() for scope_job in scope_jobs)
         jobs = tuple(self._jobs)
         for action_job in jobs:
             action_job.cancel()
@@ -1967,11 +2054,11 @@ class HyprlandRuntimeBackend:
                 native_ack = result.get("release_ack") is True
             except (Exception, asyncio.CancelledError):
                 released = reaped = False
-        scope_closed = self._scope_provider is None
+        scope_closed = self._scope_provider is None and scope_jobs_closed
         if self._scope_provider:
             try:
                 await asyncio.wait_for(self._scope_provider.close(), 0.5)
-                scope_closed = True
+                scope_closed = scope_jobs_closed
             except (Exception, asyncio.CancelledError):
                 scope_closed = False
         self._release_failed |= not released
@@ -2125,7 +2212,9 @@ class HyprlandRuntimeBackend:
                 self.config.wayland_path, self.config.output_name, provider.socket_path,
                 self.config.compositor_pid, output.logical_width, output.logical_height)
             self._recovery_current(epoch)
+            self._authorize_resource_provider(provider)
             self._owner_handle = await provider.capture_owner(guardian.owner_identity)
+            await self._capture_resource_witness(provider)
             self._persist_owner()
             self._recovery_current(epoch)
             scope, _ = await self._action_scope(self._metadata())
@@ -2178,9 +2267,12 @@ class HyprlandRuntimeBackend:
         self._invalidate()
         async with self._stop_lock:
             clean = await self._cleanup()
-        if clean and self._incarnation is not None:
+        if self._incarnation is not None:
             self._incarnation.close()
             self._incarnation = None
+        # Detach permanently closes this adapter, regardless of cleanup outcome.
+        # Do not leak retained pidfds or confuse their disposal with release.
+        self._close_resource_witness()
         return {
             "stopped": clean,
             "released": clean,

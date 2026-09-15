@@ -89,6 +89,7 @@ def read_trusted_plugin_manifest(manifest_path: str) -> _TrustedPluginManifest:
         optional = {
             "wayland_protocols_version", "wayland_protocols_commit",
             "hyprwayland_scanner_commit", "runtime_loaded", "runtime_qualified",
+            "runtime_qualification_scope",
         }
         if (
             type(value) is not dict or not required <= set(value)
@@ -96,6 +97,9 @@ def read_trusted_plugin_manifest(manifest_path: str) -> _TrustedPluginManifest:
             or type(value["schema"]) is not int or value["schema"] != 2
             or value["auto_management_approved"] is not True
             or ("runtime_qualified" in value and type(value["runtime_qualified"]) is not bool)
+            or ("runtime_qualification_scope" in value
+                and value["runtime_qualification_scope"]
+                != "same-boot-retained-original-witness-v1")
         ):
             raise ValueError
         filename = value["plugin_filename"]

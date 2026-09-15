@@ -6,8 +6,9 @@ task, reconcile held input, or qualify any of the four recovery capabilities in
 
 The source build emits a schema-2 `build-identity.json` with explicit
 `auto_management_approved: true`. This approves managed loading of that exact
-build, not its behavior after faults. `runtime_qualified: false` remains honest
-build metadata. The load approval object does not expose or consume that field as
+build, not its behavior after faults. `runtime_qualified` and the optional
+`runtime_qualification_scope` describe separately recorded bounded recovery
+evidence. The load approval object does not expose or consume either field as
 authority, and no recovery capability changes as a consequence of loading.
 
 ## What actually gates loading

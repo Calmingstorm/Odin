@@ -658,6 +658,26 @@ class ComputerController:
             if type(result) is not HyprlandRecoveryResult:
                 raise ComputerError("hyprland_recovery_evidence_invalid")
             cleanup = result.cleanup
+            qualified = result.runtime_qualified is True
+            if (type(result.runtime_qualified) is not bool or type(cleanup) is not dict
+                    or (qualified and (
+                        result.state != "fresh_target_required" or result.binding is not None
+                        or result.receiver_release_verified is not False
+                        or result.original_outcome != "outcome_unknown"
+                        or cleanup.get("resources_retired") is not True
+                        or cleanup.get("guardian_process_reaped") is not True
+                        or cleanup.get("scope_connection_closed") is not True
+                        or cleanup.get("local_resources_closed") is not True
+                        or cleanup.get("released") is not False
+                        or cleanup.get("release_ack") is not False
+                        or cleanup.get("unknown_release") is not True
+                        or cleanup.get("receiver_release_verified") is not False
+                        or cleanup.get("retirement_basis") != "native_resource_absence"
+                        or type(cleanup.get("retirement_evidence")) is not dict))
+                    or (not qualified and (
+                        "retirement_evidence" in cleanup
+                        or cleanup.get("retirement_basis") == "native_resource_absence"))):
+                raise ComputerError("hyprland_recovery_evidence_invalid")
             released = (type(cleanup) is dict and cleanup.get("released") is True
                         and cleanup.get("release_ack") is True
                         and cleanup.get("unknown_release") is False)
@@ -704,10 +724,12 @@ class ComputerController:
                 # replacement guardian allocated during a rejected preparation.
                 released = retired = False
             self.store.record_hyprland_recovery_assessment(
-                fenced, state=("fresh_target_required" if released and retired
+                fenced, state=("fresh_target_required" if qualified or released and retired
                                else "operator_release_required"),
-                released=released, resources_retired=retired)
-            if (retired or cleanup.get("local_resources_closed") is True) \
+                released=released, resources_retired=retired,
+                runtime_qualified=qualified, recovery_generation=fenced.generation,
+                retirement_evidence=cleanup.get("retirement_evidence"))
+            if (qualified or retired or cleanup.get("local_resources_closed") is True) \
                     and result.state != "ready_for_replan":
                 self._live.pop(sid, None)
                 timer = self._watchdogs.pop(sid, None)

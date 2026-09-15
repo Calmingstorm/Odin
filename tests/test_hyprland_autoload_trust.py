@@ -56,12 +56,16 @@ def test_installed_document_manifest_resolves_fixed_library_root(tmp_path, monke
 
 
 @pytest.mark.parametrize("already_loaded", [False, True])
+@pytest.mark.parametrize("qualification_scope", ["same-boot-retained-original-witness-v1", None])
 @pytest.mark.parametrize("fault", [None, "mapped", "build_id", "artifact", "abi"])
 async def test_prepare_plugin_real_trust_and_manager_without_recovery_qualification(
-    tmp_path, monkeypatch, already_loaded, fault,
+    tmp_path, monkeypatch, already_loaded, fault, qualification_scope,
 ):
     manifest, artifact, value = _manifest(tmp_path)
     assert value["runtime_qualified"] is False
+    if qualification_scope is not None:
+        value["runtime_qualification_scope"] = qualification_scope
+        manifest.write_text(json.dumps(value))
     _trusted_filesystem(monkeypatch)
     approved = plugin.read_trusted_plugin_manifest(str(manifest)).approval
     pinned = identity(approved)
@@ -108,25 +112,29 @@ async def test_prepare_plugin_real_trust_and_manager_without_recovery_qualificat
         await backend._prepare_plugin(pinned, ipc_path="/fixture/command.sock")
     assert ipc.loads == (0 if already_loaded or fault in {"artifact", "abi"} else 1)
     assert backend._guardian is None
-    assert backend._cross_incarnation.capability.runtime_qualified is False
+    # Load metadata is ignored: the independently qualified bounded implementation
+    # owns its gate, even when this fixture manifest explicitly reports false.
+    assert backend._cross_incarnation.capability.runtime_qualified is True
 
 
 def test_build_manifest_explicitly_separates_load_and_recovery_claims():
     script = Path("scripts/build-hyprland-input.sh").read_text()
     assert '"schema":2' in script
     assert '"auto_management_approved":true' in script
-    assert '"runtime_qualified":false' in script
+    assert '"runtime_qualified":true' in script
+    assert '"runtime_qualification_scope":"same-boot-retained-original-witness-v1"' in script
 
 
 @pytest.mark.parametrize("schema", [1, 2, True, 3])
+@pytest.mark.parametrize("qualified", [False, True, "true"])
 @pytest.mark.parametrize("artifact_mode", [0o644, 0o664, 0o646])
 def test_existing_lab_harness_accepts_new_build_schema_without_claiming_qualification(
-    tmp_path, schema, artifact_mode,
+    tmp_path, schema, artifact_mode, qualified,
 ):
     from tests.test_hyprland_harness_exit_r48 import qualification
 
     manifest, artifact, _ = _manifest(
-        tmp_path, schema=schema,
+        tmp_path, schema=schema, runtime_qualified=qualified,
         hyprland_commit="39d7e209c79d451efab1b21151d5938289da838d",
     )
     # The lab harness requires its own UID and no group/world write bits.
@@ -145,9 +153,19 @@ def test_existing_lab_harness_accepts_new_build_schema_without_claiming_qualific
     harness.call = no_ipc
     if type(schema) is not int or schema not in (1, 2):
         expected = "identity"
+    elif type(qualified) is not bool:
+        expected = "runtime_qualified invalid"
     elif artifact_mode & 0o022:
         expected = "plugin artifact type/owner/mode invalid"
     else:
         expected = "fixture IPC boundary"
     with pytest.raises(qualification.Refusal, match=expected):
         harness.manifest_check()
+
+
+@pytest.mark.parametrize("value", [None, True, [], "all-recovery", ""])
+def test_manifest_rejects_unknown_qualification_scope(tmp_path, monkeypatch, value):
+    manifest, _, _ = _manifest(tmp_path, runtime_qualification_scope=value)
+    _trusted_filesystem(monkeypatch)
+    with pytest.raises(plugin.HyprlandPluginError, match="manifest_invalid"):
+        plugin.read_trusted_plugin_manifest(str(manifest))

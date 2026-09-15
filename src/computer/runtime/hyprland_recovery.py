@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import os
+import re
 import select
 from dataclasses import dataclass
 from typing import Any
@@ -83,6 +85,7 @@ class HyprlandResourceAbsenceProof:
     native_certificate: str
     owned_virtual_devices_absent: bool
     old_connections_absent: bool
+    inventory_digest: str = ""
 
 
 class HyprlandCrossIncarnationRecovery:
@@ -94,9 +97,14 @@ class HyprlandCrossIncarnationRecovery:
     """
 
     def __init__(self, capability=None):
-        self.capability = capability or HyprlandRetirementCapability()
+        if capability is None:
+            from .hyprland_absence import RUNTIME_QUALIFIED
 
-    async def reconcile(self, *, provider, handle, successor, command_id, checkpoint):
+            capability = HyprlandRetirementCapability(runtime_qualified=RUNTIME_QUALIFIED)
+        self.capability = capability
+
+    async def reconcile(self, *, provider, handle, successor, command_id, checkpoint,
+                        local_closure_confirmed=False):
         from ..store import canonical_hash
         from .hyprland_scope import owner_handle_to_record
 
@@ -109,10 +117,10 @@ class HyprlandCrossIncarnationRecovery:
                 {"released": False, "release_ack": False, "unknown_release": True,
                  "resources_retired": False, "receiver_release_verified": False},
                 "hyprland_cross_incarnation_unqualified")
-        # Qualification alone does not install a native proof verifier. Today's
-        # provider intentionally has no verifier/producer across plugin death.
+        # The retained original witness, not a replacement plugin, owns the proof.
         verifier = getattr(provider, "verify_resource_absence", None)
-        if successor is None or not callable(verifier):
+        if (successor is None or not callable(verifier)
+                or local_closure_confirmed is not True):
             return HyprlandRecoveryResult(
                 "operator_release_required", None,
                 {"released": False, "release_ack": False, "unknown_release": True,
@@ -120,7 +128,8 @@ class HyprlandCrossIncarnationRecovery:
                 "hyprland_native_resource_witness_unavailable")
         # Query the qualified producer, never infer absence from compositor exit.
         proof = await provider.prove_resource_absence(
-            handle, command_id=command_id)
+            handle, command_id=command_id, successor=successor,
+            local_closure_confirmed=local_closure_confirmed)
         await checkpoint()
         valid = (
             type(proof) is HyprlandResourceAbsenceProof
@@ -134,16 +143,37 @@ class HyprlandCrossIncarnationRecovery:
             and 32 <= len(proof.native_certificate) <= 4096
             and proof.owned_virtual_devices_absent is True
             and proof.old_connections_absent is True
+            and type(proof.inventory_digest) is str
+            and re.fullmatch(r"[0-9a-f]{64}", proof.inventory_digest) is not None
         )
         if valid:
             valid = await verifier(proof, handle=handle, successor=successor) is True
             await checkpoint()
+        evidence = {}
+        if valid:
+            evidence["retirement_evidence"] = {
+                "protocol": proof.protocol,
+                "resource_model": "wayland-process-local-v1",
+                "owner_digest": proof.owner_digest,
+                "predecessor_digest": proof.predecessor_digest,
+                "successor_digest": proof.successor_digest,
+                "command_id": proof.command_id,
+                "inventory_digest": proof.inventory_digest,
+                "native_certificate_digest": hashlib.sha256(
+                    proof.native_certificate.encode("utf-8")).hexdigest(),
+                "original_compositor_exited": True,
+                "original_guardian_exited": True,
+                "local_resources_closed": True,
+                "receiver_release_verified": False,
+            }
         return HyprlandRecoveryResult(
             "fresh_target_required" if valid else "operator_release_required", None,
             {"released": False, "release_ack": False, "unknown_release": True,
              "resources_retired": valid, "receiver_release_verified": False,
-             "retirement_basis": "native_resource_absence" if valid else "unproven"},
-            "hyprland_fresh_target_required" if valid else "hyprland_retirement_unproven")
+             "retirement_basis": "native_resource_absence" if valid else "unproven",
+             **evidence},
+            "hyprland_fresh_target_required" if valid else "hyprland_retirement_unproven",
+            runtime_qualified=valid)
 
 
 class CompositorIncarnation:

@@ -2,9 +2,10 @@
 
 Status: **execution plan with capability-scoped evidence requirements**. The
 recovery implementation is not blanket runtime-qualified. Record independently
-reviewable verdicts per capability and exact tuple; production recovery receipts
-retain `runtime_qualified=false` and `receiver_release_verified=false`. Their
-storage contract rejects either field becoming true. Offline tests, successful
+reviewable verdicts per capability and exact tuple. `runtime_qualified` describes
+only the bounded retirement producer, not all four capabilities. Qualified
+retirement receipts require exact owner/command/generation-bound evidence;
+`receiver_release_verified` remains false. Offline tests, successful
 compilation, native ACKs, and manifest booleans cannot substitute for compositor
 and receiver evidence.
 
@@ -16,9 +17,9 @@ This plan qualifies four bounded capabilities:
 3. persisted-descriptor durable-owner takeover and release-only reconciliation;
 4. incarnation-bound retirement after failed cleanup.
 
-It does **not** claim automatic recovery across compositor death. Durable task
-continuity after that boundary is an explicit operator-reconciliation flow, not a
-seamless session resurrection or native continuation.
+It does **not** claim seamless session resurrection across compositor death.
+Qualified resource retirement may remove the need for external cleanup attestation,
+but continuation still requires a fresh explicitly selected target and new authority.
 
 It is written for an operator who did not build the feature. Read it completely
 before starting. A diagnosed refusal is useful. Weakening a guard until the case
@@ -91,9 +92,9 @@ Keep these claims separate:
 Compositor death destroys native object identity. A replacement window is not the
 original window. Same title/class, executable, PID, or appearance is insufficient.
 The backend may return `fresh_target_required` with a fresh inventory after the
-original compositor pidfd has exited, but the controller records
-`operator_release_required` when `released` is false. A fresh inventory is not
-release proof and cannot advance that state.
+original compositor pidfd has exited. With unproved release, the controller records
+`operator_release_required` unless the bounded original-witness retirement proof
+also verifies. A fresh inventory alone is not release or retirement proof.
 
 After external cleanup and an explicit, authenticated operator attestation, a
 later operator-supervised flow may create a successor that carries only saved task
@@ -120,9 +121,10 @@ Automatic discovery and managed loading do not authorize desktop input or assert
 any of this plan's four recovery capabilities. Explicit manual/pinned opt-outs
 remain available.
 
-The source build still emits `runtime_qualified: false`; recovery evidence remains
-missing until the applicable matrix actually runs and passes. This plan adds no
-qualification workflow or automatic promotion. An authorized lab run may use the
+The source build's qualification metadata must follow the recorded bounded lab
+result, not substitute for it. See
+[the retirement record](HYPRLAND-CROSS-COMPOSITOR-RETIREMENT-2026-09-15.md).
+There is no automatic promotion workflow. An authorized lab run may use the
 approved automatic-loading path or the deliberate manual harness. Record immutable
 plugin ELF digest, companion build ID, exact Hyprland version/commit, headers and
 dependency ABI; prove mapped image and executing companion agree. Demonstrate
@@ -413,8 +415,11 @@ supported or refuses. In-memory absence is never success.
 
 Before arm, `owner_capture` binds a `HyprlandOwnerHandle` to exact original
 compositor `ProcessPin`, authenticated guardian `{pid,uid,start_ticks}`, random
-`plugin_epoch`, random `ledger_id`, peer credentials and pidfd. Native operations
-are:
+`plugin_epoch`, random `ledger_id`, and recovery-peer credentials/pidfd. The
+separate containment-capture operation seals the exact virtual resources; Python
+then opens and revalidates the original guardian and compositor pidfds. Backend
+startup completes this sequence before arm. `owner_capture` alone is not an atomic
+resource-containment certificate. Native ledger operations are:
 
 - `owner_status`, a pure query;
 - `owner_reconcile(handle, command_id)`, one idempotent release attempt or prior
@@ -524,21 +529,21 @@ resources cannot survive. Retire historical authority without claiming action or
 receiver success. Do not resurrect the old session/action. Any continuation needs
 a new recovery session, explicit target and fresh pixels.
 
-Changed-boot obsolescence is not the cross-compositor native resource-absence
-certificate. The current provider has no production absence producer/verifier,
-and backend recovery supplies no successor to that coordinator. A guest can test
-the required refusal and fresh startup, but cannot qualify this missing positive
-capability by changing a flag. This is missing implementation, not missing GPU
-hardware. Same-incarnation exact-client retirement is a separate supported path.
+Changed-boot obsolescence is not the same-boot cross-compositor resource-absence
+certificate. The bounded producer retains the original authenticated sealed
+inventory and original compositor/guardian pidfds. It does not reconstruct those
+from disk after controller exit or reboot. This is a software evidence boundary,
+not missing GPU hardware. Same-incarnation exact-client retirement is separate.
 
 **Original-compositor exit:** create unknown-release quarantine, retain the
-original compositor pidfd, stop that disposable compositor, and confirm both its
-pidfd exit and local guardian/scope closure. Expect `original_compositor_exited=true`
-and `local_resources_closed=true`, but `resources_retired=false`,
-`retirement_basis=unproven`, and `released=false`. It must not establish
-native-owner retirement, action success, or receiver release. The controller
-remains `operator_release_required` while the locally closed adapter can be
-discarded to permit the explicit external-cleanup attestation route.
+original compositor and guardian pidfds and authenticated pre-arm containment
+witness. Stop only that disposable compositor, confirm both retained lifetimes
+exited and local guardian/scope closure, then independently authenticate a different
+same-boot successor. A verified original witness permits `resources_retired=true`,
+`retirement_basis=native_resource_absence`, and `fresh_target_required`, while
+`released=false` and receiver uncertainty remain. Without that witness, expect
+`resources_retired=false`, `retirement_basis=unproven`, and operator reconciliation.
+Neither branch resurrects old input authority or claims action success.
 
 **Failed proof:** same-boot PID absence without the retained original pidfd,
 guardian SIGKILL, socket unlink, plugin disappearance, and replacement-compositor
@@ -547,8 +552,9 @@ compositor never vouches for the old ledger.
 
 **Receiver evidence:** retain actual down/up/disconnect ordering. Retirement may
 pass while receiver release remains unknown, but the report must say so. Prove no
-later receiver event can originate from the retired incarnation, including delayed
-callbacks and endpoint recreation.
+new input can be generated by the retired resources, including delayed callbacks
+and endpoint recreation. A receiver may still consume previously queued events;
+resource disposal does not retroactively remove them.
 
 **Pass:** retirement binds exact owner/incarnation/device lifetime; historical
 uncertainty remains; old grants/callbacks refuse; replacement uses new authority.
@@ -631,10 +637,10 @@ orchestration and managed activation must be separately demonstrated; X11 and
 portal gates must pass on the same SHA; and an independent reviewer must reproduce
 every evidence-to-verdict decision. Until then the aggregate decision is false.
 
-There is currently no implemented per-capability flag-promotion API. Capability
-verdicts belong in the reviewed evidence report, not invented manifest keys or
-runtime receipt edits. Build/load approval remains separate. Do not set
-`HyprlandRetirementCapability.runtime_qualified` while its native producer/verifier
-is absent, and do not change production receiver-verification fields based on a
-test receiver log. A passed expected-refusal case qualifies that boundary only,
-not the positive capability which was refused.
+There is no per-capability flag-promotion API. Capability verdicts belong in the
+reviewed evidence report. Build/load approval remains separate. The bounded
+retirement implementation's flag is enabled only after its producer/verifier has
+positive lab evidence, and manifests identify its limited qualification scope.
+Other capabilities are not promoted by that flag. Do not change production
+receiver-verification fields based on a test receiver log. A passed expected-refusal
+case qualifies that boundary only, not the positive capability which was refused.

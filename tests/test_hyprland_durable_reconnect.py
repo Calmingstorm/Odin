@@ -157,7 +157,7 @@ async def test_capture_cannot_export_unnegotiated_capability(durable, capability
 
 @pytest.mark.asyncio
 async def test_forged_cross_compositor_support_is_not_a_protocol(durable):
-    provider, handle, row, _ = durable
+    provider, _, row, _ = durable
     row["cross_compositor_retirement_supported"] = True
     with pytest.raises(scope.HyprlandScopeFailure, match="retirement_protocol_unavailable"):
-        await provider.prove_resource_absence(handle, command_id="retire-1")
+        await provider.recovery_capabilities()

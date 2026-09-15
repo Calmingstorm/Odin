@@ -570,7 +570,10 @@ class ComputerStore:
                             or resolution.get("status") == "native_reconciled"
                             and ((resolution.get("released") is True
                                   and resolution.get("resources_retired") is True)
-                                 or self._external_cleanup_attested(resolution))
+                                 or self._external_cleanup_attested(resolution)
+                                 or self._validated_hyprland_retirement(
+                                     resolution, pending, resolution.get(
+                                         "recovery_owner", resolution.get("native_owner"))))
                         )
                     )
                     valid = (
@@ -1311,9 +1314,15 @@ class ComputerStore:
             raise ComputerError("invalid_runtime_identity")
 
     def record_hyprland_recovery_assessment(self, grant: SessionGrant, *, state: str,
-                                          released: bool, resources_retired: bool) -> None:
+                                          released: bool, resources_retired: bool,
+                                          runtime_qualified: bool = False,
+                                          recovery_generation: int | None = None,
+                                          retirement_evidence: dict | None = None) -> None:
         """CAS a bounded assessment. Retirement is deliberately not clean release."""
-        if state not in {"fresh_target_required", "operator_release_required"}:
+        if (state not in {"fresh_target_required", "operator_release_required"}
+                or any(type(value) is not bool for value in (
+                    released, resources_retired, runtime_qualified))
+                or (not runtime_qualified and retirement_evidence is not None)):
             raise ComputerError("invalid_recovery_pending")
         with self.lock:
             self.db.execute("BEGIN IMMEDIATE")
@@ -1326,6 +1335,12 @@ class ComputerStore:
                 owner = receipt.get("recovery_owner", receipt.get("native_owner"))
                 if owner is None:
                     raise ComputerError("hyprland_durable_owner_required")
+                if runtime_qualified and (
+                        type(recovery_generation) is not int
+                        or recovery_generation != grant.generation
+                        or recovery_generation != pending.recovery_generation
+                        or recovery_generation != pending.grant_generation):
+                    raise ComputerError("invalid_recovery_pending")
                 receipt.update(status=state, complete=False, released=released is True,
                                resources_retired=resources_retired is True,
                                recovery_command_id=pending.old_grant.get("recovery_command_id"),
@@ -1333,7 +1348,16 @@ class ComputerStore:
                                # current-session CAS above still fences stale work.
                                recovery_generation=pending.grant_generation,
                                owner_digest=canonical_hash(owner),
-                               receiver_release_verified=False, runtime_qualified=False)
+                               receiver_release_verified=False, runtime_qualified=runtime_qualified)
+                if runtime_qualified:
+                    receipt.update(retirement_evidence=retirement_evidence,
+                                   retirement_basis="native_resource_absence",
+                                   release_ack=False, unknown_release=True,
+                                   original_outcome="outcome_unknown")
+                    self._validated_hyprland_retirement(receipt, pending, owner)
+                elif receipt.get("retirement_evidence") is not None:
+                    # A weaker assessment cannot erase a qualified witness.
+                    raise ComputerError("invalid_recovery_pending")
                 self.db.execute("INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                                 (grant.session_id, json.dumps(receipt, sort_keys=True)))
                 self.db.execute("COMMIT")
@@ -1345,6 +1369,11 @@ class ComputerStore:
         row = self.db.execute("SELECT result FROM session_recovery WHERE session_id=?",
                               (session_id,)).fetchone()
         result = json.loads(row[0]) if row else {}
+        if (type(result) is not dict
+                or (result.get("runtime_qualified") is True
+                    and result.get("status") not in {
+                        "fresh_target_required", "native_reconciled"})):
+            raise ComputerError("invalid_recovery_pending")
         if "native_owner" in result:
             self._validate_hyprland_owner(result["native_owner"])
         if "recovery_owner" in result:
@@ -1394,12 +1423,70 @@ class ComputerStore:
                         "released", "resources_retired", "complete",
                         "receiver_release_verified", "runtime_qualified"))
                     or result["complete"] or result["receiver_release_verified"]
-                    or result["runtime_qualified"]
                     or result["status"] in {"fresh_target_required", "native_reconciled"}
                     and not (result["released"] and result["resources_retired"])
-                    and not self._external_cleanup_attested(result)):
+                    and not self._external_cleanup_attested(result)
+                    and not result["runtime_qualified"]):
+                raise ComputerError("invalid_recovery_pending")
+            if result["runtime_qualified"]:
+                self._validated_hyprland_retirement(result, pending, owner)
+            elif ("retirement_evidence" in result
+                  or result.get("retirement_basis") == "native_resource_absence"):
                 raise ComputerError("invalid_recovery_pending")
         return result
+
+    @staticmethod
+    def _validated_hyprland_retirement(result, pending, owner):
+        """Bind backend-verified absence to history, never infer release from exit.
+
+        Native witness authentication belongs to the provider. This boundary
+        rejects boolean-only qualification, including on database reopen.
+        """
+        if result.get("runtime_qualified") is not True:
+            return False
+        predecessor_digest = None
+        if type(owner) is dict:
+            if owner.get("version") == 2:
+                from .runtime.hyprland_scope import owner_handle_from_record
+
+                predecessor_digest = owner_handle_from_record(owner).compositor.digest
+            elif owner.get("version") == 1 and type(owner.get("compositor")) is dict:
+                predecessor_digest = owner["compositor"].get("digest")
+        evidence = result.get("retirement_evidence")
+        digests = {"owner_digest", "predecessor_digest", "successor_digest",
+                   "inventory_digest", "native_certificate_digest"}
+        positive = {"original_compositor_exited", "original_guardian_exited",
+                    "local_resources_closed"}
+        keys = digests | positive | {"protocol", "resource_model", "command_id",
+                                      "receiver_release_verified"}
+        if (type(evidence) is not dict or set(evidence) != keys
+                or pending is None or type(owner) is not dict
+                or evidence.get("protocol") != "hyprland-resource-absence-v1"
+                or evidence.get("resource_model") != "wayland-process-local-v1"
+                or any(type(evidence.get(k)) is not str
+                       or re.fullmatch(r"[0-9a-f]{64}", evidence[k]) is None for k in digests)
+                or any(evidence.get(k) is not True for k in positive)
+                or evidence.get("receiver_release_verified") is not False
+                or type(evidence.get("command_id")) is not str
+                or re.fullmatch(r"[0-9a-f]{32}", evidence["command_id"]) is None
+                or evidence["command_id"] != pending.old_grant.get("recovery_command_id")
+                or evidence["command_id"] != result.get("recovery_command_id")
+                or evidence["owner_digest"] != canonical_hash(owner)
+                or evidence["owner_digest"] != result.get("owner_digest")
+                or evidence["predecessor_digest"] != predecessor_digest
+                or evidence["successor_digest"] == evidence["predecessor_digest"]
+                or type(result.get("recovery_generation")) is not int
+                or result["recovery_generation"] != pending.grant_generation
+                or result["recovery_generation"] != pending.recovery_generation
+                or result.get("status") not in {"fresh_target_required", "native_reconciled"}
+                or result.get("retirement_basis") != "native_resource_absence"
+                or result.get("original_outcome") != "outcome_unknown"
+                or result.get("resources_retired") is not True
+                or result.get("unknown_release") is not True
+                or any(result.get(k) is not False for k in (
+                    "released", "release_ack", "receiver_release_verified", "complete"))):
+            raise ComputerError("invalid_recovery_pending")
+        return True
 
     @staticmethod
     def _external_cleanup_attested(result):
@@ -1574,7 +1661,10 @@ class ComputerStore:
                 or assessment.get("status") != "fresh_target_required"
                 or not ((assessment.get("released") is True
                          and assessment.get("resources_retired") is True)
-                        or self._external_cleanup_attested(assessment))):
+                        or self._external_cleanup_attested(assessment)
+                        or self._validated_hyprland_retirement(
+                            assessment, pending, assessment.get(
+                                "recovery_owner", assessment.get("native_owner"))))):
             raise ComputerError("hyprland_reconciliation_required")
         if (assessment.get("recovery_generation") != predecessor.generation
                 or assessment.get("recovery_command_id") is None
@@ -1831,6 +1921,7 @@ class ComputerStore:
                 result.pop("native_owner", None)
                 result.pop("recovery_owner", None)
                 result.pop("owner_digest", None)
+                result.pop("retirement_evidence", None)
                 result.pop("pre_handoff_cleanup", None)
                 result.pop("recovery_command_id", None)
                 result.pop("durable_reconnect", None)

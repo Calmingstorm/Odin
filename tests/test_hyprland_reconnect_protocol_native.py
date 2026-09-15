@@ -40,10 +40,21 @@ def test_native_owner_protocol_component(tmp_path):
 #include <string>
 #include <memory>
 #include <cassert>
+#include <vector>
 ''' + helpers + r'''
 std::string nonce() { static int n = 0; return std::string(40, 'a') + std::to_string(++n); }
 std::string processStartTicks(pid_t) { return "123"; }
-struct Keyboard { void* client = nullptr; bool dead = false; };
+using wl_client = void;
+struct Device { bool isVirtual() { return true; } };
+struct Keyboard {
+    void* client = nullptr; bool dead = false; pid_t pid = 0;
+    std::shared_ptr<Device> device = std::make_shared<Device>();
+};
+int clientFD = -1;
+int wl_client_get_fd(void*) { return clientFD; }
+void wl_client_get_credentials(void*, pid_t* pid, uid_t* uid, gid_t* gid) {
+    *pid = getpid(); *uid = getuid(); *gid = getgid();
+}
 using Pointer = Keyboard;
 Keyboard *destroyK = nullptr, *destroyP = nullptr;
 int destroyed = 0;
@@ -58,6 +69,7 @@ struct State {
     std::map<int, std::unique_ptr<Peer>> peers;
     int guardianFD = -1, releases = 0;
     std::string keys, buttons;
+    std::vector<std::unique_ptr<Keyboard>> keyboards, pointers;
     J status(bool ok = true, const std::string& error = {}) {
         auto row = obj(); put(row.get(), "ok", ok); put(row.get(), "error", error); return row;
     }
@@ -85,6 +97,28 @@ int main() {
     assert(!id.empty() && state.owners.size() == 1);
     assert(text(state.ownerRequest(peer, req.get(), "owner_capture").get(), "ledger_id") == id);
     put(req.get(), "ledger_id", id); put(req.get(), "command_id", std::string("txn-1"));
+    // Production sealing method: missing devices, inheritance, replacement and
+    // after-first-arm capture all refuse; exact idle repeat preserves inventory.
+    assert(!boolean(state.ownerRequest(peer, req.get(), "capture_resource_containment"), "ok"));
+    state.keyboards.push_back(std::make_unique<Keyboard>());
+    state.pointers.push_back(std::make_unique<Keyboard>());
+    state.keyboards[0]->pid = state.pointers[0]->pid = getpid();
+    state.keyboards[0]->client = state.pointers[0]->client = &state;
+    clientFD = pipes[0];
+    assert(!boolean(state.ownerRequest(peer, req.get(), "capture_resource_containment"), "ok"));
+    assert(fcntl(clientFD, F_SETFD, FD_CLOEXEC) == 0);
+    auto sealed = state.ownerRequest(peer, req.get(), "capture_resource_containment");
+    assert(boolean(sealed, "ok"));
+    const auto inventory = state.owners.at(id).resourceInventory;
+    assert(!inventory.empty());
+    assert(boolean(state.ownerRequest(peer, req.get(), "capture_resource_containment"), "ok"));
+    assert(state.owners.at(id).resourceInventory == inventory);
+    auto originalKeyboard = std::move(state.keyboards[0]);
+    state.keyboards[0] = std::make_unique<Keyboard>(*originalKeyboard);
+    assert(!boolean(state.ownerRequest(peer, req.get(), "capture_resource_containment"), "ok"));
+    state.keyboards[0] = std::move(originalKeyboard);
+    state.owners.at(id).everArmed = true;
+    assert(!boolean(state.ownerRequest(peer, req.get(), "capture_resource_containment"), "ok"));
     auto& owner = state.owners.at(id); state.activeOwner = &owner; state.armed = true;
     assert(!boolean(state.ownerRequest(peer, req.get(), "owner_status"), "ok"));
     assert(state.releases == 0); // read-before-submit has no release side effect

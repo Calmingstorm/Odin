@@ -238,7 +238,9 @@ class Harness:
             m.get("hyprland_version")=="0.55.2" and
             m.get("hyprland_commit")=="39d7e209c79d451efab1b21151d5938289da838d",
             "manifest pinned Hyprland identity mismatch")
-        req(m.get("runtime_qualified") is False,"manifest runtime_qualified is not false")
+        # Metadata is not authority for this narrow harness. A qualified build
+        # still needs every native identity, resource and receiver check below.
+        req(type(m.get("runtime_qualified")) is bool,"manifest runtime_qualified invalid")
         req(type(bid)is str and HEX64.fullmatch(bid),"bad build id")
         req(type(sha)is str and HEX64.fullmatch(sha),"bad plugin hash")
         req(type(name)is str and name==os.path.basename(name),"bad plugin filename")

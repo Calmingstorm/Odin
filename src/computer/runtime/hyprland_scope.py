@@ -69,6 +69,7 @@ _NATIVE_REFUSALS = frozenset({
     "inventory-environment-unavailable", "inventory-scope-armed",
     "inventory-seat-button-held", "inventory-device-input-held-or-unavailable",
     "inventory-owned-recovery-pending", "owned-recovery-pending",
+    "resource-containment-late", "resource-containment-unavailable",
 })
 
 
@@ -471,6 +472,15 @@ class HyprlandScopeProvider:
         self._group_authority = None
         self._lock = asyncio.Lock()
         self._closed = False
+        self._resource_witnesses = {}
+        self._resource_build_id = None
+
+    def authorize_resource_containment(self, *, companion_build_id):
+        """Backend supplies build ID only after independent mapped-plugin trust."""
+        if (type(companion_build_id) is not str or not _DIGEST.fullmatch(companion_build_id)
+                or self._resource_build_id not in {None, companion_build_id}):
+            _fail("hyprland_retirement_protocol_unavailable")
+        self._resource_build_id = companion_build_id
 
     @classmethod
     async def from_identity(
@@ -614,7 +624,50 @@ class HyprlandScopeProvider:
             if row["revoked"] or row["unknown_release"] or not row["ledger_empty"]:
                 _fail("hyprland_owner_capture_late_or_retired")
             await revalidate(identity, time.monotonic() + 0.5)
-            return handle
+        if self._resource_build_id is not None:
+            await self.capture_resource_witness(handle)
+        return handle
+
+    async def capture_resource_witness(self, handle):
+        """Seal before first arm. Exported pidfds outlive provider.close()."""
+        from .hyprland_absence import RESOURCE_MODEL, ResourceContainmentWitness
+
+        async with self._lock:
+            if self._resource_build_id is None:
+                return None
+            identity, instance, plugin = self._owner_context()
+            owner_handle_to_record(handle)
+            if (handle.compositor != identity or handle.instance_id != instance
+                    or handle.plugin_epoch != plugin or handle.recovery_pid != os.getpid()
+                    or handle.recovery_uid != os.geteuid()
+                    or handle.recovery_start_ticks != str(_proc_start(os.getpid(), os.geteuid()))):
+                _fail("hyprland_owner_identity_invalid")
+            if handle in self._resource_witnesses:
+                return self._resource_witnesses[handle]
+            await revalidate(identity, time.monotonic() + 0.5)
+            status = await self._request({"op": "status"})
+            _instance_status(status, identity)
+            if status.get("cross_compositor_retirement_supported") is False:
+                return None
+            if (status.get("companion_build_id") != self._resource_build_id
+                    or status.get("plugin_epoch") != plugin
+                    or status.get("cross_compositor_retirement_supported") is not True
+                    or type(status.get("resource_containment_version")) is not int
+                    or status["resource_containment_version"] != 1
+                    or status.get("resource_model") != RESOURCE_MODEL):
+                _fail("hyprland_retirement_protocol_unavailable")
+            row = await self._request({"op": "capture_resource_containment",
+                                       "instance_id": instance, "plugin_epoch": plugin,
+                                       "ledger_id": handle.ledger_id})
+            self._owner_reply(row, handle)
+            if row.get("companion_build_id") != self._resource_build_id:
+                _fail("hyprland_retirement_protocol_unavailable")
+            witness = await ResourceContainmentWitness.capture(handle, row)
+            self._resource_witnesses[handle] = witness
+            return witness
+
+    def export_resource_witness(self, handle):
+        return self._resource_witnesses.get(handle)
 
     async def _owner_operation(self, handle, operation, command_id):
         async with self._lock:
@@ -698,16 +751,23 @@ class HyprlandScopeProvider:
             for key in ("owner_reconnect_version", "retirement_evidence_version"):
                 if type(row.get(key)) is not int or row[key] != 1:
                     _fail("hyprland_owner_protocol_unavailable")
-            # This implementation has no witness surviving the old compositor.
-            # A peer unexpectedly claiming support is not an implemented protocol.
-            if row.get("cross_compositor_retirement_supported") is not False:
+            from .hyprland_absence import RESOURCE_MODEL, RUNTIME_QUALIFIED
+
+            supported = row.get("cross_compositor_retirement_supported")
+            if type(supported) is not bool or (supported and (
+                    type(row.get("resource_containment_version")) is not int
+                    or row["resource_containment_version"] != 1
+                    or row.get("resource_model") != RESOURCE_MODEL)):
                 _fail("hyprland_retirement_protocol_unavailable")
             await revalidate(identity, time.monotonic() + 0.5)
             return {"owner_reconnect_version": 1, "retirement_evidence_version": 1,
-                    "cross_compositor_retirement_supported": False,
-                    "runtime_qualified": False}
+                    "cross_compositor_retirement_supported": supported,
+                    "runtime_qualified": bool(supported and RUNTIME_QUALIFIED),
+                    **({"runtime_qualification_scope": "same-boot-retained-original-witness-v1"}
+                       if supported else {})}
 
-    async def prove_resource_absence(self, handle, *, command_id):
+    async def prove_resource_absence(self, handle, *, command_id, successor=None,
+                                     local_closure_confirmed=False):
         """A replacement plugin cannot testify to a lost plugin's ledger.
 
         Explicit capability refusal, not an optional callback whose absence could
@@ -716,8 +776,17 @@ class HyprlandScopeProvider:
         owner_handle_to_record(handle)
         if type(command_id) is not str or not re.fullmatch(r"[A-Za-z0-9-]{1,128}", command_id):
             _fail("hyprland_owner_identity_invalid")
-        await self.recovery_capabilities()
-        _fail("hyprland_cross_compositor_retirement_unavailable")
+        witness = self.export_resource_witness(handle)
+        if witness is None:
+            _fail("hyprland_cross_compositor_retirement_unavailable")
+        return await witness.prove_resource_absence(
+            handle, command_id=command_id, successor=successor,
+            local_closure_confirmed=local_closure_confirmed)
+
+    async def verify_resource_absence(self, proof, *, handle, successor):
+        witness = self.export_resource_witness(handle)
+        return bool(witness is not None and await witness.verify_resource_absence(
+            proof, handle=handle, successor=successor))
 
     async def owner_status(self, handle, *, command_id):
         """Query a recorded transaction after lost acknowledgement, no mutation."""

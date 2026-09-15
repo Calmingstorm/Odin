@@ -91,7 +91,7 @@ class Recovery(narrow.Harness):
         narrow.req(type(manifest.get("schema")) is int and manifest["schema"] in (1, 2)
                    and manifest.get("hyprland_version") == "0.55.2"
                    and manifest.get("hyprland_commit") == "39d7e209c79d451efab1b21151d5938289da838d"
-                   and manifest.get("runtime_qualified") is False, "manifest tuple invalid")
+                   and type(manifest.get("runtime_qualified")) is bool, "manifest tuple invalid")
         digest, build = manifest.get("plugin_sha256"), manifest.get("companion_build_id")
         narrow.req(
             isinstance(digest, str) and narrow.HEX64.fullmatch(digest)
