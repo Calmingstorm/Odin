@@ -119,15 +119,20 @@ def test_build_manifest_explicitly_separates_load_and_recovery_claims():
 
 
 @pytest.mark.parametrize("schema", [1, 2, True, 3])
+@pytest.mark.parametrize("artifact_mode", [0o644, 0o664, 0o646])
 def test_existing_lab_harness_accepts_new_build_schema_without_claiming_qualification(
-    tmp_path, schema,
+    tmp_path, schema, artifact_mode,
 ):
     from tests.test_hyprland_harness_exit_r48 import qualification
 
-    manifest, _, _ = _manifest(
+    manifest, artifact, _ = _manifest(
         tmp_path, schema=schema,
         hyprland_commit="39d7e209c79d451efab1b21151d5938289da838d",
     )
+    # The lab harness requires its own UID and no group/world write bits.
+    # Set fixture permissions explicitly rather than inheriting the runner umask;
+    # unsafe modes below must still be rejected before any IPC.
+    artifact.chmod(artifact_mode)
     harness = qualification.Harness.__new__(qualification.Harness)
     harness.a = SimpleNamespace(manifest=str(manifest))
     harness.uid = os.getuid()
@@ -138,6 +143,11 @@ def test_existing_lab_harness_accepts_new_build_schema_without_claiming_qualific
         raise qualification.Refusal("fixture IPC boundary")
 
     harness.call = no_ipc
-    expected = "fixture IPC boundary" if type(schema) is int and schema in (1, 2) else "identity"
+    if type(schema) is not int or schema not in (1, 2):
+        expected = "identity"
+    elif artifact_mode & 0o022:
+        expected = "plugin artifact type/owner/mode invalid"
+    else:
+        expected = "fixture IPC boundary"
     with pytest.raises(qualification.Refusal, match=expected):
         harness.manifest_check()
