@@ -99,13 +99,22 @@ int main(int argc, char** argv) {
         assert(j.press('k',9));
         J other; assert(!other.open(dir,id));
         J independent; assert(independent.open(dir,"i1-abcdef"));
-    } else if (mode == "cycles") {
-        assert(j.press('k',44));
-        for (int i = 0; i < 3000; ++i) {
+    } else if (mode.starts_with("cycles:")) {
+        assert(mode.size() == 8 && mode[7] >= '0' && mode[7] <= '9');
+        const int batch = mode[7] - '0';
+        if (batch == 0) {
+            assert(!j.hasPending() && j.press('k',44));
+        }
+        assert(j.ready() && !j.poisoned() && j.hasPending());
+        assert(j.heldKeys() == std::set<uint32_t>({44}));
+        assert(j.heldButtons().empty() && j.heldModifiers().empty());
+        for (int i = 0; i < 300; ++i) {
             assert(j.press('b',272) && j.release('b',272));
             struct stat st{}; assert(!::stat(path.c_str(),&st) && st.st_size == 268);
+            assert(j.heldKeys() == std::set<uint32_t>({44}));
+            assert(j.heldButtons().empty() && j.heldModifiers().empty());
         }
-        assert(j.release('k',44));
+        if (batch == 9) assert(j.release('k',44));
     } else if (mode == "unlink" || mode == "replace" || mode == "chmod" ||
                mode == "dir-chmod" || mode == "truncate" || mode == "lock-unlink") {
         assert(j.press('k',44));
@@ -198,11 +207,18 @@ def test_crash_pending_reopens_with_duplicate_down_suppression(driver, runtime):
     "invalid-modifier",
 ])
 def test_contract_and_identity_fences(driver, runtime, mode):
-    run(driver, mode, runtime)
     if mode == "cycles":
+        # Preserve all 3,000 real-fsync cycles and the pending key across ten
+        # process lifetimes. This is a bounded-size/recovery contract, not a
+        # 12,000-fsync storage benchmark with a single 60-second deadline.
+        # Each batch keeps the normal timeout; none is retried on failure.
+        for batch in range(10):
+            run(driver, f"cycles:{batch}", runtime)
         assert (runtime / FILENAME).stat().st_size == 260
         assert len(list(runtime.iterdir())) == 2
         run(driver, "empty", runtime)
+    else:
+        run(driver, mode, runtime)
 
 
 def test_poison_persists_and_never_erases_intent(driver, runtime):
