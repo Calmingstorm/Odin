@@ -76,8 +76,9 @@ struct CXDGSurfaceResource { bool alive=true,m_mapped=true;
     bool good() const{return alive;}
 };
 struct Window { WP<CXDGSurfaceResource> m_xdgSurface; };
-struct PopupWatch {bool valid=true; std::vector<CHyprSignalListener> listeners;};
-struct Snapshot {WP<CWLSurfaceResource> surface; WP<Window> window;
+struct PopupWatch {bool valid=true, action=false; std::set<uintptr_t> withdrawn;
+    std::vector<WP<CWLSurfaceResource>> captured; std::vector<CHyprSignalListener> listeners;};
+struct Snapshot {WP<CWLSurfaceResource> surface, pointerSurface; WP<Window> window;
     std::vector<SubsurfaceNode> subsurfaces;
     std::vector<std::vector<odin_scope::PopupAncestor>> popups; SP<PopupWatch> popupWatch;
 };

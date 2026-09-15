@@ -50,7 +50,9 @@ int main() {
 
 def test_native_keyboard_and_pointer_fences_remain_distinct():
     source = (ROOT / "assets/hyprland-input/scope-plugin.cpp").read_text()
-    assert "keyboardFocus == b.surface" in source
+    assert "destination(b, g_pSeatManager->m_state.keyboardFocus.lock())" in source
+    assert ("same(bound, false) && capturedDeparture(bound, previous) && "
+            "destination(bound, next)") in source
     assert "pointerFocus == b.pointerSurface" in source
     assert "chain != b.ancestry" in source
     assert "wl_client_get_credentials(surface->client()" in source

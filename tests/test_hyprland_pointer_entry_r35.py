@@ -74,6 +74,14 @@ struct State {
     std::vector<int> keys, buttons;
     std::string reason;
     bool inputHeld() const { return !input.physicalKeys.empty() || input.physicalButtons; }
+    // This harness covers the one-shot entry from a separately observed foreign
+    // pointer. Full captured-ancestry transfers run in admitted_focus_native.
+    bool focusTransfer(SP<CWLSurfaceResource> previous, SP<CWLSurfaceResource> next) const {
+        const auto admitted = [&](SP<CWLSurfaceResource> surface) {
+            return surface && (surface==bound.surface.lock() || surface==observedPopup);
+        };
+        return scope() && admitted(previous) && admitted(next);
+    }
     struct {
         Vector2D outputPos{0,0}, outputSize{1,1};
         Ref surface, pointerSurface;

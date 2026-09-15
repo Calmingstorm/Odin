@@ -184,6 +184,9 @@ bool releaseCommandID(const std::string& value) {
 }
 struct PopupWatch {
     bool valid = true;
+    bool action = false;
+    std::set<uintptr_t> withdrawn;
+    std::vector<WP<CWLSurfaceResource>> captured;
     std::vector<CHyprSignalListener> listeners;
 };
 struct SubsurfaceNode {
@@ -304,6 +307,11 @@ struct State {
     Snapshot bound;
     std::set<uint32_t> keys, buttons;
     bool armed = false, draining = false, ownedModifiers = false, failed = false;
+    // A successful arm observes the aggregate button ledger empty. Thereafter
+    // every non-owned button event invalidates exclusive ownership for this
+    // lease. The compositor aggregate alone cannot distinguish our own hold
+    // from a human hold of the same button.
+    bool buttonOwnershipKnown = false, foreignButtonActivity = false;
     bool lockTransition = false;
     int64_t deadline = 0;
     uint64_t accepted = 0, rejected = 0, revision = 1;
@@ -755,6 +763,7 @@ struct State {
         // must have been captured, be live and mapped, and retain its exact role.
         std::set<uintptr_t> seen;
         while (surface && surface->m_role && surface->m_role->role() == SURFACE_ROLE_SUBSURFACE) {
+            if (b.popupWatch && b.popupWatch->withdrawn.contains(reinterpret_cast<uintptr_t>(surface.get()))) return false;
             if (seen.size() >= 32 || !seen.insert(reinterpret_cast<uintptr_t>(surface.get())).second ||
                 !surface->good() || !surface->m_mapped || b.surface.expired() || surface->client() != b.surface->client()) return false;
             const auto it = std::find_if(b.subsurfaces.begin(), b.subsurfaces.end(),
@@ -770,26 +779,87 @@ struct State {
         }
         std::vector<odin_scope::PopupAncestor> chain;
         if (!popupChain(b, surface, chain)) return false;
+        if (b.popupWatch && std::any_of(chain.begin(), chain.end(), [&](const auto& node) {
+                return b.popupWatch->withdrawn.contains(node.surface);
+            })) return false;
         return chain.size() == 1 || std::find(b.popups.begin(), b.popups.end(), chain) != b.popups.end();
+    }
+    bool withdrawnSurface(const Snapshot& b, SP<CWLSurfaceResource> surface) const {
+        if (!surface || !b.popupWatch) return false;
+        auto id = reinterpret_cast<uintptr_t>(surface.get());
+        for (size_t depth = 0; depth <= 32; ++depth) {
+            if (b.popupWatch->withdrawn.contains(id)) return true;
+            for (const auto& chain : b.popups)
+                if (!chain.empty() && chain.front().surface == id)
+                    return std::any_of(chain.begin(), chain.end(), [&](const auto& n) { return b.popupWatch->withdrawn.contains(n.surface); });
+            const auto node = std::find_if(b.subsurfaces.begin(), b.subsurfaces.end(), [&](const auto& n) {
+                return !n.surface.expired() && reinterpret_cast<uintptr_t>(n.surface.lock().get()) == id;
+            });
+            if (node == b.subsurfaces.end() || node->parent.expired()) return false;
+            id = reinterpret_cast<uintptr_t>(node->parent.lock().get());
+        }
+        return false;
+    }
+    bool capturedDeparture(const Snapshot& b, SP<CWLSurfaceResource> surface) const {
+        if (!surface || !b.popupWatch || !b.popupWatch->action || !b.popupWatch->valid) return false;
+        if (destination(b, surface)) return true;
+        return withdrawnSurface(b, surface) &&
+            std::any_of(b.popupWatch->captured.begin(), b.popupWatch->captured.end(),
+                [&](const auto& captured) { return !captured.expired() && captured.lock() == surface; });
+    }
+    bool actionTopology(const Snapshot& b) const {
+        if (!b.popupWatch || !b.popupWatch->valid) return false;
+        const auto current = popupInventory(b);
+        for (const auto& chain : current)
+            if (std::find(b.popups.begin(), b.popups.end(), chain) == b.popups.end()) return false;
+        for (const auto& chain : b.popups) {
+            const bool withdrawn = std::any_of(chain.begin(), chain.end(), [&](const auto& node) {
+                return b.popupWatch->withdrawn.contains(node.surface);
+            });
+            if (!withdrawn && std::find(current.begin(), current.end(), chain) == current.end()) return false;
+        }
+        std::vector<SubsurfaceNode> nodes;
+        if (!subsurfaceInventory(b, nodes)) return false;
+        for (const auto& node : nodes) {
+            if (node.surface.expired()) return false;
+            if (withdrawnSurface(b, node.surface.lock())) continue;
+            if (std::find(b.subsurfaces.begin(), b.subsurfaces.end(), node) == b.subsurfaces.end()) return false;
+        }
+        for (const auto& node : b.subsurfaces) {
+            if (node.surface.expired()) continue;
+            if (destination(b, node.surface.lock()) && std::find(nodes.begin(), nodes.end(), node) == nodes.end()) return false;
+        }
+        return true;
     }
     void watchPopups(Snapshot& b) {
         b.popupWatch = std::make_shared<PopupWatch>();
         if (b.window.expired() || b.window->m_xdgSurface.expired() || b.window->m_xdgSurface->m_owner.expired() ||
             b.window->m_xdgSurface->m_owner->m_surfaces.size() > 256) { b.popupWatch->valid = false; return; }
         const std::weak_ptr<PopupWatch> weak = b.popupWatch;
-        const auto invalidate = [this, weak] { if (auto watch = weak.lock(); watch && watch->valid) { watch->valid = false; ++revision; } };
+        const auto invalidate = [this, weak] { if (auto watch = weak.lock(); watch && watch->valid) {
+            watch->valid = false;
+            if (!armed || bound.popupWatch == watch) ++revision;
+        } };
+        const auto withdraw = [weak, invalidate](uintptr_t id) {
+            if (auto watch = weak.lock(); watch && watch->valid && watch->action) watch->withdrawn.insert(id);
+            else invalidate();
+        };
         // Content commits are expected while painting. Only topology/lifecycle
         // signals invalidate eagerly; same() compares effective geometry/state.
         std::vector<SP<CWLSurfaceResource>> subParents{b.surface.lock()};
         for (const auto& node : b.subsurfaces) {
             if (node.surface.expired() || node.role.expired()) { invalidate(); return; }
             auto surface = node.surface.lock();
+            b.popupWatch->captured.emplace_back(surface);
+            const auto retire = [withdraw, id = reinterpret_cast<uintptr_t>(surface.get())] { withdraw(id); };
             subParents.push_back(surface);
             b.popupWatch->listeners.emplace_back(surface->m_events.map.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(surface->m_events.unmap.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(surface->m_events.destroy.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(node.role->m_events.destroy.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(surface->m_events.commit.listen([node, invalidate] {
+            b.popupWatch->listeners.emplace_back(surface->m_events.unmap.listen(retire));
+            b.popupWatch->listeners.emplace_back(surface->m_events.destroy.listen(retire));
+            b.popupWatch->listeners.emplace_back(node.role->m_events.destroy.listen(retire));
+            b.popupWatch->listeners.emplace_back(surface->m_events.commit.listen([node, weak, invalidate] {
+                if (auto watch = weak.lock(); watch && watch->action && !node.surface.expired() &&
+                    watch->withdrawn.contains(reinterpret_cast<uintptr_t>(node.surface.lock().get()))) return;
                 if (node.surface.expired() || node.role.expired()) { invalidate(); return; }
                 const auto surface = node.surface.lock();
                 const auto sub = node.role.lock();
@@ -810,18 +880,25 @@ struct State {
             // invalidate even unrelated popup changes; destination() still
             // requires the exact mapped, observed root ancestry.
             auto popup = candidate->m_popup.lock();
+            const auto id = reinterpret_cast<uintptr_t>(candidate->m_surface.lock().get());
+            const bool captured = std::any_of(b.popups.begin(), b.popups.end(), [&](const auto& chain) {
+                return !chain.empty() && chain.front().surface == id;
+            });
+            if (captured) b.popupWatch->captured.emplace_back(candidate->m_surface);
+            const auto retire = [withdraw, invalidate, captured, id] { if (captured) withdraw(id); else invalidate(); };
             if (auto surface = candidate->m_surface.lock())
                 b.popupWatch->listeners.emplace_back(surface->m_events.newSubsurface.listen([invalidate](SP<CWLSubsurfaceResource>) { invalidate(); }));
             b.popupWatch->listeners.emplace_back(popup->m_events.reposition.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(popup->m_events.dismissed.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(popup->m_events.destroy.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(popup->m_events.dismissed.listen(retire));
+            b.popupWatch->listeners.emplace_back(popup->m_events.destroy.listen(retire));
             b.popupWatch->listeners.emplace_back(candidate->m_events.map.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(candidate->m_events.unmap.listen(invalidate));
-            b.popupWatch->listeners.emplace_back(candidate->m_events.destroy.listen(invalidate));
+            b.popupWatch->listeners.emplace_back(candidate->m_events.unmap.listen(retire));
+            b.popupWatch->listeners.emplace_back(candidate->m_events.destroy.listen(retire));
             b.popupWatch->listeners.emplace_back(candidate->m_events.newPopup.listen([invalidate](SP<CXDGPopupResource>) { invalidate(); }));
             const auto geometry = candidate->m_current.geometry;
             const auto placement = popup->m_geometry;
-            b.popupWatch->listeners.emplace_back(candidate->m_events.commit.listen([candidate, geometry, placement, invalidate] {
+            b.popupWatch->listeners.emplace_back(candidate->m_events.commit.listen([candidate, geometry, placement, weak, id, invalidate] {
+                if (auto watch = weak.lock(); watch && watch->action && watch->withdrawn.contains(id)) return;
                 if (candidate.expired() || candidate->m_popup.expired() || candidate->m_current.geometry != geometry ||
                     candidate->m_popup->m_geometry != placement) invalidate();
             }));
@@ -833,7 +910,7 @@ struct State {
         auto surface = g_pCompositor->vectorWindowToSurface(pos, bound.window.lock(), local);
         return destination(bound, surface) ? surface : nullptr;
     }
-    bool same(const Snapshot& b) const {
+    bool same(const Snapshot& b, bool checkFocus = true) const {
         if (!environment() || b.revision != revision || b.surface.expired() || b.window.expired() || b.monitor.expired()) return false;
         if (!b.groupToken.empty()) {
             const auto it = applicationGroups.find(b.groupToken);
@@ -843,14 +920,17 @@ struct State {
         auto w = b.window.lock(); auto m = b.monitor.lock();
         std::vector<odin_scope::NativeAncestor> chain;
         std::vector<SubsurfaceNode> subsurfaces;
-        if (!subsurfaceInventory(b, subsurfaces) || subsurfaces != b.subsurfaces) return false;
-        if (!b.processFD || !b.image.valid() || !b.popupWatch || !b.popupWatch->valid || !provenance(w, chain) || chain != b.ancestry || popupInventory(b) != b.popups) return false;
+        const bool action = armed && b.popupWatch && b.popupWatch == bound.popupWatch && b.popupWatch->action;
+        if (action ? !actionTopology(b) : (!subsurfaceInventory(b, subsurfaces) || subsurfaces != b.subsurfaces || popupInventory(b) != b.popups)) return false;
+        if (!b.processFD || !b.image.valid() || !b.popupWatch || !b.popupWatch->valid || !provenance(w, chain) || chain != b.ancestry) return false;
         pollfd identity{*b.processFD, POLLIN, 0};
         if (poll(&identity, 1, 0) != 0) return false;
         return w->m_isMapped && w->visible() && !w->m_isX11 && w->wlSurface() &&
             w->resource() == b.surface.lock() &&
             Desktop::focusState()->window() == w && Desktop::focusState()->monitor() == m &&
-            g_pSeatManager->m_state.keyboardFocus == b.surface && g_pSeatManager->m_state.pointerFocus == b.pointerSurface &&
+            (!checkFocus || (destination(b, g_pSeatManager->m_state.keyboardFocus.lock()) &&
+            (g_pSeatManager->m_state.pointerFocus == b.pointerSurface ||
+                (action && destination(b, g_pSeatManager->m_state.pointerFocus.lock()))))) &&
             w->m_monitor == b.monitor && w->m_realPosition->value() == b.pos && w->m_realSize->value() == b.size &&
             w->m_class == b.app && chain.front().pid == b.pid && chain.front().uid == b.uid &&
             processStartTicks(b.pid) == b.startTicks && processImage(b.pid) == b.image &&
@@ -864,6 +944,11 @@ struct State {
         return armed && !failed && ns() < deadline && guardianFD >= 0 && peers.contains(guardianFD) &&
             isPeer(peers.at(guardianFD)->pid) &&
             keyboard && pointer && !keyboard->dead && !pointer->dead && same(bound);
+    }
+    bool focusTransfer(SP<CWLSurfaceResource> previous, SP<CWLSurfaceResource> next) const {
+        return armed && !failed && !draining && ns() < deadline && guardianFD >= 0 && peers.contains(guardianFD) &&
+            isPeer(peers.at(guardianFD)->pid) && keyboard && pointer && !keyboard->dead && !pointer->dead &&
+            same(bound, false) && capturedDeparture(bound, previous) && destination(bound, next);
     }
     bool point(const Vector2D& v) const {
         return std::isfinite(v.x) && std::isfinite(v.y) && v.x >= bound.pos.x && v.y >= bound.pos.y &&
@@ -879,14 +964,19 @@ struct State {
     }
     void revoke(const char* why) noexcept {
         armed = false; deadline = 0; reason = why;
+        if (bound.popupWatch) bound.popupWatch->action = false;
         if (draining) return;
         if (activeOwner && activeOwner->unknown) { failed = true; return; }
         if (activeOwner && activeOwner->reconciled) return;
-        // EOF/lease expiry can precede the explicit reconnect request. They
-        // must not release an overlapping physical hold either. Hyprland does
-        // not expose per-device button ownership, so held buttons fail closed.
+        const bool alreadyClean = activeOwner && activeOwner->empty && activeOwner->ack &&
+            !failed && keys.empty() && buttons.empty() && !ownedModifiers;
+        // EOF/lease expiry can precede the explicit reconnect request. Never
+        // release a potentially overlapping physical hold. hasHeldButtons()
+        // includes this guardian's own press, so use the clean arm baseline
+        // plus continuous foreign-event observation, not that aggregate alone.
         if (activeOwner && (!keys.empty() || !buttons.empty() || ownedModifiers)) {
-            bool overlap = !g_pInputManager || (!buttons.empty() && g_pInputManager->hasHeldButtons());
+            bool overlap = !g_pInputManager || (!buttons.empty() &&
+                (!buttonOwnershipKnown || foreignButtonActivity));
             if (g_pInputManager) for (const auto& device : g_pInputManager->m_keyboards) {
                 if (!device) { overlap = true; break; }
                 if (keyboard && device == keyboard->device) continue;
@@ -918,17 +1008,46 @@ struct State {
         for (const auto button : pendingButtons) {
             try {
                 if (!pointer) throw std::runtime_error("missing pointer");
+                if (activeOwner && (!buttonOwnershipKnown || foreignButtonActivity))
+                    throw std::runtime_error("button ownership changed during drain");
                 g_pInputManager->onMouseButton(IPointer::SButtonEvent{.timeMs = ms(), .button = button, .state = WL_POINTER_BUTTON_STATE_RELEASED}, pointer->device);
                 buttons.erase(button);
             } catch (...) { releaseFailed = true; }
         }
         failed = releaseFailed || !keys.empty() || !buttons.empty() || ownedModifiers;
+        // Local empty sets are necessary, not sufficient: the exact live
+        // virtual keyboard must agree, and no aggregate pointer hold may
+        // remain after our exclusive releases. Unknown is never repaired here.
+        if (keyboard && !keyboard->dead && keyboard->device) {
+            for (uint32_t code = 0; code <= KEY_MAX; ++code)
+                if (keyboard->device->getPressed(code)) failed = true;
+            const auto& modifiers = keyboard->device->m_modifiersState;
+            if (modifiers.depressed || modifiers.latched || modifiers.locked || modifiers.group) failed = true;
+        } else if (activeOwner && !alreadyClean) failed = true;
+        if (activeOwner && !alreadyClean && (!pointer || pointer->dead || !pointer->device ||
+            !g_pInputManager || (!pendingButtons.empty() && g_pInputManager->hasHeldButtons()))) failed = true;
         if (activeOwner) {
             activeOwner->empty = keys.empty() && buttons.empty() && !ownedModifiers;
             activeOwner->ack = !failed; activeOwner->unknown = failed;
         }
         draining = false;
         if (failed) std::fprintf(stderr, "[odin-scope] CRITICAL release failure; admission fenced\n");
+    }
+    bool cleanInactiveOwner() const {
+        // Only an already completed local release can consume a late cleanup
+        // duplicate. Never forward that up (it could erase a human's new hold),
+        // admit a down, or settle unknown/adopted/retired ownership here.
+        if (armed || failed || !activeOwner || !activeOwner->empty || !activeOwner->ack ||
+            activeOwner->unknown || activeOwner->inputFenced || activeOwner->revoked ||
+            activeOwner->retired || activeOwner->reconciled ||
+            activeOwner->keyboard != keyboard || activeOwner->pointer != pointer ||
+            !keys.empty() || !buttons.empty() || ownedModifiers ||
+            !keyboard || keyboard->dead || !keyboard->device ||
+            !pointer || pointer->dead || !pointer->device) return false;
+        for (uint32_t code = 0; code <= KEY_MAX; ++code)
+            if (keyboard->device->getPressed(code)) return false;
+        const auto& modifiers = keyboard->device->m_modifiersState;
+        return !(modifiers.depressed || modifiers.latched || modifiers.locked || modifiers.group);
     }
     J status(bool ok = true, const std::string& error = {}) {
         auto j = obj(); put(j.get(), "ok", ok); put(j.get(), "version", int64_t(1));
@@ -1004,6 +1123,12 @@ struct State {
     }
     J snapshot(const std::string& output, const std::string& groupToken = {}, bool refreshGroup = false) {
         if (!environment()) return status(false, "lock-or-unknown-state");
+        if (armed) {
+            // Frozen read-only proof, never a recapture or a new input lease.
+            if (refreshGroup || !scope() || bound.monitor.expired() || bound.monitor->m_name != output ||
+                groupToken != bound.groupToken) return status(false, "action-snapshot-scope-refused");
+            return snapshotReply(bound);
+        }
         if (refreshGroup && !odin_scope::group_refresh_allowed(armed, failed, !keys.empty(), !buttons.empty(),
                 ownedModifiers, activeOwner && (activeOwner->unknown || activeOwner->inputFenced), true))
             return status(false, "application-group-refresh-not-released");
@@ -1133,11 +1258,15 @@ struct State {
             b.groupToken = selectedGroup; b.groupEpoch = nextGroup.epoch;
         }
         snapshots.emplace(b.token, b);
-        auto j = status(); put(j.get(), "token", b.token); put(j.get(), "measured_monotonic_ns", b.measured); put(j.get(), "locked", false);
+        return snapshotReply(b);
+    }
+    J snapshotReply(const Snapshot& b) {
+        const auto w = b.window.lock(); const auto m = b.monitor.lock();
+        auto j = status(); put(j.get(), "token", b.token); put(j.get(), "measured_monotonic_ns", ns()); put(j.get(), "locked", false);
         if (!b.groupToken.empty()) {
             auto group = obj(); put(group.get(), "token", b.groupToken); put(group.get(), "epoch", int64_t(b.groupEpoch));
             auto* members = json_object_new_array();
-            for (const auto& [id, member] : nextGroup.members) json_object_array_add(members, json_object_new_string(id.c_str()));
+            for (const auto& [id, member] : applicationGroups.at(b.groupToken).members) json_object_array_add(members, json_object_new_string(id.c_str()));
             json_object_object_add(group.get(), "member_tokens", members);
             json_object_object_add(j.get(), "application_group", group.release());
         }
@@ -1485,9 +1614,11 @@ struct State {
         activeOwner = owner;
         if (owner) { owner->keyboard = k; owner->pointer = p; owner->empty = false; owner->ack = false; }
         keyboard = k; pointer = p; guardianFD = peer.fd; bound = it->second; snapshots.erase(it);
+        buttonOwnershipKnown = true; foreignButtonActivity = false;
         if (diagnosticToken != bound.token) { diagnosticToken.clear(); wire = {}; wireCount = 0; wireOverflow = false; dispatchNumber = 0; }
         rejectionGuards.fill(nullptr); rejectionBase = rejected;
         deadline = expiry; armed = true; reason = "armed";
+        bound.popupWatch->action = true;
         return status();
     }
     void drop(int fd) {
@@ -1615,6 +1746,7 @@ void onKey(CInputManager* manager, const IKeyboard::SKeyEvent& event, SP<IKeyboa
     if (!k) { original(manager, event, device); return; }
     if (k == s.keyboard && s.activeOwner && (s.activeOwner->unknown || s.activeOwner->inputFenced)) { s.reject("owner-release-unknown-or-fenced"); return; }
     if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.keys.erase(event.keycode)) { original(manager, event, device); return; }
+    if (k == s.keyboard && event.state == WL_KEYBOARD_KEY_STATE_RELEASED && s.cleanInactiveOwner()) return;
     if (k != s.keyboard || !s.allow()) {
         if (k != s.keyboard) s.reject("key-device-mismatch");
         // IKeyboard::updatePressed precedes this handler. Undo refused device
@@ -1635,17 +1767,31 @@ void onMod(CInputManager* manager, SP<IKeyboard> device) {
     const auto& m = device->m_modifiersState;
     const bool zero = !(m.depressed || m.latched || m.locked || m.group);
     if (k == s.keyboard && zero && s.ownedModifiers) { s.ownedModifiers = false; original(manager, device); return; }
+    if (k == s.keyboard && zero && s.cleanInactiveOwner()) return;
     if (k != s.keyboard || !s.allow()) { if (k != s.keyboard) s.reject("modifier-device-mismatch"); device->updateModifiers(0, 0, 0, 0); return; }
     s.ownedModifiers = !zero; original(manager, device);
 }
 void onButton(CInputManager* manager, IPointer::SButtonEvent event, SP<IPointer> device) {
     auto& s = *live; auto original = reinterpret_cast<ButtonFn>(s.buttonHook->m_original);
+    // Observe before passthrough (including physical devices and drain-time
+    // reentrancy). Never swallow a human event or infer ownership from a
+    // same-code aggregate release. One foreign event poisons this lease's
+    // exclusive-button proof until another clean arm, not until an arbitrary up.
+    if (s.buttonOwnershipKnown && (!s.pointer || device != s.pointer->device))
+        s.foreignButtonActivity = true;
     if (s.draining) { original(manager, event, device); return; }
     auto* p = s.find(device); if (!p) { original(manager, event, device); return; }
     if (p == s.pointer && s.activeOwner && (s.activeOwner->unknown || s.activeOwner->inputFenced)) { s.reject("owner-release-unknown-or-fenced"); return; }
+    if (p == s.pointer && s.activeOwner && event.state == WL_POINTER_BUTTON_STATE_RELEASED &&
+        s.buttons.contains(event.button) && (!s.buttonOwnershipKnown || s.foreignButtonActivity)) {
+        // The ordinary guardian up shares the same aggregate-erasure hazard as
+        // revoke's synthetic up. Keep the ledger intact for explicit recovery.
+        s.reject("button-release-ownership-unknown"); s.revoke("button-release-ownership-unknown"); return;
+    }
     if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.buttons.erase(event.button)) {
         State::OwnedDispatch trace(s, false); original(manager, event, device); return;
     }
+    if (p == s.pointer && event.state == WL_POINTER_BUTTON_STATE_RELEASED && s.cleanInactiveOwner()) return;
     if (p != s.pointer || !s.allow()) { if (p != s.pointer) s.reject("button-device-mismatch"); return; }
     if (event.state != WL_POINTER_BUTTON_STATE_PRESSED || !s.destinationAt(g_pPointerManager->position()) ||
         s.destinationAt(g_pPointerManager->position()) != g_pSeatManager->m_state.pointerFocus.lock()) { s.reject("button-destination-refused"); s.revoke("button-destination-refused"); return; }
@@ -1719,6 +1865,12 @@ void onWarp(CInputManager* manager, IPointer::SMotionAbsoluteEvent event) {
 }
 void onFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface) {
     auto& s = *live; auto original = reinterpret_cast<FocusFn>(s.focusHook->m_original);
+    if (surface != g_pSeatManager->m_state.keyboardFocus.lock() &&
+        s.focusTransfer(g_pSeatManager->m_state.keyboardFocus.lock(), surface)) {
+        original(manager, surface);
+        if (!s.scope()) s.revoke("admitted-keyboard-focus-postcondition-refused");
+        return;
+    }
     if (surface != g_pSeatManager->m_state.keyboardFocus.lock()) { ++s.revision; if (!s.draining) s.revoke("pre-keyboard-focus-transfer"); }
     original(manager, surface);
 }
@@ -1733,6 +1885,14 @@ void onPointerFocus(CSeatManager* manager, SP<CWLSurfaceResource> surface, const
         original(manager, surface, local);
         s.bound.pointerSurface = surface;
         if (!s.scope()) s.revoke("positioning-scope-postcondition-refused");
+        return;
+    }
+    if (surface != g_pSeatManager->m_state.pointerFocus.lock() &&
+        s.focusTransfer(g_pSeatManager->m_state.pointerFocus.lock(), surface) &&
+        s.destinationAt(g_pPointerManager->position()) == surface) {
+        original(manager, surface, local);
+        s.bound.pointerSurface = surface; // never return to grandfathered foreign focus
+        if (!s.scope()) s.revoke("admitted-pointer-focus-postcondition-refused");
         return;
     }
     if (surface != g_pSeatManager->m_state.pointerFocus.lock()) { ++s.revision; if (!s.draining) s.revoke("pre-pointer-focus-transfer"); }
@@ -1826,7 +1986,12 @@ APICALL EXPORT PLUGIN_DESCRIPTION_INFO PLUGIN_INIT(HANDLE pluginHandle) {
     s->epochListeners.emplace_back(e.monitor.focused.listen(epoch));
     s->epochListeners.emplace_back(e.monitor.added.listen(epoch));
     s->epochListeners.emplace_back(e.monitor.preRemoved.listen(epoch));
-    s->epochListeners.emplace_back(e.window.active.listen(epoch));
+    s->epochListeners.emplace_back(e.window.active.listen([s, epoch] {
+        // Hyprland emits active for intra-member surface focus too. The seat
+        // hooks already fence foreign ABA; only a still-valid lease can retain
+        // its serial through this redundant same-member notification.
+        if (!s->scope()) epoch();
+    }));
     s->epochListeners.emplace_back(e.window.class_.listen(epoch));
     s->epochListeners.emplace_back(e.window.open.listen(epoch));
     s->epochListeners.emplace_back(e.window.close.listen(epoch));

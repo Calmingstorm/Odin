@@ -19,7 +19,8 @@ def extracted_popup_binary(tmp_path_factory):
                          production.index("    SP<CWLSurfaceResource> destinationAt(")]
     source = directory / "popup.cpp"
     source.write_text('#include "native_popup_fixture.hpp"\n'
-                      'struct State { unsigned revision=0;\n' + methods +
+                      'struct State { unsigned revision=0; bool armed=false; Snapshot bound;\n'
+                      + methods +
                       '\n};\n#include "native_popup_cases.hpp"\n')
     binary = directory / "popup"
     subprocess.run(["c++", "-std=c++23", "-Wall", "-Wextra", "-Werror",
@@ -34,6 +35,8 @@ def extracted_popup_binary(tmp_path_factory):
     "dismissed", "popup-destroy", "surface-destroy", "unmap", "root-new",
     "nested-new", "expired-popup", "retired-watch", "unrelated",
     "subsurface-position", "subsurface-client", "subsurface-new", "subsurface-unmap",
+    "action-withdraw", "action-remap", "action-new", "action-foreign",
+    "action-subsurface", "action-stale-watch", "action-destroy",
 ])
 def test_extracted_production_popup_methods(extracted_popup_binary, scenario):
     subprocess.run([str(extracted_popup_binary), scenario], check=True)
@@ -81,7 +84,7 @@ int main() {
 def test_scope_contract():
     source = (ROOT / "assets/hyprland-input/scope-plugin.cpp").read_text()
     assert "g_pSeatManager->m_state.pointerFocus == b.pointerSurface" in source
-    assert "g_pSeatManager->m_state.keyboardFocus == b.surface" in source
+    assert "destination(b, g_pSeatManager->m_state.keyboardFocus.lock())" in source
     assert "popupInventory(b) != b.popups" in source
     assert "!b.popupWatch->valid" in source
     for event in ("reposition", "dismissed", "destroy", "map", "unmap", "newPopup"):
@@ -91,7 +94,8 @@ def test_scope_contract():
     # Existing unmapped popups must be watched before map->unmap restores the
     # inventory. Lifecycle watching must not use the mapped admission predicate.
     assert "popupChain(" not in watcher
-    assert "watch->valid = false; ++revision" in watcher
+    assert "watch->valid = false;" in watcher
+    assert "if (!armed || bound.popupWatch == watch) ++revision" in watcher
     button = source.split("void onButton(", 1)[1].split("void onAxis(", 1)[0]
     assert button.index("WL_POINTER_BUTTON_STATE_RELEASED") < button.index("!s.allow()")
     assert "s.destinationAt" in button

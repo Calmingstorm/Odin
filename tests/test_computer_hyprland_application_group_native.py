@@ -73,7 +73,7 @@ def test_group_commit_is_after_full_snapshot_validation_and_lease_stays_exact():
     assert snapshot.index('"focus-not-contained-or-ambiguous"') < snapshot.index(
         "applicationGroups.insert_or_assign")
     assert "bound =" not in snapshot
-    exact = source.split("    bool same(const Snapshot& b)", 1)[1].split("    bool scope()", 1)[0]
+    exact = source.split("    bool same(const Snapshot& b,", 1)[1].split("    bool scope()", 1)[0]
     assert "it->second.epoch != b.groupEpoch" in exact
     assert "Desktop::focusState()->window() == w" in exact
     assert "w->m_realPosition->value() == b.pos" in exact
