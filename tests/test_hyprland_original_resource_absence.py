@@ -1,5 +1,6 @@
 """Proof authority with real pidfds, no native-display claims."""
 import copy
+import hashlib
 import os
 import subprocess
 from dataclasses import replace
@@ -37,6 +38,14 @@ def originals(monkeypatch):
         "inventory_id": "c" * 48, "keyboard_count": 1, "pointer_count": 1,
         "persistent_devices": False, "kernel_devices": False,
         "endpoint_semantics": "original-process-protocol-dispatch"}}
+    # This fixture explicitly emulates the audited tuple. Production constants
+    # remain fixed; ordinary synthetic approved builds must be rejected.
+    guardian_sha = hashlib.sha256(
+        Path(f"/proc/{children[1].pid}/exe").read_bytes()
+    ).hexdigest()
+    monkeypatch.setattr(absence, "QUALIFIED_RETIREMENT_TUPLE",
+                        absence.RetirementQualificationTuple(
+                            "a" * 64, "b" * 64, "a" * 64, guardian_sha))
     monkeypatch.setattr(absence, "revalidate", AsyncMock())
     yield handle, successor, row, children
     for child in children:
@@ -49,6 +58,30 @@ def stop(children):
     for child in children:
         child.kill()
         child.wait()
+
+
+def test_retirement_tuple_rejects_other_approved_builds():
+    qualified = absence.QUALIFIED_RETIREMENT_TUPLE
+    assert absence.exact_retirement_build(
+        plugin_sha256=qualified.plugin_sha256,
+        companion_build_id=qualified.companion_build_id,
+        compositor_sha256=qualified.compositor_sha256,
+    )
+    assert not absence.exact_retirement_build(
+        plugin_sha256="0" * 64,
+        companion_build_id=qualified.companion_build_id,
+        compositor_sha256=qualified.compositor_sha256,
+    )
+    assert not absence.exact_retirement_build(
+        plugin_sha256=qualified.plugin_sha256,
+        companion_build_id="0" * 64,
+        compositor_sha256=qualified.compositor_sha256,
+    )
+    assert not absence.exact_retirement_build(
+        plugin_sha256=qualified.plugin_sha256,
+        companion_build_id=qualified.companion_build_id,
+        compositor_sha256="0" * 64,
+    )
 
 
 @pytest.mark.asyncio
@@ -105,6 +138,17 @@ async def test_capture_requires_alive_processes_and_inventory(originals):
 
 
 @pytest.mark.asyncio
+async def test_root_trusted_but_unqualified_guardian_cannot_produce_witness(originals, monkeypatch):
+    handle, _, row, _ = originals
+    monkeypatch.setattr(absence, "QUALIFIED_RETIREMENT_TUPLE",
+                        absence.QUALIFIED_RETIREMENT_TUPLE._replace(guardian_sha256="f" * 64))
+    # The fixture process is a real trusted executable. Ownership alone must not
+    # substitute for the independently recorded qualified guardian image digest.
+    with pytest.raises(HyprlandScopeFailure, match="resource_absence_unproven"):
+        await absence.ResourceContainmentWitness.capture(handle, row)
+
+
+@pytest.mark.asyncio
 async def test_provider_build_authorization_export_and_close(originals, monkeypatch):
     handle, successor, inventory, children = originals
     provider = scope.HyprlandScopeProvider(
@@ -134,10 +178,15 @@ async def test_provider_build_authorization_export_and_close(originals, monkeypa
     monkeypatch.setattr(scope, "revalidate", AsyncMock())
     assert await provider.capture_resource_witness(handle) is None
     with pytest.raises(HyprlandScopeFailure):
-        provider.authorize_resource_containment(companion_build_id="malformed")
-    provider.authorize_resource_containment(companion_build_id=row["companion_build_id"])
+        provider.authorize_resource_containment(
+            plugin_sha256="malformed", companion_build_id="malformed", compositor_sha256="a" * 64)
+    provider.authorize_resource_containment(
+        plugin_sha256="a" * 64, companion_build_id=row["companion_build_id"],
+        compositor_sha256="a" * 64)
     with pytest.raises(HyprlandScopeFailure):
-        provider.authorize_resource_containment(companion_build_id="f" * 64)
+        provider.authorize_resource_containment(
+            plugin_sha256="f" * 64, companion_build_id=row["companion_build_id"],
+            compositor_sha256="a" * 64)
     for field, value in (("companion_build_id", "f" * 64), ("resource_model", "not-contained"),
                          ("resource_containment_version", True), ("plugin_epoch", "f" * 48)):
         before = row[field]

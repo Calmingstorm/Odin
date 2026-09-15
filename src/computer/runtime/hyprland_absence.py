@@ -25,13 +25,14 @@ from __future__ import annotations
 
 import asyncio
 import copy
+import hashlib
 import os
 import re
 import secrets
 import select
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING, NoReturn
+from typing import TYPE_CHECKING, Final, NamedTuple, NoReturn
 
 from .hyprland_identity import HyprlandIdentity, _proc_start, revalidate
 
@@ -41,9 +42,50 @@ if TYPE_CHECKING:
 # Bounded KVM evidence: original sealed inventory, retained pidfds, both exits,
 # same-boot independently pinned successor. Not the other recovery capabilities.
 # See docs/computer-use/HYPRLAND-CROSS-COMPOSITOR-RETIREMENT-2026-09-15.md.
-RUNTIME_QUALIFIED = True
 RUNTIME_QUALIFICATION_SCOPE = "same-boot-retained-original-witness-v1"
 RESOURCE_MODEL = "wayland-process-local-v1"
+
+
+class RetirementQualificationTuple(NamedTuple):
+    """The sole native build audited for cross-compositor retirement."""
+
+    plugin_sha256: str
+    companion_build_id: str
+    compositor_sha256: str
+    guardian_sha256: str
+
+
+# Build approval permits normal managed input activation.  It does not establish
+# the narrower process-local containment facts needed for retirement witnesses.
+# These values must only change after a separately recorded native qualification.
+QUALIFIED_RETIREMENT_TUPLE: Final = RetirementQualificationTuple(
+    "51330a77e1fd88a8862bbd5930ed3651c0fa3adba9173fdb8eeb13de27f27a55",
+    "943217433d52f0b5a4fd92f4bce6f41bc37a73cefee32813acff3c1a4c3d8fdb",
+    "bfb6a200300e09b5929130d831c815242ec87ce98531ea25993a921aa9e2472b",
+    "f89600182181028e428b7b7d74a8d0678d7b73795b791d53b33ae33a851fe580",
+)
+
+
+def exact_retirement_build(*, plugin_sha256, companion_build_id, compositor_sha256):
+    """Return true only for the independently audited build tuple."""
+    qualified = QUALIFIED_RETIREMENT_TUPLE
+    return (
+        type(plugin_sha256) is str
+        and type(companion_build_id) is str
+        and type(compositor_sha256) is str
+        and plugin_sha256 == qualified.plugin_sha256
+        and companion_build_id == qualified.companion_build_id
+        and compositor_sha256 == qualified.compositor_sha256
+    )
+
+
+def exact_retirement_compositor(identity: HyprlandIdentity):
+    """The pinned executable image, not version/commit metadata, is qualified."""
+    return (
+        isinstance(identity, HyprlandIdentity)
+        and identity.trust.sha256 == QUALIFIED_RETIREMENT_TUPLE.compositor_sha256
+        and identity.process.sha256 == QUALIFIED_RETIREMENT_TUPLE.compositor_sha256
+    )
 
 
 def _fail() -> NoReturn:
@@ -97,7 +139,9 @@ class ResourceContainmentWitness:
         _owner_digest(handle)
         inventory = row.get("resource_containment")
         build_id = row.get("companion_build_id")
-        if (type(build_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", build_id)
+        if (not exact_retirement_compositor(handle.compositor)
+                or build_id != QUALIFIED_RETIREMENT_TUPLE.companion_build_id
+                or type(build_id) is not str or not re.fullmatch(r"[0-9a-f]{64}", build_id)
                 or type(inventory) is not dict or set(inventory) != {
                 "version", "resource_model", "inventory_id", "keyboard_count",
                 "pointer_count", "persistent_devices", "kernel_devices", "endpoint_semantics"}
@@ -122,6 +166,25 @@ class ResourceContainmentWitness:
             executable = os.readlink(f"/proc/{handle.guardian_pid}/exe")
             trusted_binary(executable)
             before = os.stat(f"/proc/{handle.guardian_pid}/exe")
+            # Root-owned executable trust is necessary but not an implementation
+            # audit. Hash the stable original process image before retaining pidfds.
+            guardian_image = os.open(
+                f"/proc/{handle.guardian_pid}/exe", os.O_RDONLY | os.O_CLOEXEC
+            )
+            try:
+                guardian_before = os.fstat(guardian_image)
+                digest = hashlib.sha256()
+                while block := os.read(guardian_image, 1024 * 1024):
+                    digest.update(block)
+                guardian_after = os.fstat(guardian_image)
+            finally:
+                os.close(guardian_image)
+            if ((guardian_before.st_dev, guardian_before.st_ino, guardian_before.st_size,
+                 guardian_before.st_ctime_ns) !=
+                    (guardian_after.st_dev, guardian_after.st_ino, guardian_after.st_size,
+                     guardian_after.st_ctime_ns)
+                    or digest.hexdigest() != QUALIFIED_RETIREMENT_TUPLE.guardian_sha256):
+                _fail()
             witness._compositor_fd = os.pidfd_open(handle.compositor.process.pid, 0)
             witness._guardian_fd = os.pidfd_open(handle.guardian_pid, 0)
             await revalidate(handle.compositor, time.monotonic() + 0.5)

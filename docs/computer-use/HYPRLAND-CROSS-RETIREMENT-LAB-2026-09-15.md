@@ -1,5 +1,43 @@
 # Cross-compositor retirement: final KVM evidence, 2026-09-15
 
+## Exact-tuple hardening addendum
+
+The earlier final tuple below was superseded by the final exact-tuple campaign.
+The retained, public-safe evidence is
+`/mnt/storage/hyprland-lab/cross-retirement-20260915T155653Z/exact-final2-public.tar.gz`
+(SHA-256 `47547263837b2fa63d5dd40ca27f5fd52c58118089ca68ddda91254a0240189a`).
+Private databases and capability/owner-descriptor material are excluded.
+
+The final shipping-default guest driver exited **0** without `--provisional`.
+It enforced this exact native qualification tuple:
+
+| Artifact | SHA-256 / identity |
+| --- | --- |
+| Hyprland executable | `bfb6a200300e09b5929130d831c815242ec87ce98531ea25993a921aa9e2472b` |
+| Plugin | `51330a77e1fd88a8862bbd5930ed3651c0fa3adba9173fdb8eeb13de27f27a55` |
+| Companion build ID | `943217433d52f0b5a4fd92f4bce6f41bc37a73cefee32813acff3c1a4c3d8fdb` |
+| Guardian | `f89600182181028e428b7b7d74a8d0678d7b73795b791d53b33ae33a851fe580` |
+| Capture | `4fb6fd308a0af8dfc21bf11b87b26c91f03aeff34e036d11e9607bf64c63d096` |
+
+`exact-final2` proved the narrow same-boot retained-original-witness case:
+held input was issued before compositor death; guardian release then became
+unknown (`input-path-lost`, no release submission or acknowledgement); the
+original resources retired through real native resource-absence evidence;
+`runtime_qualified=true`; durable state became `fresh_target_required`; old
+observation/action authority refused; and the independently authenticated new
+receiver had zero button events. Direct native proof verified exactly once;
+the predeath, changed-successor, and missing-local-closure negative paths all
+refused. Recovery took `0.5891971420001028` seconds.
+
+The first exact-final run correctly refused because the typed witness had not
+yet propagated its exact qualification to the live coordinator. It is retained
+as `exact-final1`, not claimed as success. The narrowly scoped backend
+propagation repair produced the final `exact-final2` pass. Final source evidence
+contains 14 files and was compared against the frozen worktree with **zero
+hash mismatches**. The guest then powered off cleanly: QEMU `Result=success`,
+main exit 0, inactive/dead, and its local SSH forward was absent. No host
+desktop, external host, or production deployment was touched.
+
 ## Decision and scope
 
 **PASS for `same-boot-retained-original-witness-v1`.** Final native artifact rebuilt

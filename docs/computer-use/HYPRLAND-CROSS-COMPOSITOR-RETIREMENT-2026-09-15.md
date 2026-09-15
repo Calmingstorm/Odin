@@ -49,6 +49,12 @@ restart. A qualified boolean without the matching evidence is rejected.
 - Plugin reload while the original compositor lives does not satisfy retirement.
 - Native protocol support is not itself runtime qualification. Qualification must
   be recorded against the actual lab tuple before enabling the bounded gate.
+- The runtime allowlist binds plugin digest, companion build ID, compositor image
+  digest and measured live guardian image digest. Other approved builds can still
+  load normally but cannot capture a qualified retirement witness. Build manifests
+  default to unqualified unless their exact plugin/companion/guardian tuple appears
+  in the separate reviewed evidence registry. Rebuilding changed source or using a
+  different compiler cannot silently inherit this lab verdict.
 - This does not qualify the entire task-lineage, output-handoff, durable-takeover,
   human-conflict, or cancellation matrix.
 

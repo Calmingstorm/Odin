@@ -98,9 +98,9 @@ class HyprlandCrossIncarnationRecovery:
 
     def __init__(self, capability=None):
         if capability is None:
-            from .hyprland_absence import RUNTIME_QUALIFIED
-
-            capability = HyprlandRetirementCapability(runtime_qualified=RUNTIME_QUALIFIED)
+            # Qualification is attached to an authenticated provider/build tuple.
+            # A coordinator constructed without that evidence is never qualified.
+            capability = HyprlandRetirementCapability(runtime_qualified=False)
         self.capability = capability
 
     async def reconcile(self, *, provider, handle, successor, command_id, checkpoint,

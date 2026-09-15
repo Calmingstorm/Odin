@@ -474,13 +474,24 @@ class HyprlandScopeProvider:
         self._closed = False
         self._resource_witnesses = {}
         self._resource_build_id = None
+        self._resource_plugin_sha256 = None
+        self._resource_compositor_sha256 = None
 
-    def authorize_resource_containment(self, *, companion_build_id):
-        """Backend supplies build ID only after independent mapped-plugin trust."""
-        if (type(companion_build_id) is not str or not _DIGEST.fullmatch(companion_build_id)
-                or self._resource_build_id not in {None, companion_build_id}):
+    def authorize_resource_containment(self, *, plugin_sha256, companion_build_id,
+                                       compositor_sha256):
+        """Authorize resource containment only for the audited native tuple."""
+        from .hyprland_absence import exact_retirement_build
+
+        if (not exact_retirement_build(plugin_sha256=plugin_sha256,
+                                       companion_build_id=companion_build_id,
+                                       compositor_sha256=compositor_sha256)
+                or self._resource_build_id not in {None, companion_build_id}
+                or self._resource_plugin_sha256 not in {None, plugin_sha256}
+                or self._resource_compositor_sha256 not in {None, compositor_sha256}):
             _fail("hyprland_retirement_protocol_unavailable")
         self._resource_build_id = companion_build_id
+        self._resource_plugin_sha256 = plugin_sha256
+        self._resource_compositor_sha256 = compositor_sha256
 
     @classmethod
     async def from_identity(
@@ -751,7 +762,7 @@ class HyprlandScopeProvider:
             for key in ("owner_reconnect_version", "retirement_evidence_version"):
                 if type(row.get(key)) is not int or row[key] != 1:
                     _fail("hyprland_owner_protocol_unavailable")
-            from .hyprland_absence import RESOURCE_MODEL, RUNTIME_QUALIFIED
+            from .hyprland_absence import RESOURCE_MODEL, exact_retirement_build
 
             supported = row.get("cross_compositor_retirement_supported")
             if type(supported) is not bool or (supported and (
@@ -762,7 +773,10 @@ class HyprlandScopeProvider:
             await revalidate(identity, time.monotonic() + 0.5)
             return {"owner_reconnect_version": 1, "retirement_evidence_version": 1,
                     "cross_compositor_retirement_supported": supported,
-                    "runtime_qualified": bool(supported and RUNTIME_QUALIFIED),
+                    "runtime_qualified": bool(supported and exact_retirement_build(
+                        plugin_sha256=self._resource_plugin_sha256,
+                        companion_build_id=self._resource_build_id,
+                        compositor_sha256=identity.trust.sha256)),
                     **({"runtime_qualification_scope": "same-boot-retained-original-witness-v1"}
                        if supported else {})}
 

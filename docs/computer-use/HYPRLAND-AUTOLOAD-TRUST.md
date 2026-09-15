@@ -10,6 +10,10 @@ build, not its behavior after faults. `runtime_qualified` and the optional
 `runtime_qualification_scope` describe separately recorded bounded recovery
 evidence. The load approval object does not expose or consume either field as
 authority, and no recovery capability changes as a consequence of loading.
+The separate retirement runtime checks an exact qualified native tuple, including
+the live guardian image digest. An approved but unqualified build still loads;
+it does not inherit the retirement capability. The build script similarly emits
+qualified metadata only for an exact entry in `runtime-qualified-tuples.txt`.
 
 ## What actually gates loading
 

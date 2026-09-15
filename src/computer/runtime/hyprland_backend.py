@@ -398,6 +398,8 @@ class HyprlandRuntimeBackend:
         # Never reconstruct this authority from stored process descriptors.
         self._resource_witness: Any | None = None
         self._containment_build_id: str | None = None
+        self._containment_plugin_sha256: str | None = None
+        self._containment_compositor_sha256: str | None = None
         self._incarnation: CompositorIncarnation | None = None
         self._recovery_epoch = 0
         self._prepared_recovery: tuple[int, int] | None = None
@@ -605,7 +607,20 @@ class HyprlandRuntimeBackend:
             ).activate(authorized_task=True)
             if plugin_state.ready is not True:
                 raise HyprlandPluginError(plugin_state.code or "hyprland_plugin_unready")
-            self._containment_build_id = approval.companion_build_id
+            from .hyprland_absence import exact_retirement_build
+
+            if exact_retirement_build(
+                plugin_sha256=approval.sha256,
+                companion_build_id=approval.companion_build_id,
+                compositor_sha256=identity.trust.sha256,
+            ) and identity.process.sha256 == identity.trust.sha256:
+                self._containment_build_id = approval.companion_build_id
+                self._containment_plugin_sha256 = approval.sha256
+                self._containment_compositor_sha256 = identity.trust.sha256
+            else:
+                self._containment_build_id = None
+                self._containment_plugin_sha256 = None
+                self._containment_compositor_sha256 = None
         except HyprlandPluginError as error:
             raise ComputerError(str(error)) from None
 
@@ -1625,9 +1640,13 @@ class HyprlandRuntimeBackend:
         self._revision += 1
 
     def _authorize_resource_provider(self, provider):
-        if self._containment_build_id is not None:
+        if (self._containment_build_id is not None
+                and self._containment_plugin_sha256 is not None
+                and self._containment_compositor_sha256 is not None):
             provider.authorize_resource_containment(
-                companion_build_id=self._containment_build_id)
+                plugin_sha256=self._containment_plugin_sha256,
+                companion_build_id=self._containment_build_id,
+                compositor_sha256=self._containment_compositor_sha256)
 
     async def _capture_resource_witness(self, provider):
         self._authorize_resource_provider(provider)
@@ -1637,9 +1656,14 @@ class HyprlandRuntimeBackend:
         witness = await capture(self._owner_handle) if callable(capture) else None
         if isinstance(provider, HyprlandScopeProvider) and witness is not None:
             from .hyprland_absence import ResourceContainmentWitness
+            from .hyprland_recovery import HyprlandRetirementCapability
 
             if type(witness) is not ResourceContainmentWitness:
                 raise ComputerError("hyprland_resource_witness_invalid")
+            # Exact mapped plugin/compositor admission and stable guardian hash
+            # have both succeeded. Only this retained witness enables the gate.
+            self._cross_incarnation.capability = HyprlandRetirementCapability(
+                runtime_qualified=True)
         previous = self._resource_witness
         self._resource_witness = witness
         if previous is not None and previous is not witness:

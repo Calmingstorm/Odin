@@ -172,6 +172,8 @@ async def test_verified_build_is_authorized_before_capture_and_bind(runtime):
     backend, provider, guardian = runtime
     calls = []
     backend._containment_build_id = "a" * 64
+    backend._containment_plugin_sha256 = "b" * 64
+    backend._containment_compositor_sha256 = "c" * 64
     provider.authorize_resource_containment = Mock(
         side_effect=lambda **kwargs: calls.append(("authorize", kwargs)))
     old_capture = provider.capture_owner
@@ -185,7 +187,11 @@ async def test_verified_build_is_authorized_before_capture_and_bind(runtime):
     provider.capture_resource_witness = AsyncMock(return_value=witness)
     result = await backend.recover_native_authority(consent_generation=2, command_id="txn")
     assert result.state == "ready_for_replan"
-    assert calls[0] == ("authorize", {"companion_build_id": "a" * 64})
+    assert calls[0] == ("authorize", {
+        "plugin_sha256": "b" * 64,
+        "companion_build_id": "a" * 64,
+        "compositor_sha256": "c" * 64,
+    })
     assert calls[1][0] == "owner"
     provider.capture_resource_witness.assert_awaited_once_with(backend._owner_handle)
     guardian.bind_scope.assert_awaited_once()

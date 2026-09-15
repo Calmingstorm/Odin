@@ -112,16 +112,18 @@ async def test_prepare_plugin_real_trust_and_manager_without_recovery_qualificat
         await backend._prepare_plugin(pinned, ipc_path="/fixture/command.sock")
     assert ipc.loads == (0 if already_loaded or fault in {"artifact", "abi"} else 1)
     assert backend._guardian is None
-    # Load metadata is ignored: the independently qualified bounded implementation
-    # owns its gate, even when this fixture manifest explicitly reports false.
-    assert backend._cross_incarnation.capability.runtime_qualified is True
+    # Loading this non-qualified fixture remains permitted, but its artifact
+    # cannot inherit the independently recorded exact native retirement tuple.
+    assert backend._cross_incarnation.capability.runtime_qualified is False
 
 
 def test_build_manifest_explicitly_separates_load_and_recovery_claims():
     script = Path("scripts/build-hyprland-input.sh").read_text()
     assert '"schema":2' in script
     assert '"auto_management_approved":true' in script
-    assert '"runtime_qualified":true' in script
+    assert '"runtime_qualified":%s' in script
+    assert "qualified=false" in script
+    assert 'grep -Fqx "$build_id $plugin_sha $guardian_sha"' in script
     assert '"runtime_qualification_scope":"same-boot-retained-original-witness-v1"' in script
 
 
