@@ -122,9 +122,13 @@ def test_readiness_is_not_denied_by_application_name(app):
     ],
 )
 def test_controller_readiness_never_reuses_expired_or_inactive_authority(state, age, expected):
-    owner = SimpleNamespace(monotonic=lambda: 100)
+    # Exercise the controller's real backend-aware freshness policy, not an
+    # incomplete stand-in that predates _model_observation_seconds.
+    owner = ComputerController.__new__(ComputerController)
+    owner.monotonic = lambda: 100
     live = SimpleNamespace(
         revoked=False,
+        capabilities=None,
         backend=SimpleNamespace(
             input_readiness="target_available", input_supported=True, input_blocker=None
         ),

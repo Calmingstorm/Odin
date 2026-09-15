@@ -3,6 +3,7 @@
 import asyncio
 import base64
 import copy
+import json
 from contextlib import asynccontextmanager
 from dataclasses import replace
 from io import BytesIO
@@ -186,6 +187,149 @@ async def test_changed_pixels_keyboard_only_and_no_replay(
                 await c.act(ctx, action)
             assert calls == []
             assert c.store.db.execute("SELECT count(*) FROM receipts").fetchone()[0] == 0
+
+
+@pytest.mark.asyncio
+async def test_hyprland_predispatch_focus_recovery_registers_fresh_binding_never_dispatches(
+    tmp_path, monkeypatch
+):
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        backend = controller._live[action["session_id"]].backend
+        backend.capabilities = replace(
+            backend.capabilities, platform="wayland", backend="hyprland",
+            owned_input_release="hyprland_best_effort",
+        )
+        controller._live[action["session_id"]].capabilities = backend.capabilities
+        backend.recovery_supported = True
+        recovered = []
+
+        async def recover_focus(expected_application, *, context):
+            recovered.append((expected_application, context))
+            state["binding"]["window"] = 90
+            state["binding"]["focus_window"] = 90
+            return True
+
+        backend.recover_focus = recover_focus
+        state["binding"]["window"] = 91
+        state["binding"]["focus_window"] = 91
+        action.update(operation="key", key="Right")
+        result = await controller.act(context, action)
+
+        assert len(recovered) == 1
+        assert calls == []
+        assert result["status"] == "unavailable"
+        assert result["execution"]["injected"] is False
+        assert result["next_observation"]["observation_id"] != action["observation_id"]
+        assert action["session_id"] not in controller._delivered_observations
+
+
+@pytest.mark.asyncio
+async def test_hyprland_recovery_rechecks_pending_receipt_before_fresh_binding_or_input(
+    tmp_path, monkeypatch
+):
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        backend = controller._live[action["session_id"]].backend
+        backend.capabilities = replace(
+            backend.capabilities, platform="wayland", backend="hyprland",
+            owned_input_release="hyprland_best_effort",
+        )
+        controller._live[action["session_id"]].capabilities = backend.capabilities
+        backend.recovery_supported = True
+        started, release = asyncio.Event(), asyncio.Event()
+
+        async def recover_focus(expected_application, *, context):
+            started.set()
+            await release.wait()
+            state["binding"]["window"] = 90
+            state["binding"]["focus_window"] = 90
+            return True
+
+        backend.recover_focus = recover_focus
+        state["binding"]["window"] = 91
+        state["binding"]["focus_window"] = 91
+        action.update(operation="key", key="Right")
+        pending = asyncio.create_task(controller.act(context, action))
+        await started.wait()
+        # _actions serializes controller actions, but a receipt can appear while
+        # the native recovery await is in flight and must block fresh binding.
+        with controller.store.lock:
+            controller.store.db.execute(
+                "INSERT INTO receipts VALUES (?,?,?,?,?)",
+                (action["session_id"], "other-pending", "p" * 64, "pending", json.dumps({})),
+            )
+            controller.store.db.commit()
+        release.set()
+        result = await pending
+
+        assert result["status"] == "unavailable"
+        assert result["verification"]["focus_recovered"] is False
+        assert "next_observation" not in result
+        assert calls == []
+        assert await controller.act(context, action) == persisted_receipt(result)
+
+
+@pytest.mark.asyncio
+async def test_pause_cancels_inflight_hyprland_recovery_before_backend_pause_waits(
+    tmp_path, monkeypatch
+):
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        backend = controller._live[action["session_id"]].backend
+        backend.capabilities = replace(
+            backend.capabilities, platform="wayland", backend="hyprland",
+            owned_input_release="hyprland_best_effort",
+        )
+        controller._live[action["session_id"]].capabilities = backend.capabilities
+        backend.recovery_supported = True
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def recover_focus(expected_application, *, context):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                cancelled.set()
+                raise
+
+        backend.recover_focus = recover_focus
+        state["binding"]["window"] = 91
+        state["binding"]["focus_window"] = 91
+        action.update(operation="key", key="Right")
+        in_flight = asyncio.create_task(controller.act(context, action))
+        await started.wait()
+        paused = await controller.session(
+            context, {"operation": "pause", "session_id": action["session_id"], "generation": 1}
+        )
+        await asyncio.wait_for(cancelled.wait(), timeout=1)
+        with pytest.raises(asyncio.CancelledError):
+            await in_flight
+
+        assert paused["state"] == "paused"
+        assert calls == []
+
+
+@pytest.mark.asyncio
+async def test_x11_predispatch_binding_failure_does_not_call_hyprland_recovery(
+    tmp_path, monkeypatch
+):
+    async with fixture(tmp_path, monkeypatch) as (controller, context, action, state, calls):
+        backend = controller._live[action["session_id"]].backend
+        called = False
+
+        async def recover_focus(*args, **kwargs):
+            nonlocal called
+            called = True
+            return True
+
+        backend.recovery_supported = True
+        backend.recover_focus = recover_focus
+        state["binding"]["window"] = 91
+        state["binding"]["focus_window"] = 91
+        action.update(operation="key", key="Right")
+        result = await controller.act(context, action)
+
+        assert called is False
+        assert calls == []
+        assert result["reason"] == "stale_source_binding"
 
 
 @pytest.mark.parametrize(

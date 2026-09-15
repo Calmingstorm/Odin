@@ -328,6 +328,14 @@ def register_computer(routes: web.RouteTableDef, bot) -> None:
                            if recovery.get("reason") in reasons else "unknown"),
                 "complete": recovery.get("complete") is True,
             }
+            # Local cleanup and receiver delivery are different facts. Preserve
+            # the historical result while exposing whether recovery still blocks.
+            if recovery.get("local_recovery_status") == "locally_released":
+                result["recovery"]["local_recovery_status"] = "locally_released"
+                for key in ("local_cleanup_complete", "admission_blocked",
+                            "receiver_release_verified"):
+                    if type(recovery.get(key)) is bool:
+                        result["recovery"][key] = recovery[key]
         if accessibility is not None:
             result["accessibility"] = accessibility
         owned_recovery = value.get("owned_input_recovery")

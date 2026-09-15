@@ -1,4 +1,12 @@
-.PHONY: run test lint fmt clean install dev
+.PHONY: run test test-cov lint fmt clean install dev
+
+PYTHON ?= python
+# Verification policy and local/CI usage: docs/testing.md.
+# Two concurrent CI jobs: six workers each, never CPU-count-based auto sizing.
+TEST_ARGS = -q -n 6 --dist loadgroup --durations=25
+export OMP_NUM_THREADS = 1
+export OPENBLAS_NUM_THREADS = 1
+export MKL_NUM_THREADS = 1
 
 install:
 	pip install -e .
@@ -10,10 +18,10 @@ run:
 	python -m src
 
 test:
-	pytest -v
+	$(PYTHON) -m pytest $(TEST_ARGS)
 
 test-cov:
-	pytest --cov=src --cov-report=term-missing
+	COVERAGE_CORE=sysmon $(PYTHON) scripts/ci/coverage_gate.py
 
 lint:
 	ruff check src/ tests/

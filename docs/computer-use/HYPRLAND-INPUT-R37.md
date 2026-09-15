@@ -5,7 +5,7 @@ No speculative retry, longer input lease, scope bypass, or quarantine change.
 
 ## Observed live evidence on 6eeca2ba
 
-Read-only inspection of Clippy's SQLite receipts confirms the reported generic
+Read-only inspection of the target's SQLite receipts confirms the reported generic
 `dispatch / input_release_unknown` receipt for `palette-blue`. That is controller
 fallback evidence, not a native finding that the pointer disconnected.
 

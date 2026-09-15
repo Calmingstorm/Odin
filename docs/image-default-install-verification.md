@@ -4,21 +4,22 @@ Scope: template, setup wizard absence and Debian config delivery/preservation.
 Run from the isolated `work/image-default-install` worktree based on
 `997dc1c976117a8c01322d46b4f3edbc694d4cfe`, not from the live install.
 
-Commands used (artifact directory is outside the worktree):
+Commands used (operator-specific paths replaced with variables; artifact directory
+is outside the worktree, and `PYTHON`/`RUFF` refer to the development virtualenv):
 
 ```sh
 docker run --rm --network none -v "$PWD:/source" odin-computer-package-builder:r21
-mkdir -p /home/odin/reviews/image-default-install-artifacts
-VERSION=3.97.0 /home/odin/reviews/r21-packaging/tools/nfpm package \
+mkdir -p "$ARTIFACT_DIR"
+VERSION=3.97.0 "$NFPM" package \
   --config packaging/nfpm.yml --packager deb \
-  --target /home/odin/reviews/image-default-install-artifacts/odin-image-defaults.deb
-ODIN_IMAGE_DEFAULT_DEB=/home/odin/reviews/image-default-install-artifacts/odin-image-defaults.deb \
-  /home/odin/odin-dev/.venv/bin/python -m pytest -q \
+  --target "$ARTIFACT_DIR/odin-image-defaults.deb"
+ODIN_IMAGE_DEFAULT_DEB="$ARTIFACT_DIR/odin-image-defaults.deb" \
+  "$PYTHON" -m pytest -q \
   tests/test_image_default_installation.py tests/test_setup_helpers.py
-/home/odin/odin-dev/.venv/bin/ruff check tests/test_image_default_installation.py
-dpkg-deb --field /home/odin/reviews/image-default-install-artifacts/odin-image-defaults.deb \
+"$RUFF" check tests/test_image_default_installation.py
+dpkg-deb --field "$ARTIFACT_DIR/odin-image-defaults.deb" \
   Package Version Architecture
-sha256sum /home/odin/reviews/image-default-install-artifacts/odin-image-defaults.deb
+sha256sum "$ARTIFACT_DIR/odin-image-defaults.deb"
 git diff --exit-code 997dc1c976117a8c01322d46b4f3edbc694d4cfe -- \
   src/setup_wizard.py src/web/api/self_update.py src/tools/image/openai_backend.py
 ```
@@ -41,7 +42,7 @@ custom config, old exact model values, and repeated installs; existing configs
 remain byte-identical. The setup helper tests exercise the wizard builder.
 
 This is deliberately **not a full dpkg service/dependency installation**. Account,
-pip, SSH and systemd postinstall operations are excluded. No live `/opt/odin`
+pip, SSH and systemd postinstall operations are excluded. No live-install
 writes, deployment, service restart, or active desktop effects occurred. This
 artifact contains baseline core/API code and is not a releasable integrated
 artifact: rebuild after integrating all agents' changes.

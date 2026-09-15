@@ -515,19 +515,29 @@ FIELDS: dict[str, FieldSpec] = {
         "capture/input with no portal fallback. Hyprland input is best-effort: hard guardian "
         "SIGKILL may leave held input; release may clobber a simultaneous human same-button hold.",
     ),
+    "computer.hyprland_discovery_mode": FieldSpec(
+        label="Hyprland discovery mode",
+        apply_mode="restart",
+        restart_reason="The computer lifecycle snapshots its desktop target when it is "
+        "constructed; existing sessions retain their pinned or auto-discovery policy.",
+        description="Pinned requires every explicit compositor identity value. Auto "
+        "discovers only the runtime socket identity while retaining the approved "
+        "output and executable trust pins.",
+    ),
     "computer.hyprland_runtime_dir": FieldSpec(
         label="Hyprland runtime directory",
-        description="Explicit desktop-owner runtime directory, e.g. /run/user/1000. "
-        "Never inferred.",
+        description="Desktop-owner runtime directory, e.g. /run/user/1000. "
+        "Auto mode defaults an empty value to /run/user/<configured UID>.",
     ),
     "computer.hyprland_wayland_display": FieldSpec(
         label="Hyprland Wayland socket name",
-        description="Explicit local socket basename, e.g. wayland-1. "
-        "Must belong to the pinned compositor.",
+        description="Pinned-mode socket basename, e.g. wayland-1. "
+        "Auto mode discovers this from the authenticated compositor.",
     ),
     "computer.hyprland_instance_signature": FieldSpec(
         label="Hyprland instance signature",
-        description="Explicit target HYPRLAND_INSTANCE_SIGNATURE. Update after compositor restart.",
+        description="Pinned-mode HYPRLAND_INSTANCE_SIGNATURE. Auto mode discovers "
+        "the current signature after each boot; pinned mode requires manual updates.",
     ),
     "computer.hyprland_output_name": FieldSpec(
         label="Hyprland consented output",
@@ -536,8 +546,8 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     "computer.hyprland_compositor_pid": FieldSpec(
         label="Hyprland compositor PID",
-        description="Explicit live compositor PID, pinned with UID, "
-        "process start time and executable build.",
+        description="Pinned-mode live compositor PID; auto mode discovers it. "
+        "Both modes verify UID, process start time and executable build.",
     ),
     "computer.hyprland_compositor_executable": FieldSpec(
         label="Hyprland trusted executable",
@@ -577,7 +587,29 @@ FIELDS: dict[str, FieldSpec] = {
         label="Hyprland scope socket",
         description="Explicit absolute scope socket; empty uses "
         "runtime directory/odin-hyprland-scope.sock. "
-        "Load the ABI-matched plugin once during operator setup; Odin never edits hyprland.conf.",
+        "Managed activation loads the trusted plugin on first use; Odin never edits hyprland.conf.",
+    ),
+    "computer.hyprland_managed_activation": FieldSpec(
+        label="Hyprland managed activation",
+        apply_mode="restart",
+        restart_reason="The desktop lifecycle snapshots native activation policy at construction.",
+        description=(
+            "Enabled by default: load one trusted root-installed plugin on first "
+            "native inventory or session start. Independent of recovery qualification."
+        ),
+    ),
+    "computer.hyprland_plugin_manifest": FieldSpec(
+        label="Hyprland plugin manifest",
+        apply_mode="restart",
+        restart_reason=(
+            "The desktop lifecycle snapshots the trusted manifest location "
+            "at construction."
+        ),
+        description=(
+            "Absolute root-owned build-identity manifest. The default installed "
+            "document manifest selects its exact artifact under /usr/local/lib/odin; "
+            "a manifest in that library directory selects its sibling artifact."
+        ),
     ),
     "timezone": FieldSpec(
         label="Timezone",

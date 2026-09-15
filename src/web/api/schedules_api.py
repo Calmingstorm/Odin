@@ -14,6 +14,7 @@ from aiohttp import web
 from croniter import croniter
 
 from ...odin_log import get_logger
+from ...scheduler.scheduler import ScheduleConnectionUnavailableError
 from ..api_common import (
     _MAX_DESCRIPTION_LEN,
     _safe_int_param,
@@ -29,6 +30,15 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
     # ------------------------------------------------------------------
     # Schedules
     # ------------------------------------------------------------------
+
+    def unavailable(exc: ScheduleConnectionUnavailableError) -> web.Response:
+        return web.json_response(
+            {"error": "scheduling unavailable", "connection": exc.snapshot}, status=503
+        )
+
+    @routes.get("/api/schedules/status")
+    async def schedules_status(_request: web.Request) -> web.Response:
+        return web.json_response(bot.scheduler.connection_status())
 
     @routes.get("/api/schedules")
     async def list_schedules(_request: web.Request) -> web.Response:
@@ -73,6 +83,8 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
                 report_format=data.get("report_format"),
             )
             return web.json_response(schedule, status=201)
+        except ScheduleConnectionUnavailableError as e:
+            return unavailable(e)
         except (ValueError, TypeError) as e:
             return web.json_response({"error": _sanitize_error(e)}, status=400)
 
@@ -113,6 +125,8 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
                 cron_timezone=data.get("cron_timezone"),
                 report_format=data.get("report_format"),
             )
+        except ScheduleConnectionUnavailableError as e:
+            return unavailable(e)
         except (ValueError, TypeError) as e:
             return web.json_response({"error": _sanitize_error(e)}, status=400)
         if updated is None:
@@ -132,6 +146,8 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
         try:
             result = await bot.scheduler.run_now(sid)
             return web.json_response(result)
+        except ScheduleConnectionUnavailableError as e:
+            return unavailable(e)
         except ValueError as e:
             err = str(e)
             if "not found" in err:

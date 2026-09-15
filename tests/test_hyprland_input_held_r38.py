@@ -15,7 +15,7 @@ def test_device_hold_predicate_ignores_stale_seat_output_not_live_inputs(tmp_pat
     source = (ROOT / "assets/hyprland-input/scope-plugin.cpp").read_text()
     helper = "    bool inputHeld() const {" + source.split(
         "    bool inputHeld() const {", 1
-    )[1].split("    bool provenance(", 1)[0]
+    )[1].split("    bool pendingIntent(", 1)[0]
     harness = r'''
 #include <cassert>
 #include <cstdint>
@@ -64,4 +64,9 @@ int main() {
                     str(cpp), "-o", str(binary)], check=True, timeout=60)
     subprocess.run([str(binary)], check=True, timeout=10)
     assert 'if (inputHeld()) return status(false, "human-input-held")' in source
-    assert source.count("s.inputHeld()") == 2
+    # Initial positioning, stationary-position reprocessing, and the actual
+    # focus transfer must independently preserve the no-foreign-input guard.
+    warp = source.split("void onWarp(", 1)[1].split("\nvoid onFocus(", 1)[0]
+    focus = source.split("void onPointerFocus(", 1)[1].split("\nvoid onNewPointer(", 1)[0]
+    assert warp.count("s.inputHeld()") == 2
+    assert focus.count("s.inputHeld()") == 1

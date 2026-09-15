@@ -3,6 +3,7 @@ from pathlib import Path
 from typing import Any
 
 IMAGE_MODEL_DEFAULTS = {"image_model": "gpt-image-2.5-flare", "outer_model": "gpt-6-astra"}
+# v3.98.0 migration source values, not active model selections. Keep for upgrades.
 LEGACY_IMAGE_MODEL_DEFAULTS = {"image_model": "gpt-image-2", "outer_model": "gpt-5.5"}
 IMAGE_MODEL_PREFIX = ("image", "openai")
 

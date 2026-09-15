@@ -11,15 +11,17 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
+from src.config.schema import WebConfig
 from src.health.server import AUTH_PUBLIC_EXACT, AUTH_PUBLIC_PREFIXES
 
 
 def _make_bot():
     bot = MagicMock()
     bot.config = MagicMock()
-    bot.config.web.api_token = "test-secret-token"
-    bot.config.web.api_tokens = []
-    bot.config.web.resolve_api_identity.return_value = None
+    # MagicMock is callable.  The middleware therefore treats a mock web
+    # config as a supplier and receives another empty mock rather than this
+    # test's configured credential.
+    bot.config.web = WebConfig(api_token="test-secret-token")
     bot.sessions = MagicMock()
     bot.sessions.count.return_value = 0
     bot.sessions.ids.return_value = []

@@ -47,6 +47,8 @@ def expectation_arguments(expected):
 
 def execution_receipt(raw, result):
     """Preserve release even on missing verification; never forward native prose."""
+    from .error_guidance import _GROUP_PREFLIGHT, safety_terminal
+
     raw = raw if type(raw) is dict else {}
     released = raw.get("released") is True
     injected = raw.get("injected") if type(raw.get("injected")) is bool else None
@@ -56,6 +58,25 @@ def execution_receipt(raw, result):
         result.update(status="unknown", reason="input_release_unknown")
     elif result["status"] == "unknown":
         result.update(status="interrupted", reason="effect_unknown_reconcile_no_replay")
+    if (released and raw.get("status") == "interrupted"
+            and raw.get("reason") == "hyprland_dispatch_interrupted_after_release"):
+        # Preserve this bounded native interruption reason through visual/pointer
+        # normalization. It proves neither completion nor replay safety.
+        result.update(status="interrupted", reason=raw["reason"])
+        result["verification"] = {"status": "unavailable"}
+        # Retain bounded safety facts INSIDE the persisted verification schema,
+        # not new top-level fields rejected by Store.finish_action. Other
+        # backends keep their existing receipt contract unchanged.
+        safety = result["verification"]
+        for key in ("terminal", "uncertain_outcome", "fresh_session_required", "held_input"):
+            if raw.get(key) is True:
+                safety[key] = True
+        if raw.get("release_confirmed") is False:
+            safety["release_confirmed"] = False
+        if raw.get("state") in {"unknown", "quarantined", "closed", "cancelled"}:
+            safety["state"] = raw["state"]
+        if type(raw.get("cleanup")) is dict and raw["cleanup"].get("complete") is not True:
+            safety["cleanup"] = {"complete": False}
     diagnostics = raw.get("diagnostics", {})
     diagnostics = diagnostics if type(diagnostics) is dict else {}
     planned, completed = (diagnostics.get(k) for k in ("steps_planned", "steps_completed"))
@@ -107,6 +128,27 @@ def execution_receipt(raw, result):
     if result["status"] in {"interrupted", "unknown"}:
         safe["next_action"] = "stop" if not released else "observe_and_reconcile"
     result["diagnostics"] = safe
+    # Preserve only bounded, known pre-input native refusal codes. Stripping
+    # these into backend_refused makes a harmless stale frame look like an
+    # unknown release to the caller. No raw native messages cross this boundary.
+    if (raw.get("status") == "unavailable" and injected is False and released
+            and phase == "preflight" and reason in _GROUP_PREFLIGHT | {
+                "hyprland_observation_changed",
+                "hyprland_observation_expired",
+                "hyprland_fresh_application_observation_required",
+                "hyprland_focus_changed_before_dispatch",
+                "hyprland_focus_changed",
+                "hyprland_scope_evidence_expired",
+                "hyprland_capture_settle_budget_exhausted",
+                "hyprland_capture_scope_changed",
+                "hyprland_application_group_target_changed",
+            }):
+        result["reason"] = reason
+        safe["reason"] = reason
+    # Keep negative nested safety evidence for every reason, not a special-case
+    # interruption allowlist. Do not forward raw native prose or large receipts.
+    if safety_terminal(raw):
+        result["verification"]["terminal"] = True
     path = raw.get("targeting_path")
     if type(path) is str and path in {
         "native_atspi_identity",
@@ -162,6 +204,25 @@ def effect_receipt(raw, observation, expected, target=None):
         and evidence.get(key) == getattr(observation.source, key)
         for key in ("source_id", "source_revision", "consent_generation")
     )
+    group_transition = evidence.get("application_group_transition")
+    if (
+        native_binding and same_app
+        and result["execution"]["released"]
+        and result["execution"]["injected"] is True
+        and result["status"] not in {"unknown", "interrupted", "unavailable"}
+        and type(group_transition) is dict
+        and group_transition.get("method") == "native_application_group_member_transition"
+        and all(type(group_transition.get(key)) is str
+                and 1 <= len(group_transition[key]) <= 128 for key in ("before", "after"))
+        and group_transition["before"] != group_transition["after"]
+    ):
+        # A focused member transition is not proof a dialog was newly mapped.
+        # Expose only that distinction, never the private native member IDs.
+        result["verification"]["application_group_transition"] = {
+            "method": "native_application_group_member_transition",
+            "changed": True,
+            "newly_mapped": "unmeasured",
+        }
     transition = evidence.get("transition")
     if (
         native_binding
@@ -175,6 +236,11 @@ def effect_receipt(raw, observation, expected, target=None):
             key: transition[key] for key in ("method", "appeared", "kind")
         }
     if kind == "visual_change":
+        return result
+    if result.get("reason") == "hyprland_dispatch_interrupted_after_release":
+        # Preserve the safety facts above for region/dialog/field expectations
+        # too. An interrupted plan has no measured effect to promote below.
+        result["verification"]["type"] = kind
         return result
     native_transition = result["verification"].get("native_transition")
     result["verification"] = {

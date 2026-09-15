@@ -285,9 +285,9 @@ def test_close_fences_queued_send_under_transport_lock():
         session._write_lock.acquire()
         try:
             operation = asyncio.create_task(session._rpc("capture", timeout=3))
-            await asyncio.sleep(.03)
+            await asyncio.sleep(0)
             closing = asyncio.create_task(session.close())
-            await asyncio.sleep(.03)
+            assert await asyncio.to_thread(session._operations_stopped.wait, 0.5)
             assert session._closing and session._operations_stopped.is_set()
             session._write_lock.release()
             with pytest.raises(portal.PortalError):
@@ -320,7 +320,7 @@ def test_repeated_caller_cancellation_never_cancels_owned_close(tmp_path):
             await asyncio.wait_for(ready.wait(), .5)
             for _ in range(3):
                 caller.cancel()
-                await asyncio.sleep(.01)
+                await asyncio.sleep(0)
                 assert not session._close_task.done()
             resume.set()
             with pytest.raises(asyncio.CancelledError):

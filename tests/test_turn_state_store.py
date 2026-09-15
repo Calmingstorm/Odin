@@ -12,10 +12,11 @@ The load-bearing properties, each from the settled design:
 
 from __future__ import annotations
 
-import time
+from types import SimpleNamespace
 
 import pytest
 
+import src.turn_state.store as store_module
 from src.turn_state import (
     LedgerIntentError,
     OpState,
@@ -27,6 +28,26 @@ from src.turn_state import (
 )
 
 KEY = TurnKey(source="discord", channel_id="c1", message_id="m1")
+
+
+class _StoreClock:
+    """Controllable UTC clock for store expiry and lease assertions."""
+
+    def __init__(self, now: float = 1_700_000_000.0):
+        self.now = now
+
+    def time(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+@pytest.fixture(autouse=True)
+def store_clock(monkeypatch):
+    clock = _StoreClock()
+    monkeypatch.setattr(store_module, "time", SimpleNamespace(time=clock.time))
+    return clock
 
 
 @pytest.fixture
@@ -92,16 +113,14 @@ class TestAdmissionAndCheckpoint:
         store.finish_sync(new_lease)
         assert self._readmit(store) == (None, "already_processed")
 
-    def test_expired_active_readmission_sweeps_to_resumable(self, store):
-        import time as _time
-
+    def test_expired_active_readmission_sweeps_to_resumable(self, store, store_clock):
         lease = _admit(store)
         store.record_intents_sync(
             lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
         )
         store.mark_running_sync(lease, 0, "c1")
         store._conn.execute(
-            "UPDATE turns SET lease_expires_at=?", [_time.time() - 10]
+            "UPDATE turns SET lease_expires_at=?", [store_clock.time() - 10]
         )
         store._conn.commit()
         assert self._readmit(store) == (None, "resumable")
@@ -122,9 +141,9 @@ class TestAdmissionAndCheckpoint:
             session_snapshot=None,
         ) == (None, "store_unavailable")
 
-    def test_recovery_deadline_persisted_utc(self, store):
+    def test_recovery_deadline_persisted_utc(self, store, store_clock):
         lease = _admit(store)
-        deadline = time.time() + 300.0
+        deadline = store_clock.time() + 300.0
         store.checkpoint_sync(
             lease, {}, progressed=False, recovery_deadline_utc=deadline
         )
@@ -168,12 +187,12 @@ class TestFencing:
 
 
 class TestHeartbeat:
-    def test_heartbeat_extends_lease_only(self, store):
+    def test_heartbeat_extends_lease_only(self, store, store_clock):
         lease = _admit(store)
         store.checkpoint_sync(lease, {"n": 1}, progressed=True)
         _, rev_before, _, progress_before = _row(store)
         (lease_before,) = _row(store, cols="lease_expires_at")
-        time.sleep(0.01)
+        store_clock.advance(1.0)
         store.heartbeat_sync(lease)
         status, rev_after, _, progress_after = _row(store)
         (lease_after,) = _row(store, cols="lease_expires_at")
@@ -181,11 +200,11 @@ class TestHeartbeat:
         assert rev_after == rev_before  # NOT a state change
         assert progress_after == progress_before  # never fake progress
 
-    def test_waits_do_not_advance_progress(self, store):
+    def test_waits_do_not_advance_progress(self, store, store_clock):
         lease = _admit(store)
         store.checkpoint_sync(lease, {"n": 1}, progressed=True)
         (progress_before,) = _row(store, cols="last_progress_at")
-        time.sleep(0.01)
+        store_clock.advance(1.0)
         store.checkpoint_sync(lease, {"n": 1, "waiting": True}, progressed=False)
         (progress_after,) = _row(store, cols="last_progress_at")
         assert progress_after == progress_before
@@ -306,7 +325,7 @@ class TestLedger:
 
 
 class TestBootSweep:
-    def test_stale_active_suspends_and_ops_go_unknown(self, tmp_path):
+    def test_stale_active_suspends_and_ops_go_unknown(self, tmp_path, store_clock):
         db = tmp_path / "turns.sqlite3"
         s = TurnStateStore(db, blob_dir=tmp_path / "blobs")
         lease = _admit(s)
@@ -317,7 +336,9 @@ class TestBootSweep:
         )
         s.mark_running_sync(lease, 0, "c1")
         # Simulate crash: expire the lease on disk, drop the handle, reopen.
-        s._conn.execute("UPDATE turns SET lease_expires_at = ?", [time.time() - 10])
+        s._conn.execute(
+            "UPDATE turns SET lease_expires_at = ?", [store_clock.time() - 10]
+        )
         s._conn.commit()
         s.close()
 
@@ -346,14 +367,14 @@ class TestBootSweep:
         assert row[0] == TurnStatus.SUSPENDED
         reopened.close()
 
-    def test_periodic_expired_active_sweep(self, tmp_path):
-        import time as _time
-
+    def test_periodic_expired_active_sweep(self, tmp_path, store_clock):
         s = TurnStateStore(tmp_path / "t.sqlite3", blob_dir=tmp_path / "blobs")
         _admit(s)
         # Live lease: the periodic sweep must NOT touch a healthy owner.
         assert s.sweep_expired_active_sync() == {"turns": 0, "ops": 0}
-        s._conn.execute("UPDATE turns SET lease_expires_at=?", [_time.time() - 5])
+        s._conn.execute(
+            "UPDATE turns SET lease_expires_at=?", [store_clock.time() - 5]
+        )
         s._conn.commit()
         out = s.sweep_expired_active_sync()
         assert out["turns"] == 1
@@ -363,17 +384,17 @@ class TestBootSweep:
 
 
 class TestTtlSweep:
-    def _age(self, store, key, *, progress_age_s):
+    def _age(self, store, key, *, progress_age_s, store_clock):
         store._conn.execute(
             "UPDATE turns SET last_progress_at=? WHERE message_id=?",
-            [time.time() - progress_age_s, key.message_id],
+            [store_clock.time() - progress_age_s, key.message_id],
         )
         store._conn.commit()
 
-    def test_resumable_expires_after_ttl(self, store):
+    def test_resumable_expires_after_ttl(self, store, store_clock):
         lease = _admit(store)
         store.suspend_sync(lease, {"p": 1})
-        self._age(store, KEY, progress_age_s=25 * 3600)
+        self._age(store, KEY, progress_age_s=25 * 3600, store_clock=store_clock)
         out = store.ttl_sweep_sync(resume_ttl_hours=24.0)
         assert out["expired_turns"] == 1
         assert out["expired_turn_keys"] == [(KEY.source, KEY.channel_id, KEY.message_id)]
@@ -383,17 +404,17 @@ class TestTtlSweep:
         (payload,) = _row(store, cols="payload")
         assert payload is not None
 
-    def test_diagnostic_payload_compacts_after_seven_days(self, store):
+    def test_diagnostic_payload_compacts_after_seven_days(self, store, store_clock):
         lease = _admit(store)
         store.suspend_sync(lease, {"p": 1})
-        self._age(store, KEY, progress_age_s=8 * 86400)
+        self._age(store, KEY, progress_age_s=8 * 86400, store_clock=store_clock)
         out = store.ttl_sweep_sync()
         assert out["expired_turns"] == 1
         assert out["compacted_payloads"] == 1
         (payload,) = _row(store, cols="payload")
         assert payload is None
 
-    def test_ledger_expires_except_unknown(self, store):
+    def test_ledger_expires_except_unknown(self, store, store_clock):
         lease = _admit(store)
         store.record_intents_sync(
             lease, 0,
@@ -406,9 +427,9 @@ class TestTtlSweep:
             [OpState.OUTCOME_UNKNOWN],
         )
         store.finish_sync(lease, TurnStatus.TERMINAL_FAILED)
-        self._age(store, KEY, progress_age_s=91 * 86400)
+        self._age(store, KEY, progress_age_s=91 * 86400, store_clock=store_clock)
         store._conn.execute(
-            "UPDATE operations SET updated_at=?", [time.time() - 91 * 86400]
+            "UPDATE operations SET updated_at=?", [store_clock.time() - 91 * 86400]
         )
         store._conn.commit()
         out = store.ttl_sweep_sync()
@@ -569,45 +590,45 @@ class TestFullFenceOnTurnWrites:
     live fence — an expired-lease owner can neither checkpoint (which used
     to silently RENEW the lease) nor settle."""
 
-    def _expire(self, store):
-        import time as _time
-
-        store._conn.execute("UPDATE turns SET lease_expires_at=?", [_time.time() - 5])
+    def _expire(self, store, store_clock):
+        store._conn.execute(
+            "UPDATE turns SET lease_expires_at=?", [store_clock.time() - 5]
+        )
         store._conn.commit()
 
-    def test_expired_lease_checkpoint_is_rejected(self, store):
+    def test_expired_lease_checkpoint_is_rejected(self, store, store_clock):
         lease = _admit(store)
-        self._expire(store)
+        self._expire(store, store_clock)
         with pytest.raises(StaleTurnError):
             store.checkpoint_sync(lease, {"continued": True}, progressed=True)
         # And crucially it did NOT renew the lease.
         (expires,) = store._conn.execute(
             "SELECT lease_expires_at FROM turns"
         ).fetchone()
-        import time as _time
+        assert expires < store_clock.time()
 
-        assert expires < _time.time()
-
-    def test_expired_lease_settle_is_rejected(self, store):
+    def test_expired_lease_settle_is_rejected(self, store, store_clock):
         lease = _admit(store)
         store.record_intents_sync(
             lease, 0, [{"tool_call_id": "c1", "tool_name": "t", "tool_input": {}}]
         )
         store.mark_running_sync(lease, 0, "c1")
-        self._expire(store)
+        self._expire(store, store_clock)
         with pytest.raises(StaleTurnError):
             store.settle_op_sync(lease, 0, "c1", state=OpState.APPLIED,
                                  result_text="ok")
 
-    def test_heartbeat_extends_across_the_ttl(self, tmp_path):
-        import time as _time
-
+    def test_heartbeat_extends_across_the_ttl(self, tmp_path, store_clock):
         s = TurnStateStore(tmp_path / "hb.sqlite3", blob_dir=tmp_path / "b",
                            lease_ttl=0.5)
         lease = _admit(s)
-        _time.sleep(0.3)
+        original_expiry = s._conn.execute(
+            "SELECT lease_expires_at FROM turns"
+        ).fetchone()[0]
+        store_clock.advance(0.3)
         s.heartbeat_sync(lease)
-        _time.sleep(0.3)  # past the original expiry, inside the beaten one
+        store_clock.advance(0.3)  # past original expiry, inside renewed lease
+        assert store_clock.time() > original_expiry
         s.checkpoint_sync(lease, {"alive": True}, progressed=True)  # no raise
         s.close()
 

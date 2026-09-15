@@ -39,6 +39,11 @@ _ERRORS = {
         "Computer storage could not be provisioned.",
         "Provide a writable private storage directory for the service account and retry.",
     ),
+    "storage_schema_unsupported": (
+        "Computer storage has an unsupported schema or invalid durable state.",
+        "Preserve the existing store and have an operator inspect a backup; "
+        "do not repair or replace the live database automatically.",
+    ),
     "storage_selection_required": (
         "Computer storage requires an explicit selection.",
         "Set computer.storage_dir explicitly; existing default storage will not be migrated.",

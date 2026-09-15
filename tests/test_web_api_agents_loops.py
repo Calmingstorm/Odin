@@ -256,6 +256,28 @@ class TestLoops:
             assert (await c.post("/api/loops/L1/restart")).status == 404
 
     @pytest.mark.asyncio
+    async def test_restart_missing_channel_preserves_running_loop(self):
+        bot = MagicMock()
+        info = _loop_info(status="running", channel_id="123")
+        bot.loop_manager._loops = {"L1": info}
+        bot.get_channel.return_value = None
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            assert (await c.post("/api/loops/L1/restart")).status == 404
+        bot.loop_manager.stop_loop.assert_not_called()
+        assert bot.loop_manager._loops["L1"] is info
+
+    @pytest.mark.asyncio
+    async def test_restart_rejects_reused_channel_identity_before_stop(self):
+        bot = MagicMock()
+        bot.loop_manager._loops = {"L1": _loop_info(status="running", channel_id="123")}
+        bot.get_channel.return_value = SimpleNamespace(id="999")
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            assert (await c.post("/api/loops/L1/restart")).status == 404
+        bot.loop_manager.stop_loop.assert_not_called()
+
+    @pytest.mark.asyncio
+
+    @pytest.mark.asyncio
     async def test_restart_manager_error(self):
         bot = MagicMock()
         bot.loop_manager._loops = {"L1": _loop_info(status="running", channel_id="123")}

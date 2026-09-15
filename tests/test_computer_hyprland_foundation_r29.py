@@ -274,7 +274,12 @@ async def test_helper_transport_and_scope_fence(tmp_path, mode):
 async def test_cancel_reaps_helper(tmp_path):
     pid_path = tmp_path / "pid"
     helper = helper_script(tmp_path, (
-        f"import os,time\nopen({str(pid_path)!r},'w').write(str(os.getpid()))\ntime.sleep(20)\n"
+        "import os,time\n"
+        f"pending={str(pid_path.with_suffix('.pending'))!r}\n"
+        "with open(pending,'w') as stream:\n"
+        "    stream.write(str(os.getpid()))\n"
+        f"os.replace(pending,{str(pid_path)!r})\n"
+        "time.sleep(20)\n"
     ))
     pin, out = pinned(), output()
 

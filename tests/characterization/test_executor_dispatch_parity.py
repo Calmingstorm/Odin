@@ -380,9 +380,15 @@ class TestMiddlewarePins:
         """User identity is contextvar-backed and task-isolated: two
         overlapping execute() calls must each observe their own caller."""
         ex = _executor()
+        both_started = asyncio.Event()
+        arrivals = 0
 
         async def report_identity(tool_input):
-            await asyncio.sleep(0.05)  # force overlap
+            nonlocal arrivals
+            arrivals += 1
+            if arrivals == 2:
+                both_started.set()
+            await both_started.wait()
             return f"uid={_user_id_ctx.get()}"
 
         ex._handle_run_command = report_identity

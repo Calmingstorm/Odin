@@ -165,7 +165,7 @@ class TestValidateEmptyHandling:
         assert outcome.valid is True
         assert outcome.normalized == ""
 
-    @pytest.mark.parametrize("tool", list(_EMPTY_OK_TOOLS))
+    @pytest.mark.parametrize("tool", sorted(_EMPTY_OK_TOOLS))
     def test_all_empty_ok_tools(self, tool):
         outcome = validate_tool_result(tool, "")
         assert "empty_result_replaced" not in outcome.violations

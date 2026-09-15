@@ -1,8 +1,46 @@
 """Tests for the DAG planner — execution, validation, and input interpolation."""
 
+import asyncio
+
+import pytest
 
 from src.odin.planner import Planner
 from src.odin.types import PlanSpec, StepSpec, StepStatus
+from tests.conftest import TimestampTool
+
+
+@pytest.fixture
+def parallel_barrier(monkeypatch):
+    """Prove overlap by rendezvous, not by a wall-clock speed threshold."""
+    def install(participants):
+        entered = set()
+        completed = set()
+        ready = asyncio.Event()
+        sequence = 0
+
+        async def execute(self, params, ctx):
+            nonlocal sequence
+            name = params["participant"]
+            sequence += 1
+            start = sequence
+            if name in participants:
+                entered.add(name)
+                if entered == participants:
+                    ready.set()
+                # Safety fuse only: serial execution cannot satisfy this barrier.
+                await asyncio.wait_for(ready.wait(), timeout=10)
+                assert entered == participants
+            if name == "d":
+                assert completed == participants
+            sequence += 1
+            if name in participants:
+                completed.add(name)
+            return {"start": start, "end": sequence}
+
+        monkeypatch.setattr(TimestampTool, "execute", execute)
+        return entered, completed
+
+    return install
 
 
 class TestExecution:
@@ -493,18 +531,16 @@ class TestConditionalExecution:
 # ---------------------------------------------------------------------------
 
 class TestParallelExecution:
-    async def test_diamond_parallel_speedup(self, ts_registry):
-        """Diamond plan B and C (both depend on A only) run concurrently.
-
-        B and C each sleep 0.1s. Sequential would take ~0.2s; parallel < 0.15s.
-        """
+    async def test_diamond_parallel_speedup(self, ts_registry, parallel_barrier):
+        """Both siblings enter before either completes; D follows both."""
+        parallel_barrier({"b", "c"})
         plan = PlanSpec(
             name="diamond",
             steps=(
-                StepSpec(id="a", tool="ts", params={"sleep": 0.01}),
-                StepSpec(id="b", tool="ts", params={"sleep": 0.1}, depends_on=("a",)),
-                StepSpec(id="c", tool="ts", params={"sleep": 0.1}, depends_on=("a",)),
-                StepSpec(id="d", tool="ts", params={"sleep": 0.01}, depends_on=("b", "c")),
+                StepSpec(id="a", tool="ts", params={"participant": "a"}),
+                StepSpec(id="b", tool="ts", params={"participant": "b"}, depends_on=("a",)),
+                StepSpec(id="c", tool="ts", params={"participant": "c"}, depends_on=("a",)),
+                StepSpec(id="d", tool="ts", params={"participant": "d"}, depends_on=("b", "c")),
             ),
         )
         p = Planner(ts_registry)
@@ -519,46 +555,42 @@ class TestParallelExecution:
         c_end = r.steps["c"].output["end"]
         assert b_start < c_end and c_start < b_end, "B and C should overlap in time"
 
-    async def test_wide_fan_out_parallel(self, ts_registry):
+    async def test_wide_fan_out_parallel(self, ts_registry, parallel_barrier):
         """Many independent steps all run concurrently from a single root."""
         n = 5
-        steps = [StepSpec(id="root", tool="ts", params={"sleep": 0.01})]
+        participants = {f"fan_{i}" for i in range(n)}
+        entered, completed = parallel_barrier(participants)
+        steps = [StepSpec(id="root", tool="ts", params={"participant": "root"})]
         for i in range(n):
             steps.append(
-                StepSpec(id=f"fan_{i}", tool="ts", params={"sleep": 0.1}, depends_on=("root",))
+                StepSpec(id=f"fan_{i}", tool="ts", params={"participant": f"fan_{i}"},
+                         depends_on=("root",))
             )
         plan = PlanSpec(name="fan_out", steps=tuple(steps))
         p = Planner(ts_registry)
 
-        import time
-        t0 = time.monotonic()
         r = await p.execute(plan)
-        elapsed = time.monotonic() - t0
 
         assert r.success
-        # 5 x 0.1s sequential = 0.5s; parallel should be ~0.1s + overhead
-        assert elapsed < 0.3, f"Fan-out took {elapsed:.3f}s — expected parallel execution"
+        assert entered == completed == participants
 
-    async def test_independent_roots_parallel(self, ts_registry):
+    async def test_independent_roots_parallel(self, ts_registry, parallel_barrier):
         """Steps with no dependencies at all run concurrently."""
+        entered, completed = parallel_barrier({"a", "b", "c"})
         plan = PlanSpec(
             name="roots",
             steps=(
-                StepSpec(id="a", tool="ts", params={"sleep": 0.1}),
-                StepSpec(id="b", tool="ts", params={"sleep": 0.1}),
-                StepSpec(id="c", tool="ts", params={"sleep": 0.1}),
+                StepSpec(id="a", tool="ts", params={"participant": "a"}),
+                StepSpec(id="b", tool="ts", params={"participant": "b"}),
+                StepSpec(id="c", tool="ts", params={"participant": "c"}),
             ),
         )
         p = Planner(ts_registry)
 
-        import time
-        t0 = time.monotonic()
         r = await p.execute(plan)
-        elapsed = time.monotonic() - t0
 
         assert r.success
-        # 3 x 0.1s sequential = 0.3s; parallel should be ~0.1s
-        assert elapsed < 0.2, f"Independent roots took {elapsed:.3f}s — expected parallel"
+        assert entered == completed == {"a", "b", "c"}
 
     async def test_parallel_failure_still_cascades(self, ts_registry):
         """When one parallel branch fails, its dependents are still skipped."""

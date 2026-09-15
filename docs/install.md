@@ -1,18 +1,14 @@
 # Install
 
-Odin ships as an amd64 Debian package and as a source checkout. The package path is the one to use for a long-running service; the source path is for development.
+The WebUI-first bootstrap flow below describes this branch's upcoming release.
+Published v3.98.0 packages still require the earlier manual configuration and start procedure.
 
-::: warning Configure API authentication before starting or exposing Odin
-With no API token configured (empty `web.api_token`, no `web.api_tokens` entries,
-and no managed tokens), the general API authentication gate is disabled. Routes
-relying on that gate are unauthenticated. The operator must set a strong, private
-`web.api_token` to secure the installation. Bind `web.host` to `127.0.0.1` unless
-deliberately exposing it behind TLS and access controls. This applies to both
-package and source setup, especially before enabling desktop observation and
-stored evidence. Computer routes additionally require an authenticated admin
-identity; those separate checks do not secure the rest of a tokenless installation.
-The template also defaults permissions to `admin`, and the package grants the
-`odin` account passwordless sudo. Review these before starting the service.
+Odin ships as an amd64 Debian package and as a source checkout. The package path is for a long-running service; the source path is for development.
+
+::: warning Bootstrap is local only
+A fresh package install starts a pending bootstrap service bound effectively to loopback, even if the configured host is broader. Complete setup at `http://127.0.0.1:3000`, or through an SSH tunnel to that address. Do not expose the bootstrap UI through a reverse proxy or public listener. Entering a Discord token does not authenticate the WebUI or widen its listener.
+
+After setup, configure a strong private `web.api_token` before deliberately exposing Odin beyond loopback. Computer routes have separate admin checks; those checks do not secure the rest of a tokenless installation. The package also grants the `odin` account passwordless sudo. Review the [security model](/security).
 :::
 
 ## Debian or Ubuntu package
@@ -22,7 +18,7 @@ curl -LO https://github.com/Calmingstorm/Odin/releases/latest/download/odin_3.98
 sudo apt install ./odin_3.98.0_amd64.deb
 ```
 
-The package installs a dedicated `odin` system user, a Python virtual environment with dependencies, the configuration files, and a systemd service. The service is enabled but left stopped until it is configured.
+The package installs a dedicated `odin` system user, a Python virtual environment with dependencies, configuration files, and a systemd service. A fresh install starts a restricted loopback bootstrap service so setup happens in the WebUI. Upgrades preserve configuration and restart Odin only when it was already running.
 
 | Purpose | Path |
 |---|---|
@@ -36,35 +32,14 @@ The package installs a dedicated `odin` system user, a Python virtual environmen
 
 ## First-time setup
 
-1. Create a Discord application and bot in the [developer portal](https://discord.com/developers/applications) and enable **Message Content Intent**.
-2. Put the token in the environment file — never in YAML:
+1. Open `http://127.0.0.1:3000`. For a remote host, forward that loopback port over SSH rather than publishing it through a proxy.
+2. Create a Discord application and bot in the [developer portal](https://discord.com/developers/applications), enable **Message Content Intent**, and enter its token in the WebUI. The token is persisted without being displayed. A valid token attaches the gateway immediately, without a service restart.
+3. Complete provider authorization in the WebUI. Codex uses the existing device flow; it may be completed before or after the Discord token.
+4. Review hosts, permissions, command workspace, and eventual WebUI exposure under **System**. Add Web authentication before widening the listener.
 
-   ```bash
-   sudoedit /etc/odin/.env
-   # DISCORD_TOKEN=...
-   ```
+Bootstrap is not a permanent Discord-less mode: schedules and normal Discord-backed work remain unavailable until Odin is connected. An invalid token or unfinished provider authorization stays visible as an actionable setup state. Watch startup with `sudo journalctl -u odin -f` when diagnosing a failed attachment.
 
-3. Authenticate a model backend. Codex uses the ChatGPT subscription OAuth flow; Kimi and Ollama can be configured later from the WebUI:
-
-   ```bash
-   sudo -u odin /opt/odin/.venv/bin/python /opt/odin/scripts/codex_login.py \
-     --credentials-path /var/lib/odin/codex_auth.json --device
-   ```
-
-4. Review hosts, permissions, the command workspace, and the WebUI binding and API token:
-
-   ```bash
-   sudoedit /etc/odin/config.yml
-   ```
-
-5. Start the service and watch it come up:
-
-   ```bash
-   sudo systemctl start odin
-   sudo journalctl -u odin -f
-   ```
-
-The WebUI listens on `web.port`, which defaults to `3000`. Register the hosts Odin may reach under **System → Hosts**, then ask it for something harmless in a channel it can see.
+The WebUI listens on `web.port`, which defaults to `3000`. Once connected, register the hosts Odin may reach under **System → Hosts**, then ask it for something harmless in a channel it can see.
 
 Read the [security model](/security) for the remaining deployment controls.
 

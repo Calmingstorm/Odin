@@ -511,12 +511,15 @@ class TestPersistFdDiscipline:
         real_persist = obs._persist_locked
         first_entered = threading.Event()
         release_first = threading.Event()
+        first_worker_started = asyncio.Event()
         calls = 0
+        loop = asyncio.get_running_loop()
 
         def controlled_persist(state):
             nonlocal calls
             calls += 1
             if calls == 1:
+                loop.call_soon_threadsafe(first_worker_started.set)
                 first_entered.set()
                 assert release_first.wait(5)
             real_persist(state)
@@ -540,7 +543,8 @@ class TestPersistFdDiscipline:
                 response=_acceptance(key=ACCT_B, tokens=420_000),
             )
         )
-        await asyncio.sleep(0.05)
+        await first_worker_started.wait()
+        await asyncio.sleep(0)
         assert calls == 1  # B cannot enter while A's worker still owns the transaction.
         release_first.set()
         with pytest.raises(asyncio.CancelledError):

@@ -34,6 +34,8 @@ import time
 from collections.abc import Callable
 from typing import Any
 
+import discord
+
 from ..odin_log import get_logger
 from ..tools.effect_classifier import ToolEffectClass
 from ..turn_state.codec import compute_content_digest, restore_field_values
@@ -428,8 +430,23 @@ class TurnResumeManager:
         original = None
         try:
             original = await self._fetch_message(key.channel_id, key.message_id)
-        except Exception:
+        except discord.NotFound:
+            # Only Discord's positive not-found response proves deletion.
             original = None
+        except discord.Forbidden:
+            log.warning("Resume admission cannot fetch %s: Discord access forbidden", key)
+            return None, None, "Discord currently denies access to the original message"
+        except discord.HTTPException as exc:
+            log.warning("Resume admission cannot fetch %s: Discord HTTP failure: %s", key, exc)
+            return None, None, "Discord could not fetch the original message yet"
+        except (ConnectionError, OSError, TimeoutError) as exc:
+            log.warning("Resume admission cannot fetch %s: transient failure: %s", key, exc)
+            return None, None, "the original message could not be fetched yet"
+        except Exception:
+            # The injected fetch adapter is outside the store's authority.
+            # Preserve the row rather than falsely claiming deletion.
+            log.exception("Resume admission fetch failed for %s", key)
+            return None, None, "the original message could not be fetched yet"
         if original is None:
             await asyncio.to_thread(
                 self._store.reject_resumable_sync, key, "original message unavailable"

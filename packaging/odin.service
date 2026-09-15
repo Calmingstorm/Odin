@@ -18,7 +18,9 @@ WorkingDirectory=/opt/odin
 # resolve against live data.
 StateDirectory=odin-workspace
 StateDirectoryMode=0700
-ExecStart=/opt/odin/.venv/bin/python -m src
+Environment=ODIN_ENV_FILE=/etc/odin/.env
+Environment=ODIN_INITIALIZATION_STATE=/var/lib/odin/initialization/state.json
+ExecStart=/opt/odin/.venv/bin/python -m src /etc/odin/config.yml --env-file /etc/odin/.env --initialization-state /var/lib/odin/initialization/state.json
 EnvironmentFile=/etc/odin/.env
 Restart=always
 RestartSec=5

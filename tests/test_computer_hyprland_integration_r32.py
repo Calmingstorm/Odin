@@ -17,9 +17,12 @@ from tests.test_computer_attached_controller_r5 import Attached
 
 
 def settings(**updates):
+    # These synthetic transports use a preselected target and an already prepared
+    # companion, rather than exercising discovery or managed plugin activation.
     return ComputerUseConfig(**{
         "enabled": True, "platform": "wayland", "environment": "existing_session",
         "wayland_backend": "hyprland", "wayland_uid": 1000,
+        "hyprland_discovery_mode": "pinned", "hyprland_managed_activation": False,
         "hyprland_runtime_dir": "/run/user/1000", "hyprland_wayland_display": "wayland-1",
         "hyprland_instance_signature": "approved_instance", "hyprland_output_name": "DP-1",
         "hyprland_compositor_pid": 123, "hyprland_compositor_executable": "/usr/bin/Hyprland",
@@ -106,6 +109,17 @@ class Native(Attached):
                 "input_revoked": True, "capture_revoked": True,
                 "owned_devices": "hyprland_owned_connections_closed",
                 "hyprland_owned_connections_closed": True, "receiver_release_verified": False}
+
+    @property
+    def hyprland_handoff_binding(self):
+        return {
+            "output_name": "DP-1",
+            "source_id": "fixture-opaque-source-1",
+            "application_identity": {
+                "pid": 42, "uid": 1000, "start_ticks": 9, "exe": "/usr/bin/xed",
+                "exe_identity": [1, 2],
+            },
+        }
 
 
 @pytest.mark.parametrize("released", [True, False])

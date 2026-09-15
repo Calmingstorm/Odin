@@ -186,10 +186,18 @@ class TestResolution:
         from src.config.apply_registry import schema_facts
 
         facts = schema_facts()
-        # Fourteen native Hyprland leaves plus the two live MCP publication caps.
-        assert len(facts) == 301
+        # Includes managed activation and its qualified companion manifest.
+        assert len(facts) == 304
         assert "mcp.max_published_tools_per_server" in facts
         assert "mcp.max_published_tools_global" in facts
+        discovery = spec_for("computer.hyprland_discovery_mode")
+        assert discovery.apply_mode == "restart"
+        assert discovery.restart_reason
+        for path in ("computer.hyprland_managed_activation",
+                     "computer.hyprland_plugin_manifest"):
+            assert path in facts
+            assert spec_for(path).apply_mode == "restart"
+            assert spec_for(path).restart_reason
         assert "graceful_degradation.enabled" not in facts
         assert "grafana_alerts.enabled" not in facts
         for path in (

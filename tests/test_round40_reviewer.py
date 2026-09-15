@@ -103,6 +103,25 @@ class TestReadLinesCallbackTimeout:
 
         proc.wait = hang_forever
 
+        # Exercise the timeout branch without paying its production ten-second
+        # budget. Only the known hung awaitable is intercepted; readline and
+        # callback waits still use the real asyncio implementation.
+        from types import SimpleNamespace
+
+        real_wait_for = asyncio.wait_for
+        deadlines = []
+
+        async def expire_hung_wait(awaitable, timeout):
+            if getattr(awaitable, "cr_code", None) is hang_forever.__code__:
+                deadlines.append(timeout)
+                awaitable.close()
+                raise TimeoutError
+            return await real_wait_for(awaitable, timeout)
+
+        monkeypatch.setattr(ssh_mod, "asyncio", SimpleNamespace(
+            **{name: getattr(asyncio, name) for name in dir(asyncio)
+               if name != "wait_for"}, wait_for=expire_hung_wait,
+        ))
         reap = AsyncMock()
         monkeypatch.setattr(ssh_mod, "terminate_process_tree", reap)
 
@@ -110,6 +129,7 @@ class TestReadLinesCallbackTimeout:
         code, output = await _read_lines_with_callback(proc, timeout=30, on_output=cb)
         reap.assert_awaited_once_with(proc, owned_pgid=None)
         assert "line" in output
+        assert deadlines == [10]
 
     @pytest.mark.asyncio
     async def test_proc_wait_completes_normally(self):

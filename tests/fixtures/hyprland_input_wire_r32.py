@@ -41,6 +41,8 @@ class WirePeer:
         self.bad_scope = False
         self.ack_release = True
         self.delay_op = None
+        self.drop_release_once = False
+        self.release_status_reply = None
         for path, handler in ((self.wayland, self._wayland), (self.scope, self._scope)):
             listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
             listener.bind(path)
@@ -57,14 +59,11 @@ class WirePeer:
             while not self.stop.is_set():
                 try:
                     connection, _ = listener.accept()
-                    break
                 except TimeoutError:
                     continue
-            else:
-                return
-            with connection:
-                connection.settimeout(0.1)
-                handler(connection)
+                with connection:
+                    connection.settimeout(0.1)
+                    handler(connection)
         except (BrokenPipeError, ConnectionResetError):
             pass
         except Exception as error:
@@ -86,16 +85,26 @@ class WirePeer:
                 request = json.loads(line)
                 self.requests.append(request)
                 op = request["op"]
-                assert op in {"status", "arm", "renew", "release_all"}, request
+                assert op in {"status", "arm", "renew", "release_all", "release_status"}, request
                 if op == self.delay_op:
                     time.sleep(0.12)
+                if op == "release_all" and self.drop_release_once:
+                    # Model a complete release command whose response is lost,
+                    # not a request which never reached the scope peer.
+                    self.armed = False
+                    self.drop_release_once = False
+                    return
                 if op == "arm":
                     self.armed = True
                 if op == "release_all":
                     self.armed = not self.ack_release
+                if op == "release_status" and self.release_status_reply is not None:
+                    connection.sendall(self.release_status_reply)
+                    continue
                 response = {"ok": not self.bad_scope, "armed": self.armed,
                             "keys": 0, "buttons": 0, "rejected": 0,
-                            "release_acknowledged": self.ack_release}
+                            "release_acknowledged": self.ack_release,
+                            "release_status_v1": True}
                 connection.sendall(json.dumps(response).encode() + b"\n")
 
     def _wayland(self, connection):

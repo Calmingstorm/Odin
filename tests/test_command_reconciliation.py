@@ -1,6 +1,4 @@
-"""Startup application-command reconciliation: the global scope is forced
-empty, each guild holds exactly the tree, scopes are isolated, and only
-failed or new scopes are retried."""
+"""One exact global command set; legacy guild copies must be removed first."""
 from __future__ import annotations
 
 from types import SimpleNamespace
@@ -52,7 +50,6 @@ def _bot(tree, guilds):
         tree=tree,
         guilds=guilds,
         _synced_command_scopes=set(),
-        _command_snapshot=None,
     )
     bot._reconcile_application_commands = (
         lambda guilds=None: OdinBot._reconcile_application_commands(bot, guilds=guilds)
@@ -68,18 +65,16 @@ def _guild(gid):
     return SimpleNamespace(id=gid, name=f"g{gid}")
 
 
-async def test_global_cleared_first_then_each_guild_holds_exactly_the_tree():
+async def test_guild_copies_cleared_before_exact_global_publication():
     tree = _Tree()
     bot = _bot(tree, [_guild(1), _guild(2)])
     await _reconcile(bot)
-    assert tree.calls[:2] == [("clear", None), ("sync", None)]
-    assert tree.globals == []  # global scope reconciled to EMPTY, not duplicated
+    assert tree.calls == [
+        ("clear", 1), ("sync", 1), ("clear", 2), ("sync", 2), ("sync", None),
+    ]
+    assert [c.name for c in tree.globals] == ["status", "usage"]
     for gid in (1, 2):
-        assert [c.name for c in tree.guild_maps[gid]] == ["status", "usage"]
-    assert ("clear", 1) in tree.calls and ("sync", 1) in tree.calls
-    clear_at = tree.calls.index(("clear", 1))
-    add_at = tree.calls.index(("add", 1, "status"))
-    assert clear_at < add_at < tree.calls.index(("sync", 1))
+        assert tree.guild_maps[gid] == []
     assert bot._synced_command_scopes == {"global", "guild:1", "guild:2"}
 
 
@@ -87,13 +82,14 @@ async def test_failed_scope_is_isolated_and_retried_later():
     tree = _Tree(fail_guilds={1})
     bot = _bot(tree, [_guild(1), _guild(2)])
     await _reconcile(bot)  # must not raise
-    assert bot._synced_command_scopes == {"global", "guild:2"}
+    assert bot._synced_command_scopes == {"guild:2"}
+    assert ("sync", None) not in tree.calls
     before = len(tree.calls)
     tree.fail_guilds.clear()
     await _reconcile(bot)
     after = tree.calls[before:]
     assert ("sync", 1) in after
-    assert ("sync", None) not in after and ("sync", 2) not in after  # only the failed scope
+    assert ("sync", None) in after and ("sync", 2) not in after
     assert bot._synced_command_scopes == {"global", "guild:1", "guild:2"}
 
 
@@ -103,15 +99,68 @@ async def test_global_failure_does_not_block_guild_reconciliation():
     bot = _bot(tree, [_guild(7)])
     await _reconcile(bot)
     assert "guild:7" in bot._synced_command_scopes and "global" not in bot._synced_command_scopes
+    tree.fail_global = False
+    tree.calls.clear()
+    await _reconcile(bot)
+    assert tree.calls == [("sync", None)]
 
 
-async def test_guild_join_reconciles_only_the_new_guild_from_the_snapshot():
+async def test_guild_join_clears_new_guild_without_creating_copies():
     tree = _Tree()
     bot = _bot(tree, [_guild(1)])
     await _reconcile(bot)
-    assert tree.globals == []
+    assert [c.name for c in tree.globals] == ["status", "usage"]
     before = len(tree.calls)
     await OdinBot.on_guild_join(bot, _guild(9))
     after = tree.calls[before:]
-    assert after == [("clear", 9), ("add", 9, "status"), ("add", 9, "usage"), ("sync", 9)]
+    assert after == [("clear", 9), ("sync", 9)]
     assert "guild:9" in bot._synced_command_scopes
+
+
+async def test_join_cannot_bypass_other_guild_cleanup_failure():
+    tree = _Tree(fail_guilds={1})
+    bot = _bot(tree, [_guild(1)])
+    await _reconcile(bot)
+    await OdinBot.on_guild_join(bot, _guild(9))
+    assert ("sync", None) not in tree.calls
+    assert tree.guild_maps[9] == []
+
+
+async def test_no_guilds_still_publishes_global_set_and_reconnect_is_noop():
+    tree = _Tree()
+    bot = _bot(tree, [])
+    await _reconcile(bot)
+    await _reconcile(bot)
+    assert tree.calls == [("sync", None)]
+
+
+async def test_real_discord_tree_bulk_sync_replaces_stale_remote_commands():
+    from unittest.mock import AsyncMock
+
+    import discord
+    from discord import app_commands
+
+    client = discord.Client(intents=discord.Intents.none(), application_id=123)
+    tree = app_commands.CommandTree(client)
+    remote = {None: ["removed"], 7: ["status", "removed"]}
+
+    @tree.command(name="status", description="Current status")
+    async def status(interaction: discord.Interaction):
+        pass
+
+    async def global_sync(application_id, *, payload):
+        assert application_id == 123
+        remote[None] = [row["name"] for row in payload]
+        return []
+
+    async def guild_sync(application_id, guild_id, *, payload):
+        assert application_id == 123
+        remote[guild_id] = [row["name"] for row in payload]
+        return []
+
+    tree._http = SimpleNamespace(
+        bulk_upsert_global_commands=AsyncMock(side_effect=global_sync),
+        bulk_upsert_guild_commands=AsyncMock(side_effect=guild_sync),
+    )
+    await _reconcile(_bot(tree, [_guild(7)]))
+    assert remote == {None: ["status"], 7: []}

@@ -770,6 +770,19 @@ class TestBooleanResponseIds:
 
 
 class TestBoundedServerRequestReplies:
+    def test_request_during_disconnect_does_not_schedule_reply(self, monkeypatch):
+        conn = _stdio("legacy")
+        conn._accept_server_requests = False
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("disconnected client scheduled a reply")
+
+        monkeypatch.setattr(client_mod.asyncio, "create_task", forbidden)
+        conn._handle_server_request(
+            {"jsonrpc": "2.0", "id": 42, "method": "roots/list"}, channel="stdio",
+        )
+        assert not conn._server_reply_tasks
+
     async def test_flood_is_bounded_and_disconnect_drains_tasks(self, monkeypatch):
         monkeypatch.setattr(client_mod, "_MAX_SERVER_REPLY_TASKS", 4)
         monkeypatch.setattr(client_mod, "_SERVER_REPLY_DRAIN_TIMEOUT", 0.05)

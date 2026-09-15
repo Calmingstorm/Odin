@@ -26,7 +26,7 @@ def test_committed_api_reference_is_byte_identical():
 def test_routes_exactly_match_characterization_method_path_name_and_order():
     rows = reference.collect_rest_routes()
     assert [(r.method, r.path, r.handler_name) for r in rows] == EXPECTED_ROUTES
-    assert len(rows) == 225
+    assert len(rows) == 228
     assert len({(r.method, r.path) for r in rows}) == len(rows)
     rendered = reference.render().split("## Other HTTP and WebSocket routes", 1)[0]
     table = [line.split(" | ") for line in rendered.splitlines() if line.startswith("| ")][2:]
@@ -109,7 +109,9 @@ async def test_flags_match_actual_admin_middleware_without_dispatching_handlers(
     from src.health.server import _make_admin_middleware
 
     # Synthetic token presence, not a credential loaded from config or disk.
-    policy = _make_admin_middleware(SimpleNamespace(api_token="", api_tokens=[object()]))
+    policy = _make_admin_middleware(
+        SimpleNamespace(api_token="", api_tokens=[SimpleNamespace(token="synthetic-test-value")])
+    )
     for row in reference.collect_rest_routes():
         resource = web.DynamicResource(row.path) if "{" in row.path else web.PlainResource(row.path)
         request = SimpleNamespace(
@@ -203,7 +205,7 @@ def test_generation_does_not_load_config_start_services_or_read_ui(monkeypatch):
     # Constructors can register routes but must not inspect UI assets on disk.
     monkeypatch.setattr(reference.Path, "is_dir", forbidden)
     monkeypatch.setattr(reference.Path, "is_file", forbidden)
-    assert "**225 REST registrations**" in reference.render()
+    assert "**228 REST registrations**" in reference.render()
 
 
 def test_cli_is_offline_and_works_outside_repo_without_git(tmp_path):

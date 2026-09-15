@@ -15,11 +15,16 @@ Missing ACKs remain unconfirmed/quarantined. The capability is
 `owned_input_release: hyprland_best_effort`, not `verified`. These residuals do
 not weaken or reclassify other backends.
 
-Keep the person present. Never fault-test held input or kill the compositor on
-their desktop. Installing helpers, loading a plugin, enabling computer use and
-selecting an output are not themselves task consent.
+Keep the owner or designated operator reachable with an independent stop path.
+Use the KVM lab for planned held-input/compositor fault qualification; an explicitly
+owner-approved supervised workstation test is not categorically excluded. Protect
+unrelated user work, identify disposable test documents, and signal only recorded
+test-owned PIDs/start ticks. See the corrected safety and venue requirements in
+`docs/computer-use/HYPRLAND-RECOVERY-QUALIFICATION-PLAN.md` in the source checkout.
+Installing helpers, loading a plugin, enabling computer use and selecting an
+output are not themselves task consent or authorization for fault injection.
 
-## Build, install, then explicitly load once
+## Build and install once; automatically load on first use
 
 Use the optional native build/install flow documented below. On the target
 distribution, install the C/C++ toolchain, `pkg-config`, Wayland development
@@ -46,7 +51,8 @@ The optional helper installation contains:
 * Source installer only: `/usr/local/lib/odin/odin-hyprland-scope.so`
   (compatibility symlink, **not** the recommended load path)
 
-No activation hook is permitted. Hyprland is not a headless base dependency.
+No activation hook runs during package installation. On first native inventory or
+session start, Odin loads the approved plugin by default. Hyprland is not a headless base dependency.
 Source installs need native helpers as well as the Python package;
 `pip install '.[computer]'` alone cannot build a compositor-ABI plugin.
 See [PACKAGING.md](PACKAGING.md) for authentication, service and storage policy.
@@ -79,19 +85,32 @@ nfpm package --config packaging/nfpm-hyprland.yml --packager deb --target build/
 Do not publish a generic plugin package that silently accepts an unmatched
 Hyprland ABI. Build identity is required even for source installation.
 
-The desktop owner runs this **once at setup**, in the chosen Hyprland session,
-after reviewing the exact matching plugin build:
+With the schema-2 manifest installed, `hyprland_managed_activation: true` (the
+default) loads the verified plugin on the first native inventory/session request.
+No manual command is needed after each boot. Existing explicit manual opt-outs
+remain manual. Only for that deliberate manual mode, the owner can load the exact
+matching plugin in the chosen Hyprland session:
 
 ```sh
 plugin=$(python3 -c 'import json; print(json.load(open("/usr/local/share/doc/odin-hyprland/build-identity.json"))["plugin_filename"])')
 hyprctl plugin load "/usr/local/lib/odin/$plugin"
 ```
 
-This is transient loading, not a persistent `hyprland.conf` edit. Odin never
-automatically loads/unloads it per action or session. Config rereads are allowed
-only during explicit setup/recovery and must remain infrequent. Never rewrite
-the user's compositor config. A compositor restart requires deliberate setup
-again and refreshed explicit session identity in Odin configuration.
+Loading is transient, not a persistent `hyprland.conf` edit. Odin inspects first,
+loads only when the exact approved image is absent, and verifies the mapped image
+and executing build ID. It does not unload/reload per action. Never rewrite the
+user's compositor config. Auto discovery refreshes reboot-scoped identifiers for
+a fresh session without hand-editing PID/signature/socket names. This is not a
+promise to resume a pre-reboot session or recover held input. See
+`docs/computer-use/HYPRLAND-AUTOLOAD-TRUST.md` in the source checkout for the
+complete trust contract. On upgrade, rebuild and provision the schema-2 manifest
+with its matching artifact once; schema-1 manifests are not implicitly promoted.
+Do not flip recovery metadata to permit loading.
+
+The existing installer's completion message still mentions explicit setup and
+qualification. That legacy wording does not impose a recovery-qualification gate:
+installation is inert, while the first-use loader follows the build-trust contract
+above. Packaging behavior is unchanged by this runtime update.
 
 ### Loaded image identity and recovery
 
@@ -112,8 +131,9 @@ JSON `status` response reports `companion_build_id` from the **executing** code.
 Compare that value with the manifest before qualification/admission. A missing
 or mismatched value means stop, not “the new file must be loaded.” The source
 ID does not attest compiler, headers or libraries; the ELF digest and exact ABI
-pin are separate evidence. This metadata is not an automatic Python admission
-gate and `runtime_qualified: false` must not be mistaken for live approval.
+pin are separate evidence. Schema-2 build approval and these identity checks gate
+automatic loading. `runtime_qualified: false` remains recovery metadata, not a
+load gate and not evidence that recovery-after-fault has been demonstrated.
 
 During explicit owner-supervised recovery only: end input, verify owned release,
 unload the old plugin using its actual loaded path, and load the new versioned
@@ -136,11 +156,14 @@ contacts the compositor. Use the normal operator flow for an Odin restart.
 | `computer.environment` | `existing_session` |
 | `computer.wayland_backend` | `hyprland` |
 | `computer.wayland_uid` | Desktop owner's numeric UID |
-| `computer.hyprland_runtime_dir` | Explicit runtime directory |
-| `computer.hyprland_wayland_display` | Local Wayland socket basename |
-| `computer.hyprland_instance_signature` | Selected compositor instance signature |
+| `computer.hyprland_discovery_mode` | `auto` (default); explicit `pinned` remains available |
+| `computer.hyprland_managed_activation` | `true` (default); `false` only for deliberate manual loading |
+| `computer.hyprland_plugin_manifest` | Installed `/usr/local/share/doc/odin-hyprland/build-identity.json` by default |
+| `computer.hyprland_runtime_dir` | Optional in auto mode; defaults to `/run/user/<UID>` |
+| `computer.hyprland_wayland_display` | Required only in pinned mode; discovered in auto mode |
+| `computer.hyprland_instance_signature` | Required only in pinned mode; discovered in auto mode |
 | `computer.hyprland_output_name` | One explicitly consented native output |
-| `computer.hyprland_compositor_pid` | Exact selected compositor PID |
+| `computer.hyprland_compositor_pid` | Required only in pinned mode; discovered in auto mode |
 | `computer.hyprland_compositor_executable` | Approved absolute executable path |
 | `computer.hyprland_compositor_sha256` | Independently approved executable SHA-256 |
 | `computer.hyprland_compositor_version` | Approved build version |

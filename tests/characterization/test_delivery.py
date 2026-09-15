@@ -7,8 +7,11 @@ send retry/backoff loop.
 
 from __future__ import annotations
 
+import io
+
 import pytest
 
+import discord
 from src.discord.delivery import DISCORD_MAX_LEN
 from tests.fakes import FakeLLM, FakeMessage, make_bot
 
@@ -112,7 +115,14 @@ class TestSendChunked:
 
 
 class TestSendWithRetry:
-    async def test_retries_after_transient_failure(self, bot, monkeypatch):
+    @staticmethod
+    def _http_error(*, code: int, status: int = 400, errors=None):
+        import discord
+
+        response = type("Response", (), {"status": status, "reason": "test", "headers": {}})()
+        return discord.HTTPException(response, {"code": code, "message": "test", "errors": errors})
+
+    async def test_does_not_retry_uncertain_transport_failure(self, bot, monkeypatch):
         sleeps = []
 
         async def fake_sleep(secs):
@@ -122,11 +132,11 @@ class TestSendWithRetry:
         msg = FakeMessage("q")
         msg.reply_error = ConnectionError("blip")  # first attempt fails
         sent = await bot.delivery.send_with_retry(msg, "eventually delivered")
-        assert sent is not None
-        assert msg.reply_texts == ["eventually delivered"]
-        assert sleeps == [1]  # backoff is 1 + attempt
+        assert sent is None
+        assert msg.reply_texts == []
+        assert sleeps == []
 
-    async def test_gives_up_after_three_attempts_returns_none(self, bot, monkeypatch):
+    async def test_uncertain_transport_failure_returns_none_without_retries(self, bot, monkeypatch):
         sleeps = []
 
         async def fake_sleep(secs):
@@ -141,10 +151,146 @@ class TestSendWithRetry:
         msg.reply = always_fail
         sent = await bot.delivery.send_with_retry(msg, "never arrives")
         assert sent is None
-        assert sleeps == [1, 2]  # two backoffs between three attempts
+        assert sleeps == []
 
     async def test_as_reply_false_uses_channel_send(self, bot):
         msg = FakeMessage("q")
         await bot.delivery.send_with_retry(msg, "broadcast", as_reply=False)
         assert msg.replies == []
         assert msg.channel.sent_texts == ["broadcast"]
+
+    async def test_confirmed_deleted_reply_reference_falls_back_once_to_plain_send(self, bot):
+        msg = FakeMessage("q")
+        msg.reply_error = self._http_error(code=10008)
+
+        sent = await bot.delivery.send_with_retry(msg, "still delivered")
+
+        assert sent is not None
+        assert msg.replies == []
+        assert msg.channel.sent_texts == ["still delivered"]
+
+    async def test_structured_invalid_reference_falls_back_to_plain_send(self, bot):
+        msg = FakeMessage("q")
+        msg.reply_error = self._http_error(
+            code=50035,
+            errors={
+                "message_reference": {"message_id": {"_errors": [{"code": "UNKNOWN_MESSAGE"}]}}
+            },
+        )
+
+        sent = await bot.delivery.send_with_retry(msg, "still delivered")
+
+        assert sent is not None
+        assert msg.replies == []
+        assert msg.channel.sent_texts == ["still delivered"]
+
+    @pytest.mark.parametrize("attachment_kind", ["path", "buffer"])
+    async def test_invalid_reply_fallback_preserves_attachment_after_parameter_cleanup(
+        self, bot, tmp_path, attachment_kind, monkeypatch
+    ):
+        """discord.py closes request parameters even when Discord rejects them."""
+        payload = b"the exact attachment bytes"
+        if attachment_kind == "path":
+            path = tmp_path / "report.txt"
+            path.write_bytes(payload)
+            file = discord.File(path, filename="report.txt", spoiler=True, description="report")
+        else:
+            file = discord.File(
+                io.BytesIO(payload), filename="report.txt", spoiler=True, description="report"
+            )
+
+        msg = FakeMessage("q")
+        fallback_payloads: list[bytes] = []
+
+        async def rejected_reply(*_args, **kwargs):
+            # This mirrors MultipartParameters.__exit__ calling File.close().
+            for sent_file in kwargs["files"]:
+                sent_file.close()
+            raise self._http_error(code=10008)
+
+        original_send = msg.channel.send
+
+        async def capture_fallback(*args, **kwargs):
+            fallback_payloads.extend(sent_file.fp.read() for sent_file in kwargs["files"])
+            return await original_send(*args, **kwargs)
+
+        monkeypatch.setattr(msg, "reply", rejected_reply)
+        monkeypatch.setattr(msg.channel, "send", capture_fallback)
+        sent = await bot.delivery.send_with_retry(msg, "still delivered", files=[file])
+
+        assert sent is not None
+        assert msg.channel.sent_texts == ["still delivered"]
+        fallback = msg.channel.sent[0]["files"]
+        assert len(fallback) == 1
+        assert fallback_payloads == [payload]
+        assert fallback[0].fp.closed
+        assert fallback[0].filename == "SPOILER_report.txt"
+        assert fallback[0].description == "report"
+
+    async def test_invalid_reply_fallback_rewinds_owned_file_after_request_consumes_it(
+        self, bot, tmp_path, monkeypatch
+    ):
+        """The fallback must not inherit the first multipart request's EOF."""
+        payload = b"the attachment survives Discord's cleanup"
+        path = tmp_path / "report.txt"
+        path.write_bytes(payload)
+        file = discord.File(path, filename="report.txt")
+        msg = FakeMessage("q")
+        captured: list[bytes] = []
+
+        async def rejected_reply(*_args, **kwargs):
+            for sent_file in kwargs["files"]:
+                assert sent_file.fp.read() == payload
+                sent_file.close()
+            raise self._http_error(code=10008)
+
+        async def rejected_fallback(*_args, **kwargs):
+            for sent_file in kwargs["files"]:
+                captured.append(sent_file.fp.read())
+                sent_file.close()
+            raise self._http_error(code=50013, status=403)
+
+        monkeypatch.setattr(msg, "reply", rejected_reply)
+        monkeypatch.setattr(msg.channel, "send", rejected_fallback)
+
+        sent = await bot.delivery.send_with_retry(msg, "still delivered", files=[file])
+
+        assert sent is None
+        assert captured == [payload]
+
+    async def test_other_invalid_form_body_never_uses_plain_send_fallback(self, bot, monkeypatch):
+        async def no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr("asyncio.sleep", no_sleep)
+        msg = FakeMessage("q")
+        msg.reply_error = self._http_error(
+            code=50035,
+            errors={"content": {"_errors": [{"code": "BASE_TYPE_BAD_LENGTH"}]}},
+        )
+
+        await bot.delivery.send_with_retry(msg, "must not broadcast")
+
+        assert msg.channel.sent_texts == []
+
+    async def test_other_http_failure_never_uses_plain_send_fallback(self, bot, monkeypatch):
+        async def no_sleep(_seconds):
+            return None
+
+        monkeypatch.setattr("asyncio.sleep", no_sleep)
+        msg = FakeMessage("q")
+        msg.reply_error = self._http_error(code=50013, status=403)
+
+        await bot.delivery.send_with_retry(msg, "must not broadcast")
+
+        assert msg.channel.sent_texts == []
+
+    async def test_transport_failure_is_not_retried_or_fallen_back(self, bot):
+        msg = FakeMessage("q")
+        msg.reply_error = ConnectionError("outcome uncertain")
+
+        sent = await bot.delivery.send_with_retry(msg, "must not duplicate")
+
+        assert sent is None
+        assert msg.replies == []
+        assert msg.channel.sent_texts == []

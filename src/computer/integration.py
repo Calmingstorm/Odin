@@ -1,4 +1,5 @@
 """Lazy foreground authority facade; no desktop imports until session start."""
+# ruff: noqa: E501
 
 from __future__ import annotations
 
@@ -6,6 +7,7 @@ import asyncio
 import contextvars
 import hashlib
 import json
+import logging
 from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -13,7 +15,10 @@ from pathlib import Path
 
 from ..tools.output_authorization import tool_scope_allows
 from ..tools.result_validator import ToolResult
+from .error_guidance import exception_reason, failure_guidance, guidance, safety_terminal
 from .models import RequestContext
+
+logger = logging.getLogger(__name__)
 
 COMPUTER_TOOLS = frozenset({"computer_session", "computer_observe", "computer_act"})
 NONVISUAL_OPERATIONS = frozenset({"stop", "cancel", "close", "status", "pause"})
@@ -94,15 +99,17 @@ class ComputerIntegration:
                 from .runtime.hyprland_identity import ExecutableTrust
 
                 s = self.settings
+                auto = getattr(s, "hyprland_discovery_mode", "auto") == "auto"
+                runtime_dir = s.hyprland_runtime_dir or f"/run/user/{s.wayland_uid}"
                 return HyprlandRuntimeBackend(
                     enabled=self.enabled, environment=s.environment,
                     config=HyprlandSessionConfig(
                         expected_uid=s.wayland_uid,
-                        runtime_dir=s.hyprland_runtime_dir,
-                        wayland_display=s.hyprland_wayland_display,
-                        instance_signature=s.hyprland_instance_signature,
+                        runtime_dir=runtime_dir,
+                        wayland_display="" if auto else s.hyprland_wayland_display,
+                        instance_signature="" if auto else s.hyprland_instance_signature,
                         output_name=s.hyprland_output_name,
-                        compositor_pid=s.hyprland_compositor_pid,
+                        compositor_pid=None if auto else s.hyprland_compositor_pid,
                         compositor_trust=ExecutableTrust(
                             path=s.hyprland_compositor_executable,
                             sha256=s.hyprland_compositor_sha256,
@@ -112,8 +119,10 @@ class ComputerIntegration:
                         ),
                         guardian_binary=s.hyprland_guardian_binary,
                         capture_binary=s.hyprland_capture_binary,
-                        scope_socket=s.hyprland_scope_socket or (
-                            s.hyprland_runtime_dir + "/odin-hyprland-scope.sock"),
+                        scope_socket=s.hyprland_scope_socket or (runtime_dir + "/odin-hyprland-scope.sock"),
+                        discovery_mode="auto" if auto else "pinned",
+                        managed_activation=s.hyprland_managed_activation,
+                        plugin_manifest_path=s.hyprland_plugin_manifest or None,
                     ),
                 )
             from .runtime.wayland_backend import WaylandRuntimeBackend, WaylandSessionConfig
@@ -226,7 +235,7 @@ class ComputerIntegration:
         grant = _grant.get()
         if grant is None or not self.grant_allows(name, grant.context.owner_id, grant.conversation):
             return ToolResult(
-                "Permission denied: no foreground computer grant.",
+                json.dumps({"status": "rejected", "reason": "permission_denied", **guidance("permission_denied")}),
                 ok=False,
                 error="permission_denied",
                 tool_name=name,
@@ -235,7 +244,7 @@ class ComputerIntegration:
             not isinstance(values, dict) or values.get("operation") != grant.nonvisual_operation
         ):
             return ToolResult(
-                "Permission denied: computer operation changed.",
+                json.dumps({"status": "rejected", "reason": "permission_denied", **guidance("permission_denied")}),
                 ok=False,
                 error="permission_denied",
                 tool_name=name,
@@ -247,6 +256,19 @@ class ComputerIntegration:
         }[name]
         try:
             result = await method(grant.context, values)
+            if isinstance(result, dict) and (
+                result.get("status") in {"unknown", "interrupted", "unavailable", "not_satisfied", "rejected", "failed"}
+                or safety_terminal(result)
+                or result.get("uncertain_outcome") is True
+                or (isinstance(result.get("cleanup"), dict) and result["cleanup"].get("complete") is not True)
+            ):
+                result = failure_guidance(result)
+            clean_interruption = (
+                isinstance(result, dict)
+                and result.get("status") == "interrupted"
+                and result.get("recoverable") is True
+                and result.get("terminal") is False
+            )
             if (
                 name == "computer_act"
                 and isinstance(result, dict)
@@ -257,6 +279,11 @@ class ComputerIntegration:
                 # reissue pixels or authorize a subsequent action.
                 observation = result["next_observation"]
                 receipt = {k: v for k, v in result.items() if k != "next_observation"}
+                if clean_interruption:
+                    # The existing image-delivery loop treats every interrupted
+                    # transport status as unknown. Publish a settled failure at
+                    # that boundary, retaining the native status and evidence.
+                    receipt = {**receipt, "status": "not_satisfied", "native_status": "interrupted"}
                 try:
                     image = self.output_image(observation)
                 except (ValueError, TypeError, KeyError):
@@ -283,16 +310,8 @@ class ComputerIntegration:
                     raise ComputerError("invalid_observation_response") from None
                 grant.images.append(image)
                 return image
-            unknown = isinstance(result, dict) and (
-                result.get("status") in {"unknown", "interrupted"}
-                or result.get("state") in {"unknown", "quarantined"}
-                or (
-                    isinstance(result.get("cleanup"), dict)
-                    and result["cleanup"].get("complete") is not True
-                )
-                or result.get("uncertain_outcome") is True
-            )
-            rejected = isinstance(result, dict) and result.get("status") in {
+            unknown = isinstance(result, dict) and safety_terminal(result)
+            rejected = clean_interruption or isinstance(result, dict) and result.get("status") in {
                 "unavailable",
                 "not_satisfied",
                 "rejected",
@@ -316,17 +335,34 @@ class ComputerIntegration:
             raise
         except Exception as exc:
             from .models import ComputerError
+            from .runtime.hyprland_scope import HyprlandScopeFailure
 
-            if isinstance(exc, (ComputerError, PermissionError)):
+            if isinstance(exc, (ComputerError, PermissionError, HyprlandScopeFailure)):
+                from .admission import InputAdmissionError
+
+                reason = exception_reason(exc)
+                from .error_guidance import InputBoundaryError
+
+                rejection: dict = {"status": "rejected", "reason": reason}
+                if isinstance(exc, InputBoundaryError):
+                    rejection.update(execution=exc.execution, state=exc.state)
+                rejection = failure_guidance(rejection)
+                if isinstance(exc, InputAdmissionError):
+                    rejection["input_admission"] = exc.admission.public()
                 return ToolResult(
-                    "Computer request rejected: " + str(exc),
+                    json.dumps(rejection, ensure_ascii=True),
                     ok=False,
                     error="computer_rejected",
                     tool_name=name,
                 )
-            await self.stop_context(grant.context)
+            # Never log exception text/traceback: native errors can contain secrets.
+            logger.error("Unexpected computer tool failure; stopping context (details suppressed)")
+            try:
+                await self.stop_context(grant.context)
+            except Exception:
+                logger.error("Computer failure cleanup failed; operator release required (details suppressed)")
             return ToolResult(
-                "Computer outcome unknown; reconcile with fresh evidence. Do not replay.",
+                json.dumps({"status": "unknown", "reason": "outcome_unknown", **guidance("outcome_unknown", terminal=True)}),
                 ok=False,
                 error="outcome_unknown",
                 uncertain_outcome=True,

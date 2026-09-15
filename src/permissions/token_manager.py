@@ -7,8 +7,10 @@ import json
 import secrets
 from pathlib import Path
 
+from ..config.persistence import config_transaction
 from ..config.schema import ApiTokenIdentity
 from ..odin_log import get_logger
+from ..web.bootstrap_policy import CredentialInventory
 from .persistence import write_private_atomic
 
 log = get_logger("token_manager")
@@ -34,6 +36,8 @@ class ApiTokenManager:
         self._path = Path(path)
         self._lock = asyncio.Lock()
         self._tokens: dict[str, _StoredToken] = {}
+        self._store_status = "missing"
+        self._last_credential_guard = None
         self._load()
 
     def _load(self) -> None:
@@ -42,22 +46,41 @@ class ApiTokenManager:
         try:
             data = json.loads(self._path.read_text())
             if not isinstance(data, list):
+                self._store_status = "malformed"
                 return
+            self._store_status = "valid"
             for entry in data:
                 try:
                     user_id = entry.get("user_id", "")
                     token_hash = entry.get("token_hash", "")
                     token_prefix = entry.get("token_prefix", "")
-                    if not user_id or not token_hash:
-                        log.warning("Skipping token entry: missing user_id or token_hash")
+                    if (
+                        not isinstance(user_id, str)
+                        or not user_id
+                        or not isinstance(token_hash, str)
+                    ):
+                        self._store_status = "malformed"
+                        log.warning("Skipping invalid API token entry")
                         continue
+                    if len(token_hash) != 64 or any(
+                        c not in "0123456789abcdef" for c in token_hash
+                    ):
+                        # Preserve legacy records for callers that need to
+                        # repair them, but never count this store as usable
+                        # listener authentication inventory.
+                        self._store_status = "malformed"
+                        if not token_hash:
+                            log.warning("Skipping invalid API token entry")
+                            continue
                     tier = entry.get("tier", "admin")
                     if tier not in ("admin", "user", "guest"):
+                        self._store_status = "malformed"
                         log.warning("Skipping token %s: invalid tier '%s'", user_id, tier)
                         continue
                     allowed_tools = entry.get("allowed_tools", [])
                     if (not isinstance(allowed_tools, list)
                             or not all(isinstance(t, str) for t in allowed_tools)):
+                        self._store_status = "malformed"
                         log.warning(
                             "Skipping token %s: allowed_tools must be a list of strings",
                             user_id,
@@ -69,6 +92,7 @@ class ApiTokenManager:
                     elif isinstance(raw_hosts, list) and all(isinstance(h, str) for h in raw_hosts):
                         allowed_hosts = raw_hosts
                     else:
+                        self._store_status = "malformed"
                         log.warning(
                             "Skipping token %s: allowed_hosts must be a list of strings or null",
                             user_id,
@@ -86,12 +110,14 @@ class ApiTokenManager:
                         default_host=default_host,
                     )
                     self._tokens[user_id] = _StoredToken(token_hash, token_prefix, identity)
-                except Exception as e:
-                    log.warning("Skipping invalid token entry: %s", e)
+                except Exception:
+                    self._store_status = "malformed"
+                    log.warning("Skipping invalid API token entry")
         except (json.JSONDecodeError, OSError) as e:
-            log.warning("Failed to load API tokens: %s", e)
+            self._store_status = "unreadable" if isinstance(e, OSError) else "malformed"
+            log.warning("API token store unavailable or malformed")
 
-    def _save(self, candidate: dict[str, _StoredToken] | None = None) -> None:
+    def _save(self, candidate: dict[str, _StoredToken] | None = None) -> bool:
         self._path.parent.mkdir(parents=True, exist_ok=True)
         data = []
         for st in (self._tokens if candidate is None else candidate).values():
@@ -103,6 +129,37 @@ class ApiTokenManager:
             d["token_prefix"] = st.token_prefix
             data.append(d)
         self.durability_degraded = not write_private_atomic(self._path, json.dumps(data, indent=2))
+        if self.durability_degraded:
+            log.error("API token store durability is degraded after publishing credentials")
+        else:
+            self._store_status = "valid"
+        # False means replacement committed but its directory fsync failed.
+        # This is degraded durability, not a rollback.
+        return not self.durability_degraded
+
+    @property
+    def credential_inventory(self) -> CredentialInventory:
+        """Validated non-secret dynamic count. Bad stores count as zero."""
+        return CredentialInventory(
+            dynamic_usable=len(self._tokens) if self._store_status == "valid" else 0
+        )
+
+    @property
+    def credential_store_status(self) -> str:
+        return self._store_status
+
+    def set_last_credential_guard(self, guard) -> None:
+        self._last_credential_guard = guard
+
+    async def _may_publish_candidate(self, candidate: dict[str, _StoredToken]) -> bool:
+        if self._last_credential_guard is None:
+            return True
+        result = self._last_credential_guard(CredentialInventory(dynamic_usable=len(candidate)))
+        if hasattr(result, "__await__"):
+            result = await result
+        if type(result) is not bool:
+            raise TypeError("last credential guard must return bool")
+        return result
 
     def resolve(self, raw_token: str) -> ApiTokenIdentity | None:
         """HMAC-safe lookup by hashing the incoming token and comparing."""
@@ -139,7 +196,7 @@ class ApiTokenManager:
         default_host: str = "",
     ) -> ApiTokenIdentity:
         """Generate a new token. Returns identity with raw token (shown once)."""
-        async with self._lock:
+        async with config_transaction(), self._lock:
             if user_id in self._tokens:
                 raise ValueError(f"Token with user_id '{user_id}' already exists")
             raw_token = secrets.token_urlsafe(48)
@@ -166,7 +223,7 @@ class ApiTokenManager:
 
     async def update_token(self, user_id: str, **kwargs) -> ApiTokenIdentity | None:
         """Update fields on an existing token (not the token value itself)."""
-        async with self._lock:
+        async with config_transaction(), self._lock:
             st = self._tokens.get(user_id)
             if st is None:
                 return None
@@ -191,7 +248,7 @@ class ApiTokenManager:
 
     async def regenerate_token(self, user_id: str) -> str | None:
         """Generate a new token value. Returns raw token (shown once)."""
-        async with self._lock:
+        async with config_transaction(), self._lock:
             st = self._tokens.get(user_id)
             if st is None:
                 return None
@@ -207,10 +264,14 @@ class ApiTokenManager:
 
     async def delete_token(self, user_id: str) -> bool:
         """Delete a token by user_id."""
-        async with self._lock:
+        async with config_transaction(), self._lock:
             if user_id in self._tokens:
                 candidate = dict(self._tokens)
                 del candidate[user_id]
+                if not await self._may_publish_candidate(candidate):
+                    raise PermissionError(
+                        "cannot remove the last usable credential from a non-loopback listener"
+                    )
                 self._save(candidate)
                 self._tokens = candidate
                 log.info("Deleted API token for user_id=%s", user_id)

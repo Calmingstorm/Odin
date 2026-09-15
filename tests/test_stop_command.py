@@ -43,14 +43,23 @@ async def test_stop_reports_settled_result():
     bot = _bot()
     bot.channel_state.set_active_request("42", "req")
     interaction = _Interaction()
+    deferred = asyncio.Event()
+    release_defer = asyncio.Event()
+
+    async def defer(*_args, **_kwargs):
+        deferred.set()
+        await release_defer.wait()
+
+    interaction.response.defer.side_effect = defer
 
     task = asyncio.create_task(bot.tree.commands["stop"](interaction))
-    await asyncio.sleep(0)
+    await asyncio.wait_for(deferred.wait(), timeout=1)
     assert bot.channel_state.cancel_events["42"].is_set()
     assert not task.done()
 
     bot.channel_state.finish_stop("42", "req", "Task stopped by user.")
     bot.channel_state.clear_active_request("42", "req")
+    release_defer.set()
     await asyncio.wait_for(task, timeout=1)
     interaction.response.defer.assert_awaited_once_with(ephemeral=True)
     interaction.followup.send.assert_awaited_once_with(

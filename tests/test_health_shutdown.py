@@ -40,12 +40,15 @@ from src.web.websocket import WebSocketManager, setup_websocket
 
 
 class _FakeWS:
-    def __init__(self, *, close_exc=None, hang=False):
+    def __init__(self, *, close_exc=None, hang=False, close_started=None):
         self.closed_with = None
         self._close_exc = close_exc
         self._hang = hang
+        self._close_started = close_started
 
     async def close(self, *, code=None, message=b""):
+        if self._close_started is not None:
+            self._close_started.set()
         if self._hang:
             await asyncio.sleep(30)
         if self._close_exc is not None:
@@ -156,9 +159,10 @@ class TestCloseAll:
         assert manager._session_expiry_tasks == {}
 
     async def test_outer_cancellation_propagates_and_still_clears(self):
-        manager = _manager_with([_FakeWS(hang=True)])
+        close_started = asyncio.Event()
+        manager = _manager_with([_FakeWS(hang=True, close_started=close_started)])
         task = asyncio.create_task(manager.close_all())
-        await asyncio.sleep(0.05)  # let it reach the close await
+        await close_started.wait()
         task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await task

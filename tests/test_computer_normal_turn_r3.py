@@ -25,8 +25,9 @@ def test_migration_drops_only_obsolete_restrictions(tmp_path):
     store.finish_action(grant.session_id, "action", {"status": "verified"})
     evidence_id = store.put_evidence(grant.session_id, b"preserved artifact", kind="export")
     store.record_cleanup(grant.session_id, {"stopped": True}, clean=True)
-    store.db.execute("CREATE TABLE restrictions (owner_id TEXT, channel_id TEXT, "
-                     "turn_id TEXT, created_at REAL)")
+    store.db.execute("CREATE TABLE restrictions (owner_id TEXT NOT NULL, "
+                     "channel_id TEXT NOT NULL, turn_id TEXT NOT NULL, "
+                     "created_at REAL NOT NULL, PRIMARY KEY(owner_id,channel_id))")
     store.db.execute("INSERT INTO restrictions VALUES ('alice','channel','turn',0)")
     before = {table: [tuple(row) for row in store.db.execute(f"SELECT * FROM {table}")]
               for table in ("sessions", "evidence", "receipts", "session_cleanup")}
