@@ -116,7 +116,9 @@ def resolve_startup_context(
     # The canonical path binds persistence/setup identity. Keep the lexical
     # launch alias separately: re-exec replays it, so workspace protection must
     # protect both the alias and its target through load_config's existing path.
-    launch = _absolute(config_path)
+    # Unlike abspath(), absolute() retains '..': resolving a symlink before
+    # its parent traversal can select a different file than lexical collapse.
+    launch = Path(config_path).expanduser().absolute()
     config = launch.resolve()
     env = _absolute(env_file) if env_file is not None else default_environment_path(config)
     state = (_absolute(initialization_state) if initialization_state is not None

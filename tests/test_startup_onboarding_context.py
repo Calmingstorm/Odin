@@ -244,10 +244,13 @@ def test_main_preserves_launch_alias_for_workspace_protection(
         pass
 
     def load_and_stop(path):
-        real_load(path)
-        raise LoadedError
+        return real_load(path)
 
     monkeypatch.setattr(src.config, "load_config", load_and_stop)
+    def stop_after_load(*args, **kwargs):
+        raise LoadedError
+
+    monkeypatch.setattr("logging.basicConfig", stop_after_load)
     with pytest.raises(LoadedError):
         main()
 
@@ -260,3 +263,48 @@ def test_main_preserves_launch_alias_for_workspace_protection(
         provision_workspace(str(alias_dir), protected_roots=roots)
     assert alias.is_file()
     assert sys.argv == argv, "re-exec must retain the original launch arguments"
+
+
+def test_startup_preserves_symlink_parent_traversal_semantics(tmp_path, monkeypatch):
+    import sys
+
+    import src.config
+    from src.__main__ import main
+    from src.config import schema
+
+    real = tmp_path / "real"
+    (real / "child").mkdir(parents=True)
+    launch = tmp_path / "launch"
+    launch.mkdir()
+    (launch / "alias").symlink_to(real / "child", target_is_directory=True)
+    (real / "config.yml").write_text("discord: {token: ''}\ntimezone: America/New_York\n")
+    (launch / "config.yml").write_text("discord: {token: ''}\ntimezone: UTC\n")
+    monkeypatch.chdir(tmp_path)
+    argument = "launch/alias/../config.yml"
+    monkeypatch.setattr(sys, "argv", ["odin", "--config", argument])
+    monkeypatch.setattr(schema, "_ACTIVE_CONFIG_PATH", None)
+    monkeypatch.setattr(schema, "_LAUNCH_CONFIG_PATH", None)
+    real_load = src.config.load_config
+    loaded = []
+
+    class LoadedError(Exception):
+        pass
+
+    def load_and_stop(path):
+        config = real_load(path)
+        loaded.append(config)
+        return config
+
+    monkeypatch.setattr(src.config, "load_config", load_and_stop)
+    def stop_after_load(*args, **kwargs):
+        raise LoadedError
+
+    monkeypatch.setattr("logging.basicConfig", stop_after_load)
+    with pytest.raises(LoadedError):
+        main()
+    assert loaded[0].timezone == "America/New_York"
+    assert schema.active_config_path() == real / "config.yml"
+    context = resolve_startup_context(argument)
+    assert context.config_path == real / "config.yml"
+    assert context.config_launch_path == tmp_path / argument
+    assert context.environment_path == real / ".env"

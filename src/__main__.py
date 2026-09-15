@@ -549,7 +549,11 @@ def main() -> None:
     from src.health import HealthServer
     from src.odin_log import get_logger
 
-    config = load_config(context.config_launch_path)
+    config = load_config(context.config_path)
+    # Load/migrate against the canonical target; preserve the original alias
+    # separately for the existing workspace protection used before re-exec.
+    from src.config.schema import set_active_config_path
+    set_active_config_path(context.config_launch_path)
 
     import logging
     logging.basicConfig(
