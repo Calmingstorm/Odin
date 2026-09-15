@@ -131,6 +131,7 @@ async def test_setup_completion_race_returns_conflict():
 async def test_setup_gateway_failure_is_not_reported_connected():
     onboarding = coordinator(return_value=SimpleNamespace(
         gateway_attached=False, activation_detail="gateway unavailable", persisted=True,
+        restart_required=(),
     ))
     async with TestClient(TestServer(app_for(
         register_setup, SimpleNamespace(onboarding=onboarding),
