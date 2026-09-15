@@ -3,7 +3,12 @@ from unittest.mock import AsyncMock
 import pytest
 
 from src.computer.models import ComputerError
-from tests.computer.test_hyprland_backend import action, backend  # noqa: F401
+from tests.computer.test_hyprland_backend import action
+from tests.computer.test_hyprland_backend import backend as backend
+from tests.test_computer_hyprland_receipts_r33 import durable
+from tests.test_computer_hyprland_turnloop_r33 import NativeTransport, call, observe, start
+from tests.test_computer_hyprland_turnloop_r33 import action as turn_action
+from tests.test_computer_hyprland_turnloop_r33 import normal as normal
 
 
 async def test_preflight_capture_failure_is_known_no_input(backend, monkeypatch):
@@ -24,7 +29,9 @@ async def test_preflight_does_not_mask_previous_unknown(backend):
 
 async def test_dispatch_error_preserves_ledger_cleanup(backend, monkeypatch):
     frame = await backend.observe()
-    monkeypatch.setattr(backend._guardian, "act", AsyncMock(side_effect=ComputerError("dispatch_failed")))
+    monkeypatch.setattr(
+        backend._guardian, "act", AsyncMock(side_effect=ComputerError("dispatch_failed")),
+    )
     monkeypatch.setattr(backend._guardian, "close", AsyncMock(return_value={
         "release_ack": False, "release_confirmed": True, "unknown_release": False,
     }))
@@ -42,9 +49,6 @@ def test_release_proof_is_explicit(backend, receipt):
 
 
 async def test_normal_receipt_retains_ledger_basis(normal, monkeypatch):
-    from tests.test_computer_hyprland_turnloop_r33 import start, observe, action as turn_action, call, NativeTransport
-    from tests.test_computer_hyprland_receipts_r33 import durable
-
     grant = await start(normal)
     await observe(normal, grant)
     original = NativeTransport.act
@@ -55,19 +59,20 @@ async def test_normal_receipt_retains_ledger_basis(normal, monkeypatch):
         return result
 
     monkeypatch.setattr(NativeTransport, "act", ledger)
-    output = await normal.runner._run_one_tool(normal.state, call("computer_act", **turn_action(normal, grant)))
+    output = await normal.runner._run_one_tool(
+        normal.state, call("computer_act", **turn_action(normal, grant)),
+    )
     result = durable(normal, grant, "first")
     assert result.get("execution", {}).get("released") is True, (result, output)
     assert result["input_safety"]["release_basis"] == "guardian_ledger_drained"
     assert result["input_safety"]["recovery"] == "fresh_observation_and_replan_no_replay"
 
 
-from tests.test_computer_hyprland_turnloop_r33 import normal  # noqa: E402,F401
-
-
 async def test_dispatch_unknown_close_stays_unknown(backend, monkeypatch):
     frame = await backend.observe()
-    monkeypatch.setattr(backend._guardian, "act", AsyncMock(side_effect=ComputerError("dispatch_failed")))
+    monkeypatch.setattr(
+        backend._guardian, "act", AsyncMock(side_effect=ComputerError("dispatch_failed")),
+    )
     monkeypatch.setattr(backend._guardian, "close", AsyncMock(return_value={}))
     with pytest.raises(ComputerError):
         await backend.act(action(frame))
@@ -75,17 +80,18 @@ async def test_dispatch_unknown_close_stays_unknown(backend, monkeypatch):
 
 
 async def test_dispatch_cleanup_ledger_is_durable(normal, monkeypatch):
-    from tests.test_computer_hyprland_turnloop_r33 import start, observe, action as turn_action, call, NativeTransport
-    from tests.test_computer_hyprland_receipts_r33 import durable
-
     grant = await start(normal)
     await observe(normal, grant)
-    monkeypatch.setattr(NativeTransport, "act", AsyncMock(side_effect=ComputerError("dispatch_failed")))
+    monkeypatch.setattr(
+        NativeTransport, "act", AsyncMock(side_effect=ComputerError("dispatch_failed")),
+    )
     monkeypatch.setattr(NativeTransport, "close", AsyncMock(return_value={
         "release_confirmed": True, "release_ack": False, "unknown_release": False,
         "process_reaped": True,
     }))
-    await normal.runner._run_one_tool(normal.state, call("computer_act", **turn_action(normal, grant)))
+    await normal.runner._run_one_tool(
+        normal.state, call("computer_act", **turn_action(normal, grant)),
+    )
     result = durable(normal, grant, "first")
     assert result["status"] == "interrupted"
     assert result["execution"]["released"] is True

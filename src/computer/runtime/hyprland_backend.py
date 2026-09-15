@@ -115,6 +115,7 @@ def _inventory_failure(error: BaseException, phase: str) -> BaseException:
     from .hyprland_discovery import HyprlandDiscoveryError
 
     reason = "target_inventory_unavailable"
+    candidate: object
     if isinstance(error, (ComputerError, HyprlandDiscoveryError)):
         candidate = error.code
     elif isinstance(error, HyprlandScopeFailure):
@@ -1481,6 +1482,8 @@ class HyprlandRuntimeBackend:
                     receipt["diagnostics"] = delivered["diagnostics"]
             except BaseException as exc:
                 details = getattr(exc, "details", {})
+                # Diagnostic metadata must not mask failures or skip cleanup.
+                details = details if type(details) is dict else {}
                 if (
                     details.get("event") == "action_rejected"
                     and details.get("input_was_sent") is False

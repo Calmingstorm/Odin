@@ -3,7 +3,7 @@
 ## Observed failure
 
 The R40 request reported sustained-use `wayland_guardian_input_path_lost` after
-several successful actions. The raw Clippy journal at 2026-09-08 22:38:39 UTC
+several successful actions. The target service journal at 2026-09-08 22:38:39 UTC
 instead records `scope-evidence-expired`, three planned/locally queued events,
 `input_was_sent=true`, and explicit release sent and acknowledged. The generic
 Python error is not proof of a Wayland socket or virtual device disappearing.
@@ -15,7 +15,7 @@ Its following sequence steps were not dispatched.
 ## Direct reproduction against the unchanged R39 plugin
 
 Three explicitly inspected, individually grounded diagnostic clicks were made
-on Clippy, each in a fresh manually supervised backend session. The original
+on the target host, each in a fresh manually supervised backend session. The original
 production guardian reproduced the failure on its **first action**, with the
 same three locally queued events, confirmed release and scope failure. This
 rules out a required ninth/sixteenth-action threshold for this reproduction.
@@ -51,10 +51,10 @@ bound root toplevel surface. A native popup is a different Wayland surface even
 when it is Pinta's own visible menu. Root-only warp postconditions and subsequent
 button/axis/motion checks therefore rejected the menu target.
 
-The correction is in the **scope plugin and its provenance helper**. It admits
+The R40 correction was in the **scope plugin and its provenance helper**. It admitted
 only live, mapped native `xdg_popup` ancestry ending at the exact observed root,
 with the same `wl_client`, consistent back-links, bounded acyclic ancestry and
-unchanged geometry. It does not admit arbitrary same-client toplevels,
+unchanged geometry. That revision did not admit arbitrary same-client toplevels,
 subsurfaces, foreign clients or out-of-window coordinates. Exact pointer focus,
 original root/window/process/output identity, scope deadlines and owned release
 remain enforced. A surface transfer still requires the existing one-shot owned
@@ -67,7 +67,8 @@ bounded `xdg_wm_base` collection; it does not grant unrelated popups input.
 Other `xdg_wm_base` bindings and collections over 256 surfaces fail closed.
 The maximum ancestry is 33 nodes. Popup areas beyond the root rectangle remain
 unsupported. Independent review caught and corrected the unmapped-popup watcher
-gap before deployment.
+gap before deployment. These are the R40 revision's limits, not a current support
+matrix: later native Krita work added bounded same-root subsurface ancestry.
 
 The production guardian, X11, libei, locks and Python dispatch are unchanged.
 The scratch diagnostic binary was removed after the reproduction. It is not a
@@ -90,8 +91,9 @@ Versioned plugin SHA-256:
 `ec1b43590be18ca37ecf738770fcc2eef1004213423464143f9d2c9ab96a1592`.
 The build manifest retains `runtime_qualified=false`; live acceptance is separate.
 
-Private evidence: localhost `/tmp/odin-r40-evidence`; Clippy
-`/home/Uncraftbar/odin-r40-{reproduce,diagnostic,warp-diagnostic}`.
+Private evidence is retained in operator-controlled local and target-host
+archives for reproduction, diagnostics and warp diagnostics. Host names and
+absolute paths are intentionally omitted.
 Raw wire files contain scope tokens and must not be published. The table above
 is the bounded sanitized status evidence, not raw wire content.
 

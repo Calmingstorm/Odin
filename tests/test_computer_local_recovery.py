@@ -1,9 +1,12 @@
 import json
 from dataclasses import replace
+
 import pytest
+
 from src.computer.models import ComputerError
 from src.computer.runtime.local_recovery import local_cleanup_verified
-from tests.test_hyprland_durable_recovery import recovered, durable
+from tests.test_hyprland_durable_recovery import durable as durable
+from tests.test_hyprland_durable_recovery import recovered as recovered
 
 
 @pytest.fixture

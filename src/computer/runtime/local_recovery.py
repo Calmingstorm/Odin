@@ -27,7 +27,7 @@ def local_cleanup_verified(result, *, session_id, generation, command_id, now):
         and attestation.get("acknowledgment") == f"ACKNOWLEDGE UNVERIFIED CLEANUP {session_id}"
         and type(operator) is str and 1 <= len(operator) <= 128
         and all(32 <= ord(c) < 127 for c in operator)
-        and type(timestamp) in (int, float) and math.isfinite(timestamp)
+        and (type(timestamp) is int or type(timestamp) is float) and math.isfinite(timestamp)
         and 0 < timestamp <= now
         and all(attestation.get(k) is True for k in (
             "scope_ledger_empty", "physical_devices_empty", "scope_disarmed",

@@ -1,6 +1,9 @@
 # ruff: noqa: E501
 import os
 import socket
+import tempfile
+from contextlib import ExitStack
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -191,20 +194,38 @@ async def test_resolver_maps_identity_deadline():
         await HyprlandDiscoveryResolver(policy, inventory=lambda *_: [hint], pin=pin).resolve()
 
 
+@pytest.fixture
+def runtime_sockets():
+    # Linux pathname sockets have a 108-byte sun_path, including the terminator.
+    # Neither pytest's basetemp/worker paths nor TMPDIR have a bounded length.
+    with ExitStack() as stack:
+        root = Path(stack.enter_context(tempfile.TemporaryDirectory(prefix="hdi-", dir="/tmp")))
+        root.chmod(0o700)
+
+        def bind(relative_path):
+            path = root / relative_path
+            listener = stack.enter_context(socket.socket(socket.AF_UNIX, socket.SOCK_STREAM))
+            listener.bind(str(path))
+            # Set fixture permissions explicitly; do not change process-global umask.
+            path.chmod(0o600)
+            return listener
+
+        yield root, bind
+
+
 def test_runtime_inventory_enumerates_real_unix_sockets_with_narrow_fake_proc(
-    tmp_path, tmp_path_factory, monkeypatch
+    tmp_path, runtime_sockets, monkeypatch
 ):
     """Keep runtime artifacts real; only the otherwise hard-coded /proc is remapped."""
     uid = os.getuid()
-    # AF_UNIX has a kernel path limit; xdist adds a worker path component.
-    root = tmp_path_factory.mktemp("ipc")
-    root.chmod(0o700)
-    display_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    display_socket.bind(str(root / "wayland-9"))
+    root, bind = runtime_sockets
+    bind("wayland-9")
+    (root / "hypr").mkdir(mode=0o700)
+    (root / "hypr").chmod(0o700)
     hypr_socket_dir = root / "hypr" / "signature"
-    hypr_socket_dir.mkdir(parents=True, mode=0o700)
-    ipc_socket = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    ipc_socket.bind(str(hypr_socket_dir / ".socket.sock"))
+    hypr_socket_dir.mkdir(mode=0o700)
+    hypr_socket_dir.chmod(0o700)
+    bind("hypr/signature/.socket.sock")
     proc = tmp_path / "proc"
     (proc / "42").mkdir(parents=True)
     real_scandir = discovery.os.scandir
@@ -224,43 +245,30 @@ def test_runtime_inventory_enumerates_real_unix_sockets_with_narrow_fake_proc(
     policy = HyprlandDiscoveryPolicy(
         uid, str(root), ExecutableTrust("/usr/bin/Hyprland", "a" * 64, "0.54.2", "b" * 40)
     )
-    try:
-        assert runtime_inventory(policy, discovery.time.monotonic() + 1) == (
-            HyprlandCandidateHint(42, str(root), "wayland-9", "signature"),
-        )
-    finally:
-        display_socket.close()
-        ipc_socket.close()
+    assert runtime_inventory(policy, discovery.time.monotonic() + 1) == (
+        HyprlandCandidateHint(42, str(root), "wayland-9", "signature"),
+    )
 
 
-def test_runtime_inventory_fails_closed_for_deadline_and_socket_permissions(tmp_path, monkeypatch):
+def test_runtime_inventory_fails_closed_for_deadline_and_socket_permissions(runtime_sockets, monkeypatch):
     uid = os.getuid()
-    root = tmp_path / "runtime"
-    root.mkdir(mode=0o700)
-    listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-    listener.bind(str(root / "wayland-9"))
+    root, bind = runtime_sockets
+    bind("wayland-9")
     os.chmod(root / "wayland-9", 0o777)
     monkeypatch.setattr(discovery, "stable_runtime_root", lambda _uid: str(root))
     policy = HyprlandDiscoveryPolicy(
         uid, str(root), ExecutableTrust("/usr/bin/Hyprland", "a" * 64, "0.54.2", "b" * 40)
     )
-    try:
-        assert runtime_inventory(policy, discovery.time.monotonic() + 1) == ()
-        with pytest.raises(HyprlandDiscoveryError, match="deadline"):
-            runtime_inventory(policy, discovery.time.monotonic() - 1)
-    finally:
-        listener.close()
+    assert runtime_inventory(policy, discovery.time.monotonic() + 1) == ()
+    with pytest.raises(HyprlandDiscoveryError, match="deadline"):
+        runtime_inventory(policy, discovery.time.monotonic() - 1)
 
 
-def test_runtime_inventory_rejects_candidate_overflow_and_unavailable_scans(tmp_path, monkeypatch):
+def test_runtime_inventory_rejects_candidate_overflow_and_unavailable_scans(runtime_sockets, monkeypatch):
     uid = os.getuid()
-    root = tmp_path / "runtime"
-    root.mkdir(mode=0o700)
-    listeners = []
+    root, bind = runtime_sockets
     for number in range(2):
-        listener = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
-        listener.bind(str(root / f"wayland-{number}"))
-        listeners.append(listener)
+        bind(f"wayland-{number}")
     monkeypatch.setattr(discovery, "stable_runtime_root", lambda _uid: str(root))
     policy = HyprlandDiscoveryPolicy(
         uid,
@@ -268,14 +276,11 @@ def test_runtime_inventory_rejects_candidate_overflow_and_unavailable_scans(tmp_
         ExecutableTrust("/usr/bin/Hyprland", "a" * 64, "0.54.2", "b" * 40),
         max_candidates=1,
     )
-    try:
-        with pytest.raises(HyprlandDiscoveryError, match="candidate_limit"):
-            runtime_inventory(policy, discovery.time.monotonic() + 1)
-        monkeypatch.setattr(discovery.os, "scandir", lambda _path: (_ for _ in ()).throw(OSError()))
+    with pytest.raises(HyprlandDiscoveryError, match="candidate_limit"):
+        runtime_inventory(policy, discovery.time.monotonic() + 1)
+    with monkeypatch.context() as scan_patch:
+        scan_patch.setattr(discovery.os, "scandir", lambda _path: (_ for _ in ()).throw(OSError()))
         assert runtime_inventory(policy, discovery.time.monotonic() + 1) == ()
-    finally:
-        for listener in listeners:
-            listener.close()
 
 
 @pytest.mark.asyncio

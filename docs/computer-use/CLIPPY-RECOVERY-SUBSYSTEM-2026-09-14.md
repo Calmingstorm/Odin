@@ -5,7 +5,7 @@ This is a development handoff, not a completed Discord drawing qualification.
 
 ## Verified failure chain
 
-The real Discord trajectory for session `9f9560c462ab432a97d6637db2a59d08`
+The real Discord trajectory for the affected session (private identifier omitted)
 contains a successfully sent/released Ctrl+N and a delivered post-action modal
 observation. Create was refused **before input**, with `stale_source_binding`.
 The caller used the NEW observation and exact modal. Controller binding error
@@ -52,7 +52,7 @@ draws multiple strokes, crosses real `finish_turn`/resume boundaries, changes
 guardian identities, repeats the document/session, and checks no replay or
 recovery-pending rows. It is NOT live receiver or Discord proof.
 
-A bounded probe on Uncraftbar used the production controller with the modified
+A bounded probe on the target host used the production controller with the modified
 backend in a separate diagnostic process. Two actual native pause/resume cycles
 passed (generations 1 -> 2 -> 3 -> 4 -> 5), followed by clean close. No brush or
 keyboard action was sent. Scope ledger was disarmed/empty; 31 devices clear;
@@ -73,7 +73,7 @@ application check against the clean base passed. Full hosted CI was not run.
 
 ## Live stranded session settlement
 
-Only the explicitly requested `9f9560c` was settled, after fresh empty native
+Only the explicitly requested affected session was settled, after fresh empty native
 ledger/device and recorded-process-absence checks. Deployed store APIs performed
 generation-CAS acknowledgment and pending archival. It is closed generation 6;
 pending removed; original action receipts unchanged; receiver verification false.
@@ -82,13 +82,13 @@ Private backup and owner records remain on the host, excluded from attachments.
 ## Deployment and required acceptance
 
 Python-only changes: controller, error guidance, Hyprland backend. No guardian or
-plugin rebuild. Claudia owns clean deployment; no config, daemon, branch,
+plugin rebuild. The deployment operator owns clean deployment; no config, daemon, branch,
 plugin, guardian, compositor, or runtime-qualified change was made by this work.
 
 The final patch supersedes the earlier runtime-only handoff: the composed test
 exposed the normal finish-turn cancellation after that handoff was prepared.
 
-After deployment, Aaron must issue the ordinary Discord drawing request: new
+After deployment, the authorized operator must issue the ordinary Discord drawing request: new
 document, multiple picture elements, natural completion pause, explicit resumed
 continuation, then a second new picture/session. Inspect actual pixels and
 retained receipts and check no quarantine/unknown release. Do not substitute the

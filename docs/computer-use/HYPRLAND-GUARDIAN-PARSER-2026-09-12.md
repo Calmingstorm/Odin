@@ -4,6 +4,11 @@ Authorized narrow repair on `feat/onboarding-wayland-autonomy`, pulled clean at
 `c0e240f6c66f34b9cff4a8ceeda7f034c3e2c37d` on 2026-09-12. No deployment, master
 merge, new PR, full suite or hosted gate was requested or performed.
 
+This records the parser-repair checkpoint. The subsequent input-delivery
+diagnosis is documented in
+[HYPRLAND-INPUT-DELIVERY-2026-09-12.md](HYPRLAND-INPUT-DELIVERY-2026-09-12.md);
+the unresolved findings below describe this earlier run, not current status.
+
 ## Repair and regression evidence
 
 Only production change: `assets/hyprland-input/guardian.c`. The historical
@@ -98,18 +103,18 @@ not repairs included in this change.
 
 The guest compositor stopped gracefully and guest powered off at approximately
 17:34 UTC, well before the 19:03 operational cutoff. No VM, guest compositor,
-guardian or receiver remains running; loopback SSH port 22226 is closed. Offline
-`qemu-img check` passed. Lab disk/artifacts remain under
-`/mnt/storage/hyprland-lab/`, approximately 4.5 GiB allocated.
+guardian or receiver remained running at that checkpoint; the loopback SSH
+forward was closed. Offline `qemu-img check` passed. Lab disk/artifacts were
+retained in a private lab archive, approximately 4.5 GiB allocated.
 
 QEMU used a closed device policy, only KVM access, hidden host DRM/input paths,
 no host graphics/display sockets, no display backend, no passthrough and no host
-network/module changes. The same active seat0/tty7/:0 operator session remained intact.
-No desktop connection/input, Incus mutation, `/opt/odin` access/change, deploy,
+network/module changes. The same active operator desktop session remained intact.
+No desktop connection/input, Incus mutation, live-install access/change, deploy,
 Odin restart or host reboot occurred. Ordinary CPU/RAM/I/O contention is not
 claimed impossible.
 
-Full report: `/mnt/storage/hyprland-lab/PARSER-REPAIR-REPORT.md`.
+Full report: `PARSER-REPAIR-REPORT.md` in the private lab archive.
 Raw logs, XML results, source/binary hashes, control/patched native and receiver
-logs, host isolation and cleanup evidence:
-`/mnt/storage/hyprland-lab/evidence/parser-repair-20260912/`.
+logs, host isolation and cleanup evidence are retained in that archive's dated
+parser-repair evidence set. Absolute infrastructure paths are intentionally omitted.

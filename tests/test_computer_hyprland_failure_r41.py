@@ -125,9 +125,15 @@ async def test_action_exception_identity_and_safe_journal(
     {"command": "none", "scope_operation": "none", "scope_error": "none"},
     {**DETAIL, "release_acknowledged": False, "input_was_sent": True},
 ])
-async def test_native_receipt_roundtrip_does_not_promote_execution(normal, monkeypatch, detail):
+@pytest.mark.parametrize("released", [False, True])
+async def test_native_receipt_roundtrip_does_not_promote_execution(
+    normal, monkeypatch, detail, released,
+):
     grant = await start(normal)
     await observe(normal, grant)
+    controller = normal.service.controller
+    backend = controller._live[grant["session_id"]].backend
+    backend._guardian.release_ack = released
 
     async def refused(*args, **kwargs):
         exc = module.HyprlandGuardianError("wayland_guardian_input_path_lost")
@@ -140,9 +146,11 @@ async def test_native_receipt_roundtrip_does_not_promote_execution(normal, monke
     raw = store.db.execute("SELECT result FROM receipts WHERE session_id=? AND action_id=?",
                            (grant["session_id"], "first")).fetchone()[0]
     receipt = json.loads(raw)
-    assert receipt["native_failure"] == detail
-    assert receipt["status"] == "unknown"
-    assert receipt["execution"]["released"] is False
+    diagnostics = receipt["diagnostics"] if released else receipt
+    assert diagnostics["native_failure"] == detail
+    assert receipt["status"] == ("interrupted" if released else "unknown")
+    assert receipt["execution"]["released"] is released
+    await assert_revoked_owned_cleanup(controller, grant, backend, released=released)
 
 
 async def test_invalid_native_failure_is_not_attached_or_logged(monkeypatch, caplog):
@@ -212,13 +220,15 @@ async def test_cancelled_dispatch_always_revokes_and_never_replays(
 
 @pytest.mark.parametrize("details", [None, [], {}, {"native_failure": []},
                                      {"native_failure": {**DETAIL, "command": []}}])
+@pytest.mark.parametrize("released", [False, True])
 async def test_controller_drops_malformed_native_details_but_still_revokes(
-    normal, monkeypatch, details,
+    normal, monkeypatch, details, released,
 ):
     grant = await start(normal)
     await observe(normal, grant)
     controller = normal.service.controller
     backend = controller._live[grant["session_id"]].backend
+    backend._guardian.release_ack = released
 
     async def refused(*args, **kwargs):
         exc = module.HyprlandGuardianError("wayland_guardian_input_path_lost")
@@ -232,6 +242,8 @@ async def test_controller_drops_malformed_native_details_but_still_revokes(
         (grant["session_id"], "first"),
     ).fetchone()[0]
     result = json.loads(raw)
-    assert result["status"] == "unknown"
+    assert result["status"] == ("interrupted" if released else "unknown")
+    assert result["execution"]["released"] is released
     assert "native_failure" not in result
-    await assert_revoked_owned_cleanup(controller, grant, backend)
+    assert "native_failure" not in result["diagnostics"]
+    await assert_revoked_owned_cleanup(controller, grant, backend, released=released)

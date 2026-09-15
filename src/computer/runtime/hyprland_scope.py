@@ -1200,6 +1200,8 @@ class HyprlandScopeProvider:
                 }
             )
             if (
+                # Older companions emitted these optional boolean diagnostics.
+                # Accept them for wire compatibility only, never as focus proof.
                 set(row) - {"window_id", "plugin_epoch", "diagnostic_geometry_changed",
                             "diagnostic_animating"}
                 != {

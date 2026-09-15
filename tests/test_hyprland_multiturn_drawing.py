@@ -4,6 +4,7 @@ These are not native receiver or live Discord qualification.
 """
 # ruff: noqa: F811
 import copy
+import json
 
 import pytest
 
@@ -226,6 +227,20 @@ async def test_rearmed_owner_first_capture_transient_is_clean_retry(drawing, mon
     result = await invoke(rig, "computer_session", operation="resume", **rig.grant)
     assert controller.store.get_session(sid).state == "paused", result
     assert "hyprland_resume_retryable" in result["content"], result
+    delivered = rig.runner._audit_tool_outcome.call_args.args[6]
+    refusal = json.loads(delivered.output)
+    assert delivered.ok is False and delivered.uncertain_outcome is False
+    assert refusal["recoverable"] is True and refusal["terminal"] is False
+    assert refusal["next_action"] == "inspect_session_status"
+    assert refusal["replay_permitted"] is False
+    assert "CONTINUE" in refusal["instruction"]
+    assert "current generation" in refusal["instruction"]
+    assert "operator must" not in refusal["instruction"]
+    assert refusal["state"] == "paused"
+    assert refusal["execution"] == {
+        "injected": False, "sent": False, "released": True,
+        "release_basis": "confirmed_resume_rollback",
+    }
     assert calls == 1
     clean(rig)
     assert commands(rig) == before

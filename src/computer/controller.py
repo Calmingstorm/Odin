@@ -1083,7 +1083,7 @@ class ComputerController:
         if live.capabilities is not None and live.capabilities.backend == "hyprland":
             value = getattr(live.backend, "observation_valid_seconds", None)
             # Trusted backend policy, bounded defensively; bool/NaN/inf are invalid.
-            if type(value) in (int, float) and 0 < value <= 300:
+            if (type(value) is int or type(value) is float) and 0 < value <= 300:
                 return value
         return default
 
@@ -1335,7 +1335,7 @@ class ComputerController:
             except (Exception, asyncio.CancelledError) as exc:
                 # Native errors can contain owner secrets: log no messages,
                 # traceback source lines, values, or locals.
-                frames = []
+                frames: list[str] = []
                 tb = exc.__traceback__
                 while tb is not None and len(frames) < 12:
                     frames.append(tb.tb_frame.f_code.co_name[:64])
@@ -1478,6 +1478,7 @@ class ComputerController:
                         raise ComputerError("hyprland_fresh_observation_required") from None
                     if (
                         not isinstance(exc, asyncio.CancelledError)
+                        and live.capabilities is not None
                         and live.capabilities.backend == "hyprland"
                         and self.store.get_session(grant.session_id) == grant
                         and grant.state == "active"
@@ -1491,6 +1492,7 @@ class ComputerController:
                         grant = self.store.get_session(grant.session_id)
                     if (
                         not isinstance(exc, asyncio.CancelledError)
+                        and live.capabilities is not None
                         and live.capabilities.backend == "hyprland"
                         and getattr(live.backend, "normal_resume_retryable", False) is True
                         and self.store.get_session(grant.session_id) == grant
@@ -1501,7 +1503,14 @@ class ComputerController:
                         # Keep the NEW paused grant, never replay the failed resume.
                         live.observations.clear()
                         self._delivered_observations.pop(grant.session_id, None)
-                        raise ComputerError("hyprland_resume_retryable") from None
+                        from .error_guidance import InputBoundaryError
+
+                        raise InputBoundaryError(
+                            "hyprland_resume_retryable",
+                            execution={"injected": False, "sent": False, "released": True,
+                                       "release_basis": "confirmed_resume_rollback"},
+                            state=grant.state,
+                        ) from None
                     await self._stop(grant.session_id, "cancelled")
                     raise
                 return self._public_session(self.store.get_session(grant.session_id))
@@ -2053,7 +2062,14 @@ class ComputerController:
             except ComputerError as exc:
                 if exc.code == "unexpected_modal":
                     if live.capabilities.backend == "hyprland":
-                        raise ComputerError("hyprland_fresh_modal_binding_required") from None
+                        from .error_guidance import InputBoundaryError
+
+                        raise InputBoundaryError(
+                            "hyprland_fresh_modal_binding_required",
+                            execution={"injected": False, "sent": False,
+                                       "release_basis": "not_required_no_input_sent"},
+                            state=grant.state,
+                        ) from None
                     await self._pause(grant.session_id)
                 raise
             group_before = deepcopy(getattr(live.backend, "application_window_group", None))

@@ -2,9 +2,9 @@
 
 ## Evidence and diagnosis
 
-The target is running `41f6d501` and the native `HyprlandGuardian` /
+At this checkpoint the target was running `41f6d501` and the native `HyprlandGuardian` /
 `odin-hyprland-input` route. The libei helper's `plost` branch is not this route.
-Read-only inspection of Clippy's stored `palette-open-1` receipt found only the
+Read-only inspection of the target's stored `palette-open-1` receipt found only the
 controller's generic dispatch exception result: sent/injected unknown, release
 unconfirmed. It does **not** establish a dropped virtual pointer. An earlier
 `color-open` receipt on the same head completed all three native steps with

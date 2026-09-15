@@ -5,6 +5,12 @@ recovery path. It is **not native runtime qualification**, compositor-restart
 recovery, or permission to replay an interrupted action. PR #356 remains a
 partial implementation of the broader autonomy plan.
 
+This is a historical checkpoint, not a current deployment or backlog report.
+Later offline implementation is documented in
+[HYPRLAND-NO-DEPLOY-2026-09-12.md](HYPRLAND-NO-DEPLOY-2026-09-12.md) and
+[HYPRLAND-RECOVERY-BUILD-2026-09-12.md](HYPRLAND-RECOVERY-BUILD-2026-09-12.md).
+Those reports do not promote native runtime qualification.
+
 ## Integration defects found
 
 The previous component tests did not connect the actual native selection wire
@@ -79,7 +85,7 @@ were removed and its render-node ACL revoked. The original render-node ACL and
 stopped-container state were rechecked. No broad process kills, live desktop
 connection, Odin deployment or compositor restart was performed.
 
-Host-local evidence is retained at `/home/odin/hyprland-lab-20260912/`:
+Host-local evidence is retained in a private lab archive (absolute path omitted):
 `preflight.txt`, `run-isolated-wlr-selector.sh`, `isolation-summary.txt`,
 `hyprland-no-drm.log`, `hyprland-wlr-selector.log`,
 `render-node-assessment.txt`, `rendernode-startup-observation.txt`,
@@ -131,7 +137,7 @@ The full pinned native bundle compiled locally at header commit
 upstream-header `unused-parameter` and `missing-field-initializers` warnings;
 the lab compile succeeded with only those warning classes demoted. Build-script
 defaults were not changed. The plugin ELF SHA-256 is
-`bfd85bded93c2caf8072bf4278e9976ef94f3ca3355ec73fc873f502db1410db`, under
-`/tmp/odin-hyprland-20260912-build/`. The source-derived companion build ID and
+`bfd85bded93c2caf8072bf4278e9976ef94f3ca3355ec73fc873f502db1410db`, retained
+in the private build archive. The source-derived companion build ID and
 manifest were independently checked; the manifest still reports
 `runtime_qualified: false`. No helper or plugin was installed or loaded.

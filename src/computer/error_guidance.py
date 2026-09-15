@@ -5,6 +5,21 @@ from __future__ import annotations
 import re
 
 from .admission import InputAdmissionError
+from .models import ComputerError
+
+
+class InputBoundaryError(ComputerError):
+    """Controller refusal with explicit, server-owned input-boundary evidence.
+
+    Only use where the controller has established non-dispatch or clean release.
+    A reason string alone must never acquire these facts in the presentation layer.
+    """
+
+    def __init__(self, code: str, *, execution: dict, state: str):
+        super().__init__(code)
+        self.execution = dict(execution)
+        self.state = state
+
 
 _SELECTION = frozenset({
     "target_selection_required", "target_selection_stale", "target_selection_changed",
@@ -41,7 +56,7 @@ _GROUP_PREFLIGHT = frozenset({
 })
 
 
-def exception_reason(error: Exception) -> str:
+def exception_reason(error: BaseException) -> str:
     # ComputerError.code is the entire formatted message for admission errors.
     if isinstance(error, InputAdmissionError):
         return error.admission.code
@@ -169,7 +184,8 @@ def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False)
             "Let the user return focus to the intended application, then observe without "
             "crop and verify the application and target. Do not steal focus."
         )
-    recoverable = next_action != "operator_intervention_required"
+    # A specialized inspection action does not clear a terminal release state.
+    recoverable = not terminal
     if recoverable:
         instruction += (
             " This is not task failure. Inspect fresh evidence, then CONTINUE the task "
@@ -177,7 +193,7 @@ def guidance(reason: str, *, terminal: bool = False, safe_receipt: bool = False)
         )
     return {
         "recoverable": recoverable,
-        "terminal": not recoverable,
+        "terminal": terminal,
         "next_action": next_action,
         "instruction": (
             instruction + " Do not replay the previous action or reuse stale coordinates."

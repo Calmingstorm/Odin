@@ -281,6 +281,36 @@ async def test_capture_timeout_invalidates_frames_without_recovery(rig):
 
 
 @pytest.mark.asyncio
+async def test_resume_without_measured_capabilities_preserves_error_and_fences(rig):
+    controller, store, context, grant, live, committed, _ = rig
+    error = TimeoutError("resume failed before capabilities were measured")
+    detached = []
+
+    async def resume(**kwargs):
+        live.capabilities = None
+        raise error
+
+    async def detach():
+        detached.append(True)
+        return {"stopped": True}
+
+    live.backend.resume = resume
+    live.backend.detach = detach
+    paused = store.set_state(grant.session_id, "paused", revoke=True)
+    with pytest.raises(TimeoutError) as caught:
+        await controller.session(context, {
+            "operation": "resume", "session_id": grant.session_id,
+            "generation": paused.generation,
+        })
+    assert caught.value is error
+    # Unknown adapter capabilities cannot choose an arbitrary cleanup method.
+    assert detached == []
+    assert live.revoked and not committed
+    assert store.get_session(grant.session_id).state == "quarantined"
+    assert store.cleanup(grant.session_id)["complete"] is False
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("changed", [{"window_id": "replacement"}, {"plugin_epoch": "new"},
                                    {"compositor_digest": "new"}, {"window_id": None}])
 async def test_replacement_same_process_never_inherits_authority(rig, changed):

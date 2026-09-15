@@ -309,10 +309,13 @@ class HyprlandGuardian(WaylandGuardian):
                 failure,
             )
             raise
+        # Validate native evidence before normalizing public facts: replacing a
+        # forged receiver claim must not admit a later group refresh.
+        clean_release = owned_release_v1(receipt, closed=False)
         receipt["release_ack"] = (receipt.pop("release_acknowledged", False) is True
-                                  and owned_release_v1(receipt, closed=False))
+                                  and clean_release)
         receipt["receiver_release_verified"] = False
-        self._group_refresh_clean = owned_release_v1(receipt, closed=False)
+        self._group_refresh_clean = clean_release
         return receipt
 
     async def close(self):

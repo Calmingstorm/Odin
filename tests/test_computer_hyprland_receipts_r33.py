@@ -149,7 +149,9 @@ async def test_normal_readiness_stale_and_paused(normal, monkeypatch):
     assert backend.input_readiness == "ready"  # Normal start captures a frame.
     await observe(normal, grant)
     assert backend.input_readiness == "ready"
-    monkeypatch.setattr(backend, "_captured_at", backend._captured_at - backend.observation_valid_seconds - 1)
+    monkeypatch.setattr(
+        backend, "_captured_at", backend._captured_at - backend.observation_valid_seconds - 1,
+    )
     assert backend.input_readiness == "observation_required"
     await normal.runner._run_one_tool(
         normal.state, call("computer_session", operation="pause", **grant))

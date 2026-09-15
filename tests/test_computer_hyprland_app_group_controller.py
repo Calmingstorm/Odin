@@ -1,5 +1,6 @@
 """Same-application target handshake through real tool dispatch, synthetic OS IO."""
 
+import json
 from unittest.mock import AsyncMock, PropertyMock
 
 import pytest
@@ -64,6 +65,19 @@ async def test_missing_or_old_modal_binding_never_pauses_clean_hyprland(normal, 
         request["expected_modal"] = expected
     result = await normal.runner._run_one_tool(normal.state, call("computer_act", **request))
     assert "hyprland_fresh_modal_binding_required" in result["content"], result
+    delivered = normal.runner._audit_tool_outcome.call_args.args[6]
+    refusal = json.loads(delivered.output)
+    assert delivered.ok is False and delivered.uncertain_outcome is False
+    assert refusal["recoverable"] is True and refusal["terminal"] is False
+    assert refusal["next_action"] == "inspect_returned_view_and_use_new_modal_binding"
+    assert refusal["replay_permitted"] is False
+    assert "CONTINUE" in refusal["instruction"]
+    assert "NEW observation" in refusal["instruction"]
+    assert "operator must" not in refusal["instruction"]
+    assert refusal["state"] == "active"
+    assert refusal["execution"] == {
+        "injected": False, "sent": False, "release_basis": "not_required_no_input_sent",
+    }
     assert not normal.transports[0].commands
     assert controller.store.get_session(grant["session_id"]).state == "active"
     assert controller.store.get_recovery_pending(grant["session_id"]) is None

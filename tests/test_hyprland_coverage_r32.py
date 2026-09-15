@@ -130,7 +130,7 @@ async def test_close_joins_pending_spawn_and_distinguishes_no_owner(guardian, mo
     async def spawn():
         if fails:
             raise OSError("exec failed")
-        return SimpleNamespace(wait=AsyncMock(return_value=0))
+        return SimpleNamespace(wait=AsyncMock(return_value=0), returncode=0)
 
     guardian._spawning = asyncio.create_task(spawn())
     guardian._last_terminal = {"release_acknowledged": True}
@@ -138,7 +138,12 @@ async def test_close_joins_pending_spawn_and_distinguishes_no_owner(guardian, mo
     monkeypatch.setattr(guardian_module.WaylandGuardian, "close", parent_close)
     receipt = await guardian.close()
     assert receipt["release_not_required"] is fails
-    assert receipt["native_release_acknowledged"] is (not fails)
+    # A bare terminal ACK lacks both drained-ledger and closed-resource proof.
+    assert receipt["native_release_acknowledged"] is False
+    assert receipt["release_ack"] is fails
+    if not fails:
+        assert receipt["release_confirmed"] is False
+        assert receipt["guardian_exit_code"] == 0
     assert receipt["receiver_release_verified"] is False
     assert guardian._closing
     parent_close.assert_awaited_once()

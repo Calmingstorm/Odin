@@ -3,7 +3,7 @@
 ## Provenance
 
 `companion-status-2026-09-12.json` is the exact saved response from
-`/mnt/storage/hyprland-lab/evidence/companion-status.json`, not a hand-written
+the private lab archive's `companion-status.json`, not a hand-written
 or reserialized approximation. On 2026-09-12 the repair agent read the entire
 file using `read_file(raw=true)` (one source line, `truncated=false`, 675 content
 bytes), then added only the framed source content via `apply_patch`.

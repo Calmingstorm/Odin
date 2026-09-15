@@ -54,8 +54,8 @@ private, not committed as fixtures.
 
 Final store source SHA-256:
 `e48697742fa7006831699ac970fa9083c6053b20ac9a1fef3b3b1b647d115a16`.
-Machine evidence and runner:
-`/mnt/storage/hyprland-lab/evidence/no-deploy-20260912/final-store/`.
+Machine evidence and runner are retained in the private no-deploy archive's
+`final-store` evidence set; its absolute path is intentionally omitted.
 
 ## Receiver evidence and boundaries
 
@@ -101,6 +101,6 @@ Final hosted gate status belongs to the exact PR head reported after push, not
 this preliminary local count. Visible coroutine/shutdown warnings remain, not
 suppressed or represented as fixed.
 
-Private reports under `/mnt/storage/hyprland-lab/`:
+Private reports retained in the operator-controlled lab archive:
 `NO-DEPLOY-STORE-REPORT.md`, `NO-DEPLOY-ADJACENT-REPORT.md`,
 `NO-DEPLOY-QUALIFICATION-REPORT.md`, `NO-DEPLOY-WORKSTREAMS-REPORT.md`.

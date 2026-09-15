@@ -1835,9 +1835,12 @@ class ComputerStore:
                 result.pop("recovery_command_id", None)
                 result.pop("durable_reconnect", None)
                 result.pop("resolved_recovery_pending", None)
-                if (result.get("local_recovery_status") == "locally_released"
-                        and self._local_cleanup_verified(
-                            self.get_session(session_id), self._hyprland_recovery_record(session_id))):
+                if (
+                    result.get("local_recovery_status") == "locally_released"
+                    and self._local_cleanup_verified(
+                        self.get_session(session_id), self._hyprland_recovery_record(session_id),
+                    )
+                ):
                     result["local_cleanup_complete"] = True
                     result["admission_blocked"] = False
                 return result or None
@@ -1967,6 +1970,18 @@ class ComputerStore:
                             return self.get_session(grant.session_id)
                     # Inspections cannot erase ownership or manufacture release.
                     receipt = {**prior, "last_inspection": receipt}
+                    if clean or acknowledged:
+                        # The pending lineage survives close, so startup must see
+                        # its terminal resolution at the top level. Keep the old
+                        # assessment and native evidence without promoting an
+                        # operator attestation to verified release.
+                        receipt.update(
+                            pre_recovery_status={
+                                "status": prior.get("status"),
+                                "complete": prior.get("complete")},
+                            status="absence_verified" if clean
+                            else "operator_acknowledged_unverified",
+                            complete=clean)
                 self.db.execute(
                     "INSERT OR REPLACE INTO session_recovery VALUES (?,?)",
                     (grant.session_id, json.dumps(receipt, sort_keys=True)),

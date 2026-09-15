@@ -83,7 +83,9 @@ static void fail(struct guardian *g,const char *reason) { g->reason=reason; }
 #define send controlled_send
 #define recv controlled_recv
 '''
-    ledger = source[source.index("static bool own_ledger_empty("):source.index("static bool release_all(")]
+    ledger = source[
+        source.index("static bool own_ledger_empty("):source.index("static bool release_all(")
+    ]
     harness += helpers + ledger + receipt
     harness += "\nstatic void map_command(struct guardian *g,char *line) {\n" + mapping + "}\n"
     harness += r'''

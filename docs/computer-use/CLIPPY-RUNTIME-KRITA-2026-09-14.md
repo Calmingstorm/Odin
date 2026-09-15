@@ -1,4 +1,4 @@
-# Clippy native Krita runtime verification, 2026-09-14
+# Native Krita runtime verification, 2026-09-14
 
 ## Final result
 
@@ -32,7 +32,7 @@ Shipping companion build identity:
 
 Built with the repository shipping script against the target's Hyprland 0.55.2 headers. The running plugin was replaced with this fixed build. No compositor restart or destructive scenario was performed. The first replacement attempt used the resolved path while Hyprland had registered the symlink spelling; it did not unload the original and duplicate load was refused. The second used the registered spelling, verified removal, then loaded and verified the fixed image. No input occurred during replacement.
 
-Clippy's service was restarted once after the runtime test to import the Python fixes. New PID 436150 logged into Discord as Clippy; HTTP health returned status ok and WebUI returned 200. config.yml checksum remained unchanged. Remote deployment checkout HEAD was intentionally not changed; source edits are present on disk and require normal clean-deploy reconciliation with the committed branch.
+The target bot service was restarted once after the runtime test to import the Python fixes. The replacement process logged into Discord; HTTP health returned status ok and WebUI returned 200. config.yml checksum remained unchanged. At that checkpoint, the remote deployment checkout HEAD was intentionally not changed; source edits were present on disk and required normal clean-deploy reconciliation with the committed branch. This historical report does not establish the current deployment state.
 
 ## Scope and limitations
 
@@ -42,4 +42,4 @@ The earlier failed stroke was not replayed. The successful stroke used a new act
 
 The operator scope plugin was originally requested to stay loaded. Final verification required replacing that plugin; this deviation is recorded explicitly rather than claiming the original artifact stayed loaded. No claim of uninterrupted plugin identity is made.
 
-Private evidence: `/home/Uncraftbar/clippy-runtime-fix-20260914/`. Do not publish the durable test stores, which contain owner capabilities. Sanitized screenshots, receipts, diagnostics and patches were attached separately.
+Private evidence is retained in an operator-controlled runtime-fix archive; its host and absolute path are intentionally omitted. Do not publish the durable test stores, which contain owner capabilities. Sanitized screenshots, receipts, diagnostics and patches were attached separately.

@@ -145,7 +145,7 @@ async def test_hyprland_local_readiness_properties_and_start_refusal(monkeypatch
     assert backend.sources() == [
         {
             "source_id": "DP-1",
-            "label": "Explicitly granted Hyprland output",
+            "label": "DP-1",
             "width": 12,
             "height": 8,
         }

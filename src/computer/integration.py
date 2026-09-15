@@ -341,7 +341,12 @@ class ComputerIntegration:
                 from .admission import InputAdmissionError
 
                 reason = exception_reason(exc)
-                rejection = {"status": "rejected", "reason": reason, **guidance(reason)}
+                from .error_guidance import InputBoundaryError
+
+                rejection: dict = {"status": "rejected", "reason": reason}
+                if isinstance(exc, InputBoundaryError):
+                    rejection.update(execution=exc.execution, state=exc.state)
+                rejection = failure_guidance(rejection)
                 if isinstance(exc, InputAdmissionError):
                     rejection["input_admission"] = exc.admission.public()
                 return ToolResult(

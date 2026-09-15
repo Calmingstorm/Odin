@@ -245,6 +245,18 @@ int main() {
             put(result.get(), "focus_calls", int64_t(focusCalls));
             put(result.get(), "candidates", int64_t(state.focusCandidates.size()));
         }
+        else if (op == "test_focus_geometry") {
+            put(result.get(), "selected_window_focused", Desktop::focus.window() == window);
+            put(result.get(), "selected_monitor_focused", Desktop::focus.monitor() == monitor);
+            put(result.get(), "x", window->m_realPosition->value().x);
+            put(result.get(), "y", window->m_realPosition->value().y);
+            put(result.get(), "width", window->m_realSize->value().x);
+            put(result.get(), "height", window->m_realSize->value().y);
+            put(result.get(), "goal_x", window->m_realPosition->goal().x);
+            put(result.get(), "goal_y", window->m_realPosition->goal().y);
+            put(result.get(), "goal_width", window->m_realSize->goal().x);
+            put(result.get(), "goal_height", window->m_realSize->goal().y);
+        }
         else return 4;
         std::cout << json_object_to_json_string_ext(result.get(), JSON_C_TO_STRING_PLAIN)
                   << std::endl;
@@ -492,25 +504,66 @@ def test_native_candidate_deliberation_lifetime(peer, age_ns, accepted):
 
 
 @pytest.mark.parametrize("age_seconds", [6, 37, 43, 299])
+@pytest.mark.parametrize("stage", ["before_focus", "during_focus"])
 @pytest.mark.parametrize("mode,accepted", [
     ("converge", True), ("settle", True), ("diverge", False), ("retarget", False),
 ])
 def test_deliberation_preserves_same_layout_goal_animation_contract(
-    peer, age_seconds, mode, accepted,
+    peer, age_seconds, stage, mode, accepted,
 ):
     async def run():
         peer.request({"op": "test_mutate", "mode": "start_animation"})
         provider, inventory, _, received = await joined_provider(peer)
         peer.request({"op": "test_advance_clock", "ns": age_seconds * 1_000_000_000})
-        peer.request({"op": "test_mutate", "mode": mode})
+        peer.request({
+            "op": "test_mutate" if stage == "before_focus" else "test_focus_mode",
+            "mode": mode,
+        })
         if accepted:
             result = await focus(provider, inventory)
-            assert result["window_id"] == received[0]["candidates"][0]["window_id"]
-            assert received[-1]["diagnostic_geometry_changed"] is True
+            original = received[0]["candidates"][0]
+            for key in ("window_id", "plugin_epoch", "identity", "output_id", "output"):
+                assert result[key] == original[key]
+            assert "diagnostic_geometry_changed" not in received[-1]
+            assert "diagnostic_animating" not in received[-1]
+            geometry = peer.request({"op": "test_focus_geometry"})
+            expected = (60.5, 70.5, 350.5, 250.5) if mode == "converge" else (110, 120, 400, 300)
+            assert geometry == dict(
+                zip(("x", "y", "width", "height"), expected, strict=True),
+                selected_window_focused=True, selected_monitor_focused=True,
+                goal_x=110, goal_y=120, goal_width=400, goal_height=300,
+            )
         else:
             with pytest.raises(HyprlandScopeFailure):
                 await focus(provider, inventory)
-        assert peer.request({"op": "test_state"})["focus_calls"] == int(accepted)
+            assert received[-1]["reason"] == (
+                "stale-or-ineligible-candidate" if stage == "before_focus"
+                else "native-focus-not-confirmed"
+            )
+            assert "candidate_diagnostic" not in received[-1]
+        assert peer.request({"op": "test_state"})["focus_calls"] == int(
+            accepted or stage == "during_focus"
+        )
+        assert peer.request({"op": "test_state"})["candidates"] == 0
+    asyncio.run(run())
+
+
+@pytest.mark.parametrize("field", ["diagnostic_geometry_changed", "diagnostic_animating"])
+@pytest.mark.parametrize("value", [True, False, 0, "true", None])
+def test_provider_accepts_only_boolean_legacy_diagnostics_and_discards_them(peer, field, value):
+    async def run():
+        provider, inventory, _, received = await joined_provider(
+            peer, response_edit=lambda row: row.__setitem__(field, value)
+        )
+        if type(value) is bool:
+            result = await focus(provider, inventory)
+            assert field not in result
+            assert result["identity"] == received[0]["candidates"][0]["identity"]
+            assert result["window_id"] == received[0]["candidates"][0]["window_id"]
+        else:
+            with pytest.raises(HyprlandScopeFailure):
+                await focus(provider, inventory)
+        assert peer.request({"op": "test_state"})["focus_calls"] == 1
     asyncio.run(run())
 
 

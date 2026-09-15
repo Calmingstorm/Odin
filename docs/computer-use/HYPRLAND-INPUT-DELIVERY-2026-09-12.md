@@ -3,12 +3,17 @@
 Status: the stationary-click non-delivery is diagnosed and repaired. The narrow
 three-case receiver corpus passes. **`runtime_qualified` remains false.**
 
-Authorization: `/home/odin/reviews/input-delivery-lane-2026-09-12.md`.
+This is a historical lane report. Follow-up receipt/harness repairs and their
+separate evidence are recorded in
+[HYPRLAND-NO-DEPLOY-2026-09-12.md](HYPRLAND-NO-DEPLOY-2026-09-12.md).
+The deliberately untouched findings below describe this checkpoint.
+
+Authorization: the private input-delivery lane brief dated 2026-09-12.
 Started from clean `feat/onboarding-wayland-autonomy` at `114dde0d`, pulled
 fast-forward-only before editing. This lane does not deploy or change the live
-installation. Full local report and evidence are under
-`/mnt/storage/hyprland-lab/INPUT-DELIVERY-REPORT.md` and
-`/mnt/storage/hyprland-lab/evidence/input-delivery-20260912/`.
+installation. The full local report (`INPUT-DELIVERY-REPORT.md`) and dated
+input-delivery evidence are retained in a private lab archive; absolute paths
+are intentionally omitted.
 
 ## Root cause and control
 
@@ -151,6 +156,7 @@ Incus, or live-install change was made.
 
 The guest compositor, receivers, guardians, and VM are stopped. Loopback SSH
 forward is closed. Offline `qemu-img check` found no errors. Lab allocation was
-4.5 GiB (4,774,379,520 bytes before final reports). The original operator c1 session
-remained active on seat0/tty7/:0, leader 1798. `odin.service` remained active with
-`NRestarts=0`. `/opt/odin` was not accessed or modified by this work.
+4.5 GiB (4,774,379,520 bytes before final reports). The original operator desktop
+session and its leader remained active and unchanged. The bot service remained
+active with `NRestarts=0`. The live installation was not accessed or modified
+by this work.
