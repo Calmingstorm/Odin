@@ -486,11 +486,13 @@ def _make_auth_middleware(
                 request._session_managed = True
                 session_identity = session_manager.get_identity(bearer_value)
                 if session_identity is not None:
-                    # Token stores publish detached identities. A browser
-                    # session must not retain yesterday's administrative tier.
                     user_id = getattr(session_identity, "user_id", None)
                     current = None
-                    if source == "static" or not dynamic_recovery:
+                    if source == "legacy" and _usable_web_credential(configured_token):
+                        session_token = getattr(session_identity, "token", "")
+                        if session_token and hmac.compare_digest(session_token, configured_token):
+                            current = session_identity
+                    elif source == "static":
                         current = next(
                             (
                                 entry
@@ -499,17 +501,36 @@ def _make_auth_middleware(
                             ),
                             None,
                         )
-                    if current is None and not dynamic_recovery:
+                    elif source == "dynamic" and not dynamic_recovery:
                         current = (
                             token_snapshot.get(user_id)
                             if token_snapshot and user_id
                             else None
                         )
-                    if dynamic_recovery and source == "static" and current is None:
+                    elif source is None and not dynamic_recovery:
+                        # Compatibility for sessions created before provenance
+                        # tracking; never use this path during store recovery.
+                        current = (
+                            token_snapshot.get(user_id)
+                            if token_snapshot and user_id
+                            else None
+                        )
+                        if current is None:
+                            current = next(
+                                (
+                                    entry
+                                    for entry in getattr(current_web_config, "api_tokens", ())
+                                    if entry.user_id == user_id
+                                ),
+                                None,
+                            )
+                    if dynamic_recovery and current is None:
                         raise web.HTTPForbidden(text="API credential store requires recovery")
                     if current is not None:
                         session_identity = current
                     request._api_identity = session_identity
+                elif dynamic_recovery:
+                    raise web.HTTPForbidden(text="API credential store requires recovery")
                 return await handler(request)
 
         if dynamic_recovery:

@@ -12,9 +12,12 @@ def migrate_retired_codex_selections(data: dict) -> None:
     log = logging.getLogger("odin.config")
 
     def migrate(section: object, key: str, path: str, successor: str) -> None:
-        if isinstance(section, dict) and str(section.get(key, "")).strip() == "gpt-5.5":
+        if not isinstance(section, dict):
+            return
+        retired = str(section.get(key, "")).strip()
+        if retired in {"gpt-5.3-codex-spark", "gpt-5.5"}:
             section[key] = successor
-            log.warning("%s uses retired model gpt-5.5; using %s on load", path, successor)
+            log.warning("%s uses retired model %s; using %s on load", path, retired, successor)
 
     codex = data.get("openai_codex")
     if isinstance(codex, dict):
@@ -27,11 +30,13 @@ def migrate_retired_codex_selections(data: dict) -> None:
         overrides = codex.get("context_budget_overrides")
         if isinstance(overrides, dict):
             for key in list(overrides):
-                if str(key).strip() == "gpt-5.5":
+                retired = str(key).strip()
+                if retired in {"gpt-5.3-codex-spark", "gpt-5.5"}:
                     del overrides[key]
                     log.warning(
-                        "Ignoring retired gpt-5.5 context budget override on load; "
-                        "model-specific limits are not transferable to its successor"
+                        "Ignoring retired %s context budget override on load; "
+                        "model-specific limits are not transferable to its successor",
+                        retired,
                     )
     image = data.get("image")
     if isinstance(image, dict):

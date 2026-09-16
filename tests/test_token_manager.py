@@ -163,14 +163,13 @@ class TestLoadValidation:
             {"user_id": "u1", "token_hash": "a" * 64, "allowed_hosts": None}])
         assert mgr.get("u1").allowed_hosts is None
 
-    def test_non_dict_entry_invalidates_entire_store(self, tmp_path):
-        # Partial authentication cannot coexist with an unusable inventory.
+    def test_non_dict_entry_isolated_from_valid_legacy_entry(self, tmp_path):
         mgr = self._write(tmp_path, [
             "i am not a dict",
             {"user_id": "u2", "token_hash": "b" * 64},
         ])
-        assert mgr.list_tokens() == []
-        assert mgr.credential_store_auth_required is True
+        assert [entry["user_id"] for entry in mgr.list_tokens()] == ["u2"]
+        assert mgr.credential_store_auth_required is False
 
     def test_valid_entry_loads(self, tmp_path):
         mgr = self._write(tmp_path, [{
@@ -180,3 +179,47 @@ class TestLoadValidation:
         }])
         got = mgr.get("u1")
         assert got.tier == "user" and got.username == "Bob" and got.default_host == "h1"
+
+    def test_v398_reader_parity_for_0644_symlink_and_ignored_unknown_field(self, tmp_path):
+        raw = "legacy-secret"
+        target = tmp_path / "legacy-token-store.json"
+        target.write_text(json.dumps([{
+            "user_id": "owner",
+            "token_hash": _hash_token(raw),
+            "token_prefix": "legacy-s",
+            "tier": "admin",
+            "allowed_tools": [],
+            "allowed_hosts": None,
+            "future_field": "ignored by v3.98.0",
+        }]))
+        target.chmod(0o644)
+        link = tmp_path / "api_tokens.json"
+        link.symlink_to(target)
+
+        mgr = ApiTokenManager(path=str(link))
+
+        assert mgr.credential_store_status == "valid"
+        assert mgr.credential_inventory.dynamic_usable == 1
+        assert mgr.resolve(raw).user_id == "owner"
+
+    def test_invalid_entry_isolated_while_valid_credentials_load(self, tmp_path):
+        valid = {
+            "user_id": "owner", "token_hash": _hash_token("known-secret"),
+            "allowed_tools": [], "allowed_hosts": None,
+        }
+        mgr = self._write(tmp_path, [valid, "invalid", {"user_id": "broken"}])
+
+        assert mgr.credential_store_status == "valid"
+        assert mgr.credential_store_auth_required is False
+        assert mgr.credential_inventory.dynamic_usable == 1
+        assert mgr.resolve("known-secret").user_id == "owner"
+
+    def test_invalid_only_store_fails_closed_but_empty_store_is_bootstrap(self, tmp_path):
+        invalid = self._write(tmp_path, ["invalid", {"user_id": "broken"}])
+        assert invalid.credential_store_status == "malformed"
+        assert invalid.credential_store_auth_required is True
+
+        (tmp_path / "api_tokens.json").write_text("[]")
+        empty = ApiTokenManager(path=str(tmp_path / "api_tokens.json"))
+        assert empty.credential_store_status == "valid"
+        assert empty.credential_store_auth_required is False

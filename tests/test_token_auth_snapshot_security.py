@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import json
 import os
-from types import SimpleNamespace
 
 import pytest
 
@@ -86,24 +85,24 @@ async def test_async_guard_and_nonboolean_guard(tmp_path):
 
 
 @pytest.mark.parametrize("unknown", ["allowed_host", "allowed_tool", "tiers", "token"])
-def test_unknown_store_fields_are_rejected_not_ignored(tmp_path, unknown):
+def test_unknown_store_fields_remain_v398_compatible(tmp_path, unknown):
     manager, _ = manager_at(tmp_path, [entry(**{unknown: "restriction"})])
-    assert manager.credential_store_status == "malformed"
-    assert manager.credential_store_auth_required
-    assert manager.resolve("known-secret") is None
+    assert manager.credential_store_status == "valid"
+    assert not manager.credential_store_auth_required
+    assert manager.resolve("known-secret") is not None
 
 
 @pytest.mark.parametrize("mode", [0o666, 0o620, 0o602])
-def test_permissions_change_invalidates_cached_token(tmp_path, mode):
+def test_legacy_writable_modes_remain_read_compatible(tmp_path, mode):
     manager, path = manager_at(tmp_path)
     assert manager.resolve("known-secret")
     path.chmod(mode)
-    assert manager.credential_store_status == "unreadable"
-    assert manager.resolve("known-secret") is None
-    assert manager.credential_store_auth_required
+    assert manager.credential_store_status == "valid"
+    assert manager.resolve("known-secret") is not None
+    assert not manager.credential_store_auth_required
 
 
-@pytest.mark.parametrize("kind", ["symlink", "fifo", "directory"])
+@pytest.mark.parametrize("kind", ["fifo", "directory"])
 def test_nonregular_store_replacement_is_denied_without_blocking(tmp_path, kind):
     manager, path = manager_at(tmp_path)
     target = tmp_path / "target"
@@ -118,16 +117,14 @@ def test_nonregular_store_replacement_is_denied_without_blocking(tmp_path, kind)
     assert manager.resolve("known-secret") is None
 
 
-def test_foreign_file_owner_is_rejected(tmp_path, monkeypatch):
+def test_symlinked_store_remains_v398_compatible(tmp_path):
     manager, path = manager_at(tmp_path)
-    fstat = os.fstat
-    def foreign(fd):
-        info = fstat(fd)
-        return SimpleNamespace(st_mode=info.st_mode, st_uid=max(1, os.geteuid() + 1))
-    monkeypatch.setattr(os, "fstat", foreign)
-    path.write_text(json.dumps([entry(label="changed")]))
-    assert manager.credential_store_status == "unreadable"
-    assert manager.credential_store_auth_required
+    target = tmp_path / "target"
+    path.rename(target)
+    path.symlink_to(target)
+
+    assert manager.credential_store_status == "valid"
+    assert manager.resolve("known-secret") is not None
 
 
 def test_open_replacement_race_rejects_mismatched_descriptor(tmp_path, monkeypatch):

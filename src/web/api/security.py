@@ -499,16 +499,15 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         api_token = bot.config.web.api_token
         tm = getattr(bot, "api_token_manager", None)
         snapshot = _auth_snapshot(tm)
-        if snapshot and getattr(
-            snapshot, "credential_store_auth_required", False
-        ) is True:
-            return web.json_response(
-                {"error": "API credential store requires recovery"}, status=403
-            )
+        store_requires_recovery = bool(
+            snapshot
+            and getattr(snapshot, "credential_store_auth_required", False) is True
+        )
         has_any_token = bool(
             api_token
             or bot.config.web.api_tokens
             or _dynamic_auth_required(snapshot)
+            or store_requires_recovery
         )
         if not has_any_token:
             # A fresh install has no UI credential by design. Do not turn an
@@ -539,15 +538,30 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
                 })
             return web.json_response({"error": "no session manager"}, status=500)
 
-        # Check dynamic token manager first, then static config tokens
-        identity = snapshot.resolve(token) if snapshot else None
+        # Preserve dynamic-before-static collision behavior during healthy
+        # operation. Recovery disables only the broken dynamic source.
+        identity = snapshot.resolve(token) if snapshot and not store_requires_recovery else None
+        identity_source = "dynamic" if identity is not None else ""
         if identity is None:
             identity = bot.config.web.resolve_api_identity(token)
+            if identity is not None:
+                identity_source = (
+                    "static"
+                    if any(identity is configured for configured in bot.config.web.api_tokens)
+                    else "legacy"
+                )
+        if store_requires_recovery and identity is None:
+            return web.json_response(
+                {"error": "API credential store requires recovery"}, status=403
+            )
         if identity is not None:
             sm = request.app.get("session_manager")
             if not sm:
                 return web.json_response({"error": "no session manager"}, status=500)
             sid, timeout = sm.create(identity=identity)
+            set_source = getattr(sm, "set_auth_source", None)
+            if callable(set_source):
+                set_source(sid, identity_source)
             return web.json_response({
                 "session_id": sid,
                 "timeout_seconds": timeout,

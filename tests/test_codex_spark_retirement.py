@@ -6,6 +6,7 @@ from src.config.schema import (
     OpenAICodexConfig,
     effort_incompatibility_error,
     input_budget_floor_for_model,
+    load_config,
 )
 from src.llm.context_budget import resolve_context_budget
 
@@ -57,3 +58,48 @@ def test_final_request_boundary_rejects_retirement_as_nonretryable():
 
     with pytest.raises(LLMRequestError, match="is retired"):
         _reject_known_bad_pair(SPARK, "medium")
+
+
+def test_load_migrates_persisted_spark_without_rewriting_operator_file(tmp_path, caplog):
+    path = tmp_path / "config.yml"
+    original = f"""discord:
+  token: test
+openai_codex:
+  model: ' {SPARK} '
+  agent_model: {SPARK}
+  auxiliary:
+    model: {SPARK}
+  context_budget_overrides:
+    {SPARK}: 124001
+    gpt-5.6-terra: 800000
+"""
+    path.write_text(original)
+
+    cfg = load_config(path)
+
+    assert cfg.openai_codex.model == "gpt-5.6-terra"
+    assert cfg.openai_codex.agent_model == "gpt-5.6-terra"
+    assert cfg.openai_codex.auxiliary.model == "gpt-5.6-terra"
+    assert cfg.openai_codex.context_budget_overrides == {"gpt-5.6-terra": 800000}
+    assert path.read_text() == original
+    assert SPARK in caplog.text
+    assert "using gpt-5.6-terra on load" in caplog.text
+
+
+def test_environment_backed_persisted_spark_migrates(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_CODEX_MODEL", SPARK)
+    path = tmp_path / "config.yml"
+    original = "discord: {token: test}\nopenai_codex: {model: '${TEST_CODEX_MODEL}'}\n"
+    path.write_text(original)
+
+    assert load_config(path).openai_codex.model == "gpt-5.6-terra"
+    assert path.read_text() == original
+
+
+def test_persisted_spark_image_carrier_uses_established_successor(tmp_path):
+    path = tmp_path / "config.yml"
+    original = f"discord: {{token: test}}\nimage: {{openai: {{outer_model: {SPARK}}}}}\n"
+    path.write_text(original)
+
+    assert load_config(path).image.openai.outer_model == "gpt-6-astra"
+    assert path.read_text() == original

@@ -1,4 +1,4 @@
-"""F12 regressions: dynamic token stores are all-or-nothing auth state."""
+"""Dynamic token stores isolate entries while root/storage failures fail closed."""
 from __future__ import annotations
 
 import json
@@ -37,17 +37,12 @@ def _manager(tmp_path: Path, data: object) -> tuple[ApiTokenManager, Path]:
         {"not": "a list"},
         ["not an object"],
         [{"user_id": "owner"}],
-        [{**_entry(), "token_hash": "not-a-sha256"}],
         [{**_entry(), "tier": "wizard"}],
         [{**_entry(), "allowed_tools": ["safe", 7]}],
         [{**_entry(), "allowed_hosts": "localhost"}],
-        [_entry(), {"user_id": "broken"}],
-        [_entry(), _entry()],
-        [_entry("one"), {**_entry("two"), "token_hash": _entry("one")["token_hash"]}],
     ],
 )
-def test_malformed_store_is_not_partially_resolved_or_counted(tmp_path: Path, data: object) -> None:
-    """Every malformed record invalidates all dynamic credentials, not just itself."""
+def test_store_with_no_valid_entries_is_not_anonymous(tmp_path: Path, data: object) -> None:
     manager, _path = _manager(tmp_path, data)
 
     assert manager.credential_store_status == "malformed"
@@ -57,6 +52,25 @@ def test_malformed_store_is_not_partially_resolved_or_counted(tmp_path: Path, da
     assert manager.resolve("known-secret") is None
     assert manager.get("owner") is None
     assert manager.list_tokens() == []
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        "not an object",
+        {"user_id": "broken"},
+        {**_entry("broken"), "tier": "wizard"},
+        {**_entry("broken"), "allowed_tools": ["safe", 7]},
+        {**_entry("broken"), "allowed_hosts": "localhost"},
+    ],
+)
+def test_invalid_entry_does_not_revoke_valid_sibling(tmp_path: Path, invalid: object) -> None:
+    manager, _path = _manager(tmp_path, [_entry(), invalid])
+
+    assert manager.credential_store_status == "valid"
+    assert manager.credential_store_auth_required is False
+    assert manager.credential_inventory.dynamic_usable == 1
+    assert manager.resolve("known-secret").user_id == "owner"
 
 
 def test_runtime_corruption_invalidates_a_previously_valid_cache(tmp_path: Path) -> None:

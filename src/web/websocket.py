@@ -217,11 +217,6 @@ class WebSocketManager:
     def _policy_authorized(self, ws: web.WebSocketResponse) -> bool:
         manager = self._token_manager(ws)
         snapshot = self._auth_snapshot(manager)
-        if (
-            snapshot is not None
-            and getattr(snapshot, "credential_store_auth_required", False) is True
-        ):
-            return False
         if getattr(ws, "_odin_policy_revoked", False) or not self._session_is_valid(
             ws, touch=False
         ):
@@ -229,6 +224,12 @@ class WebSocketManager:
         identity = getattr(ws, "_odin_identity", None)
         credential = getattr(ws, "_odin_credential_policy", None)
         if isinstance(credential, _CredentialPolicy):
+            if (
+                credential.source == "dynamic"
+                and snapshot is not None
+                and getattr(snapshot, "credential_store_auth_required", False) is True
+            ):
+                return False
             if self._policy_generations.get(credential.user_id, 0) != credential.generation:
                 return False
             current = identity
@@ -491,10 +492,18 @@ class WebSocketManager:
         token_snapshot = getattr(request, "_token_auth_snapshot", None)
         if token_snapshot is None:
             token_snapshot = self._auth_snapshot(tm)
-        if (
+        store_requires_recovery = bool(
             token_snapshot
             and getattr(token_snapshot, "credential_store_auth_required", False) is True
-        ):
+        )
+        static_identity = None
+        if store_requires_recovery:
+            current_config = self._current_web_config()
+            if token and current_config is not None:
+                static_identity = current_config.resolve_api_identity(token)
+            if static_identity is None and getattr(request, "_session_managed", False):
+                static_identity = getattr(request, "_api_identity", None)
+        if store_requires_recovery and static_identity is None:
             ws = web.WebSocketResponse()
             await ws.prepare(request)
             await ws.close(code=4001, message=b"API credential store requires recovery")
@@ -505,9 +514,11 @@ class WebSocketManager:
         if auth_required:
             valid = False
             if token:
-                resolved = self._resolve_identity(
-                    token, request, token_snapshot=token_snapshot
-                )
+                resolved = static_identity
+                if not store_requires_recovery:
+                    resolved = self._resolve_identity(
+                        token, request, token_snapshot=token_snapshot
+                    )
                 if resolved is not None:
                     identity = resolved
                     valid = True
