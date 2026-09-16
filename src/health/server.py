@@ -342,6 +342,32 @@ def _static_credential_count(web_config: WebConfig) -> int:
     )
 
 
+def _token_auth_snapshot(manager):
+    """Return one coherent auth view, retaining simple test-double support."""
+    if manager is None:
+        return None
+    snapshot_method = getattr(type(manager), "auth_snapshot", None)
+    if callable(snapshot_method):
+        return snapshot_method(manager)
+    return manager
+
+
+def _snapshot_dynamic_auth_required(snapshot) -> bool:
+    if snapshot is None:
+        return False
+    required = getattr(snapshot, "dynamic_auth_required", None)
+    if isinstance(required, bool):
+        return required
+    inventory = getattr(snapshot, "credential_inventory", None)
+    has_usable_auth = getattr(inventory, "has_usable_auth", None)
+    if isinstance(has_usable_auth, bool):
+        return has_usable_auth
+    list_tokens = getattr(snapshot, "list_tokens", None)
+    if callable(list_tokens):
+        return bool(list_tokens())
+    return False
+
+
 def _make_auth_middleware(
     web_config: WebConfig | Callable[[], WebConfig],
     session_manager: SessionManager,
@@ -368,7 +394,12 @@ def _make_auth_middleware(
             return await handler(request)
 
         token_store = request.app.get("token_manager")
-        if token_store and getattr(token_store, "credential_store_auth_required", False) is True:
+        token_snapshot = _token_auth_snapshot(token_store)
+        request._token_auth_snapshot = token_snapshot
+        if (
+            token_snapshot
+            and getattr(token_snapshot, "credential_store_auth_required", False) is True
+        ):
             raise web.HTTPForbidden(text="API credential store requires recovery")
         is_websocket = path == "/api/ws"
         # Presence, not truthiness or first-value order, is the security
@@ -383,10 +414,10 @@ def _make_auth_middleware(
             else web_config
         )
         configured_token = getattr(current_web_config, "api_token", "") or ""
-        tm = request.app.get("token_manager")
         has_any_token = _static_credential_count(current_web_config) or (
-            tm and tm.credential_inventory.has_usable_auth
+            _snapshot_dynamic_auth_required(token_snapshot)
         )
+        request._auth_required = bool(has_any_token)
         if not has_any_token:
             return await handler(request)
 
@@ -423,7 +454,7 @@ def _make_auth_middleware(
                 )
                 return await handler(request)
 
-            identity = tm.resolve(bearer_value) if tm else None
+            identity = token_snapshot.resolve(bearer_value) if token_snapshot else None
             if identity is None and hasattr(current_web_config, "resolve_api_identity"):
                 identity = current_web_config.resolve_api_identity(bearer_value)
             if identity is not None:
@@ -439,7 +470,7 @@ def _make_auth_middleware(
                     # Token stores publish detached identities. A browser
                     # session must not retain yesterday's administrative tier.
                     user_id = getattr(session_identity, "user_id", None)
-                    current = tm.get(user_id) if tm and user_id else None
+                    current = token_snapshot.get(user_id) if token_snapshot and user_id else None
                     if current is None:
                         current = next(
                             (
@@ -476,14 +507,26 @@ def _make_admin_middleware(web_config: WebConfig | Callable[[], WebConfig]) -> M
         path = resource.canonical if resource is not None else request.path
         if not _is_admin_only_path(path, request.method):
             return await handler(request)
+        auth_required = getattr(request, "_auth_required", None)
+        if isinstance(auth_required, bool):
+            if not auth_required:
+                return await handler(request)  # dev mode
+            identity = getattr(request, "_api_identity", None)
+            if getattr(identity, "tier", None) != "admin":
+                return web.json_response({"error": "admin access required"}, status=403)
+            return await handler(request)
+        snapshot = _token_auth_snapshot(request.app.get("token_manager"))
+        if snapshot and getattr(snapshot, "credential_store_auth_required", False):
+            return web.json_response(
+                {"error": "API credential store requires recovery"}, status=403
+            )
         current_web_config = (
             web_config()
             if callable(web_config)
             else web_config
         )
-        tm = request.app.get("token_manager")
         has_any_token = _static_credential_count(current_web_config) or (
-            tm and tm.credential_inventory.has_usable_auth
+            _snapshot_dynamic_auth_required(snapshot)
         )
         if not has_any_token:
             return await handler(request)  # dev mode

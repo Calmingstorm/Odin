@@ -93,15 +93,14 @@ def test_unchanged_store_uses_stat_signature_without_reloading_contents(
 ) -> None:
     manager, path = _manager(tmp_path, [_entry()])
     reads = 0
-    original_read_text = Path.read_text
+    original_read = manager._read_store
 
-    def count_reads(candidate: Path, *args: object, **kwargs: object) -> str:
+    def count_reads(signature) -> str:
         nonlocal reads
-        if candidate == path:
-            reads += 1
-        return original_read_text(candidate, *args, **kwargs)
+        reads += 1
+        return original_read(signature)
 
-    monkeypatch.setattr(Path, "read_text", count_reads)
+    monkeypatch.setattr(manager, "_read_store", count_reads)
 
     assert manager.resolve("known-secret") is not None
     assert manager.credential_store_status == "valid"
@@ -119,10 +118,10 @@ def test_unreadable_store_requires_auth_without_secret_logging(
 ) -> None:
     manager, path = _manager(tmp_path, [_entry(raw_token="never-log-this")])
 
-    def deny_read(_path: Path, *args: object, **kwargs: object) -> str:
+    def deny_read(signature) -> str:
         raise PermissionError("denied")
 
-    monkeypatch.setattr(Path, "read_text", deny_read)
+    monkeypatch.setattr(manager, "_read_store", deny_read)
     path.write_text("changed")
 
     assert manager.resolve("never-log-this") is None

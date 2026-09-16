@@ -71,7 +71,7 @@ async def test_token_failed_publication(tmp_path, operation):
                 await manager.regenerate_token("owner")
             else:
                 await manager.delete_token("owner")
-    assert manager.resolve(issued.token) is captured
+    assert manager.resolve(issued.token) == captured
     assert captured.tier == "user"
     assert manager.get("rejected") is None
     assert path.read_bytes() == original
@@ -87,5 +87,5 @@ async def test_token_update_validates_detached_identity(tmp_path):
     captured = manager.resolve(issued.token)
     with pytest.raises(ValueError):
         await manager.update_token("owner", tier="invalid")
-    assert manager.resolve(issued.token) is captured
+    assert manager.resolve(issued.token) == captured
     assert captured.tier == "user"

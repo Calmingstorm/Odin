@@ -17,6 +17,28 @@ from ..api_common import admin_gate
 
 log = get_logger("web.api")
 
+
+def _auth_snapshot(manager):
+    if manager is None:
+        return None
+    method = getattr(type(manager), "auth_snapshot", None)
+    return method(manager) if callable(method) else manager
+
+
+def _dynamic_auth_required(snapshot) -> bool:
+    if snapshot is None:
+        return False
+    value = getattr(snapshot, "dynamic_auth_required", None)
+    if isinstance(value, bool):
+        return value
+    inventory = getattr(snapshot, "credential_inventory", None)
+    value = getattr(inventory, "has_usable_auth", None)
+    if isinstance(value, bool):
+        return value
+    list_tokens = getattr(snapshot, "list_tokens", None)
+    return bool(list_tokens()) if callable(list_tokens) else False
+
+
 def register_permissions_rbac(routes: web.RouteTableDef, bot) -> None:
     """Permissions / RBAC (verbatim from the monolith)."""
     # ------------------------------------------------------------------
@@ -476,11 +498,18 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
 
         api_token = bot.config.web.api_token
         tm = getattr(bot, "api_token_manager", None)
-        has_any_token = api_token or bot.config.web.api_tokens or (tm and tm.list_tokens())
-        if tm and getattr(tm, "credential_store_auth_required", False) is True:
+        snapshot = _auth_snapshot(tm)
+        if snapshot and getattr(
+            snapshot, "credential_store_auth_required", False
+        ) is True:
             return web.json_response(
                 {"error": "API credential store requires recovery"}, status=403
             )
+        has_any_token = bool(
+            api_token
+            or bot.config.web.api_tokens
+            or _dynamic_auth_required(snapshot)
+        )
         if not has_any_token:
             # A fresh install has no UI credential by design. Do not turn an
             # arbitrary value, including its Discord gateway token, into an
@@ -511,8 +540,7 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
             return web.json_response({"error": "no session manager"}, status=500)
 
         # Check dynamic token manager first, then static config tokens
-        tm = getattr(bot, "api_token_manager", None)
-        identity = tm.resolve(token) if tm else None
+        identity = snapshot.resolve(token) if snapshot else None
         if identity is None:
             identity = bot.config.web.resolve_api_identity(token)
         if identity is not None:

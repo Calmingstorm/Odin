@@ -172,7 +172,19 @@ class WebSocketManager:
             if entry is not None
         )
 
-    def _authentication_required(self, ws: web.WebSocketResponse | None = None) -> bool:
+    @staticmethod
+    def _auth_snapshot(manager):
+        if manager is None:
+            return None
+        method = getattr(type(manager), "auth_snapshot", None)
+        return method(manager) if callable(method) else manager
+
+    def _authentication_required(
+        self,
+        ws: web.WebSocketResponse | None = None,
+        *,
+        token_snapshot=None,
+    ) -> bool:
         """Whether the current static or dynamic inventory requires auth."""
         config = self._current_web_config()
         legacy = getattr(config, "api_token", "") if config is not None else self._api_token
@@ -183,7 +195,10 @@ class WebSocketManager:
             for token in getattr(config, "api_tokens", ())
         ):
             return True
-        return self._dynamic_auth_required(self._token_manager(ws))
+        dynamic = token_snapshot
+        if dynamic is None:
+            dynamic = self._auth_snapshot(self._token_manager(ws))
+        return self._dynamic_auth_required(dynamic)
 
     @asynccontextmanager
     async def policy_change(self, user_id: str):
@@ -201,8 +216,11 @@ class WebSocketManager:
 
     def _policy_authorized(self, ws: web.WebSocketResponse) -> bool:
         manager = self._token_manager(ws)
-        if (manager is not None
-                and getattr(manager, "credential_store_auth_required", False) is True):
+        snapshot = self._auth_snapshot(manager)
+        if (
+            snapshot is not None
+            and getattr(snapshot, "credential_store_auth_required", False) is True
+        ):
             return False
         if getattr(ws, "_odin_policy_revoked", False) or not self._session_is_valid(
             ws, touch=False
@@ -215,13 +233,12 @@ class WebSocketManager:
                 return False
             current = identity
             if credential.source == "dynamic":
-                tm = self._token_manager(ws)
-                if tm is None:
+                if snapshot is None:
                     return False
                 current = (
-                    tm.resolve(credential.bearer)
+                    snapshot.resolve(credential.bearer)
                     if credential.bearer
-                    else tm.get(credential.user_id)
+                    else snapshot.get(credential.user_id)
                 )
             elif credential.source == "static":
                 config = self._current_web_config()
@@ -243,7 +260,7 @@ class WebSocketManager:
             elif credential.source == "session":
                 current = self._session_manager.get_identity(ws._odin_session_id)  # type: ignore[attr-defined]
             elif credential.source == "development":
-                return not self._authentication_required(ws)
+                return not self._authentication_required(ws, token_snapshot=snapshot)
             elif credential.source == "unknown":
                 return False
             return current is not None and _policy_fingerprint(current) == credential.fingerprint
@@ -254,8 +271,7 @@ class WebSocketManager:
         if source in {"dynamic", "static"} and identity is None:
             return False
         if source == "dynamic":
-            manager = self._token_manager(ws)
-            current = manager.get(getattr(identity, "user_id", "")) if manager else None
+            current = snapshot.get(getattr(identity, "user_id", "")) if snapshot else None
         elif source == "static":
             config = self._current_web_config()
             current = next(
@@ -420,15 +436,17 @@ class WebSocketManager:
     def client_count(self) -> int:
         return len(self._clients)
 
-    def _resolve_identity(self, token: str, request=None):
+    def _resolve_identity(self, token: str, request=None, *, token_snapshot=None):
         """Resolve an ApiTokenIdentity from a raw token string."""
         if self._session_manager:
             if self._session_manager.validate(token):
                 identity = self._session_manager.get_identity(token)
                 if identity is not None:
                     return identity
-        tm = request.app.get("token_manager") if request else None
-        tm = tm or self._token_manager()
+        tm = token_snapshot
+        if tm is None:
+            manager = request.app.get("token_manager") if request else None
+            tm = self._auth_snapshot(manager or self._token_manager())
         if tm:
             identity = tm.resolve(token)
             if identity is not None:
@@ -469,10 +487,27 @@ class WebSocketManager:
             if header.startswith("Bearer ")
             else _decode_bearer_subprotocol(offered_protocol)
         )
-        if self._authentication_required():
+        tm = request.app.get("token_manager") or self._token_manager()
+        token_snapshot = getattr(request, "_token_auth_snapshot", None)
+        if token_snapshot is None:
+            token_snapshot = self._auth_snapshot(tm)
+        if (
+            token_snapshot
+            and getattr(token_snapshot, "credential_store_auth_required", False) is True
+        ):
+            ws = web.WebSocketResponse()
+            await ws.prepare(request)
+            await ws.close(code=4001, message=b"API credential store requires recovery")
+            return ws
+        auth_required = getattr(request, "_auth_required", None)
+        if not isinstance(auth_required, bool):
+            auth_required = self._authentication_required(token_snapshot=token_snapshot)
+        if auth_required:
             valid = False
             if token:
-                resolved = self._resolve_identity(token, request)
+                resolved = self._resolve_identity(
+                    token, request, token_snapshot=token_snapshot
+                )
                 if resolved is not None:
                     identity = resolved
                     valid = True
@@ -498,7 +533,6 @@ class WebSocketManager:
         )
         ws._odin_session_id = getattr(request, "_session_id", None) or "ws-anon"  # type: ignore[attr-defined]  # sanctioned dynamic attr
         ws._odin_session_managed = bool(getattr(request, "_session_managed", False))  # type: ignore[attr-defined]  # sanctioned dynamic attr
-        tm = request.app.get("token_manager") or self._token_manager()
         source = "unknown"
         config = self._current_web_config()
         legacy = getattr(config, "api_token", "") if config is not None else self._api_token
@@ -517,9 +551,18 @@ class WebSocketManager:
         if legacy and hmac.compare_digest(presented, legacy):
             source = "legacy"
         elif identity is not None:
-            candidate = tm.resolve(presented) if tm and presented else None
-            if candidate is None and tm and session_identity is not None and not presented:
-                candidate = tm.get(identity.user_id)
+            candidate = (
+                token_snapshot.resolve(presented)
+                if token_snapshot and presented
+                else None
+            )
+            if (
+                candidate is None
+                and token_snapshot
+                and session_identity is not None
+                and not presented
+            ):
+                candidate = token_snapshot.get(identity.user_id)
             if candidate is not None:
                 source = "dynamic"
                 identity = candidate
@@ -551,7 +594,7 @@ class WebSocketManager:
                     self._usable_credential(getattr(token, "token", ""))
                     for token in getattr(config, "api_tokens", ())
                 )
-                and not self._dynamic_auth_required(tm)
+                and not self._dynamic_auth_required(token_snapshot)
             ):
                 source = "development"
         uid = getattr(identity, "user_id", "")
