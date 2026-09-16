@@ -195,9 +195,15 @@ async def test_listener_consent_does_not_rebind_or_restart_composed_server(compo
         })
         assert login.status == 200
         session_id = (await login.json())["session_id"]
-        response = await client.post(url + "/api/setup/listener", json={
+        session_only = await client.post(url + "/api/setup/listener", json={
             "expose_beyond_loopback": True,
         }, headers={"Authorization": f"Bearer {session_id}"})
+        assert session_only.status == 403
+        # The Config UI explicitly reauthenticates with a one-shot raw token,
+        # without replacing its managed browser session.
+        response = await client.post(url + "/api/setup/listener", json={
+            "expose_beyond_loopback": True,
+        }, headers={"Authorization": f"Bearer {bot.config.web.api_token}"})
         assert response.status == 200
         assert (await response.json())["restart_required"] == ["web.listener"]
         assert server._runner is original_runner

@@ -53,40 +53,33 @@ def _image_intent_revision(metadata: dict) -> str:
 
 
 def _listener_admin_current(request: web.Request, bot) -> bool:
-    """Recheck consent authority after acquiring the credential publication lock."""
+    """Reauthenticate the supplied raw credential under the publication lock.
+
+    Browser sessions contain identities, not credential provenance. Never
+    resolve them by user_id or infer a default credential from public labels.
+    This sensitive action requires explicit reauthentication, including in UI.
+    """
     import hmac
 
     from ...health.server import _usable_web_credential
 
+    if getattr(request, "_session_managed", False):
+        return False
+    header = request.headers.get("Authorization", "")
+    bearer = header[7:] if header.startswith("Bearer ") else ""
+    if not _usable_web_credential(bearer):
+        return False
     manager = getattr(bot, "api_token_manager", None)
     current = bot.config.web
-    if getattr(request, "_session_managed", False):
-        sessions = request.app.get("session_manager")
-        sid = getattr(request, "_session_id", "")
-        if sessions is None or not sessions.validate(sid, touch=False):
-            return False
-        identity = sessions.get_identity(sid)
-        user_id = getattr(identity, "user_id", None)
-        if user_id == "api-admin" and getattr(identity, "label", None) == "default":
-            return _usable_web_credential(current.api_token)
-        identity = manager.get(user_id) if manager and user_id else None
-        if identity is None:
-            identity = next((
-                entry for entry in current.api_tokens
-                if entry.user_id == user_id and _usable_web_credential(entry.token)
-            ), None)
-    else:
-        header = request.headers.get("Authorization", "")
-        bearer = header[7:] if header.startswith("Bearer ") else request.query.get("token", "")
-        if _usable_web_credential(current.api_token) and hmac.compare_digest(
-            current.api_token, bearer,
-        ):
-            return True
-        identity = manager.resolve(bearer) if manager else None
-        if identity is None:
-            identity = next((entry for entry in current.api_tokens
-                             if _usable_web_credential(entry.token)
-                             and hmac.compare_digest(entry.token, bearer)), None)
+    if _usable_web_credential(current.api_token) and hmac.compare_digest(
+        current.api_token, bearer,
+    ):
+        return True
+    identity = manager.resolve(bearer) if manager else None
+    if identity is None:
+        identity = next((entry for entry in current.api_tokens
+                         if _usable_web_credential(entry.token)
+                         and hmac.compare_digest(entry.token, bearer)), None)
     return identity is not None and identity.tier == "admin"
 
 
@@ -243,7 +236,14 @@ def register_setup_wizard(routes: web.RouteTableDef, bot) -> None:
 
     @routes.post("/api/setup/listener")
     async def setup_listener(request: web.Request) -> web.Response:
-        """Record authenticated admin consent to use web.host on the next restart."""
+        """Reauthenticate a raw admin bearer and consent to web.host on next restart."""
+        if getattr(request, "_session_managed", False) or not request.headers.get(
+            "Authorization", "",
+        ).startswith("Bearer "):
+            return web.json_response({
+                "error": "Re-enter a current admin API token to authorize listener exposure; "
+                         "browser sessions and query credentials cannot record consent.",
+            }, status=403)
         identity = getattr(request, "_api_identity", None)
         if identity is None or getattr(identity, "tier", None) != "admin":
             # Dev-mode access must never authorize a durable exposure decision.
