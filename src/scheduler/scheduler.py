@@ -321,10 +321,23 @@ class Scheduler:
         return snapshot
 
     @staticmethod
+    def _requires_connection(schedule: dict) -> bool:
+        """Whether this action needs the Discord-owned delivery connection."""
+        return schedule.get("action") != "webhook"
+
+    def _admitted_epoch(self, schedule: dict) -> int | None:
+        """Admit one effect, returning its Discord generation when required."""
+        if not self._requires_connection(schedule):
+            return None
+        return self._require_connection().epoch
+
+    @staticmethod
     def _field_snapshot(schedule: dict, key: str) -> tuple[bool, Any]:
         return key in schedule, copy.deepcopy(schedule.get(key))
 
-    def _capture_reservation_before_mutation(self, schedule: dict, epoch: int) -> str:
+    def _capture_reservation_before_mutation(
+        self, schedule: dict, epoch: int | None
+    ) -> str:
         key = uuid.uuid4().hex
         self._gate_reservations[key] = {
             "id": schedule["id"],
@@ -490,7 +503,7 @@ class Scheduler:
         schedule["last_error_at"] = None
 
         async with self._lock:
-            self._require_connection()
+            self._admitted_epoch(schedule)
             await self._publish([*self._schedules, schedule])
         self._wake.set()
         log_next = schedule.get("next_run", "on trigger")
@@ -753,14 +766,9 @@ class Scheduler:
         Collects matches under lock, executes callbacks outside it
         (same pattern as _tick) to prevent deadlock.
         """
-        if not self._callback:
-            return 0
-
-        matched: list[tuple[dict, str]] = []
+        matched: list[tuple[dict, str, int | None]] = []
         async with self._lock:
             availability = self._connection_availability()
-            if not availability.available:
-                return 0
             now = datetime.now(UTC)
             candidate = copy.deepcopy(self._schedules)
             for schedule in candidate:
@@ -771,25 +779,28 @@ class Scheduler:
                     continue
                 if not self._trigger_matches(trigger, source, event_data):
                     continue
+                if self._requires_connection(schedule) and not availability.available:
+                    continue
+                if self._requires_connection(schedule) and not self._callback:
+                    continue
 
                 log.info(
                     "Webhook trigger fired: schedule %s (%s) on %s event",
                     schedule["id"], schedule["description"], source,
                 )
-                reservation = self._capture_reservation_before_mutation(
-                    schedule, availability.epoch
-                )
+                epoch = availability.epoch if self._requires_connection(schedule) else None
+                reservation = self._capture_reservation_before_mutation(schedule, epoch)
                 schedule["last_run"] = now.isoformat()
                 self._capture_reservation_after_mutation(reservation, schedule)
-                matched.append((copy.deepcopy(schedule), reservation))
+                matched.append((copy.deepcopy(schedule), reservation, epoch))
 
             if matched:
                 await self._publish(candidate)
 
         executed = 0
-        for schedule, reservation in matched:
+        for schedule, reservation, epoch in matched:
             try:
-                if await self._execute_and_record(schedule, reservation, availability.epoch):
+                if await self._execute_and_record(schedule, reservation, epoch):
                     executed += 1
             except ScheduleConnectionUnavailableError:
                 continue
@@ -958,7 +969,7 @@ class Scheduler:
             # Resuming admits future effects, so it is an admission boundary
             # just like creation. Pausing remains available while disconnected.
             if original.get("paused") and target.get("paused") is False:
-                self._require_connection()
+                self._admitted_epoch(target)
             candidate = list(self._schedules)
             candidate[target_index] = target
             await self._publish(candidate)
@@ -971,20 +982,19 @@ class Scheduler:
         Returns a result dict with status, schedule info, and optional warning.
         Raises ValueError if the schedule is not found or callback is not set.
         """
-        if not self._callback:
-            raise ValueError("Scheduler callback not configured")
-
         schedule: dict | None = None
         async with self._lock:
-            availability = self._require_connection()
             for s in self._schedules:
                 if s["id"] == schedule_id:
                     schedule = copy.deepcopy(s)
                     break
             if schedule is None:
                 raise ValueError(f"Schedule '{schedule_id}' not found")
+            if self._requires_connection(schedule) and not self._callback:
+                raise ValueError("Scheduler callback not configured")
+            admitted_epoch = self._admitted_epoch(schedule)
             reservation = self._capture_reservation_before_mutation(
-                schedule, availability.epoch
+                schedule, admitted_epoch
             )
             schedule["last_run"] = datetime.now(UTC).isoformat()
             self._capture_reservation_after_mutation(reservation, schedule)
@@ -993,7 +1003,7 @@ class Scheduler:
 
         log.info("Manual run: schedule %s (%s)", schedule_id, schedule.get("description", ""))
         failures_before = schedule.get("consecutive_failures", 0)
-        executed = await self._execute_and_record(schedule, reservation, availability.epoch)
+        executed = await self._execute_and_record(schedule, reservation, admitted_epoch)
         if not executed:
             skipped_result = {
                 "status": "skipped",
@@ -1138,12 +1148,13 @@ class Scheduler:
         try:
             # Recheck after durable reservation but before an executor sees it.
             # An unavailable connection leaves no history for unstarted work.
-            snapshot = self._connection_availability()
-            if not snapshot.available or (
-                admitted_epoch is not None and snapshot.epoch != admitted_epoch
-            ):
-                await self._restore_unstarted_reservation(schedule, reservation)
-                raise ScheduleConnectionUnavailableError(snapshot)
+            if self._requires_connection(schedule):
+                snapshot = self._connection_availability()
+                if not snapshot.available or (
+                    admitted_epoch is not None and snapshot.epoch != admitted_epoch
+                ):
+                    await self._restore_unstarted_reservation(schedule, reservation)
+                    raise ScheduleConnectionUnavailableError(snapshot)
             identity = self._execution_identity(schedule)
             nonce = uuid.uuid4().hex
             self._active_execution_nonces.add(nonce)
@@ -1353,12 +1364,10 @@ class Scheduler:
                 log.error("Failure alert callback error for %s: %s", schedule["id"], alert_err)
 
     async def _tick(self) -> None:
-        to_fire: list[tuple[dict, str, int]] = []
+        to_fire: list[tuple[dict, str, int | None]] = []
 
         async with self._lock:
             availability = self._connection_availability()
-            if not availability.available:
-                return
             now = datetime.now(UTC)
             now_naive = now.replace(tzinfo=None)
 
@@ -1366,6 +1375,10 @@ class Scheduler:
             for schedule in candidate:
                 if schedule.get("paused"):
                     continue
+                if self._requires_connection(schedule) and not availability.available:
+                    continue
+
+                epoch = availability.epoch if self._requires_connection(schedule) else None
 
                 retry_at_str = schedule.get("retry_at")
                 if retry_at_str:
@@ -1379,10 +1392,10 @@ class Scheduler:
                             schedule.get("retry_count", 0),
                         )
                         reservation = self._capture_reservation_before_mutation(
-                            schedule, availability.epoch
+                            schedule, epoch
                         )
                         self._capture_reservation_after_mutation(reservation, schedule)
-                        to_fire.append((copy.deepcopy(schedule), reservation, availability.epoch))
+                        to_fire.append((copy.deepcopy(schedule), reservation, epoch))
                     continue
 
                 next_run_str = schedule.get("next_run")
@@ -1397,7 +1410,7 @@ class Scheduler:
 
                 log.info("Firing schedule %s: %s", schedule["id"], schedule["description"])
                 reservation = self._capture_reservation_before_mutation(
-                    schedule, availability.epoch
+                    schedule, epoch
                 )
                 schedule["last_run"] = now.isoformat()
 
@@ -1406,7 +1419,7 @@ class Scheduler:
                         schedule["cron"], schedule.get("timezone"),
                     )
                 self._capture_reservation_after_mutation(reservation, schedule)
-                to_fire.append((copy.deepcopy(schedule), reservation, availability.epoch))
+                to_fire.append((copy.deepcopy(schedule), reservation, epoch))
 
             if to_fire:
                 await self._publish(candidate)

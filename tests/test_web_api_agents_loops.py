@@ -8,6 +8,8 @@ delegation, and response shaping, not real loop/process startup.
 from __future__ import annotations
 
 import asyncio
+import gc
+import weakref
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -15,7 +17,12 @@ import pytest
 from aiohttp import web
 from aiohttp.test_utils import TestClient, TestServer
 
-from src.web.api.agents_loops import register_agents, register_loops, register_processes
+from src.web.api.agents_loops import (
+    _LOOP_RESTART_LOCKS,
+    register_agents,
+    register_loops,
+    register_processes,
+)
 
 
 def _app(*registrars, bot):
@@ -205,6 +212,63 @@ class TestLoops:
             body = await r.json()
             assert body["old_id"] == "L1" and body["new_id"] == "loop-new"
             bot.loop_manager.stop_loop.assert_called_once_with("L1")  # stopped first
+
+    @pytest.mark.asyncio
+    async def test_restart_lock_is_pruned_after_request(self):
+        bot = MagicMock()
+        bot.loop_manager._loops = {
+            "prune-lock": _loop_info(status="stopped", channel_id="123")
+        }
+        bot.get_channel.return_value = MagicMock()
+        bot.loop_manager.start_loop.return_value = "loop-new"
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            assert (await c.post("/api/loops/prune-lock/restart")).status == 201
+        gc.collect()
+        assert "prune-lock" not in _LOOP_RESTART_LOCKS
+
+    @pytest.mark.asyncio
+    async def test_restart_lock_survives_waiter_cancellation_and_serializes(self):
+        bot = MagicMock()
+        bot.loop_manager._loops = {
+            "serialized-lock": _loop_info(status="running", channel_id="123")
+        }
+        bot.get_channel.return_value = MagicMock()
+        entered = asyncio.Event()
+        release = asyncio.Event()
+        active = 0
+        peak = 0
+
+        async def stop_loop(_lid):
+            nonlocal active, peak
+            active += 1
+            peak = max(peak, active)
+            entered.set()
+            await release.wait()
+            active -= 1
+            return "Loop stopped."
+
+        bot.loop_manager.stop_loop = stop_loop
+        bot.loop_manager.start_loop.side_effect = ["new-one", "new-two"]
+        async with TestClient(TestServer(_app(register_loops, bot=bot))) as c:
+            first = asyncio.create_task(c.post("/api/loops/serialized-lock/restart"))
+            await entered.wait()
+            lock_ref = weakref.ref(_LOOP_RESTART_LOCKS["serialized-lock"])
+            cancelled = asyncio.create_task(c.post("/api/loops/serialized-lock/restart"))
+            survivor = asyncio.create_task(c.post("/api/loops/serialized-lock/restart"))
+            await asyncio.sleep(0)
+            cancelled.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await cancelled
+            assert lock_ref() is not None
+            release.set()
+            assert (await first).status == 201
+            assert (await survivor).status == 201
+            assert peak == 1
+
+        del first, survivor
+        gc.collect()
+        assert lock_ref() is None
+        assert "serialized-lock" not in _LOOP_RESTART_LOCKS
 
     @pytest.mark.asyncio
     async def test_restart_callback_accepts_manager_invocation_shape(self):

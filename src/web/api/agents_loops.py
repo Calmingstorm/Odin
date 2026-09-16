@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import weakref
 
 from aiohttp import web
 
@@ -23,7 +24,22 @@ from ._agent_display import agent_display_policy
 
 log = get_logger("web.api")
 
-_LOOP_RESTART_LOCKS: dict[str, asyncio.Lock] = {}
+_LOOP_RESTART_LOCKS: weakref.WeakValueDictionary[str, asyncio.Lock] = (
+    weakref.WeakValueDictionary()
+)
+
+
+def _loop_restart_lock(loop_id: str) -> asyncio.Lock:
+    """Return the per-loop lock without retaining every historical loop id."""
+    # Route handlers run on one event loop and do not await between get/set.
+    # Each caller keeps a strong local reference through acquisition, including
+    # while queued, so weak pruning cannot split active waiters across locks.
+    lock = _LOOP_RESTART_LOCKS.get(loop_id)
+    if lock is None:
+        lock = asyncio.Lock()
+        _LOOP_RESTART_LOCKS[loop_id] = lock
+    return lock
+
 
 def register_loops(routes: web.RouteTableDef, bot) -> None:
     """Autonomous loops (verbatim from the monolith)."""
@@ -198,7 +214,7 @@ def register_loops(routes: web.RouteTableDef, bot) -> None:
     @routes.post("/api/loops/{loop_id}/restart")
     async def restart_loop(request: web.Request) -> web.Response:
         lid = request.match_info["loop_id"]
-        lock = _LOOP_RESTART_LOCKS.setdefault(lid, asyncio.Lock())
+        lock = _loop_restart_lock(lid)
         async with lock:
             info = bot.loop_manager._loops.get(lid)
             if not info:

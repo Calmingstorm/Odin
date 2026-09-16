@@ -50,9 +50,16 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
         description = data.get("description", "").strip()
         action = data.get("action", "reminder")
         channel_id = data.get("channel_id", "").strip()
-        if not description or not channel_id:
+        if not description or (action != "webhook" and not channel_id):
             return web.json_response(
-                {"error": "description and channel_id are required"}, status=400
+                {
+                    "error": (
+                        "description is required"
+                        if action == "webhook"
+                        else "description and channel_id are required"
+                    )
+                },
+                status=400,
             )
         err = _validate_string(description, "description", _MAX_DESCRIPTION_LEN)
         if err:
@@ -79,6 +86,7 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
                 trigger=data.get("trigger"),
                 max_retries=data.get("max_retries"),
                 retry_backoff_seconds=data.get("retry_backoff_seconds"),
+                webhook_config=data.get("webhook_config"),
                 cron_timezone=data.get("cron_timezone"),
                 report_format=data.get("report_format"),
             )
@@ -121,6 +129,7 @@ def register_schedules(routes: web.RouteTableDef, bot) -> None:
                 channel_id=data.get("channel_id"),
                 max_retries=data.get("max_retries"),
                 retry_backoff_seconds=data.get("retry_backoff_seconds"),
+                webhook_config=data.get("webhook_config"),
                 paused=paused,
                 cron_timezone=data.get("cron_timezone"),
                 report_format=data.get("report_format"),

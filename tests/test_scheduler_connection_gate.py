@@ -37,6 +37,25 @@ async def test_create_and_unpause_are_rejected_while_connection_unavailable(tmp_
 
 
 @pytest.mark.asyncio
+async def test_webhook_create_and_resume_do_not_require_discord(tmp_path):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    scheduler.set_connection_state_provider(
+        lambda: ConnectionAvailability(False, ConnectionReason.DISCONNECTED, 17)
+    )
+
+    schedule = await scheduler.add(
+        "http only", "webhook", "",
+        run_at="2030-01-01T00:00:00Z",
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+    await scheduler.update(schedule["id"], paused=True)
+    resumed = await scheduler.update(schedule["id"], paused=False)
+
+    assert resumed is not None
+    assert resumed["paused"] is False
+
+
+@pytest.mark.asyncio
 async def test_lost_connection_after_reservation_restores_due_work_without_history(tmp_path):
     scheduler = Scheduler(str(tmp_path / "schedules.json"))
     state = {"up": True}

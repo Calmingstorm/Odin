@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import io
 from types import SimpleNamespace
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 
@@ -141,6 +141,11 @@ async def test_application_startup_completes_services_despite_nonfatal_component
     bot.audit = SimpleNamespace(initialize_chain=AsyncMock(side_effect=RuntimeError("bad chain")))
     bot.usage_rollup = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("backfill failed")))
     bot.computer = SimpleNamespace(start=AsyncMock(side_effect=RuntimeError("desktop unavailable")))
+    bot.scheduler = SimpleNamespace(start=Mock())
+    bot.scheduled_events = SimpleNamespace(
+        _on_scheduled_task=AsyncMock(),
+        _on_schedule_failure=AsyncMock(),
+    )
     bot.load_extension = AsyncMock()
     report = SimpleNamespace(
         results=[
@@ -168,6 +173,10 @@ async def test_application_startup_completes_services_despite_nonfatal_component
     bot.load_extension.assert_awaited_once_with("test.extension")
     bot.audit.initialize_chain.assert_awaited_once()
     bot.usage_rollup.start.assert_awaited_once()
+    bot.scheduler.start.assert_called_once_with(
+        bot.scheduled_events._on_scheduled_task,
+        bot.scheduled_events._on_schedule_failure,
+    )
     bot.computer.start.assert_awaited_once()
 
 

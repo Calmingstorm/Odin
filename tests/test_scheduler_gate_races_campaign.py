@@ -21,7 +21,7 @@ def _provider(state):
 
 
 @pytest.mark.asyncio
-async def test_webhook_http_executor_is_bypassed_before_any_effect(tmp_path, monkeypatch):
+async def test_webhook_run_now_executes_without_discord(tmp_path, monkeypatch):
     scheduler = Scheduler(str(tmp_path / "schedules.json"))
     state = {"available": True, "epoch": 4}
     scheduler.set_connection_state_provider(_provider(state))
@@ -42,12 +42,115 @@ async def test_webhook_http_executor_is_bypassed_before_any_effect(tmp_path, mon
     )
     state["available"] = False
 
-    with pytest.raises(ScheduleConnectionUnavailableError):
-        await scheduler.run_now(schedule["id"])
+    result = await scheduler.run_now(schedule["id"])
 
-    assert calls == []
-    assert scheduler.list_all()[0]["last_run"] is None
-    assert await scheduler.history.query() == []
+    assert result["status"] == "success"
+    assert calls == ["http"]
+    assert scheduler.list_all() == []
+    assert len(await scheduler.history.query()) == 1
+    await scheduler.stop()
+
+
+@pytest.mark.asyncio
+async def test_webhook_run_now_does_not_require_discord_callback(tmp_path, monkeypatch):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    scheduler.set_connection_state_provider(
+        lambda: ConnectionAvailability(False, ConnectionReason.DISCONNECTED, 4)
+    )
+    calls = []
+
+    async def http(_config):
+        calls.append("http")
+        return {"status_code": 200}
+
+    monkeypatch.setattr(scheduler, "_execute_webhook", http)
+    schedule = await scheduler.add(
+        "webhook", "webhook", "", run_at="2030-01-01T00:00:00Z",
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+
+    assert (await scheduler.run_now(schedule["id"]))["status"] == "success"
+    assert calls == ["http"]
+
+
+@pytest.mark.asyncio
+async def test_due_webhook_executes_without_discord(tmp_path, monkeypatch):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    state = {"available": False, "epoch": 4}
+    scheduler.set_connection_state_provider(_provider(state))
+    calls = []
+
+    async def http(_config):
+        calls.append("http")
+        return {"status_code": 200}
+
+    monkeypatch.setattr(scheduler, "_execute_webhook", http)
+    await scheduler.add(
+        "webhook", "webhook", "", run_at="2030-01-01T00:00:00Z",
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+    scheduler._schedules[0]["next_run"] = (
+        datetime.now(UTC) - timedelta(seconds=1)
+    ).isoformat()
+
+    await scheduler._tick()
+
+    assert calls == ["http"]
+    assert scheduler.list_all() == []
+    assert len(await scheduler.history.query()) == 1
+
+
+@pytest.mark.asyncio
+async def test_matching_webhook_action_trigger_executes_without_discord(tmp_path, monkeypatch):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    state = {"available": False, "epoch": 4}
+    scheduler.set_connection_state_provider(_provider(state))
+    calls = []
+
+    async def http(_config):
+        calls.append("http")
+        return {"status_code": 200}
+
+    monkeypatch.setattr(scheduler, "_execute_webhook", http)
+    await scheduler.add(
+        "push", "webhook", "", trigger={"source": "github", "event": "push"},
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+
+    assert await scheduler.fire_triggers("github", {"event": "push"}) == 1
+    assert calls == ["http"]
+
+
+@pytest.mark.asyncio
+async def test_disconnected_trigger_only_fires_webhook_actions(tmp_path, monkeypatch):
+    scheduler = Scheduler(str(tmp_path / "schedules.json"))
+    state = {"available": True, "epoch": 4}
+    scheduler.set_connection_state_provider(_provider(state))
+    callback_calls = []
+    http_calls = []
+
+    async def callback(schedule):
+        callback_calls.append(schedule["id"])
+
+    async def http(_config):
+        http_calls.append("http")
+        return {"status_code": 200}
+
+    scheduler.start(callback)
+    monkeypatch.setattr(scheduler, "_execute_webhook", http)
+    await scheduler.add(
+        "report", "reminder", "1", trigger={"source": "github", "event": "push"},
+    )
+    await scheduler.add(
+        "hook", "webhook", "", trigger={"source": "github", "event": "push"},
+        webhook_config={"url": "https://example.invalid/hook"},
+    )
+    state["available"] = False
+    state["epoch"] = 5
+
+    assert await scheduler.fire_triggers("github", {"event": "push"}) == 1
+    assert callback_calls == []
+    assert http_calls == ["http"]
     await scheduler.stop()
 
 

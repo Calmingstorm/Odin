@@ -7,7 +7,9 @@ pipeline dispatch is authorized. A normal PR synchronization must run hosted CI.
 
 - A implements transient WebUI-first onboarding, installation-bound state,
   loopback bootstrap, live credential policy, supervised Discord attachment,
-  and connected-only scheduling admission/dispatch (including HTTP webhooks).
+  and per-action scheduling admission/dispatch. Reports, checks, reminders and
+  workflows require the Discord connection; pure outbound HTTP webhook actions
+  remain available in bootstrap/API-only mode.
   Tests use isolated transports, not a real external device authorization or
   gateway. Full capability requires successful authorization and gateway ready;
   merely submitting an invalid token does not manufacture a connection.

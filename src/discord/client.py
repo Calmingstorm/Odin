@@ -311,6 +311,15 @@ class OdinBot(commands.Bot):
 
             await start_mcp(self)
 
+            # The scheduler is an application service, not a gateway service.
+            # Starting it here lets pure outbound HTTP webhook actions run in
+            # bootstrap/API-only mode. Discord-delivered actions remain fenced
+            # by the scheduler's per-action connection admission.
+            self.scheduler.start(
+                self.scheduled_events._on_scheduled_task,
+                self.scheduled_events._on_schedule_failure,
+            )
+
             try:
                 await self.computer.start()
             except Exception:
