@@ -484,6 +484,18 @@ class TurnResumeManager:
                 load_blob=self._store.load_blob_sync,
                 stuck_tracker_cls=self._tool_loop._stuck_loop_tracker_cls,
             )
+            # Checkpoints written before learned-context provenance existed
+            # cannot be safely scrubbed as text: a deliberate memory value may
+            # itself contain ``## Learned Context``. Rebuild only those legacy
+            # prompts from live components instead of guessing at boundaries.
+            if not self._tool_loop._prompt_builder.has_learned_provenance(
+                fields["system_prompt"]
+            ):
+                fields["system_prompt"] = self._tool_loop._prompt_builder.build_full_prompt(
+                    channel=original.channel,
+                    user_id=str(original.author.id),
+                    query=getattr(original, "content", "") or None,
+                )
             # Current security policy wins: tools re-derived from the live
             # catalog + permission filter, never the persisted definitions.
             tools = None

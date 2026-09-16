@@ -27,8 +27,16 @@ from ..odin_log import get_logger
 
 log = get_logger("discord")
 
+_LEARNED_BLOCK_START = "<!-- odin:generated-learned-context:v1:start -->"
+_LEARNED_BLOCK_END = "<!-- odin:generated-learned-context:v1:end -->"
+
 
 class PromptBuilder:
+    @staticmethod
+    def has_learned_provenance(prompt: str) -> bool:
+        """Whether a cached prompt carries the refreshable learned boundary."""
+        return _LEARNED_BLOCK_START in prompt and _LEARNED_BLOCK_END in prompt
+
     def __init__(
         self,
         *,
@@ -127,7 +135,60 @@ class PromptBuilder:
         """
         if self.reflector is None:
             return ""
+        learning = getattr(self.get_config(), "learning", None)
+        if learning is None or not getattr(learning, "enabled", False):
+            return ""
         return self.reflector.get_prompt_section(user_id=user_id, query=query, trace=trace)
+
+    def refresh_learned_context(
+        self,
+        prompt: str,
+        *,
+        user_id: str | None = None,
+        query: str | None = None,
+        trace=None,
+    ) -> str:
+        """Refresh only Learned Context in an already assembled prompt.
+
+        Long-running tool loops and agents retain prompt snapshots. Calling
+        this at physical request assembly makes the live switch authoritative
+        without rebuilding or altering Persistent Memory or unrelated text.
+        """
+        learned = self.reflector_section(user_id, query, trace=trace)
+        replacement = self._format_learned_block(learned)
+        first = prompt.find(_LEARNED_BLOCK_START)
+        if first < 0:
+            # Compatibility for prompts assembled before provenance markers
+            # existed. New prompts always carry an empty placeholder at the
+            # correct insertion point, including while learning is disabled.
+            return prompt.rstrip() + f"\n\n{replacement}"
+
+        parts: list[str] = []
+        cursor = 0
+        inserted = False
+        while True:
+            start = prompt.find(_LEARNED_BLOCK_START, cursor)
+            if start < 0:
+                parts.append(prompt[cursor:])
+                break
+            end = prompt.find(_LEARNED_BLOCK_END, start + len(_LEARNED_BLOCK_START))
+            if end < 0:
+                parts.append(prompt[cursor:])
+                break
+            parts.append(prompt[cursor:start])
+            if not inserted:
+                parts.append(replacement)
+                inserted = True
+            cursor = end + len(_LEARNED_BLOCK_END)
+        return "".join(parts)
+
+    def _format_learned_block(self, learned: str) -> str:
+        body = f"\n{learned}\n" if learned else "\n"
+        return f"{_LEARNED_BLOCK_START}{body}{_LEARNED_BLOCK_END}"
+
+    def _append_learned_block(self, prompt: str, learned: str) -> str:
+        """Append one provenance-bounded generated learned block."""
+        return prompt + f"\n\n{self._format_learned_block(learned)}"
 
     def invalidate(self) -> None:
         """Invalidate all prompt-related caches. Called on config/context reload."""
@@ -191,8 +252,7 @@ class PromptBuilder:
         # (per-user filtered, relevance-ranked against the current query).
         # The reflector records its own selection decisions on the trace.
         learned = self.reflector_section(user_id, query, trace=trace)
-        if learned:
-            prompt += f"\n\n{learned}"
+        prompt = self._append_learned_block(prompt, learned)
 
         # Inject user-created skills list (cached, invalidated on skill CRUD)
         skills_text = self.cached_skills_list_text()
@@ -270,7 +330,6 @@ class PromptBuilder:
 
         # Inject learned context (per-user filtered, relevance-ranked)
         learned = self.reflector_section(user_id, query)
-        if learned:
-            prompt += f"\n\n{learned}"
+        prompt = self._append_learned_block(prompt, learned)
 
         return prompt

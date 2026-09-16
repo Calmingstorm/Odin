@@ -368,7 +368,10 @@ class _LoopIterClient:
                 get_default_system_prompt=lambda: "sys",
                 get_context_compressor=lambda: None,
                 llm_gateway=self._fake_gateway,
-                prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
+                prompt_builder=SimpleNamespace(
+                    build_full_prompt=lambda **kw: "sys",
+                    refresh_learned_context=lambda prompt, **kw: prompt,
+                ),
                 tool_catalog=SimpleNamespace(merged_definitions=lambda: [{"name": "run_command"}]),
                 channel_state=SimpleNamespace(),
                 channel_config=SimpleNamespace(),

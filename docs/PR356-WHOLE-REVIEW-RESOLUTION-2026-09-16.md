@@ -36,6 +36,38 @@ CI/gate configuration and thresholds are unchanged.
 | F21 | Declined cosmetic native change | Documented the existing literal backslash-zero separator. Changing an opaque native digest/image solely for notation would invalidate recorded artifact qualification without improving behavior. No native source or qualification tuple was changed. |
 | F22 | Fixed documentation | README describes upcoming automatic loopback bootstrap startup, SSH forwarding, authentication, explicit listener consent and manual restart. Published-release behavior is distinguished from this branch. |
 
+## Automatic-learning opt-in correction (2026-09-16)
+
+Aaron authorized option B: default off when omitted, preserve explicit opt-in,
+and leave deliberate memory entirely alone. No live store is changed by this work.
+
+| Item | Resolution | Evidence |
+| --- | --- | --- |
+| 1 | One live, persisted `learning.enabled` gates automatic generation, publication and learned-context injection. In-flight results cannot publish while disabled. | Runtime regression tests cover operation/session/compaction/loop reflection, model-context consumers, disable during generation and re-enable without restart. |
+| 2 | Deliberate memory storage, tools, prompt injection and ordinary compaction are unchanged. | Regression coverage requires persistent memory in assembled prompts while learned context is absent; scoped source comparison checks the unchanged memory implementation and injection blocks. |
+| 3 | The schema defaults to false, omitted settings load off, explicit true remains on, and the template does not override the default. | Configuration-load and persistence regression tests. No opt-in migration. |
+| 4 | Capabilities → Learned has an administrator-only Automatic learning toggle with current state and retained-entry explanation. The setting is classified live. | Config API authorization/persistence and UI checks; rebuilt UI assets. Other learning settings retain their existing apply modes. |
+| 5 | Existing learned entries are retained for inspection and deliberate edits/deletion, even while off. | Disabled-state learned CRUD regression tests. No live data reads/writes are required. |
+| 6 | Configuration and WebUI documentation explain opt-in behavior, retained entries and the deliberate-memory boundary. | This resolution and configuration reference document the change. Existing API route contracts are preserved. |
+
+Behavioral transport regressions fail on the pulled base `e088b64` (five failures)
+and pass on the implementation: Discord chat, Web/API provider-lock wait,
+autonomous loop, agent retry and legacy checkpoint resume. Separate regressions
+cover omitted/default and explicit-on configuration, actual API persistence,
+administrator denial, disabled CRUD, and reflection publication after disable.
+The API-to-prompt integration uses temporary persisted memory and learned files;
+it proves the optional scratch live-shape equivalent without launching a service.
+
+Disabling advances a publication generation so re-enabling cannot authorize an
+older in-flight reflection. Prompt refresh preserves the learned insertion point
+across off/on transitions and process restart. Pre-marker suspended checkpoints
+rebuild their system prompt from live components on resume rather than guessing
+which Markdown headings belong to learned context. Their conversation/tool state
+is preserved; ordinary memory loading and compaction are unchanged.
+
+Final full-suite and hosted-CI results are reported with the pushed commit rather
+than inferred from the implementation table.
+
 ## Model retirement
 
 File loading migrates legacy main/fixed-agent/auxiliary selections to the current

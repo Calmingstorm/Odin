@@ -120,7 +120,9 @@ The web interface provides grouped views for:
 - chat and current system posture;
 - active execution, agents, loops, processes, and schedules;
 - audit records, sessions, traces, and model usage;
-- tools, skills, knowledge, memory, and learned context;
+- tools, skills, knowledge, memory, and learned context (automatic learning is
+  opt-in; administrators can switch it live under Capabilities → Learned without
+  affecting deliberate memory);
 - health, resources, logs, configuration, permissions, host access, and updates.
 
 The API exposes 211 REST routes (pinned in order by a characterization test) plus health, metrics, webhook, WebSocket, and static-interface routes.

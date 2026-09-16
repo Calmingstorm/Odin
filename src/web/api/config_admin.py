@@ -591,6 +591,15 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
         if not isinstance(updates, dict):
             return web.json_response({"error": "expected JSON object"}, status=400)
 
+        # The Learned panel owns this live switch. Keep its generic config write
+        # route-level admin-gated as well as centrally protected by middleware,
+        # so alternate route composition cannot turn the UI control into a
+        # privilege bypass.
+        if isinstance(updates.get("learning"), dict) and "enabled" in updates["learning"]:
+            denied = admin_gate(bot)(request)
+            if denied is not None:
+                return denied
+
         # Provisioning is desired state only: ComputerLifecycle owns a deep
         # startup snapshot, even across disable/enable cycles. Never let this
         # route bypass the dedicated enable/revoke lifecycle transaction.
@@ -702,6 +711,9 @@ def register_discord_config(routes: web.RouteTableDef, bot) -> None:
             # is not the whole effective state: personality presets and prompt /
             # tool schemas have process-global or cached derivatives.
             bot.config = new_config
+            reflector = getattr(bot, "reflector", None)
+            if reflector is not None:
+                reflector.observe_enabled_state(new_config.learning.enabled)
             # HealthServer reads web credentials from the live config owner.
             if "personality" in updates:
                 from src.llm.system_prompt import register_user_presets

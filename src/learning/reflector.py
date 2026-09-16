@@ -178,6 +178,7 @@ class ConversationReflector:
         consolidation_target: int = 120,
         injection_token_budget: int = 4000,
         enabled: bool = True,
+        enabled_provider: Callable[[], bool] | None = None,
     ) -> None:
         self._path = Path(learned_path)
         self._lock = asyncio.Lock()
@@ -185,10 +186,43 @@ class ConversationReflector:
         self._consolidation_target = consolidation_target
         self._injection_token_budget = injection_token_budget
         self._enabled = enabled
+        self._enabled_provider = enabled_provider
+        self._enabled_state = enabled
+        self._policy_generation = 0
         self._text_fn: TextFn | None = None
         self._consolidation_fn: TextFn | None = None
         self._injection_cache: tuple[float, dict] | None = None
         self._use_stamps: dict[str, str] = {}
+
+    def is_enabled(self) -> bool:
+        """Return the live master switch for automatic learned behavior.
+
+        CRUD deliberately ignores this switch. A failed provider read fails
+        closed so learned context cannot leak or publish against operator intent.
+        """
+        if self._enabled_provider is None:
+            return self._enabled_state
+        try:
+            enabled = bool(self._enabled_provider())
+        except Exception:  # noqa: BLE001 — automatic learning must fail closed
+            log.warning("Learning enabled-state provider failed; disabling automatic learning")
+            enabled = False
+        self.observe_enabled_state(enabled)
+        return enabled
+
+    def observe_enabled_state(self, enabled: bool) -> None:
+        """Publish live policy and advance the ABA-safe disable generation."""
+        enabled = bool(enabled)
+        if self._enabled_state and not enabled:
+            self._policy_generation += 1
+        self._enabled_state = enabled
+        self._enabled = enabled
+
+    def _policy_token(self) -> int | None:
+        return self._policy_generation if self.is_enabled() else None
+
+    def _policy_allows(self, token: int | None) -> bool:
+        return token is not None and self.is_enabled() and token == self._policy_generation
 
     def set_text_fn(self, fn: TextFn) -> None:
         """Register an async callable for LLM text generation.
@@ -496,6 +530,9 @@ class ConversationReflector:
         and the requester's preferences, then fills with the operational
         and fact entries most relevant to *query*.
         """
+        if not self.is_enabled():
+            return ""
+
         from ..relevance import rank as relevance_rank
 
         data = self._read_for_injection()
@@ -689,7 +726,8 @@ class ConversationReflector:
         lessons from what actually happened — tool calls, results, errors,
         and the final response — rather than raw conversation text.
         """
-        if not self._enabled or not self._text_fn:
+        policy_token = self._policy_token()
+        if policy_token is None or not self._text_fn:
             return
         if not tools_used:
             return
@@ -748,6 +786,8 @@ class ConversationReflector:
             new_entries = self._parse_entries(raw.strip())
             if not new_entries:
                 return
+            if not self._policy_allows(policy_token):
+                return
 
             new_entries = self._attribute_personal_entries(new_entries, user_ids)
             if not new_entries:
@@ -758,6 +798,8 @@ class ConversationReflector:
             async with self._lock:
                 from ..json_store import StoreCorruptError
 
+                if not self._policy_allows(policy_token):
+                    return
                 try:
                     data = await asyncio.to_thread(self._load_for_write)
                 except StoreCorruptError as exc:
@@ -766,14 +808,20 @@ class ConversationReflector:
                         "(backup preserved): %s", exc,
                     )
                     return
+                if not self._policy_allows(policy_token):
+                    return
                 existing = data.get("entries", [])
                 self._apply_use_stamps(existing)
                 merged = self._merge_entries(existing, new_entries)
                 if len(merged) > self._max_entries:
-                    merged = await self._consolidate(merged)
+                    merged = await self._consolidate(merged, policy_token=policy_token)
+                if not self._policy_allows(policy_token):
+                    return
                 data["entries"] = merged
                 data["last_reflection"] = datetime.now(UTC).isoformat()
-                await asyncio.to_thread(self._save, data)
+                # Keep the final live check and atomic replace contiguous. A
+                # queued worker could otherwise publish after a live disable.
+                self._save(data)
                 self.invalidate_cache()
                 log.info("Operational reflection: %d new entries merged", len(new_entries))
         except Exception as e:
@@ -784,7 +832,8 @@ class ConversationReflector:
         user_ids: list[str] | None = None,
     ) -> None:
         """Full reflection on a completed session."""
-        if not self._enabled:
+        policy_token = self._policy_token()
+        if policy_token is None:
             return
         messages = session.messages
         if len(messages) < 3:
@@ -793,7 +842,9 @@ class ConversationReflector:
         # Prefer explicit user_ids list; fall back to legacy single user_id
         effective_ids = user_ids if user_ids is not None else ([user_id] if user_id else [])
         conversation = self._format_conversation(messages, session.summary)
-        await self._reflect(conversation, full=True, user_ids=effective_ids)
+        await self._reflect(
+            conversation, full=True, user_ids=effective_ids, policy_token=policy_token
+        )
 
     async def reflect_on_compacted(
         self, messages: list[Message], summary: str,
@@ -801,14 +852,17 @@ class ConversationReflector:
         user_ids: list[str] | None = None,
     ) -> None:
         """Lighter reflection on messages about to be discarded during compaction."""
-        if not self._enabled:
+        policy_token = self._policy_token()
+        if policy_token is None:
             return
         if len(messages) < 5:
             return
 
         effective_ids = user_ids if user_ids is not None else ([user_id] if user_id else [])
         conversation = self._format_conversation(messages, summary)
-        await self._reflect(conversation, full=False, user_ids=effective_ids)
+        await self._reflect(
+            conversation, full=False, user_ids=effective_ids, policy_token=policy_token
+        )
 
     def _format_conversation(
         self, messages: list[Message], summary: str = "",
@@ -827,8 +881,15 @@ class ConversationReflector:
     async def _reflect(
         self, conversation: str, *, full: bool,
         user_ids: list[str] | None = None,
+        policy_token: int | None = None,
     ) -> None:
+        if policy_token is None:
+            policy_token = self._policy_token()
+        if not self._policy_allows(policy_token):
+            return
         async with self._lock:
+            if not self._policy_allows(policy_token):
+                return
             from ..json_store import StoreCorruptError
 
             try:
@@ -837,6 +898,8 @@ class ConversationReflector:
                 log.error(
                     "Skipping reflection — learned.json corrupt (backup preserved): %s", exc
                 )
+                return
+            if not self._policy_allows(policy_token):
                 return
             existing = data.get("entries", [])
 
@@ -875,6 +938,8 @@ class ConversationReflector:
                 log.error("Reflection API call failed: %s", e)
                 return
 
+            if not self._policy_allows(policy_token):
+                return
             raw = raw_text.strip()
             new_entries = self._parse_entries(raw)
             if not new_entries:
@@ -901,11 +966,14 @@ class ConversationReflector:
 
             # Consolidate if over limit
             if len(merged) > self._max_entries:
-                merged = await self._consolidate(merged)
+                merged = await self._consolidate(merged, policy_token=policy_token)
 
+            if not self._policy_allows(policy_token):
+                return
             data["entries"] = merged
             data["last_reflection"] = datetime.now(UTC).isoformat(timespec="seconds")
-            await asyncio.to_thread(self._save, data)
+            # No await between the final enabled check and atomic publication.
+            self._save(data)
             self.invalidate_cache()
             log.info(
                 "Reflection complete: %d new insights, %d total entries",
@@ -1029,7 +1097,7 @@ class ConversationReflector:
         return json.dumps(compact, indent=2)
 
     async def _repair_damaged(
-        self, damaged: list[dict]
+        self, damaged: list[dict], *, policy_token: int | None = None,
     ) -> tuple[list[dict], list[dict]]:
         """Resummarize clipped entries so the damage quarantine isn't permanent.
 
@@ -1042,12 +1110,21 @@ class ConversationReflector:
         and the ``damaged`` flag are ever modified; repair is maintenance,
         not evidence of reuse, so timestamps and expiry semantics stay as-is.
         """
-        if not damaged or not self._consolidation_text_fn:
+        if policy_token is None:
+            policy_token = self._policy_token()
+        if (
+            not self._policy_allows(policy_token)
+            or not damaged
+            or not self._consolidation_text_fn
+        ):
             return [], damaged
         repaired: list[dict] = []
         still_damaged: list[dict] = []
         attempted = 0
         for entry in damaged:
+            if not self._policy_allows(policy_token):
+                still_damaged.extend(damaged[attempted:])
+                break
             if attempted >= _REPAIR_BUDGET:
                 still_damaged.append(entry)
                 continue
@@ -1075,6 +1152,10 @@ class ConversationReflector:
                 )
                 still_damaged.append(entry)
                 continue
+            if not self._policy_allows(policy_token):
+                still_damaged.append(entry)
+                still_damaged.extend(damaged[attempted:])
+                break
             result = (raw or "").strip()
             if not self._repair_output_ok(result):
                 log.warning(
@@ -1115,7 +1196,9 @@ class ConversationReflector:
         _clip_content(probe)
         return not probe.get("damaged")
 
-    async def _consolidate(self, entries: list[dict]) -> list[dict]:
+    async def _consolidate(
+        self, entries: list[dict], *, policy_token: int | None = None,
+    ) -> list[dict]:
         """Ask the LLM to merge same-topic duplicates down to the target.
 
         Damaged entries are first offered repair (``_repair_damaged``);
@@ -1125,6 +1208,11 @@ class ConversationReflector:
         never packed together to hit the target count; dropping low-value
         entries is the sanctioned way to shrink.
         """
+        if policy_token is None:
+            policy_token = self._policy_token()
+        if not self._policy_allows(policy_token):
+            return entries
+
         import time as _time
         t0 = _time.monotonic()
 
@@ -1138,7 +1226,9 @@ class ConversationReflector:
         # Repair-then-consolidate: the target math below deliberately uses
         # the REMAINING damaged count, so every successful repair reclaims
         # its consolidation slot immediately.
-        repaired, damaged = await self._repair_damaged(damaged)
+        repaired, damaged = await self._repair_damaged(damaged, policy_token=policy_token)
+        if not self._policy_allows(policy_token):
+            return entries
         candidates.extend(repaired)
         if not candidates:
             return damaged
@@ -1212,6 +1302,8 @@ class ConversationReflector:
             )
             return _fallback()
 
+        if not self._policy_allows(policy_token):
+            return entries
         raw = raw_text.strip()
         consolidated = self._parse_entries(raw)
         if not consolidated:

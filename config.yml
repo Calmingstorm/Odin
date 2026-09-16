@@ -209,7 +209,7 @@ audit:
   hmac_key: ''  # Set a secret to enable HMAC-SHA256 signing; empty = disabled
 
 learning:
-  enabled: true
+  # enabled: false  # Automatic learning is opt-in; omitted follows the false default
   max_entries: 150
   consolidation_target: 120
   injection_token_budget: 4000

@@ -198,6 +198,9 @@ def build_services(
         consolidation_target=config.learning.consolidation_target,
         injection_token_budget=config.learning.injection_token_budget,
         enabled=config.learning.enabled,
+        enabled_provider=(
+            (lambda: get_config().learning.enabled) if get_config is not None else None
+        ),
     )
 
     # Semantic search + FTS5 components

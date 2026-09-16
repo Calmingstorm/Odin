@@ -578,6 +578,38 @@ class TestDiscordConfig:
         assert on_disk["tools"]["max_tool_iterations_chat"] == 9
 
     @pytest.mark.asyncio
+    async def test_learning_toggle_persists_and_response_is_state_readback(self, _active_config):
+        from ruamel.yaml import YAML
+
+        app, bot = _app(register_discord_config)
+        bot.api_token_manager = None  # dev mode is the route gate's admin-equivalent fixture
+        assert bot.config.learning.enabled is False
+        async with TestClient(TestServer(app)) as c:
+            enabled = await c.put("/api/config", json={"learning": {"enabled": True}})
+            assert enabled.status == 200
+            assert (await enabled.json())["learning"]["enabled"] is True
+            assert (await (await c.get("/api/config")).json())["learning"]["enabled"] is True
+
+            disabled = await c.put("/api/config", json={"learning": {"enabled": False}})
+            assert disabled.status == 200
+            assert (await disabled.json())["learning"]["enabled"] is False
+            assert (await (await c.get("/api/config")).json())["learning"]["enabled"] is False
+
+        assert bot.config.learning.enabled is False
+        assert YAML().load(_active_config.read_text())["learning"]["enabled"] is False
+
+    @pytest.mark.asyncio
+    async def test_learning_toggle_requires_admin_when_auth_is_configured(self):
+        app, bot = _app(register_discord_config)
+        bot.config.web.api_token = "configured"
+        async with TestClient(TestServer(app)) as c:
+            response = await c.put("/api/config", json={"learning": {"enabled": True}})
+            body = await response.json()
+        assert response.status == 403
+        assert body["error"] == "admin access required"
+        assert bot.config.learning.enabled is False
+
+    @pytest.mark.asyncio
     async def test_config_put_persist_failure_is_reported_and_changes_nothing(self):
         """A save that cannot reach disk must fail loudly.
 

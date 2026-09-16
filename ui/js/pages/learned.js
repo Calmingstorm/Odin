@@ -23,6 +23,26 @@ export default {
         </button>
       </div>
 
+      <section class="hm-card mb-4" aria-labelledby="automatic-learning-title">
+        <div class="flex items-start justify-between gap-4">
+          <div>
+            <h2 id="automatic-learning-title" class="text-sm font-semibold text-gray-300">Automatic learning</h2>
+            <p class="page-lede">When off, Odin neither creates automatic lessons nor adds stored learned entries to model context. Existing entries are retained.</p>
+            <p v-if="configReady" class="text-xs text-gray-500 mt-2" role="status">Current state: {{ learningEnabled ? 'On' : 'Off' }}</p>
+            <p v-else-if="configError" class="text-sm text-red-400 mt-2" role="alert">{{ configError }}</p>
+            <p v-else class="text-xs text-gray-500 mt-2" role="status">Checking administrator configuration…</p>
+          </div>
+          <label v-if="configReady" class="flex items-center gap-2 shrink-0">
+            <span class="text-xs text-gray-400">{{ learningEnabled ? 'On' : 'Off' }}</span>
+            <span class="toggle-switch" :aria-busy="savingConfig ? 'true' : 'false'">
+              <input type="checkbox" :checked="learningEnabled" :disabled="savingConfig"
+                     aria-label="Automatic learning" @change="setLearningEnabled($event.target.checked)" />
+              <span class="toggle-slider"></span>
+            </span>
+          </label>
+        </div>
+      </section>
+
       <div v-if="loading && entries.length === 0" class="space-y-2">
         <div v-for="n in 5" :key="n" class="skeleton skeleton-row"></div>
       </div>
@@ -33,7 +53,7 @@ export default {
       <div v-else-if="entries.length === 0" class="hm-card empty-state">
         <span class="empty-state-icon"><odin-icon name="brain" :size="28" /></span>
         <span class="empty-state-text">No learned entries yet</span>
-        <span class="empty-state-hint">Odin learns from conversations automatically</span>
+        <span class="empty-state-hint">Existing entries remain available whether automatic learning is on or off</span>
       </div>
 
       <div v-else class="space-y-2">
@@ -88,6 +108,10 @@ export default {
     const filterCat = ref(null);
     const editing = ref(null);
     const editContent = ref('');
+    const learningEnabled = ref(false);
+    const configReady = ref(false);
+    const configError = ref(null);
+    const savingConfig = ref(false);
 
     const categories = computed(() => {
       const cats = new Set(entries.value.map(e => e.category));
@@ -158,12 +182,50 @@ export default {
       loading.value = false;
     }
 
-    onMounted(fetchEntries);
+    async function fetchLearningConfig() {
+      configReady.value = false;
+      configError.value = null;
+      try {
+        const config = await api.get('/api/config');
+        learningEnabled.value = config.learning?.enabled === true;
+        configReady.value = true;
+      } catch (e) {
+        configError.value = e.status === 403
+          ? 'Administrator access is required to change automatic learning.'
+          : (e.message || 'Automatic learning state is unavailable.');
+      }
+    }
+
+    async function setLearningEnabled(enabled) {
+      if (!configReady.value || savingConfig.value) return;
+      savingConfig.value = true;
+      configError.value = null;
+      try {
+        await api.put('/api/config', { learning: { enabled } });
+        await fetchLearningConfig();
+        if (!configReady.value) return;
+        toast.success(`Automatic learning ${learningEnabled.value ? 'enabled' : 'disabled'}`);
+      } catch (e) {
+        configReady.value = false;
+        configError.value = e.status === 403
+          ? 'Administrator access is required to change automatic learning.'
+          : (e.message || 'Failed to change automatic learning.');
+      } finally {
+        savingConfig.value = false;
+      }
+    }
+
+    onMounted(() => {
+      fetchEntries();
+      fetchLearningConfig();
+    });
 
     return {
       entries, meta, loading, error, filterCat, editing, editContent,
       categories, catCounts, filtered,
+      learningEnabled, configReady, configError, savingConfig,
       catBadge, formatTs, startEdit, saveEdit, deleteEntry, fetchEntries,
+      fetchLearningConfig, setLearningEnabled,
     };
   },
 };

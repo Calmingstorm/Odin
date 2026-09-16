@@ -27,7 +27,7 @@ def _bot(*, reflection_enabled: bool = True, gate_verdict=(True, "test")):
     reflector.reflect_on_operation = AsyncMock()
     return SimpleNamespace(
         config=SimpleNamespace(
-            learning=SimpleNamespace(loop_reflection_enabled=reflection_enabled)
+            learning=SimpleNamespace(enabled=True, loop_reflection_enabled=reflection_enabled)
         ),
         reflector=reflector,
         _loop_reflection_gate=gate,

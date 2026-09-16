@@ -730,6 +730,9 @@ def _chat_runner(gateway, observer):
 
     runner = ToolLoopRunner.__new__(ToolLoopRunner)
     runner._llm_gateway = gateway
+    runner._prompt_builder = SimpleNamespace(
+        refresh_learned_context=lambda prompt, **kwargs: prompt
+    )
     runner._get_config = lambda: SimpleNamespace(openai_codex=None)
     runner._get_context_compressor = lambda: None
     runner._get_compression_stats = lambda: None

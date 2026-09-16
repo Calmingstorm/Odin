@@ -855,7 +855,7 @@ class WebhookConfig(BaseModel):
 
 
 class LearningConfig(BaseModel):
-    enabled: bool = True
+    enabled: bool = False
     max_entries: int = 150
     consolidation_target: int = 120
     # Learned Context injection budget (tokens). When the scoped corpus fits,

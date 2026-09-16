@@ -904,9 +904,8 @@ FIELDS: dict[str, FieldSpec] = {
     ),
     # ---------------- learning ----------------
     "learning.enabled": FieldSpec(
-        apply_mode="restart",
-        description="Reflect on conversations and record what was learned.",
-        restart_reason="The reflector is built with this flag at startup.",
+        apply_mode="live_read",
+        description="Create automatic lessons and add stored learned entries to model context.",
     ),
     "learning.max_entries": FieldSpec(
         apply_mode="restart",

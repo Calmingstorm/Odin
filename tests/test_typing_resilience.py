@@ -229,7 +229,9 @@ def _make_runner(recorder_save=None):
         get_default_system_prompt=lambda: "sys",
         get_context_compressor=lambda: None,
         llm_gateway=SimpleNamespace(),
-        prompt_builder=SimpleNamespace(),
+        prompt_builder=SimpleNamespace(
+            refresh_learned_context=lambda prompt, **kwargs: prompt
+        ),
         tool_catalog=SimpleNamespace(),
         channel_state=RecordingChannelState(),
         channel_config=SimpleNamespace(),

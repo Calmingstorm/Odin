@@ -556,6 +556,10 @@ class ToolLoopDeps:
 
 
 class ToolLoopRunner:
+    def _refresh_learned_prompt(self, prompt: str, user_id: str | None) -> str:
+        """Apply the live learned overlay to one physical request."""
+        return self._prompt_builder.refresh_learned_context(prompt, user_id=user_id)
+
     def __init__(self, deps: ToolLoopDeps) -> None:
         self._get_config = deps.get_config
         self._get_default_system_prompt = deps.get_default_system_prompt
@@ -1849,6 +1853,10 @@ class ToolLoopRunner:
             return await self._llm_gateway.call_with_tools(
                 messages=st.messages,
                 system=st.system_prompt,
+                system_provider=lambda: self._refresh_learned_prompt(
+                    st.system_prompt,
+                    st.user_id,
+                ),
                 tools=st.tools or [],
                 **pin_kwargs,
                 user_id=st.user_id,
@@ -3579,6 +3587,10 @@ class ToolLoopRunner:
                 current_tools=st.tools,
                 cache_result=False,
                 request_config=request_config,
+            )
+            st.system_prompt = self._refresh_learned_prompt(
+                st.system_prompt,
+                getattr(st, "user_id", None),
             )
             return await serving_identity.client.chat_with_tools(
                 messages=st.messages,

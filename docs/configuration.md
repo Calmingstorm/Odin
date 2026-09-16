@@ -176,6 +176,33 @@ sessions:
   adaptive_compaction: true
 ```
 
+## Automatic learning
+
+```yaml
+learning:
+  # enabled: false               # Default when omitted; opt in explicitly
+```
+
+Automatic learning is **off by default**. An existing explicit
+`learning.enabled: true` stays enabled until an administrator switches it off;
+upgrading does not override that choice. In the WebUI, open **Capabilities →
+Learned** and use **Automatic learning**. This persisted setting applies live,
+without a restart, including to already-created reflection and prompt services.
+
+When off, Odin neither creates automatic lessons nor adds stored learned entries
+to model context. Existing entries are retained. Operation, session, compaction
+and loop reflection are all gated; an in-flight reflection cannot publish while
+disabled. The loop-reflection setting remains a subordinate switch, not an
+override of `learning.enabled`.
+
+The Learned panel and `/api/learned` inspection, editing and deletion remain
+available while learning is off. Disabling is not a deletion or migration of the
+learned store. Re-enabling makes retained lessons eligible for context again.
+
+This switch controls **only automatic reflections and learned context**.
+Deliberate persistent memory (`memory_manage` and `memory.json`), its system-prompt
+section, and ordinary conversation compaction are unaffected.
+
 ## Browser
 
 ```yaml

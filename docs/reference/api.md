@@ -36,13 +36,13 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/config | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L584) | Yes | — |
 | GET | /api/discord/connection | [src.web.api.discord&#95;connection](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/discord_connection.py#L84) | Yes + local | — |
 | POST | /api/discord/connection | [src.web.api.discord&#95;connection](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/discord_connection.py#L91) | Yes + local | — |
-| POST | /api/restart | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L752) | Yes + local | Cleanly restart the running process, on operator request. |
-| POST | /api/sessions/clear-all | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L781) | Yes + local | — |
-| POST | /api/reload | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L789) | Yes | — |
-| GET | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L844) | Yes | — |
-| PUT | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L861) | Yes | — |
-| POST | /api/personality/presets | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L915) | Yes | — |
-| DELETE | /api/personality/presets/&#123;name&#125; | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L979) | Yes | — |
+| POST | /api/restart | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L764) | Yes + local | Cleanly restart the running process, on operator request. |
+| POST | /api/sessions/clear-all | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L793) | Yes + local | — |
+| POST | /api/reload | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L801) | Yes | — |
+| GET | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L856) | Yes | — |
+| PUT | /api/personality | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L873) | Yes | — |
+| POST | /api/personality/presets | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L927) | Yes | — |
+| DELETE | /api/personality/presets/&#123;name&#125; | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L991) | Yes | — |
 | GET | /api/update/check | [src.web.api.self&#95;update](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/self_update.py#L55) | Yes | — |
 | POST | /api/update/apply | [src.web.api.self&#95;update](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/self_update.py#L83) | Yes | — |
 | POST | /api/loops/stop-all | [src.web.api.self&#95;update](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/self_update.py#L254) | Yes | — |
@@ -231,7 +231,7 @@ This describes the normal authenticated deployment. With no configured tokens (i
 | PUT | /api/learned/&#123;key&#125; | [src.web.api.knowledge&#95;mem](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/knowledge_mem.py#L478) | Yes | — |
 | GET | /api/affordances | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L451) | Yes | — |
 | GET | /api/compression/stats | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L463) | Yes | — |
-| GET | /api/startup/diagnostics | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L1030) | Yes | — |
+| GET | /api/startup/diagnostics | [src.web.api.config&#95;admin](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/config_admin.py#L1042) | Yes | — |
 | GET | /api/subsystems/status | [src.web.api.observability](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/observability.py#L497) | Yes | — |
 | GET | /api/agent-trajectories | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/sessions_chat.py#L488) | Yes | — |
 | GET | /api/agent-trajectories/agent/&#123;agent&#95;id&#125; | [src.web.api.sessions&#95;chat](https://github.com/Calmingstorm/Odin/blob/9411b73ae63ce959295fa9968f63d92c129b8578/src/web/api/sessions_chat.py#L496) | Yes | — |

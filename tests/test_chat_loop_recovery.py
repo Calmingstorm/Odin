@@ -171,6 +171,9 @@ def _runner(gateway) -> ToolLoopRunner:
     runner = ToolLoopRunner.__new__(ToolLoopRunner)
     runner._channel_state = ChannelStateRegistry()
     runner._llm_gateway = gateway
+    runner._prompt_builder = SimpleNamespace(
+        refresh_learned_context=lambda prompt, **kwargs: prompt
+    )
     runner._get_config = lambda: SimpleNamespace(openai_codex=None)
     runner._get_context_compressor = lambda: None
     runner._get_compression_stats = lambda: None
@@ -1343,7 +1346,10 @@ def _census_runner(gw, *, config=None, recorder=None):
         get_default_system_prompt=lambda: "sys",
         get_context_compressor=lambda: None,
         llm_gateway=gw,
-        prompt_builder=SimpleNamespace(build_full_prompt=lambda **kw: "sys"),
+        prompt_builder=SimpleNamespace(
+            build_full_prompt=lambda **kw: "sys",
+            refresh_learned_context=lambda prompt, **kw: prompt,
+        ),
         tool_catalog=SimpleNamespace(merged_definitions=lambda: []),
         channel_state=RecordingChannelState(),
         channel_config=SimpleNamespace(),

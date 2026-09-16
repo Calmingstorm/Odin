@@ -508,6 +508,9 @@ class AgentTaskDeps:
 
 
 class AgentTaskTools:
+    def _refresh_learned_prompt(self, prompt: str, user_id: str | None) -> str:
+        return self._prompt_builder.refresh_learned_context(prompt, user_id=user_id)
+
     def __init__(self, deps: AgentTaskDeps) -> None:
         self._get_config = deps.get_config
         self._window_observer = deps.window_observer
@@ -813,6 +816,7 @@ class AgentTaskTools:
         agent_effort: str,
         resolved_model,
         provider: str = "codex",
+        system_provider: Callable[[], str] | None = None,
     ):
         """One agent LLM generation through the shared recovery policy.
 
@@ -846,9 +850,10 @@ class AgentTaskTools:
         policy = self._llm_gateway.recovery_policy()
 
         async def _attempt():
+            request_system = system_provider() if system_provider is not None else sys_prompt
             return await client.chat_with_tools(
                 messages=messages,
-                system=sys_prompt,
+                system=request_system,
                 tools=tool_defs,
                 reasoning_effort=effective_effort,
                 model=resolved_model,
@@ -974,6 +979,10 @@ class AgentTaskTools:
                 agent_effort=plan["effort"],
                 resolved_model=plan["model"],
                 provider=plan["provider"],
+                system_provider=lambda: self._refresh_learned_prompt(
+                    sys_prompt,
+                    user_id,
+                ),
             )
             return {
                 "text": resp.text,
@@ -1402,6 +1411,10 @@ class AgentTaskTools:
                     agent_effort=plan["effort"],
                     resolved_model=plan["model"],
                     provider=plan["provider"],
+                    system_provider=lambda: self._refresh_learned_prompt(
+                        sys,
+                        loop_info.requester_id,
+                    ),
                 )
                 return {
                     "text": resp.text or "",

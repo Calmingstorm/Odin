@@ -82,7 +82,10 @@ def _deps(**ov):
         get_context_compressor=lambda: None,
         tool_loop=MagicMock(),
         turn_recorder=SimpleNamespace(_emit_lifecycle_event=AsyncMock()),
-        prompt_builder=SimpleNamespace(build_full_prompt=lambda **k: "SYS"),
+        prompt_builder=SimpleNamespace(
+            build_full_prompt=lambda **k: "SYS",
+            refresh_learned_context=lambda prompt, **k: prompt,
+        ),
         tool_catalog=SimpleNamespace(merged_definitions=lambda: [{"name": "web_search"}]),
     )
     d.update(ov)
