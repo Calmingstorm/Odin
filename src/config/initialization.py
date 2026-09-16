@@ -152,15 +152,20 @@ class InitializationStore:
         self._declared_parent = declared_path.parent
         try:
             canonical_parent = self._declared_parent.resolve(strict=False)
-        except OSError:
+        except (OSError, RuntimeError):
             canonical_parent = self._declared_parent
         self.path = canonical_parent / declared_path.name
         try:
             declared = os.stat(self._declared_parent)
+        except FileNotFoundError:
+            self._declared_parent_identity = None
+            self._declared_parent_absent_at_start = True
         except OSError:
             self._declared_parent_identity = None
+            self._declared_parent_absent_at_start = False
         else:
             self._declared_parent_identity = (declared.st_dev, declared.st_ino)
+            self._declared_parent_absent_at_start = False
         self.binding = binding.normalized()
         self._lock_path = self.path.with_name(f".{self.path.name}.lock")
         self._parent_fd: int | None = None
@@ -242,15 +247,21 @@ class InitializationStore:
                     try:
                         self._write_locked(migrated)
                     except InitializationError as exc:
-                        observed = self._read_locked()
+                        try:
+                            observed = self._read_locked()
+                        except (InitializationError, OSError):
+                            observed = None
                         if observed is not None:
                             return observed
-                        return self._legacy_state(legacy_loopback_restricted, str(exc))
+                        legacy = self._legacy_if_verified_absent(
+                            legacy_loopback_restricted
+                        )
+                        return legacy or self._recovery(str(exc))
                     return migrated
                 return state
         except InitializationReentrancyError:
             raise
-        except InitializationError:
+        except (InitializationError, OSError):
             legacy = self._legacy_if_verified_absent(legacy_loopback_restricted)
             return legacy or self._recovery(
                 "initialization gate cannot verify trusted state storage"
@@ -372,11 +383,6 @@ class InitializationStore:
     ) -> InitializationState | None:
         if type(legacy_loopback_restricted) is not bool or self._record_seen:
             return None
-        if not self._declared_parent.exists():
-            return self._legacy_state(
-                legacy_loopback_restricted,
-                "legacy initialization migration parent is unavailable",
-            )
         try:
             parent_fd = self._open_trusted_parent()
             try:
@@ -386,6 +392,7 @@ class InitializationStore:
                     except FileNotFoundError:
                         continue
                     if name == self.path.name:
+                        self._record_seen = True
                         return None
                     if not stat.S_ISREG(info.st_mode) or stat.S_IMODE(info.st_mode) & 0o077:
                         return None
@@ -395,6 +402,21 @@ class InitializationStore:
                 )
             finally:
                 os.close(parent_fd)
+        except FileNotFoundError:
+            # Only a parent known absent when the store was pinned proves a
+            # recordless legacy layout.  A parent that vanished later is
+            # recovery, as are permission errors that cannot prove absence.
+            if self._declared_parent_absent_at_start:
+                try:
+                    os.stat(self._declared_parent)
+                except FileNotFoundError:
+                    return self._legacy_state(
+                        legacy_loopback_restricted,
+                        "legacy initialization migration parent is unavailable",
+                    )
+                except OSError:
+                    pass
+            return None
         except (InitializationError, OSError):
             return None
 
