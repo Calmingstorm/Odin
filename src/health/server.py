@@ -493,11 +493,14 @@ def _make_auth_middleware(
                         if session_token and hmac.compare_digest(session_token, configured_token):
                             current = session_identity
                     elif source == "static":
+                        session_token = getattr(session_identity, "token", "")
                         current = next(
                             (
                                 entry
                                 for entry in getattr(current_web_config, "api_tokens", ())
                                 if entry.user_id == user_id
+                                and session_token
+                                and hmac.compare_digest(entry.token, session_token)
                             ),
                             None,
                         )
