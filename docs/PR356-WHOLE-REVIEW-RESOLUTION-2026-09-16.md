@@ -121,3 +121,38 @@ It must serve HTTP before its owned process is stopped. It is not a package
 installation or a deployment, and does not touch the live installation or
 operator-created policy files. Exact results belong to the tested commit and
 are recorded below after execution.
+
+### Executed compatibility evidence
+
+- Against isolated `e22d27a`, the new environment tests failed on the `0775`
+  parent and implicit working-directory source; they pass after the fix.
+- The ten storage cases produced **5 failed, 5 passed** on `e22d27a` and
+  **10 passed** after the fix. They cover `0775` source and `0755` package
+  shapes, private new storage, symlinked data/rebinding, state/lock symlinks,
+  missing unwritable parents, lock failures, authenticated API continuity,
+  failed-write races and corrupt/unsafe/vanished records.
+- Four isolated token/model reproductions failed on `e22d27a`: symlinked
+  `0644` credentials, invalid entries alongside valid ones, static login
+  during dynamic corruption, and persisted Spark. The focused post-fix
+  token/model/auth suite passed **247 tests**. Integration review also caught
+  and fixed static-session recovery matching by user ID alone; the added
+  regression requires the exact session-bound static credential to remain
+  current after rotation/revocation.
+- Actual source-clone proof ran at `cfa727bc`, under unprivileged umask `0002`
+  with naturally `0775` checkout/data directories, a scratch home, empty
+  credentials and disabled external integrations. With `web.host=0.0.0.0`,
+  the real process listened only on `127.0.0.1:50691`. `/health/live`,
+  `/health?detail=1`, and `/api/setup/status` each returned **200**. Four
+  group-write diagnostics appeared, exactly once for each group-writable
+  directory in that proof path. The process was stopped by its recorded
+  PID/start-time identity, exited **0**, and left no listener behind.
+
+Diagnostic wording (the suffix is the actual inspected directory):
+
+```text
+Existing configuration ancestor is group-writable; continuing for upgrade compatibility: <directory>
+```
+
+The exact diagnostic lines and final hosted-CI verdict are included in the
+delivery report. The source-clone proof is intentionally not evidence about
+a package installation or any live service. No package was installed.
