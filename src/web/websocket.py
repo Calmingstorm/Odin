@@ -158,6 +158,8 @@ class WebSocketManager:
         """Count only a validated dynamic store, never an unusable inventory."""
         if manager is None:
             return False
+        if getattr(manager, "credential_store_auth_required", False) is True:
+            return True
         inventory = getattr(manager, "credential_inventory", None)
         if inventory is not None:
             return bool(getattr(inventory, "has_usable_auth", False))
@@ -198,6 +200,10 @@ class WebSocketManager:
                     self._event_subscribers.discard(ws)
 
     def _policy_authorized(self, ws: web.WebSocketResponse) -> bool:
+        manager = self._token_manager(ws)
+        if (manager is not None
+                and getattr(manager, "credential_store_auth_required", False) is True):
+            return False
         if getattr(ws, "_odin_policy_revoked", False) or not self._session_is_valid(
             ws, touch=False
         ):

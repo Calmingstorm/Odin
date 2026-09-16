@@ -121,6 +121,7 @@ def _is_admin_only_path(path: str, method: str = "GET") -> bool:
 
 def _make_bootstrap_gate_middleware():
     """Pending installs expose only the setup UI's narrow ingress surface."""
+    last_recovery_reason = None
     allowed_api = frozenset(
         {
             ("GET", "/api/setup/status"),
@@ -134,14 +135,24 @@ def _make_bootstrap_gate_middleware():
 
     @web.middleware
     async def bootstrap_gate(request: web.Request, handler: Callable) -> web.StreamResponse:
+        nonlocal last_recovery_reason
         onboarding = request.app.get("onboarding")
         if onboarding is not None:
+            reason = None
             try:
                 state = await onboarding.state()
                 state_mode = getattr(state, "mode", state)
                 mode = getattr(state_mode, "value", state_mode)
-            except Exception:
+                if mode == "recovery":
+                    reason = getattr(state, "detail", None) or "initialization recovery required"
+            except Exception as exc:
                 mode = "recovery"
+                # Exception values can include credentials or operator input.
+                reason = f"initialization state unavailable ({type(exc).__name__})"
+            if reason != last_recovery_reason:
+                if reason is not None:
+                    log.warning("Bootstrap gate entered recovery: %s", reason)
+                last_recovery_reason = reason
             if mode != "complete":
                 path = request.path
                 static = path in {"/", "/ui"} or path.startswith("/ui/")
@@ -356,6 +367,9 @@ def _make_auth_middleware(
         if path in _AUTH_SKIP_PATHS:
             return await handler(request)
 
+        token_store = request.app.get("token_manager")
+        if token_store and getattr(token_store, "credential_store_auth_required", False) is True:
+            raise web.HTTPForbidden(text="API credential store requires recovery")
         is_websocket = path == "/api/ws"
         # Presence, not truthiness or first-value order, is the security
         # boundary.  Do not validate/refresh ANY query credential on /api/ws;
@@ -1151,6 +1165,14 @@ class HealthServer:
             return web.json_response({"status": "not_ready"}, status=503)
 
         components = self._check_components()
+        owner = self._config_owner
+        if owner is not None and owner.config.discord.token:
+            supervisor = getattr(owner, "connection_supervisor", None)
+            available = supervisor is not None and supervisor.connection_availability().available
+            components["discord_connection"] = {
+                "healthy": bool(available),
+                "detail": "connected" if available else "configured gateway unavailable",
+            }
         all_healthy = all(c["healthy"] for c in components.values())
         status_code = 200 if all_healthy else 503
         status_text = "ready" if all_healthy else "degraded"

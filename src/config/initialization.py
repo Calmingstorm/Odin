@@ -27,6 +27,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import TypeVar
 
+from .source_trust import trusted_group_write
+
 STATE_VERSION = 1
 _MAX_STATE_BYTES = 64 * 1024
 _MAX_INSTALLATION_ID_BYTES = 256
@@ -151,6 +153,58 @@ class InitializationStore:
         self._parent_fd: int | None = None
         self._parent_identity: tuple[int, int] | None = None
         self._operation_local = threading.local()
+        self._cached: tuple[object, InitializationState] | None = None
+        self._record_seen = False
+
+    def _cache_signature(self) -> object:
+        # Revalidate all ancestors through no-follow descriptors. Metadata is
+        # cheap compared with a thread-contended flock and JSON read; never
+        # let the cache hide chmod/chown, rebinds or revoked group delegation.
+        fd = self._open_trusted_parent()
+        try:
+            parent = os.fstat(fd)
+            try:
+                info = os.stat(self.path.name, dir_fd=fd, follow_symlinks=False)
+            except FileNotFoundError:
+                record = None
+            else:
+                self._record_seen = True
+                record = (info.st_dev, info.st_ino, info.st_mode, info.st_uid,
+                          info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            return (parent.st_dev, parent.st_ino, parent.st_mode, parent.st_uid,
+                    parent.st_gid, record)
+        finally:
+            os.close(fd)
+
+    def cached_state(
+        self, *, legacy_loopback_restricted: bool | None = None
+    ) -> InitializationState:
+        """Gate snapshot with metadata invalidation, never stale-on-error.
+
+        Authoritative writes/reads still use ``state`` and the publication
+        lock. A previously observed record disappearing is recovery, not a new
+        legacy installation. Repairs and changes by another process invalidate.
+        """
+        with _lock_for(self._lock_path):
+            try:
+                before = self._cache_signature()
+                if self._cached is not None and self._cached[0] == before:
+                    return self._cached[1]
+                policy = None if self._record_seen else legacy_loopback_restricted
+                state = self.state(legacy_loopback_restricted=policy)
+                after = self._cache_signature()
+                if before != after:
+                    # Includes initial legacy migration. Require a stable read
+                    # before caching so concurrent external edits cannot hide.
+                    state = self.state()
+                    if after != self._cache_signature():
+                        self._cached = None
+                        return self._recovery("initialization record changed during gate read")
+                self._cached = (after, state)
+                return state
+            except (InitializationError, OSError):
+                self._cached = None
+                return self._recovery("initialization gate cannot verify trusted state storage")
 
     def state(self, *, legacy_loopback_restricted: bool | None = None) -> InitializationState:
         """Read the current state without ever inferring it from credentials."""
@@ -350,6 +404,7 @@ class InitializationStore:
             raise ValueError("a loopback-restricted listener cannot be explicitly widened")
 
     def _write_locked(self, state: InitializationState) -> None:
+        self._cached = None
         if state.mode is InitializationMode.RECOVERY:
             raise InitializationError("recovery state is diagnostic-only")
         self._validate_bind_decision(state.loopback_restricted, state.explicit_widening)
@@ -503,7 +558,7 @@ class InitializationStore:
             raise InitializationError("initialization parent must be absolute")
         fd = os.open(os.path.sep, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
         try:
-            self._validate_parent_directory(os.fstat(fd), terminal=len(parts) == 1)
+            self._validate_parent_directory(os.fstat(fd), terminal=len(parts) == 1, directory=fd)
             for index, part in enumerate(parts[1:], start=1):
                 next_fd = os.open(
                     part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd
@@ -511,7 +566,7 @@ class InitializationStore:
                 os.close(fd)
                 fd = next_fd
                 self._validate_parent_directory(
-                    os.fstat(fd), terminal=index == len(parts) - 1
+                    os.fstat(fd), terminal=index == len(parts) - 1, directory=fd
                 )
             return fd
         except BaseException:
@@ -519,14 +574,17 @@ class InitializationStore:
             raise
 
     @staticmethod
-    def _validate_parent_directory(info: os.stat_result, *, terminal: bool) -> None:
+    def _validate_parent_directory(
+        info: os.stat_result, *, terminal: bool, directory: int | None = None
+    ) -> None:
         if info.st_uid not in {0, os.geteuid()}:
             raise InitializationError("initialization ancestor has unsafe ownership")
         mode = stat.S_IMODE(info.st_mode)
         if terminal:
             if mode & 0o077:
                 raise InitializationError("initialization parent has unsafe ownership or mode")
-        elif mode & 0o022 and not (info.st_mode & stat.S_ISVTX):
+        elif (mode & 0o022 and not (info.st_mode & stat.S_ISVTX)
+              and not trusted_group_write(info, owner_uid=os.geteuid(), directory=directory)):
             raise InitializationError(
                 "initialization ancestor is writable without sticky protection"
             )

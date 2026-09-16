@@ -11,6 +11,7 @@ from pathlib import Path
 
 from .environment import EnvironmentSource
 from .initialization import InitializationStore, InstallationBinding
+from .source_trust import trusted_group_write
 
 _MACHINE_ID_PATHS = (Path("/etc/machine-id"), Path("/var/lib/dbus/machine-id"))
 
@@ -30,14 +31,17 @@ def default_initialization_state_path(config_path: Path) -> Path:
     return config_path.parent / "data" / "initialization" / "state.json"
 
 
-def _validate_initialization_ancestor(info: os.stat_result, *, terminal: bool) -> None:
+def _validate_initialization_ancestor(
+    info: os.stat_result, *, terminal: bool, directory: int | None = None
+) -> None:
     if info.st_uid not in {0, os.geteuid()}:
         raise RuntimeError("initialization directory has unsafe ownership")
     mode = stat.S_IMODE(info.st_mode)
     if terminal:
         if mode & 0o077:
             raise RuntimeError("initialization directory has unsafe mode")
-    elif mode & 0o022 and not (info.st_mode & stat.S_ISVTX):
+    elif (mode & 0o022 and not (info.st_mode & stat.S_ISVTX)
+          and not trusted_group_write(info, owner_uid=os.geteuid(), directory=directory)):
         raise RuntimeError("initialization ancestor is writable without sticky protection")
 
 
@@ -60,7 +64,7 @@ def provision_initialization_parent(state_path: Path) -> None:
                 )
             os.close(fd)
             fd = next_fd
-            _validate_initialization_ancestor(os.fstat(fd), terminal=terminal)
+            _validate_initialization_ancestor(os.fstat(fd), terminal=terminal, directory=fd)
     except BaseException:
         os.close(fd)
         raise

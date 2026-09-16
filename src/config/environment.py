@@ -17,6 +17,8 @@ from pathlib import Path
 
 from dotenv.parser import parse_stream
 
+from .source_trust import trusted_group_write
+
 
 class EnvironmentSourceError(RuntimeError):
     """The declared source cannot safely be edited."""
@@ -117,7 +119,8 @@ def _trusted_directory(path: Path, owner: int, *, terminal: bool = False) -> _Id
     if s.st_uid not in {owner, 0}:
         raise EnvironmentSourceError(f"environment parent has untrusted ownership: {path}")
     writable_by_others = s.st_mode & (stat.S_IWGRP | stat.S_IWOTH)
-    if writable_by_others and (terminal or not s.st_mode & stat.S_ISVTX):
+    if (writable_by_others and (terminal or not s.st_mode & stat.S_ISVTX)
+            and not trusted_group_write(s, owner_uid=owner, directory=path)):
         raise EnvironmentSourceError(f"environment parent is writable by others: {path}")
     return _Identity(path, s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_ctime_ns)
 
@@ -252,13 +255,10 @@ def _edit(text: str, updates: Mapping[str, str]) -> str:
         original = binding.original.string
         if binding.error:
             raise EnvironmentSourceError("environment source contains an invalid dotenv binding")
-        if binding.key not in updates:
+        if binding.key is None or binding.key not in updates:
             output.append(original)
             continue
         key = binding.key
-        if key is None:
-            output.append(original)
-            continue
         found.add(key)
         ending = "\r\n" if original.endswith("\r\n") else "\n" if original.endswith("\n") else ""
         prefix = _ASSIGNMENT_PREFIX.match(original)

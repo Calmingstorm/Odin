@@ -160,21 +160,21 @@ class TestLoadValidation:
 
     def test_null_allowed_hosts_becomes_none(self, tmp_path):
         mgr = self._write(tmp_path, [
-            {"user_id": "u1", "token_hash": "h", "allowed_hosts": None}])
+            {"user_id": "u1", "token_hash": "a" * 64, "allowed_hosts": None}])
         assert mgr.get("u1").allowed_hosts is None
 
-    def test_non_dict_entry_caught_per_entry(self, tmp_path):
-        # A non-dict list item makes entry.get() raise — the per-entry
-        # except swallows it and keeps loading the rest.
+    def test_non_dict_entry_invalidates_entire_store(self, tmp_path):
+        # Partial authentication cannot coexist with an unusable inventory.
         mgr = self._write(tmp_path, [
             "i am not a dict",
-            {"user_id": "u2", "token_hash": "h2"},
+            {"user_id": "u2", "token_hash": "b" * 64},
         ])
-        assert [t["user_id"] for t in mgr.list_tokens()] == ["u2"]
+        assert mgr.list_tokens() == []
+        assert mgr.credential_store_auth_required is True
 
     def test_valid_entry_loads(self, tmp_path):
         mgr = self._write(tmp_path, [{
-            "user_id": "u1", "token_hash": "h", "token_prefix": "pre",
+            "user_id": "u1", "token_hash": "a" * 64, "token_prefix": "pre",
             "tier": "user", "allowed_tools": ["web_search"], "allowed_hosts": ["h1"],
             "default_host": "h1", "username": "Bob", "label": "svc",
         }])

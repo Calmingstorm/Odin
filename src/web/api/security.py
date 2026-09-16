@@ -477,6 +477,10 @@ def register_auth(routes: web.RouteTableDef, bot) -> None:
         api_token = bot.config.web.api_token
         tm = getattr(bot, "api_token_manager", None)
         has_any_token = api_token or bot.config.web.api_tokens or (tm and tm.list_tokens())
+        if tm and getattr(tm, "credential_store_auth_required", False) is True:
+            return web.json_response(
+                {"error": "API credential store requires recovery"}, status=403
+            )
         if not has_any_token:
             # A fresh install has no UI credential by design. Do not turn an
             # arbitrary value, including its Discord gateway token, into an
