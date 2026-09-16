@@ -74,6 +74,39 @@ async def test_rejects_empty_token() -> None:
     with pytest.raises(ValueError, match="non-empty"):
         await ConnectionSupervisor(FakeBot(), adapter=FakeAdapter()).attach(" ")
 
+
+@pytest.mark.asyncio
+async def test_close_during_attach_retirement_prevents_new_gateway() -> None:
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    class ControlledAdapter(FakeAdapter):
+        async def retire_gateway(self, task):
+            entered.set()
+            await release.wait()
+            await super().retire_gateway(task)
+
+    bot = FakeBot()
+    supervisor = ConnectionSupervisor(bot, adapter=ControlledAdapter())
+    await supervisor.attach("first")
+    await asyncio.sleep(0)
+    attaching = asyncio.create_task(supervisor.attach("must-not-start"))
+    await asyncio.wait_for(entered.wait(), 1)
+    closing = asyncio.create_task(supervisor.close())
+    await asyncio.sleep(0)
+    assert supervisor._closed
+    assert not closing.done()
+    release.set()
+    try:
+        with pytest.raises(RuntimeError, match="permanently closed"):
+            await attaching
+    finally:
+        await closing
+    assert bot.tokens == ["first"]
+    assert supervisor._task is None
+    assert supervisor._retirement is None
+    assert supervisor.status().state == "detached"
+    assert not supervisor.connection_availability().available
+
 @pytest.mark.asyncio
 async def test_stale_callback_generation_cannot_change_current_transport_state() -> None:
     bot = FakeBot()

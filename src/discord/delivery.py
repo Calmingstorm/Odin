@@ -65,14 +65,14 @@ def _is_confirmed_invalid_reply_reference(error: discord.HTTPException) -> bool:
 def _prepare_owned_file_fallbacks(
     files: list[discord.File] | None,
 ) -> list[tuple[discord.File, int] | None] | None:
-    """Prepare independent attachment streams before attempting a reply.
+    """Prepare independent attachment streams before attempting a send.
 
     discord.py consumes and closes the supplied streams even when a reply is
     rejected.  Duplicating the already-open descriptor preserves the exact
     file object selected by the caller, rather than reopening a pathname that
     may now name something else.  The duplicate shares its offset until the
-    reply finishes; the saved position is restored only for the plain-send
-    fallback.
+    send finishes; the saved position is restored only when a safe retry or
+    plain-send fallback is actually attempted.
     """
     if not files:
         return []
@@ -114,7 +114,7 @@ def _fallback_files_after_reply_failure(
     files: list[discord.File] | None,
     prepared: list[tuple[discord.File, int] | None] | None,
 ) -> list[discord.File] | None:
-    """Build exactly one safe attachment set for the plain-send fallback."""
+    """Activate exactly one safe attachment set for a retry or fallback."""
     if not files:
         return []
     if prepared is None:
@@ -122,10 +122,20 @@ def _fallback_files_after_reply_failure(
 
     fallback_files: list[discord.File] = []
     try:
-        for replacement in prepared:
+        for index, replacement in enumerate(prepared):
             if replacement is not None:
                 replacement_file, original_pos = replacement
+                # Rewrap only after rewinding: discord.py records the starting
+                # position in File.__init__ for its own multipart retries.
                 replacement_file.fp.seek(original_pos)
+                replacement_file.close()
+                replacement_file = discord.File(
+                    replacement_file.fp,
+                    filename=replacement_file.filename,
+                    spoiler=replacement_file.spoiler,
+                    description=replacement_file.description,
+                )
+                prepared[index] = (replacement_file, original_pos)
                 fallback_files.append(replacement_file)
     except (OSError, ValueError):
         _close_unused_fallback_files(prepared)
@@ -267,9 +277,25 @@ class ResponseDelivery:
         outcome, so retrying could duplicate a message.
         """
         prepared_fallbacks = _prepare_owned_file_fallbacks(files) if as_reply else None
+        # MultipartParameters closes File wrappers even on connector failure.
+        # Reserve the bounded retry sets while the original is still open;
+        # never reopen its pathname or reuse a consumed wrapper/stream.
+        prepared_retries = [
+            _prepare_owned_file_fallbacks(files) for _ in range(SEND_MAX_RETRIES - 1)
+        ]
         fallback_files: list[discord.File] | None = None
         try:
             for attempt in range(SEND_MAX_RETRIES):
+                attempt_files = files
+                if attempt:
+                    attempt_files = _fallback_files_after_reply_failure(
+                        files, prepared_retries[attempt - 1]
+                    )
+                    if attempt_files is None:
+                        log.error(
+                            "Attachments cannot be safely replayed; not retrying the send"
+                        )
+                        return None
                 try:
                     log.info(
                         "Sending message (attempt %d, reply=%s): %r",
@@ -277,7 +303,7 @@ class ResponseDelivery:
                         as_reply,
                         text[:100],
                     )
-                    kwargs: dict = {"files": files} if files else {}
+                    kwargs: dict = {"files": attempt_files} if attempt_files else {}
                     if as_reply:
                         sent = await message.reply(text, **kwargs)
                     else:
@@ -343,6 +369,8 @@ class ResponseDelivery:
             return None
         finally:
             _close_unused_fallback_files(prepared_fallbacks)
+            for prepared in prepared_retries:
+                _close_unused_fallback_files(prepared)
             for fallback_file in fallback_files or []:
                 _close_generated_fallback_file(fallback_file)
 

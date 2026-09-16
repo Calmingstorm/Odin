@@ -82,6 +82,11 @@ class ConnectionSupervisor:
                 raise RuntimeError("Discord connection supervisor is permanently closed")
             if self._task is not None:
                 await self._detach_locked()
+            # close() fences synchronously before acquiring this lock, so it
+            # can begin while the retirement above yields. Never start a new
+            # gateway after that terminal fence has been published.
+            if self._closed:
+                raise RuntimeError("Discord connection supervisor is permanently closed")
             # First login uses only discord.py's public start API. Private
             # reset compatibility is required only when reusing a transport.
             if self._generation:
