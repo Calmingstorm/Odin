@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import fcntl
+import json
 from pathlib import Path
 
 import pytest
@@ -208,4 +209,17 @@ def test_failed_lock_observes_record_and_later_absence_stays_recovery(tmp_path, 
     assert store.state(legacy_loopback_restricted=False).mode is InitializationMode.RECOVERY
     path.unlink()
     monkeypatch.setattr(fcntl, "flock", real_flock)
+    assert store.state(legacy_loopback_restricted=False).mode is InitializationMode.RECOVERY
+
+
+def test_legacy_compatibility_cannot_be_persisted_or_loaded_as_authority(tmp_path):
+    private = tmp_path / "private"
+    private.mkdir(mode=0o700)
+    store = _store(private / "state.json")
+    store.provision_fresh()
+    with store._locked(), pytest.raises(InitializationError, match="diagnostic-only"):
+        store._write_locked(store._legacy_state(False, "storage unavailable"))
+    payload = json.loads(store.path.read_text())
+    payload["mode"] = "legacy"
+    store.path.write_text(json.dumps(payload))
     assert store.state(legacy_loopback_restricted=False).mode is InitializationMode.RECOVERY

@@ -479,6 +479,7 @@ class InitializationStore:
             if (
                 type(state.version) is not int
                 or state.version != STATE_VERSION
+                or state.mode is InitializationMode.LEGACY
                 or not isinstance(decoded["mode"], str)
                 or not isinstance(decoded["installation_id"], str)
                 or not isinstance(decoded["config_path"], str)
@@ -502,8 +503,8 @@ class InitializationStore:
 
     def _write_locked(self, state: InitializationState) -> None:
         self._cached = None
-        if state.mode is InitializationMode.RECOVERY:
-            raise InitializationError("recovery state is diagnostic-only")
+        if state.mode in {InitializationMode.RECOVERY, InitializationMode.LEGACY}:
+            raise InitializationError("recovery and legacy states are diagnostic-only")
         self._validate_bind_decision(state.loopback_restricted, state.explicit_widening)
         parent_fd = self._require_parent_fd()
         payload = {
